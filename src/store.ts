@@ -4,10 +4,17 @@
 
 import type { CID } from "multiformats/cid";
 import type { Block, Ref, RunnerKind, ThreadState, Ms } from "./types.ts";
+import type { Message } from "./records.ts";
 
 export class NotFound extends Error {
   readonly cid: string;
   constructor(cid: string) { super(`not found: ${cid}`); this.cid = cid; }
+}
+
+/** putMessage refused the record. The store is unchanged. */
+export class Rejected extends Error {
+  readonly reason: "bad-signature" | "duplicate-seq";
+  constructor(reason: Rejected["reason"], message: string) { super(message); this.reason = reason; }
 }
 
 // ---------------------------------------------------------------- 1. blocks
@@ -43,8 +50,11 @@ export interface Chains {
 // The index. Both directions. Rebuildable from the blocks at any time.
 
 export interface Filter {
-  kind?: "thread" | "node";
+  kind?: "thread" | "node" | "message"; // messages are single records, not chains: only message filters apply
   thread?: CID;           // nodes belonging to this thread
+  program?: CID;          // threads running this program record
+  from?: string;          // messages from this identity (implies kind "message")
+  to?: string;            // messages to this identity or handle (implies kind "message")
   runner?: RunnerKind;    // threads of this runner kind
   state?: ThreadState[];  // threads whose tip state is one of these
   parentless?: boolean;   // threads with no launchedBy
@@ -80,11 +90,15 @@ export interface Live {
   due(now: Ms): AsyncIterable<CID>;
   /** Threads waiting on `thread` (event trigger: it came to rest, wake these). */
   waitersOn(thread: CID): AsyncIterable<CID>;
+  /** Thread origins whose tip has `waitingFrom === identity` (a message from it should wake them). */
+  waitingFrom(identity: string): AsyncIterable<CID>;
 }
 
 // ---------------------------------------------------------------- the store
 
 export interface Store extends Blocks {
+  /** Verify and store a signed message; index it by (from, seq). Rejects a bad signature or a second message at one (from, seq). */
+  putMessage(m: Message): Promise<CID>;
   chains: Chains;
   edges: Edges;
   live: Live;

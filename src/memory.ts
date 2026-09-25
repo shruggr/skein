@@ -5,8 +5,10 @@
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import * as dagCbor from "@ipld/dag-cbor";
-import { NotFound, type Filter, type Handle, type Store } from "./store.ts";
+import { encode } from "./cid.ts";
+import { NotFound, Rejected, type Filter, type Handle, type Store } from "./store.ts";
 import type { Block, Emission, Ms, NodeOrigin, Ref, RunnerKind, ThreadOrigin, ThreadState } from "./types.ts";
+import { verifyMessageSync, type Message } from "./records.ts";
 
 interface Meta {
   cid: CID;
@@ -16,11 +18,15 @@ interface Meta {
   tipAt: Ms;              // at of the latest block in the chain
   thread?: string;        // nodes: owning thread
   runner?: RunnerKind;    // threads
+  program?: string;       // threads
   parentless?: boolean;   // threads
   state?: ThreadState;    // threads: tip state; undefined = never started
   waitingOn?: string[];
+  waitingFrom?: string;
   until?: Ms;
 }
+
+interface MessageMeta { cid: CID; from: string; to?: string; seq: number; at: Ms; order: number }
 
 type Edge = Ref & { from: CID };
 
@@ -32,6 +38,8 @@ export function memoryStore(): Store {
   const out = new Map<string, Edge[]>();
   const inc = new Map<string, Edge[]>();
   const handles = new Map<string, Handle>();
+  const messages = new Map<string, MessageMeta>(); // cid → row
+  const bySeq = new Map<string, string>();          // `${from} ${seq}` → cid
   const locks = new Map<string, Promise<unknown>>();
   let order = 0;
 
@@ -68,7 +76,7 @@ export function memoryStore(): Store {
     const kind = kindOf(b);
     if (kind === "thread") {
       const t = b as ThreadOrigin;
-      meta.set(cid.toString(), { cid, kind: "thread", order: order++, at: t.at, tipAt: t.at, runner: t.runner, parentless: !t.launchedBy });
+      meta.set(cid.toString(), { cid, kind: "thread", order: order++, at: t.at, tipAt: t.at, runner: t.runner, program: t.program?.toString(), parentless: !t.launchedBy });
       // launchedBy is the inverse of the node's "launched" edge; store it that way round.
       if (t.launchedBy) addEdge({ from: t.launchedBy, rel: "launched", to: cid });
     } else if (kind === "node") {
@@ -84,6 +92,7 @@ export function memoryStore(): Store {
     if (m?.kind === "thread") {
       m.state = u.state as ThreadState;
       m.waitingOn = (u.waitingOn as CID[] | undefined)?.map(String);
+      m.waitingFrom = typeof u.waitingFrom === "string" ? u.waitingFrom : undefined;
       m.until = u.until as Ms | undefined;
       for (const w of (u.waitingOn as CID[] | undefined) ?? []) addEdge({ from: origin, rel: "depends-on", to: w });
       if (u.resolution) addEdge({ from: origin, rel: "resolution", to: u.resolution as CID });
@@ -101,6 +110,15 @@ export function memoryStore(): Store {
     indexOrigin(cid, b);
   }
 
+  function indexMessage(cid: CID, m: Message) {
+    const key = `${m.from} ${m.seq}`;
+    const had = bySeq.get(key);
+    if (had === cid.toString()) return;
+    if (had) throw new Rejected("duplicate-seq", `message: ${m.from} already sent seq ${m.seq}`);
+    bySeq.set(key, cid.toString());
+    messages.set(cid.toString(), { cid, from: m.from, to: m.to, seq: m.seq, at: m.at, order: order++ });
+  }
+
   const threads = () => [...meta.values()].filter((m) => m.kind === "thread");
 
   const store: Store = {
@@ -108,6 +126,15 @@ export function memoryStore(): Store {
     get,
     async has(cid) { return bytes.has(cid.toString()); },
     async putBlock(cid, data) { if (!bytes.has(cid.toString())) bytes.set(cid.toString(), data); },
+    async putMessage(m) {
+      if (!verifyMessageSync(m)) throw new Rejected("bad-signature", "message: bad shape or signature");
+      const { cid, bytes: data } = encode(m); // cid.ts's encode: the same bytes the signature was checked against
+      const k = `${m.from} ${m.seq}`;
+      if (bySeq.has(k) && bySeq.get(k) !== cid.toString()) throw new Rejected("duplicate-seq", `message: ${m.from} already sent seq ${m.seq}`);
+      if (!bytes.has(cid.toString())) bytes.set(cid.toString(), data);
+      indexMessage(cid, m);
+      return cid;
+    },
     async bytes(cid) {
       const data = bytes.get(cid.toString());
       if (!data) throw new NotFound(cid.toString());
@@ -157,10 +184,21 @@ export function memoryStore(): Store {
         return [...(inc.get(cid.toString()) ?? [])];
       },
       async *query(f: Filter) {
+        if (f.kind === "message" || (f.kind === undefined && (f.from !== undefined || f.to !== undefined))) {
+          const ms = [...messages.values()]
+            .filter((m) => f.from === undefined || m.from === f.from)
+            .filter((m) => f.to === undefined || m.to === f.to)
+            .filter((m) => f.since === undefined || m.at >= f.since)
+            .filter((m) => f.before === undefined || m.at < f.before)
+            .sort((a, b) => b.at - a.at || b.order - a.order);
+          yield* ms.slice(0, f.limit ?? ms.length).map((m) => m.cid);
+          return;
+        }
         const hits = [...meta.values()]
           .filter((m) => !f.kind || m.kind === f.kind)
           .filter((m) => !f.thread || m.thread === f.thread.toString())
           .filter((m) => !f.runner || m.runner === f.runner)
+          .filter((m) => !f.program || m.program === f.program.toString())
           .filter((m) => !f.state || (m.kind === "thread" && m.state !== undefined && f.state.includes(m.state)))
           .filter((m) => f.parentless === undefined || (m.kind === "thread" && m.parentless === f.parentless))
           .filter((m) => f.since === undefined || m.at >= f.since)
@@ -169,14 +207,15 @@ export function memoryStore(): Store {
         yield* hits.slice(0, f.limit ?? hits.length).map((m) => m.cid);
       },
       async rebuild() {
-        chains.clear(); originOf.clear(); meta.clear(); out.clear(); inc.clear();
+        chains.clear(); originOf.clear(); meta.clear(); out.clear(); inc.clear(); messages.clear(); bySeq.clear();
         order = 0;
         const updates: Array<{ cid: CID; u: Record<string, unknown> }> = [];
         for (const k of bytes.keys()) {
           const cid = CID.parse(k);
           const b = await get(cid);
           const o = CID.asCID((b as { origin?: unknown }).origin);
-          if (o && typeof (b as { seq?: unknown }).seq === "number") updates.push({ cid, u: b as Record<string, unknown> });
+          if (kindOf(b) === "message") { if (verifyMessageSync(b)) indexMessage(cid, b); } // put() can store unsigned look-alikes
+          else if (o && typeof (b as { seq?: unknown }).seq === "number") updates.push({ cid, u: b as Record<string, unknown> });
           else if (kindOf(b) === "thread" || kindOf(b) === "node") register(cid, b);
         }
         updates.sort((a, b) => (a.u.seq as number) - (b.u.seq as number));
@@ -210,6 +249,9 @@ export function memoryStore(): Store {
       async *waitersOn(thread) {
         const k = thread.toString();
         yield* threads().filter((m) => m.state === "waiting" && m.waitingOn?.includes(k)).map((m) => m.cid);
+      },
+      async *waitingFrom(identity) {
+        yield* threads().filter((m) => m.waitingFrom === identity).sort((a, b) => a.order - b.order).map((m) => m.cid);
       },
     },
 

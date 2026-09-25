@@ -41,7 +41,9 @@ export interface ThreadOrigin {
   kind: "thread";
   runner: RunnerKind;
   spec: unknown;      // what the runner needs; shape is per runner kind
-  launchedBy?: CID;   // the node that launched it; absent = parent-less
+  program?: CID;      // v2: the program record to run (docs/VM.md); runner/spec remain until v1 is gone
+  args?: unknown;     // v2: the program's input, per its `inputs` schema
+  launchedBy?: CID;   // the node or message that launched it; absent = parent-less (v1 only)
   at: Ms;
   nonce?: string;     // distinguishes otherwise identical launches (same spec, parent, ms)
 }
@@ -53,6 +55,7 @@ export interface ThreadUpdate {
   at: Ms;
   state: ThreadState;
   waitingOn?: CID[];  // thread origins
+  waitingFrom?: string; // an identity (pubkey hex): woken by a message from it
   until?: Ms;         // wake time (nudges, retries, David)
   resolution?: CID;   // node holding the result, when finished
   error?: { kind: "cant-do" | "blew-up"; message: string };
