@@ -112,88 +112,96 @@ export function isProgram(x: unknown): x is Program {
 
 // ---------------------------------------------------------------- subscription
 
-export interface SubscriptionMatch {
-  from?: string;
-  to?: string;
-  kind?: string;                   // the body's kind: every inbound record is a message
-  body?: Record<string, unknown>;  // subset of the body, compared by dag-cbor encoding
-}
-
+/**
+ * Routing for admitted envelopes (docs/MESSAGES.md): on (sender identity key,
+ * BRC-33 box), tried in genesis order, first match wins. An absent field
+ * matches anything. The handler is a program record's CID.
+ */
 export type Subscription = {
-  kind: "subscription";
-  match: SubscriptionMatch;
-  handler: CID | "resolve-waiter";
-  at: Ms;
+  match: { sender?: Identity; box?: string };
+  handler: CID;
 };
 
-export function subscription(match: SubscriptionMatch, handler: Subscription["handler"], at: Ms): Subscription {
-  const out: Subscription = { kind: "subscription", match, handler, at };
-  if (!isSubscription(out)) throw new TypeError("subscription: malformed");
-  return out;
-}
-
 export function isSubscription(x: unknown): x is Subscription {
-  if (!isObj(x) || x.kind !== "subscription" || !isObj(x.match) || typeof x.at !== "number") return false;
+  if (!isObj(x) || !isObj(x.match)) return false;
   const m = x.match;
-  return (m.from === undefined || typeof m.from === "string")
-    && (m.to === undefined || typeof m.to === "string")
-    && (m.kind === undefined || typeof m.kind === "string")
-    && (m.body === undefined || isObj(m.body))
-    && (x.handler === "resolve-waiter" || isCID(x.handler));
+  return (m.sender === undefined || isIdentity(m.sender)) && (m.box === undefined || typeof m.box === "string") && isCID(x.handler);
 }
 
-/** The subscription a message carries, if it is one and `admin` signed it. Verify the message first. */
-export function subscriptionIn(m: Message, admin: Identity): Subscription | undefined {
-  return m.from === admin && isSubscription(m.body) ? m.body : undefined;
-}
-
-/** Pure in (subscription, message): delivery must replay identically. */
-export function matches(sub: Subscription, m: Message): boolean {
-  const { from, to, kind, body } = sub.match;
-  if (from !== undefined && m.from !== from) return false;
-  if (to !== undefined && m.to !== to) return false;
-  if (kind !== undefined && !(isObj(m.body) && m.body.kind === kind)) return false;
-  return body === undefined || contains(body, m.body);
-}
-
-// Plain objects match as subsets, recursively; anything else (arrays, CIDs,
-// bytes, scalars) must be equal, and dag-cbor bytes are the canonical equality.
-function contains(pattern: unknown, value: unknown): boolean {
-  if (isPlain(pattern)) {
-    if (!isPlain(value)) return false;
-    return Object.entries(pattern).every(([k, p]) => k in value && contains(p, value[k]));
-  }
-  if (pattern === undefined || value === undefined) return pattern === value;
-  try {
-    return Buffer.from(encode(pattern).bytes).equals(encode(value).bytes);
-  } catch {
-    return false;
-  }
+/** Pure in (subscription, sender, box): delivery must replay identically. */
+export function matches(sub: Subscription, sender: Identity, box: string): boolean {
+  return (sub.match.sender === undefined || sub.match.sender === sender) && (sub.match.box === undefined || sub.match.box === box);
 }
 
 // ---------------------------------------------------------------- genesis
 
 /**
- * An instance's first record, carried as the body of a signed message.
- * `root` is the wallet's identity key; BRC-100 never signs with that key
- * itself, so the carrying message is from a key derived under it.
+ * An instance's starting state: the record the first log entry names. Its
+ * `identity` is the instance wallet's identity key, which signs every log
+ * entry (log.ts); `owner` is the identity it acts for; `programs` are the
+ * programs it starts with, by name, and `subscriptions` route its boxes.
  */
 export type Genesis = {
   kind: "genesis";
-  root: Identity;
-  at: Ms;
-  name?: string;
+  identity: Identity;
+  handle: string;
+  domain: string;
+  owner: Identity;
+  programs: Record<string, CID>;
+  subscriptions: Subscription[];
 };
 
-export function genesis(root: Identity, name: string | undefined, at: Ms): Genesis {
-  const out: Genesis = name === undefined ? { kind: "genesis", root, at } : { kind: "genesis", root, at, name };
-  if (!isGenesis(out)) throw new TypeError("genesis: malformed");
-  return out;
+export function isGenesis(x: unknown): x is Genesis {
+  return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && isIdentity(x.owner)
+    && typeof x.handle === "string" && typeof x.domain === "string"
+    && isObj(x.programs) && Object.values(x.programs).every(isCID)
+    && Array.isArray(x.subscriptions) && x.subscriptions.every(isSubscription);
 }
 
-export function isGenesis(x: unknown): x is Genesis {
-  return isObj(x) && x.kind === "genesis" && isIdentity(x.root) && typeof x.at === "number"
-    && (x.name === undefined || typeof x.name === "string");
+// ---------------------------------------------------------------- message keys
+
+/**
+ * The BRC-78 message key the host derived for an admitted envelope
+ * (inbox.ts): the AES-256-GCM key its content decrypts under. Handlers decrypt
+ * purely with it; a replayer recomputes the plaintext and checks the tag.
+ */
+export type MessageKey = { kind: "message-key"; envelope: CID; key: Uint8Array };
+
+export function isMessageKey(x: unknown): x is MessageKey {
+  return isObj(x) && x.kind === "message-key" && isCID(x.envelope) && x.key instanceof Uint8Array && x.key.length === 32;
+}
+
+// ---------------------------------------------------------------- program-written records
+
+/** What a handler emits: an outbound envelope to `to` in `box`, whose content is the record `body`. */
+export type Emit = { kind: "emit"; to: Identity; handle?: string; domain?: string; box: string; body: CID };
+
+export function isEmit(x: unknown): x is Emit {
+  return isObj(x) && x.kind === "emit" && isIdentity(x.to) && typeof x.box === "string" && x.box !== "" && isCID(x.body)
+    && (x.handle === undefined || typeof x.handle === "string") && (x.domain === undefined || typeof x.domain === "string");
+}
+
+/**
+ * An attested call's record: the request a step made across the boundary and
+ * the answer, at (thread, step, i). Referenced, in order, from the step's
+ * update (`calls`); on replay the answer is served from here, not the wallet.
+ *   op "wallet": request = a BRC-100 wire request frame, result = the result frame
+ *   op "reveal": request = the revealed record's CID, result = the DER signature
+ *                (instance identity, [2, "skein reveal"], key "1", anyone, over the record's bytes)
+ */
+export type Attested = {
+  kind: "attested";
+  thread: CID;
+  step: number;
+  i: number;
+  op: "wallet" | "reveal";
+  request: Uint8Array | CID;
+  result: Uint8Array;
+};
+
+export function isAttested(x: unknown): x is Attested {
+  return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
+    && (x.op === "wallet" || x.op === "reveal") && x.result instanceof Uint8Array;
 }
 
 // ---------------------------------------------------------------- helpers

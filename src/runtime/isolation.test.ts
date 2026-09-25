@@ -2,10 +2,16 @@
 // (docs/ARCH.md). This scans every non-test source file under src/runtime for
 // imports and identifiers that would give it one, and fails on any hit.
 // Allowed exceptions, each named:
-//   - transport.ts may import node:net (the unix socket: the message edge);
-//   - main.ts may read process.env (its config: home, store path, socket, wallet),
-//     import ../wallet.ts (the wallet edge, which reaches wallet-api over HTTP),
-//     and use a timer (to admit ticks while threads sleep);
+//   - inbox.ts is the instance's edge to the host's messagebox: the runtime's
+//     own tooling talking to the network (through @bsv/message-box-client,
+//     which does the fetching). It may import ../envelope.ts (sealing and
+//     verifying BRC-169 envelopes, shared with the client), use a timer (to
+//     poll the boxes), and read the wall clock inside `createdOf` only through
+//     Date.parse/new Date(<ms>) of an envelope's own `created` (not the clock;
+//     the freshness check uses log.ts's now());
+//   - main.ts may read process.env (its config: home, store path, wallet, keys,
+//     messagebox), import ../wallet.ts (the wallet edge, which reaches
+//     wallet-api over HTTP), and use timers (a wake entry at each sleeper's deadline);
 //   - log.ts may read the wall clock (Date.now / process.hrtime): the runtime
 //     stamps each admitted entry with its own time, and this is the only place.
 
@@ -68,18 +74,19 @@ export function violations(root = ROOT): string[] {
     for (const spec of imports(src)) {
       const bare = spec.replace(/^node:/, "");
       if (FORBIDDEN_MODULES.includes(bare) || FORBIDDEN_MODULES.some((m) => bare.startsWith(`${m}/`))) {
-        if (!(rel === "transport.ts" && bare === "net")) out.push(`${rel}: imports ${spec}`);
+        out.push(`${rel}: imports ${spec}`);
       }
       if (spec.startsWith(".")) {
         const target = relative(root, join(f, "..", spec));
-        if (target.startsWith("..") && !(rel === "main.ts" && spec === "../wallet.ts")) out.push(`${rel}: imports ${spec} from outside src/runtime`);
+        const allowed = (rel === "main.ts" && spec === "../wallet.ts") || (rel === "inbox.ts" && spec === "../envelope.ts");
+        if (target.startsWith("..") && !allowed) out.push(`${rel}: imports ${spec} from outside src/runtime`);
       }
     }
     const body = code(src);
     for (const [re, name] of FORBIDDEN_IDENTIFIERS) {
       if (!re.test(body)) continue;
       if (name === "process.env" && rel === "main.ts") continue;
-      if (name === "timers" && rel === "main.ts") continue;
+      if (name === "timers" && (rel === "main.ts" || rel === "inbox.ts")) continue;
       if ((name === "Date.now" || name === "process.hrtime") && rel === "log.ts") continue;
       out.push(`${rel}: uses ${name}`);
     }

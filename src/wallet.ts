@@ -35,8 +35,8 @@ export async function connectWallet(config: WalletConfig): Promise<WalletInterfa
  * Tests only. Never persisted, so nothing it signs is attributable after the
  * process exits. A ProtoWallet has keys but no actions; those reject.
  */
-export function ephemeralWallet(): WalletInterface {
-  return new Proxy(new ProtoWallet(PrivateKey.fromRandom()), {
+export function ephemeralWallet(key: PrivateKey = PrivateKey.fromRandom()): WalletInterface {
+  return new Proxy(new ProtoWallet(key), {
     get(t, p) {
       // `then` must stay undefined or awaiting the wallet would call it.
       if (typeof p !== "string" || p === "then" || p in t) return Reflect.get(t, p);

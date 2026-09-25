@@ -81,8 +81,8 @@ export async function commands(modules: Modules): Promise<string[]> {
 
 // The empty tree, for the one run that needs no filesystem.
 const EMPTY = hashTree([]);
-const EMPTY_TREE = EMPTY.cid;
-const emptyBlocks: TreeBlocks = {
+export const EMPTY_TREE = EMPTY.cid;
+export const emptyBlocks: TreeBlocks = {
   bytes: async () => EMPTY.object,
   has: async () => true,
   putBlock: async () => {},
@@ -92,9 +92,15 @@ const emptyBlocks: TreeBlocks = {
 
 type RunOptions = ConstructorParameters<typeof Process>[0];
 
-async function runModule(mod: WebAssembly.Module, o: RunOptions): Promise<number> {
+/**
+ * Instantiate and run a WASI command to exit. `extend` adds import
+ * namespaces (or functions in one) given the process, whose `memory` is set
+ * before the module starts.
+ */
+export async function runModule(mod: WebAssembly.Module, o: RunOptions, extend?: (proc: Process) => Record<string, Record<string, unknown>>): Promise<number> {
   const proc = new Process(o);
   const imports = proc.imports();
+  for (const [ns, fns] of Object.entries(extend?.(proc) ?? {})) imports[ns] = { ...(imports[ns] ?? {}), ...fns } as WebAssembly.ModuleImports;
   // Anything the module imports that we do not provide fails with ENOSYS rather than at link time.
   for (const imp of WebAssembly.Module.imports(mod)) {
     const ns = (imports[imp.module] ??= {}) as Record<string, unknown>;

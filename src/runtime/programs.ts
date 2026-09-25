@@ -1,10 +1,11 @@
-// The programs this runtime can run. For now exactly one, `shell`: the wasm
-// shell (brush + uutils coreutils) driven from TypeScript (the loop program is
-// a later phase). Its record names the two WASI modules by CID; the runtime
-// loads them from the store and never from a disk. Whoever administers the
-// instance puts the module bytes into the store (skein-dev does it as a
-// stand-in for the client); until then a shell thread errors "module not in
-// store".
+// The programs this runtime starts with. `shell` is the wasm shell (brush +
+// uutils coreutils) driven from TypeScript; its record names the two WASI
+// modules by CID. `run-handler` and `objects-handler` are handler programs
+// (Go, GOOS=wasip1; programs/, built by scripts/build-programs.sh) stepped
+// through the `skein` imports (program.ts). The runtime loads every module
+// from the store by CID and never from a disk; `skein-dev install` puts the
+// bytes there (the bootstrap side door, docs/OPEN.md). Until then a thread
+// errors "module not in store".
 
 import { createHash } from "node:crypto";
 import { CID } from "multiformats/cid";
@@ -12,6 +13,7 @@ import * as Digest from "multiformats/hashes/digest";
 import { encode } from "./cid.ts";
 import type { Modules } from "./shell.ts";
 import type { Blocks } from "./store.ts";
+import { program } from "./records.ts";
 
 export const RAW = 0x55;
 
@@ -24,6 +26,8 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
+  "run-handler": CID.parse("bafkreidqjkh3nvpgcjk6s4jj6vibeloxxv6x7c4iyulhaoyfuiiai6gizq"),
+  "objects-handler": CID.parse("bafkreihhyygh5venniad2spqnmggn2fze2fp3uqogypbi2noaim65nlyki"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -38,6 +42,31 @@ export const SHELL_PROGRAM = {
 } as const;
 
 export const SHELL_CID = encode(SHELL_PROGRAM).cid;
+
+/** A handler program: a WASI module stepped with the `skein` imports. */
+export const RUN_HANDLER = program({
+  name: "run-handler",
+  code: { wasm: MODULES["run-handler"] },
+  inputs: { envelope: "cid", box: "string", sender: "identity" },
+  services: ["wallet"],
+  description: "The `run` box: decrypt {cmd, tree, cwd?, env?}, reveal it, run the shell, reply in `results`.",
+});
+
+export const OBJECTS_HANDLER = program({
+  name: "objects-handler",
+  code: { wasm: MODULES["objects-handler"] },
+  inputs: { envelope: "cid", box: "string", sender: "identity" },
+  services: ["wallet"],
+  description: "The `objects` box: decrypt a bundle {records: [{cid, bytes}], root?}, store each record, reveal {of, root?, count}.",
+});
+
+/** The programs a genesis names, by name. */
+export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER } as const;
+export const PROGRAM_CIDS: Record<keyof typeof PROGRAMS, CID> = {
+  shell: SHELL_CID,
+  "run-handler": encode(RUN_HANDLER).cid,
+  "objects-handler": encode(OBJECTS_HANDLER).cid,
+};
 
 export interface ShellArgs {
   cmd: string;

@@ -5,7 +5,7 @@
 import type { CID } from "multiformats/cid";
 import type { Block, Ref, ThreadState, Ms } from "./types.ts";
 import type { Message } from "./records.ts";
-import type { Stamp } from "./syscalls.ts";
+import { stampNs, type Stamp } from "./syscalls.ts";
 
 export class NotFound extends Error {
   readonly cid: string;
@@ -14,7 +14,7 @@ export class NotFound extends Error {
 
 /** putMessage refused the record. The store is unchanged. */
 export class Rejected extends Error {
-  readonly reason: "bad-signature" | "duplicate-seq";
+  readonly reason: "bad-signature" | "duplicate-seq" | "duplicate-envelope" | "out-of-order";
   constructor(reason: Rejected["reason"], message: string) { super(message); this.reason = reason; }
 }
 
@@ -103,29 +103,41 @@ export interface Live {
 }
 
 // ---------------------------------------------------------------- 5. the input log
-// Every admitted message, in admission order, as a hash chain of log-entry
-// records. The tip entry's CID is the instance's state hash. Not derived and
-// never rebuilt: admission order is not recoverable from the messages.
+// Every input, in admission order, as a hash chain of signed log-entry
+// records (log.ts). The tip entry's CID is the instance's state hash. Not
+// derived and never rebuilt: admission order is not recoverable from the records.
 
 export type LogEntry = {
   kind: "log";
-  prev: CID | null; // the previous entry; null for the first
-  n: number;        // 0-based position
-  message: CID;     // a verified message in this store
-  time: Stamp;      // the runtime's clock when it admitted the message: [sec, nsec] since the epoch; never before prev's
+  prev: CID | null;  // the previous entry; null for the first
+  n: number;         // 0-based position
+  time: Stamp;       // the runtime's clock at admission: [sec, nsec] since the epoch; never before prev's
+  /** Exactly one of: the genesis record (n = 0) … */
+  genesis?: CID;
+  /** … an admitted envelope (its JSON object as dag-cbor), the BRC-33 box it arrived in, and the message key record … */
+  envelope?: CID;
+  box?: string;
+  key?: CID;
+  /** … or a wake: the thread whose `until` this entry reaches. */
+  wake?: CID;
+  /** DER, by the instance identity over the entry's dag-cbor without `sig` (log.ts). */
+  sig: Uint8Array;
 };
 
 export interface Log {
   /**
-   * Append an entry for a message already put with putMessage, stamped `time`
-   * (raised to the previous entry's stamp if earlier: stamps never go back).
-   * The store has no clock; log.ts reads it. A message already in the log returns its existing entry.
+   * Append a signed entry. It must extend the tip (prev = tip, n = tip.n + 1,
+   * time not before tip's) or it is Rejected "out-of-order"; an envelope
+   * already in the log is Rejected "duplicate-envelope". The store does not
+   * check the signature (log.ts does).
    */
-  append(message: CID, time: Stamp): Promise<CID>;
+  append(entry: LogEntry): Promise<CID>;
   /** The latest entry (the state hash), or undefined for an empty log. */
   tip(): Promise<CID | undefined>;
   /** Entries with n >= from, in order. */
   entries(from?: number): AsyncIterable<{ cid: CID; entry: LogEntry }>;
+  /** The entry that admitted an envelope record, if any. */
+  byEnvelope(envelope: CID): Promise<CID | undefined>;
 }
 
 // ---------------------------------------------------------------- the store
@@ -138,4 +150,12 @@ export interface Store extends Blocks {
   edges: Edges;
   live: Live;
   close(): Promise<void>;
+}
+
+/** The checks every Log.append makes, given the current tip entry. Throws Rejected. */
+export function checkExtends(entry: LogEntry, tipCid: CID | undefined, tip: LogEntry | undefined): void {
+  const okPrev = tipCid ? entry.prev !== null && entry.prev.equals(tipCid) : entry.prev === null;
+  const okN = entry.n === (tip ? tip.n + 1 : 0);
+  const okTime = !tip || stampNs(entry.time) >= stampNs(tip.time);
+  if (!okPrev || !okN || !okTime) throw new Rejected("out-of-order", `log: entry #${entry.n} does not extend the tip${okTime ? "" : " (stamped before it)"}`);
 }

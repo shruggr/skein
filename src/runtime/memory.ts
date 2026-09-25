@@ -6,10 +6,9 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import * as dagCbor from "@ipld/dag-cbor";
 import { encode } from "./cid.ts";
-import { NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
+import { checkExtends, NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
 import type { Block, Emission, Ms, NodeOrigin, Ref, ThreadOrigin, ThreadState } from "./types.ts";
 import { verifyMessageSync, type Message } from "./records.ts";
-import { maxStamp } from "./syscalls.ts";
 
 interface Meta {
   cid: CID;
@@ -42,7 +41,7 @@ export function memoryStore(): Store {
   const bySeq = new Map<string, string>();          // `${from} ${seq}` → cid
   const locks = new Map<string, Promise<unknown>>();
   const log: CID[] = [];                            // entry CIDs, in order; not derived, survives rebuild
-  const logged = new Map<string, CID>();            // message → entry
+  const logged = new Map<string, CID>();            // envelope → entry
   let cursor = 0;
   let order = 0;
 
@@ -181,19 +180,19 @@ export function memoryStore(): Store {
     },
 
     log: {
-      async append(message, time) {
-        const had = logged.get(message.toString());
-        if (had) return had;
-        if (!messages.has(message.toString())) throw new NotFound(`${message} (not a stored message)`);
+      async append(entry) {
+        // No await before the push: appends must not interleave.
+        if (entry.envelope && logged.has(entry.envelope.toString())) throw new Rejected("duplicate-envelope", `log: envelope ${entry.envelope} is already admitted`);
         const n = log.length;
-        const prev = n ? (dagCbor.decode(bytes.get(log[n - 1].toString())!) as LogEntry) : undefined; // no await: appends must not interleave
-        const entry: LogEntry = { kind: "log", prev: n ? log[n - 1] : null, n, message, time: prev ? maxStamp(time, prev.time) : time };
-        const cid = encode(entry).cid;
-        bytes.set(cid.toString(), encode(entry).bytes);
-        log.push(cid);
-        logged.set(message.toString(), cid);
-        return cid;
+        const tipEntry = n ? (dagCbor.decode(bytes.get(log[n - 1].toString())!) as LogEntry) : undefined;
+        checkExtends(entry, log.at(-1), tipEntry);
+        const e = encode(entry);
+        bytes.set(e.cid.toString(), e.bytes);
+        log.push(e.cid);
+        if (entry.envelope) logged.set(entry.envelope.toString(), e.cid);
+        return e.cid;
       },
+      async byEnvelope(envelope) { return logged.get(envelope.toString()); },
       async tip() { return log.at(-1); },
       async *entries(from = 0) {
         for (let i = from; i < log.length; i++) yield { cid: log[i], entry: await get<LogEntry>(log[i]) };

@@ -1,58 +1,91 @@
-// The scheduler: the log consumer (docs/ARCH.md, "The kernel"). One loop:
+// The scheduler: the log consumer (docs/ARCH.md, "The kernel"; docs/MESSAGES.md).
 //
 //   for each log entry after the cursor, in order:
-//     wake the sleeping threads whose deadline the entry's stamp has reached;
-//     apply admin configuration (subscriptions) it carries;
-//     route its message by the subscriptions as of this point in the log —
-//       a program CID launches a thread {program, args, launchedBy, input};
-//       no match: recorded, nothing runs;
-//     step each thread it touches until it rests or ends;
-//     emit the outbound messages they produced (via the outbox);
+//     check its signature against the instance identity;
+//     genesis  → the starting state: programs and subscriptions;
+//     envelope → route by subscription on (sender, box), first match wins:
+//                launch the handler program's thread {program, args: {envelope,
+//                key, box, sender}, launchedBy: <envelope>, input: <entry>} and step it;
+//     wake     → resume the sleeping thread it names, if its deadline is reached;
+//     step every thread that touches until each rests or ends, and hand the
+//     envelopes they emitted to the outbox;
 //   then advance the cursor.
 //
-// Time and randomness are pure (syscalls.ts): a thread's clock is the stamp of
-// the entry currently driving it plus 1 ns per read, and its random stream is
-// keyed by that entry and the thread. A sleep past "now" rests the thread
-// (`waiting`, `until`) with its wasm instance parked (JSPI); the promise is the
-// thread's only handle. Nothing about the handle is durable: on start, every
-// thread that is running or waiting is re-executed from its origin. Its records
-// already exist, so re-execution *verifies* rather than appends — each update
-// it would write is recomputed and must equal the one in its chain (same CID;
-// otherwise the run diverged and the thread stops) — and a wake the chain
-// records is replayed on the spot. A sleeper whose wake was not yet recorded
-// rests again and is woken by the loop, exactly as without a restart.
+// Two kinds of thread body:
+//
+// - The shell (program code {ts: "shell"}): the wasm shell run from TypeScript
+//   in one go. A sleep rests the thread (`waiting`, `until`) with its instance
+//   parked (JSPI); main.ts writes a wake entry at the deadline. Nothing about
+//   the handle is durable: on start it is re-executed from its origin, and
+//   re-execution *verifies* — each update it would write must equal the one in
+//   its chain (same CID), else the run diverged and the thread stops.
+//
+// - Handler programs (code {wasm: <module>}): WASI modules stepped with the
+//   `skein` imports (program.ts). A step runs to completion over its input and
+//   ends in one update: `finished`, `errored`, or `waiting` on the threads it
+//   launched, which start after it. When they are all at rest the program runs
+//   again with their resolution as input. A step's attested calls (wallet wire
+//   frames, reveal signatures) are records listed in its update (`calls`); a
+//   Witness serves them on replay, so replay needs no wallet.
 //
 // Determinism: every record the runtime writes carries `input` (the entry
-// whose processing wrote it) and `at` = that entry's message time. Nothing
-// here reads a clock or a random source. A fresh runtime fed the same log
-// (messages and stamps) with the same wallet reproduces every chain.
+// whose processing wrote it) and `at` (that entry's stamp, in ms). Nothing
+// here reads a clock or a random source.
 
+import { createHash } from "node:crypto";
+import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
-import { encode, isCID } from "./cid.ts";
-import { identityOf, rootIdentity, signerFor, type KeyWallet, type Signer } from "./identity.ts";
-import { admit, isLogEntry, NAMES, now as clockNow, short, type LogEntry } from "./log.ts";
-import { isShellArgs, loadShellModules, SHELL_CID } from "./programs.ts";
-import { isGenesis, matches, signMessage, subscriptionIn, type Message, type Subscription } from "./records.ts";
+import { decode, encode, isCID } from "./cid.ts";
+import { signAnyone } from "./identity.ts";
+import { appendEntry, genesisOf, isLogEntry, now as clockNow, short, stampMs, verifyEntry, type EntryBody, type LogEntry } from "./log.ts";
+import { runProgram } from "./program.ts";
+import { isShellArgs, loadModule, loadShellModules } from "./programs.ts";
+import { isAttested, isEmit, isGenesis, isProgram, matches, type Attested, type Emit, type Genesis, type MessageKey, type Program } from "./records.ts";
 import { runShell } from "./shell.ts";
 import { Rejected, type Store } from "./store.ts";
 import { entropy, stampNs, ThreadClock, type Stamp } from "./syscalls.ts";
-import type { Ms, Ref, ThreadOrigin, ThreadState, ThreadUpdate } from "./types.ts";
+import type { Ms, ThreadOrigin, ThreadState, ThreadUpdate } from "./types.ts";
 
-/** Where outbound messages go. The transport; tests may capture. */
-export interface Outbox { send(m: Message): void }
+/** A reveal's signature: the instance identity, over the revealed record's dag-cbor bytes. */
+export const REVEAL_PROTOCOL: [2, "skein reveal"] = [2, "skein reveal"];
+export const REVEAL_KEY_ID = "1";
+
+/** Wallet wire calls a program may make (BRC-100 call codes): key derivation and crypto only — no actions, no certificates. */
+export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
+  [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],
+]);
+
+/** An emitted envelope, for the edge to seal and send. */
+export interface Outbound extends Emit {
+  emit: CID;         // the emit record
+  bytes: Uint8Array; // the body record's dag-cbor: the envelope's plaintext content
+  thread: CID;
+}
+
+/** Where emitted envelopes go: the edge (inbox.ts). Tests may capture. */
+export interface Outbox { send(o: Outbound): void | Promise<void> }
+
+/** Answers to attested calls, by position: what replay serves instead of a wallet. */
+export interface Witness { find(thread: CID, step: number, i: number): Promise<Attested | undefined> }
 
 export interface RuntimeOptions {
   store: Store;
-  wallet: KeyWallet;
+  /** The instance wallet. Absent on replay: attested answers come from `witness`, and nothing can be admitted. */
+  wallet?: WalletInterface;
+  witness?: Witness;
   outbox?: Outbox;
   /** One line per transition. Default: nowhere. */
   log?: (line: string) => void;
   /** The clock admission stamps entries with. Default: log.ts's wall clock. Tests pass a script. */
   now?: () => Stamp;
+  /** Called when a thread starts sleeping: main.ts writes a wake entry at `until`. */
+  onSleep?: (thread: CID, until: Ms) => void;
 }
 
 /** A recomputed record differs from the one already stored: replay is not reproducing the run. */
 export class Diverged extends Error {}
+/** An attested call with no wallet to make it and no witness that recorded it. */
+export class NoWitness extends Error {}
 class Stopped extends Error {}
 
 interface Ctx { input: CID; at: Ms }
@@ -64,7 +97,7 @@ function deferred(): Deferred {
   return { promise, resolve };
 }
 
-/** A thread with a live instance: its handle. Transient by design. */
+/** A shell thread with a live instance: its handle. Transient by design. */
 class Live {
   readonly origin: CID;
   readonly o: ThreadOrigin;
@@ -83,41 +116,50 @@ class Live {
     this.history = history;
   }
   /** Now driven by `entry`: its stamp is the clock's floor, its CID keys the random stream. */
-  drive(entry: CID, e: LogEntry, at: Ms): void {
-    this.ctx = { input: entry, at };
+  drive(entry: CID, e: LogEntry): void {
+    this.ctx = { input: entry, at: stampMs(e.time) };
     this.clock.drive(stampNs(e.time));
     this.random = entropy(entry, this.origin);
   }
 }
 
+/** A launched thread at rest, as the next step's input names it. */
+interface Resolved { thread: CID; state: ThreadState; result?: unknown; error?: unknown }
+
 export class Runtime {
   readonly store: Store;
-  readonly wallet: KeyWallet;
+  readonly wallet?: WalletInterface;
   outbox?: Outbox;
+  private readonly witness?: Witness;
   private readonly say: (line: string) => void;
   private readonly now: () => Stamp;
+  private readonly onSleep?: (thread: CID, until: Ms) => void;
+  private readonly wire?: WalletWireProcessor;
 
-  identity = "";              // the runtime's own: signs results
-  admin = "";
-  private signer!: Signer;
-  private readonly subs: Subscription[] = [];
-  private readonly names = new Map<string, string>();
-  private readonly live = new Map<string, Live>();         // thread origin → handle
+  genesis?: Genesis;
+  private readonly live = new Map<string, Live>();         // shell thread origin → handle
   private readonly sleepers = new Map<string, Live>();     // thread origin → a live thread resting on a deadline
-  private seq = 0;
+  private readonly stepping = new Set<string>();           // program threads mid-step
   private cursor = 0;
   private started = false;
   private stopped = false;
   private draining?: Promise<void>;
   private again = false;
+  private appending: Promise<unknown> = Promise.resolve();
 
   constructor(o: RuntimeOptions) {
     this.store = o.store;
     this.wallet = o.wallet;
+    this.witness = o.witness;
     this.outbox = o.outbox;
     this.say = o.log ?? (() => {});
     this.now = o.now ?? clockNow;
+    this.onSleep = o.onSleep;
+    if (o.wallet) this.wire = new WalletWireProcessor(o.wallet);
   }
+
+  /** The instance identity (the genesis's), once there is a log. */
+  get identity(): string { return this.genesis?.identity ?? ""; }
 
   /** The instance's current state hash: the log's tip entry. */
   tip(): Promise<CID | undefined> { return this.store.log.tip(); }
@@ -125,38 +167,33 @@ export class Runtime {
   /** Entries processed so far. */
   get processed(): number { return this.cursor; }
 
-  /** Threads resting on a deadline: while there are any, main.ts admits ticks so they see time pass. */
+  /** Threads resting on a deadline. */
   get sleeping(): number { return this.sleepers.size; }
+
+  /** Every sleeper and its deadline (ms, rounded up), earliest first. */
+  sleepersDue(): Array<{ thread: CID; until: Ms }> {
+    return [...this.sleepers.values()].sort((a, b) => (a.deadline! < b.deadline! ? -1 : a.deadline! > b.deadline! ? 1 : 0))
+      .map((t) => ({ thread: t.origin, until: Number((t.deadline! + 999_999n) / 1_000_000n) }));
+  }
+
+  /** The boxes the subscriptions route (what the edge collects). Reads the genesis if not yet started. */
+  async boxes(): Promise<string[]> {
+    if (!this.genesis && (await this.store.log.tip())) this.genesis = await genesisOf(this.store);
+    return [...new Set((this.genesis?.subscriptions ?? []).map((s) => s.match.box).filter((b): b is string => !!b))];
+  }
 
   // ------------------------------------------------------------ lifecycle
 
   async start(): Promise<void> {
-    const w = this.wallet;
-    this.signer = await signerFor(w, NAMES.runtime);
-    this.identity = this.signer.identity;
-    this.admin = await identityOf(w, NAMES.admin);
-    for (const n of Object.values(NAMES)) this.names.set(await identityOf(w, n), n);
-    this.names.set(await rootIdentity(w), "root");
-
-    this.seq = await this.nextSeq(this.identity);
+    if (await this.store.log.tip()) this.genesis = await genesisOf(this.store);
     this.cursor = await this.store.live.cursor.get();
-    for await (const { entry } of this.store.log.entries()) {
-      if (entry.n >= this.cursor) break;
-      this.configure(await this.store.get<Message>(entry.message));
-    }
-    this.say(`runtime ${short(this.identity)} · log ${this.cursor} processed · seq ${this.seq}`);
-
-    // Re-execute threads whose handles died with the last process.
-    const resume: CID[] = [];
-    for await (const t of this.store.live.resting()) {
-      const tip = await this.tipOf(t);
-      if (!tip || tip.state === "running" || tip.state === "waiting") resume.push(t);
-    }
+    this.say(`runtime ${short(this.identity)} · log ${this.cursor} processed${this.wallet ? "" : " · no wallet (replay)"}`);
     this.started = true;
-    for (const t of resume) {
-      this.say(`${short(t)} re-executing from its origin`);
-      await this.run(t);
-    }
+
+    // Threads whose handles died with the last process.
+    const resting: CID[] = [];
+    for await (const t of this.store.live.resting()) resting.push(t);
+    for (const t of resting) await this.resume(t);
     this.kick();
   }
 
@@ -174,21 +211,37 @@ export class Runtime {
     while (this.draining) await this.draining;
   }
 
-  /** Verify, store, stamp and log an inbound message, and schedule processing. Returns its log entry. */
-  async admit(m: Message): Promise<CID> {
-    const entry = await admit(this.store, m, this.now());
-    this.kick();
-    return entry;
+  // ------------------------------------------------------------ admission
+
+  /**
+   * Admit a BRC-169 envelope that arrived in `box`, with the message key the
+   * host derived for it: store the envelope (its JSON object as received, as
+   * dag-cbor) and a key record, write a signed log entry naming both, and
+   * schedule processing. The edge has verified and screened it (inbox.ts).
+   * An envelope already in the log is Rejected "duplicate-envelope".
+   */
+  async admitEnvelope(envelope: object, box: string, key: Uint8Array): Promise<{ entry: CID; envelope: CID }> {
+    const env = await this.store.put(envelope as never);
+    if (await this.store.log.byEnvelope(env)) throw new Rejected("duplicate-envelope", `envelope ${env} is already admitted`);
+    const k: MessageKey = { kind: "message-key", envelope: env, key };
+    const keyCid = await this.store.put(k);
+    return { entry: await this.append({ envelope: env, box, key: keyCid }), envelope: env };
   }
 
-  /** The next seq the store will accept from `identity` (for a peer's welcome, or a tick). */
-  async nextSeq(identity: string): Promise<number> {
-    let max = -1;
-    for await (const c of this.store.edges.query({ kind: "message", from: identity })) max = Math.max(max, (await this.store.get<Message>(c)).seq);
-    return max + 1;
+  /** Write a wake entry for a sleeper whose deadline has come (main.ts's timer). No-op if it is not sleeping. */
+  async wake(thread: CID): Promise<CID | undefined> {
+    if (!this.sleepers.has(thread.toString())) return undefined;
+    return this.append({ wake: thread });
   }
 
-  nameOf(identity: string): string { return this.names.get(identity) ?? identity.slice(0, 10); }
+  /** Appends are serialised: each entry extends the tip the previous one made. */
+  private append(body: EntryBody): Promise<CID> {
+    const wallet = this.wallet;
+    if (!wallet) return Promise.reject(new Error("runtime: no wallet, cannot sign a log entry"));
+    const p = this.appending.then(() => appendEntry(this.store, wallet, body, this.now()));
+    this.appending = p.catch(() => {});
+    return p.then(({ cid }) => { this.kick(); return cid; });
+  }
 
   // ------------------------------------------------------------ the loop
 
@@ -217,43 +270,230 @@ export class Runtime {
     }
   }
 
-  private configure(m: Message): void {
-    const sub = subscriptionIn(m, this.admin);
-    if (sub) this.subs.push(sub);
-  }
-
   private async process(entry: CID, e: LogEntry): Promise<void> {
-    const m = await this.store.get<Message>(e.message);
-    const what = `#${e.n} ${kindOf(m)} from ${this.nameOf(m.from)}`;
-
-    // Time passes: wake sleepers whose deadline this entry's stamp has reached, earliest first.
-    const ns = stampNs(e.time);
-    const due = [...this.sleepers.values()].filter((t) => t.deadline! <= ns)
-      .sort((a, b) => (a.deadline! < b.deadline! ? -1 : a.deadline! > b.deadline! ? 1 : a.origin.toString() < b.origin.toString() ? -1 : 1));
-    for (const t of due) {
-      this.say(`${what} → wakes ${short(t.origin)} (slept until ${t.deadline})`);
-      await this.resume(t, entry, e, m.at);
+    if (e.genesis) {
+      const g = await this.store.get(e.genesis);
+      if (!isGenesis(g)) throw new Error(`#${e.n}: genesis record is malformed`);
+      this.genesis = g;
     }
+    const g = this.genesis;
+    if (!g) throw new Error(`#${e.n}: no genesis`);
+    if (!isLogEntry(e) || !verifyEntry(e, g.identity)) throw new Error(`#${e.n} ${short(entry)}: bad log entry signature; stopping`);
 
-    this.configure(m);
-    if (isGenesis(m.body) || subscriptionIn(m, this.admin)) { this.say(`${what}: configuration`); return; }
-    for (const s of this.subs) {
-      if (!matches(s, m) || s.handler === "resolve-waiter") continue; // no program waits on a peer yet
-      if (!s.handler.equals(SHELL_CID)) { this.say(`${what}: handler ${short(s.handler)} is not a program this runtime has`); continue; }
-      const { kind: _, ...args } = (m.body ?? {}) as Record<string, unknown>;
-      const origin: ThreadOrigin = { kind: "thread", program: s.handler, args, launchedBy: e.message, input: entry, at: m.at };
-      const t = await this.store.chains.open(origin);
-      this.say(`${what} → shell ${short(t)}`);
-      await this.run(t);
+    if (e.genesis) { this.say(`#${e.n} genesis: ${g.handle}@${g.domain}, owner ${short(g.owner)}, ${g.subscriptions.length} subscriptions`); return; }
+
+    if (e.wake) {
+      const t = this.sleepers.get(e.wake.toString());
+      if (!t || t.deadline! > stampNs(e.time)) { this.say(`#${e.n} wake ${short(e.wake)}: not sleeping or not due; nothing runs`); return; }
+      this.say(`#${e.n} wake → ${short(t.origin)}`);
+      await this.wakeSleeper(t, entry, e);
       return;
     }
-    if (!due.length) this.say(`${what}: recorded, nothing runs`);
+
+    if (e.envelope) {
+      const box = e.box ?? "";
+      const sender = senderOf(await this.store.get(e.envelope).catch(() => undefined));
+      const what = `#${e.n} envelope ${short(e.envelope)} in ${box} from ${sender ? short(sender) : "?"}`;
+      const sub = sender ? g.subscriptions.find((s) => matches(s, sender, box)) : undefined;
+      if (!sub || !sender) { this.say(`${what}: no subscription; recorded, nothing runs`); return; }
+      const origin: ThreadOrigin = {
+        kind: "thread", program: sub.handler, args: { envelope: e.envelope, key: e.key, box, sender },
+        launchedBy: e.envelope, input: entry, at: stampMs(e.time),
+      };
+      const t = await this.store.chains.open(origin);
+      this.say(`${what} → ${await this.programName(sub.handler)} ${short(t)}`);
+      await this.run(t);
+    }
   }
 
   // ------------------------------------------------------------ threads
 
-  /** Start (or re-execute) a thread and step it until it rests or ends. */
+  private async programOf(o: ThreadOrigin): Promise<Program> {
+    const p = await this.store.get(o.program).catch(() => undefined);
+    if (!isProgram(p)) throw new Error(`program ${short(o.program)} is not a program record in this store`);
+    return p;
+  }
+
+  private async programName(c: CID): Promise<string> {
+    const p = await this.store.get(c).catch(() => undefined);
+    return isProgram(p) ? p.name : short(c);
+  }
+
+  /** Start a thread that has no updates yet, by its program's kind. */
   private async run(origin: CID): Promise<void> {
+    const o = await this.store.get<ThreadOrigin>(origin);
+    const p = await this.programOf(o).catch(() => undefined);
+    if (p && "wasm" in p.code) await this.step(origin, o.input!, await this.store.get<LogEntry>(o.input!), undefined);
+    else await this.runShell(origin);
+  }
+
+  /** After a restart: carry on with a thread that is not at rest. */
+  private async resume(origin: CID): Promise<void> {
+    const o = await this.store.get<ThreadOrigin>(origin);
+    const tip = await this.tipOf(origin);
+    if (tip && tip.state !== "running" && tip.state !== "waiting") return;
+    const p = await this.programOf(o).catch(() => undefined);
+    if (p && "wasm" in p.code) {
+      if (!tip) { this.say(`${short(origin)} ${p.name}: stepping (interrupted before its first step ended)`); await this.run(origin); }
+      else await this.maybeStep(origin, tip);
+      return;
+    }
+    if (this.live.has(origin.toString())) return;
+    this.say(`${short(origin)} re-executing from its origin`);
+    await this.runShell(origin);
+  }
+
+  /**
+   * A program thread waiting on launched threads: when all are at rest, step it
+   * with their resolution. The step is driven by the entry that brought the
+   * last of them to rest (the latest `input` among their final updates).
+   */
+  private async maybeStep(origin: CID, tip: ThreadUpdate): Promise<void> {
+    if (tip.state !== "waiting" || !tip.waitingOn?.length) return;
+    const resolved: Resolved[] = [];
+    let driver: { cid: CID; e: LogEntry } | undefined;
+    for (const w of tip.waitingOn) {
+      const u = await this.tipOf(w);
+      if (!u || (u.state !== "finished" && u.state !== "errored")) return;
+      resolved.push(compact({ thread: w, state: u.state, result: u.result, error: u.error }) as unknown as Resolved);
+      const e = await this.store.get<LogEntry>(u.input!);
+      if (!driver || e.n > driver.e.n) driver = { cid: u.input!, e };
+    }
+    await this.step(origin, driver!.cid, driver!.e, resolved);
+  }
+
+  /** A thread came to rest for good: step the program that launched it, if it now can. */
+  private async rested(child: CID): Promise<void> {
+    const o = await this.store.get<ThreadOrigin>(child);
+    const parent = o.launchedBy;
+    if (!parent) return;
+    const p = await this.store.get(parent).catch(() => undefined) as { kind?: string } | undefined;
+    if (p?.kind !== "thread") return;
+    const tip = await this.tipOf(parent);
+    if (tip?.state === "waiting" && tip.waitingOn?.some((w) => w.equals(child))) await this.maybeStep(parent, tip);
+  }
+
+  // ------------------------------------------------------------ program steps
+
+  /** One step of a handler program over `entry`: run it, record its update, start what it launched. */
+  private async step(origin: CID, entry: CID, e: LogEntry, resolved: Resolved[] | undefined): Promise<void> {
+    const key = origin.toString();
+    if (this.stepping.has(key) || this.stopped) return;
+    this.stepping.add(key);
+    let after: { emits: CID[]; launched: CID[]; rested: boolean };
+    try {
+      const o = await this.store.get<ThreadOrigin>(origin);
+      const prog = await this.programOf(o);
+      if (!("wasm" in prog.code)) throw new Error("not a wasm program");
+      let n = 1;
+      for await (const c of this.store.chains.history(origin)) if (!c.equals(origin)) n++;
+      const at = stampMs(e.time);
+      const clock = new ThreadClock();
+      clock.drive(stampNs(e.time));
+      const random = entropy(entry, origin);
+
+      const calls: CID[] = [], launched: CID[] = [], reveals: CID[] = [], emits: CID[] = [];
+      const children: ThreadOrigin[] = [];
+      const input = encode(compact({ kind: "step", thread: origin, step: n, entry, args: o.args, programs: this.genesis!.programs, resolved })).bytes;
+
+      const attest = async (op: Attested["op"], request: Uint8Array | CID, perform: () => Promise<Uint8Array>): Promise<Uint8Array> => {
+        const i = calls.length;
+        const w = await this.witness?.find(origin, n, i);
+        let result: Uint8Array;
+        if (w) {
+          if (w.op !== op || !Buffer.from(encode(w.request).bytes).equals(encode(request).bytes)) {
+            throw new Diverged(`${short(origin)} step ${n} call ${i}: the request differs from the recorded one`);
+          }
+          result = w.result;
+        } else if (this.wallet) {
+          result = await perform();
+        } else {
+          throw new NoWitness(`${short(origin)} step ${n} call ${i} (${op}): no wallet and no recorded answer`);
+        }
+        const rec: Attested = { kind: "attested", thread: origin, step: n, i, op, request, result };
+        calls.push(await this.store.put(rec));
+        return result;
+      };
+
+      const out = await runProgram(await loadModule(this.store, prog.code.wasm), {
+        input: () => input,
+        get: (c) => this.store.bytes(c),
+        put: async (bytes) => this.store.put(decode(bytes)),
+        putBlock: async (c, bytes) => {
+          if (!hashMatches(c, bytes)) throw new Error(`putblock: bytes do not hash to ${c}`);
+          await this.store.putBlock(c, bytes);
+        },
+        reveal: async (c) => {
+          const bytes = await this.store.bytes(c);
+          if (decode<{ kind?: unknown }>(bytes)?.kind !== "reveal") throw new Error("reveal: the record is not {kind: \"reveal\", …}");
+          await attest("reveal", c, () => signAnyone(this.wallet!, REVEAL_PROTOCOL, REVEAL_KEY_ID, bytes));
+          reveals.push(c);
+        },
+        launch: async (program, args) => {
+          if (!isProgram(await this.store.get(program).catch(() => undefined))) throw new Error(`launch: ${program} is not a program`);
+          const child: ThreadOrigin = { kind: "thread", program, args: await this.store.get(args), launchedBy: origin, input: entry, at, nonce: `${n}.${launched.length}` };
+          const c = encode(child).cid;
+          children.push(child);
+          launched.push(c);
+          return c;
+        },
+        emit: async (c) => {
+          if (!isEmit(await this.store.get(c))) throw new Error("emit: want {kind: \"emit\", to, handle?, domain?, box, body}");
+          emits.push(c);
+        },
+        wallet: async (frame) => {
+          if (!WALLET_CALLS.has(frame[0])) throw new Error(`wallet: call ${frame[0]} is not allowed to programs`);
+          return attest("wallet", frame, async () => Uint8Array.from(await this.wire!.transmitToWallet([...frame])));
+        },
+        fatal: (err) => err instanceof Stopped || err instanceof Diverged || err instanceof NoWitness,
+      }, { name: prog.name, clock: () => clock.read(), random });
+
+      if (this.stopped) return;
+      const state: ThreadState = out.exitCode !== 0 ? "errored" : launched.length ? "waiting" : "finished";
+      for (const c of children) await this.store.chains.open(c);
+      const text = (b: Uint8Array) => Buffer.from(b).toString("utf8").trim();
+      await this.store.chains.append(origin, compact({
+        state, step: n, input: entry, at,
+        waitingOn: state === "waiting" ? launched : undefined,
+        calls: calls.length ? calls : undefined,
+        launched: launched.length ? launched : undefined,
+        reveals: reveals.length ? reveals : undefined,
+        emits: emits.length ? emits : undefined,
+        result: { exitCode: out.exitCode, stdout: out.stdout, stderr: out.stderr },
+        error: state === "errored" ? { kind: "blew-up", message: text(out.stderr).split("\n").at(-1) || `exit ${out.exitCode}` } : undefined,
+      }));
+      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${reveals.length ? ` · ${reveals.length} revealed` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
+      after = { emits, launched, rested: state !== "waiting" };
+    } catch (err) {
+      if (err instanceof Stopped || this.stopped) return;
+      this.say(`${short(origin)} step ${err instanceof Diverged ? "DIVERGED" : err instanceof NoWitness ? "cannot run" : "failed"}: ${(err as Error).message}`);
+      if (err instanceof Diverged || err instanceof NoWitness) return;
+      await this.store.chains.append(origin, { state: "errored", input: entry, at: stampMs(e.time), error: { kind: "blew-up", message: (err as Error).message } }).catch(() => {});
+      after = { emits: [], launched: [], rested: true };
+    } finally {
+      this.stepping.delete(key);
+    }
+    // The step is recorded: now its effects. Launched threads may come to rest
+    // within this call and step this thread again (it is no longer mid-step).
+    for (const c of after.emits) await this.send(origin, c);
+    for (const c of after.launched) await this.run(c);
+    if (after.rested) await this.rested(origin);
+  }
+
+  private async send(thread: CID, emit: CID): Promise<void> {
+    if (!this.outbox) return;
+    const rec = await this.store.get<Emit>(emit);
+    try {
+      await this.outbox.send({ ...rec, emit, thread, bytes: await this.store.bytes(rec.body) });
+    } catch (e) {
+      this.say(`${short(thread)} emit ${short(emit)}: ${(e as Error).message}`);
+    }
+  }
+
+  // ------------------------------------------------------------ the shell
+
+  /** Start (or re-execute) a shell thread and step it until it rests or ends. */
+  private async runShell(origin: CID): Promise<void> {
     if (this.live.has(origin.toString())) return;
     const o = await this.store.get<ThreadOrigin>(origin);
     const history: CID[] = [];
@@ -261,17 +501,17 @@ export class Runtime {
     const launch = await this.store.get<LogEntry>(o.input!);
     if (!isLogEntry(launch)) throw new Error(`thread ${short(origin)}: input is not a log entry`);
     const t = new Live(origin, o, history);
-    t.drive(o.input!, launch, o.at);
+    t.drive(o.input!, launch);
     this.live.set(origin.toString(), t);
-    void this.body(t);
+    void this.shellBody(t);
     await t.step.promise;
   }
 
   /** Wake a sleeper: drive it by `entry` and step it until it rests or ends. */
-  private async resume(t: Live, entry: CID, e: LogEntry, at: Ms): Promise<void> {
+  private async wakeSleeper(t: Live, entry: CID, e: LogEntry): Promise<void> {
     this.sleepers.delete(t.origin.toString());
     t.deadline = undefined;
-    t.drive(entry, e, at);
+    t.drive(entry, e);
     t.step = deferred();
     const wake = t.wake!;
     t.wake = undefined;
@@ -279,13 +519,14 @@ export class Runtime {
     await t.step.promise;
   }
 
-  /** The shell program: the only one for now. */
-  private async body(t: Live): Promise<void> {
+  private async shellBody(t: Live): Promise<void> {
+    let ended = false;
     try {
-      await this.append(t, { state: "running" });
+      await this.appendShell(t, { state: "running" });
       const args = t.o.args;
-      if (!t.o.program.equals(SHELL_CID) || !isShellArgs(args)) {
-        await this.end(t, { state: "errored", error: { kind: "cant-do", message: "shell wants {cmd, tree, cwd?, env?}" } });
+      if (!isShellArgs(args)) {
+        await this.appendShell(t, { state: "errored", error: { kind: "cant-do", message: "shell wants {cmd, tree, cwd?, env?}" } });
+        ended = true;
         return;
       }
       const modules = await loadShellModules(this.store);
@@ -295,24 +536,25 @@ export class Runtime {
         random: (len) => t.random(len),
         sleep: (clocks) => this.sleep(t, clocks),
       });
-      await this.end(t, { state: "finished", result: { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, tree: r.tree } });
+      await this.appendShell(t, { state: "finished", result: { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, tree: r.tree } });
+      ended = true;
     } catch (e) {
       if (e instanceof Stopped) return;
       if (e instanceof Diverged) { this.say(`${short(t.origin)} DIVERGED: ${e.message}`); return; }
-      await this.end(t, { state: "errored", error: { kind: "blew-up", message: (e as Error).message } }).catch((e2) => {
+      await this.appendShell(t, { state: "errored", error: { kind: "blew-up", message: (e as Error).message } }).then(() => { ended = true; }, (e2) => {
         if (!(e2 instanceof Stopped)) this.say(`${short(t.origin)}: ${(e2 as Error).message}`);
       });
     } finally {
       this.live.delete(t.origin.toString());
+      if (ended && !this.stopped) await this.rested(t.origin).catch((e) => this.say(`${short(t.origin)}: ${(e as Error).message}`));
       t.step.resolve();
     }
   }
 
   /**
    * A sleep: if the earliest deadline is not after the thread's "now", return
-   * at once. Otherwise rest `waiting` until it, and resume when an entry
-   * stamped at or after it is processed (or, re-executing, when the chain says
-   * that already happened).
+   * at once. Otherwise rest `waiting` until it, and resume when a wake entry
+   * for it is processed (or, re-executing, when the chain says that already happened).
    */
   private async sleep(t: Live, clocks: Array<{ timeout: bigint; absolute: boolean }>): Promise<void> {
     const now = t.clock.peek();
@@ -322,68 +564,29 @@ export class Runtime {
       if (deadline === undefined || d < deadline) deadline = d;
     }
     if (deadline === undefined || deadline <= now) return;
-    await this.append(t, { state: "waiting", until: Number((deadline + 999_999n) / 1_000_000n) });
+    const until = Number((deadline + 999_999n) / 1_000_000n);
+    await this.appendShell(t, { state: "waiting", until });
 
     // Re-executing: the chain may already record the wake. Replay it from its entry.
     const recorded = t.history[t.pos];
     if (recorded) {
       const u = await this.store.get<ThreadUpdate>(recorded);
-      const e = await this.store.get<LogEntry>(u.input!);
-      const m = await this.store.get<Message>(e.message);
-      t.drive(u.input!, e, m.at);
-      await this.append(t, { state: "running" });
+      t.drive(u.input!, await this.store.get<LogEntry>(u.input!));
+      await this.appendShell(t, { state: "running" });
       return;
     }
     t.deadline = deadline;
     this.sleepers.set(t.origin.toString(), t);
+    this.onSleep?.(t.origin, until);
     await new Promise<void>((resolve) => {
       t.wake = resolve;
       t.step.resolve(); // resting: this step is over
     });
-    await this.append(t, { state: "running" });
-  }
-
-  /** Final update, plus the result message to whoever launched the thread (named in the update). */
-  private async end(t: Live, body: { state: ThreadState; result?: unknown; error?: ThreadUpdate["error"] }): Promise<void> {
-    const launcher = await this.store.get<Message>(t.o.launchedBy!).catch(() => undefined);
-    let msg: Message | undefined;
-    if (launcher?.kind === "message" && launcher.from !== this.identity) {
-      const out = body.result !== undefined ? { kind: "result", ...(body.result as object) } : { kind: "result", error: body.error };
-      msg = await this.sign(t, { to: launcher.from, body: out, refs: [{ to: t.o.launchedBy!, rel: "replies-to" }, { to: t.origin, rel: "from-thread" }] }, "result");
-    }
-    const mcid = msg ? await this.putOwn(msg) : undefined;
-    await this.append(t, { ...body, refs: mcid ? [{ to: mcid, rel: "result" }] : undefined });
-    if (msg) this.outbox?.send(msg);
-  }
-
-  // ------------------------------------------------------------ records
-
-  /**
-   * Sign a message from the runtime identity at log time. Its seq is the one the
-   * chain already recorded for this position (re-execution), else the next.
-   */
-  private async sign(t: Live, m: { to: string; body: unknown; refs: Ref[] }, rel: string): Promise<Message> {
-    let seq: number | undefined;
-    const existing = t.history[t.pos];
-    if (existing) {
-      const u = await this.store.get<ThreadUpdate>(existing);
-      const ref = u.refs?.find((r) => r.rel === rel)?.to;
-      if (isCID(ref)) seq = (await this.store.get<Message>(ref)).seq;
-    }
-    return signMessage(this.signer, { ...m, seq: seq ?? this.seq++, at: t.ctx.at });
-  }
-
-  private async putOwn(m: Message): Promise<CID> {
-    try {
-      return await this.store.putMessage(m);
-    } catch (e) {
-      if (e instanceof Rejected && e.reason === "duplicate-seq") throw new Diverged(`recomputed message at seq ${m.seq} differs from the stored one`);
-      throw e;
-    }
+    await this.appendShell(t, { state: "running" });
   }
 
   /** Append the thread's next update, or verify it against the chain when re-executing. */
-  private async append(t: Live, body: Record<string, unknown>): Promise<CID> {
+  private async appendShell(t: Live, body: Record<string, unknown>): Promise<CID> {
     if (this.stopped) throw new Stopped();
     const full = compact({ ...body, input: t.ctx.input, at: t.ctx.at });
     const existing = t.history[t.pos];
@@ -399,18 +602,14 @@ export class Runtime {
     const cid = await this.store.chains.append(t.origin, full);
     t.history.push(cid);
     t.pos++;
-    this.transition(t, from, full);
-    return cid;
-  }
-
-  private transition(t: Live, from: string, u: Record<string, unknown>): void {
     const bits: string[] = [];
-    if (typeof u.until === "number") bits.push(`until ${u.until}`);
-    const res = u.result as { exitCode?: number } | undefined;
+    if (typeof full.until === "number") bits.push(`until ${full.until}`);
+    const res = full.result as { exitCode?: number } | undefined;
     if (res) bits.push(`exit ${res.exitCode}`);
-    const err = u.error as ThreadUpdate["error"];
+    const err = full.error as ThreadUpdate["error"];
     if (err) bits.push(`${err.kind}: ${err.message}`);
-    this.say(`${short(t.origin)} shell ${from} → ${String(u.state)}${bits.length ? ` (${bits.join(", ")})` : ""} · input #${short(u.input as CID)}`);
+    this.say(`${short(t.origin)} shell ${from} → ${String(full.state)}${bits.length ? ` (${bits.join(", ")})` : ""}`);
+    return cid;
   }
 
   private async tipOf(thread: CID): Promise<ThreadUpdate | undefined> {
@@ -419,9 +618,45 @@ export class Runtime {
   }
 }
 
-function kindOf(m: Message): string {
-  const k = (m.body as { kind?: unknown } | null)?.kind;
-  return typeof k === "string" ? k : "message";
+// ---------------------------------------------------------------- replay
+
+/**
+ * A Witness over a store's recorded steps: every attested record its thread
+ * chains list, by (thread, step, i). Feed it to a fresh Runtime with no wallet
+ * to replay a log.
+ */
+export async function witnessFrom(store: Store): Promise<Witness> {
+  const byKey = new Map<string, Attested>();
+  for await (const t of store.edges.query({ kind: "thread" })) {
+    for await (const u of store.chains.history(t)) {
+      if (u.equals(t)) continue;
+      const calls = (await store.get(u) as { calls?: unknown }).calls;
+      if (!Array.isArray(calls)) continue;
+      for (const c of calls) {
+        if (!isCID(c)) continue;
+        const a = await store.get(c);
+        if (isAttested(a)) byKey.set(`${a.thread} ${a.step} ${a.i}`, a);
+      }
+    }
+  }
+  return { find: async (thread, step, i) => byKey.get(`${thread} ${step} ${i}`) };
+}
+
+// ---------------------------------------------------------------- helpers
+
+/** The sender identity key of an envelope record, or undefined. */
+function senderOf(env: unknown): string | undefined {
+  const k = (env as { sender?: { identityKey?: unknown } } | undefined)?.sender?.identityKey;
+  return typeof k === "string" && /^0[23][0-9a-f]{64}$/.test(k) ? k : undefined;
+}
+
+const GIT_RAW = 0x78, RAW = 0x55, DAG_CBOR = 0x71, SHA1 = 0x11, SHA2_256 = 0x12;
+
+/** Does `bytes` hash to `cid`? git-raw/sha1, raw/sha2-256 and dag-cbor/sha2-256 only. */
+function hashMatches(cid: CID, bytes: Uint8Array): boolean {
+  const alg = cid.multihash.code === SHA1 ? "sha1" : cid.multihash.code === SHA2_256 ? "sha256" : undefined;
+  if (!alg || ![GIT_RAW, RAW, DAG_CBOR].includes(cid.code)) return false;
+  return Buffer.from(createHash(alg).update(bytes).digest()).equals(cid.multihash.digest);
 }
 
 /** Drop undefined fields (dag-cbor has no undefined). */

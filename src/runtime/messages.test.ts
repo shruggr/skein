@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CID, encode, fmt } from "./cid.ts";
 import { memoryStore } from "./memory.ts";
-import { genesis, program, signMessage, type Message } from "./records.ts";
+import { isGenesis, program, signMessage, type Genesis, type Message } from "./records.ts";
 import { openStore } from "./sqlite.ts";
 import { Rejected, type Filter, type Store } from "./store.ts";
 import { collect } from "../testkit.ts";
@@ -108,7 +108,9 @@ for (const [name, open] of stores) {
     const s = open();
     const wasm = encode({ kind: "blob" }).cid;
     const p = program({ name: "grep", code: { wasm }, inputs: { type: "object", properties: { pattern: { type: "string" } } }, services: [], description: "search" });
-    const g = genesis(await rootIdentity(ephemeralWallet()), "ripper", 42);
+    const id = await rootIdentity(ephemeralWallet());
+    const g: Genesis = { kind: "genesis", identity: id, handle: "ripper", domain: "localhost", owner: id, programs: { grep: encode(p).cid }, subscriptions: [{ match: { box: "run" }, handler: encode(p).cid }] };
+    assert.ok(isGenesis(g));
     for (const r of [p, g]) {
       const cid = await s.put(r);
       assert.ok(cid.equals(encode(r).cid));             // same CID in either store and from cid.ts

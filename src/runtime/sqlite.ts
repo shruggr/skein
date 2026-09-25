@@ -6,10 +6,9 @@
 
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { CID, decode, encode, fmt, fromBytes, isCID, parse } from "./cid.ts";
-import { NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
+import { checkExtends, NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 import { verifyMessageSync, type Message } from "./records.ts";
-import { maxStamp } from "./syscalls.ts";
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS blocks (
@@ -83,12 +82,13 @@ CREATE TABLE IF NOT EXISTS handles (
   json   TEXT NOT NULL
 ) WITHOUT ROWID;
 
--- Not derived and not rebuilt: the input log. Each row is one log-entry record
--- (also in blocks); admission order is not recoverable from the messages.
-CREATE TABLE IF NOT EXISTS log (
-  n       INTEGER PRIMARY KEY,
-  cid     BLOB NOT NULL UNIQUE,
-  message BLOB NOT NULL UNIQUE
+-- Not derived and not rebuilt: the input log. Each row is one signed
+-- log-entry record (also in blocks); admission order is not recoverable from
+-- the records. (An older file's message-based "log" table is left unread.)
+CREATE TABLE IF NOT EXISTS entries (
+  n        INTEGER PRIMARY KEY,
+  cid      BLOB NOT NULL UNIQUE,
+  envelope BLOB UNIQUE
 );
 
 -- Not derived: the scheduler's cursor and similar single values.
@@ -202,11 +202,10 @@ export function openStore(path: string): SqliteStore {
     wipeChains: db.prepare("DELETE FROM chains"),
     wipeMessages: db.prepare("DELETE FROM messages"),
 
-    logTip: db.prepare("SELECT n, cid FROM log ORDER BY n DESC LIMIT 1"),
-    logOf: db.prepare("SELECT cid FROM log WHERE message = ?"),
-    logIns: db.prepare("INSERT INTO log (n, cid, message) VALUES (?, ?, ?)"),
-    logFrom: db.prepare("SELECT cid FROM log WHERE n >= ? ORDER BY n"),
-    isMessage: db.prepare("SELECT 1 AS x FROM messages WHERE cid = ?"),
+    logTip: db.prepare("SELECT n, cid FROM entries ORDER BY n DESC LIMIT 1"),
+    logOf: db.prepare("SELECT cid FROM entries WHERE envelope = ?"),
+    logIns: db.prepare("INSERT INTO entries (n, cid, envelope) VALUES (?, ?, ?)"),
+    logFrom: db.prepare("SELECT cid FROM entries WHERE n >= ? ORDER BY n"),
     metaGet: db.prepare("SELECT value FROM meta WHERE key = ?"),
     metaSet: db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"),
   };
@@ -346,19 +345,20 @@ export function openStore(path: string): SqliteStore {
     },
 
     log: {
-      async append(message, time) {
+      async append(entry) {
         return tx(() => {
-          const had = q.logOf.get(message.bytes);
-          if (had) return fromBytes(had.cid as Uint8Array);
-          if (!q.isMessage.get(message.bytes)) throw new NotFound(`${fmt(message)} (not a stored message)`);
+          if (entry.envelope && q.logOf.get(entry.envelope.bytes)) throw new Rejected("duplicate-envelope", `log: envelope ${fmt(entry.envelope)} is already admitted`);
           const last = q.logTip.get();
-          const n = last ? (last.n as number) + 1 : 0;
-          const prev = last ? getBlock<LogEntry>(fromBytes(last.cid as Uint8Array)) : undefined;
-          const entry: LogEntry = { kind: "log", prev: last ? fromBytes(last.cid as Uint8Array) : null, n, message, time: prev ? maxStamp(time, prev.time) : time };
+          const tipCid = last ? fromBytes(last.cid as Uint8Array) : undefined;
+          checkExtends(entry, tipCid, tipCid ? getBlock<LogEntry>(tipCid) : undefined);
           const cid = put(entry);
-          q.logIns.run(n, cid.bytes, message.bytes);
+          q.logIns.run(entry.n, cid.bytes, entry.envelope?.bytes ?? null);
           return cid;
         });
+      },
+      async byEnvelope(envelope) {
+        const r = q.logOf.get(envelope.bytes);
+        return r ? fromBytes(r.cid as Uint8Array) : undefined;
       },
       async tip() {
         const last = q.logTip.get();

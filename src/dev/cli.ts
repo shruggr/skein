@@ -1,33 +1,26 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-dev`: the developer's tools. OUTSIDE the machine: this process reads
 // the disk and opens the runtime's store file directly, which the runtime
-// itself never lets anything do. Two roles:
+// itself never lets anything do.
 //
-//   - client stand-in: `scan` hashes a directory into tree objects and `install`
-//     puts the wasm modules into the store file directly (a real client would
-//     send them as messages); `run` signs a message as admin and sends it over
-//     the runtime's socket like any peer.
-//   - inspection: `ls`, `show`, `refs`, `log`, `tree ls`, `rebuild` read the store.
-//
-// `sh` runs the wasm shell here, in this process, with a fixed clock and seed:
-// a debugging aid, not the machine.
+//   - bootstrap: `install` puts the pinned wasm modules into the store file
+//     (they exceed a message; docs/OPEN.md). Trees and commands come from the
+//     client (bin/skein) through the messagebox.
+//   - inspection: `log`, `ls`, `show`, `refs`, `rebuild` read the store.
 
 import { readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
 import { readLog } from "../runtime/log.ts";
-import { loadShellModules, MODULES, rawCid } from "../runtime/programs.ts";
+import { MODULES, rawCid } from "../runtime/programs.ts";
 import { openStore, type SqliteStore } from "../runtime/sqlite.ts";
-import { lookup, readTree } from "../runtime/tree.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
-import { connectWallet } from "../wallet.ts";
-import { skeinHome, socketPath } from "../peers/connection.ts";
-import { connectAs, run, type As } from "./admin.ts";
-import { scan } from "./scan.ts";
 
+const skeinHome = () => process.env.SKEIN_HOME || join(homedir(), ".skein");
 const dbPath = () => process.env.SKEIN_DB || join(skeinHome(), "runtime.db");
 const WASM_DIR = fileURLToPath(new URL("../../wasm/", import.meta.url));
 
@@ -106,25 +99,11 @@ async function withStore<T>(fn: (s: SqliteStore) => Promise<T>): Promise<T> {
 }
 
 const COMMANDS: Record<string, Command> = {
-  scan: {
-    usage: `skein-dev scan <dir>
-  Hash a directory into git tree/blob objects in the store file; print the root
-  tree CID. Also installs the wasm modules if the store lacks them.`,
-    flags: {},
-    async run(a, env) {
-      if (!a.pos[0]) throw new UsageError("missing <dir>");
-      await withStore(async (store) => {
-        for (const l of await install(store)) env.err(`installed ${l}`);
-        env.out(fmt(await scan(store, a.pos[0])));
-      });
-      return 0;
-    },
-  },
-
   install: {
     usage: `skein-dev install
-  Put wasm/brush.wasm and wasm/coreutils.wasm into the store file under their
-  pinned CIDs (the shell program's modules).`,
+  Put the pinned wasm modules (the shell's brush and coreutils, the handler
+  programs) into the store file under their CIDs: the bootstrap side door
+  (docs/OPEN.md); objects bigger than a message cannot arrive any other way yet.`,
     flags: {},
     async run(_a, env) {
       const done = await withStore(install);
@@ -133,82 +112,18 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
-  run: {
-    usage: `skein-dev run --tree <cid> [--cwd /path] [--as admin|david] -- '<command>'
-  Send { kind: "run", cmd, tree } to the runtime over its socket, signed as
-  admin (default) or david, and print the result it sends back.`,
-    flags: { tree: "string", cwd: "string", as: "string" },
-    async run(a, env) {
-      const tree = str(a.opts.tree);
-      if (!tree) throw new UsageError("missing --tree <cid>");
-      const cmd = a.pos.join(" ");
-      if (!cmd.trim()) throw new UsageError("missing '<command>'");
-      const conn = await connectAs(await devWallet(), (str(a.opts.as) ?? "admin") as As);
-      try {
-        const r = await run(conn, { cmd, tree: parse(tree), cwd: str(a.opts.cwd) });
-        env.err(`admitted as log entry ${fmt(r.entry)}`);
-        const b = r.result.body as { exitCode?: number; stdout?: Uint8Array; stderr?: Uint8Array; tree?: CID; error?: { kind: string; message: string } };
-        if (b.error) { env.err(`${b.error.kind}: ${b.error.message}`); return 1; }
-        env.write(1, b.stdout ?? new Uint8Array());
-        env.write(2, b.stderr ?? new Uint8Array());
-        env.err(`exit ${b.exitCode} · tree ${b.tree ? fmt(b.tree) : "?"}`);
-        return b.exitCode ?? 1;
-      } finally { conn.close(); }
-    },
-  },
-
-  sh: {
-    usage: `skein-dev sh --tree <cid> [--cwd /path] [--time <ms>] [--seed n] -- '<command>'
-  Run the wasm shell in THIS process over a tree in the store file, with a fixed
-  clock and seed. Outside the machine: nothing is logged. The resulting tree's
-  CID goes to stderr as "tree <cid>".`,
-    flags: { tree: "string", cwd: "string", time: "string", seed: "string" },
-    async run(a, env) {
-      const tree = str(a.opts.tree);
-      if (!tree) throw new UsageError("missing --tree <cid>");
-      const { runShell } = await import("../runtime/shell.ts");
-      return withStore(async (store) => {
-        await install(store);
-        const r = await runShell(store, {
-          tree: parse(tree), cmd: a.pos.join(" "), cwd: str(a.opts.cwd), modules: await loadShellModules(store),
-          time: a.opts.time ? Number(a.opts.time) : undefined, seed: a.opts.seed ? Number(a.opts.seed) : undefined,
-        });
-        env.write(1, r.stdout);
-        env.write(2, r.stderr);
-        env.err(`tree ${fmt(r.tree)}`);
-        return r.exitCode;
-      });
-    },
-  },
-
-  tree: {
-    usage: `skein-dev tree ls <cid> [path]   list a tree's entries (mode, cid, name)`,
-    flags: {},
-    async run(a, env) {
-      const [sub, arg, path = ""] = a.pos;
-      if (sub !== "ls" || !arg) throw new UsageError("usage: tree ls <cid> [path]");
-      await withStore(async (store) => {
-        const leaf = await lookup(store, parse(arg), path);
-        if (!leaf) throw new Error(`no such path: ${path}`);
-        if (leaf.mode !== "40000") { env.out(`${leaf.mode.padStart(6, "0")} ${fmt(leaf.cid)}\t${path}`); return; }
-        for (const e of await readTree(store, leaf.cid)) env.out(`${e.mode.padStart(6, "0")} ${fmt(e.cid)}\t${e.name}`);
-      });
-      return 0;
-    },
-  },
-
   log: {
     usage: `skein-dev log [--limit n]
-  The input log: position, admission stamp, entry CID (the last is the state hash), sender, kind.`,
+  The input log: position, admission stamp, entry CID (the last is the state hash), and what it admits.`,
     flags: { limit: "string" },
     async run(a, env) {
       await withStore(async (store) => {
         const all = await readLog(store);
         const lim = a.opts.limit ? Number(a.opts.limit) : all.length;
-        for (const { cid, entry, message } of all.slice(-lim)) {
-          const b = message.body as { kind?: unknown } | null;
+        for (const { cid, entry } of all.slice(-lim)) {
           const when = new Date(entry.time[0] * 1000 + Math.floor(entry.time[1] / 1e6)).toISOString();
-          env.out(`${String(entry.n).padStart(4)}  ${when}  ${fmt(cid)}  ${message.from.slice(0, 12)}  ${String(b?.kind ?? "?")}`);
+          const what = entry.genesis ? `genesis ${fmt(entry.genesis)}` : entry.envelope ? `${entry.box} envelope ${fmt(entry.envelope)}` : `wake ${entry.wake ? fmt(entry.wake) : "?"}`;
+          env.out(`${String(entry.n).padStart(4)}  ${when}  ${fmt(cid)}  ${what}`);
         }
         const tip = await store.log.tip();
         env.out(`state ${tip ? fmt(tip) : "(empty)"} · processed ${await store.live.cursor.get()}/${all.length}`);
@@ -285,20 +200,13 @@ const COMMANDS: Record<string, Command> = {
   },
 };
 
-function devWallet() {
-  return connectWallet(process.env.SKEIN_WALLET === "ephemeral" ? { kind: "ephemeral" } : { kind: "remote", url: process.env.SKEIN_WALLET_URL, originator: "skein" });
-}
-
 const HELP = `skein-dev — developer tools, outside the machine
 
-  skein-dev scan <dir>                     hash a directory into the store file; print its tree CID
-  skein-dev install                        put the wasm modules into the store file
-  skein-dev run --tree <cid> -- '<cmd>'    send a run message as admin; print the result
-  skein-dev sh --tree <cid> -- '<cmd>'     run the wasm shell locally (fixed clock), not the machine
-  skein-dev log | ls | show <cid> | refs <cid> | tree ls <cid> | rebuild
+  skein-dev install                        put the pinned wasm modules into the store file (bootstrap)
+  skein-dev log | ls | show <cid> | refs <cid> | rebuild
 
-Env: SKEIN_HOME (~/.skein), SKEIN_DB ($SKEIN_HOME/runtime.db), SKEIN_SOCKET
-($SKEIN_HOME/runtime.sock), SKEIN_WALLET (remote|ephemeral), SKEIN_WALLET_URL.`;
+Trees and commands come from the client (bin/skein import / run) through the
+messagebox. Env: SKEIN_HOME (~/.skein), SKEIN_DB ($SKEIN_HOME/runtime.db).`;
 
 export async function main(argv: string[]): Promise<number> {
   const env: Env = {
@@ -321,4 +229,3 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
-export { socketPath };
