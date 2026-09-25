@@ -80,9 +80,17 @@ export interface InstanceConfig {
   owner: Identity;
   handle?: string;  // default "skein"
   domain?: string;  // default "localhost"
-  /** Default: (owner, run) → run-handler, (owner, objects) → objects-handler. */
+  /** Default: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, chat) → loop. */
   subscriptions?: Subscription[];
+  /** Peers by role: `infer` is the inference peer the loop asks. */
+  peers?: Record<string, Identity>;
+  /** Default: {model: "ripper/qwen38", thinking: "off"}. */
+  defaults?: Record<string, string>;
+  /** Reply-only boxes the edge collects. Default: ["completions"]. */
+  collect?: string[];
 }
+
+export const DEFAULTS: Record<string, string> = { model: "ripper/qwen38", thinking: "off" };
 
 /** The genesis record for a config: the instance identity is the wallet's. */
 export async function genesisFor(wallet: KeyWallet, c: InstanceConfig): Promise<Genesis> {
@@ -96,7 +104,11 @@ export async function genesisFor(wallet: KeyWallet, c: InstanceConfig): Promise<
     subscriptions: c.subscriptions ?? [
       { match: { sender: c.owner, box: "run" }, handler: PROGRAM_CIDS["run-handler"] },
       { match: { sender: c.owner, box: "objects" }, handler: PROGRAM_CIDS["objects-handler"] },
+      { match: { sender: c.owner, box: "chat" }, handler: PROGRAM_CIDS.loop },
     ],
+    ...(c.peers && Object.keys(c.peers).length ? { peers: c.peers } : {}),
+    defaults: c.defaults ?? DEFAULTS,
+    collect: c.collect ?? ["completions"],
   };
 }
 

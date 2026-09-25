@@ -5,6 +5,7 @@
 #   SKEIN_INSTANCE_WIF  ← PRIVATE_KEY_WIF in dev-wallet.env (the key the instance wallet runs with;
 #                         the edge derives message keys from it)
 #   SKEIN_OWNER         ← owner.identity        SKEIN_MESSAGEBOX ← messagebox.url
+#   SKEIN_INFER         ← infer.identity (the inference peer; a new genesis's peers.infer)
 # and puts the pinned wasm modules into the store first (skein-dev install).
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -16,6 +17,7 @@ if [ -z "${SKEIN_INSTANCE_WIF:-}" ] && [ -f "$home/dev-wallet.env" ]; then
   export SKEIN_INSTANCE_WIF
 fi
 [ -z "${SKEIN_OWNER:-}" ] && [ -f "$home/owner.identity" ] && export SKEIN_OWNER="$(cat "$home/owner.identity")"
+[ -z "${SKEIN_INFER:-}" ] && [ -f "$home/infer.identity" ] && export SKEIN_INFER="$(cat "$home/infer.identity")"
 [ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"
 node --experimental-strip-types --no-warnings "$root/src/dev/cli.ts" install >&2
 exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@"

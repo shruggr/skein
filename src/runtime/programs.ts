@@ -1,6 +1,6 @@
 // The programs this runtime starts with. `shell` is the wasm shell (brush +
 // uutils coreutils) driven from TypeScript; its record names the two WASI
-// modules by CID. `run-handler` and `objects-handler` are handler programs
+// modules by CID. `run-handler`, `objects-handler` and `loop` are handler programs
 // (Go, GOOS=wasip1; programs/, built by scripts/build-programs.sh) stepped
 // through the `skein` imports (program.ts). The runtime loads every module
 // from the store by CID and never from a disk; `skein-dev install` puts the
@@ -26,8 +26,9 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreidqjkh3nvpgcjk6s4jj6vibeloxxv6x7c4iyulhaoyfuiiai6gizq"),
-  "objects-handler": CID.parse("bafkreihhyygh5venniad2spqnmggn2fze2fp3uqogypbi2noaim65nlyki"),
+  "run-handler": CID.parse("bafkreihcpjdmdnvrseesqlvianiwgxcodpy377llnn66jgna2qtgoab2yy"),
+  "objects-handler": CID.parse("bafkreidofbrdbgvjrf3agwqii3gl23mfqajed2wqu2p3lrss7c57nyypou"),
+  "loop": CID.parse("bafkreihm3befzivgoamaqbls72t5tz2wz4hunif56abketqn272ywqjcva"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -60,12 +61,21 @@ export const OBJECTS_HANDLER = program({
   description: "The `objects` box: decrypt a bundle {records: [{cid, bytes}], root?}, store each record, reveal {of, root?, count}.",
 });
 
+export const LOOP = program({
+  name: "loop",
+  code: { wasm: MODULES.loop },
+  inputs: { envelope: "cid", box: "string", sender: "identity" },
+  services: ["wallet", "infer"],
+  description: "The `chat` box: the turn loop. Reveals each turn; asks the `infer` peer; runs `bash` tool calls in the shell; says the answer to David and awaits his reply.",
+});
+
 /** The programs a genesis names, by name. */
-export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER } as const;
+export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER, loop: LOOP } as const;
 export const PROGRAM_CIDS: Record<keyof typeof PROGRAMS, CID> = {
   shell: SHELL_CID,
   "run-handler": encode(RUN_HANDLER).cid,
   "objects-handler": encode(OBJECTS_HANDLER).cid,
+  loop: encode(LOOP).cid,
 };
 
 export interface ShellArgs {

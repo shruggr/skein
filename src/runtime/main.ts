@@ -10,6 +10,8 @@
 //                         message keys from it (inbox.ts). Required with a remote wallet.
 //   SKEIN_OWNER           the owner's identity key (a new instance's genesis routes its `run`/`objects` boxes)
 //   SKEIN_OWNER_HANDLE    the owner's handle for outbound envelopes, default david@localhost
+//   SKEIN_INFER           the inference peer's identity key (a new instance's genesis `peers.infer`)
+//   SKEIN_INFER_HANDLE    its handle for outbound envelopes, default infer@localhost
 //   SKEIN_HANDLE          the instance's handle, default skein@localhost
 //   SKEIN_MESSAGEBOX      the messagebox host, e.g. http://127.0.0.1:8100/messagebox
 //   SKEIN_POLL_MS         how often to collect the boxes, default 1000
@@ -42,7 +44,7 @@ const store = openStore(dbPath); // SQLite creates the file; the directory must 
 
 if (!(await store.log.tip())) {
   if (!env.SKEIN_OWNER) die("an empty store needs SKEIN_OWNER (the owner's identity key) for its genesis");
-  const g = await ensureGenesis(store, wallet, { owner: env.SKEIN_OWNER!, handle: user, domain });
+  const g = await ensureGenesis(store, wallet, { owner: env.SKEIN_OWNER!, handle: user, domain, peers: env.SKEIN_INFER ? { infer: env.SKEIN_INFER } : undefined });
   say(`genesis ${g.entry}`);
 }
 
@@ -62,13 +64,17 @@ await runtime.start();
 const g = runtime.genesis!;
 
 const [ownerUser, ownerDomain = "localhost"] = (env.SKEIN_OWNER_HANDLE || "david@localhost").split("@");
+const [inferUser, inferDomain = "localhost"] = (env.SKEIN_INFER_HANDLE || "infer@localhost").split("@");
 let edge: Edge | undefined;
 if (env.SKEIN_MESSAGEBOX) {
   edge = new Edge({
     runtime, wallet, rootKey,
     box: messageBoxClient(wallet, env.SKEIN_MESSAGEBOX),
     freshnessMs: env.SKEIN_FRESHNESS_MS ? Number(env.SKEIN_FRESHNESS_MS) : undefined,
-    handles: { [g.owner]: { handle: ownerUser, domain: ownerDomain } },
+    handles: {
+      [g.owner]: { handle: ownerUser, domain: ownerDomain },
+      ...(g.peers?.infer ? { [g.peers.infer]: { handle: inferUser, domain: inferDomain } } : {}),
+    },
     log: say,
   });
   await edge.check().catch((e) => die((e as Error).message));
@@ -77,7 +83,7 @@ if (env.SKEIN_MESSAGEBOX) {
 } else {
   say("SKEIN_MESSAGEBOX unset: no edge; nothing will be admitted");
 }
-say(`skein runtime ${g.identity} (${g.handle}@${g.domain}) · owner ${short(g.owner)} · db ${dbPath} · boxes ${(await runtime.boxes()).join(",")} · state ${(await runtime.tip())?.toString()}`);
+say(`skein runtime ${g.identity} (${g.handle}@${g.domain}) · owner ${short(g.owner)}${g.peers?.infer ? ` · infer ${short(g.peers.infer)}` : " · no infer peer"} · db ${dbPath} · boxes ${(await runtime.boxes()).join(",")} · state ${(await runtime.tip())?.toString()}`);
 
 const stop = async (sig: string) => {
   say(`${sig}: stopping`);
