@@ -96,20 +96,20 @@ test("transport: unsigned, tampered, or foreign-signed inbound messages are reje
 
 test("transport: a message to an unconnected identity is held, then delivered on hello", async (t) => {
   const { sock, wallet, rt, transport } = await setup(t);
-  const clock = await signerFor(wallet, "clock");
+  const peer = await signerFor(wallet, "peer");
   const runtimeSigner = await signerFor(wallet, "runtime");
-  const m = await signMessage(runtimeSigner, { to: clock.identity, seq: 999, at: 1, body: { kind: "time", state: encode({ x: 1 }).cid } });
+  const m = await signMessage(runtimeSigner, { to: peer.identity, seq: 999, at: 1, body: { kind: "time", state: encode({ x: 1 }).cid } });
   rt.outbox!.send(m);
-  assert.equal(transport.heldFor(clock.identity).length, 1);
+  assert.equal(transport.heldFor(peer.identity).length, 1);
   const got: Message[] = [];
-  const conn = await connectPeer(clock, sock);
+  const conn = await connectPeer(peer, sock);
   conn.onMessage((x) => got.push(x));
   for (let i = 0; i < 50 && !got.length; i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(got.length, 1);
   assert.ok(encode(got[0]).cid.equals(encode(m).cid));
-  assert.equal(transport.heldFor(clock.identity).length, 0);
+  assert.equal(transport.heldFor(peer.identity).length, 0);
   // Connected now: delivered straight away.
-  const m2 = await signMessage(runtimeSigner, { to: clock.identity, seq: 1000, at: 2, body: { kind: "time", state: encode({ x: 2 }).cid } });
+  const m2 = await signMessage(runtimeSigner, { to: peer.identity, seq: 1000, at: 2, body: { kind: "time", state: encode({ x: 2 }).cid } });
   rt.outbox!.send(m2);
   for (let i = 0; i < 50 && got.length < 2; i++) await new Promise((r) => setTimeout(r, 10));
   assert.equal(got.length, 2);

@@ -1,11 +1,11 @@
 // wasi_snapshot_preview1 over a Vfs, for one process (one wasm instance).
 // This is the runtime's kernel surface (docs/ARCH.md, "The kernel"). Nothing
-// here touches a host: the filesystem is the tree, stdio are in-memory pipes,
-// and every sleep returns at once. clock_time_get and random_get are handed to
-// the caller (`clock`, `random`), which may answer them from inside or route
-// them out as attested syscalls (runtime/syscalls.ts) — a message out, a
-// signed reply back — suspending the instance meanwhile. Imports that may wait
-// (a record from the store, an attested reply, a spawned child) are async and
+// here touches a host: the filesystem is the tree, stdio are in-memory pipes.
+// clock_time_get, random_get and sleeps (poll_oneoff on clocks) are handed to
+// the caller (`clock`, `random`, `sleep`); the scheduler answers them from the
+// current log entry (runtime/syscalls.ts), and a sleep may park the instance
+// until a later entry arrives. Imports that may wait
+// (a record from the store, a sleep, a spawned child) are async and
 // wrapped with JSPI (WebAssembly.Suspending): the wasm stack is parked on the
 // promise and resumes when it settles.
 
@@ -87,10 +87,12 @@ export interface ProcessOptions {
   env: string[];
   /** fd → description. 0-2 are stdio; the preopen for "/" is added at 3. */
   stdio: [Desc, Desc, Desc];
-  /** clock_time_get(id): nanoseconds. May suspend (an attested read). */
+  /** clock_time_get(id): nanoseconds. */
   clock: (id: number) => bigint | Promise<bigint>;
-  /** random_get: `len` bytes. May suspend (the first call per thread fetches an attested seed). */
+  /** random_get: `len` bytes. */
   random: (len: number) => Uint8Array | Promise<Uint8Array>;
+  /** A poll on clocks only (a sleep). May suspend until the machine's time reaches the earliest deadline. Default: returns at once. */
+  sleep?: (clocks: Array<{ timeout: bigint; absolute: boolean }>) => void | Promise<void>;
   /** Host services for the shell (the "skein" import module). */
   spawn?: (req: SpawnRequest) => Promise<number | undefined>;
   commandExists?: (name: string) => boolean;
@@ -156,7 +158,6 @@ export class Process {
       proc_exit: (code: number) => { throw new ProcExit(code); },
       proc_raise: () => E.NOSYS,
       sched_yield: () => 0,
-      poll_oneoff: (inp: number, out: number, n: number, nout: number) => this.pollOneoff(inp, out, n, nout),
       fd_write: (fd: number, iovs: number, n: number, nw: number) => this.fdWrite(fd, iovs, n, nw),
       fd_read: (fd: number, iovs: number, n: number, nr: number) => this.fdRead(fd, iovs, n, nr),
       fd_pread: (fd: number, iovs: number, n: number, off: bigint, nr: number) => this.fdRead(fd, iovs, n, nr, Number(off)),
@@ -206,6 +207,7 @@ export class Process {
     };
 
     const async: Record<string, Fn> = {
+      poll_oneoff: (inp: number, out: number, n: number, nout: number) => this.pollOneoff(inp, out, n, nout),
       // Read memory views only after the await: a suspension may have grown (and so detached) memory.
       clock_time_get: async (id: number, _prec: bigint, out: number) => {
         const t = await this.o.clock(id);
@@ -561,9 +563,24 @@ export class Process {
 
   // ---------------------------------------------------------------- time
 
-  /** Every subscription is ready at once: sleeps take no time, reads never block. */
-  private pollOneoff(inp: number, out: number, n: number, nout: number): number {
-    const dv = this.dv;
+  /**
+   * fd subscriptions are ready at once (reads never block: processes run one at
+   * a time). A poll on clocks only is a sleep: handed to `sleep`, which may
+   * suspend the instance until the machine's time passes the deadline.
+   */
+  private async pollOneoff(inp: number, out: number, n: number, nout: number): Promise<number> {
+    let dv = this.dv;
+    const clocks: Array<{ timeout: bigint; absolute: boolean }> = [];
+    let fds = false;
+    for (let i = 0; i < n; i++) {
+      const s = inp + i * 48;
+      if (dv.getUint8(s + 8) === 0) clocks.push({ timeout: dv.getBigUint64(s + 24, true), absolute: (dv.getUint16(s + 40, true) & 1) !== 0 });
+      else fds = true;
+    }
+    if (clocks.length && !fds && this.o.sleep) {
+      await this.o.sleep(clocks);
+      dv = this.dv; // memory may have grown while suspended
+    }
     for (let i = 0; i < n; i++) {
       const s = inp + i * 48, e = out + i * 32;
       const tag = dv.getUint8(s + 8);

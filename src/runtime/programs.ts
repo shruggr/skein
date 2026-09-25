@@ -33,7 +33,7 @@ export const SHELL_PROGRAM = {
   code: { ts: "shell" },
   modules: { brush: MODULES.brush, coreutils: MODULES.coreutils },
   inputs: { cmd: "string", tree: "cid", cwd: "string?", env: "map?" },
-  services: ["clock"],
+  services: [],
   description: "Run a bash command in the wasm shell over a tree; result {exitCode, stdout, stderr, tree}.",
 } as const;
 

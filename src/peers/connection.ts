@@ -1,6 +1,6 @@
 // A peer's side of the runtime socket (see src/runtime/transport.ts): connect,
 // say hello as an identity, then send signed messages and receive the ones
-// addressed to that identity. Used by the clock peer and by skein-dev.
+// addressed to that identity. Used by skein-dev and future peers.
 
 import { connect, type Socket } from "node:net";
 import { homedir } from "node:os";

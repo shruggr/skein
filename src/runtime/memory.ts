@@ -9,6 +9,7 @@ import { encode } from "./cid.ts";
 import { NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
 import type { Block, Emission, Ms, NodeOrigin, Ref, ThreadOrigin, ThreadState } from "./types.ts";
 import { verifyMessageSync, type Message } from "./records.ts";
+import { maxStamp } from "./syscalls.ts";
 
 interface Meta {
   cid: CID;
@@ -180,12 +181,13 @@ export function memoryStore(): Store {
     },
 
     log: {
-      async append(message) {
+      async append(message, time) {
         const had = logged.get(message.toString());
         if (had) return had;
         if (!messages.has(message.toString())) throw new NotFound(`${message} (not a stored message)`);
         const n = log.length;
-        const entry: LogEntry = { kind: "log", prev: n ? log[n - 1] : null, n, message };
+        const prev = n ? (dagCbor.decode(bytes.get(log[n - 1].toString())!) as LogEntry) : undefined; // no await: appends must not interleave
+        const entry: LogEntry = { kind: "log", prev: n ? log[n - 1] : null, n, message, time: prev ? maxStamp(time, prev.time) : time };
         const cid = encode(entry).cid;
         bytes.set(cid.toString(), encode(entry).bytes);
         log.push(cid);

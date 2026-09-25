@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# The clock peer (src/peers/clock.ts): answers time and random requests.
-set -euo pipefail
-root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-exec node --experimental-strip-types --no-warnings "$root/src/peers/clock.ts" "$@"

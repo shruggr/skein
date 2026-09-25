@@ -1,141 +1,74 @@
-// The binding table: which WASI syscalls are answered inside (pure) and which
-// leave the runtime (attested) and to which peer identity (docs/ARCH.md, "The
-// kernel"). Pure syscalls are deterministic functions of the thread's own
-// state and are never recorded. An attested syscall is one message out and one
-// signed message back, bound to the state that asked; the reply is in the log,
-// so replay answers it from there.
+// Time and randomness inside the machine (docs/ARCH.md, "Time and
+// randomness"). Both are pure: they derive from the log entry a thread is
+// currently being driven by (its `input`), so replay reproduces them exactly
+// and nothing ever leaves the runtime to ask.
 //
-// The table in code is the default. An admin message
-//   { kind: "bind", syscall, to: <identity> }
-// overrides one entry from its place in the log on; a thread uses the table as
-// of the log entry that launched it, so replay uses the binding the original
-// run used. Genesis writes the defaults as bind messages too, so an instance's
-// log states its own configuration.
+// Time. When the runtime admits an input it stamps the log entry with its own
+// clock reading (log.ts; `time: [sec, nsec]`). clock_time_get, for every clock
+// id (realtime, monotonic, process, thread), returns a per-thread Lamport
+// clock: the first read returns the entry's stamp; each later read returns
+// max(stamp of the current entry, last value + 1 ns). So two reads in a row
+// differ by exactly 1 ns, time never runs backwards, and a thread driven by a
+// later entry jumps forward to that entry's stamp.
 //
-// Attested syscalls today:
+// Sleep. poll_oneoff with a clock subscription whose deadline is not after
+// "now" returns at once; otherwise the thread rests `waiting` with
+// `until: <deadline in ms, rounded up>` and the scheduler wakes it when it
+// processes an entry stamped at or after the deadline. The runtime needs
+// *some* input to observe time passing; main.ts admits a self-signed `tick`
+// from a coarse timer while anything sleeps.
 //
-//   clock_time_get (CLOCK_REALTIME)  one request per call:
-//       out  { kind: "time", state: <log entry> }
-//       back { kind: "time", time: <ms since epoch>, state } + replies-to
-//   random_get  one request per *thread*, then a local stream:
-//       out  { kind: "random", state }
-//       back { kind: "random", seed: <32 bytes>, state } + replies-to
-//     Why per thread: Rust's std calls random_get at every process start to
-//     seed HashMap's RandomState, and brush spawns a process per external
-//     command, so a message per call would be a round trip per `ls`. One
-//     attested 32-byte seed per thread feeds a SHA-256 counter stream
-//     (`seedStream`); every later read in that thread, in any of its
-//     processes, draws from it. The stream is a pure function of the seed and
-//     the read order, which is deterministic, so replay reproduces it.
-//
-// Pure, by decision: CLOCK_MONOTONIC / PROCESS / THREAD read a per-thread
-// counter that advances 1 ms per read (Rust's Instant::now is monotonic and
-// is called freely; only wall-clock time needs a witness). poll_oneoff sleeps
-// return at once. Everything else in preview1 — files, pipes, stdio, spawn,
-// args, env — is answered from the tree and the thread's own state.
+// Random. random_get draws from a SHA-256 counter stream keyed by
+// (current log entry CID, thread origin CID): distinct per entry and per
+// sibling thread, fixed on replay, and with no seed anywhere. Never use it for
+// secrets — it is a pure function of public records. Keys and nonces that must
+// be secret come from the wallet.
 
 import { createHash } from "node:crypto";
 import type { CID } from "multiformats/cid";
-import { isCID } from "./cid.ts";
-import { isIdentity, type Identity, type Message } from "./records.ts";
 
-/** WASI clock ids. */
+/** A log-entry stamp: whole seconds and nanoseconds since the Unix epoch (both safe integers, nsec < 1e9). */
+export type Stamp = [sec: number, nsec: number];
+
+export const stampNs = (s: Stamp): bigint => BigInt(s[0]) * 1_000_000_000n + BigInt(s[1]);
+export const nsStamp = (ns: bigint): Stamp => [Number(ns / 1_000_000_000n), Number(ns % 1_000_000_000n)];
+export const msStamp = (ms: number): Stamp => [Math.floor(ms / 1000), (ms % 1000) * 1_000_000];
+
+export function isStamp(x: unknown): x is Stamp {
+  return Array.isArray(x) && x.length === 2 && x.every((v) => Number.isSafeInteger(v) && v >= 0) && x[1] < 1_000_000_000;
+}
+
+/** The later of two stamps. */
+export const maxStamp = (a: Stamp, b: Stamp): Stamp => (stampNs(a) >= stampNs(b) ? a : b);
+
+/** WASI clock ids. All read the same per-thread clock. */
 export const CLOCK = { REALTIME: 0, MONOTONIC: 1, PROCESS_CPUTIME: 2, THREAD_CPUTIME: 3 } as const;
 
-/** Syscalls that can be bound. "clock_time_get" is CLOCK_REALTIME; the other clocks are "clock_time_get:monotonic". */
-export type Syscall = "clock_time_get" | "clock_time_get:monotonic" | "random_get";
-export const SYSCALLS: readonly Syscall[] = ["clock_time_get", "clock_time_get:monotonic", "random_get"];
+/** A thread's clock: the current entry's stamp as a floor, +1 ns per read. */
+export class ThreadClock {
+  private base = 0n;
+  private last: bigint | undefined;
 
-export type Binding =
-  | { kind: "pure" }
-  | { kind: "peer"; to: Identity }
-  // TODO: a mock is a binding to a bundle of recorded replies. Read side only: a thread bound to one errors.
-  | { kind: "bundle"; bundle: CID };
-
-/** The defaults, by name: "pure", or a peer by the wallet keyID its identity derives from. */
-export const DEFAULT_BINDINGS: Record<Syscall, "pure" | { peer: string }> = {
-  "clock_time_get": { peer: "clock" },
-  "clock_time_get:monotonic": "pure",
-  "random_get": { peer: "clock" },
-};
-
-/** The rest of wasi_snapshot_preview1 that host.ts implements: always pure, not rebindable. */
-export const PURE_SYSCALLS = [
-  "args_get", "args_sizes_get", "environ_get", "environ_sizes_get", "clock_res_get", "poll_oneoff", "sched_yield",
-  "proc_exit", "proc_raise", "fd_*", "path_*", "sock_* (ENOTSUP)", "skein.spawn", "skein.pipe", "skein.cmd_exists",
-] as const;
-
-export type Bind = { kind: "bind"; syscall: Syscall; to: Identity | "pure" | { bundle: CID } };
-
-export function isBind(x: unknown): x is Bind {
-  const b = x as Partial<Bind> | null;
-  if (!b || typeof b !== "object" || b.kind !== "bind" || !SYSCALLS.includes(b.syscall as Syscall)) return false;
-  const to = b.to as unknown;
-  return to === "pure" || isIdentity(to) || (typeof to === "object" && to !== null && isCID((to as { bundle?: unknown }).bundle));
-}
-
-function toBinding(to: Bind["to"]): Binding {
-  if (to === "pure") return { kind: "pure" };
-  if (typeof to === "string") return { kind: "peer", to };
-  return { kind: "bundle", bundle: to.bundle };
-}
-
-/** The table over the log: defaults, then admin binds in log order. */
-export class Bindings {
-  private readonly defaults: Record<Syscall, Binding>;
-  private readonly overrides: Array<{ n: number; syscall: Syscall; binding: Binding }> = [];
-
-  constructor(peers: Record<string, Identity>) {
-    const d = {} as Record<Syscall, Binding>;
-    for (const s of SYSCALLS) {
-      const v = DEFAULT_BINDINGS[s];
-      if (v === "pure") d[s] = { kind: "pure" };
-      else {
-        const to = peers[v.peer];
-        if (!to) throw new Error(`default binding for ${s}: no identity for peer "${v.peer}"`);
-        d[s] = { kind: "peer", to };
-      }
-    }
-    this.defaults = d;
+  /** The thread is now driven by an entry stamped `ns`. The base only moves forward. */
+  drive(ns: bigint): void {
+    if (ns > this.base) this.base = ns;
   }
 
-  /** Apply an admin bind at log position n. Positions must arrive in order. */
-  apply(n: number, b: Bind): void {
-    this.overrides.push({ n, syscall: b.syscall, binding: toBinding(b.to) });
+  /** clock_time_get. */
+  read(): bigint {
+    this.last = this.last === undefined || this.base > this.last ? this.base : this.last + 1n;
+    return this.last;
   }
 
-  /** The binding for `syscall` as of log position n (inclusive). */
-  at(n: number, syscall: Syscall): Binding {
-    let out = this.defaults[syscall];
-    for (const o of this.overrides) {
-      if (o.n > n) break;
-      if (o.syscall === syscall) out = o.binding;
-    }
-    return out;
+  /** "Now" without consuming a read: what a relative sleep counts from. */
+  peek(): bigint {
+    return this.last === undefined || this.base > this.last ? this.base : this.last;
   }
 }
 
-// ---------------------------------------------------------------- message bodies
-
-export type TimeRequest = { kind: "time"; state: CID };
-export type TimeReply = { kind: "time"; time: number; state: CID };
-export type RandomRequest = { kind: "random"; state: CID };
-export type RandomReply = { kind: "random"; seed: Uint8Array; state: CID };
-export type Request = TimeRequest | RandomRequest;
-
-/** Is `reply` a valid answer to `request`? Same kind, from the identity asked, bound to the same state. */
-export function answers(request: Message, reply: Message): boolean {
-  const q = request.body as Request, a = reply.body as Record<string, unknown> | null;
-  if (!a || typeof a !== "object" || reply.from !== request.to || a.kind !== q.kind) return false;
-  if (!isCID(a.state) || !a.state.equals(q.state)) return false;
-  if (q.kind === "time") return typeof a.time === "number" && Number.isSafeInteger(a.time) && a.time >= 0;
-  return a.seed instanceof Uint8Array && a.seed.length >= 32;
-}
-
-// ---------------------------------------------------------------- the random stream
-
-/** A deterministic byte stream from a seed: SHA-256(seed ‖ counter as u64 BE), block after block. */
-export function seedStream(seed: Uint8Array): (len: number) => Uint8Array {
+/** The random stream for (entry, thread): SHA-256(key ‖ counter as u64 BE), block after block. */
+export function entropy(entry: CID, thread: CID): (len: number) => Uint8Array {
+  const key = createHash("sha256").update(entry.bytes).update(thread.bytes).digest();
   let counter = 0n;
   let buf = new Uint8Array(0);
   let off = 0;
@@ -146,7 +79,7 @@ export function seedStream(seed: Uint8Array): (len: number) => Uint8Array {
       if (off === buf.length) {
         const c = new Uint8Array(8);
         new DataView(c.buffer).setBigUint64(0, counter++);
-        buf = new Uint8Array(createHash("sha256").update(seed).update(c).digest());
+        buf = new Uint8Array(createHash("sha256").update(key).update(c).digest());
         off = 0;
       }
       const take = Math.min(len - i, buf.length - off);

@@ -5,13 +5,11 @@
   "type": "module",
   "bin": {
     "skein": "./bin/skein",
-    "skein-clock": "./bin/skein-clock",
     "skein-dev": "./bin/skein-dev"
   },
   "scripts": {
     "skein": "bin/skein",
     "skein-dev": "bin/skein-dev",
-    "skein-clock": "bin/skein-clock",
     "test": "node --experimental-strip-types --no-warnings --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },

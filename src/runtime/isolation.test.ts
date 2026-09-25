@@ -3,8 +3,11 @@
 // imports and identifiers that would give it one, and fails on any hit.
 // Allowed exceptions, each named:
 //   - transport.ts may import node:net (the unix socket: the message edge);
-//   - main.ts may read process.env (its config: home, store path, socket, wallet)
-//     and import ../wallet.ts (the wallet edge, which reaches wallet-api over HTTP).
+//   - main.ts may read process.env (its config: home, store path, socket, wallet),
+//     import ../wallet.ts (the wallet edge, which reaches wallet-api over HTTP),
+//     and use a timer (to admit ticks while threads sleep);
+//   - log.ts may read the wall clock (Date.now / process.hrtime): the runtime
+//     stamps each admitted entry with its own time, and this is the only place.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -76,6 +79,8 @@ export function violations(root = ROOT): string[] {
     for (const [re, name] of FORBIDDEN_IDENTIFIERS) {
       if (!re.test(body)) continue;
       if (name === "process.env" && rel === "main.ts") continue;
+      if (name === "timers" && rel === "main.ts") continue;
+      if ((name === "Date.now" || name === "process.hrtime") && rel === "log.ts") continue;
       out.push(`${rel}: uses ${name}`);
     }
   }

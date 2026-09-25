@@ -199,7 +199,7 @@ const COMMANDS: Record<string, Command> = {
 
   log: {
     usage: `skein-dev log [--limit n]
-  The input log: position, entry CID (the last is the state hash), sender, kind.`,
+  The input log: position, admission stamp, entry CID (the last is the state hash), sender, kind.`,
     flags: { limit: "string" },
     async run(a, env) {
       await withStore(async (store) => {
@@ -207,7 +207,8 @@ const COMMANDS: Record<string, Command> = {
         const lim = a.opts.limit ? Number(a.opts.limit) : all.length;
         for (const { cid, entry, message } of all.slice(-lim)) {
           const b = message.body as { kind?: unknown } | null;
-          env.out(`${String(entry.n).padStart(4)}  ${fmt(cid)}  ${message.from.slice(0, 12)}  ${String(b?.kind ?? "?")}`);
+          const when = new Date(entry.time[0] * 1000 + Math.floor(entry.time[1] / 1e6)).toISOString();
+          env.out(`${String(entry.n).padStart(4)}  ${when}  ${fmt(cid)}  ${message.from.slice(0, 12)}  ${String(b?.kind ?? "?")}`);
         }
         const tip = await store.log.tip();
         env.out(`state ${tip ? fmt(tip) : "(empty)"} · processed ${await store.live.cursor.get()}/${all.length}`);

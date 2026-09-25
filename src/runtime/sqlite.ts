@@ -9,6 +9,7 @@ import { CID, decode, encode, fmt, fromBytes, isCID, parse } from "./cid.ts";
 import { NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 import { verifyMessageSync, type Message } from "./records.ts";
+import { maxStamp } from "./syscalls.ts";
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS blocks (
@@ -345,14 +346,15 @@ export function openStore(path: string): SqliteStore {
     },
 
     log: {
-      async append(message) {
+      async append(message, time) {
         return tx(() => {
           const had = q.logOf.get(message.bytes);
           if (had) return fromBytes(had.cid as Uint8Array);
           if (!q.isMessage.get(message.bytes)) throw new NotFound(`${fmt(message)} (not a stored message)`);
           const last = q.logTip.get();
           const n = last ? (last.n as number) + 1 : 0;
-          const entry: LogEntry = { kind: "log", prev: last ? fromBytes(last.cid as Uint8Array) : null, n, message };
+          const prev = last ? getBlock<LogEntry>(fromBytes(last.cid as Uint8Array)) : undefined;
+          const entry: LogEntry = { kind: "log", prev: last ? fromBytes(last.cid as Uint8Array) : null, n, message, time: prev ? maxStamp(time, prev.time) : time };
           const cid = put(entry);
           q.logIns.run(n, cid.bytes, message.bytes);
           return cid;

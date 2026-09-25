@@ -96,40 +96,34 @@ modules over the tree; see wasm/README.md for builds and patches.
 
 ## From the runtime/clock build (2026-09-25)
 
-1. **Realtime reads are frequent.** brush reads CLOCK_REALTIME once at
-   startup and every coreutils process reads it at least once (`ls` twice),
-   so `date; ls | head -3` is four time round trips. Options: one attested
-   time per thread *step* (frozen until the next suspension), or a binding
-   that answers realtime from the last attestation plus the monotonic counter.
-2. **Monotonic clocks are pure**: a per-thread counter, +1 ms per read. Rust's
-   `Instant::now` is called freely; only wall time gets a witness. Confirm.
-3. **`state` in a request** is the log entry the thread is being driven by
-   (the processed position), not the admitted tip: the two differ only when
-   messages arrive faster than they are processed, and only the former
-   replays. ARCH says "the tip of the log"; this reads it as "the state the
-   machine was in".
-4. **Genesis is dated 0.** The runtime has no clock; the instance's first
-   attested time is effectively its birth certificate. Or: have the clock
-   attest the genesis.
+Items 1–4, 8 and 16 were resolved by dropping the clock peer: time and
+random are now pure, derived from the runtime's own stamp on each log entry
+(docs/ARCH.md, "Time and randomness"). Struck through, kept for the record.
+
+1. ~~**Realtime reads are frequent**~~ (a round trip each). Resolved: reads
+   are free; `date; ls | head -3` exchanges no messages.
+2. ~~**Monotonic clocks are pure**~~. Resolved: every clock id reads the same
+   per-thread clock — the current entry's stamp, +1 ns per read, never back.
+3. ~~**`state` in a request**~~. Resolved: there is no time/random request.
+4. ~~**Genesis is dated 0**~~. Resolved: the admin's genesis messages still
+   say `at: 0`, but their log entries carry the runtime's stamp.
 5. **Hello has no freshness.** A captured hello can be replayed on the
    socket (local unix socket, so low risk). A runtime-issued challenge (a
    counter is enough; transport needn't be deterministic) would close it.
-6. **Seq allocation edge.** A request's seq is reused from the thread's chain
-   on re-execution; a crash between storing a request and appending the
-   `waiting` update that names it makes the restarted runtime allocate a new
-   seq, which a replay would not. Fix: write both in one store transaction.
+6. **Seq allocation edge.** The runtime's own messages are now only
+   `result`s; a result's seq is reused from the chain on re-execution, but a
+   crash between storing it and appending the `finished` update that names it
+   makes the restarted runtime allocate a new seq, which a replay would not.
+   Fix: write both in one store transaction.
 7. **Re-execution cost** grows with the thread: restart replays it from its
-   origin (verifying every update). Long threads want checkpoints (a snapshot
-   of the instance's memory is not deterministic-by-construction, so: a
+   origin (verifying every update). Long threads want checkpoints (a
    program-level checkpoint record).
-8. **Duplicate replies.** A request re-sent after a restart can be answered
-   twice; the second reply is logged and ignored (first valid reply in log
-   order wins). Should admission refuse it instead of logging it?
+8. ~~**Duplicate replies**~~ to time/random requests. Gone with them; the
+   question returns with the first real peer call (first valid reply wins?).
 9. **Held outbound messages are in memory.** A message to an unconnected
-   peer is in the store but its delivery queue is not; after a restart only
-   re-executed threads re-send. Results to a client that disconnected are
-   not redelivered. A durable outbox is a derived query ("messages from the
-   runtime with no reply"), not yet written.
+   peer is in the store but its delivery queue is not; results to a client
+   that disconnected are not redelivered. A durable outbox is a derived query
+   ("messages from the runtime with no reply"), not yet written.
 10. **Output is stored.** The `finished` update and the `result` message
     carry stdout/stderr/tree (recomputable cache per VM.md). Needs a size
     cap and a pruning story.
@@ -141,14 +135,27 @@ modules over the tree; see wasm/README.md for builds and patches.
 12. **The wallet edge is an import.** `main.ts` imports `../wallet.ts`
     (HTTP to wallet-api); it is the one allowed escape from the isolation
     rule. The wallet's signatures are deterministic (RFC 6979, checked for
-    both ProtoWallet and wallet-api) — replay depends on it.
-13. **Peers share one wallet here.** clock, admin, david and runtime are
-    keyIDs under one wallet. In production each peer is its own wallet and
-    the instance learns its identity by `bind`/subscription messages; the
-    default binding table would then be empty rather than name "clock".
-14. **Stat times are the epoch** (git records none); previously they were
-    the single attested time. `ls -l` shows 1970.
+    both ProtoWallet and wallet-api) — replay depends on it for results.
+13. **Identities share one wallet here.** runtime, admin, david and timer are
+    keyIDs under one wallet; a real client signs with its own.
+14. **Stat times are the epoch** (git records no times). `ls -l` shows 1970.
+    Could use the thread's clock instead.
 15. **Stale socket**: the runtime cannot unlink one (no fs); `bin/skein`
     removes it when `ss -xl` shows no listener.
-16. **The `sig` in `{time, state, sig}`** is the reply message's own
-    signature; the body carries no second one.
+16. ~~**The `sig` in `{time, state, sig}`**~~. Resolved: stamps are unsigned;
+    the checkpoint signature covers them.
+17. **Random has no seed.** ARCH.md says the runtime "draws a seed" and
+    writes it into the entry; as built (per the design change), random_get is
+    a SHA-256 stream keyed by (entry CID, thread origin) and nothing is drawn
+    or stored. It is predictable from public records: never for secrets (the
+    wallet does those). Decide whether a drawn, stored seed is wanted.
+18. **Stamp resolution** is Date.now() (ms) as `[sec, nsec]`; nothing inside
+    depends on it being finer. process.hrtime could add sub-ms precision.
+19. **Sleep needs an input to wake.** Time passes inside only when an entry
+    is admitted. `main.ts` admits a `tick` (signed by `timer`) about once a
+    second (`SKEIN_TICK_MS`) while any thread sleeps, and never otherwise, so
+    ticks are in the log and replay exactly — but they are log noise, and a
+    sleep's real duration is quantised to the tick period.
+20. **Stamps are the runtime's word.** They are unsigned and trusted as
+    written; tampering shows up only against a checkpoint signature. A
+    runtime with a wrong clock stamps wrong times, monotonically.

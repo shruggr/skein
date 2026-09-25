@@ -5,6 +5,7 @@
 import type { CID } from "multiformats/cid";
 import type { Block, Ref, ThreadState, Ms } from "./types.ts";
 import type { Message } from "./records.ts";
+import type { Stamp } from "./syscalls.ts";
 
 export class NotFound extends Error {
   readonly cid: string;
@@ -111,11 +112,16 @@ export type LogEntry = {
   prev: CID | null; // the previous entry; null for the first
   n: number;        // 0-based position
   message: CID;     // a verified message in this store
+  time: Stamp;      // the runtime's clock when it admitted the message: [sec, nsec] since the epoch; never before prev's
 };
 
 export interface Log {
-  /** Append an entry for a message already put with putMessage. A message already in the log returns its existing entry. */
-  append(message: CID): Promise<CID>;
+  /**
+   * Append an entry for a message already put with putMessage, stamped `time`
+   * (raised to the previous entry's stamp if earlier: stamps never go back).
+   * The store has no clock; log.ts reads it. A message already in the log returns its existing entry.
+   */
+  append(message: CID, time: Stamp): Promise<CID>;
   /** The latest entry (the state hash), or undefined for an empty log. */
   tip(): Promise<CID | undefined>;
   /** Entries with n >= from, in order. */

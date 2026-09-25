@@ -2,8 +2,8 @@
 // all over a copy-on-write view of a git-shaped tree. Nothing reaches a host:
 // the tree is the whole filesystem, the modules come from the caller (the
 // runtime loads them from the store by CID), and clock/random reads go to the
-// caller's `clock`/`random` — attested syscalls when a thread runs this
-// (runtime/scheduler.ts), fixed values otherwise. The result is a new root
+// caller's `clock`/`random`/`sleep` — derived from the current log entry when
+// a thread runs this (runtime/scheduler.ts), fixed values otherwise. The result is a new root
 // tree CID plus captured output.
 //
 // Process model: brush is patched (wasm/README.md) to ask the host to run
@@ -25,10 +25,12 @@ export interface ShellOptions {
   stdin?: Uint8Array;
   /** The compiled modules. */
   modules: Modules;
-  /** clock_time_get(id) in ns; may suspend. Default: `time` for every clock. */
+  /** clock_time_get(id) in ns. Default: `time` for every clock. */
   clock?: (id: number) => bigint | Promise<bigint>;
-  /** random_get; may suspend. Default: a splitmix stream from `seed`. */
+  /** random_get. Default: a splitmix stream from `seed`. */
   random?: (len: number) => Uint8Array | Promise<Uint8Array>;
+  /** A sleep (poll_oneoff on clocks). Default: returns at once. */
+  sleep?: (clocks: Array<{ timeout: bigint; absolute: boolean }>) => void | Promise<void>;
   /** Without `clock`: the time every clock read returns, in ms since the epoch. Default 0. */
   time?: number;
   /** Without `random`: seed for the stream. Default 0. */
@@ -151,6 +153,7 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
   const fixed = BigInt(o.time ?? 0) * 1_000_000n;
   const clock = o.clock ?? (() => fixed);
   const random = o.random ?? prng(o.seed ?? 0);
+  const sleep = o.sleep;
   const { brush, coreutils } = o.modules;
   const utils = await utilities(coreutils);
   const exists = (name: string) => SHELLS.has(name) || name === "coreutils" || utils.has(name);
@@ -177,7 +180,7 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
       file = brush;
       args = ["bash", "--disable-color", req.program, ...req.argv.slice(1)];
     }
-    return runModule(file, { vfs, args, env, stdio: req.stdio, clock, random, spawn, commandExists: exists });
+    return runModule(file, { vfs, args, env, stdio: req.stdio, clock, random, sleep, spawn, commandExists: exists });
   };
 
   const env = { HOME: "/", PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", USER: "skein", ...o.env, PWD: cwd };
@@ -186,7 +189,7 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
     args: ["bash", "--disable-color", "-c", o.cmd],
     env: envList(env),
     stdio: [pipeDesc(stdin, "r"), pipeDesc(stdout, "w"), pipeDesc(stderr, "w")],
-    clock, random, spawn, commandExists: exists,
+    clock, random, sleep, spawn, commandExists: exists,
   });
   return { exitCode, stdout: stdout.drain(), stderr: stderr.drain(), tree: await vfs.commit() };
 }
