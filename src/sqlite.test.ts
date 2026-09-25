@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CID, encode, fmt } from "./cid.ts";
-import { openStore } from "./sqlite.ts";
+import { openStore, type SqliteStore } from "./sqlite.ts";
 import { NotFound, type Store } from "./store.ts";
 import type { NodeOrigin, ThreadOrigin, ThreadUpdate } from "./types.ts";
 
@@ -20,7 +20,7 @@ function thread(runner: string, at: number, launchedBy?: CID): ThreadOrigin {
   return { kind: "thread", runner, spec: { n: at }, ...(launchedBy ? { launchedBy } : {}), at };
 }
 
-function withStore(fn: (s: Store) => Promise<void>) {
+function withStore(fn: (s: SqliteStore) => Promise<void>) {
   return async () => {
     const s = openStore(":memory:");
     try { await fn(s); } finally { await s.close(); }
@@ -257,5 +257,54 @@ test("edges.rebuild reproduces tips, updates and edges from blocks alone", async
     assert.deepEqual(snap(), want);
   } finally {
     raw.close(); await s.close(); f.done();
+  }
+});
+
+test("edges.query orderBy tipAt: most recent update first; origins without updates use their own at", withStore(async (s) => {
+  const a = await s.chains.open(thread("loop", 100));
+  const b = await s.chains.open(thread("loop", 200));
+  const c = await s.chains.open(thread("loop", Date.now() + 60_000)); // no updates: tip_at = at, in the future
+  await s.chains.append(a, { state: "running" }); // a's tip_at = now
+  const q = async (f: Parameters<Store["edges"]["query"]>[0]) => strs(await all(s.edges.query(f)));
+  assert.deepEqual(await q({ kind: "thread" }), strs([c, b, a]));
+  assert.deepEqual(await q({ kind: "thread", orderBy: "tipAt" }), strs([c, a, b]));
+  assert.deepEqual(await q({ kind: "thread", orderBy: "at" }), strs([c, b, a]));
+}));
+
+test("findByPrefix and bytes", withStore(async (s) => {
+  const a = await s.chains.open(thread("loop", 1));
+  const b = await s.chains.open(thread("shell", 2));
+  const u = await s.chains.append(a, { state: "running" });
+  const plain = await s.put({ kind: "page", markdown: "x" });
+  assert.deepEqual(strs(await s.findByPrefix(fmt(a))), [fmt(a)]);
+  assert.deepEqual(strs(await s.findByPrefix(fmt(b).slice(0, 20))), [fmt(b)]);
+  assert.deepEqual(strs(await s.findByPrefix("bafy")).sort(), strs([a, b]).sort()); // origins only
+  assert.deepEqual(await s.findByPrefix(fmt(u)), []);
+  assert.deepEqual(await s.findByPrefix(fmt(plain)), []);
+  assert.deepEqual(await s.findByPrefix("zzz"), []);
+
+  assert.deepEqual(await s.bytes(plain), encode({ kind: "page", markdown: "x" }).bytes);
+  await assert.rejects(s.bytes(encode({ nope: 1 }).cid), NotFound);
+}));
+
+test("a file from before tip_at is migrated: column added, index rebuilt", async () => {
+  const f = tmpFile();
+  try {
+    const s = openStore(f.path);
+    const t = await s.chains.open(thread("loop", 10));
+    const u = await s.chains.append(t, { state: "running" });
+    await s.close();
+    const raw = new DatabaseSync(f.path);
+    raw.exec("DROP INDEX chains_tip_at; ALTER TABLE chains DROP COLUMN tip_at;");
+    raw.close();
+    const again = openStore(f.path);
+    const want = (await again.get<ThreadUpdate>(u)).at;
+    const raw2 = new DatabaseSync(f.path);
+    assert.equal(raw2.prepare("SELECT tip_at FROM chains WHERE origin = ?").get(t.bytes)?.tip_at, want);
+    raw2.close();
+    assert.deepEqual(strs(await all(again.edges.query({ orderBy: "tipAt" }))), [fmt(t)]);
+    await again.close();
+  } finally {
+    f.done();
   }
 });

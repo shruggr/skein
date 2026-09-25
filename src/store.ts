@@ -17,6 +17,8 @@ export interface Blocks {
   put(value: Block): Promise<CID>;
   get<T extends Block = Block>(cid: CID): Promise<T>; // throws NotFound
   has(cid: CID): Promise<boolean>;
+  /** The stored dag-cbor bytes, exactly as hashed. Throws NotFound. */
+  bytes(cid: CID): Promise<Uint8Array>;
 }
 
 // ---------------------------------------------------------------- 2. chains
@@ -47,12 +49,13 @@ export interface Filter {
   since?: Ms;
   before?: Ms;
   limit?: number;
+  orderBy?: "at" | "tipAt"; // newest origin (default) or most recent update first
 }
 
 export interface Edges {
   refsFrom(cid: CID): Promise<Ref[]>;
   refsTo(cid: CID): Promise<Array<Ref & { from: CID }>>;
-  /** Structural narrowing over origins. Never text search. Newest first. */
+  /** Structural narrowing over origins. Never text search. Newest first (by `orderBy`). */
   query(filter: Filter): AsyncIterable<CID>;
   /** Drop and rebuild the index from the blocks. */
   rebuild(): Promise<void>;

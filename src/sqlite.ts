@@ -28,12 +28,14 @@ CREATE TABLE IF NOT EXISTS chains (
   at          INTEGER,            -- origin.at
   state       TEXT,               -- threads: tip.state (NULL until the first update)
   until       INTEGER,            -- threads: tip.until
-  waiting_on  TEXT                -- threads: tip.waitingOn as a JSON array of CID strings
+  waiting_on  TEXT,               -- threads: tip.waitingOn as a JSON array of CID strings
+  tip_at      INTEGER             -- tip.at (origin.at until the first update): recent activity
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS chains_kind_at ON chains(kind, at);
 CREATE INDEX IF NOT EXISTS chains_thread  ON chains(thread, at) WHERE thread IS NOT NULL;
 CREATE INDEX IF NOT EXISTS chains_state   ON chains(state) WHERE state IS NOT NULL;
 CREATE INDEX IF NOT EXISTS chains_until   ON chains(until) WHERE state = 'waiting';
+-- chains_tip_at is created after the tip_at migration below.
 
 -- Every update's position. UNIQUE(origin, seq) is the backstop against forks.
 CREATE TABLE IF NOT EXISTS updates (
@@ -69,7 +71,12 @@ type Row = Record<string, SQLOutputValue>;
 type Obj = Record<string, unknown>;
 interface EdgeRow { to: string; rel: string; locator: string | null }
 
-export function openStore(path: string): Store {
+/** The SQLite store adds prefix lookup over origins (for the CLI's short CIDs). */
+export interface SqliteStore extends Store {
+  findByPrefix(prefix: string): Promise<CID[]>;
+}
+
+export function openStore(path: string): SqliteStore {
   const db = new DatabaseSync(path);
   db.exec(`
     PRAGMA journal_mode = WAL;
@@ -78,6 +85,10 @@ export function openStore(path: string): Store {
     PRAGMA busy_timeout = 5000;
   `);
   db.exec(DDL);
+  // Files from before tip_at: add the column, then rebuild (it's derived) once the store exists.
+  const stale = !db.prepare("PRAGMA table_info(chains)").all().some((c) => c.name === "tip_at");
+  if (stale) db.exec("ALTER TABLE chains ADD COLUMN tip_at INTEGER");
+  db.exec("CREATE INDEX IF NOT EXISTS chains_tip_at ON chains(kind, tip_at)");
 
   const q = {
     begin: db.prepare("BEGIN IMMEDIATE"),
@@ -90,12 +101,13 @@ export function openStore(path: string): Store {
     blockAll: db.prepare("SELECT cid, bytes FROM blocks ORDER BY cid"),
 
     chainIns: db.prepare(`INSERT OR IGNORE INTO chains
-      (origin, tip, seq, kind, runner, thread, launched_by, at)
-      VALUES (:origin, :origin, 0, :kind, :runner, :thread, :launched_by, :at)`),
+      (origin, tip, seq, kind, runner, thread, launched_by, at, tip_at)
+      VALUES (:origin, :origin, 0, :kind, :runner, :thread, :launched_by, :at, :at)`),
     chainGet: db.prepare("SELECT tip, seq, kind FROM chains WHERE origin = ?"),
     chainMove: db.prepare(`UPDATE chains SET tip = :tip, seq = :seq,
-      state = :state, until = :until, waiting_on = :waiting_on WHERE origin = :origin`),
+      state = :state, until = :until, waiting_on = :waiting_on, tip_at = :tip_at WHERE origin = :origin`),
     updateIns: db.prepare("INSERT INTO updates (cid, origin, seq) VALUES (?, ?, ?)"),
+    origins: db.prepare("SELECT origin FROM chains"),
     updateOrigin: db.prepare("SELECT origin FROM updates WHERE cid = ?"),
     updatesOf: db.prepare("SELECT cid FROM updates WHERE origin = ? ORDER BY seq"),
     lastUpdate: db.prepare("SELECT cid, seq FROM updates WHERE origin = ? ORDER BY seq DESC LIMIT 1"),
@@ -119,7 +131,7 @@ export function openStore(path: string): Store {
       AND (:parentless IS NULL OR (kind = 'thread' AND (launched_by IS NULL) = :parentless))
       AND (:since IS NULL OR at >= :since)
       AND (:before IS NULL OR at < :before)
-      ORDER BY at DESC, origin DESC LIMIT :limit`),
+      ORDER BY CASE WHEN :tipAt THEN tip_at ELSE at END DESC, origin DESC LIMIT :limit`),
     resting: db.prepare(`SELECT origin FROM chains
       WHERE kind = 'thread' AND (state IS NULL OR state <> 'finished')
       AND (:runner IS NULL OR runner = :runner)
@@ -192,10 +204,25 @@ export function openStore(path: string): Store {
     for (const r of stmt.all(p)) yield fromBytes(r.origin as Uint8Array);
   }
 
-  const store: Store = {
+  const store: SqliteStore = {
     async put(value) { return put(value); },
     async get<T extends Block = Block>(cid: CID) { return getBlock<T>(cid); },
     async has(cid) { return q.blockHas.get(cid.bytes) !== undefined; },
+    async bytes(cid) {
+      const row = q.blockGet.get(cid.bytes);
+      if (!row) throw new NotFound(fmt(cid));
+      return row.bytes as Uint8Array;
+    },
+
+    async findByPrefix(prefix) {
+      // Origins are stored binary, so the match is on the formatted string; a full scan is fine at this scale.
+      const out: CID[] = [];
+      for (const r of q.origins.iterate()) {
+        const cid = fromBytes(r.origin as Uint8Array);
+        if (fmt(cid).startsWith(prefix)) out.push(cid);
+      }
+      return out;
+    },
 
     chains: {
       async open(origin) {
@@ -260,6 +287,7 @@ export function openStore(path: string): Store {
           parentless: f.parentless === undefined ? null : f.parentless ? 1 : 0,
           since: f.since ?? null,
           before: f.before ?? null,
+          tipAt: f.orderBy === "tipAt" ? 1 : 0,
           limit: f.limit ?? -1,
         });
       },
@@ -342,6 +370,7 @@ export function openStore(path: string): Store {
 
     async close() { db.close(); },
   };
+  if (stale) void store.edges.rebuild(); // synchronous body: done before we return
   return store;
 }
 
@@ -373,9 +402,10 @@ function originMeta(cid: CID, b: Obj): Record<string, SQLInputValue> {
 }
 
 function tipMeta(kind: unknown, tip: Obj): Record<string, SQLInputValue> {
-  if (kind !== "thread") return { state: null, until: null, waiting_on: null };
+  const tip_at = num(tip.at);
+  if (kind !== "thread") return { state: null, until: null, waiting_on: null, tip_at };
   const w = Array.isArray(tip.waitingOn) ? tip.waitingOn.filter(isCID).map(fmt) : null;
-  return { state: str(tip.state), until: num(tip.until), waiting_on: w ? JSON.stringify(w) : null };
+  return { state: str(tip.state), until: num(tip.until), waiting_on: w ? JSON.stringify(w) : null, tip_at };
 }
 
 function edge(to: unknown, rel: string, locator?: unknown): EdgeRow[] {

@@ -13,6 +13,7 @@ interface Meta {
   kind: "thread" | "node";
   order: number;          // insertion order: tiebreak for same-ms origins
   at: Ms;
+  tipAt: Ms;              // at of the latest block in the chain
   thread?: string;        // nodes: owning thread
   runner?: RunnerKind;    // threads
   parentless?: boolean;   // threads
@@ -67,18 +68,19 @@ export function memoryStore(): Store {
     const kind = kindOf(b);
     if (kind === "thread") {
       const t = b as ThreadOrigin;
-      meta.set(cid.toString(), { cid, kind: "thread", order: order++, at: t.at, runner: t.runner, parentless: !t.launchedBy });
+      meta.set(cid.toString(), { cid, kind: "thread", order: order++, at: t.at, tipAt: t.at, runner: t.runner, parentless: !t.launchedBy });
       // launchedBy is the inverse of the node's "launched" edge; store it that way round.
       if (t.launchedBy) addEdge({ from: t.launchedBy, rel: "launched", to: cid });
     } else if (kind === "node") {
       const n = b as NodeOrigin;
-      meta.set(cid.toString(), { cid, kind: "node", order: order++, at: n.at, thread: n.thread.toString() });
+      meta.set(cid.toString(), { cid, kind: "node", order: order++, at: n.at, tipAt: n.at, thread: n.thread.toString() });
       for (const r of n.refs ?? []) addEdge({ ...r, from: cid });
     }
   }
 
   function indexUpdate(origin: CID, u: Record<string, unknown>) {
     const m = meta.get(origin.toString());
+    if (m && typeof u.at === "number") m.tipAt = u.at;
     if (m?.kind === "thread") {
       m.state = u.state as ThreadState;
       m.waitingOn = (u.waitingOn as CID[] | undefined)?.map(String);
@@ -105,6 +107,11 @@ export function memoryStore(): Store {
     put,
     get,
     async has(cid) { return bytes.has(cid.toString()); },
+    async bytes(cid) {
+      const data = bytes.get(cid.toString());
+      if (!data) throw new NotFound(cid.toString());
+      return data;
+    },
 
     chains: {
       async open(origin) {
@@ -157,7 +164,7 @@ export function memoryStore(): Store {
           .filter((m) => f.parentless === undefined || (m.kind === "thread" && m.parentless === f.parentless))
           .filter((m) => f.since === undefined || m.at >= f.since)
           .filter((m) => f.before === undefined || m.at < f.before)
-          .sort((a, b) => b.at - a.at || b.order - a.order);
+          .sort(f.orderBy === "tipAt" ? (a, b) => b.tipAt - a.tipAt || b.order - a.order : (a, b) => b.at - a.at || b.order - a.order);
         yield* hits.slice(0, f.limit ?? hits.length).map((m) => m.cid);
       },
       async rebuild() {

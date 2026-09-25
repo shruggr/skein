@@ -91,4 +91,5 @@ export function conclusion(v: NodeView): string | undefined {
   return emitsOf(v.emits, "conclusion").at(-1)?.text;
 }
 
-export const short = (cid: CID | string) => String(cid).slice(-8);
+/** The 12 chars after "bafy": what the CLI shows, and a prefix it accepts back. */
+export const short = (cid: CID | string) => String(cid).slice(4, 16);

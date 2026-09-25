@@ -4,12 +4,12 @@
 
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { encode, fmt, parse } from "./cid.ts";
+import { parse } from "./cid.ts";
 import { NotFound, type Blocks, type Resolved, type Resolver, type Resolvers } from "./store.ts";
 
 const scheme = (s: string) => s.replace(/:$/, "").toLowerCase();
 
-export function createResolvers(blocks: Pick<Blocks, "get">): Resolvers {
+export function createResolvers(blocks: Pick<Blocks, "bytes">): Resolvers {
   const table = new Map<string, Resolver>();
   const registry: Resolvers = {
     register(s, resolver) { table.set(scheme(s), resolver); },
@@ -29,18 +29,14 @@ export function createResolvers(blocks: Pick<Blocks, "get">): Resolvers {
 }
 
 /** `skein://<cid>` (or `skein:<cid>`) → the block's dag-cbor bytes. */
-export function skeinResolver(blocks: Pick<Blocks, "get">): Resolver {
+export function skeinResolver(blocks: Pick<Blocks, "bytes">): Resolver {
   return async (url) => {
     const s = url.host || url.pathname.replace(/^\/+/, "");
     let cid;
     try { cid = parse(s); }
     catch { return { ok: false, reason: "not-found", message: `not a CID: ${s}` }; }
     try {
-      // Blocks hands back decoded values; dag-cbor is canonical, so
-      // re-encoding reproduces the stored bytes exactly.
-      const { cid: again, bytes } = encode(await blocks.get(cid));
-      if (!again.equals(cid)) return { ok: false, reason: "unreachable", message: `re-encode mismatch for ${fmt(cid)}` };
-      return { ok: true, bytes, contentType: "application/vnd.ipld.dag-cbor" };
+      return { ok: true, bytes: await blocks.bytes(cid), contentType: "application/vnd.ipld.dag-cbor" };
     } catch (e) {
       if (e instanceof NotFound) return { ok: false, reason: "not-found", message: e.message };
       throw e;
