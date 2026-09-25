@@ -1,7 +1,7 @@
 // The `skein` import namespace for handler programs: the machine's syscalls
 // beyond WASI (docs/ARCH.md, "The kernel"). Pure ones (input, get, put,
-// putblock, launch, emit) are answered from the store and the thread; the
-// attested ones (wallet, reveal) leave through the runtime and are recorded,
+// putblock, launch, await) are answered from the store and the thread; the
+// attested ones (wallet, reveal, emit's seal) leave through the runtime and are recorded,
 // and on replay are served from the record (runtime/program.ts).
 //
 // ABI. Pointers and lengths are i32; CIDs are binary. Every import that
@@ -16,7 +16,11 @@
 //   putblock(cid, cid_len, data, len) → 0      store bytes under a CID minted elsewhere; the hash is checked
 //   reveal(cid, cid_len) → 0                   sign a stored record with the instance identity (attested)
 //   launch(prog, prog_len, args, args_len, out, cap) → n   open a thread; → its origin CID
-//   emit(cid, cid_len) → 0                     queue an outbound envelope named by an emit record
+//   emit(cid, cid_len, out, cap) → n           seal an outbound envelope named by an emit record (attested:
+//                                              the edge seals it now); → the envelope record's CID. Sent when the step ends.
+//   await(cid, cid_len) → 0                    rest on a reply to an envelope this step emitted: the step ends
+//                                              `waiting` with `awaits`, and an admitted envelope whose body's
+//                                              `replyTo` is that CID is this thread's next input
 //   wallet(frame, len, out, cap) → n           a BRC-100 wallet wire request frame → result frame (attested)
 //   take(out, cap) → n                         the held result of the last call
 //   error(out, cap) → n                        the last error's message
@@ -31,7 +35,8 @@ export interface ProgramHost {
   putBlock(cid: CID, bytes: Uint8Array): Promise<void>;
   reveal(cid: CID): Promise<void>;
   launch(program: CID, args: CID): Promise<CID>;
-  emit(cid: CID): Promise<void>;
+  emit(cid: CID): Promise<CID>;
+  awaitReply(envelope: CID): Promise<void>;
   wallet(frame: Uint8Array): Promise<Uint8Array>;
   /** Errors that must end the run rather than be returned to the program (the runtime stopping, a replay diverging). */
   fatal?(e: unknown): boolean;
@@ -67,7 +72,8 @@ export function skeinImports(proc: Process, host: ProgramHost): Record<string, u
     reveal: async(async (c: number, cl: number) => { await host.reveal(cid(c, cl)); return 0; }),
     launch: async(async (pp: number, pl: number, ap: number, al: number, p: number, cap: number) =>
       out((await host.launch(cid(pp, pl), cid(ap, al))).bytes, p, cap)),
-    emit: async(async (c: number, cl: number) => { await host.emit(cid(c, cl)); return 0; }),
+    emit: async(async (c: number, cl: number, p: number, cap: number) => out((await host.emit(cid(c, cl))).bytes, p, cap)),
+    await: async(async (c: number, cl: number) => { await host.awaitReply(cid(c, cl)); return 0; }),
     wallet: async(async (f: number, fl: number, p: number, cap: number) => out(await host.wallet(bytes(f, fl)), p, cap)),
     take: (p: number, cap: number) => sync(() => { if (held.length > cap) throw new Error("take: buffer too small"); u8().set(held, p); return held.length; })(),
     error: (p: number, cap: number) => {

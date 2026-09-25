@@ -27,6 +27,23 @@ const send = (s: Signer, seq: number, at: number, to?: string, body: unknown = {
   signMessage(s, { to, seq, body, at });
 
 for (const [name, open] of stores) {
+  test(`${name}: awaits — threads whose tip awaits an envelope; only the tip counts; survives a rebuild`, async () => {
+    const s = open();
+    const [e1, e2] = [encode({ env: 1 }).cid, encode({ env: 2 }).cid];
+    const p = encode({ kind: "p" }).cid;
+    const t1 = await s.chains.open({ kind: "thread", program: p, args: 1, at: 1 } satisfies ThreadOrigin);
+    const t2 = await s.chains.open({ kind: "thread", program: p, args: 2, at: 2 } satisfies ThreadOrigin);
+    await s.chains.append(t1, { at: 3, state: "waiting", awaits: [e1] });
+    await s.chains.append(t2, { at: 3, state: "waiting", awaits: [e1, e2] });
+    assert.deepEqual(strs(await collect(s.live.awaiting(e1))), strs([t1, t2]));
+    await s.chains.append(t1, { at: 4, state: "finished" });
+    assert.deepEqual(strs(await collect(s.live.awaiting(e1))), strs([t2]));
+    await s.edges.rebuild();
+    assert.deepEqual(strs(await collect(s.live.awaiting(e2))), strs([t2]));
+    assert.deepEqual(strs(await collect(s.live.awaiting(encode({ env: 3 }).cid))), []);
+    await s.close();
+  });
+
   test(`${name}: putMessage verifies, stores the record as signed, rejects tampering and a reused seq`, async () => {
     const s = open();
     const { david, admin } = await actors();

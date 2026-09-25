@@ -227,7 +227,20 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   await b.rt.idle();
   t.diagnostic(b.lines.join("\n"));
   assert.ok(b.lines.some((l) => l.includes("re-executing")));
-  for (const th of await threads(ref.store)) assert.ok((await b.store.chains.tip(th)).equals(await ref.store.chains.tip(th)), `thread ${fmt(th)} identical to the reference`);
+  // Identical, except where a step sealed an envelope: sealing draws a fresh
+  // BRC-78 key id and IV, so the attested seal answer (and the update listing
+  // it) differs between two runs; everything else about the update is the same.
+  for (const th of await threads(ref.store)) {
+    if ((await b.store.chains.tip(th)).equals(await ref.store.chains.tip(th))) continue;
+    const [x, y] = [await history(b.store, th), await history(ref.store, th)];
+    assert.equal(x.length, y.length, `thread ${fmt(th)}: same number of updates`);
+    for (let k = 0; k < x.length; k++) {
+      const strip = ({ calls: _c, prev: _p, ...u }: ThreadUpdate & { calls?: unknown }) => encode(u).cid.toString();
+      assert.equal(strip(x[k]), strip(y[k]), `thread ${fmt(th)} update ${k + 1} identical but for its sealed envelope`);
+    }
+    const seals = await Promise.all(((x.at(-1) as { calls?: CID[] }).calls ?? []).map((c) => b.store.get<Attested>(c)));
+    assert.ok(seals.some((a) => a.op === "seal"), `thread ${fmt(th)}: the difference is a seal`);
+  }
   assert.ok((await b.store.log.tip())!.equals((await ref.store.log.tip())!), "identical log");
   const [r] = await results(b);
   assert.deepEqual(r.body, refResult.body, "identical result body");

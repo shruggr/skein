@@ -78,15 +78,21 @@ type EmitRecord struct {
 	Body   CID    `cbor:"body"`
 }
 
-// Reply puts body as a record and emits it to env's sender in box.
-func Reply(env *Envelope, box string, body any) error {
+// Send puts body as a record and emits it to `to` in box; returns the sealed envelope's CID.
+func Send(to, handle, domain, box string, body any) (CID, error) {
 	bc, err := Put(body)
 	if err != nil {
-		return fmt.Errorf("put body: %w", err)
+		return nil, fmt.Errorf("put body: %w", err)
 	}
-	ec, err := Put(EmitRecord{Kind: "emit", To: env.Sender.IdentityKey, Handle: env.Sender.Handle, Domain: env.Sender.Domain, Box: box, Body: bc})
+	ec, err := Put(EmitRecord{Kind: "emit", To: to, Handle: handle, Domain: domain, Box: box, Body: bc})
 	if err != nil {
-		return fmt.Errorf("put emit: %w", err)
+		return nil, fmt.Errorf("put emit: %w", err)
 	}
 	return Emit(ec)
+}
+
+// Reply puts body as a record and emits it to env's sender in box.
+func Reply(env *Envelope, box string, body any) error {
+	_, err := Send(env.Sender.IdentityKey, env.Sender.Handle, env.Sender.Domain, box, body)
+	return err
 }

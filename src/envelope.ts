@@ -93,6 +93,9 @@ export function brc78Decode(bytes: Uint8Array): Brc78 {
 
 // ---------------------------------------------------------------- seal, verify, open
 
+/** A `created` value: ISO 8601 of a time in ms since the epoch. */
+export const isoTime = (ms: number): string => new Date(ms).toISOString();
+
 export async function seal(wallet: WalletInterface, args: {
   recipient: { identityKey: string; handle: string; domain: string };
   sender?: { handle?: string; domain?: string };

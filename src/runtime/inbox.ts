@@ -18,7 +18,9 @@
 //   come back.
 //
 // Out: an emit (scheduler.ts) is sealed as an envelope through the instance
-// wallet and sent to its recipient's box.
+// wallet during the step that emits it (so the program learns its CID and can
+// await a reply naming it), and sent to its recipient's box once the step is
+// recorded.
 //
 // The message key. Decryption inside is pure (AES-256-GCM with a recorded
 // key), so the edge must hand in the per-message key, which BRC-100 has no
@@ -30,9 +32,10 @@
 
 import { MessageBoxClient } from "@bsv/message-box-client";
 import { PrivateKey, PublicKey, type WalletInterface } from "@bsv/sdk";
-import { brc78Decode, isEnvelope, seal, verify, type Envelope } from "../envelope.ts";
+import { brc78Decode, isEnvelope, isoTime, seal, verify, type Envelope } from "../envelope.ts";
 import { encode } from "./cid.ts";
 import { now as clockNow, short, stampMs } from "./log.ts";
+import type { Emit } from "./records.ts";
 import type { Runtime, Outbound } from "./scheduler.ts";
 import { Rejected } from "./store.ts";
 import type { Stamp } from "./syscalls.ts";
@@ -202,17 +205,28 @@ export class Edge {
     }
   }
 
-  /** The runtime's outbox: seal an emit as an envelope and send it. */
-  async send(o: Outbound): Promise<void> {
+  /**
+   * The runtime's outbox, part 1: seal an emit as an envelope through the
+   * instance wallet, during the step that emits it (the scheduler records the
+   * envelope as an attested answer, so its CID is known before the step ends).
+   * `created` is this edge's clock.
+   */
+  async seal(e: Emit, bytes: Uint8Array): Promise<Envelope> {
     const g = this.o.runtime.genesis!;
-    const named = o.handle ? { handle: o.handle, domain: o.domain ?? g.domain } : this.o.handles?.[o.to] ?? { handle: o.to.slice(0, 16), domain: g.domain };
-    const env = await seal(this.o.wallet, {
-      recipient: { identityKey: o.to, ...named },
+    const named = e.handle ? { handle: e.handle, domain: e.domain ?? g.domain } : this.o.handles?.[e.to] ?? { handle: e.to.slice(0, 16), domain: g.domain };
+    const s = (this.o.now ?? clockNow)();
+    return seal(this.o.wallet, {
+      recipient: { identityKey: e.to, ...named },
       sender: { handle: g.handle, domain: g.domain },
-      body: o.bytes,
+      body: bytes,
+      created: isoTime(stampMs(s)),
     });
-    await this.o.box.send({ recipient: o.to, box: o.box, body: env });
-    this.say(`outbox ${o.box} → ${short(o.to)}: ${short(encode(env).cid)} (emit ${short(o.emit)})`);
+  }
+
+  /** The runtime's outbox, part 2: send the sealed envelope, once the step is recorded. */
+  async send(o: Outbound): Promise<void> {
+    await this.o.box.send({ recipient: o.to, box: o.box, body: o.envelope });
+    this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)} (emit ${short(o.emit)})`);
   }
 }
 

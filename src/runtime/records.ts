@@ -149,13 +149,22 @@ export type Genesis = {
   owner: Identity;
   programs: Record<string, CID>;
   subscriptions: Subscription[];
+  /** Peers by role, e.g. `infer`: the identity a program sends that kind of request to. */
+  peers?: Record<string, Identity>;
+  /** Defaults programs fall back on, e.g. `model` for the loop. */
+  defaults?: Record<string, string>;
+  /** Boxes the edge collects besides the subscribed ones: replies (e.g. `completions`), routed only by `replyTo`. */
+  collect?: string[];
 };
 
 export function isGenesis(x: unknown): x is Genesis {
   return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && isIdentity(x.owner)
     && typeof x.handle === "string" && typeof x.domain === "string"
     && isObj(x.programs) && Object.values(x.programs).every(isCID)
-    && Array.isArray(x.subscriptions) && x.subscriptions.every(isSubscription);
+    && Array.isArray(x.subscriptions) && x.subscriptions.every(isSubscription)
+    && (x.peers === undefined || (isObj(x.peers) && Object.values(x.peers).every(isIdentity)))
+    && (x.defaults === undefined || (isObj(x.defaults) && Object.values(x.defaults).every((v) => typeof v === "string")))
+    && (x.collect === undefined || (Array.isArray(x.collect) && x.collect.every((b) => typeof b === "string" && b !== "")));
 }
 
 // ---------------------------------------------------------------- message keys
@@ -188,20 +197,23 @@ export function isEmit(x: unknown): x is Emit {
  *   op "wallet": request = a BRC-100 wire request frame, result = the result frame
  *   op "reveal": request = the revealed record's CID, result = the DER signature
  *                (instance identity, [2, "skein reveal"], key "1", anyone, over the record's bytes)
+ *   op "seal":   request = the emit record's CID, result = the sealed BRC-169 envelope
+ *                (its JSON object as dag-cbor: the envelope record) — sealing draws a random
+ *                BRC-78 key id and IV and reads the edge's clock, so the envelope is an answer
  */
 export type Attested = {
   kind: "attested";
   thread: CID;
   step: number;
   i: number;
-  op: "wallet" | "reveal";
+  op: "wallet" | "reveal" | "seal";
   request: Uint8Array | CID;
   result: Uint8Array;
 };
 
 export function isAttested(x: unknown): x is Attested {
   return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
-    && (x.op === "wallet" || x.op === "reveal") && x.result instanceof Uint8Array;
+    && (x.op === "wallet" || x.op === "reveal" || x.op === "seal") && x.result instanceof Uint8Array;
 }
 
 // ---------------------------------------------------------------- helpers

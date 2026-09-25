@@ -22,6 +22,7 @@ interface Meta {
   state?: ThreadState;    // threads: tip state; undefined = never started
   waitingOn?: string[];
   waitingFrom?: string;
+  awaits?: string[];
   until?: Ms;
 }
 
@@ -95,6 +96,7 @@ export function memoryStore(): Store {
       m.state = u.state as ThreadState;
       m.waitingOn = (u.waitingOn as CID[] | undefined)?.map(String);
       m.waitingFrom = typeof u.waitingFrom === "string" ? u.waitingFrom : undefined;
+      m.awaits = (u.awaits as CID[] | undefined)?.map(String);
       m.until = u.until as Ms | undefined;
       for (const w of (u.waitingOn as CID[] | undefined) ?? []) addEdge({ from: origin, rel: "depends-on", to: w });
       if (u.resolution) addEdge({ from: origin, rel: "resolution", to: u.resolution as CID });
@@ -273,6 +275,10 @@ export function memoryStore(): Store {
       },
       async *waitingFrom(identity) {
         yield* threads().filter((m) => m.waitingFrom === identity).sort((a, b) => a.order - b.order).map((m) => m.cid);
+      },
+      async *awaiting(envelope) {
+        const k = envelope.toString();
+        yield* threads().filter((m) => m.awaits?.includes(k)).sort((a, b) => a.order - b.order).map((m) => m.cid);
       },
       cursor: {
         async get() { return cursor; },

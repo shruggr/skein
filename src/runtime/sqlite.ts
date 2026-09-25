@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS chains (
   waiting_on  TEXT,               -- threads: tip.waitingOn as a JSON array of CID strings
   tip_at      INTEGER,            -- tip.at (origin.at until the first update): recent activity
   program     BLOB,               -- threads: origin.program
-  waiting_from TEXT               -- threads: tip.waitingFrom (an identity)
+  waiting_from TEXT,              -- threads: tip.waitingFrom (an identity)
+  awaits      TEXT                -- threads: tip.awaits (emitted envelopes awaiting a reply) as a JSON array of CID strings
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS chains_kind_at ON chains(kind, at);
 CREATE INDEX IF NOT EXISTS chains_thread  ON chains(thread, at) WHERE thread IS NOT NULL;
@@ -120,13 +121,14 @@ export function openStore(path: string): SqliteStore {
   // Older files: add missing derived columns, then rebuild once the store
   // exists. A new messages table beside old chains may owe rows to old blocks.
   const cols = new Set(db.prepare("PRAGMA table_info(chains)").all().map((c) => c.name));
-  const added = [["tip_at", "INTEGER"], ["program", "BLOB"], ["waiting_from", "TEXT"]].filter(([c]) => !cols.has(c));
+  const added = [["tip_at", "INTEGER"], ["program", "BLOB"], ["waiting_from", "TEXT"], ["awaits", "TEXT"]].filter(([c]) => !cols.has(c));
   for (const [c, type] of added) db.exec(`ALTER TABLE chains ADD COLUMN ${c} ${type}`);
   const stale = added.length > 0 || (tables.has("chains") && !tables.has("messages"));
   db.exec(`
     CREATE INDEX IF NOT EXISTS chains_tip_at       ON chains(kind, tip_at);
     CREATE INDEX IF NOT EXISTS chains_program      ON chains(program) WHERE program IS NOT NULL;
     CREATE INDEX IF NOT EXISTS chains_waiting_from ON chains(waiting_from) WHERE waiting_from IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS chains_awaits       ON chains(kind) WHERE awaits IS NOT NULL;
   `);
 
   const q = {
@@ -144,7 +146,7 @@ export function openStore(path: string): SqliteStore {
       VALUES (:origin, :origin, 0, :kind, :thread, :launched_by, :at, :at, :program)`),
     chainGet: db.prepare("SELECT tip, seq, kind FROM chains WHERE origin = ?"),
     chainMove: db.prepare(`UPDATE chains SET tip = :tip, seq = :seq,
-      state = :state, until = :until, waiting_on = :waiting_on, tip_at = :tip_at, waiting_from = :waiting_from
+      state = :state, until = :until, waiting_on = :waiting_on, tip_at = :tip_at, waiting_from = :waiting_from, awaits = :awaits
       WHERE origin = :origin`),
     updateIns: db.prepare("INSERT INTO updates (cid, origin, seq) VALUES (?, ?, ?)"),
     origins: db.prepare("SELECT origin FROM chains"),
@@ -191,6 +193,9 @@ export function openStore(path: string): SqliteStore {
       AND EXISTS (SELECT 1 FROM json_each(waiting_on) WHERE value = ?) ORDER BY at, origin`),
     waitingFrom: db.prepare(`SELECT origin FROM chains
       WHERE kind = 'thread' AND waiting_from = ? ORDER BY at, origin`),
+    awaiting: db.prepare(`SELECT origin FROM chains
+      WHERE kind = 'thread' AND awaits IS NOT NULL
+      AND EXISTS (SELECT 1 FROM json_each(awaits) WHERE value = ?) ORDER BY at, origin`),
 
     handleSet: db.prepare(`INSERT INTO handles (thread, json) VALUES (?, ?)
       ON CONFLICT (thread) DO UPDATE SET json = excluded.json`),
@@ -490,6 +495,10 @@ export function openStore(path: string): SqliteStore {
         for (const r of q.waitingFrom.all(identity)) yield fromBytes(r.origin as Uint8Array);
       },
 
+      async *awaiting(envelope) {
+        for (const r of q.awaiting.all(fmt(envelope))) yield fromBytes(r.origin as Uint8Array);
+      },
+
       cursor: {
         async get() { return (q.metaGet.get("cursor")?.value as number | undefined) ?? 0; },
         async set(n) { q.metaSet.run("cursor", n); },
@@ -531,9 +540,10 @@ function originMeta(cid: CID, b: Obj): Record<string, SQLInputValue> {
 
 function tipMeta(kind: unknown, tip: Obj): Record<string, SQLInputValue> {
   const tip_at = num(tip.at);
-  if (kind !== "thread") return { state: null, until: null, waiting_on: null, tip_at, waiting_from: null };
+  if (kind !== "thread") return { state: null, until: null, waiting_on: null, tip_at, waiting_from: null, awaits: null };
   const w = Array.isArray(tip.waitingOn) ? tip.waitingOn.filter(isCID).map(fmt) : null;
-  return { state: str(tip.state), until: num(tip.until), waiting_on: w ? JSON.stringify(w) : null, tip_at, waiting_from: str(tip.waitingFrom) };
+  const a = Array.isArray(tip.awaits) ? tip.awaits.filter(isCID).map(fmt) : null;
+  return { state: str(tip.state), until: num(tip.until), waiting_on: w ? JSON.stringify(w) : null, tip_at, waiting_from: str(tip.waitingFrom), awaits: a?.length ? JSON.stringify(a) : null };
 }
 
 function edge(to: unknown, rel: string, locator?: unknown): EdgeRow[] {

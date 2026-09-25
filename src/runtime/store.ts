@@ -95,6 +95,8 @@ export interface Live {
   waitersOn(thread: CID): AsyncIterable<CID>;
   /** Thread origins whose tip has `waitingFrom === identity` (a message from it should wake them). */
   waitingFrom(identity: string): AsyncIterable<CID>;
+  /** Thread origins whose tip `awaits` includes this emitted envelope: a reply naming it (`replyTo`) is theirs. */
+  awaiting(envelope: CID): AsyncIterable<CID>;
   /** The scheduler's position in the log: entries with n < cursor have been processed. Not derived. */
   cursor: {
     get(): Promise<number>;

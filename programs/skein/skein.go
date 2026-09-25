@@ -38,7 +38,10 @@ func _reveal(cid unsafe.Pointer, cidLen uint32) int32
 func _launch(prog unsafe.Pointer, progLen uint32, args unsafe.Pointer, argsLen uint32, out unsafe.Pointer, cap uint32) int32
 
 //go:wasmimport skein emit
-func _emit(cid unsafe.Pointer, cidLen uint32) int32
+func _emit(cid unsafe.Pointer, cidLen uint32, out unsafe.Pointer, cap uint32) int32
+
+//go:wasmimport skein await
+func _await(cid unsafe.Pointer, cidLen uint32) int32
 
 //go:wasmimport skein wallet
 func _wallet(req unsafe.Pointer, n uint32, out unsafe.Pointer, cap uint32) int32
@@ -51,6 +54,9 @@ func _error(out unsafe.Pointer, cap uint32) int32
 
 // CID is a binary CID. In dag-cbor it is tag 42 over 0x00 ‖ bytes.
 type CID []byte
+
+// IsZero lets `omitzero` drop an absent CID (omitempty does not apply to a Marshaler).
+func (c CID) IsZero() bool { return len(c) == 0 }
 
 func (c CID) MarshalCBOR() ([]byte, error) {
 	if len(c) == 0 {
@@ -132,14 +138,66 @@ type Resolved struct {
 	Error  cbor.RawMessage `cbor:"error,omitempty"`
 }
 
-// Step is what input() returns: which thread, which step, and why it runs now.
+// Answer is an admitted envelope delivered to the thread that awaited the
+// envelope its body's replyTo names (see Await). Same fields as a handler's
+// args, so Open(r.Envelope, r.Key) decrypts it.
+type Answer struct {
+	Envelope CID    `cbor:"envelope"`
+	Key      CID    `cbor:"key"`
+	Box      string `cbor:"box"`
+	Sender   string `cbor:"sender"`
+	ReplyTo  CID    `cbor:"replyTo"`
+}
+
+// Step is what input() returns: which thread, which step, and why it runs now
+// (the first step; Resolved: launched threads at rest; Reply: an awaited reply).
 type Step struct {
-	Thread   CID             `cbor:"thread"`
-	N        int             `cbor:"step"`
-	Entry    CID             `cbor:"entry"`
-	Args     cbor.RawMessage `cbor:"args"`
-	Programs map[string]CID  `cbor:"programs"`
-	Resolved []Resolved      `cbor:"resolved,omitempty"`
+	Thread   CID               `cbor:"thread"`
+	N        int               `cbor:"step"`
+	Entry    CID               `cbor:"entry"`
+	Args     cbor.RawMessage   `cbor:"args"`
+	Programs map[string]CID    `cbor:"programs"`
+	Resolved []Resolved        `cbor:"resolved,omitempty"`
+	Tip      CID               `cbor:"tip,omitzero"`      // the thread's latest update before this step; absent on step 1
+	Reply    *Answer            `cbor:"reply,omitempty"`
+	Peers    map[string]string `cbor:"peers,omitempty"`    // genesis peers by role (e.g. "infer")
+	Defaults map[string]string `cbor:"defaults,omitempty"` // genesis defaults (e.g. "model")
+}
+
+// Update is the part of a thread update a program reads when walking its own
+// chain back from Step.Tip.
+type Update struct {
+	Prev    CID    `cbor:"prev"`
+	Seq     int    `cbor:"seq"`
+	State   string `cbor:"state"`
+	Reveals []CID  `cbor:"reveals,omitempty"`
+	Awaits  []CID  `cbor:"awaits,omitempty"`
+}
+
+// Reveals walks the thread's chain from tip back to its origin and returns
+// every revealed record CID in order, oldest first.
+func Reveals(tip CID) ([]CID, error) {
+	var chain [][]CID
+	for c := tip; len(c) > 0; {
+		b, err := Get(c)
+		if err != nil {
+			return nil, err
+		}
+		var u Update
+		if err := Decode(b, &u); err != nil {
+			return nil, fmt.Errorf("update: %w", err)
+		}
+		if u.Seq < 1 {
+			break // the origin
+		}
+		chain = append(chain, u.Reveals)
+		c = u.Prev
+	}
+	var out []CID
+	for i := len(chain) - 1; i >= 0; i-- {
+		out = append(out, chain[i]...)
+	}
+	return out, nil
 }
 
 // Input is this step's input record.
@@ -195,10 +253,21 @@ func Launch(program, args CID) (CID, error) {
 	return CID(b), err
 }
 
-// Emit queues an outbound envelope described by an emit record (already Put):
-// {kind: "emit", to, handle?, domain?, box, body: <cid>}. The edge seals and sends it.
-func Emit(c CID) error {
-	if _emit(ptr(c), uint32(len(c))) < 0 {
+// Emit seals an outbound envelope described by an emit record (already Put):
+// {kind: "emit", to, handle?, domain?, box, body: <cid>}, and returns the sealed
+// envelope record's CID (what a reply's replyTo names). Sealing is attested;
+// the envelope is sent when the step ends.
+func Emit(c CID) (CID, error) {
+	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _emit(ptr(c), uint32(len(c)), out, cap) })
+	return CID(b), err
+}
+
+// Await rests the thread on a reply to an envelope this step emitted: the step
+// ends waiting, and the admitted envelope whose body's replyTo is env (from the
+// identity it was sealed to) is the next step's Reply. A step awaits replies or
+// launches threads, not both.
+func Await(env CID) error {
+	if _await(ptr(env), uint32(len(env))) < 0 {
 		return lastError()
 	}
 	return nil
