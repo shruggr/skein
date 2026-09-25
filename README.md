@@ -8,6 +8,9 @@ plus a chain of state updates; every turn inside it is a node with typed
 emissions. The only mutable state is a rebuildable tip index and transient
 runner handles. See `docs/MODEL.md` for the model and `src/store.ts` for the
 interface everything is built against.
+Files live in the same store as git objects (`src/tree.ts`): a directory's
+tree CID is CIDv1(git-raw, sha1) over git's own tree object, so it carries the
+same id `git write-tree` prints.
 
 Skein is the engine. `easel` (a sibling repo) is the first lens onto it, and
 is not part of it.
