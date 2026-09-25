@@ -6,7 +6,8 @@
   "bin": {
     "skein": "./bin/skein",
     "skein-dev": "./bin/skein-dev",
-    "skein-runtime": "./bin/skein-runtime"
+    "skein-runtime": "./bin/skein-runtime",
+    "skein-infer": "./bin/skein-infer"
   },
   "scripts": {
     "skein": "bin/skein",
