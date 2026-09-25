@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Developer tools, outside the machine (src/dev/cli.ts).
+set -euo pipefail
+root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+exec node --experimental-strip-types --no-warnings "$root/src/dev/cli.ts" "$@"

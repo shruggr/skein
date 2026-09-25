@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# The skein runtime (src/runtime/main.ts).
+set -euo pipefail
+root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+home="${SKEIN_HOME:-$HOME/.skein}"
+sock="${SKEIN_SOCKET:-$home/runtime.sock}"
+mkdir -p "$home" "$(dirname "${SKEIN_DB:-$home/runtime.db}")"
+# A socket file left by a crashed runtime blocks listen(); the runtime cannot
+# remove it (no filesystem access), so do it here if nothing is listening on it.
+if [ -S "$sock" ] && ! ss -xl 2>/dev/null | grep -qF "$sock"; then rm -f "$sock"; fi
+exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@"
