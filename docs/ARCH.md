@@ -13,12 +13,20 @@ instance. Its edges are:
 2. **The wallet** — the connected BRC-100 wallet, for signing, verifying,
    encrypting, decrypting and deriving. Keys never enter the runtime.
 
-Everything else that looks like an input — the time, a random seed, a model
-completion, a tree of files, a person's line — is a message. Even the clock
-and randomness: under the covers a program's request for "now" or for random
-bytes is a message to a receiver outside, and the answer comes back signed,
-bound to the state it applied to (`{ time | seed, state, sig }`), and is
-recorded. That is what makes replay exact.
+Everything else that looks like an input — a model completion, a tree of
+files, a person's line — is a message from another identity, signed by it.
+
+Time and randomness are different: they are the runtime's own observations,
+not another party's statement. When the runtime admits an input it reads its
+clock and draws a seed and writes both into that log entry, unsigned and
+immutable. Inside the machine, "now" is the entry's time plus a counter that
+advances one nanosecond per read (so time always moves forward and never
+backwards), and random bytes are a stream from the entry's seed. A program
+that sleeps rests until an input stamped at or after its deadline arrives.
+Nothing inside ever asks outside for time. Replay reads the stamps back, so
+it is exact; the checkpoint signature covers them all at once. (An earlier
+version of this note had a signed clock peer; it was signing the runtime's
+own word, and is gone.)
 
 Inside the runtime:
 
@@ -54,8 +62,6 @@ network. Peers include:
   with the signed result. This is the sysadmin path and the toolchain path
   (`go build`, `npm test`): the command runs outside, the result is a
   recorded input.
-- **clock and random** — the simplest peers: they answer requests with
-  attestations.
 - **messagebox** — the BRC-33/BRC-169 relay to people and other instances.
 - **other instances** — peers like any other.
 
@@ -81,8 +87,8 @@ through gib. The runtime never writes to a disk.
 - `1sat serve wallet-api` — the wallet.
 - a **client** — David's terminal or easel: scans, prompts, renders, signs as
   David.
-- **peers** — inference (ripper), clock/random, a machine runner for
-  commands that cannot run inside, each with its own derived identity.
+- **peers** — inference (ripper), a machine runner for commands that cannot
+  run inside, each with its own derived identity.
 
 The v1 daemon glued a runtime and a local client into one process and let
 the "skein" CLI read the disk. That is the thing this note corrects.
@@ -94,9 +100,10 @@ userland is anything compiled to plain WASI (Rust `wasm32-wasip1`, wasi-sdk
 C/C++, Go `wasip1`, interpreters as modules). Programs target WASI, never
 skein. Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
 — are answered inside, deterministically, and never recorded. **Attested**
-ones — anything that leaves the runtime: time, random, a message to a peer
-(inference, fetch, clone, run-on-machine) — are one message out and one
-signed message back, bound to the state that asked, recorded and replayed.
+ones — anything that leaves the runtime: a message to a peer (inference,
+fetch, clone, run-on-machine) — are one message out and one signed message
+back, recorded and replayed. Time and random are pure: they derive from the
+stamp the runtime wrote on the current log entry.
 Request/response *is* attestation; peers all look the same from inside. A
 program waiting on an attested call is an ordinary thread at rest: the
 suspended instance is its transient handle, the scheduler wakes it when the
