@@ -172,6 +172,10 @@ that point in the log. No match → recorded, nothing runs.
 
 ## Host
 
+> Superseded by `ARCH.md`: there is no host layer beside the runtime.
+> Everything outside is a peer reached by messages; clock and random are
+> peers too. The table below is kept only to show what those peers cover.
+
 Everything that is not the machine is the host. Its surfaces into the
 machine are exactly three: **messages** (in and out), the **wallet** (BRC-100,
 keys never enter), and **time attestations**. Its services behind those:
