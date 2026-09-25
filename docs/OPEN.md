@@ -37,3 +37,13 @@ code; none is settled. Settle them with David, then update MODEL.md.
 10. **Rebuild cannot recover a chain of an unknown kind** that was opened but
     never appended to (it looks like a plain block). Origins should probably
     carry a marker, or every opened chain should get a seq-1 update.
+
+## Direction to keep in view (David, 2026-09-25)
+
+Skein as a virtual machine whose storage is the full local graph, with the
+scheduler as its execution engine. Runners become a standard interface into a
+runtime (wasm or otherwise); tools become immutable objects, addressable in
+the graph and on chain, calling each other through that same interface. gib's
+git↔chain mapping can be reused between the VM's hash store and real git
+repos. The ORDFS patch format (vcdiff against a base) is a candidate for how a
+tool call expresses file edits, mapped onto the host filesystem.
