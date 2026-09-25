@@ -18,10 +18,13 @@ files, a person's line — is a message from another identity, signed by it.
 
 Time and randomness are different: they are the runtime's own observations,
 not another party's statement. When the runtime admits an input it reads its
-clock and draws a seed and writes both into that log entry, unsigned and
-immutable. Inside the machine, "now" is the entry's time plus a counter that
-advances one nanosecond per read (so time always moves forward and never
-backwards), and random bytes are a stream from the entry's seed. A program
+clock and writes the time into that log entry, unsigned and immutable.
+Inside the machine, "now" is the entry's time plus a counter that advances
+one nanosecond per read (so time always moves forward and never backwards),
+and random bytes are a stream keyed by the entry's CID — no seed is recorded,
+because a recorded seed is exactly as visible as a derived one. Nothing
+inside the machine may use that randomness for secrets; the wallet does
+that, with real entropy, on the other side of the boundary. A program
 that sleeps rests until an input stamped at or after its deadline arrives.
 Nothing inside ever asks outside for time. Replay reads the stamps back, so
 it is exact; the checkpoint signature covers them all at once. (An earlier
