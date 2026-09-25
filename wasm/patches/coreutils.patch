@@ -1,0 +1,17 @@
+diff --git i/src/bin/coreutils.rs w/src/bin/coreutils.rs
+index 4641811..438cd02 100644
+--- i/src/bin/coreutils.rs
++++ w/src/bin/coreutils.rs
+@@ -50,6 +50,12 @@ Currently defined functions:
+ 
+ #[allow(clippy::cognitive_complexity)]
+ fn main() {
++    // WASI has no inherited working directory: wasi-libc starts every program at "/".
++    // The skein host passes the directory in $PWD, as a shell does.
++    #[cfg(target_os = "wasi")]
++    if let Some(pwd) = std::env::var_os("PWD") {
++        let _ = std::env::set_current_dir(pwd);
++    }
+     let utils = util_map();
+     let mut args = uucore::args_os();
+ 
