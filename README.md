@@ -1,60 +1,75 @@
 # skein
 
-A content-addressed graph of threads, and the scheduler that wakes them.
+A deterministic WASI machine over a content-addressed graph. Its only inputs
+are an ordered log of signed messages; its only outputs are messages. Programs
+(for now: a bash-compatible wasm shell over git-shaped trees) run inside it;
+anything that needs the world — the time, a random seed, a model, a real
+machine — is a **peer** that answers a signed request with a signed reply,
+which the log records. Replaying the log reproduces the graph.
 
-Everything that does work is a thread: a shell command, one model call, a
-subagent loop, a question to David. Every thread is an immutable origin block
-plus a chain of state updates; every turn inside it is a node with typed
-emissions. The only mutable state is a rebuildable tip index and transient
-runner handles. See `docs/MODEL.md` for the model and `src/store.ts` for the
-interface everything is built against.
-Files live in the same store as git objects (`src/tree.ts`): a directory's
-tree CID is CIDv1(git-raw, sha1) over git's own tree object, so it carries the
-same id `git write-tree` prints.
+Read `docs/ARCH.md` first (the architecture; "The kernel, in one paragraph" is
+the spec), then `docs/VM.md`. Open questions are in `docs/OPEN.md`.
 
-Skein is the engine. `easel` (a sibling repo) is the first lens onto it, and
-is not part of it.
+## Layout
 
 ```
-npm install
-npm run skein -- --help
-npm test
+src/runtime/     the machine — one process, no disk/network/clock/randomness
+  main.ts          `skein`: store + wallet + socket + scheduler
+  scheduler.ts     the log consumer: route by subscription, step threads, attested syscalls
+  log.ts           the input log as a hash chain (tip = state hash); genesis
+  syscalls.ts      the binding table (pure vs attested → which peer); the seed stream
+  transport.ts     unix socket, length-prefixed dag-cbor frames, hello, held messages
+  programs.ts      the `shell` program record; wasm modules loaded from the store by CID
+  shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
+  store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
+src/peers/       things outside that talk to the runtime by messages
+  clock.ts         `skein-clock`: answers time and random requests
+  connection.ts    a peer's side of the socket
+src/dev/         developer tools, OUTSIDE the machine (read the disk, open the store file)
+  cli.ts           `skein-dev`: scan, install, run, sh, log, ls, show, refs, tree ls, rebuild
+  scan.ts          directory <-> tree objects (the client's job)
+  admin.ts         sign and send messages as admin/david
+src/wallet.ts    connecting a BRC-100 wallet (the runtime's other edge)
+wasm/            brush.wasm, coreutils.wasm (see wasm/README.md)
 ```
 
-Requires Node ≥ 24 (`node:sqlite`, type stripping, `import.meta.main`).
+`src/runtime/isolation.test.ts` fails if anything under `src/runtime` imports
+`node:fs`, `child_process`, `http(s)`, `dns`, `net` (except `transport.ts`),
+or uses `fetch`, `Date.now`, `Math.random`, `randomBytes`, timers or
+`process.env` (except `main.ts`).
 
 ## Running it
 
-Models are configured in `~/.skein/config.json` (copy `docs/config.example.json`).
-The graph lives in `~/.skein/skein.db` (override with `$SKEIN_DB`).
+Needs Node 26 (JSPI, `node:sqlite`, type stripping) and a wallet:
+`1sat serve wallet-api` on 127.0.0.1:3321 with origin `skein` granted protocol
+`skein` and identity-key retrieval (or `SKEIN_WALLET=ephemeral` for a
+throwaway key).
 
 ```
-npm run skein -- run                 # the daemon: scheduler + runners + web UI
+npm install
+bin/skein                                   # the runtime; writes a genesis into an empty store
+bin/skein-clock                             # the clock peer, in another terminal
+bin/skein-dev scan ~/Work/easel             # tree objects into the store file; prints the tree CID
+bin/skein-dev run --tree <cid> -- 'date; ls | head -3'
+bin/skein-dev log                           # the input log and the state hash
+bin/skein-dev ls; bin/skein-dev show <cid-suffix>
+npm test
 ```
 
-Then open **http://localhost:4322** — start a thread, watch it, reply to it,
-and browse any block (`/b/<cid>`) with every CID a link. The daemon binds
-127.0.0.1 only; the UI starts threads that run bash, so widen `--host` only
-onto a network you trust. `--port` / `$SKEIN_PORT` changes the port; bash runs
-in `$SKEIN_CWD` (default `~`).
+State lives in `$SKEIN_HOME` (default `~/.skein`): `runtime.db` (`$SKEIN_DB`)
+and `runtime.sock` (`$SKEIN_SOCKET`).
 
-The CLI works with or without the daemon (reads never need it; writes poke it
-via `POST /wake`, else its 1 s timer picks them up):
+## Messages
 
-```
-skein new "Run uname -a and tell me what machine this is" --watch
-skein ls [--all] [--state waiting] [--runner shell]
-skein show <cid> [--thinking]        # a thread, a node, or any block as JSON
-skein reply <cid> "thanks, now list ~/Work" [--watch]
-skein watch <cid> [--replay]
-skein refs <cid>
-skein rebuild                        # rebuild the index from the blocks
-```
+All are signed records `{kind: "message", from, to?, seq, at, body, refs, sig}`.
 
-(`skein` = `npm run -s skein --`.) A `<cid>` is a whole CID or a prefix of a
-thread/node origin: the 12 characters `ls` and the daemon log print, with or
-without `bafy`. `reply` takes the loop or the david thread it waits on.
-
-JSON API: `GET /api/threads`, `GET /api/thread/:cid[?since=version]`,
-`GET /api/block/:cid`, `POST /api/new {prompt, model?, thinking?, tools?, system?}`,
-`POST /api/reply {thread, text}`, `POST /api/wake {thread?}`.
+| body | from → to | |
+|---|---|---|
+| `{kind: "hello", identity}` | peer → runtime | first frame; verified, not logged |
+| `{kind: "run", cmd, tree, cwd?, env?}` | admin/david → runtime | routed to `shell` by subscription |
+| `{kind: "time", state}` | runtime → clock | per CLOCK_REALTIME read; `state` = the log entry asking |
+| `{kind: "time", time, state}` + `replies-to` | clock → runtime | ms since epoch |
+| `{kind: "random", state}` | runtime → clock | once per thread |
+| `{kind: "random", seed, state}` + `replies-to` | clock → runtime | 32 bytes seeding a SHA-256 stream |
+| `{kind: "result", exitCode, stdout, stderr, tree}` + `replies-to` | runtime → launcher | when a thread ends |
+| genesis, subscription, `{kind: "bind", syscall, to}` | admin → runtime | configuration, in the log |

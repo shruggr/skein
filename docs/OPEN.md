@@ -50,7 +50,7 @@ tool call expresses file edits, mapped onto the host filesystem.
 
 ## From the wasm shell prototype (2026-09-25)
 
-`runShell` (src/shell.ts) runs patched brush + uutils coreutils as WASI
+`runShell` (src/runtime/shell.ts) runs patched brush + uutils coreutils as WASI
 modules over the tree; see wasm/README.md for builds and patches.
 
 1. **Pipelines run stage by stage.** Every external command runs to
@@ -93,3 +93,62 @@ modules over the tree; see wasm/README.md for builds and patches.
     `error: command not found: x` rather than bash's wording.
 11. **Devices**: `/dev/null` and `/dev/std{in,out,err}` are synthesized unless
     the tree has its own `/dev`; no `/dev/zero`, `/dev/urandom`, `/dev/fd/*`.
+
+## From the runtime/clock build (2026-09-25)
+
+1. **Realtime reads are frequent.** brush reads CLOCK_REALTIME once at
+   startup and every coreutils process reads it at least once (`ls` twice),
+   so `date; ls | head -3` is four time round trips. Options: one attested
+   time per thread *step* (frozen until the next suspension), or a binding
+   that answers realtime from the last attestation plus the monotonic counter.
+2. **Monotonic clocks are pure**: a per-thread counter, +1 ms per read. Rust's
+   `Instant::now` is called freely; only wall time gets a witness. Confirm.
+3. **`state` in a request** is the log entry the thread is being driven by
+   (the processed position), not the admitted tip: the two differ only when
+   messages arrive faster than they are processed, and only the former
+   replays. ARCH says "the tip of the log"; this reads it as "the state the
+   machine was in".
+4. **Genesis is dated 0.** The runtime has no clock; the instance's first
+   attested time is effectively its birth certificate. Or: have the clock
+   attest the genesis.
+5. **Hello has no freshness.** A captured hello can be replayed on the
+   socket (local unix socket, so low risk). A runtime-issued challenge (a
+   counter is enough; transport needn't be deterministic) would close it.
+6. **Seq allocation edge.** A request's seq is reused from the thread's chain
+   on re-execution; a crash between storing a request and appending the
+   `waiting` update that names it makes the restarted runtime allocate a new
+   seq, which a replay would not. Fix: write both in one store transaction.
+7. **Re-execution cost** grows with the thread: restart replays it from its
+   origin (verifying every update). Long threads want checkpoints (a snapshot
+   of the instance's memory is not deterministic-by-construction, so: a
+   program-level checkpoint record).
+8. **Duplicate replies.** A request re-sent after a restart can be answered
+   twice; the second reply is logged and ignored (first valid reply in log
+   order wins). Should admission refuse it instead of logging it?
+9. **Held outbound messages are in memory.** A message to an unconnected
+   peer is in the store but its delivery queue is not; after a restart only
+   re-executed threads re-send. Results to a client that disconnected are
+   not redelivered. A durable outbox is a derived query ("messages from the
+   runtime with no reply"), not yet written.
+10. **Output is stored.** The `finished` update and the `result` message
+    carry stdout/stderr/tree (recomputable cache per VM.md). Needs a size
+    cap and a pruning story.
+11. **Modules and trees enter by the side door.** `skein-dev scan`/`install`
+    write objects straight into the store file as a stand-in for the client.
+    The real path is messages carrying (or announcing, then streaming) the
+    objects, and a program registration message naming module CIDs; the
+    shell program's module CIDs are pinned in code for now.
+12. **The wallet edge is an import.** `main.ts` imports `../wallet.ts`
+    (HTTP to wallet-api); it is the one allowed escape from the isolation
+    rule. The wallet's signatures are deterministic (RFC 6979, checked for
+    both ProtoWallet and wallet-api) — replay depends on it.
+13. **Peers share one wallet here.** clock, admin, david and runtime are
+    keyIDs under one wallet. In production each peer is its own wallet and
+    the instance learns its identity by `bind`/subscription messages; the
+    default binding table would then be empty rather than name "clock".
+14. **Stat times are the epoch** (git records none); previously they were
+    the single attested time. `ls -l` shows 1970.
+15. **Stale socket**: the runtime cannot unlink one (no fs); `bin/skein`
+    removes it when `ss -xl` shows no listener.
+16. **The `sig` in `{time, state, sig}`** is the reply message's own
+    signature; the body carries no second one.
