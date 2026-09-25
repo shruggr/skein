@@ -47,3 +47,49 @@ the graph and on chain, calling each other through that same interface. gib's
 git↔chain mapping can be reused between the VM's hash store and real git
 repos. The ORDFS patch format (vcdiff against a base) is a candidate for how a
 tool call expresses file edits, mapped onto the host filesystem.
+
+## From the wasm shell prototype (2026-09-25)
+
+`runShell` (src/shell.ts) runs patched brush + uutils coreutils as WASI
+modules over the tree; see wasm/README.md for builds and patches.
+
+1. **Pipelines run stage by stage.** Every external command runs to
+   completion inside `skein.spawn` before the next starts; pipes are
+   in-memory buffers capped at 64 MiB. Deterministic by construction, but
+   `yes | head` ends only when the cap makes `yes` fail, streaming (`tail -f`),
+   coprocesses and process substitution `<(…)` do not work. Good enough for
+   agent use, or do we want real concurrency (one instance per stage with JSPI
+   suspension on empty pipes, still deterministic if scheduling is fixed)?
+2. **No metering.** `while :; do :; done` hangs the host. Needs fuel
+   (instrumented wasm, counted per instance) rather than a wall-clock timeout,
+   which would make results depend on the machine.
+3. **Empty directories** are kept as empty git trees so `mkdir d` survives
+   into the next command. `scan` drops empty directories, so
+   `scan(materialize(t)) ≠ t` when `t` has one. Keep, or drop at commit?
+4. **Modes.** WASI preview1 has no permission bits and no chmod: the exec bit
+   comes only from the input tree, new files are 100644, `ls -l` shows
+   `r-xr-xr-x` for everything, `test -x` is "exists". A `skein.chmod` import
+   plus a patched `chmod` would close this if agents need it.
+5. **Time** is one attested value for the whole run: every clock read and
+   every mtime returns it, `sleep` returns at once. Should it advance per
+   spawn, or per attestation message only?
+6. **Randomness** is a seeded stream (`seed` option, default 0): `$RANDOM`,
+   `mktemp`, `shuf` and Rust hash seeds are deterministic. Is the seed an
+   input carried in the message that ran the command, or always 0?
+7. **Toolset.** coreutils' WASI feature set has no `env`, `chmod`, `stat`,
+   `du`, `timeout`; there is no `grep`, `sed`, `awk`, `find`, `diff`, `xargs`.
+   Which programs to register next, and how: today names are hard-wired to
+   two files in wasm/; the model says programs are records by CID.
+8. **Binaries in git** (4.9 + 10.0 MB) and two patched forks to carry. The
+   brush patch (host spawn/pipe imports behind `cfg(target_os = "wasi")`) is
+   small and could be offered upstream as a pluggable process backend. Builds
+   are byte-identical only on one machine (build paths in panic strings);
+   `--remap-path-prefix` would fix that if program CIDs must be rebuildable.
+9. **JSPI** (`WebAssembly.Suspending`/`promising`) lets reads load records
+   lazily from the async store. It is Node 26 / V8 only; a Go host would need
+   its own suspension or a preloaded tree.
+10. **brush gaps seen**: `exec` is a unix-only builtin (so `exec 3>file` fails),
+    `**/*.txt` with globstar missed top-level matches, errors read
+    `error: command not found: x` rather than bash's wording.
+11. **Devices**: `/dev/null` and `/dev/std{in,out,err}` are synthesized unless
+    the tree has its own `/dev`; no `/dev/zero`, `/dev/urandom`, `/dev/fd/*`.
