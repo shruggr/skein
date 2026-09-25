@@ -5,23 +5,41 @@
 //   skein import <dir>
 //   skein run --tree <cid> [--cwd <path>] [--env K=V]... -- '<cmd>'
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
+//   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
+//   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
 
 import { parseArgs } from "node:util";
+import { createInterface } from "node:readline/promises";
 import { loadConfig } from "./config.ts";
-import { SkeinClient, type Result } from "./client.ts";
+import { BOX, SkeinClient, type Result } from "./client.ts";
+import { parseReplLine, parseSay, short } from "./conversation.ts";
 
 export type Command =
   | { cmd: "whoami" }
   | { cmd: "import"; dir: string }
   | { cmd: "run"; tree: string; cwd?: string; env?: Record<string, string>; line: string }
   | { cmd: "inbox"; wait: boolean; timeout: number; ack: boolean; json: boolean }
+  | { cmd: "chat"; text: string; tree?: string; model?: string; fresh: boolean; wait: boolean; timeout: number }
+  | { cmd: "talk"; tree?: string; model?: string; fresh: boolean; timeout: number }
   | { cmd: "help" };
 
 export const USAGE = `usage:
   skein whoami
   skein import <dir>
   skein run --tree <cid> [--cwd <path>] [--env K=V]... -- '<cmd>'
-  skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]`;
+  skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
+  skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
+  skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]`;
+
+export const DEFAULT_TIMEOUT = 120;
+
+function timeoutOf(cmd: string, v: string | undefined): number {
+  const t = v === undefined ? DEFAULT_TIMEOUT : Number(v);
+  if (!Number.isFinite(t) || t <= 0) throw new Error(`${cmd}: bad --timeout ${v}`);
+  return t;
+}
+
+const convOptions = { tree: { type: "string" }, model: { type: "string" }, new: { type: "boolean" }, timeout: { type: "string" } } as const;
 
 export function parseCli(argv: string[]): Command {
   const [sub, ...rest] = argv;
@@ -62,9 +80,23 @@ export function parseCli(argv: string[]): Command {
         options: { wait: { type: "boolean" }, timeout: { type: "string" }, "no-ack": { type: "boolean" }, json: { type: "boolean" } },
         allowPositionals: false,
       });
-      const timeout = values.timeout === undefined ? 300 : Number(values.timeout);
-      if (!Number.isFinite(timeout) || timeout <= 0) throw new Error(`inbox: bad --timeout ${values.timeout}`);
-      return { cmd: "inbox", wait: !!values.wait, timeout, ack: !values["no-ack"], json: !!values.json };
+      return { cmd: "inbox", wait: !!values.wait, timeout: timeoutOf("inbox", values.timeout), ack: !values["no-ack"], json: !!values.json };
+    }
+    case "chat": {
+      const { values, positionals } = parseArgs({ args: rest, options: { ...convOptions, wait: { type: "boolean" } }, allowPositionals: true });
+      const text = positionals.join(" ");
+      if (!text.trim()) throw new Error('chat: expected "<text>"');
+      return {
+        cmd: "chat", text, fresh: !!values.new, wait: !!values.wait, timeout: timeoutOf("chat", values.timeout),
+        ...(values.tree !== undefined && { tree: values.tree }), ...(values.model !== undefined && { model: values.model }),
+      };
+    }
+    case "talk": {
+      const { values } = parseArgs({ args: rest, options: convOptions, allowPositionals: false });
+      return {
+        cmd: "talk", fresh: !!values.new, timeout: timeoutOf("talk", values.timeout),
+        ...(values.tree !== undefined && { tree: values.tree }), ...(values.model !== undefined && { model: values.model }),
+      };
     }
     default:
       throw new Error(`unknown command: ${sub}`);
@@ -78,14 +110,27 @@ function text(v: unknown): string {
   return v === undefined || v === null ? "" : String(v);
 }
 
+/** A `say` as text: the text line, the page (markdown, as is), then tree/thread. */
+export function formatSay(body: Record<string, unknown> | undefined): string {
+  const s = parseSay(body);
+  const out = [s.text];
+  if (s.page) out.push("", s.page.replace(/\s+$/, ""), "");
+  const ids = [s.tree && `tree ${short(s.tree.toString())}`, `thread ${short(s.thread.toString())}`].filter(Boolean);
+  out.push(`  [${ids.join("  ")}]`);
+  return out.join("\n");
+}
+
 function show(r: Result, json: boolean): void {
   if (json) {
     console.log(JSON.stringify(r, (_k, v) => (v instanceof Uint8Array ? text(v) : v)));
     return;
   }
   const b = r.body ?? {};
-  console.log(`— ${r.created ?? "?"} from ${r.sender.slice(0, 16)}… ${r.verified ? "verified" : "UNVERIFIED"} msg ${r.messageId.slice(0, 12)}`);
+  console.log(`— ${r.box} ${r.created ?? "?"} from ${r.sender.slice(0, 16)}… ${r.verified ? "verified" : "UNVERIFIED"} msg ${r.messageId.slice(0, 12)}`);
   if (r.error) { console.log(`  error: ${r.error}`); return; }
+  if (r.box === BOX.say) {
+    try { console.log(formatSay(b)); return; } catch (e) { console.log(`  malformed say: ${(e as Error).message}`); }
+  }
   if (b.replyTo !== undefined) console.log(`  replyTo:  ${text(b.replyTo)}`);
   if (b.exitCode !== undefined) console.log(`  exitCode: ${text(b.exitCode)}`);
   if (b.tree !== undefined) console.log(`  tree:     ${text(b.tree)}`);
@@ -124,17 +169,61 @@ export async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "inbox": {
-      const want = c.wait ? client.lastSent("run")?.cid : undefined;
-      if (c.wait && !want) throw new Error("inbox --wait: no run sent from this machine yet (~/.skein/client/sent.jsonl)");
-      const deadline = Date.now() + c.timeout * 1000;
-      for (;;) {
-        const rs = await client.inbox({ ack: c.ack });
-        for (const r of rs) show(r, c.json);
-        if (!c.wait || rs.some((r) => r.body && text(r.body.replyTo) === want)) return 0;
-        if (Date.now() > deadline) { console.error(`inbox: no result for ${want} within ${c.timeout}s`); return 1; }
-        await new Promise((res) => setTimeout(res, 1000));
+      if (!c.wait) { for (const r of await client.inbox({ ack: c.ack })) show(r, c.json); return 0; }
+      const want = [];
+      const chat = client.lastSent(BOX.chat), run = client.lastSent(BOX.run);
+      if (chat) want.push({ box: BOX.say, replyTo: chat.cid });
+      if (run) want.push({ box: BOX.results, replyTo: run.cid });
+      if (!want.length) throw new Error("inbox --wait: no chat or run sent from this machine yet (~/.skein/client/sent.jsonl)");
+      return wait(client, want, c.timeout, (r) => show(r, c.json), c.ack);
+    }
+    case "chat": {
+      const s = await client.chat(c);
+      if (!c.wait) { console.log(s.cid); return 0; }
+      process.stderr.write(`sent ${short(s.cid)}${s.replyTo ? ` (reply to ${short(s.replyTo)})` : " (new conversation)"}\n`);
+      return wait(client, [{ box: BOX.say, replyTo: s.cid }], c.timeout, (r) => show(r, false));
+    }
+    case "talk":
+      return talk(client, c);
+  }
+}
+
+async function wait(client: SkeinClient, want: { box: string; replyTo: string }[], timeout: number, onResult: (r: Result) => void, ack = true): Promise<number> {
+  const hit = await client.waitFor(want, { timeoutMs: timeout * 1000, ack, onResult });
+  if (hit) return 0;
+  console.error(`no answer to ${want.map((w) => `${w.box}←${short(w.replyTo)}`).join(" or ")} within ${timeout}s`);
+  return 1;
+}
+
+/** The REPL: each line is a chat continuing the last say; waits for its say. */
+async function talk(client: SkeinClient, c: Extract<Command, { cmd: "talk" }>): Promise<number> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let fresh = c.fresh, tree = c.tree;
+  console.log("talk: /new, /tree <cid>, /quit");
+  try {
+    for (;;) {
+      let line: string;
+      try { line = await rl.question("> "); } catch { return 0; } // stdin closed
+      const cmd = parseReplLine(line);
+      switch (cmd.kind) {
+        case "empty": continue;
+        case "quit": return 0;
+        case "error": console.log(cmd.message); continue;
+        case "new": fresh = true; tree = undefined; console.log("(new conversation)"); continue;
+        case "tree": tree = cmd.cid; console.log(`(tree ${short(cmd.cid)} for the next message)`); continue;
+        case "chat": {
+          const s = await client.chat({ text: cmd.text, fresh, tree, model: c.model });
+          fresh = false; tree = undefined; // after this, the say's tree carries the conversation
+          const hit = await client.waitFor([{ box: BOX.say, replyTo: s.cid }], {
+            timeoutMs: c.timeout * 1000,
+            onResult: (r) => { if (r.box === BOX.say && String(r.body?.replyTo) === s.cid && !r.error) console.log(formatSay(r.body)); else show(r, false); },
+          });
+          if (!hit) console.log(`(no answer within ${c.timeout}s; \`skein inbox\` picks it up later)`);
+        }
       }
     }
+  } finally {
+    rl.close();
   }
 }
 

@@ -90,7 +90,7 @@ test("parseCli", () => {
   assert.deepEqual(parseCli(["run", "--tree", "baf", "--", "ls", "|", "head", "-3"]), { cmd: "run", tree: "baf", line: "ls | head -3" });
   assert.deepEqual(parseCli(["run", "--tree", "baf", "--cwd", "src", "--env", "A=1", "--env", "B=x=y", "--", "ls | head -3"]),
     { cmd: "run", tree: "baf", line: "ls | head -3", cwd: "src", env: { A: "1", B: "x=y" } });
-  assert.deepEqual(parseCli(["inbox", "--wait"]), { cmd: "inbox", wait: true, timeout: 300, ack: true, json: false });
+  assert.deepEqual(parseCli(["inbox", "--wait"]), { cmd: "inbox", wait: true, timeout: 120, ack: true, json: false });
   assert.deepEqual(parseCli(["inbox", "--no-ack", "--timeout", "5", "--json"]), { cmd: "inbox", wait: false, timeout: 5, ack: false, json: true });
   assert.deepEqual(parseCli(["whoami"]), { cmd: "whoami" });
   assert.deepEqual(parseCli([]), { cmd: "help" });

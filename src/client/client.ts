@@ -15,8 +15,12 @@ import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
 import { open, seal, verify, type Envelope } from "./envelope.ts";
+import { chatBody, conversationFrom, loadConversation, parseSay, saveConversation, type Conversation } from "./conversation.ts";
 
-export const BOX = { objects: "objects", run: "run", results: "results" } as const;
+export const BOX = { objects: "objects", run: "run", results: "results", chat: "chat", say: "say" } as const;
+
+/** The boxes David reads, in this order. */
+export const INBOX = [BOX.results, BOX.say] as const;
 
 /** The envelope's CID: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded envelope. */
 export async function envelopeCid(env: Envelope): Promise<CID> {
@@ -35,10 +39,13 @@ export async function hashDir(dir: string): Promise<{ root: CID; records: Rec[] 
   return { root, records: [...m.values()] };
 }
 
-export interface Sent { cid: string; box: string; messageId: string; at: string; tree?: string; cmd?: string }
+export interface Sent { cid: string; box: string; messageId: string; at: string; tree?: string; cmd?: string; text?: string; replyTo?: string }
 
 export interface Result {
+  box: string;
   messageId: string;
+  /** CID of the received envelope (a `say`'s CID is the next chat's replyTo). */
+  cid?: string;
   sender: string;
   verified: boolean;
   created?: string;
@@ -109,22 +116,76 @@ export class SkeinClient {
     return this.send(BOX.run, body, { tree: args.tree, cmd: args.cmd });
   }
 
-  /** Read (and by default acknowledge) David's `results` box. */
+  /**
+   * Chat with the instance (box `chat`). Continues the conversation in
+   * conversation.json (replyTo = the last say, tree defaults to its tree)
+   * unless `fresh`.
+   */
+  chat(args: { text: string; tree?: string; model?: string; fresh?: boolean }): Promise<Sent> {
+    const body = chatBody(args, this.conversation());
+    return this.send(BOX.chat, body, {
+      text: args.text,
+      ...(body.tree && { tree: body.tree.toString() }),
+      ...(body.replyTo && { replyTo: body.replyTo.toString() }),
+    });
+  }
+
+  conversation(): Conversation | undefined {
+    return loadConversation(this.cfg.stateDir);
+  }
+
+  /**
+   * Read (and by default acknowledge) David's boxes, `results` then `say`.
+   * The newest well-formed, verified `say` becomes the conversation state.
+   */
   async inbox(opts: { ack?: boolean } = {}): Promise<Result[]> {
-    const msgs = await this.mb.listMessagesLite({ messageBox: BOX.results, host: this.cfg.messageboxUrl });
     const out: Result[] = [];
-    for (const m of msgs) out.push(await this.readOne(m.messageId, m.sender, m.body));
-    if ((opts.ack ?? true) && msgs.length) {
-      await this.mb.acknowledgeMessage({ messageIds: msgs.map((m) => m.messageId), host: this.cfg.messageboxUrl });
+    for (const box of INBOX) {
+      const msgs = await this.mb.listMessagesLite({ messageBox: box, host: this.cfg.messageboxUrl });
+      for (const m of msgs) out.push(await this.readOne(box, m.messageId, m.sender, m.body));
+      if ((opts.ack ?? true) && msgs.length) {
+        await this.mb.acknowledgeMessage({ messageIds: msgs.map((m) => m.messageId), host: this.cfg.messageboxUrl });
+      }
     }
+    let newest: Conversation | undefined;
+    for (const r of out) {
+      if (r.box !== BOX.say || r.error || !r.cid) continue;
+      try {
+        const c = conversationFrom(r.cid, parseSay(r.body), r.created);
+        if (!newest || c.at >= newest.at) newest = c;
+      } catch (e) {
+        r.error = (e as Error).message;
+      }
+    }
+    if (newest) saveConversation(this.cfg.stateDir, newest);
     return out;
   }
 
-  private async readOne(messageId: string, sender: string, raw: unknown): Promise<Result> {
-    const r: Result = { messageId, sender, verified: false };
+  /**
+   * Poll the inbox every `intervalMs` until a message in one of `want`'s boxes
+   * answers (replyTo) the paired CID; every message read goes to `onResult`.
+   * Resolves the matching result, or undefined at the deadline.
+   */
+  async waitFor(want: { box: string; replyTo: string }[], opts: { timeoutMs: number; intervalMs?: number; ack?: boolean; onResult?: (r: Result) => void }): Promise<Result | undefined> {
+    const deadline = Date.now() + opts.timeoutMs;
+    for (;;) {
+      let hit: Result | undefined;
+      for (const r of await this.inbox({ ack: opts.ack })) {
+        opts.onResult?.(r);
+        if (!hit && r.body && want.some((w) => w.box === r.box && String(r.body!.replyTo) === w.replyTo)) hit = r;
+      }
+      if (hit) return hit;
+      if (Date.now() > deadline) return undefined;
+      await new Promise((res) => setTimeout(res, opts.intervalMs ?? 1000));
+    }
+  }
+
+  private async readOne(box: string, messageId: string, sender: string, raw: unknown): Promise<Result> {
+    const r: Result = { box, messageId, sender, verified: false };
     try {
       const env = (typeof raw === "string" ? JSON.parse(raw) : raw) as Envelope;
       r.created = env.created;
+      r.cid = (await envelopeCid(env)).toString();
       r.verified = verify(env);
       if (!r.verified) throw new Error("envelope signature does not verify");
       if (env.sender.identityKey !== sender) throw new Error(`envelope sender ${env.sender.identityKey} is not the messagebox sender ${sender}`);
