@@ -86,3 +86,22 @@ through gib. The runtime never writes to a disk.
 
 The v1 daemon glued a runtime and a local client into one process and let
 the "skein" CLI read the disk. That is the thing this note corrects.
+
+## The kernel, in one paragraph (added later on 2026-09-25)
+
+Skein is a WASI machine: the runtime's import table is its kernel, and the
+userland is anything compiled to plain WASI (Rust `wasm32-wasip1`, wasi-sdk
+C/C++, Go `wasip1`, interpreters as modules). Programs target WASI, never
+skein. Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
+— are answered inside, deterministically, and never recorded. **Attested**
+ones — anything that leaves the runtime: time, random, a message to a peer
+(inference, fetch, clone, run-on-machine) — are one message out and one
+signed message back, bound to the state that asked, recorded and replayed.
+Request/response *is* attestation; peers all look the same from inside. A
+program waiting on an attested call is an ordinary thread at rest: the
+suspended instance is its transient handle, the scheduler wakes it when the
+reply arrives, and a restart re-executes it from the log. Pipeline stages are
+threads too; their records are recomputable cache. Which syscall is bound to
+what — inside, or routed out — is instance configuration in the log, so a
+mock is just a binding to a bundle, and replay uses the binding the original
+run used.
