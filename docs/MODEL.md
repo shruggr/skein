@@ -1,4 +1,8 @@
-# The skein model
+# The skein model (v1)
+
+> Superseded where they differ by `VM.md` (2026-09-25): skein as a
+> message-driven, signed, deterministic VM. This file stays as the
+> description of what the v1 code implements until it is reshaped.
 
 Skein is a content-addressed graph of threads and the scheduler that wakes them.
 It is not an agent framework: a runner can be a model, a shell, a subagent loop,
