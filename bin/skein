@@ -1,11 +1,22 @@
 #!/usr/bin/env bash
-# The skein runtime (src/runtime/main.ts).
+# skein — David's client (src/client/cli.ts): whoami | import | run | inbox | help.
+# Compatibility: with no arguments, or `skein runtime`, this still starts the
+# runtime (src/runtime/main.ts) as it did before the client existed; that
+# launcher belongs in its own script (bin/skein-runtime) once the runtime side moves it.
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-home="${SKEIN_HOME:-$HOME/.skein}"
-sock="${SKEIN_SOCKET:-$home/runtime.sock}"
-mkdir -p "$home" "$(dirname "${SKEIN_DB:-$home/runtime.db}")"
-# A socket file left by a crashed runtime blocks listen(); the runtime cannot
-# remove it (no filesystem access), so do it here if nothing is listening on it.
-if [ -S "$sock" ] && ! ss -xl 2>/dev/null | grep -qF "$sock"; then rm -f "$sock"; fi
-exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@"
+case "${1:-}" in
+  whoami|import|run|inbox|help|-h|--help)
+    exec node --experimental-strip-types --no-warnings "$root/src/client/cli.ts" "$@" ;;
+  ""|runtime)
+    [ "${1:-}" = runtime ] && shift
+    home="${SKEIN_HOME:-$HOME/.skein}"
+    sock="${SKEIN_SOCKET:-$home/runtime.sock}"
+    mkdir -p "$home" "$(dirname "${SKEIN_DB:-$home/runtime.db}")"
+    # A socket file left by a crashed runtime blocks listen(); the runtime cannot
+    # remove it (no filesystem access), so do it here if nothing is listening on it.
+    if [ -S "$sock" ] && ! ss -xl 2>/dev/null | grep -qF "$sock"; then rm -f "$sock"; fi
+    exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@" ;;
+  *)
+    exec node --experimental-strip-types --no-warnings "$root/src/client/cli.ts" "$@" ;;
+esac
