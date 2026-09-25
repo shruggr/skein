@@ -7,7 +7,7 @@ import type { CID } from "multiformats/cid";
 import type { Store } from "./store.ts";
 import type { ThreadOrigin, ThreadUpdate } from "./types.ts";
 import type { Runner, RunnerContext, Status } from "./runners/types.ts";
-import { compact, emit, isSettled, rest, short, stamp, statusOf, tipOf } from "./runners/util.ts";
+import { compact, emit, isSettled, nonce, rest, short, stamp, statusOf, tipOf } from "./runners/util.ts";
 
 export interface SchedulerOptions {
   tickMs?: number;
@@ -37,7 +37,7 @@ export class Scheduler {
       store,
       now: stamp,
       launch: async ({ runner, spec, tag }, launchedBy) => {
-        const thread = await store.chains.open(compact({ kind: "thread", runner, spec, launchedBy, at: stamp() }) as ThreadOrigin);
+        const thread = await store.chains.open(compact({ kind: "thread", runner, spec, launchedBy, at: stamp(), nonce: nonce() }) as ThreadOrigin);
         if (launchedBy) await emit(store, launchedBy, compact({ type: "launched", thread, ...tag }));
         this.say(`${short(thread)} ${runner} launched${launchedBy ? ` by ${short(launchedBy)}` : ""}`);
         this.wake(thread);

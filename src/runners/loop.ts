@@ -6,28 +6,31 @@
 // thread(s) it needs next (or finished/errored). The scheduler re-enters
 // start() whenever everything in waitingOn has settled, so "the thread I waited
 // on finished" is handled inside start(); check() only reports the tip.
-// Each transition is idempotent against the step's emissions (a model
-// launch, a tool launch per call id, a tool_result per call id, one david
+// Each transition is idempotent against the step's own blocks (its request's
+// results, a model launch, a tool launch per call id, one rest, one david
 // launch), so a crash between writes resumes from the tip without redoing
 // work already recorded. The remaining window is a launch opened but not yet
 // emitted as `launched`: that thread is orphaned and the call relaunched.
 //
-// A step's life: launched model → (model settles) text/say/page emissions →
-//   bash calls:  launched shell… rest waiting → (shells settle) tool_result… rest finished → next step
-//   otherwise:   launched david, rest finished → (David replies) next step with his reply
+// A step rests exactly once. Its life:
+//   [tool_result… carried in from the previous step's tools] → launched model → (model settles) text/say/page →
+//   bash calls:          launched shell… → rest waiting → (shells settle) next step carries their results
+//   ends turn, top-level: launched david → rest finished → (David replies) next step carries his reply
+//   ends turn, subagent:  conclusion → rest finished → thread finished, resolution = this step
 
 import type { CID } from "multiformats/cid";
 import type { Ref, ThreadOrigin } from "../types.ts";
 import type { Runner, RunnerContext } from "./types.ts";
 import type { ChatMessage, ModelSpec, Thinking, ToolCall, ToolDef } from "./model.ts";
 import type { DavidSpec } from "./david.ts";
-import { compact, conclusion, field, headNode, isSettled, nodesOf, nodeView, openNode, statusOf, tipOf, type NodeView } from "./util.ts";
+import { compact, conclusion, emitsOf, field, headNode, isSettled, nodesOf, nodeView, openNode, statusOf, tipOf, type NodeView } from "./util.ts";
 
 export interface LoopSpec {
   system: string;
-  model: { baseUrl: string; model: string; apiKey?: string; thinking?: Thinking };
-  tools: string[]; // registry names: "bash", "say", "page"
-  prompt: string;  // David's opening line
+  model?: string;       // "provider/model"; the model runner falls back to config defaults
+  thinking?: Thinking;
+  tools: string[];      // registry names: "bash", "say", "page"
+  prompt: string;       // the opening line: David's, or the caller's task for a subagent
 }
 
 export interface LoopOptions {
@@ -37,10 +40,11 @@ export interface LoopOptions {
   maxToolChars?: number;     // tool output kept in the model's context; the full output stays in the shell node
 }
 
-interface StepRequest { messages: ChatMessage[] }
-
-type Launched = { type: "launched"; thread: CID; label?: string; call?: string };
-type ToolResult = { type: "tool_result"; thread: CID; ok: boolean; content: string; call?: string };
+/** A step's request: the model's full input, plus which tool results it carries (emitted before its model call). */
+interface StepRequest {
+  messages: ChatMessage[];
+  results?: Array<{ call: string; thread: CID; ok: boolean }>;
+}
 
 export const TOOLS: Record<string, ToolDef> = {
   bash: {
@@ -86,28 +90,28 @@ export function loopRunner(opts: LoopOptions = {}): Runner {
 
   async function advance(thread: CID, ctx: RunnerContext): Promise<void> {
     const { store } = ctx;
-    const spec = (await store.get<ThreadOrigin>(thread)).spec as LoopSpec;
+    const origin = await store.get<ThreadOrigin>(thread);
+    const spec = origin.spec as LoopSpec;
     const head = await headNode(store, thread);
     if (!head) {
-      return beginStep(ctx, thread, spec, [], [
-        { role: "system", content: spec.system },
-        { role: "user", content: spec.prompt },
-      ]);
+      return beginStep(ctx, thread, spec, [], {
+        messages: [{ role: "system", content: spec.system }, { role: "user", content: spec.prompt }],
+      });
     }
     const step = await nodeView(store, head);
-    const { messages } = step.origin.request as StepRequest;
-    const launches = step.emits.filter((e): e is Launched => e.type === "launched");
+    const req = step.origin.request as StepRequest;
+    const launches = emitsOf(step.emits, "launched");
 
-    // 1. the model call
+    // 1. the model call (after any tool results this step carries)
     const models = launches.filter((l) => l.label === "model");
     const m = models.at(-1);
-    if (!m) return launchModel(ctx, thread, spec, head, messages);
+    if (!m) return runStep(ctx, thread, spec, head, req, step);
     const mTip = await tipOf(store, m.thread);
     if (!isSettled(mTip?.state)) return ctx.update(thread, { state: "waiting", waitingOn: [m.thread] });
     if (mTip!.state !== "finished" || !mTip!.resolution) {
       const err = mTip!.error;
-      if (err?.kind !== "cant-do" && models.length < maxModel) return launchModel(ctx, thread, spec, head, messages);
-      await ctx.rest(head, { state: "errored" });
+      if (err?.kind !== "cant-do" && models.length < maxModel) return launchModel(ctx, thread, spec, head, req.messages);
+      if (!step.rest) await ctx.rest(head, { state: "errored" });
       return ctx.update(thread, {
         state: "errored",
         error: { kind: err?.kind ?? "blew-up", message: `model call failed after ${models.length} attempt(s): ${err?.message ?? mTip!.state}` },
@@ -121,27 +125,18 @@ export function loopRunner(opts: LoopOptions = {}): Runner {
     if (assistant.content && !has("text")) await ctx.emit(head, { type: "text", text: assistant.content });
 
     const calls = assistant.tool_calls ?? [];
-    const results = new Map<string, { ok: boolean; content: string }>(); // call id → result for the next request
-    for (const e of after) if (e.type === "tool_result" && field(e, "call")) results.set(String(field(e, "call")), e as ToolResult);
+    const results = new Map<string, { thread: CID; ok: boolean; content: string }>(); // call id → result for the next step
     const shells: Array<{ call: ToolCall; thread: CID }> = [];
     const speech = { say: [] as string[], page: [] as string[] };
-    let ends = true; // a turn ends unless something produced a tool result the model must see
 
     for (const call of calls) {
       const name = call.function.name;
       const args = parseArgs(call.function.arguments);
-      const fail = async (content: string) => {
-        ends = false;
-        if (!results.has(call.id)) {
-          results.set(call.id, { ok: false, content });
-          await ctx.emit(head, { type: "tool_result", thread: m.thread, ok: false, content, call: call.id });
-        }
-      };
-      if (!spec.tools.includes(name) || !TOOLS[name]) { await fail(`unknown tool: ${name}`); continue; }
-      if (!args) { await fail(`invalid JSON arguments for ${name}: ${call.function.arguments}`); continue; }
+      const fail = (content: string) => results.set(call.id, { thread: m.thread, ok: false, content });
+      if (!spec.tools.includes(name) || !TOOLS[name]) { fail(`unknown tool: ${name}`); continue; }
+      if (!args) { fail(`invalid JSON arguments for ${name}: ${call.function.arguments}`); continue; }
       if (name === "bash") {
-        ends = false;
-        if (typeof args.command !== "string") { await fail("bash needs a command string"); continue; }
+        if (typeof args.command !== "string") { fail("bash needs a command string"); continue; }
         const t = launches.find((x) => x.call === call.id && after.includes(x))?.thread ?? (await ctx.launch({
           runner: "shell",
           spec: compact({ cmd: args.command, cwd: opts.cwd, timeoutMs: opts.shellTimeoutMs }),
@@ -159,54 +154,67 @@ export function loopRunner(opts: LoopOptions = {}): Runner {
       }
     }
 
-    // 3a. tools: wait for them, then feed their results to the next step.
-    if (!ends) {
-      const pending = [];
-      for (const s of shells) if (!isSettled((await tipOf(store, s.thread))?.state)) pending.push(s.thread);
-      if (pending.length) {
-        if (step.rest?.state !== "waiting") await ctx.rest(head, { state: "waiting", waitingOn: shells.map((s) => s.thread) });
-        return ctx.update(thread, { state: "waiting", waitingOn: shells.map((s) => s.thread) });
-      }
+    // 3a. tools (or failed calls the model must hear about): wait, then the next step carries the results.
+    if (shells.length || results.size) {
+      const waitingOn = shells.map((s) => s.thread);
+      if (!step.rest) await ctx.rest(head, waitingOn.length ? { state: "waiting", waitingOn } : { state: "finished" });
       for (const s of shells) {
-        if (results.has(s.call.id)) continue;
-        const r = await shellResult(ctx, s.thread, maxChars);
-        results.set(s.call.id, r);
-        await ctx.emit(head, { type: "tool_result", thread: s.thread, ok: r.ok, content: r.content, call: s.call.id });
+        if (!isSettled((await tipOf(store, s.thread))?.state)) return ctx.update(thread, { state: "waiting", waitingOn });
       }
-      const toolMsgs = calls.map((c): ChatMessage => ({ role: "tool", tool_call_id: c.id, content: results.get(c.id)?.content ?? DELIVERED }));
-      await ctx.rest(head, { state: "finished" });
-      return beginStep(ctx, thread, spec, [head], [...messages, assistant, ...toolMsgs]);
+      for (const s of shells) results.set(s.call.id, { thread: s.thread, ...(await shellResult(ctx, s.thread, maxChars)) });
+      const content = (c: ToolCall) => results.get(c.id)?.content ?? DELIVERED;
+      return beginStep(ctx, thread, spec, [head], {
+        messages: [...req.messages, assistant, ...calls.map((c): ChatMessage => ({ role: "tool", tool_call_id: c.id, content: content(c) }))],
+        results: calls.filter((c) => results.has(c.id)).map((c) => ({ call: c.id, thread: results.get(c.id)!.thread, ok: results.get(c.id)!.ok })),
+      });
     }
 
-    // 3b. end of turn: put it in front of David and wait for his reply.
-    const d = launches.find((x) => x.label === "david" && after.includes(x));
+    // 3b. end of turn.
+    if (origin.launchedBy) {
+      // A subagent answers its caller, never David: the step is the resolution, its conclusion the answer.
+      const final = speech.say.join("\n\n") || assistant.content || speech.page.join("\n\n---\n\n");
+      if (!has("conclusion")) await ctx.emit(head, { type: "conclusion", text: final });
+      if (!step.rest) await ctx.rest(head, { state: "finished" });
+      return ctx.update(thread, { state: "finished", resolution: head });
+    }
+    let d = launches.find((x) => x.label === "david" && after.includes(x))?.thread;
     if (!d) {
       const say = speech.say.join("\n\n") || (speech.page.length ? undefined : assistant.content ?? "");
       const david: DavidSpec = compact({ say, page: speech.page.join("\n\n---\n\n") || undefined });
-      const t = await ctx.launch({ runner: "david", spec: david, tag: { label: "david" } }, head);
-      await ctx.rest(head, { state: "finished" });
-      return ctx.update(thread, { state: "waiting", waitingOn: [t] });
+      d = await ctx.launch({ runner: "david", spec: david, tag: { label: "david" } }, head);
     }
-    const dTip = await tipOf(store, d.thread);
-    if (!isSettled(dTip?.state)) return ctx.update(thread, { state: "waiting", waitingOn: [d.thread] });
+    if (!step.rest) await ctx.rest(head, { state: "finished" });
+    const dTip = await tipOf(store, d);
+    if (!isSettled(dTip?.state)) return ctx.update(thread, { state: "waiting", waitingOn: [d] });
     if (dTip!.state !== "finished" || !dTip!.resolution) {
       // Dismissed rather than answered: the session is over, and this step is where it ended.
       return ctx.update(thread, { state: "finished", resolution: head });
     }
     const reply = conclusion(await nodeView(store, dTip!.resolution)) ?? "";
     const toolMsgs = calls.map((c): ChatMessage => ({ role: "tool", tool_call_id: c.id, content: DELIVERED }));
-    return beginStep(ctx, thread, spec, [head], [...messages, assistant, ...toolMsgs, { role: "user", content: reply }],
+    return beginStep(ctx, thread, spec, [head], { messages: [...req.messages, assistant, ...toolMsgs, { role: "user", content: reply }] },
       [{ to: dTip!.resolution, rel: "about" }]);
   }
 
-  async function beginStep(ctx: RunnerContext, thread: CID, spec: LoopSpec, prev: CID[], messages: ChatMessage[], refs: Ref[] = []) {
-    const step = await openNode(ctx.store, { thread, prev, request: { messages } satisfies StepRequest, refs });
-    return launchModel(ctx, thread, spec, step, messages);
+  async function beginStep(ctx: RunnerContext, thread: CID, spec: LoopSpec, prev: CID[], req: StepRequest, refs: Ref[] = []) {
+    const head = await openNode(ctx.store, { thread, prev, request: compact(req), refs });
+    return runStep(ctx, thread, spec, head, req);
+  }
+
+  /** Emit the tool results the step's request carries (any not yet emitted), then launch its model call. */
+  async function runStep(ctx: RunnerContext, thread: CID, spec: LoopSpec, head: CID, req: StepRequest, view?: NodeView) {
+    const done = new Set(emitsOf(view?.emits ?? [], "tool_result").map((e) => e.call));
+    for (const r of req.results ?? []) {
+      if (done.has(r.call)) continue;
+      const content = req.messages.findLast((msg) => msg.role === "tool" && msg.tool_call_id === r.call)?.content ?? "";
+      await ctx.emit(head, { type: "tool_result", thread: r.thread, ok: r.ok, content, call: r.call });
+    }
+    return launchModel(ctx, thread, spec, head, req.messages);
   }
 
   async function launchModel(ctx: RunnerContext, thread: CID, spec: LoopSpec, step: CID, messages: ChatMessage[]) {
     const tools = spec.tools.map((n) => TOOLS[n]).filter(Boolean);
-    const model: ModelSpec = compact({ ...spec.model, messages, tools: tools.length ? tools : undefined });
+    const model: ModelSpec = compact({ model: spec.model, thinking: spec.thinking, messages, tools: tools.length ? tools : undefined });
     const t = await ctx.launch({ runner: "model", spec: model, tag: { label: "model" } }, step);
     return ctx.update(thread, { state: "waiting", waitingOn: [t] });
   }
@@ -216,8 +224,8 @@ async function shellResult(ctx: RunnerContext, shell: CID, maxChars: number): Pr
   const tip = await tipOf(ctx.store, shell);
   const node = tip?.resolution ?? (await nodesOf(ctx.store, shell)).at(-1);
   const v: NodeView | undefined = node ? await nodeView(ctx.store, node) : undefined;
-  const out = (v?.emits ?? []).filter((e) => e.type === "text").map((e) => String(field(e, "text"))).join("");
-  const exit = field(v?.emits.findLast((e) => e.type === "conclusion"), "exitCode");
+  const out = emitsOf(v?.emits ?? [], "text").map((e) => e.text).join("");
+  const exit = emitsOf(v?.emits ?? [], "conclusion").at(-1)?.exitCode;
   const trail = tip?.state === "finished" ? `[exit ${exit ?? "?"}]` : `[${tip?.state}: ${tip?.error?.message ?? "no result"}]`;
   let body = out;
   if (body.length > maxChars) {

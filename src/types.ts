@@ -43,6 +43,7 @@ export interface ThreadOrigin {
   spec: unknown;      // what the runner needs; shape is per runner kind
   launchedBy?: CID;   // the node that launched it; absent = parent-less
   at: Ms;
+  nonce?: string;     // distinguishes otherwise identical launches (same spec, parent, ms)
 }
 
 export interface ThreadUpdate {
@@ -63,11 +64,11 @@ export interface ThreadUpdate {
 export type Emission =
   | { type: "thinking"; text: string }
   | { type: "text"; text: string }
-  | { type: "say"; text: string }
-  | { type: "page"; markdown: string }                 // or `to: CID` for a stored page block
-  | { type: "launched"; thread: CID; label?: string }  // a tool call, model call, question
-  | { type: "tool_result"; thread: CID; ok: boolean; content: string }
-  | { type: "conclusion"; text: string }
+  | { type: "say"; text: string; call?: string }         // call: the model's tool call id, when one produced it
+  | { type: "page"; markdown: string; call?: string }    // or `to: CID` for a stored page block
+  | { type: "launched"; thread: CID; label?: string; call?: string } // a tool call, model call, question
+  | { type: "tool_result"; thread: CID; ok: boolean; content: string; call?: string }
+  | { type: "conclusion"; text: string; exitCode?: number }
   | { type: string; [k: string]: unknown };           // open for new kinds
 
 export interface Rest {
@@ -82,6 +83,7 @@ export interface NodeOrigin {
   request: unknown;    // prompt, tool arguments, model-call input
   refs: Ref[];
   at: Ms;
+  nonce?: string;      // distinguishes otherwise identical nodes
 }
 
 export interface NodeUpdate {

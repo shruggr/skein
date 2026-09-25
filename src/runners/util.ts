@@ -18,6 +18,9 @@ export function compact<T>(v: T): T {
 }
 
 let last = 0;
+/** Random tag for origins that could otherwise collide (same content, same ms, another process). */
+export const nonce = () => Buffer.from(crypto.getRandomValues(new Uint8Array(8))).toString("base64url");
+
 /** Strictly increasing ms, so two identical origins written in one ms still differ. */
 export function stamp(): number {
   last = Math.max(Date.now(), last + 1);
@@ -39,8 +42,8 @@ export function statusOf(u: ThreadUpdate): Status {
   return compact({ state: u.state, waitingOn: u.waitingOn, until: u.until, resolution: u.resolution, error: u.error, note: u.note });
 }
 
-export async function openNode(store: Store, n: { thread: CID; prev: CID[]; request: unknown; refs?: Ref[] }): Promise<CID> {
-  return store.chains.open(compact({ kind: "node", thread: n.thread, prev: n.prev, request: n.request, refs: n.refs ?? [], at: stamp() }) as NodeOrigin);
+export async function openNode(store: Store, n: { thread: CID; prev: CID[]; request: unknown; refs?: Ref[]; nonce?: string }): Promise<CID> {
+  return store.chains.open(compact({ kind: "node", thread: n.thread, prev: n.prev, request: n.request, refs: n.refs ?? [], at: stamp(), nonce: n.nonce }) as NodeOrigin);
 }
 
 export const emit = (store: Store, node: CID, e: Emission) => store.chains.append(node, { emit: compact(e) });
@@ -75,12 +78,17 @@ export async function headNode(store: Store, thread: CID): Promise<CID | undefin
   return nodes.filter((n) => !prevs.has(n.toString())).at(-1);
 }
 
+type Known = "thinking" | "text" | "say" | "page" | "launched" | "tool_result" | "conclusion";
+/** Emissions of one declared type, typed as that variant (a plain `type ===` check can't narrow past the open member). */
+export function emitsOf<K extends Known>(emits: Emission[], type: K): Array<Extract<Emission, { type: K }>> {
+  return emits.filter((e) => e.type === type) as Array<Extract<Emission, { type: K }>>;
+}
+
 /** Read a field of an emission regardless of its declared variant (emissions are open maps). */
 export const field = (e: Emission | undefined, k: string): unknown => (e as Record<string, unknown> | undefined)?.[k];
 
 export function conclusion(v: NodeView): string | undefined {
-  const c = v.emits.findLast((e) => e.type === "conclusion");
-  return c ? String(field(c, "text")) : undefined;
+  return emitsOf(v.emits, "conclusion").at(-1)?.text;
 }
 
 export const short = (cid: CID | string) => String(cid).slice(-8);

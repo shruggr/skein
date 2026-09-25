@@ -114,7 +114,7 @@ export function shellRunner(opts: ShellOptions = {}): Runner {
       flush();
       run.code = code; run.signal = signal;
       const text = run.failure ?? (signal ? `killed by ${signal}` : `exit ${code}`);
-      write(() => ctx.emit(node, { type: "conclusion", text, exitCode: code, signal }));
+      write(() => ctx.emit(node, { type: "conclusion", text, exitCode: code ?? undefined, signal }));
       write(() => ctx.rest(node, { state: run.failure ? "errored" : "finished" }));
       run.ended = true;
       write(async () => ctx.wake(thread));

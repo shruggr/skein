@@ -1,9 +1,12 @@
 // model: one OpenAI-compatible streaming /chat/completions call. Thinking and
 // text are emitted as they stream (coalesced); the final assistant message is
 // the `conclusion`, as JSON, so a caller can read tool_calls back exactly.
+// The spec names the model as "provider/model"; endpoint and key come from
+// config at start, so they never enter a block.
 
 import { CID } from "multiformats/cid";
 import type { ThreadOrigin } from "../types.ts";
+import { loadConfig, resolveModel, type Config } from "../config.ts";
 import type { Runner, RunnerContext, Status } from "./types.ts";
 import { compact, openNode } from "./util.ts";
 
@@ -19,21 +22,22 @@ export interface ChatMessage {
 export type Thinking = "off" | "low" | "medium" | "high";
 
 export interface ModelSpec {
-  baseUrl: string;
-  model: string;
-  apiKey?: string;
+  model?: string; // "provider/model"; config defaults.model when absent
   messages: ChatMessage[];
   tools?: ToolDef[];
   thinking?: Thinking;
 }
 
 export interface ModelOptions {
+  config?: Config; // default: loadConfig() at each start, so edits apply without a restart
   fetch?: typeof fetch;
   maxConcurrent?: number;
   flushMs?: number;
   flushChars?: number;
   timeoutMs?: number;
 }
+
+interface Target { ref: string; baseUrl: string; apiKey?: string; model: string; thinking?: Thinking }
 
 interface Usage { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
 
@@ -60,17 +64,24 @@ export function modelRunner(opts: ModelOptions = {}): Runner {
       if (flights.has(thread.toString())) return;
       if ([...flights.values()].filter((f) => !f.done).length >= max) return;
       const spec = (await ctx.store.get<ThreadOrigin>(thread)).spec as ModelSpec;
-      if (!spec?.baseUrl || !spec.model || !Array.isArray(spec.messages)) {
-        return ctx.update(thread, { state: "errored", error: { kind: "cant-do", message: "model spec needs baseUrl, model, messages" } });
+      let target: Target;
+      try {
+        if (!Array.isArray(spec?.messages)) throw new Error("model spec needs messages");
+        const config = opts.config ?? loadConfig();
+        const ref = spec.model ?? config.defaults?.model;
+        if (!ref) throw new Error("no model in spec and no defaults.model in config");
+        target = { ref, ...resolveModel(config, ref), thinking: spec.thinking ?? config.defaults?.thinking };
+      } catch (e) {
+        return ctx.update(thread, { state: "errored", error: { kind: "cant-do", message: (e as Error).message } });
       }
-      // The key stays out of the node: the request is what was asked, not how we authenticated.
-      const node = await openNode(ctx.store, { thread, prev: [], request: compact({ model: spec.model, messages: spec.messages, tools: spec.tools, thinking: spec.thinking }) });
+      // The node records what was asked, with defaults applied — never where or how we authenticated.
+      const node = await openNode(ctx.store, { thread, prev: [], request: compact({ model: target.ref, messages: spec.messages, tools: spec.tools, thinking: target.thinking }) });
       const requestId = crypto.randomUUID();
       await ctx.store.live.handles.set(thread, { requestId, startedAt: Date.now(), node: node.toString() });
-      await ctx.update(thread, { state: "running", note: `${spec.model} @ ${spec.baseUrl}` });
+      await ctx.update(thread, { state: "running", note: target.ref });
       const flight: Flight = { node, done: false };
       flights.set(thread.toString(), flight);
-      call(spec, node, requestId, ctx)
+      call(target, spec, node, requestId, ctx)
         .then((s) => { flight.status = s; }, (e) => { flight.status = errorStatus(e); })
         .finally(() => { flight.done = true; ctx.wake(thread); });
     },
@@ -89,17 +100,17 @@ export function modelRunner(opts: ModelOptions = {}): Runner {
     },
   };
 
-  async function call(spec: ModelSpec, node: CID, requestId: string, ctx: RunnerContext): Promise<Status> {
+  async function call(target: Target, spec: ModelSpec, node: CID, requestId: string, ctx: RunnerContext): Promise<Status> {
     const t0 = Date.now();
     const body: Record<string, unknown> = {
-      model: spec.model,
+      model: target.model,
       messages: spec.messages,
       stream: true,
       stream_options: { include_usage: true },
     };
     if (spec.tools?.length) body.tools = spec.tools;
-    if (spec.thinking === "off") body.chat_template_kwargs = { enable_thinking: false }; // vLLM/Qwen: no reasoning_effort "none"
-    else if (spec.thinking) body.reasoning_effort = spec.thinking;
+    if (target.thinking === "off") body.chat_template_kwargs = { enable_thinking: false }; // vLLM/Qwen: no reasoning_effort "none"
+    else if (target.thinking) body.reasoning_effort = target.thinking;
 
     let writes: Promise<unknown> = Promise.resolve();
     const write = (fn: () => Promise<unknown>) => { writes = writes.then(fn); };
@@ -123,13 +134,13 @@ export function modelRunner(opts: ModelOptions = {}): Runner {
     let finish: string | undefined;
 
     try {
-      const res = await doFetch(`${spec.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+      const res = await doFetch(`${target.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           accept: "text/event-stream",
           "x-request-id": requestId,
-          ...(spec.apiKey ? { authorization: `Bearer ${spec.apiKey}` } : {}),
+          ...(target.apiKey ? { authorization: `Bearer ${target.apiKey}` } : {}),
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(opts.timeoutMs ?? 600_000),
@@ -187,7 +198,7 @@ export function modelRunner(opts: ModelOptions = {}): Runner {
 
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     const tokens = usage ? `${usage.prompt_tokens ?? "?"} in / ${usage.completion_tokens ?? "?"} out` : "no usage";
-    return { state: "finished", resolution: node, note: `${spec.model} · ${tokens} · ${secs}s${finish && finish !== "stop" && finish !== "tool_calls" ? ` · ${finish}` : ""}` };
+    return { state: "finished", resolution: node, note: `${target.ref} · ${tokens} · ${secs}s${finish && finish !== "stop" && finish !== "tool_calls" ? ` · ${finish}` : ""}` };
   }
 }
 

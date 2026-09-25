@@ -1,0 +1,16 @@
+{
+  "$comment": "Copy to ~/.skein/config.json (or point $SKEIN_CONFIG at it). Specs and blocks name models as \"provider/model\"; baseUrl and apiKey are resolved from here when a model thread starts and are never written into the graph.",
+  "providers": {
+    "ripper": {
+      "$comment": "Any OpenAI-compatible /chat/completions endpoint. apiKey is optional; models is the list offered to lenses.",
+      "baseUrl": "http://100.100.177.87:8001/v1",
+      "apiKey": "vllm",
+      "models": ["qwen38"]
+    }
+  },
+  "defaults": {
+    "$comment": "Used when a spec omits them. thinking: off | low | medium | high.",
+    "model": "ripper/qwen38",
+    "thinking": "off"
+  }
+}
