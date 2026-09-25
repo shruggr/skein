@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 for p in run-handler objects-handler loop wire-probe; do
-  (cd programs && GOOS=wasip1 GOARCH=wasm go build -trimpath -ldflags="-s -w -buildid=" -o "../wasm/$p.wasm" "./$p")
+  (cd programs && GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "../wasm/$p.wasm" "./$p")
 done
 node --experimental-strip-types --no-warnings -e '
   const { readFileSync } = await import("node:fs");

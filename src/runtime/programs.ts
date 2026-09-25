@@ -26,9 +26,9 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreihcpjdmdnvrseesqlvianiwgxcodpy377llnn66jgna2qtgoab2yy"),
-  "objects-handler": CID.parse("bafkreidofbrdbgvjrf3agwqii3gl23mfqajed2wqu2p3lrss7c57nyypou"),
-  "loop": CID.parse("bafkreihm3befzivgoamaqbls72t5tz2wz4hunif56abketqn272ywqjcva"),
+  "run-handler": CID.parse("bafkreigml6yyeclbxf35bdyp5m7v3thyt5a4refqmxszt74k5ktgp64orm"),
+  "objects-handler": CID.parse("bafkreih6xihakii6omi36c2gbbw4csmzcyjllhzl6sigzpklrgligx6hsq"),
+  "loop": CID.parse("bafkreidnpowxg55l2vcria5rwurtbtozxecr7nku63m2tskdvojmupnlsi"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */

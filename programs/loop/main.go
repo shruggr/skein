@@ -1,4 +1,4 @@
-// loop: the turn loop (docs/CHAT.md), launched by the subscription
+// loop: the turn loop (README.md, "Records"; docs/MESSAGES.md), launched by the subscription
 // (owner, chat) → loop with David's opening `chat` envelope as its input.
 //
 // The conversation is the thread's own chain: every turn is a signed reveal,

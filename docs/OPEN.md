@@ -241,3 +241,55 @@ wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
 33. **Step outputs are stored.** A handler step's update carries its
     stdout/stderr, and the shell's `finished` update its whole result
     (VM.md: recomputable cache). Same size question as item 10.
+
+## From the chat build (2026-09-25)
+
+Settled by the build: replies correlate by the waiting thread's state (`awaits`
+on its tip, indexed), never by subscription; an emit is sealed inside the step
+(an attested `seal` call), so the envelope — and its CID — is a recorded answer
+and replay needs no wallet. Item 24 is half done: the sealed envelope is now in
+the store before the step ends; only the send is still fire-once.
+
+34. **Two runs of one input are no longer byte-identical.** Sealing draws a
+    fresh BRC-78 key id and IV, so a re-run (not a replay) of a step that
+    emits records a different `seal` answer and a different update CID.
+    Replay is exact (the witness serves the seal); `handlers.test.ts`'s
+    crash-and-redo comparison now allows exactly that difference.
+35. **The scheduler decrypts to route.** It reads `replyTo` by decrypting the
+    body purely with the key record. That is the same computation a handler
+    does and replays exactly, but it means routing depends on content; a
+    plaintext `replyTo` hint in the envelope (a BRC-169 extension field)
+    would let the messagebox and the runtime route without decrypting.
+36. **One reply per await.** The first admitted envelope that names an awaited
+    CID from the right identity wakes the thread; a second is recorded only.
+    A peer that retries after a crash (it answers, then dies before
+    acknowledging) produces a harmless duplicate; a peer that streams partial
+    results would need `awaits` to stay until a final message.
+37. **Reply boxes are genesis config** (`collect: ["completions"]`). A thread
+    awaiting a reply in a box the genesis does not collect never wakes.
+    Deriving the collected boxes from what live threads await is possible
+    only if the emit names the reply box.
+38. **The loop replays its whole conversation every step.** It walks its chain
+    back from `tip` and re-reads every reveal (O(turns) `get`s per step) and
+    sends the full history to the model each time. No context budget, no
+    summarising, no truncation beyond the 16 KiB tool-output cap.
+39. **The infer peer is trusted for the model's word and nothing else.** Its
+    completion is signed and recorded; the loop acts on it (runs `bash` in the
+    shell, which only touches trees). There is no per-thread budget, step
+    limit or tool-call cap: a model that keeps calling tools loops until
+    stopped (the live run took 8 steps for one follow-up question).
+40. **`thinking` is a genesis default** (`defaults.thinking: "off"`), not in the
+    `chat` shape; `ripper/qwen38` with thinking on is much slower. A `chat`
+    field or a per-conversation setting would let David choose.
+41. **Handler builds were not reproducible across commits** — Go embedded the
+    VCS revision. `build-programs.sh` now passes `-buildvcs=false`; the pins
+    changed once more for it. Existing stores keep their old modules (a
+    genesis names program records, which name modules by CID), so an old
+    instance keeps running the loop it started with.
+42. **The live instance was reset.** Its genesis had no `chat` route; subscriptions
+    are fixed at genesis (item 30), so `~/.skein/runtime.db` was moved to
+    `runtime.db.run-era` and a new genesis written with `peers.infer`.
+43. **The infer peer judges freshness against its own clock** and has no
+    replay protection beyond the messagebox's messageId dedupe; it keeps no
+    record of what it answered. It is a peer, so that is its business, but a
+    peer that bills would want both.

@@ -28,10 +28,11 @@ src/runtime/     the machine — one process; no disk, network or randomness; on
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
 src/envelope.ts  BRC-169 envelopes: RFC 8785 canonical form, BRC-78 content, seal/verify/open (shared with the client)
-src/client/      David's client (`bin/skein`): import, run, inbox
+src/client/      David's client (`bin/skein`): import, run, chat, inbox
+src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        handler programs in Go: run-handler, objects-handler; skein/ (the ABI), brc78/ (pure decryption)
+programs/        handler programs in Go: run-handler, objects-handler, loop (the chat turn loop); skein/ (the ABI), brc78/ (pure decryption)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
 wasm/            the committed modules; their CIDs are pinned in src/runtime/programs.ts
 ```
@@ -56,6 +57,8 @@ bin/skein-runtime                           # the instance: installs modules, wr
 bin/skein import ~/Work/easel               # the client: tree objects into `objects`; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'
 bin/skein inbox --wait                      # the result envelope, opened by the owner
+bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
+bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers in David's `say` box
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
 npm test                                    # includes `go test ./brc78` when go is on PATH
 ```
@@ -86,15 +89,35 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | record | shape |
 |---|---|
 | log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+key \| wake, sig}` — `sig` by the instance identity over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
-| genesis | `{kind: "genesis", identity, handle, domain, owner, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}]}` |
+| genesis | `{kind: "genesis", identity, handle, domain, owner, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, collect?: [box]}` |
 | envelope | the BRC-169 envelope's JSON object as received, as dag-cbor (its CID is the client's `replyTo`) |
 | message key | `{kind: "message-key", envelope, key}` — the 32-byte AES-256-GCM key its content decrypts under |
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, key, box, sender}` |
-| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, reveals?, emits?, result: {exitCode, stdout, stderr}}` |
-| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "reveal", request, result}` — a wire frame and its answer, or a reveal's signature |
-| reveal | `{kind: "reveal", of: <envelope>, …}` — run: `cmd, tree, cwd?, env?`; objects: `root?, count` |
-| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the edge seals `body` to `to` in `box` |
+| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, reveals?, emits?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on |
+| step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, key, box, sender, replyTo}, peers?, defaults?}` |
+| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "reveal" \| "seal", request, result}` — a wire frame and its answer, a reveal's signature, or an emit record and its sealed envelope |
+| reveal | `{kind: "reveal", of: <envelope>, …}` — run: `cmd, tree, cwd?, env?`; objects: `root?, count`; loop: see below |
+| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the edge seals `body` to `to` in `box` during the step (`emit` returns the envelope CID) and sends it after |
 
 Boxes: `objects` (`{records: [{cid, bytes}]}` ≤ 1 MiB, blobs first) →
 objects-handler; `run` (`{cmd, tree, cwd?, env?}`) → run-handler, which replies
 in the sender's `results` box with `{exitCode, stdout, stderr, tree, replyTo}`.
+
+Chat: `chat` (`{text, tree?, model?, replyTo?}`) with no `replyTo` → a new loop
+thread; the loop sends `infer` (`{model, messages, tools?, thinking?}`) to
+`peers.infer`, which answers in `completions` (`{replyTo, message: {role,
+content?, reasoning?, tool_calls?}, usage?, model, ms}` or `{replyTo, error}`),
+and says `{text, page?, tree?, thread, replyTo: <chat>}` to David in `say`.
+David's next `chat` carries `replyTo: <say>`.
+
+**Replies.** An admitted envelope whose body (decrypted purely with its key
+record) has `replyTo` goes only to the thread whose tip `awaits` that envelope,
+and only if its sender is the identity it was sealed to; it becomes that step's
+`reply` input. Otherwise it is recorded and nothing runs. It is never routed by
+subscription.
+
+Loop reveals, one per turn, in its chain (the conversation is rebuilt from them each step):
+`{of: <chat>, role: "user", text, tree?, model?}`,
+`{of: <completions>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}`,
+`{of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}` (16 KiB caps),
+`{of: <completions>, role: "error", error}`.

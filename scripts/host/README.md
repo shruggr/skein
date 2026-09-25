@@ -12,11 +12,13 @@ scripts/host/up.sh      # all of it, idempotent: wallets, messagebox, grants, ac
 |---|---|---|---|---|
 | instance wallet `1sat serve wallet-api` | 127.0.0.1:3321 | `$HOME` (`~/.1sat/cli`) | `~/.skein/dev-wallet.env` | `~/.skein/logs/wallet-instance.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | `~/.skein/owner-home` | `~/.skein/owner-wallet.env` | `~/.skein/logs/wallet-owner.log` |
+| infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | `~/.skein/infer-home` | `~/.skein/infer-wallet.env` | `~/.skein/logs/wallet-infer.log` |
 | messagebox host `1sat serve` | 127.0.0.1:8100, messagebox at `/messagebox` | `~/.skein/host-home` | `~/.skein/host.env` | `~/.skein/logs/messagebox.log` |
 
 Files the scripts write for the client and the runtime:
 
-- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/host.identity` — public keys, one line each
+- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/infer.identity`, `~/.skein/host.identity` — public keys, one line each
+- `~/.skein/infer.json` — the inference peer's providers, `{"ripper": {"baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm"}}` (written if absent)
 - `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`
 - `~/.skein/*.env` — `PRIVATE_KEY_WIF=…`, mode 0600, created by `genkey.ts` only if absent. Never printed, never committed.
 
@@ -42,7 +44,7 @@ Two things `1sat serve` needs that it does not do by itself:
 2. **Accounts.** It stores messages only for recipients with an account on the
    host (`403 ERR_ACCOUNT_REQUIRED`). `register.ts` does `POST /account/register`
    over AuthFetch through each identity's wallet: `david` (owner) and `skein`
-   (instance). The host also issues a BRC-52 handle certificate
+   (instance), `infer` (the inference peer). The host also issues a BRC-52 handle certificate
    (`certifier` = host identity), so `skein@localhost` is a real handle here.
 
 Host config, written once by `messagebox.sh` under `HOME=~/.skein/host-home`:
@@ -97,6 +99,15 @@ call. Each grant below answers one refusal. `grants.sh` writes them all
 1sat permissions grant skein --protocol "messagebox" --level 1
 1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone
 1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty $OWNER
+1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty $INFER
+
+# infer peer wallet, origin skein-infer (HOME=~/.skein/infer-home): transport, and envelopes to/from the instance
+1sat permissions grant skein-infer --protocol "identity key retrieval" --level 1
+1sat permissions grant skein-infer --protocol "server hmac" --level 2 --counterparty self
+1sat permissions grant skein-infer --protocol "auth message signature" --level 2 --counterparty $HOST
+1sat permissions grant skein-infer --protocol "messagebox" --level 1
+1sat permissions grant skein-infer --protocol "metanet handles envelope" --level 2 --counterparty anyone
+1sat permissions grant skein-infer --protocol "message encryption" --level 2 --counterparty $INST
 ```
 
 A level-2 grant without `--counterparty` means `self`, which is never what an
