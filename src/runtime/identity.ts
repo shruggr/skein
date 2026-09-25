@@ -4,7 +4,7 @@
 // outside the machine, handed in by main.ts.
 
 import { createHash } from "node:crypto";
-import type { WalletInterface, WalletProtocol } from "@bsv/sdk";
+import { PrivateKey, PublicKey, Signature, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
 
 export type { WalletInterface };
 
@@ -55,4 +55,35 @@ export async function signerFor(wallet: KeyWallet, name: string): Promise<Signer
       return Uint8Array.from(signature);
     },
   };
+}
+
+// ---------------------------------------------------------------- "anyone" signatures
+
+/**
+ * The public key a wallet signs with for (protocol, keyID, counterparty
+ * "anyone") under `identityKey` (BRC-42/43). Anyone can compute it: the
+ * counterparty "anyone" is the private key 1, so the shared secret is the
+ * identity key itself. This is how skein verifies log entries, reveals and
+ * envelopes without a wallet.
+ */
+export function anyoneKey(identityKey: string, protocol: WalletProtocol, keyID: string): PublicKey {
+  const invoice = `${protocol[0]}-${protocol[1].toLowerCase().trim()}-${keyID}`;
+  return PublicKey.fromString(identityKey).deriveChild(new PrivateKey(1), invoice);
+}
+
+/** Verify a DER signature over sha256(data) by the "anyone" key of (identityKey, protocol, keyID). */
+export function verifyAnyone(identityKey: string, protocol: WalletProtocol, keyID: string, data: Uint8Array, der: Uint8Array): boolean {
+  try {
+    // PublicKey.verify hashes with sha256 itself.
+    return anyoneKey(identityKey, protocol, keyID).verify([...data], Signature.fromDER([...der]));
+  } catch {
+    return false;
+  }
+}
+
+/** Sign sha256(data) with the wallet's "anyone" key for (protocol, keyID): what verifyAnyone checks. */
+export async function signAnyone(wallet: KeyWallet, protocol: WalletProtocol, keyID: string, data: Uint8Array): Promise<Uint8Array> {
+  const hash = [...createHash("sha256").update(data).digest()];
+  const { signature } = await wallet.createSignature({ protocolID: protocol, keyID, counterparty: "anyone", hashToDirectlySign: hash });
+  return Uint8Array.from(signature);
 }
