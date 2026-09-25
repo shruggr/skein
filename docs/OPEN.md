@@ -159,3 +159,12 @@ random are now pure, derived from the runtime's own stamp on each log entry
 20. **Stamps are the runtime's word.** They are unsigned and trusted as
     written; tampering shows up only against a checkpoint signature. A
     runtime with a wrong clock stamps wrong times, monotonically.
+
+## Later (David, 2026-09-26)
+
+- Propose binary wire-format extensions to BRC-169 (the envelope) and BRC-33
+  (the messagebox message), so dag-cbor bodies aren't wrapped in JSON, hex
+  and base64 at several levels.
+- Raise upstream: BRC-169 §7.2 names no derivation for the envelope
+  signature and its example signs with the raw identity key; skein uses
+  `[2, "metanet handles envelope"]`, key id `"1"`, counterparty `anyone`.
