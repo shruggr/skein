@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# The two BRC-100 wallets on David's machine, both `1sat serve wallet-api`
+# The BRC-100 wallets on David's machine, all `1sat serve wallet-api`
 # (deny-by-default; grants via `1sat permissions grant`):
 #   instance  127.0.0.1:3321  HOME unchanged (~/.1sat/cli)      key ~/.skein/dev-wallet.env
 #   owner     127.0.0.1:3322  HOME=~/.skein/owner-home          key ~/.skein/owner-wallet.env
+#   infer     127.0.0.1:3323  HOME=~/.skein/infer-home          key ~/.skein/infer-wallet.env  (the inference peer)
 # The 1sat CLI has no config-dir flag or env var: CONFIG_DIR is $HOME/.1sat/cli,
-# so the owner wallet gets its own HOME. Writes ~/.skein/{instance,owner}.identity.
+# so the owner and infer wallets get their own HOME. Writes ~/.skein/{instance,owner,infer}.identity.
 #   scripts/host/wallets.sh            # start whatever is not running (background)
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 skein="${SKEIN_HOME:-$HOME/.skein}"
-mkdir -p "$skein/logs" "$skein/owner-home"
+mkdir -p "$skein/logs" "$skein/owner-home" "$skein/infer-home"
 genkey() { node --experimental-strip-types --no-warnings "$here/genkey.ts" "$1"; }
 
 start() { # name port home envfile
@@ -26,7 +27,10 @@ start() { # name port home envfile
 [ -f "$skein/dev-wallet.env" ] || { echo "missing $skein/dev-wallet.env (instance key; see README-wallet.md)" >&2; exit 1; }
 genkey "$skein/owner-wallet.env" > "$skein/owner.identity"
 genkey "$skein/dev-wallet.env" > "$skein/instance.identity"
+genkey "$skein/infer-wallet.env" > "$skein/infer.identity"
 start instance 3321 "$HOME" "$skein/dev-wallet.env"
 start owner 3322 "$skein/owner-home" "$skein/owner-wallet.env"
+start infer 3323 "$skein/infer-home" "$skein/infer-wallet.env"
 echo "instance identity: $(cat "$skein/instance.identity")"
 echo "owner identity:    $(cat "$skein/owner.identity")"
+echo "infer identity:    $(cat "$skein/infer.identity")"
