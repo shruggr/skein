@@ -168,3 +168,76 @@ random are now pure, derived from the runtime's own stamp on each log entry
 - Raise upstream: BRC-169 §7.2 names no derivation for the envelope
   signature and its example signs with the raw identity key; skein uses
   `[2, "metanet handles envelope"]`, key id `"1"`, counterparty `anyone`.
+
+## From the envelope/handler build (2026-09-25)
+
+Settled by the build, for the record: `hello`, `tick`, the `timer` identity,
+the unix socket (items 5, 15, 19 above) are gone; wakes are signed entries
+written by `main.ts`'s timer at each deadline, one per wake. Identities no
+longer share one wallet (13): the instance has its own; the owner is another
+wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
+
+21. **The root key is in the runtime process.** The edge (`inbox.ts`) derives
+    message keys from `SKEIN_INSTANCE_WIF`, and it runs in the same process as
+    the machine (`main.ts` reads the env). Nothing inside the machine sees it,
+    but "the runtime never holds the key" holds only by code discipline. A
+    separate host-edge process that hands `{envelope, key}` to the runtime
+    over a local channel would make it structural.
+22. **Freshness is judged against admission time.** An envelope older than
+    `SKEIN_FRESHNESS_MS` when the runtime gets to it is rejected and
+    acknowledged — so a runtime that was down for 10 minutes drops what
+    arrived meanwhile (the live run dropped the client's earlier `objects`
+    bundle exactly so). Judging `created` against the messagebox's own
+    arrival time (`created_at`, which the server stamps) would keep replay
+    protection without losing mail; it trusts the server's clock.
+23. **The messagebox server** (`@bopen-io/messagebox-server` in `1sat serve`)
+    takes `sender` from the BRC-103 session (good: the authenticated
+    submitter) and dedupes by `messageId` (a UNIQUE column). It does not look
+    inside bodies, so it cannot enforce `sender == envelope.sender.identityKey`
+    or reject bad envelope signatures; the edge does both. BRC-169 §8 policy
+    at the box would need a server change.
+24. **Outbound is fire-once.** An emit is sealed and sent right after the
+    step that made it is recorded; a crash in between, or a send that fails,
+    loses it (logged only). A durable outbox is a query: emits with no
+    `sent` record (the messagebox's messageId, recorded as an attested
+    answer).
+25. **A handler that errors says nothing.** If run-handler fails before it
+    launches (bad body, decryption failure), its thread errors and no reply
+    is emitted; the client waits forever. An error envelope in `results`
+    from an errored first step (the runtime could emit it, or the handler
+    could always exit 0 and reply) is the obvious fix.
+26. **Modules still enter by the side door.** `skein-dev install`
+    (`bin/skein-runtime` runs it) puts brush, coreutils and the handlers into
+    the store; they are 4–10 MB, over the 1 MiB bundle, and a record cannot
+    be split across bundles yet. Chunked records (a manifest record plus
+    parts) would let `objects` carry them — and a program registration
+    through a config box would replace the pins.
+27. **Programs share the instance's wallet grants.** Every handler calls the
+    wallet as origin `skein`; the runtime allows only key/crypto calls
+    (getPublicKey, encrypt, decrypt, createHmac, verifyHmac,
+    createSignature, verifySignature — no actions, certificates or
+    discovery), but within those any protocol the instance is granted. A
+    per-program protocol allowlist in the program record would narrow it.
+28. **Wire interop bug.** go-sdk's `CreateSignature` with empty `Data`
+    produces a frame @bsv/sdk's `WalletWireProcessor` rejects ("read exceeds
+    available data"). Non-empty data round-trips (`program.test.ts`). To
+    report upstream.
+29. **`get` is not gated by reachability.** A program can read any record in
+    the store by CID. VM.md's gating (reachable from the thread's inputs)
+    is not implemented.
+30. **Subscriptions are fixed at genesis.** There is no config entry kind to
+    add a box or change a handler; a new instance (new genesis) is the only
+    way. A `config` box from the owner, routed to a config handler whose
+    reveals the scheduler honours, would be the in-log way.
+31. **Handler binaries are big.** 4 MB each (Go runtime + fxamacker/cbor +
+    crypto); wire-probe, which links go-sdk, is 8 MB. fxamacker was chosen over
+    go-ipld-prime for size and a plain struct API; TinyGo could cut both by
+    an order of magnitude if its wasip1 target handles `go:wasmimport` with
+    JSPI as Go does.
+32. **Owner handles are config.** Outbound envelopes need
+    `recipient.{handle, domain}`; the run-handler copies the sender's from its
+    envelope and the edge falls back to `SKEIN_OWNER_HANDLE`. BRC-169
+    resolution (handle → identity, and back) is not used.
+33. **Step outputs are stored.** A handler step's update carries its
+    stdout/stderr, and the shell's `finished` update its whole result
+    (VM.md: recomputable cache). Same size question as item 10.
