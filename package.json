@@ -1,0 +1,21 @@
+{
+  "name": "skein",
+  "version": "0.0.1",
+  "description": "A content-addressed graph of threads, and the scheduler that wakes them.",
+  "type": "module",
+  "bin": { "skein": "./src/cli.ts" },
+  "scripts": {
+    "skein": "node --experimental-strip-types src/cli.ts",
+    "test": "node --experimental-strip-types --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@ipld/dag-cbor": "^10.0.2",
+    "multiformats": "^14.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2"
+  }
+}
