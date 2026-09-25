@@ -107,6 +107,7 @@ export function memoryStore(): Store {
     put,
     get,
     async has(cid) { return bytes.has(cid.toString()); },
+    async putBlock(cid, data) { if (!bytes.has(cid.toString())) bytes.set(cid.toString(), data); },
     async bytes(cid) {
       const data = bytes.get(cid.toString());
       if (!data) throw new NotFound(cid.toString());

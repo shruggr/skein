@@ -213,6 +213,7 @@ export function openStore(path: string): SqliteStore {
       if (!row) throw new NotFound(fmt(cid));
       return row.bytes as Uint8Array;
     },
+    async putBlock(cid, data) { q.blockPut.run(cid.bytes, data); },
 
     async findByPrefix(prefix) {
       // Origins are stored binary, so the match is on the formatted string; a full scan is fine at this scale.

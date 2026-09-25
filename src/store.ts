@@ -19,6 +19,8 @@ export interface Blocks {
   has(cid: CID): Promise<boolean>;
   /** The stored dag-cbor bytes, exactly as hashed. Throws NotFound. */
   bytes(cid: CID): Promise<Uint8Array>;
+  /** Store bytes under a CID minted elsewhere (git-raw, raw). The caller vouches the CID matches. */
+  putBlock(cid: CID, bytes: Uint8Array): Promise<void>;
 }
 
 // ---------------------------------------------------------------- 2. chains
