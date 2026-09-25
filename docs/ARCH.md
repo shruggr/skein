@@ -65,7 +65,8 @@ network. Peers include:
   with the signed result. This is the sysadmin path and the toolchain path
   (`go build`, `npm test`): the command runs outside, the result is a
   recorded input.
-- **messagebox** — the BRC-33/BRC-169 relay to people and other instances.
+- **messagebox** — the host's BRC-33/BRC-169 messagebox; every message in
+  or out passes through it as a BRC-169 envelope (see `MESSAGES.md`).
 - **other instances** — peers like any other.
 
 A peer may be a thin proxy that receives messages and runs things on a real

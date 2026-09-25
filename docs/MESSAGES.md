@@ -1,90 +1,115 @@
 # Messages
 
 How messages enter and leave a skein instance, as settled with David on
-2026-09-25 (evening). This replaces the local-socket transport and the
-`hello`/`tick` messages of the first runtime build.
+2026-09-25/26. This replaces the local-socket transport, the `hello` and
+`tick` messages, and the auth-stage idea of the first runtime build.
 
-## The messagebox is the transport
+## Topology
 
-"Message" means a BRC-33 message: sent to a named **box** on an identity,
-carried by a messagebox, listed and acknowledged; wrapped in the BRC-169
-§7.2 envelope. The implementation is `@bsv/message-box-client` and the
-message-box server in ts-stack (BRC-103/104 authenticated), with the drift
-from BRC-169 that exists today (encryption per BRC-2/42/43 rather than
-BRC-78; host discovery by on-chain advertisement rather than handle-domain
-resolution; no per-message signature yet).
+A **skein host** is a BRC-169 ecosystem host: it operates a domain, the
+handle registry and attestation (BRC-52 handle certificates), the resolve
+endpoint, and a messagebox with BRC-33 semantics. It hosts any number of
+**instances**. Each instance has its own handle, its own identity key, and
+therefore its own wallet; it acts for David under a BRC-169 §9 delegation
+certificate his wallet issues (scope, per-action cap, expiry, revocable).
 
-The instance **owns its messagebox**. The outside server is a proxy into the
-VM: the BRC-103/104 handshake, the session, and the acknowledgement are done
-by the runtime itself, with every cryptographic operation (counterparty-
-derived signatures, verification, HMACs, nonces, encryption, decryption) a
-call to the connected wallet. What remains in our code is the protocol state
-machine, small enough to write in any language the kernel is written in.
-Receiving need not be an explicit poll-and-acknowledge: a queue of received
-messages is the same interface.
+Routing: a sender resolves the handle to the host's messagebox and delivers
+there; the host hands the message to the instance that owns the handle; the
+instance routes by box; subscriptions take it from there.
 
-Because the handshake happens inside, its messages are inputs and outputs
-like any other, so who-said-what is in the log and replays with everything
-else. Done outside, the VM would still be deterministic over its inputs, but
-the provenance of those inputs would be unrecorded.
+BRC-103/104 mutual authentication between clients and the messagebox is
+transport, handled at the host edge. It is not in the VM and not in the log.
 
-## What the envelope supplies
+## The envelope
 
-From the envelope and the authenticated session, not repeated in the body:
-`sender` (identity key, established by the server's authentication),
-`recipient`, `messageBox`, `messageId` (an HMAC of the body), `created_at`,
-and any attached payment.
+What arrives is a BRC-33 message — `recipient`, `messageBox`, `body` — whose
+`body` is a **BRC-169 §7.2 envelope**, sent with the messagebox client's own
+body encryption **off** (the envelope's metadata must stay readable for the
+messagebox to enforce §8 policy and reject bad signatures; the client's
+default would hide it).
 
-## The body
+```
+{ metanetHandles, recipient: {handle, tag?, domain}, sender: {identityKey, handle?, domain?},
+  created, quoteId?, payment?, content, signature }
+```
 
-The body is encrypted content, opaque to the transport. Ours is **dag-cbor**:
-the same encoding as every record in the store, so a body is a record with
-a CID. Hashes and payloads stay raw inside; the only expansion is the one
-base64 the envelope applies to the encrypted bytes. A binary envelope
-replacing the JSON one is a possible later extension BRC.
+- `sender.identityKey` and `signature` are plaintext: provenance a third party
+  can verify from the envelope alone.
+- `content` is a BRC-78 portable encrypted message: security level 2,
+  protocol `message encryption`, a random 256-bit key id per message carried
+  in the serialization, counterparty the recipient. Only the recipient can
+  decrypt; decrypting successfully is the content's authenticity check and
+  names the same identity the signature names.
+- `payment`, when present, is a BRC-29 payment as Atomic BEEF, unbroadcast,
+  to keys derived from the recipient's identity key, internalized by the
+  recipient's wallet with `internalizeAction`.
+- The box name is not in the envelope; it is the BRC-33 parameter beside it.
+  BRC-169 leaves the choice of box to the sender.
 
-The body carries only what the envelope does not: the payload itself, and
-references to records it builds on (the request it replies to, a tree, a
-thread), named by hash. Dependencies between a sender's messages are that
-sender's protocol, checked by the receiving program; the transport gives no
-per-sender ordering.
+### The signature derivation (an amendment to §7.2)
 
-## Kind is the box
+§7.2 says the signature is "by the key in `sender.identityKey`" and names no
+derivation; its worked example verifies against the raw identity key. A
+BRC-100 wallet never signs with the root key, so that cannot be produced
+through the wallet interface. Skein follows the pattern the same document
+uses for certificates (BRC-52: `[2, "certificate signature"]`, key id from
+the object, counterparty `anyone`):
 
-A message's type is the box it was sent to. Each box has one dag-cbor body
-schema. Boxes today:
+- protocol id `[2, "metanet handles envelope"]`
+- key id: fixed (`"1"`)
+- counterparty: `anyone` — the messagebox must be able to verify, and it is
+  not the recipient
 
-- `run` — `{ cmd, tree, cwd?, env? }`: run a command over a tree.
-- `subscriptions` — `{ match: { sender?, box? }, handler }`: configuration
-  from the admin identity.
-- replies to requests the runtime sent — box named by the request's
-  protocol; body names the request it answers.
+over SHA-256 of the RFC 8785 canonical envelope with `content` and
+`signature` removed. A verifier derives the signing key from
+`sender.identityKey` with those constants. Reusing one derived key across
+envelopes is safe (RFC 6979 nonces); the identity key is already plaintext,
+so a fresh key id would add no unlinkability. This is a proposed revision
+to BRC-169 §7.2, to be raised upstream.
 
-## Order
+## Inside the instance
 
-The runtime admits messages in arrival order and writes the time it observed
-on each log entry. That admission order is the order of record; replay uses
-it, not whatever the network did. Arrival is non-deterministic only until
-admission.
-
-## Routing
-
+- **Admission.** The instance collects its box (list-and-acknowledge, or an
+  equivalent queue) and admits each envelope as a log entry in arrival order,
+  with the box name and the time it observed. Arrival is non-deterministic
+  only until admission; the admitted order is the order of record.
+- **Every log entry is signed** by the instance's identity (`createSignature`
+  through its wallet, counterparty `anyone`), admissions and wakes alike, so
+  every stamp and every kick traces to a signature a third party can check.
+  The signature is an attested syscall result: recorded, never recomputed.
+- **Routing** is by **subscription** on `(sender.identityKey, box)`, in log
+  order, first match wins. The handler is the **box's handler program**, not
+  a tool: `(sender: david, box: run) → run-handler`.
+- **The handler** knows the box's message shape. It calls the wallet to
+  decrypt `content` (an attested call; the plaintext is recorded as its
+  result), **reveals** into state what it chooses as a record, **signs the
+  reveal** with the instance identity (attested, `anyone`), and launches the
+  next thread from the revealed records — for `run`, the shell over the
+  named tree. State can only build on revealed records; what a handler did
+  not reveal does not exist inside.
 - **Replies** correlate to their request through the waiting thread's own
   state: a thread that sent a request rests `waiting` with a reference to
-  that request; a message naming the request is delivered to that thread.
-  No table, no subscription.
-- **Unsolicited** messages are routed by **subscriptions**, matched on
-  `(sender, box)`, tried in log order, first match wins; the handler is a
-  program CID, and the thread it opens gets the body as its arguments and
-  the message as `launchedBy`. No match: recorded, nothing runs.
-- **Results** go out to the sender of the request that started the thread,
-  naming that request.
+  it; an admitted message naming that request is delivered to that thread.
+- **Results** leave as envelopes to the sender of the request that started
+  the thread, built and encrypted through the wallet the same way.
+- **Nothing is a message that isn't one.** Genesis is starting state. A
+  sleeper's wake is a signed, stamped log entry with no message and no
+  sender, one per wake. `hello` and `tick` are gone.
 
-## What is not a message
+## Why decrypt inside, and record the plaintext
 
-- **Genesis** is starting state: the instance's identity and first moment,
-  written by the runtime to itself. It is the first record, not a message.
-- **Time** is the runtime's stamp on each log entry. A thread that sleeps
-  rests until its deadline; when the runtime wakes it, that wake is a
-  stamped log entry with no message and no sender — one per wake.
-- **`hello`** and **`tick`** from the first build are gone.
+The alternative (decrypt at the edge, admit plaintext) is equally
+deterministic but puts the decision of what enters state outside the log.
+Decrypting inside through the wallet records the plaintext as the answer to
+an attested call, so replay reads it without any wallet; a fork can run
+under a new identity with the whole history readable; burning an old key
+costs nothing; and the handler that decided what to reveal is itself a
+record. Encrypted-at-rest is a storage policy on top, not a property of the
+log.
+
+## Bodies
+
+Inside `content`, our payload is **dag-cbor**: the same encoding as every
+record, so a body is a record with a CID. One base64 at the messagebox
+layer is the only expansion. A binary envelope replacing the JSON one would
+be a later extension BRC.
