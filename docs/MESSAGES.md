@@ -80,13 +80,24 @@ to BRC-169 §7.2, to be raised upstream.
 - **Routing** is by **subscription** on `(sender.identityKey, box)`, in log
   order, first match wins. The handler is the **box's handler program**, not
   a tool: `(sender: david, box: run) → run-handler`.
-- **The handler** knows the box's message shape. It calls the wallet to
-  decrypt `content` (an attested call; the plaintext is recorded as its
-  result), **reveals** into state what it chooses as a record, **signs the
-  reveal** with the instance identity (attested, `anyone`), and launches the
-  next thread from the revealed records — for `run`, the shell over the
-  named tree. State can only build on revealed records; what a handler did
-  not reveal does not exist inside.
+- **The host delivers the decryption key with the envelope.** The host, where
+  the wallets live, derives the BRC-78 message key for each incoming envelope
+  (a per-message key: BRC-78 picks a random key id per message, so it exposes
+  nothing else) and routes envelope and key to the instance together. Both
+  are records; the admission entry references them.
+- **The handler** knows the box's message shape. It decrypts the content
+  purely (AES-256-GCM with the recorded key — a replayer recomputes the
+  plaintext and checks the tag; no wallet, no attested call), **reveals** into
+  state what it chooses as a record, **signs the reveal** with the instance
+  identity (attested, `anyone`), and launches the next thread from the
+  revealed records — for `run`, the shell over the named tree. State can
+  only build on revealed records. Keys in the state are as sensitive as the
+  plaintext: if you don't want it exposed, don't share your state.
+- **Replay protection** is at admission: an envelope whose record CID was
+  already admitted is rejected; `created` must fall within a freshness
+  window; where the messagebox reports the authenticated submitter, it must
+  equal `envelope.sender.identityKey`. The messagebox server should enforce
+  the last of these too, and dedupe by message id.
 - **Replies** correlate to their request through the waiting thread's own
   state: a thread that sent a request rests `waiting` with a reference to
   it; an admitted message naming that request is delivered to that thread.
@@ -96,16 +107,17 @@ to BRC-169 §7.2, to be raised upstream.
   sleeper's wake is a signed, stamped log entry with no message and no
   sender, one per wake. `hello` and `tick` are gone.
 
-## Why decrypt inside, and record the plaintext
+## Why the key, not the plaintext
 
-The alternative (decrypt at the edge, admit plaintext) is equally
-deterministic but puts the decision of what enters state outside the log.
-Decrypting inside through the wallet records the plaintext as the answer to
-an attested call, so replay reads it without any wallet; a fork can run
-under a new identity with the whole history readable; burning an old key
-costs nothing; and the handler that decided what to reveal is itself a
-record. Encrypted-at-rest is a storage policy on top, not a property of the
-log.
+Recording the plaintext as an attested `decrypt` result would be
+deterministic too, but a replayer would have to take the runtime's word for
+it. Recording the message key makes decryption a pure computation anyone can
+verify against the ciphertext, keeps ciphertext as the canonical stored
+content (share the log without the keys and it is confidential; hand out one
+key and exactly one message is readable), and needs no wallet to replay or
+to fork under a new identity. It needs one wallet operation BRC-100 lacks:
+returning the message key rather than the plaintext — a method for the
+host's wallet, not the standard interface.
 
 ## Bodies
 
