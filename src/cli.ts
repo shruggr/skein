@@ -5,7 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import type { CID } from "multiformats/cid";
-import { fmt, isCID } from "./cid.ts";
+import { fmt, isCID, parse } from "./cid.ts";
 import type { Store } from "./store.ts";
 import type { NodeOrigin, Ref, ThreadOrigin, ThreadState } from "./types.ts";
 import { newThread, reply, THINKING } from "./actions.ts";
@@ -59,6 +59,8 @@ export interface Env {
   now(): number;
   sleep(ms: number): Promise<void>;
   columns: number;
+  /** Raw bytes to stdout (1) or stderr (2), for commands whose output is not lines. */
+  write(fd: 1 | 2, bytes: Uint8Array): void;
 }
 
 async function wakeDaemon(port: number, thread?: CID): Promise<boolean> {
@@ -200,6 +202,12 @@ export function formatEvent(ev: WatchEvent, o: { thinking?: boolean } = {}): str
   if (s === undefined) return undefined;
   const [first, ...more] = s.split("\n");
   return [`${at} ${pad}${first}`, ...more.map((l) => pad + l)].join("\n");
+}
+
+async function readStdin(): Promise<Uint8Array> {
+  const parts: Buffer[] = [];
+  for await (const c of process.stdin) parts.push(c as Buffer);
+  return Buffer.concat(parts);
 }
 
 // ---------------------------------------------------------------- commands
@@ -365,6 +373,52 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
+  sh: {
+    usage: `skein sh --tree <cid> [--cwd /path] [--time <ms>] [--seed n] -- '<command>'
+  Run a bash command in the wasm shell over a tree. Nothing touches the host
+  filesystem; stdout and stderr pass through, the exit code is the command's,
+  and the resulting tree's CID is printed to stderr as "tree <cid>".`,
+    flags: { tree: "string", cwd: "string", time: "string", seed: "string" },
+    async run(a, env) {
+      const tree = optStr(a.opts.tree);
+      if (!tree) throw new UsageError("missing --tree <cid>");
+      const cmd = a.pos.join(" ");
+      if (!cmd.trim()) throw new UsageError("missing '<command>'");
+      const { runShell } = await import("./shell.ts");
+      const stdin = process.stdin.isTTY ? undefined : await readStdin();
+      const r = await runShell(env.store(), {
+        tree: parse(tree), cmd, cwd: optStr(a.opts.cwd), stdin,
+        time: a.opts.time ? Number(a.opts.time) : undefined, seed: a.opts.seed ? Number(a.opts.seed) : undefined,
+      });
+      env.write(1, r.stdout);
+      env.write(2, r.stderr);
+      env.err(`tree ${fmt(r.tree)}`);
+      return r.exitCode;
+    },
+  },
+
+  tree: {
+    usage: `skein tree scan <dir>        hash a directory into the store; print its tree CID
+skein tree ls <cid> [path]    list a tree's entries (mode, cid, name)`,
+    flags: {},
+    async run(a, env) {
+      const [sub, arg, path = ""] = a.pos;
+      const t = await import("./tree.ts");
+      if (sub === "scan" && arg) {
+        env.out(fmt(await t.scan(env.store(), arg)));
+        return 0;
+      }
+      if (sub === "ls" && arg) {
+        const leaf = await t.lookup(env.store(), parse(arg), path);
+        if (!leaf) throw new Error(`no such path: ${path}`);
+        if (leaf.mode !== "40000") { env.out(`${leaf.mode.padStart(6, "0")} ${fmt(leaf.cid)}\t${path}`); return 0; }
+        for (const e of await t.readTree(env.store(), leaf.cid)) env.out(`${e.mode.padStart(6, "0")} ${fmt(e.cid)}\t${e.name}`);
+        return 0;
+      }
+      throw new UsageError(sub ? `unknown or incomplete: tree ${sub}` : "missing subcommand");
+    },
+  },
+
   rebuild: {
     usage: `skein rebuild
   Drop and rebuild the index (tips, edges) from the blocks.`,
@@ -387,6 +441,8 @@ const HELP = `skein — a content-addressed graph of threads
   skein watch <cid>               follow a thread until it's your turn
   skein refs <cid>                pointers out of / into a block
   skein rebuild                   rebuild the index from blocks
+  skein tree scan <dir> | ls <cid> file trees in the store
+  skein sh --tree <cid> -- '<cmd>' run a command in the wasm shell over a tree
 
 CIDs may be given whole, or as a prefix of a thread/node origin (the 12
 characters \`ls\` shows, with or without "bafy"). \`skein <cmd> --help\` for flags.
@@ -404,6 +460,7 @@ export async function main(argv: string[], over: Partial<Env> = {}): Promise<num
     now: () => Date.now(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     columns: process.stdout.columns || 120,
+    write: (fd, b) => void (fd === 1 ? process.stdout : process.stderr).write(b),
     ...over,
   };
   const [name, ...rest] = argv;
