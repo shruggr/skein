@@ -5,8 +5,9 @@
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "./cid.ts";
 import { NotFound, type Store } from "./store.ts";
-import type { Emission, NodeOrigin, NodeUpdate, ThreadOrigin, ThreadState, ThreadUpdate } from "./types.ts";
-import { emitsOf, headNode, isSettled, nodesOf, nodeView, short, tipOf } from "./runners/util.ts";
+import type { Block, Emission, NodeOrigin, NodeUpdate, ThreadOrigin, ThreadState, ThreadUpdate } from "./types.ts";
+import { isProgram } from "./records.ts";
+import { isSettled, nodesOf, nodeView, short, tipOf } from "./graph.ts";
 
 export { short };
 
@@ -70,72 +71,91 @@ async function findByPrefix(store: PrefixStore, prefix: string): Promise<CID[]> 
 
 // ---------------------------------------------------------------- labels
 
-export function labelOf(o: ThreadOrigin): string {
-  const spec = (o.spec ?? {}) as Record<string, unknown>;
-  switch (o.runner) {
-    case "loop": return oneLine(spec.prompt, 200);
-    case "shell": return `$ ${oneLine(spec.cmd, 200)}`;
-    case "david": return oneLine(spec.say ?? String(spec.page ?? "").split("\n").find((l) => l.trim()) ?? spec.prompt, 200);
-    case "model": return `${spec.model ?? "model"} · ${Array.isArray(spec.messages) ? spec.messages.length : 0} messages`;
-    default: return oneLine(JSON.stringify(jsonify(spec)), 200);
+/** The program's name for a v2 thread (runner for a v1 one). */
+export async function programName(store: Store, o: ThreadOrigin): Promise<string> {
+  if (!o.program) return o.runner ?? "?";
+  const p = await store.get(o.program).catch(() => undefined);
+  return isProgram(p) ? p.name : short(o.program);
+}
+
+export function labelOf(o: ThreadOrigin, name: string): string {
+  const a = (o.args ?? o.spec ?? {}) as Record<string, unknown>;
+  switch (name) {
+    case "loop": return oneLine(a.prompt ?? a.text, 200);
+    case "bash": case "shell": return `$ ${oneLine(a.cmd, 200)}`;
+    case "david": return oneLine(a.say ?? String(a.page ?? "").split("\n").find((l) => l.trim()) ?? a.prompt, 200);
+    default: return oneLine(JSON.stringify(jsonify(a)), 200);
   }
 }
 
-// ---------------------------------------------------------------- David
+// ---------------------------------------------------------------- the person
 
-/** The unsettled david thread a reply to `cid` should resolve: itself, or the one its loop waits on. */
-export async function findWaitingDavid(store: Store, cid: CID): Promise<CID | undefined> {
-  const origin = await store.get<ThreadOrigin | NodeOrigin>(cid);
-  if (origin.kind !== "thread") return undefined;
-  if (origin.runner === "david") return isSettled((await tipOf(store, cid))?.state) ? undefined : cid;
-  const tip = await tipOf(store, cid);
-  const candidates = [...(tip?.waitingOn ?? [])];
-  const head = await headNode(store, cid);
-  if (head) for (const l of emitsOf((await nodeView(store, head)).emits, "launched")) if (l.label === "david") candidates.push(l.thread);
-  for (const c of candidates) {
-    const o = await store.get<ThreadOrigin>(c);
-    // Only a waiting one: a david thread not yet started hasn't been put in front of him.
-    if (o.runner === "david" && (await tipOf(store, c))?.state === "waiting") return c;
-  }
-  return undefined;
+/** The sender of the message that launched `o`, if a message did (a session's person). */
+export async function launcherOf(store: Store, o: ThreadOrigin): Promise<string | undefined> {
+  if (!o.launchedBy) return undefined;
+  const b = await store.get<{ kind?: unknown; from?: unknown } & Block>(o.launchedBy).catch(() => undefined);
+  return b?.kind === "message" && typeof b.from === "string" ? b.from : undefined;
 }
 
-/** Stop condition for watchers: the thread settled, or its turn ended in front of David. */
+/** Whether `thread` is waiting for a message from the person who launched it (their turn). */
+export async function waitingOnPerson(store: Store, thread: CID): Promise<boolean> {
+  const o = await store.get<ThreadOrigin>(thread);
+  if (o.kind !== "thread") return false;
+  const tip = await tipOf(store, thread);
+  if (tip?.state !== "waiting" || !tip.waitingFrom) return false;
+  return tip.waitingFrom === (await launcherOf(store, o));
+}
+
+/** Stop condition for watchers: the thread settled, or its turn ended in front of its person. */
 export async function atRest(store: Store, cid: CID): Promise<boolean> {
-  return isSettled((await tipOf(store, cid))?.state) || (await findWaitingDavid(store, cid)) !== undefined;
+  return isSettled((await tipOf(store, cid))?.state) || (await waitingOnPerson(store, cid));
+}
+
+/** A node's thread, or the thread itself. */
+export async function threadOf(store: Store, cid: CID): Promise<CID | undefined> {
+  const b = await store.get<ThreadOrigin | NodeOrigin>(cid);
+  if (b.kind === "thread") return cid;
+  if (b.kind === "node" && isCID(b.thread)) return b.thread;
+  return undefined;
 }
 
 // ---------------------------------------------------------------- lists
 
 export interface ThreadRow {
   cid: string;
-  runner: string;
+  runner: string;        // the program's name
   state: ThreadState | "new";
   at: number;
   tipAt: number;
   label: string;
   launchedBy?: string;
-  davidWaiting?: string; // a david thread this one waits on, if David owes it a reply
+  davidWaiting?: string; // set (to this thread) when it waits on the person who launched it
 }
 
 export interface ListOptions { all?: boolean; state?: ThreadState[]; runner?: string; limit?: number }
 
+/** Most recent activity first. Default: top-level threads (launched by a message, or v1 parent-less). */
 export async function listThreads(store: Store, o: ListOptions = {}): Promise<ThreadRow[]> {
   const rows: ThreadRow[] = [];
-  const it = store.edges.query({ kind: "thread", parentless: o.all ? undefined : true, state: o.state, runner: o.runner, limit: o.limit ?? 50, orderBy: "tipAt" });
-  for await (const cid of it) rows.push(await threadRow(store, cid));
+  const limit = o.limit ?? 50;
+  for await (const cid of store.edges.query({ kind: "thread", state: o.state, orderBy: "tipAt" })) {
+    const origin = await store.get<ThreadOrigin>(cid);
+    if (!o.all && origin.launchedBy && (await store.get<{ kind?: unknown } & Block>(origin.launchedBy).catch(() => undefined))?.kind !== "message") continue;
+    const row = await threadRow(store, cid);
+    if (o.runner && row.runner !== o.runner) continue;
+    rows.push(row);
+    if (rows.length >= limit) break;
+  }
   return rows;
 }
 
 export async function threadRow(store: Store, cid: CID): Promise<ThreadRow> {
   const origin = await store.get<ThreadOrigin>(cid);
   const tip = await tipOf(store, cid);
-  const row: ThreadRow = { cid: fmt(cid), runner: origin.runner, state: tip?.state ?? "new", at: origin.at, tipAt: tip?.at ?? origin.at, label: labelOf(origin) };
+  const runner = await programName(store, origin);
+  const row: ThreadRow = { cid: fmt(cid), runner, state: tip?.state ?? "new", at: origin.at, tipAt: tip?.at ?? origin.at, label: labelOf(origin, runner) };
   if (origin.launchedBy) row.launchedBy = fmt(origin.launchedBy);
-  if (tip?.state === "waiting" && origin.runner !== "david") {
-    const d = await findWaitingDavid(store, cid);
-    if (d) row.davidWaiting = fmt(d);
-  }
+  if (await waitingOnPerson(store, cid)) row.davidWaiting = row.cid;
   return row;
 }
 
@@ -143,14 +163,14 @@ export async function threadRow(store: Store, cid: CID): Promise<ThreadRow> {
 
 export interface HistoryRow {
   cid: string; seq: number; at: number; state: ThreadState;
-  waitingOn?: string[]; until?: number; resolution?: string; note?: string; error?: string;
+  waitingOn?: string[]; waitingFrom?: string; until?: number; resolution?: string; note?: string; error?: string;
 }
 
 export interface LaunchView {
   cid: string; runner: string; label: string; state: ThreadState | "new";
   note?: string; error?: string;
-  thinking?: string; // model threads: the reasoning, which only lives in the model's own node
-  reply?: string;    // david threads: what David answered
+  thinking?: string; // v1 model threads only; v2 thinking is an emission on the step
+  reply?: string;    // v1 david threads only
 }
 
 export type EmitView = { type: string; [k: string]: Json | LaunchView | undefined } & { run?: LaunchView };
@@ -163,7 +183,8 @@ export interface NodeViewRow {
 }
 
 export interface ThreadView extends ThreadRow {
-  spec: Json;
+  spec: Json;      // the program's args
+  program?: string;
   parent?: string; // the thread whose step launched this one
   history: HistoryRow[];
   nodes: NodeViewRow[];
@@ -181,7 +202,7 @@ export async function threadView(store: Store, cid: CID): Promise<ThreadView> {
     const u = await store.get<ThreadUpdate>(c);
     history.push(stripUndef({
       cid: fmt(c), seq: u.seq, at: u.at, state: u.state,
-      waitingOn: u.waitingOn?.map(fmt), until: u.until, resolution: u.resolution && fmt(u.resolution), note: u.note,
+      waitingOn: u.waitingOn?.map(fmt), waitingFrom: u.waitingFrom, until: u.until, resolution: u.resolution && fmt(u.resolution), note: u.note,
       error: u.error && `${u.error.kind}: ${u.error.message}`,
     }));
   }
@@ -201,55 +222,40 @@ export async function threadView(store: Store, cid: CID): Promise<ThreadView> {
       emits.push(ev);
     }
     nodes.push(stripUndef({
-      cid: fmt(n), at: v.origin.at, prev: v.origin.prev.map(fmt), asked: asked(origin, v.origin), emits,
+      cid: fmt(n), at: v.origin.at, prev: v.origin.prev.map(fmt), asked: await asked(store, row.runner, v.origin), emits,
       rest: v.rest && stripUndef({ state: v.rest.state, waitingOn: v.rest.waitingOn?.map(fmt) }),
     }));
   }
-  const view: ThreadView = { ...row, spec: jsonify(origin.spec), history, nodes, settled: isSettled(row.state as ThreadState), version };
+  const view: ThreadView = { ...row, spec: jsonify(origin.args ?? origin.spec), history, nodes, settled: isSettled(row.state as ThreadState), version };
+  if (origin.program) view.program = fmt(origin.program);
   if (origin.launchedBy) {
     const by = await store.get<NodeOrigin>(origin.launchedBy).catch(() => undefined);
     if (by?.kind === "node" && isCID(by.thread)) view.parent = fmt(by.thread);
   }
-  if (origin.runner === "david" && !view.settled && row.state === "waiting") view.davidWaiting = row.cid;
   return view;
 }
 
 async function launchView(store: Store, t: CID): Promise<{ view: LaunchView; version: number }> {
   const o = await store.get<ThreadOrigin>(t);
   const tip = await tipOf(store, t);
+  const runner = await programName(store, o);
   const view: LaunchView = stripUndef({
-    cid: fmt(t), runner: o.runner, label: labelOf(o), state: tip?.state ?? "new",
+    cid: fmt(t), runner, label: labelOf(o, runner), state: tip?.state ?? "new",
     note: tip?.note, error: tip?.error && `${tip.error.kind}: ${tip.error.message}`,
   });
-  let version = tip?.seq ?? 0;
-  if (o.runner === "model") {
-    // Streaming thinking counts toward version so a watching page sees it arrive.
-    for (const n of await nodesOf(store, t)) {
-      const v = await nodeView(store, n);
-      version += v.emits.length;
-      const thinking = emitsOf(v.emits, "thinking").map((e) => e.text).join("");
-      if (thinking) view.thinking = (view.thinking ?? "") + thinking;
-    }
-  }
-  if (o.runner === "david" && tip?.state === "finished" && tip.resolution) {
-    const text = emitsOf((await nodeView(store, tip.resolution)).emits, "conclusion").at(-1)?.text;
-    if (text !== undefined) view.reply = text;
-  }
-  return { view, version };
+  return { view, version: tip?.seq ?? 0 };
 }
 
-function asked(thread: ThreadOrigin, n: NodeOrigin): string | undefined {
+async function asked(store: Store, runner: string, n: NodeOrigin): Promise<string | undefined> {
   const r = n.request as Record<string, unknown> | string | undefined;
   if (typeof r === "string") return r;
   if (!r || typeof r !== "object") return undefined;
-  if (thread.runner === "loop" && Array.isArray(r.messages)) {
+  if (runner === "loop" && Array.isArray(r.messages)) {
     const last = r.messages.at(-1) as { role?: string; content?: string } | undefined;
     if (last?.role !== "user") return undefined; // tool results: the tool_result emissions say it
     return `${n.prev.length ? "David" : "Prompt"}: ${last.content ?? ""}`;
   }
-  if (typeof r.reply === "string") return undefined; // david's reply node: its conclusion says it
   if (typeof r.cmd === "string") return `$ ${r.cmd}`;
-  if (typeof r.model === "string") return `model ${r.model}`;
   return undefined;
 }
 
@@ -264,7 +270,7 @@ export interface WatchEvent {
   at: number;
   depth: number;             // 0 = the watched thread, 1 = launched by it, …
   thread: CID;
-  runner: string;
+  runner: string;            // the program's name
   node?: CID;                // set for emissions and rests
   update?: ThreadUpdate;     // a thread state change
   emit?: Emission;
@@ -304,20 +310,22 @@ export class Watcher {
 
   private async visitThread(t: CID, depth: number, out: WatchEvent[]) {
     const origin = await this.store.get<ThreadOrigin>(t);
+    const runner = await programName(this.store, origin);
     for (const c of await this.fresh(t)) {
       const u = await this.store.get<ThreadUpdate>(c);
-      out.push({ at: u.at, depth, thread: t, runner: origin.runner, update: u });
+      out.push({ at: u.at, depth, thread: t, runner, update: u });
     }
     for (const n of await nodesOf(this.store, t)) {
       const k = fmt(n);
       for (const c of await this.fresh(n)) {
         const u = await this.store.get<NodeUpdate>(c);
-        const ev: WatchEvent = { at: u.at, depth, thread: t, runner: origin.runner, node: n };
+        const ev: WatchEvent = { at: u.at, depth, thread: t, runner, node: n };
         if (u.emit) {
           ev.emit = u.emit;
           if (u.emit.type === "launched" && isCID(u.emit.thread)) {
             this.launched.set(k, [...(this.launched.get(k) ?? []), u.emit.thread]);
-            ev.label = labelOf(await this.store.get<ThreadOrigin>(u.emit.thread));
+            const lo = await this.store.get<ThreadOrigin>(u.emit.thread);
+            ev.label = labelOf(lo, await programName(this.store, lo));
           }
         }
         if (u.rest) ev.rest = u.rest;

@@ -97,8 +97,19 @@ export interface Live {
 // ---------------------------------------------------------------- the store
 
 export interface Store extends Blocks {
-  /** Verify and store a signed message; index it by (from, seq). Rejects a bad signature or a second message at one (from, seq). */
+  /**
+   * Verify and store a signed message; index it by (from, seq) and its refs as
+   * edges; append it to the log. Rejects a bad signature or a second message
+   * at one (from, seq). The same record again is a no-op returning its CID.
+   */
   putMessage(m: Message): Promise<CID>;
+  /**
+   * The instance's input log: every message in arrival order, positions from 1.
+   * Not derived: arrival order isn't recoverable from the records (two senders'
+   * clocks disagree), so rebuild keeps it, appending any message it finds that
+   * the log lacks. `after` is a position; yields positions > after.
+   */
+  log(after?: number): AsyncIterable<{ n: number; cid: CID }>;
   chains: Chains;
   edges: Edges;
   live: Live;

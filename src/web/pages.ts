@@ -121,7 +121,7 @@ function emission(v: ThreadView, e: EmitView): string {
     case "thinking":
       return details(`thinking · ${s(e.text).length} chars`, `<pre>${esc(e.text)}</pre>`, `th-${s(e.text).length}`);
     case "text":
-      return v.runner === "shell" ? `<pre>${esc(e.text)}</pre>` : `<div class="text">${markdown(s(e.text))}</div>`;
+      return v.runner === "shell" || v.runner === "bash" ? `<pre>${esc(e.text)}</pre>` : `<div class="text">${markdown(s(e.text))}</div>`;
     case "say":
       return `<div class="say">${esc(e.text)}</div>`;
     case "page":
@@ -132,6 +132,10 @@ function emission(v: ThreadView, e: EmitView): string {
       return v.runner === "model" ? details("assistant message", `<pre>${esc(e.text)}</pre>`) : `<div class="asked"><b>${v.runner === "david" ? "David" : "conclusion"}:</b> ${esc(e.text)}</div>`;
     case "launched":
       return e.run ? launch(e.run) : `<div class="launch">launched ${cidLink(s(e.thread), "/t/")}</div>`;
+    case "sent":
+      return `<div class="small mut">→ ${esc(e.kind ?? "message")} ${cidLink(s(e.message))}</div>`;
+    case "received":
+      return `<div class="small mut">← ${cidLink(s(e.message))}${e.note ? ` · ${esc(e.note)}` : ""}</div>`;
     default:
       return `<pre>${esc(JSON.stringify(e, null, 2))}</pre>`;
   }

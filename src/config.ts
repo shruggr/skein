@@ -5,7 +5,8 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Thinking } from "./runners/model.ts";
+import type { Thinking } from "./chat.ts";
+import type { WalletConfig } from "./wallet.ts";
 
 export interface ProviderConfig {
   baseUrl: string;   // OpenAI-compatible, e.g. http://host:8001/v1
@@ -16,6 +17,7 @@ export interface ProviderConfig {
 export interface Config {
   providers: Record<string, ProviderConfig>;
   defaults?: { model?: string; thinking?: Thinking };
+  wallet?: WalletConfig; // default: a dev key file under $SKEIN_HOME (wallet.ts)
 }
 
 export const defaultConfigPath = () => process.env.SKEIN_CONFIG ?? join(homedir(), ".skein", "config.json");
@@ -31,7 +33,7 @@ export function loadConfig(path?: string): Config {
     throw new Error(`skein config ${p}: ${(e as Error).message}`);
   }
   const c = JSON.parse(text) as Partial<Config>;
-  return { providers: c.providers ?? {}, defaults: c.defaults };
+  return { providers: c.providers ?? {}, defaults: c.defaults, ...(c.wallet ? { wallet: c.wallet } : {}) };
 }
 
 /** "ripper/qwen38" → endpoint, key, and the model name the server knows. Splits on the first "/" only. */

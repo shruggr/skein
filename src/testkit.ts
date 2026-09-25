@@ -1,19 +1,55 @@
-// Test helpers: drive a scheduler to a condition; a scripted SSE fetch.
+// Test helpers: an instance on a memory store, a scripted inference service,
+// a scripted SSE fetch for the real one.
 
 import type { CID } from "multiformats/cid";
+import type { WalletInterface } from "@bsv/sdk";
 import type { Store } from "./store.ts";
-import type { Scheduler } from "./scheduler.ts";
-import type { ThreadOrigin } from "./types.ts";
-import { compact, stamp } from "./runners/util.ts";
+import type { ThreadOrigin, ThreadUpdate } from "./types.ts";
+import type { ChatMessage, ToolCall as Call } from "./chat.ts";
+import { compact, stamp, tipOf } from "./graph.ts";
+import { memoryStore } from "./memory.ts";
+import { initInstance, type Instance } from "./instance.ts";
+import { Runtime } from "./runtime.ts";
+import type { Service } from "./services/types.ts";
+import { failed } from "./services/types.ts";
+import { ephemeralWallet } from "./wallet.ts";
 
-export async function drive(s: Scheduler, until: () => Promise<boolean> | boolean, ms = 5000): Promise<void> {
-  const end = Date.now() + ms;
-  for (;;) {
-    await s.tick();
-    if (await until()) return;
-    if (Date.now() > end) throw new Error("drive: condition not reached");
-    await new Promise((r) => setTimeout(r, 10));
-  }
+export interface Harness extends Instance {
+  store: Store;
+  wallet: WalletInterface;
+  rt: Runtime;
+  lines: string[];
+  tip(thread: CID): Promise<ThreadUpdate | undefined>;
+}
+
+/** A fresh instance: memory store (unless given), ephemeral wallet, the given services, defaults written. */
+export async function instance(services: Service[] = [], o: { store?: Store; wallet?: WalletInterface } = {}): Promise<Harness> {
+  const store = o.store ?? memoryStore();
+  const wallet = o.wallet ?? ephemeralWallet();
+  const lines: string[] = [];
+  const rt = new Runtime(store, { wallet, services, log: (l) => lines.push(l), names: ["david"] });
+  const inst = await initInstance(store, wallet, { runtime: rt });
+  return { ...inst, store, wallet, rt, lines, tip: (t) => tipOf(store, t) };
+}
+
+export type Reply = { content?: string; thinking?: string; calls?: Array<[id: string, name: string, args: object]> } | { fail: "cant-do" | "blew-up"; message: string };
+
+/** An inference service that answers each infer request with the next scripted reply, recording the requests. */
+export function scriptedInference(replies: Reply[]): Service & { requests: any[] } {
+  const requests: any[] = [];
+  return {
+    name: "inference",
+    requests,
+    async handle(req, ctx) {
+      requests.push(req.msg.body);
+      const r = replies.shift();
+      if (!r) { await ctx.reply(failed("cant-do", "no more scripted replies")); return; }
+      if ("fail" in r) { await ctx.reply(failed(r.fail, r.message)); return; }
+      const calls: Call[] = (r.calls ?? []).map(([id, name, args]) => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } }));
+      const message: ChatMessage = { role: "assistant", content: r.content ?? null, ...(calls.length ? { tool_calls: calls } : {}) };
+      await ctx.reply({ kind: "inferred", message, ...(r.thinking ? { thinking: r.thinking } : {}), model: "scripted/m", ms: 0 });
+    },
+  };
 }
 
 export function openThread(store: Store, runner: string, spec: unknown, launchedBy?: CID): Promise<CID> {

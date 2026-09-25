@@ -3,6 +3,8 @@
 // rest of the code sees only a `Signer` built from it.
 
 import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { HTTPWalletJSON, PrivateKey, ProtoWallet, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
 
 export type { WalletInterface };
@@ -22,14 +24,34 @@ export type WalletConfig =
   /** A running BRC-100 JSON endpoint, e.g. `1sat serve wallet-api` (default http://127.0.0.1:3321). */
   | { kind: "remote"; url?: string; originator?: string }
   /** Tests only: a random key that lives as long as the process. */
-  | { kind: "ephemeral" };
+  | { kind: "ephemeral" }
+  /**
+   * Stopgap until the Yours/1sat wallet is wired for everyday use: a key in a
+   * 0600 file under $SKEIN_HOME, so the daemon and the CLI share identities.
+   * Not a wallet in any real sense (no actions); the key is the only secret.
+   */
+  | { kind: "dev"; keyFile: string };
 
 export async function connectWallet(config: WalletConfig): Promise<WalletInterface> {
   switch (config.kind) {
     case "remote": return remoteWallet(config.url, config.originator);
     case "node": return nodeWallet(config);
     case "ephemeral": return ephemeralWallet();
+    case "dev": return devWallet(config.keyFile);
   }
+}
+
+export function devWallet(keyFile: string): WalletInterface {
+  let hex: string;
+  try {
+    hex = readFileSync(keyFile, "utf8").trim();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    mkdirSync(dirname(keyFile), { recursive: true });
+    hex = PrivateKey.fromRandom().toHex();
+    writeFileSync(keyFile, `${hex}\n`, { mode: 0o600, flag: "wx" });
+  }
+  return keyWallet(PrivateKey.fromHex(hex));
 }
 
 /**
@@ -37,11 +59,15 @@ export async function connectWallet(config: WalletConfig): Promise<WalletInterfa
  * process exits. A ProtoWallet has keys but no actions; those reject.
  */
 export function ephemeralWallet(): WalletInterface {
-  return new Proxy(new ProtoWallet(PrivateKey.fromRandom()), {
+  return keyWallet(PrivateKey.fromRandom());
+}
+
+function keyWallet(key: PrivateKey): WalletInterface {
+  return new Proxy(new ProtoWallet(key), {
     get(t, p) {
       // `then` must stay undefined or awaiting the wallet would call it.
       if (typeof p !== "string" || p === "then" || p in t) return Reflect.get(t, p);
-      return () => Promise.reject(new Error(`ephemeral wallet: ${p} is not supported`));
+      return () => Promise.reject(new Error(`key-only wallet: ${p} is not supported`));
     },
   }) as unknown as WalletInterface;
 }

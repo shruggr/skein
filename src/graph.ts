@@ -1,10 +1,10 @@
-// Chain-reading helpers shared by runners. All state is read back from blocks;
-// nothing here caches.
+// Chain-reading helpers over a Store: the host-side view of threads and nodes
+// (CLI, web, runtime, tests). Programs can't use these — they see only `get`;
+// see program.ts for their equivalents. All state is read back from blocks.
 
 import type { CID } from "multiformats/cid";
-import type { Store } from "../store.ts";
-import type { Emission, NodeOrigin, NodeUpdate, Ref, Rest, ThreadState, ThreadUpdate } from "../types.ts";
-import type { Status } from "./types.ts";
+import type { Store } from "./store.ts";
+import type { Emission, NodeOrigin, NodeUpdate, Ref, Rest, ThreadState, ThreadUpdate } from "./types.ts";
 
 /** dag-cbor rejects `undefined`; optional fields must be absent, not undefined. */
 export function compact<T>(v: T): T {
@@ -36,10 +36,6 @@ export function isSettled(state: ThreadState | undefined): boolean {
 export async function tipOf(store: Store, thread: CID): Promise<ThreadUpdate | undefined> {
   const tip = await store.chains.tip(thread);
   return tip.equals(thread) ? undefined : store.get<ThreadUpdate>(tip);
-}
-
-export function statusOf(u: ThreadUpdate): Status {
-  return compact({ state: u.state, waitingOn: u.waitingOn, until: u.until, resolution: u.resolution, error: u.error, note: u.note });
 }
 
 export async function openNode(store: Store, n: { thread: CID; prev: CID[]; request: unknown; refs?: Ref[]; nonce?: string }): Promise<CID> {

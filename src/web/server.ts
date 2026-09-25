@@ -4,17 +4,20 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { CID } from "multiformats/cid";
+import type { WalletInterface } from "@bsv/sdk";
 import { fmt, isCID } from "../cid.ts";
 import { NotFound, type Store } from "../store.ts";
 import type { Config } from "../config.ts";
 import type { NodeOrigin, ThreadOrigin, ThreadState } from "../types.ts";
 import { newThread, reply, Refused } from "../actions.ts";
 import { Ambiguous, jsonify, listThreads, resolveCid, threadView } from "../view.ts";
+import type { Runtime } from "../runtime.ts";
 import { blockPage, errorPage, home, threadBody, threadPage } from "./pages.ts";
 
 export interface WebContext {
   store: Store;
-  wake(thread?: CID): void;
+  wallet: WalletInterface; // signs the owner's prompts (instance.ts)
+  runtime: Runtime;
   config(): Config;
   loopbackOnly?: boolean; // refuse Host headers that aren't loopback (DNS rebinding)
 }
@@ -96,21 +99,20 @@ async function route(req: IncomingMessage, res: ServerResponse, url: URL, ctx: W
     const form = !String(req.headers["content-type"] ?? "").includes("json");
     const str = (k: string) => (typeof body[k] === "string" ? (body[k] as string) : undefined);
     if (p === "/api/new") {
-      const tools = Array.isArray(body.tools) ? (body.tools as string[]) : str("tools")?.split(",").filter(Boolean);
-      const t = await newThread(store, { prompt: str("prompt") ?? "", model: str("model"), thinking: str("thinking"), system: str("system"), tools });
-      ctx.wake(t);
-      return form ? redirect(res, `/t/${fmt(t)}`) : send(res, 201, { thread: fmt(t) });
+      // Tool choice by name went with v1's registry; sessions get the loop's default tools until the UI is redone.
+      if (body.tools !== undefined && str("tools") !== "") throw new HttpError(501, "choosing tools is not supported in v2 yet: sessions get the loop's default tools");
+      const r = await newThread(store, ctx.wallet, { prompt: str("prompt") ?? "", model: str("model"), thinking: str("thinking"), system: str("system") }, ctx.runtime);
+      return form ? redirect(res, `/t/${fmt(r.thread)}`) : send(res, 201, { thread: fmt(r.thread), message: fmt(r.message) });
     }
     if (p === "/api/reply") {
       const cid = await resolveCid(store, str("thread") ?? "");
-      const r = await reply(store, cid, str("text") ?? "");
-      ctx.wake(r.david);
+      const r = await reply(store, ctx.wallet, cid, str("text") ?? "", ctx.runtime);
       const back = str("back");
-      return form ? redirect(res, back?.startsWith("/t/") ? back : `/t/${fmt(cid)}`) : send(res, 200, { david: fmt(r.david), reply: fmt(r.node) });
+      return form ? redirect(res, back?.startsWith("/t/") ? back : `/t/${fmt(r.thread)}`) : send(res, 200, { thread: fmt(r.thread), message: fmt(r.message) });
     }
     if (p === "/api/wake" || p === "/wake") {
-      const t = str("thread");
-      ctx.wake(t ? await resolveCid(store, t) : undefined);
+      // Another process put messages in the log: process them now rather than on the next tick.
+      void ctx.runtime.poll();
       return send(res, 200, { ok: true });
     }
   }

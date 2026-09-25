@@ -77,7 +77,27 @@ CREATE INDEX IF NOT EXISTS messages_at      ON messages(at);
 CREATE INDEX IF NOT EXISTS messages_from_at ON messages("from", at);
 CREATE INDEX IF NOT EXISTS messages_to_at   ON messages("to", at) WHERE "to" IS NOT NULL;
 
--- Not derived and not rebuilt: runner bookkeeping, overwritten freely.
+-- A message's refs, as edges out of the message (messages aren't chains, so
+-- they can't use the edges table's foreign key). Derived.
+CREATE TABLE IF NOT EXISTS message_refs (
+  "from"  BLOB NOT NULL REFERENCES messages(cid) ON DELETE CASCADE,
+  ord     INTEGER NOT NULL,
+  "to"    TEXT NOT NULL,
+  rel     TEXT NOT NULL,
+  locator TEXT,
+  PRIMARY KEY ("from", ord)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS message_refs_to ON message_refs("to", rel);
+
+-- Not derived and not rebuilt: the input log, in arrival order. Arrival order
+-- is not recoverable from the records, so rebuild keeps this and only appends
+-- messages it lacks.
+CREATE TABLE IF NOT EXISTS log (
+  n   INTEGER PRIMARY KEY AUTOINCREMENT,
+  cid BLOB NOT NULL UNIQUE
+);
+
+-- Not derived and not rebuilt: service bookkeeping, overwritten freely.
 CREATE TABLE IF NOT EXISTS handles (
   thread BLOB PRIMARY KEY,
   json   TEXT NOT NULL
@@ -108,7 +128,7 @@ export function openStore(path: string): SqliteStore {
   const cols = new Set(db.prepare("PRAGMA table_info(chains)").all().map((c) => c.name));
   const added = [["tip_at", "INTEGER"], ["program", "BLOB"], ["waiting_from", "TEXT"]].filter(([c]) => !cols.has(c));
   for (const [c, type] of added) db.exec(`ALTER TABLE chains ADD COLUMN ${c} ${type}`);
-  const stale = added.length > 0 || (tables.has("chains") && !tables.has("messages"));
+  const stale = added.length > 0 || (tables.has("chains") && (!tables.has("messages") || !tables.has("log")));
   db.exec(`
     CREATE INDEX IF NOT EXISTS chains_tip_at       ON chains(kind, tip_at);
     CREATE INDEX IF NOT EXISTS chains_program      ON chains(program) WHERE program IS NOT NULL;
@@ -144,7 +164,7 @@ export function openStore(path: string): SqliteStore {
     // updates) collapses to one ref, in order of first appearance.
     refsFrom: db.prepare(`SELECT "to", rel, locator FROM edges WHERE "from" = ?
       GROUP BY "to", rel, locator ORDER BY MIN(seq * 1048576 + ord)`),
-    refsTo: db.prepare(`SELECT e."from", e.rel, e.locator FROM edges e
+    refsTo: db.prepare(`SELECT e."from", e.rel, e.locator, MAX(c.at) AS at FROM edges e
       JOIN chains c ON c.origin = e."from" WHERE e."to" = ?
       GROUP BY e."from", e.rel, e.locator ORDER BY MAX(c.at) DESC, e."from" DESC`),
 
@@ -166,6 +186,13 @@ export function openStore(path: string): SqliteStore {
       AND (:before IS NULL OR at < :before)
       ORDER BY at DESC, cid DESC LIMIT :limit`),
     messageIns: db.prepare(`INSERT INTO messages (cid, "from", "to", seq, at) VALUES (:cid, :from, :to, :seq, :at)`),
+    messageRefIns: db.prepare(`INSERT OR IGNORE INTO message_refs ("from", ord, "to", rel, locator) VALUES (?, ?, ?, ?, ?)`),
+    messageRefsFrom: db.prepare(`SELECT "to", rel, locator FROM message_refs WHERE "from" = ? ORDER BY ord`),
+    messageRefsTo: db.prepare(`SELECT r."from", r.rel, r.locator, m.at FROM message_refs r
+      JOIN messages m ON m.cid = r."from" WHERE r."to" = ?`),
+    logIns: db.prepare("INSERT OR IGNORE INTO log (cid) VALUES (?)"),
+    logAfter: db.prepare("SELECT n, cid FROM log WHERE n > ? ORDER BY n"),
+    logMissing: db.prepare("SELECT cid FROM messages WHERE cid NOT IN (SELECT cid FROM log) ORDER BY at, \"from\", seq"),
     messageAt: db.prepare(`SELECT cid FROM messages WHERE "from" = ? AND seq = ?`),
     resting: db.prepare(`SELECT origin FROM chains
       WHERE kind = 'thread' AND (state IS NULL OR state <> 'finished')
@@ -189,6 +216,7 @@ export function openStore(path: string): SqliteStore {
     wipeUpdates: db.prepare("DELETE FROM updates"),
     wipeChains: db.prepare("DELETE FROM chains"),
     wipeMessages: db.prepare("DELETE FROM messages"),
+    wipeMessageRefs: db.prepare("DELETE FROM message_refs"),
   };
 
   function tx<T>(fn: () => T): T {
@@ -239,6 +267,7 @@ export function openStore(path: string): SqliteStore {
 
   function indexMessage(cid: CID, m: Message) {
     q.messageIns.run({ cid: cid.bytes, from: m.from, to: m.to ?? null, seq: m.seq, at: m.at });
+    m.refs.forEach((r, i) => { for (const e of edge(r.to, r.rel, r.locator)) q.messageRefIns.run(cid.bytes, i, e.to, e.rel, e.locator); });
   }
 
   function* rows(stmt: { all(p: Record<string, SQLInputValue>): Row[] }, p: Record<string, SQLInputValue>) {
@@ -268,8 +297,13 @@ export function openStore(path: string): SqliteStore {
         }
         put(m);
         indexMessage(cid, m);
+        q.logIns.run(cid.bytes);
         return cid;
       });
+    },
+
+    async *log(after = 0) {
+      for (const r of q.logAfter.all(after)) yield { n: r.n as number, cid: fromBytes(r.cid as Uint8Array) };
     },
 
     async findByPrefix(prefix) {
@@ -296,7 +330,8 @@ export function openStore(path: string): SqliteStore {
           const row = chainRow(origin);
           const seq = (row.seq as number) + 1;
           // The chain fields are the store's to set; a caller's copies are overridden.
-          const update = { ...body, origin, prev: fromBytes(row.tip as Uint8Array), seq, at: Date.now() };
+          // `at` is the caller's when given: the runtime stamps records with log time, so replay reproduces them.
+          const update = { ...body, origin, prev: fromBytes(row.tip as Uint8Array), seq, at: typeof body.at === "number" ? body.at : Date.now() };
           const cid = put(update);
           q.updateIns.run(cid.bytes, origin.bytes, seq);
           writeEdges(origin, seq, updateEdges(update));
@@ -326,11 +361,14 @@ export function openStore(path: string): SqliteStore {
 
     edges: {
       async refsFrom(cid) {
-        return q.refsFrom.all(cid.bytes).map((r) => toRef(r.to as string, r.rel as string, r.locator));
+        const rows = [...q.refsFrom.all(cid.bytes), ...q.messageRefsFrom.all(cid.bytes)];
+        return rows.map((r) => toRef(r.to as string, r.rel as string, r.locator));
       },
 
       async refsTo(cid) {
-        return q.refsTo.all(fmt(cid)).map((r) => ({
+        const rows = [...q.refsTo.all(fmt(cid)), ...q.messageRefsTo.all(fmt(cid))]
+          .sort((a, b) => (b.at as number) - (a.at as number));
+        return rows.map((r) => ({
           ...toRef(cid, r.rel as string, r.locator),
           from: fromBytes(r.from as Uint8Array),
         }));
@@ -363,6 +401,7 @@ export function openStore(path: string): SqliteStore {
           q.wipeEdges.run();
           q.wipeUpdates.run();
           q.wipeChains.run();
+          q.wipeMessageRefs.run();
           q.wipeMessages.run();
 
           // Origins are thread/node blocks plus anything an update names as
@@ -410,6 +449,7 @@ export function openStore(path: string): SqliteStore {
             const tip = fromBytes(last.cid as Uint8Array);
             move(cid, block.kind, tip, last.seq as number, getBlock<Obj>(tip));
           }
+          for (const r of q.logMissing.all()) q.logIns.run(r.cid as Uint8Array);
         });
       },
     },

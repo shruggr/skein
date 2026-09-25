@@ -1,5 +1,6 @@
 // Block shapes. Every value here is encoded as dag-cbor and identified by its
-// CIDv1 (codec dag-cbor 0x71, multihash sha2-256 0x12). See docs/MODEL.md.
+// CIDv1 (codec dag-cbor 0x71, multihash sha2-256 0x12). See docs/VM.md
+// (docs/MODEL.md for the v1 shapes some fields are kept from).
 //
 // CIDs are carried as multiformats `CID` instances inside blocks (dag-cbor
 // tag 42) and as base32 strings (`bafy…`) everywhere a string is needed:
@@ -16,7 +17,8 @@ export type Rel =
   | "launched"   // this node launched thread `to`
   | "produced"   // this node produced asset `to`
   | "about"      // free correlation: repo, commit, topic, prior thread
-  | "replies-to" // David's reply → the david thread it resolves
+  | "replies-to" // a reply message → the request message (or thread) it answers
+  | "from-thread" // an emitted message → the thread whose step emitted it
   | (string & {}); // producers may add their own; retrieval tolerates unknown rels
 
 export interface Ref {
@@ -39,13 +41,13 @@ export type ThreadState =
 
 export interface ThreadOrigin {
   kind: "thread";
-  runner: RunnerKind;
-  spec: unknown;      // what the runner needs; shape is per runner kind
-  program?: CID;      // v2: the program record to run (docs/VM.md); runner/spec remain until v1 is gone
-  args?: unknown;     // v2: the program's input, per its `inputs` schema
-  launchedBy?: CID;   // the node or message that launched it; absent = parent-less (v1 only)
+  program?: CID;      // the program record to run (docs/VM.md); absent only on v1 threads
+  args?: unknown;     // the program's input, per its `inputs` schema
+  launchedBy?: CID;   // the node (step) or message that launched it; absent only on v1 threads
   at: Ms;
-  nonce?: string;     // distinguishes otherwise identical launches (same spec, parent, ms)
+  nonce?: string;     // distinguishes otherwise identical launches (a tool call id)
+  runner?: RunnerKind; // v1 only: kept so old files still read
+  spec?: unknown;      // v1 only
 }
 
 export interface ThreadUpdate {
@@ -59,7 +61,9 @@ export interface ThreadUpdate {
   until?: Ms;         // wake time (nudges, retries, David)
   resolution?: CID;   // node holding the result, when finished
   error?: { kind: "cant-do" | "blew-up"; message: string };
-  note?: string;      // free text a runner attaches ("ran on ripper/qwen38")
+  note?: string;      // free text a program attaches ("ripper/qwen38 · 812 in / 40 out")
+  head?: CID;         // the thread's latest node *update* as of this update: how a program, which
+                      // can only `get`, finds its own nodes' emissions (walk prev back to the origin)
 }
 
 // ---------------------------------------------------------------- nodes

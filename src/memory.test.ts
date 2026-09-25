@@ -4,7 +4,7 @@ import { memoryStore } from "./memory.ts";
 import { NotFound } from "./store.ts";
 import type { ThreadUpdate } from "./types.ts";
 import { collect, openThread } from "./testkit.ts";
-import { openNode } from "./runners/util.ts";
+import { openNode } from "./graph.ts";
 
 test("blocks: put is idempotent and content-addressed", async () => {
   const s = memoryStore();

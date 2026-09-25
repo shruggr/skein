@@ -4,10 +4,15 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { openStore, type SqliteStore } from "./sqlite.ts";
+import { loadConfig } from "./config.ts";
+import { connectWallet, type WalletInterface } from "./wallet.ts";
 
 export const DEFAULT_PORT = 4322;
 
-export const dbPath = () => process.env.SKEIN_DB || join(homedir(), ".skein", "skein.db");
+/** Skein's own directory: the db, the execution service's work dirs, the dev wallet key. */
+export const skeinHome = () => process.env.SKEIN_HOME || join(homedir(), ".skein");
+
+export const dbPath = () => process.env.SKEIN_DB || join(skeinHome(), "skein.db");
 
 export function openDefaultStore(path = dbPath()): SqliteStore {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -20,5 +25,10 @@ export function portFrom(flag?: string): number {
   return p;
 }
 
-/** Where bash runs for threads the daemon starts. */
+/** Where bash runs when a command names no tree (in place, as v1 did). */
 export const workDir = () => process.env.SKEIN_CWD || homedir();
+
+/** The wallet config.json names, else the dev key file (shared by the daemon and the CLI). */
+export function openWallet(): Promise<WalletInterface> {
+  return connectWallet(loadConfig().wallet ?? { kind: "dev", keyFile: join(skeinHome(), "dev-wallet.key") });
+}

@@ -40,6 +40,7 @@ export function memoryStore(): Store {
   const handles = new Map<string, Handle>();
   const messages = new Map<string, MessageMeta>(); // cid → row
   const bySeq = new Map<string, string>();          // `${from} ${seq}` → cid
+  const log: CID[] = [];                             // arrival order; not derived, survives rebuild
   const locks = new Map<string, Promise<unknown>>();
   let order = 0;
 
@@ -117,6 +118,7 @@ export function memoryStore(): Store {
     if (had) throw new Rejected("duplicate-seq", `message: ${m.from} already sent seq ${m.seq}`);
     bySeq.set(key, cid.toString());
     messages.set(cid.toString(), { cid, from: m.from, to: m.to, seq: m.seq, at: m.at, order: order++ });
+    for (const r of m.refs) addEdge({ ...r, from: cid });
   }
 
   const threads = () => [...meta.values()].filter((m) => m.kind === "thread");
@@ -132,8 +134,12 @@ export function memoryStore(): Store {
       const k = `${m.from} ${m.seq}`;
       if (bySeq.has(k) && bySeq.get(k) !== cid.toString()) throw new Rejected("duplicate-seq", `message: ${m.from} already sent seq ${m.seq}`);
       if (!bytes.has(cid.toString())) bytes.set(cid.toString(), data);
+      if (!messages.has(cid.toString())) log.push(cid);
       indexMessage(cid, m);
       return cid;
+    },
+    async *log(after = 0) {
+      for (let i = after; i < log.length; i++) yield { n: i + 1, cid: log[i] };
     },
     async bytes(cid) {
       const data = bytes.get(cid.toString());
@@ -218,6 +224,8 @@ export function memoryStore(): Store {
           else if (o && typeof (b as { seq?: unknown }).seq === "number") updates.push({ cid, u: b as Record<string, unknown> });
           else if (kindOf(b) === "thread" || kindOf(b) === "node") register(cid, b);
         }
+        const logged = new Set(log.map(String));
+        for (const m of [...messages.values()].sort((a, b) => a.at - b.at || a.order - b.order)) if (!logged.has(m.cid.toString())) log.push(m.cid);
         updates.sort((a, b) => (a.u.seq as number) - (b.u.seq as number));
         for (const { cid, u } of updates) {
           const origin = u.origin as CID;
