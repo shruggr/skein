@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { PublicKey, Signature } from "@bsv/sdk";
 import { CID, decode, encode, isCID } from "./cid.ts";
 import type { Ms, Ref } from "./types.ts";
-import type { Signer } from "./wallet.ts";
+import type { Signer } from "./identity.ts";
 
 export type * from "./types.ts";
 
@@ -46,12 +46,12 @@ export function messageDigest(m: UnsignedMessage | Message): Uint8Array {
 
 export async function signMessage(
   signer: Signer,
-  m: { to?: string; seq: number; body: unknown; refs?: Ref[]; at?: Ms },
+  m: { to?: string; seq: number; body: unknown; refs?: Ref[]; at: Ms },
 ): Promise<Message> {
   // Round-trip through dag-cbor so the record we return is exactly what gets
   // stored and re-encoded at verify time (undefined dropped, CIDs canonical).
   const unsigned = decode<UnsignedMessage>(encode({
-    kind: "message", from: signer.identity, to: m.to, seq: m.seq, at: m.at ?? Date.now(), body: m.body, refs: m.refs ?? [],
+    kind: "message", from: signer.identity, to: m.to, seq: m.seq, at: m.at, body: m.body, refs: m.refs ?? [],
   }).bytes);
   if (!isMessage({ ...unsigned, sig: new Uint8Array() })) throw new TypeError("signMessage: malformed message");
   return { ...unsigned, sig: await signer.sign(messageBytes(unsigned)) };
@@ -126,7 +126,7 @@ export type Subscription = {
   at: Ms;
 };
 
-export function subscription(match: SubscriptionMatch, handler: Subscription["handler"], at: Ms = Date.now()): Subscription {
+export function subscription(match: SubscriptionMatch, handler: Subscription["handler"], at: Ms): Subscription {
   const out: Subscription = { kind: "subscription", match, handler, at };
   if (!isSubscription(out)) throw new TypeError("subscription: malformed");
   return out;
@@ -185,7 +185,7 @@ export type Genesis = {
   name?: string;
 };
 
-export function genesis(root: Identity, name?: string, at: Ms = Date.now()): Genesis {
+export function genesis(root: Identity, name: string | undefined, at: Ms): Genesis {
   const out: Genesis = name === undefined ? { kind: "genesis", root, at } : { kind: "genesis", root, at, name };
   if (!isGenesis(out)) throw new TypeError("genesis: malformed");
   return out;

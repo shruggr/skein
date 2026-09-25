@@ -1,9 +1,9 @@
-// The store interface. Four layers: blocks, chains, edges, live.
-// Everything above this (scheduler, runners, CLI, lenses) calls only this.
+// The store interface. Five layers: blocks, chains, the input log, edges, live.
+// Everything above this (scheduler, programs, dev inspection) calls only this.
 // The first implementation is one SQLite file via node:sqlite (sqlite.ts).
 
 import type { CID } from "multiformats/cid";
-import type { Block, Ref, RunnerKind, ThreadState, Ms } from "./types.ts";
+import type { Block, Ref, ThreadState, Ms } from "./types.ts";
 import type { Message } from "./records.ts";
 
 export class NotFound extends Error {
@@ -36,7 +36,10 @@ export interface Blocks {
 export interface Chains {
   /** Write an origin block and register its chain (tip = origin, seq 0). */
   open(origin: Block): Promise<CID>;
-  /** Write an update {origin, prev: tip, seq: n+1, at, ...body}; move the tip. Serialised per origin. */
+  /**
+   * Write an update {...body, origin, prev: tip, seq: n+1}; move the tip. Serialised per origin.
+   * `body.at` is required: the store has no clock (the runtime passes log time).
+   */
   append(origin: CID, body: Record<string, unknown>): Promise<CID>;
   /** Latest update, or the origin itself if there are none. */
   tip(origin: CID): Promise<CID>;
@@ -55,7 +58,6 @@ export interface Filter {
   program?: CID;          // threads running this program record
   from?: string;          // messages from this identity (implies kind "message")
   to?: string;            // messages to this identity or handle (implies kind "message")
-  runner?: RunnerKind;    // threads of this runner kind
   state?: ThreadState[];  // threads whose tip state is one of these
   parentless?: boolean;   // threads with no launchedBy
   since?: Ms;
@@ -85,13 +87,39 @@ export interface Live {
     clear(thread: CID): Promise<void>;
   };
   /** Thread origins whose tip state is not finished — the scheduler's worklist. */
-  resting(filter?: Pick<Filter, "runner" | "state" | "limit">): AsyncIterable<CID>;
+  resting(filter?: Pick<Filter, "state" | "limit">): AsyncIterable<CID>;
   /** Threads whose `until` has passed (time trigger). */
   due(now: Ms): AsyncIterable<CID>;
   /** Threads waiting on `thread` (event trigger: it came to rest, wake these). */
   waitersOn(thread: CID): AsyncIterable<CID>;
   /** Thread origins whose tip has `waitingFrom === identity` (a message from it should wake them). */
   waitingFrom(identity: string): AsyncIterable<CID>;
+  /** The scheduler's position in the log: entries with n < cursor have been processed. Not derived. */
+  cursor: {
+    get(): Promise<number>;
+    set(n: number): Promise<void>;
+  };
+}
+
+// ---------------------------------------------------------------- 5. the input log
+// Every admitted message, in admission order, as a hash chain of log-entry
+// records. The tip entry's CID is the instance's state hash. Not derived and
+// never rebuilt: admission order is not recoverable from the messages.
+
+export type LogEntry = {
+  kind: "log";
+  prev: CID | null; // the previous entry; null for the first
+  n: number;        // 0-based position
+  message: CID;     // a verified message in this store
+};
+
+export interface Log {
+  /** Append an entry for a message already put with putMessage. A message already in the log returns its existing entry. */
+  append(message: CID): Promise<CID>;
+  /** The latest entry (the state hash), or undefined for an empty log. */
+  tip(): Promise<CID | undefined>;
+  /** Entries with n >= from, in order. */
+  entries(from?: number): AsyncIterable<{ cid: CID; entry: LogEntry }>;
 }
 
 // ---------------------------------------------------------------- the store
@@ -100,21 +128,8 @@ export interface Store extends Blocks {
   /** Verify and store a signed message; index it by (from, seq). Rejects a bad signature or a second message at one (from, seq). */
   putMessage(m: Message): Promise<CID>;
   chains: Chains;
+  log: Log;
   edges: Edges;
   live: Live;
   close(): Promise<void>;
-}
-
-// ---------------------------------------------------------------- resolvers
-// Outside the store. `skein:` is registered by default; others register at startup.
-
-export type Resolved =
-  | { ok: true; bytes: Uint8Array; contentType?: string }
-  | { ok: false; reason: "unknown-scheme" | "not-found" | "unreachable"; message: string };
-
-export interface Resolver { (url: URL): Promise<Resolved>; }
-
-export interface Resolvers {
-  register(scheme: string, resolver: Resolver): void;
-  resolve(url: string | URL): Promise<Resolved>;
 }

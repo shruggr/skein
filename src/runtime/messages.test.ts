@@ -11,9 +11,9 @@ import { memoryStore } from "./memory.ts";
 import { genesis, program, signMessage, type Message } from "./records.ts";
 import { openStore } from "./sqlite.ts";
 import { Rejected, type Filter, type Store } from "./store.ts";
-import { collect } from "./testkit.ts";
+import { collect } from "../testkit.ts";
 import type { ThreadOrigin } from "./types.ts";
-import { ephemeralWallet, rootIdentity, signerFor, type Signer } from "./wallet.ts";
+import { ephemeralWallet, rootIdentity, signerFor, type Signer } from "../wallet.ts";
 
 const stores: Array<[string, () => Store]> = [["memory", memoryStore], ["sqlite", () => openStore(":memory:")]];
 const strs = (cs: CID[]) => cs.map(fmt);
@@ -76,9 +76,9 @@ for (const [name, open] of stores) {
     const shell = await s.put(program({ name: "shell", code: { ts: "…" }, inputs: {}, services: ["execution"], description: "" }));
     const other = await s.put(program({ name: "model", code: { ts: "…" }, inputs: {}, services: ["inference"], description: "" }));
     const line = await s.putMessage(await send(david, 0, 1, admin.identity));
-    const t1 = await s.chains.open({ kind: "thread", runner: "program", spec: null, program: shell, args: { cmd: "ls" }, launchedBy: line, at: 2 } satisfies ThreadOrigin);
-    const t2 = await s.chains.open({ kind: "thread", runner: "program", spec: null, program: other, at: 3 } satisfies ThreadOrigin);
-    const t3 = await s.chains.open({ kind: "thread", runner: "loop", spec: {}, at: 4 } satisfies ThreadOrigin);
+    const t1 = await s.chains.open({ kind: "thread", program: shell, args: { cmd: "ls" }, launchedBy: line, at: 2 } satisfies ThreadOrigin);
+    const t2 = await s.chains.open({ kind: "thread", program: other, args: null, at: 3 } satisfies ThreadOrigin);
+    const t3 = await s.chains.open({ kind: "thread", program: encode({ kind: "p" }).cid, args: {}, at: 4 } satisfies ThreadOrigin);
 
     const q = async (f: Filter) => strs(await collect(s.edges.query(f)));
     assert.deepEqual(await q({ kind: "thread", program: shell }), strs([t1]));
@@ -87,13 +87,13 @@ for (const [name, open] of stores) {
     const launch = name === "sqlite" ? await s.edges.refsFrom(t1) : await s.edges.refsFrom(line); // the stores index it facing opposite ways
     assert.deepEqual(launch.map((r) => [String(r.to), r.rel]), name === "sqlite" ? [[fmt(line), "launched-by"]] : [[fmt(t1), "launched"]]);
 
-    await s.chains.append(t1, { state: "waiting", waitingFrom: david.identity });
-    await s.chains.append(t3, { state: "waiting", waitingFrom: david.identity, waitingOn: [t2] });
-    await s.chains.append(t2, { state: "waiting", waitingFrom: admin.identity });
+    await s.chains.append(t1, { at: 9, state: "waiting", waitingFrom: david.identity });
+    await s.chains.append(t3, { at: 9, state: "waiting", waitingFrom: david.identity, waitingOn: [t2] });
+    await s.chains.append(t2, { at: 9, state: "waiting", waitingFrom: admin.identity });
     const from = async (id: string) => strs(await collect(s.live.waitingFrom(id)));
     assert.deepEqual(await from(david.identity), strs([t1, t3]));
     assert.deepEqual(await from(admin.identity), strs([t2]));
-    await s.chains.append(t1, { state: "running" }); // only the tip counts
+    await s.chains.append(t1, { at: 9, state: "running" }); // only the tip counts
     assert.deepEqual(await from(david.identity), strs([t3]));
     assert.deepEqual(strs(await collect(s.live.waitersOn(t2))), strs([t3]));
 
@@ -130,8 +130,8 @@ test("sqlite: rebuild reproduces the messages table and skips unsigned look-alik
     const line = await s.putMessage(await send(david, 0, 1, admin.identity));
     await s.putMessage(await send(david, 1, 2));
     await s.putMessage(await send(clock, 7, 3, admin.identity));
-    const t = await s.chains.open({ kind: "thread", runner: "program", spec: null, program: encode({ kind: "p" }).cid, launchedBy: line, at: 4 } satisfies ThreadOrigin);
-    await s.chains.append(t, { state: "waiting", waitingFrom: david.identity });
+    const t = await s.chains.open({ kind: "thread", program: encode({ kind: "p" }).cid, args: null, launchedBy: line, at: 4 } satisfies ThreadOrigin);
+    await s.chains.append(t, { at: 9, state: "waiting", waitingFrom: david.identity });
     const fake = { ...(await send(david, 2, 5)), body: { kind: "line", text: "forged" } };
     await s.put(fake); // in the blocks, never in the index
 
@@ -154,8 +154,8 @@ test("sqlite: a file from before messages/program/waiting_from is migrated on op
     const { david } = await actors();
     const m = await s.putMessage(await send(david, 0, 1));
     const prog = encode({ kind: "p" }).cid;
-    const t = await s.chains.open({ kind: "thread", runner: "program", spec: null, program: prog, at: 2 } satisfies ThreadOrigin);
-    await s.chains.append(t, { state: "waiting", waitingFrom: david.identity });
+    const t = await s.chains.open({ kind: "thread", program: prog, args: null, at: 2 } satisfies ThreadOrigin);
+    await s.chains.append(t, { at: 9, state: "waiting", waitingFrom: david.identity });
     await s.close();
 
     const raw = new DatabaseSync(path);

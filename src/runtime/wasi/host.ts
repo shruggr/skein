@@ -1,9 +1,13 @@
 // wasi_snapshot_preview1 over a Vfs, for one process (one wasm instance).
-// Nothing here touches the host: the filesystem is the tree, stdio are
-// in-memory pipes, the clock is a value passed in, randomness is a seeded
-// generator, and every sleep returns at once. Imports that may need to load a
-// record from the store are async and wrapped with JSPI (WebAssembly.Suspending),
-// so reads resolve lazily without preloading the tree.
+// This is the runtime's kernel surface (docs/ARCH.md, "The kernel"). Nothing
+// here touches a host: the filesystem is the tree, stdio are in-memory pipes,
+// and every sleep returns at once. clock_time_get and random_get are handed to
+// the caller (`clock`, `random`), which may answer them from inside or route
+// them out as attested syscalls (runtime/syscalls.ts) — a message out, a
+// signed reply back — suspending the instance meanwhile. Imports that may wait
+// (a record from the store, an attested reply, a spawned child) are async and
+// wrapped with JSPI (WebAssembly.Suspending): the wasm stack is parked on the
+// promise and resumes when it settles.
 
 import { NotFound } from "../store.ts";
 import { E, FsError, checkName, type DirNode, type FileNode, type Node, type Vfs } from "./vfs.ts";
@@ -83,10 +87,10 @@ export interface ProcessOptions {
   env: string[];
   /** fd → description. 0-2 are stdio; the preopen for "/" is added at 3. */
   stdio: [Desc, Desc, Desc];
-  /** The attested time, nanoseconds since the epoch. Every clock read returns it. */
-  time: bigint;
-  /** Deterministic bytes for random_get. */
-  random: (buf: Uint8Array) => void;
+  /** clock_time_get(id): nanoseconds. May suspend (an attested read). */
+  clock: (id: number) => bigint | Promise<bigint>;
+  /** random_get: `len` bytes. May suspend (the first call per thread fetches an attested seed). */
+  random: (len: number) => Uint8Array | Promise<Uint8Array>;
   /** Host services for the shell (the "skein" import module). */
   spawn?: (req: SpawnRequest) => Promise<number | undefined>;
   commandExists?: (name: string) => boolean;
@@ -120,7 +124,8 @@ export class Process {
   }
 
   private writeStat(buf: number, ino: number, ft: number, size: number): void {
-    const dv = this.dv, t = this.o.time;
+    // Git records no times, so neither does the tree: every file reads as the epoch.
+    const dv = this.dv, t = 0n;
     dv.setBigUint64(buf, 1n, true);
     dv.setBigUint64(buf + 8, BigInt(ino), true);
     dv.setUint8(buf + 16, ft);
@@ -147,9 +152,7 @@ export class Process {
       args_get: (argv: number, buf: number) => this.strings(this.o.args, argv, buf),
       environ_sizes_get: (n: number, size: number) => this.sizes(this.o.env, n, size),
       environ_get: (env: number, buf: number) => this.strings(this.o.env, env, buf),
-      clock_time_get: (_id: number, _prec: bigint, out: number) => { this.dv.setBigUint64(out, this.o.time, true); return 0; },
       clock_res_get: (_id: number, out: number) => { this.dv.setBigUint64(out, 1n, true); return 0; },
-      random_get: (buf: number, len: number) => { this.o.random(this.u8.subarray(buf, buf + len)); return 0; },
       proc_exit: (code: number) => { throw new ProcExit(code); },
       proc_raise: () => E.NOSYS,
       sched_yield: () => 0,
@@ -203,6 +206,17 @@ export class Process {
     };
 
     const async: Record<string, Fn> = {
+      // Read memory views only after the await: a suspension may have grown (and so detached) memory.
+      clock_time_get: async (id: number, _prec: bigint, out: number) => {
+        const t = await this.o.clock(id);
+        this.dv.setBigUint64(out, t, true);
+        return 0;
+      },
+      random_get: async (buf: number, len: number) => {
+        const bytes = await this.o.random(len);
+        this.u8.set(bytes.subarray(0, len), buf);
+        return 0;
+      },
       fd_filestat_get: (fd: number, buf: number) => this.fdFilestat(fd, buf),
       fd_readdir: (fd: number, buf: number, len: number, cookie: bigint, used: number) => this.fdReaddir(fd, buf, len, cookie, used),
       path_open: (dirfd: number, dirflags: number, p: number, pl: number, oflags: number, rb: bigint, _ri: bigint, fdflags: number, out: number) =>

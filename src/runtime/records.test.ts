@@ -7,7 +7,7 @@ import {
   genesis, isGenesis, isMessage, isProgram, matches, messageBytes, messageDigest, program,
   signMessage, subscription, subscriptionIn, verifyMessage, type Message,
 } from "./records.ts";
-import { ephemeralWallet, identityOf, signerFor } from "./wallet.ts";
+import { ephemeralWallet, identityOf, signerFor } from "../wallet.ts";
 
 const wasm = encode({ kind: "blob", n: 1 }).cid;
 
@@ -57,27 +57,27 @@ test("subscription: matches from/to/body kind/body subset; carried signed by adm
   const stranger = await signerFor(ephemeralWallet(), "david");
   const admin = await signerFor(w, "admin");
   const line = { kind: "line", text: "yes", meta: { lang: "en", n: 1 }, ref: wasm };
-  const fromDavid = await signMessage(david, { to: admin.identity, seq: 0, body: line });
-  const fromStranger = await signMessage(stranger, { to: admin.identity, seq: 0, body: line });
+  const fromDavid = await signMessage(david, { to: admin.identity, seq: 0, at: 1, body: line });
+  const fromStranger = await signMessage(stranger, { to: admin.identity, seq: 0, at: 1, body: line });
 
   const sub = subscription({ from: david.identity, kind: "line" }, "resolve-waiter", 1);
   assert.ok(matches(sub, fromDavid));
   assert.ok(!matches(sub, fromStranger));
-  assert.ok(matches(subscription({ to: admin.identity }, wasm), fromStranger));
-  assert.ok(!matches(subscription({ to: "elsewhere" }, wasm), fromDavid));
-  assert.ok(!matches(subscription({ kind: "tick" }, wasm), fromDavid));
-  assert.ok(matches(subscription({ body: { meta: { lang: "en" } } }, wasm), fromDavid));   // nested subset
-  assert.ok(matches(subscription({ body: { ref: encode({ kind: "blob", n: 1 }).cid } }, wasm), fromDavid)); // CIDs by value
-  assert.ok(!matches(subscription({ body: { meta: { lang: "fr" } } }, wasm), fromDavid));
-  assert.ok(!matches(subscription({ body: { missing: undefined } }, wasm), fromDavid));
-  assert.ok(matches(subscription({}, wasm), fromDavid));
+  assert.ok(matches(subscription({ to: admin.identity }, wasm, 1), fromStranger));
+  assert.ok(!matches(subscription({ to: "elsewhere" }, wasm, 1), fromDavid));
+  assert.ok(!matches(subscription({ kind: "tick" }, wasm, 1), fromDavid));
+  assert.ok(matches(subscription({ body: { meta: { lang: "en" } } }, wasm, 1), fromDavid));   // nested subset
+  assert.ok(matches(subscription({ body: { ref: encode({ kind: "blob", n: 1 }).cid } }, wasm, 1), fromDavid)); // CIDs by value
+  assert.ok(!matches(subscription({ body: { meta: { lang: "fr" } } }, wasm, 1), fromDavid));
+  assert.ok(!matches(subscription({ body: { missing: undefined } }, wasm, 1), fromDavid));
+  assert.ok(matches(subscription({}, wasm, 1), fromDavid));
 
-  const carrying = await signMessage(admin, { seq: 0, body: sub });
+  const carrying = await signMessage(admin, { seq: 0, at: 1, body: sub });
   assert.equal(await verifyMessage(carrying), true);
   assert.ok(subscriptionIn(carrying, admin.identity));
   assert.equal(subscriptionIn(carrying, david.identity), undefined);  // only the admin's count
   assert.equal(subscriptionIn(fromDavid, david.identity), undefined); // not a subscription
-  assert.throws(() => subscription({ from: 7 as unknown as string }, wasm), TypeError);
+  assert.throws(() => subscription({ from: 7 as unknown as string }, wasm, 1), TypeError);
 });
 
 test("program and genesis: validated on construction", async () => {
@@ -89,5 +89,5 @@ test("program and genesis: validated on construction", async () => {
   const root = await identityOf(ephemeralWallet(), "root");
   assert.ok(isGenesis(genesis(root, "ripper", 1)));
   assert.deepEqual(genesis(root, undefined, 1), { kind: "genesis", root, at: 1 });
-  assert.throws(() => genesis("nope"), TypeError);
+  assert.throws(() => genesis("nope", undefined, 1), TypeError);
 });

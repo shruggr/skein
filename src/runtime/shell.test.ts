@@ -5,7 +5,9 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CID } from "multiformats/cid";
-import { diff, gitSha, lookup, materialize, readFile, scan, type TreeBlocks } from "./tree.ts";
+import { diff, gitSha, lookup, readFile, type TreeBlocks } from "./tree.ts";
+import { materialize, scan } from "../dev/scan.ts";
+import { wasmModules } from "../testkit.ts";
 import { runShell, type ShellOptions } from "./shell.ts";
 
 class MapBlocks implements TreeBlocks {
@@ -37,9 +39,9 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   await fs.symlink("a.txt", join(dir, "link"));
   const blocks = new MapBlocks();
   const tree = await scan(blocks, dir);
-  const sh = async (cmd: string, o: Partial<ShellOptions> = {}) => {
+  const sh = async (cmd: string, o: Partial<Omit<ShellOptions, "modules">> = {}) => {
     const t0 = performance.now();
-    const r = await runShell(blocks, { tree, cmd, ...o });
+    const r = await runShell(blocks, { tree, cmd, modules: await wasmModules(), ...o });
     return { ...r, out: text(r.stdout), err: text(r.stderr), ms: performance.now() - t0 };
   };
   return { dir, blocks, tree, sh };
@@ -158,7 +160,7 @@ test("a 2 MB file round-trips", async (t) => {
   await fs.writeFile(join(dir, "big.bin"), big);
   const tree = await scan(blocks, dir);
   const t0 = performance.now();
-  const r = await runShell(blocks, { tree, cmd: "cp big.bin copy.bin && cat big.bin | cat > piped.bin && wc -c < big.bin && md5sum big.bin copy.bin piped.bin | cut -c1-32 | uniq | wc -l" });
+  const r = await runShell(blocks, { tree, modules: await wasmModules(), cmd: "cp big.bin copy.bin && cat big.bin | cat > piped.bin && wc -c < big.bin && md5sum big.bin copy.bin piped.bin | cut -c1-32 | uniq | wc -l" });
   t.diagnostic(`2 MB cp + pipe + md5sum: ${(performance.now() - t0).toFixed(0)}ms`);
   assert.equal(text(r.stdout), "2097152\n1\n", text(r.stderr));
   assert.ok(Buffer.from(await readFile(blocks, r.tree, "piped.bin")).equals(big));

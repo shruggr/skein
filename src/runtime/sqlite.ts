@@ -6,7 +6,7 @@
 
 import { DatabaseSync, type SQLInputValue, type SQLOutputValue } from "node:sqlite";
 import { CID, decode, encode, fmt, fromBytes, isCID, parse } from "./cid.ts";
-import { NotFound, Rejected, type Filter, type Handle, type Store } from "./store.ts";
+import { NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 import { verifyMessageSync, type Message } from "./records.ts";
 
@@ -23,7 +23,6 @@ CREATE TABLE IF NOT EXISTS chains (
   tip         BLOB NOT NULL REFERENCES blocks(cid),
   seq         INTEGER NOT NULL,   -- tip's seq; 0 = no updates yet
   kind        TEXT,               -- origin.kind
-  runner      TEXT,               -- threads: origin.runner
   thread      BLOB,               -- nodes: origin.thread
   launched_by BLOB,               -- origin.launchedBy
   at          INTEGER,            -- origin.at
@@ -77,10 +76,24 @@ CREATE INDEX IF NOT EXISTS messages_at      ON messages(at);
 CREATE INDEX IF NOT EXISTS messages_from_at ON messages("from", at);
 CREATE INDEX IF NOT EXISTS messages_to_at   ON messages("to", at) WHERE "to" IS NOT NULL;
 
--- Not derived and not rebuilt: runner bookkeeping, overwritten freely.
+-- Not derived and not rebuilt: program bookkeeping, overwritten freely.
 CREATE TABLE IF NOT EXISTS handles (
   thread BLOB PRIMARY KEY,
   json   TEXT NOT NULL
+) WITHOUT ROWID;
+
+-- Not derived and not rebuilt: the input log. Each row is one log-entry record
+-- (also in blocks); admission order is not recoverable from the messages.
+CREATE TABLE IF NOT EXISTS log (
+  n       INTEGER PRIMARY KEY,
+  cid     BLOB NOT NULL UNIQUE,
+  message BLOB NOT NULL UNIQUE
+);
+
+-- Not derived: the scheduler's cursor and similar single values.
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
 ) WITHOUT ROWID;
 `;
 
@@ -126,8 +139,8 @@ export function openStore(path: string): SqliteStore {
     blockAll: db.prepare("SELECT cid, bytes FROM blocks ORDER BY cid"),
 
     chainIns: db.prepare(`INSERT OR IGNORE INTO chains
-      (origin, tip, seq, kind, runner, thread, launched_by, at, tip_at, program)
-      VALUES (:origin, :origin, 0, :kind, :runner, :thread, :launched_by, :at, :at, :program)`),
+      (origin, tip, seq, kind, thread, launched_by, at, tip_at, program)
+      VALUES (:origin, :origin, 0, :kind, :thread, :launched_by, :at, :at, :program)`),
     chainGet: db.prepare("SELECT tip, seq, kind FROM chains WHERE origin = ?"),
     chainMove: db.prepare(`UPDATE chains SET tip = :tip, seq = :seq,
       state = :state, until = :until, waiting_on = :waiting_on, tip_at = :tip_at, waiting_from = :waiting_from
@@ -152,7 +165,6 @@ export function openStore(path: string): SqliteStore {
     query: db.prepare(`SELECT origin FROM chains WHERE
           (:kind IS NULL OR kind = :kind)
       AND (:thread IS NULL OR thread = :thread)
-      AND (:runner IS NULL OR runner = :runner)
       AND (:program IS NULL OR program = :program)
       AND (:states IS NULL OR state IN (SELECT value FROM json_each(:states)))
       AND (:parentless IS NULL OR (kind = 'thread' AND (launched_by IS NULL) = :parentless))
@@ -169,7 +181,6 @@ export function openStore(path: string): SqliteStore {
     messageAt: db.prepare(`SELECT cid FROM messages WHERE "from" = ? AND seq = ?`),
     resting: db.prepare(`SELECT origin FROM chains
       WHERE kind = 'thread' AND (state IS NULL OR state <> 'finished')
-      AND (:runner IS NULL OR runner = :runner)
       AND (:states IS NULL OR state IN (SELECT value FROM json_each(:states)))
       ORDER BY at, origin LIMIT :limit`),
     due: db.prepare(`SELECT origin FROM chains
@@ -189,6 +200,14 @@ export function openStore(path: string): SqliteStore {
     wipeUpdates: db.prepare("DELETE FROM updates"),
     wipeChains: db.prepare("DELETE FROM chains"),
     wipeMessages: db.prepare("DELETE FROM messages"),
+
+    logTip: db.prepare("SELECT n, cid FROM log ORDER BY n DESC LIMIT 1"),
+    logOf: db.prepare("SELECT cid FROM log WHERE message = ?"),
+    logIns: db.prepare("INSERT INTO log (n, cid, message) VALUES (?, ?, ?)"),
+    logFrom: db.prepare("SELECT cid FROM log WHERE n >= ? ORDER BY n"),
+    isMessage: db.prepare("SELECT 1 AS x FROM messages WHERE cid = ?"),
+    metaGet: db.prepare("SELECT value FROM meta WHERE key = ?"),
+    metaSet: db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"),
   };
 
   function tx<T>(fn: () => T): T {
@@ -295,8 +314,9 @@ export function openStore(path: string): SqliteStore {
         return tx(() => {
           const row = chainRow(origin);
           const seq = (row.seq as number) + 1;
-          // The chain fields are the store's to set; a caller's copies are overridden.
-          const update = { ...body, origin, prev: fromBytes(row.tip as Uint8Array), seq, at: Date.now() };
+          // The chain fields are the store's to set; a caller's copies are overridden. `at` is the caller's: no clock here.
+          if (typeof body.at !== "number") throw new TypeError("append: body.at (log time) is required");
+          const update = { ...body, origin, prev: fromBytes(row.tip as Uint8Array), seq };
           const cid = put(update);
           q.updateIns.run(cid.bytes, origin.bytes, seq);
           writeEdges(origin, seq, updateEdges(update));
@@ -324,6 +344,32 @@ export function openStore(path: string): SqliteStore {
       },
     },
 
+    log: {
+      async append(message) {
+        return tx(() => {
+          const had = q.logOf.get(message.bytes);
+          if (had) return fromBytes(had.cid as Uint8Array);
+          if (!q.isMessage.get(message.bytes)) throw new NotFound(`${fmt(message)} (not a stored message)`);
+          const last = q.logTip.get();
+          const n = last ? (last.n as number) + 1 : 0;
+          const entry: LogEntry = { kind: "log", prev: last ? fromBytes(last.cid as Uint8Array) : null, n, message };
+          const cid = put(entry);
+          q.logIns.run(n, cid.bytes, message.bytes);
+          return cid;
+        });
+      },
+      async tip() {
+        const last = q.logTip.get();
+        return last ? fromBytes(last.cid as Uint8Array) : undefined;
+      },
+      async *entries(from = 0) {
+        for (const r of q.logFrom.all(from)) {
+          const cid = fromBytes(r.cid as Uint8Array);
+          yield { cid, entry: getBlock<LogEntry>(cid) };
+        }
+      },
+    },
+
     edges: {
       async refsFrom(cid) {
         return q.refsFrom.all(cid.bytes).map((r) => toRef(r.to as string, r.rel as string, r.locator));
@@ -347,7 +393,6 @@ export function openStore(path: string): SqliteStore {
         yield* rows(q.query, {
           kind: f.kind ?? null,
           thread: f.thread?.bytes ?? null,
-          runner: f.runner ?? null,
           program: f.program?.bytes ?? null,
           states: f.state ? JSON.stringify(f.state) : null,
           parentless: f.parentless === undefined ? null : f.parentless ? 1 : 0,
@@ -426,7 +471,6 @@ export function openStore(path: string): SqliteStore {
 
       async *resting(f = {}) {
         yield* rows(q.resting, {
-          runner: f.runner ?? null,
           states: f.state ? JSON.stringify(f.state) : null,
           limit: f.limit ?? -1,
         });
@@ -442,6 +486,11 @@ export function openStore(path: string): SqliteStore {
 
       async *waitingFrom(identity) {
         for (const r of q.waitingFrom.all(identity)) yield fromBytes(r.origin as Uint8Array);
+      },
+
+      cursor: {
+        async get() { return (q.metaGet.get("cursor")?.value as number | undefined) ?? 0; },
+        async set(n) { q.metaSet.run("cursor", n); },
       },
     },
 
@@ -471,7 +520,6 @@ function originMeta(cid: CID, b: Obj): Record<string, SQLInputValue> {
   return {
     origin: cid.bytes,
     kind: str(b.kind),
-    runner: b.kind === "thread" ? str(b.runner) : null,
     thread: b.kind === "node" ? cidBytes(b.thread) : null,
     launched_by: cidBytes(b.launchedBy),
     at: num(b.at),

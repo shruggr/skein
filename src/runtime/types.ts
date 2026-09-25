@@ -27,11 +27,9 @@ export interface Ref {
 
 // ---------------------------------------------------------------- threads
 
-export type RunnerKind = "model" | "shell" | "loop" | "david" | (string & {});
-
 export type ThreadState =
   | "running"
-  | "waiting"        // on threads (waitingOn) and/or a time (until)
+  | "waiting"        // on threads (waitingOn), a time (until), or a reply from an identity (waitingFrom)
   | "finished"
   | "errored"
   | "out-of-context"
@@ -39,13 +37,12 @@ export type ThreadState =
 
 export interface ThreadOrigin {
   kind: "thread";
-  runner: RunnerKind;
-  spec: unknown;      // what the runner needs; shape is per runner kind
-  program?: CID;      // v2: the program record to run (docs/VM.md); runner/spec remain until v1 is gone
-  args?: unknown;     // v2: the program's input, per its `inputs` schema
-  launchedBy?: CID;   // the node or message that launched it; absent = parent-less (v1 only)
-  at: Ms;
-  nonce?: string;     // distinguishes otherwise identical launches (same spec, parent, ms)
+  program: CID;       // the program record to run (docs/VM.md)
+  args: unknown;      // the program's input, per its `inputs` schema
+  launchedBy?: CID;   // the message (or node) that launched it; the runtime always sets it
+  input?: CID;        // the log entry being processed when it was launched; the runtime always sets it
+  at: Ms;             // log time: the `at` of that entry's message, never a clock read
+  nonce?: string;     // distinguishes otherwise identical launches
 }
 
 export interface ThreadUpdate {
@@ -59,7 +56,10 @@ export interface ThreadUpdate {
   until?: Ms;         // wake time (nudges, retries, David)
   resolution?: CID;   // node holding the result, when finished
   error?: { kind: "cant-do" | "blew-up"; message: string };
-  note?: string;      // free text a runner attaches ("ran on ripper/qwen38")
+  note?: string;      // free text a program attaches
+  input?: CID;        // the log entry whose processing appended this
+  refs?: Ref[];       // e.g. {rel: "awaits", to: <request message>} on an attested wait
+  result?: unknown;   // program output, when finished (recomputable: cache, see docs/VM.md "What is stored")
 }
 
 // ---------------------------------------------------------------- nodes
@@ -87,6 +87,7 @@ export interface NodeOrigin {
   refs: Ref[];
   at: Ms;
   nonce?: string;      // distinguishes otherwise identical nodes
+  input?: CID;         // the log entry whose processing appended this
 }
 
 export interface NodeUpdate {
@@ -96,6 +97,7 @@ export interface NodeUpdate {
   at: Ms;
   emit?: Emission;
   rest?: Rest;
+  input?: CID;         // the log entry whose processing appended this
 }
 
 export type Origin = ThreadOrigin | NodeOrigin;

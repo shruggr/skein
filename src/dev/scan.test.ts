@@ -7,9 +7,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { CID } from "multiformats/cid";
 import {
-  diff, gitCid, gitSha, hashBlob, hashTree, lookup, materialize, readFile, scan, walk,
+  diff, gitCid, gitSha, hashBlob, hashTree, lookup, readFile, walk,
   type TreeBlocks,
-} from "./tree.ts";
+} from "../runtime/tree.ts";
+import { materialize, scan } from "./scan.ts";
 
 // Local on purpose: memory.ts is in flux. Verifies every put, so a wrong object never passes silently.
 class MapBlocks implements TreeBlocks {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { PrivateKey, ProtoWallet } from "@bsv/sdk";
-import { signMessage, verifyMessage } from "./records.ts";
+import { signMessage, verifyMessage } from "./runtime/records.ts";
 import { connectWallet, ephemeralWallet, identityOf, remoteWallet, rootIdentity, signerFor } from "./wallet.ts";
 
 const HEX = /^0[23][0-9a-f]{64}$/;

@@ -16,8 +16,10 @@ async function all<T>(it: AsyncIterable<T>): Promise<T[]> {
 }
 const strs = (cids: CID[]) => cids.map(fmt);
 
-function thread(runner: string, at: number, launchedBy?: CID): ThreadOrigin {
-  return { kind: "thread", runner, spec: { n: at }, ...(launchedBy ? { launchedBy } : {}), at };
+const P = (name: string) => encode({ kind: "program", name }).cid;
+
+function thread(program: string, at: number, launchedBy?: CID): ThreadOrigin {
+  return { kind: "thread", program: P(program), args: { n: at }, ...(launchedBy ? { launchedBy } : {}), at };
 }
 
 function withStore(fn: (s: SqliteStore) => Promise<void>) {
@@ -48,11 +50,11 @@ test("chains: open, append, tip, history, originOf", withStore(async (s) => {
   assert.ok((await s.chains.tip(o)).equals(o));
   assert.deepEqual(strs(await all(s.chains.history(o))), [fmt(o)]);
 
-  const before = Date.now();
-  const u1 = await s.chains.append(o, { state: "running" });
-  // Chain fields are the store's; a caller's attempt to set them is ignored.
-  const u2 = await s.chains.append(o, { state: "waiting", until: 5, seq: 99, prev: o, at: 1, origin: u1 });
-  const u3 = await s.chains.append(o, { state: "finished", note: undefined });
+  const u1 = await s.chains.append(o, { state: "running", at: 101 });
+  // Chain fields are the store's; a caller's attempt to set them is ignored. `at` is the caller's (log time).
+  const u2 = await s.chains.append(o, { state: "waiting", until: 5, seq: 99, prev: o, at: 102, origin: u1 });
+  const u3 = await s.chains.append(o, { state: "finished", note: undefined, at: 103 });
+  await assert.rejects(s.chains.append(o, { state: "running" }), /at/); // no clock in the store
 
   const b1 = await s.get<ThreadUpdate>(u1);
   const b2 = await s.get<ThreadUpdate>(u2);
@@ -60,7 +62,7 @@ test("chains: open, append, tip, history, originOf", withStore(async (s) => {
   assert.ok(b1.origin.equals(o) && b1.prev.equals(o) && b1.seq === 1);
   assert.ok(b2.origin.equals(o) && b2.prev.equals(u1) && b2.seq === 2 && b2.until === 5);
   assert.ok(b3.prev.equals(u2) && b3.seq === 3 && !("note" in b3));
-  assert.ok(b1.at >= before && b2.at >= b1.at && b3.at >= b2.at);
+  assert.deepEqual([b1.at, b2.at, b3.at], [101, 102, 103]);
 
   assert.ok((await s.chains.tip(o)).equals(u3));
   assert.deepEqual(strs(await all(s.chains.history(o))), strs([o, u1, u2, u3]));
@@ -72,7 +74,7 @@ test("chains: open, append, tip, history, originOf", withStore(async (s) => {
 
   const stray = await s.put({ kind: "page" });
   await assert.rejects(s.chains.tip(stray), NotFound);
-  await assert.rejects(s.chains.append(stray, { state: "running" }), NotFound);
+  await assert.rejects(s.chains.append(stray, { at: 5000, state: "running" }), NotFound);
   await assert.rejects(s.chains.originOf(stray), NotFound);
   await assert.rejects(all(s.chains.history(stray)), NotFound);
 }));
@@ -80,7 +82,7 @@ test("chains: open, append, tip, history, originOf", withStore(async (s) => {
 test("chains: concurrent appends on one origin get seq 1..n with no gaps", withStore(async (s) => {
   const o = await s.chains.open(thread("loop", 1));
   const n = 50;
-  const cids = await Promise.all(Array.from({ length: n }, (_, i) => s.chains.append(o, { state: "running", note: `n${i}` })));
+  const cids = await Promise.all(Array.from({ length: n }, (_, i) => s.chains.append(o, { at: 5000, state: "running", note: `n${i}` })));
   const seqs = (await Promise.all(cids.map((c) => s.get<ThreadUpdate>(c)))).map((b) => b.seq).sort((a, b) => a - b);
   assert.deepEqual(seqs, Array.from({ length: n }, (_, i) => i + 1));
   const hist = await all(s.chains.history(o));
@@ -98,7 +100,7 @@ test("chains: two connections to one file interleave without forking", async () 
   const b = openStore(f.path);
   try {
     const o = await a.chains.open(thread("shell", 1));
-    await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).chains.append(o, { state: "running", note: `${i}` })));
+    await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).chains.append(o, { at: 5000, state: "running", note: `${i}` })));
     const hist = await all(b.chains.history(o));
     assert.equal(hist.length, 21);
     for (let i = 1; i < hist.length; i++) assert.equal((await a.get<ThreadUpdate>(hist[i])).seq, i);
@@ -114,16 +116,16 @@ test("edges.query: filters and newest-first order", withStore(async (s) => {
   const t2 = await s.chains.open(thread("model", 130, n1));
   const n2 = await s.chains.open({ kind: "node", thread: root, prev: [n1], request: "again", refs: [], at: 140 } satisfies NodeOrigin);
   const other = await s.chains.open(thread("david", 150));          // parentless
-  await s.chains.append(t1, { state: "finished" });
-  await s.chains.append(t2, { state: "running" });
-  await s.chains.append(root, { state: "waiting", waitingOn: [t1, t2] });
+  await s.chains.append(t1, { at: 5000, state: "finished" });
+  await s.chains.append(t2, { at: 5000, state: "running" });
+  await s.chains.append(root, { at: 5000, state: "waiting", waitingOn: [t1, t2] });
 
   const q = async (f: Parameters<Store["edges"]["query"]>[0]) => strs(await all(s.edges.query(f)));
   assert.deepEqual(await q({}), strs([other, n2, t2, t1, n1, root]));
   assert.deepEqual(await q({ kind: "thread" }), strs([other, t2, t1, root]));
   assert.deepEqual(await q({ kind: "node" }), strs([n2, n1]));
   assert.deepEqual(await q({ thread: root }), strs([n2, n1]));
-  assert.deepEqual(await q({ runner: "shell" }), strs([t1]));
+  assert.deepEqual(await q({ program: P("shell") }), strs([t1]));
   assert.deepEqual(await q({ state: ["running", "waiting"] }), strs([t2, root]));
   assert.deepEqual(await q({ state: ["finished"] }), strs([t1]));
   assert.deepEqual(await q({ parentless: true }), strs([other, root]));
@@ -145,11 +147,11 @@ test("edges: refsFrom / refsTo from node refs, launchedBy and updates", withStor
   } satisfies NodeOrigin);
   const t = await s.chains.open(thread("shell", 3, n));
   const res = await s.put({ kind: "result" });
-  await s.chains.append(n, { emit: { type: "launched", thread: t } });
-  await s.chains.append(n, { rest: { state: "waiting", waitingOn: [t] } });
-  await s.chains.append(root, { state: "waiting", waitingOn: [t] });
-  await s.chains.append(root, { state: "waiting", waitingOn: [t] }); // repeated pointer collapses
-  await s.chains.append(t, { state: "finished", resolution: res });
+  await s.chains.append(n, { at: 5000, emit: { type: "launched", thread: t } });
+  await s.chains.append(n, { at: 5000, rest: { state: "waiting", waitingOn: [t] } });
+  await s.chains.append(root, { at: 5000, state: "waiting", waitingOn: [t] });
+  await s.chains.append(root, { at: 5000, state: "waiting", waitingOn: [t] }); // repeated pointer collapses
+  await s.chains.append(t, { at: 5000, state: "finished", resolution: res });
 
   const from = await s.edges.refsFrom(n);
   assert.equal(from.length, 4);
@@ -177,15 +179,14 @@ test("live: resting, due, waitersOn", withStore(async (s) => {
   const later = await s.chains.open(thread("david", 5));
   const waiter = await s.chains.open(thread("loop", 6));
   await s.chains.open({ kind: "node", thread: waiter, prev: [], request: "", refs: [], at: 7 } satisfies NodeOrigin);
-  await s.chains.append(run, { state: "running" });
-  await s.chains.append(done, { state: "running" });
-  await s.chains.append(done, { state: "finished" });
-  await s.chains.append(nudge, { state: "waiting", until: 1000 });
-  await s.chains.append(later, { state: "waiting", until: 2000 });
-  await s.chains.append(waiter, { state: "waiting", waitingOn: [run, done] });
+  await s.chains.append(run, { at: 5000, state: "running" });
+  await s.chains.append(done, { at: 5000, state: "running" });
+  await s.chains.append(done, { at: 5000, state: "finished" });
+  await s.chains.append(nudge, { at: 5000, state: "waiting", until: 1000 });
+  await s.chains.append(later, { at: 5000, state: "waiting", until: 2000 });
+  await s.chains.append(waiter, { at: 5000, state: "waiting", waitingOn: [run, done] });
 
   assert.deepEqual(strs(await all(s.live.resting())), strs([fresh, run, nudge, later, waiter]));
-  assert.deepEqual(strs(await all(s.live.resting({ runner: "david" }))), strs([nudge, later]));
   assert.deepEqual(strs(await all(s.live.resting({ state: ["running"] }))), strs([run]));
   assert.deepEqual(strs(await all(s.live.resting({ limit: 2 }))), strs([fresh, run]));
   assert.deepEqual(strs(await all(s.live.resting({ state: ["finished"] }))), []);
@@ -199,8 +200,8 @@ test("live: resting, due, waitersOn", withStore(async (s) => {
   assert.deepEqual(strs(await all(s.live.waitersOn(nudge))), []);
 
   // Only the tip counts: once the waiter moves on it stops waiting and stops being due.
-  await s.chains.append(waiter, { state: "running" });
-  await s.chains.append(nudge, { state: "running" });
+  await s.chains.append(waiter, { at: 5000, state: "running" });
+  await s.chains.append(nudge, { at: 5000, state: "running" });
   assert.deepEqual(strs(await all(s.live.waitersOn(run))), []);
   assert.deepEqual(strs(await all(s.live.due(5000))), strs([later]));
 }));
@@ -231,12 +232,12 @@ test("edges.rebuild reproduces tips, updates and edges from blocks alone", async
     const t = await s.chains.open(thread("shell", 12, n));
     await s.chains.open(thread("david", 13));                         // never appended to
     const custom = await s.chains.open({ kind: "log", at: 14 });      // non-thread chain with updates
-    await s.chains.append(custom, { line: "hello" });
-    await s.chains.append(n, { emit: { type: "launched", thread: t } });
-    await s.chains.append(n, { rest: { state: "waiting", waitingOn: [t] } });
-    await s.chains.append(root, { state: "waiting", waitingOn: [t], until: 99 });
-    await s.chains.append(t, { state: "running" });
-    await s.chains.append(t, { state: "finished", resolution: n });
+    await s.chains.append(custom, { at: 5000, line: "hello" });
+    await s.chains.append(n, { at: 5000, emit: { type: "launched", thread: t } });
+    await s.chains.append(n, { at: 5000, rest: { state: "waiting", waitingOn: [t] } });
+    await s.chains.append(root, { at: 5000, state: "waiting", waitingOn: [t], until: 99 });
+    await s.chains.append(t, { at: 5000, state: "running" });
+    await s.chains.append(t, { at: 5000, state: "finished", resolution: n });
     await s.live.handles.set(t, { pid: 7 });
     await s.put({ kind: "page", markdown: "not a chain" });
 
@@ -263,8 +264,8 @@ test("edges.rebuild reproduces tips, updates and edges from blocks alone", async
 test("edges.query orderBy tipAt: most recent update first; origins without updates use their own at", withStore(async (s) => {
   const a = await s.chains.open(thread("loop", 100));
   const b = await s.chains.open(thread("loop", 200));
-  const c = await s.chains.open(thread("loop", Date.now() + 60_000)); // no updates: tip_at = at, in the future
-  await s.chains.append(a, { state: "running" }); // a's tip_at = now
+  const c = await s.chains.open(thread("loop", 60_000)); // no updates: tip_at = at, the latest
+  await s.chains.append(a, { at: 5000, state: "running" }); // a's tip_at = 5000
   const q = async (f: Parameters<Store["edges"]["query"]>[0]) => strs(await all(s.edges.query(f)));
   assert.deepEqual(await q({ kind: "thread" }), strs([c, b, a]));
   assert.deepEqual(await q({ kind: "thread", orderBy: "tipAt" }), strs([c, a, b]));
@@ -274,7 +275,7 @@ test("edges.query orderBy tipAt: most recent update first; origins without updat
 test("findByPrefix and bytes", withStore(async (s) => {
   const a = await s.chains.open(thread("loop", 1));
   const b = await s.chains.open(thread("shell", 2));
-  const u = await s.chains.append(a, { state: "running" });
+  const u = await s.chains.append(a, { at: 5000, state: "running" });
   const plain = await s.put({ kind: "page", markdown: "x" });
   assert.deepEqual(strs(await s.findByPrefix(fmt(a))), [fmt(a)]);
   assert.deepEqual(strs(await s.findByPrefix(fmt(b).slice(0, 20))), [fmt(b)]);
@@ -292,7 +293,7 @@ test("a file from before tip_at is migrated: column added, index rebuilt", async
   try {
     const s = openStore(f.path);
     const t = await s.chains.open(thread("loop", 10));
-    const u = await s.chains.append(t, { state: "running" });
+    const u = await s.chains.append(t, { at: 5000, state: "running" });
     await s.close();
     const raw = new DatabaseSync(f.path);
     raw.exec("DROP INDEX chains_tip_at; ALTER TABLE chains DROP COLUMN tip_at;");

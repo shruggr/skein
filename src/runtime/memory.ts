@@ -6,8 +6,8 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import * as dagCbor from "@ipld/dag-cbor";
 import { encode } from "./cid.ts";
-import { NotFound, Rejected, type Filter, type Handle, type Store } from "./store.ts";
-import type { Block, Emission, Ms, NodeOrigin, Ref, RunnerKind, ThreadOrigin, ThreadState } from "./types.ts";
+import { NotFound, Rejected, type Filter, type Handle, type LogEntry, type Store } from "./store.ts";
+import type { Block, Emission, Ms, NodeOrigin, Ref, ThreadOrigin, ThreadState } from "./types.ts";
 import { verifyMessageSync, type Message } from "./records.ts";
 
 interface Meta {
@@ -17,7 +17,6 @@ interface Meta {
   at: Ms;
   tipAt: Ms;              // at of the latest block in the chain
   thread?: string;        // nodes: owning thread
-  runner?: RunnerKind;    // threads
   program?: string;       // threads
   parentless?: boolean;   // threads
   state?: ThreadState;    // threads: tip state; undefined = never started
@@ -41,6 +40,9 @@ export function memoryStore(): Store {
   const messages = new Map<string, MessageMeta>(); // cid → row
   const bySeq = new Map<string, string>();          // `${from} ${seq}` → cid
   const locks = new Map<string, Promise<unknown>>();
+  const log: CID[] = [];                            // entry CIDs, in order; not derived, survives rebuild
+  const logged = new Map<string, CID>();            // message → entry
+  let cursor = 0;
   let order = 0;
 
   async function put(value: Block): Promise<CID> {
@@ -76,7 +78,7 @@ export function memoryStore(): Store {
     const kind = kindOf(b);
     if (kind === "thread") {
       const t = b as ThreadOrigin;
-      meta.set(cid.toString(), { cid, kind: "thread", order: order++, at: t.at, tipAt: t.at, runner: t.runner, program: t.program?.toString(), parentless: !t.launchedBy });
+      meta.set(cid.toString(), { cid, kind: "thread", order: order++, at: t.at, tipAt: t.at, program: t.program?.toString(), parentless: !t.launchedBy });
       // launchedBy is the inverse of the node's "launched" edge; store it that way round.
       if (t.launchedBy) addEdge({ from: t.launchedBy, rel: "launched", to: cid });
     } else if (kind === "node") {
@@ -151,8 +153,9 @@ export function memoryStore(): Store {
         return locked(origin.toString(), async () => {
           const chain = chains.get(origin.toString());
           if (!chain) throw new NotFound(origin.toString());
-          const update = { at: Date.now(), ...body, origin, prev: chain[chain.length - 1], seq: chain.length };
-          const cid = await put(update);
+          if (typeof body.at !== "number") throw new TypeError("append: body.at (log time) is required");
+          const update = { ...body, origin, prev: chain[chain.length - 1], seq: chain.length };
+          const cid = await put(update as unknown as Block);
           chain.push(cid);
           originOf.set(cid.toString(), origin);
           indexUpdate(origin, update);
@@ -173,6 +176,25 @@ export function memoryStore(): Store {
         if (o) return o;
         const b = await get(cid);
         return CID.asCID((b as { origin?: unknown }).origin) ?? cid;
+      },
+    },
+
+    log: {
+      async append(message) {
+        const had = logged.get(message.toString());
+        if (had) return had;
+        if (!messages.has(message.toString())) throw new NotFound(`${message} (not a stored message)`);
+        const n = log.length;
+        const entry: LogEntry = { kind: "log", prev: n ? log[n - 1] : null, n, message };
+        const cid = encode(entry).cid;
+        bytes.set(cid.toString(), encode(entry).bytes);
+        log.push(cid);
+        logged.set(message.toString(), cid);
+        return cid;
+      },
+      async tip() { return log.at(-1); },
+      async *entries(from = 0) {
+        for (let i = from; i < log.length; i++) yield { cid: log[i], entry: await get<LogEntry>(log[i]) };
       },
     },
 
@@ -197,7 +219,6 @@ export function memoryStore(): Store {
         const hits = [...meta.values()]
           .filter((m) => !f.kind || m.kind === f.kind)
           .filter((m) => !f.thread || m.thread === f.thread.toString())
-          .filter((m) => !f.runner || m.runner === f.runner)
           .filter((m) => !f.program || m.program === f.program.toString())
           .filter((m) => !f.state || (m.kind === "thread" && m.state !== undefined && f.state.includes(m.state)))
           .filter((m) => f.parentless === undefined || (m.kind === "thread" && m.parentless === f.parentless))
@@ -238,7 +259,6 @@ export function memoryStore(): Store {
       async *resting(f = {}) {
         const hits = threads()
           .filter((m) => m.state !== "finished")
-          .filter((m) => !f.runner || m.runner === f.runner)
           .filter((m) => !f.state || (m.state !== undefined && f.state.includes(m.state)))
           .sort((a, b) => a.order - b.order);
         yield* hits.slice(0, f.limit ?? hits.length).map((m) => m.cid);
@@ -252,6 +272,10 @@ export function memoryStore(): Store {
       },
       async *waitingFrom(identity) {
         yield* threads().filter((m) => m.waitingFrom === identity).sort((a, b) => a.order - b.order).map((m) => m.cid);
+      },
+      cursor: {
+        async get() { return cursor; },
+        async set(n) { cursor = n; },
       },
     },
 

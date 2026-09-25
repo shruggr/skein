@@ -1,6 +1,6 @@
 # wasm/
 
-The programs the wasm shell (`src/shell.ts`) runs. Both are WASI preview1
+The programs the wasm shell (`src/runtime/shell.ts`) runs. Both are WASI preview1
 modules (`wasm32-wasip1`), built with Rust 1.98.1 and stripped of symbols.
 `scripts/build-wasm.sh` rebuilds both from the pinned sources plus
 `patches/`, byte-identically on the same machine (paths of the build
