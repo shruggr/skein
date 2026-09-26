@@ -307,3 +307,17 @@ the store before the step ends; only the send is still fire-once.
 - A "claim" (first caller becomes admin, one-shot) suits local single-user
   setups only. Commercial hosting gets a host API route to register an
   instance, behind payment middleware; pricing later.
+
+## Backlog from the feature walkthrough (David, 2026-09-26)
+
+- Named heads (`main`) as record chains; chat/run default to `main`; a
+  thread's tree changes are private until the head is advanced.
+- `git` as a thin program over skein state (real commit objects; heads as
+  branches; keep a staging `index` tree per head so models' habits work).
+- Inference peer with pricing: prepaid balance per identity, top-ups on an
+  "exhausted + quote" reply, the loop paying under an instance-side spend
+  policy per peer identity (the wallet's per-origin monthly cap is only a
+  backstop).
+- Inference peer keeps the conversation graph on its side and receives only
+  graph updates per call instead of the whole chat; gives native fork and
+  revert of conversations.
