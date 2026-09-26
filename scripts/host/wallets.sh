@@ -7,8 +7,12 @@
 #   host      127.0.0.1:3324  HOME=~/.skein/host-wallet-home    key ~/.skein/host-wallet.env   (signs every log entry)
 # The 1sat CLI has no config-dir flag or env var: CONFIG_DIR is $HOME/.1sat/cli,
 # so the owner, infer and host wallets get their own HOME. Writes
-# ~/.skein/{instance,owner,infer,host-wallet}.identity. (The host wallet is not
-# the messagebox's `1sat serve`, whose key is host.env: see messagebox.sh.)
+# ~/.skein/{instance,owner-dev,infer,host-wallet}.identity, and ~/.skein/owner.identity
+# too if there is none yet — that one is the *configured* owner (a genesis's
+# `owner`), which may be some other key (e.g. the Yours wallet) that up.sh only
+# controls through the page, not through owner-dev.identity's wallet (3322).
+# (The host wallet is not the messagebox's `1sat serve`, whose key is
+# host.env: see messagebox.sh.)
 #   scripts/host/wallets.sh            # start whatever is not running (background)
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -33,7 +37,8 @@ start() { # name port home envfile
 }
 
 [ -f "$skein/dev-wallet.env" ] || { echo "missing $skein/dev-wallet.env (instance key; see README-wallet.md)" >&2; exit 1; }
-genkey "$skein/owner-wallet.env" > "$skein/owner.identity"
+genkey "$skein/owner-wallet.env" > "$skein/owner-dev.identity"
+[ -f "$skein/owner.identity" ] || cp "$skein/owner-dev.identity" "$skein/owner.identity"
 genkey "$skein/dev-wallet.env" > "$skein/instance.identity"
 genkey "$skein/infer-wallet.env" > "$skein/infer.identity"
 genkey "$skein/host-wallet.env" > "$skein/host-wallet.identity"
@@ -41,7 +46,8 @@ start instance 3321 "$HOME" "$skein/dev-wallet.env"
 start owner 3322 "$skein/owner-home" "$skein/owner-wallet.env"
 start infer 3323 "$skein/infer-home" "$skein/infer-wallet.env"
 start host 3324 "$skein/host-wallet-home" "$skein/host-wallet.env"
+owner=$(cat "$skein/owner.identity"); devowner=$(cat "$skein/owner-dev.identity")
 echo "instance identity: $(cat "$skein/instance.identity")"
-echo "owner identity:    $(cat "$skein/owner.identity")"
+echo "owner identity:    $owner$([ "$owner" = "$devowner" ] || echo " (not the dev wallet: $devowner)")"
 echo "infer identity:    $(cat "$skein/infer.identity")"
 echo "host identity:     $(cat "$skein/host-wallet.identity")"

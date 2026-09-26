@@ -18,7 +18,7 @@ scripts/host/up.sh      # all of it, idempotent: wallets, messagebox, grants, ac
 
 Files the scripts write for the client and the runtime:
 
-- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/infer.identity`, `~/.skein/host-wallet.identity`, `~/.skein/host.identity` (the messagebox's) — public keys, one line each
+- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity`, `~/.skein/host-wallet.identity`, `~/.skein/host.identity` (the messagebox's) — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once, kept after; `owner-dev.identity` is always the owner wallet's (3322) own key, so `up.sh` can tell whether they're the same wallet.
 - `~/.skein/infer.json` — the inference peer's providers, `{"ripper": {"baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm"}}` (written if absent)
 - `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`
 - `~/.skein/*.env` — `PRIVATE_KEY_WIF=…`, mode 0600, created by `genkey.ts` only if absent. Never printed, never committed.
@@ -47,6 +47,9 @@ Two things `1sat serve` needs that it does not do by itself:
    over AuthFetch through each identity's wallet: `david` (owner) and `skein`
    (instance), `infer` (the inference peer). The host also issues a BRC-52 handle certificate
    (`certifier` = host identity), so `skein@localhost` is a real handle here.
+   `up.sh` can only register the owner through the dev owner wallet (3322); if
+   `owner.identity` names some other key (e.g. the Yours wallet), it prints a
+   one-line notice instead and that key must register itself from `web/` (Register).
 
 Host config, written once by `messagebox.sh` under `HOME=~/.skein/host-home`:
 
