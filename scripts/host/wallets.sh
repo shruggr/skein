@@ -16,14 +16,19 @@ skein="${SKEIN_HOME:-$HOME/.skein}"
 mkdir -p "$skein/logs" "$skein/owner-home" "$skein/infer-home" "$skein/host-wallet-home"
 genkey() { node --experimental-strip-types --no-warnings "$here/genkey.ts" "$1"; }
 
+# A wallet-api answering HTTP, not just a listening socket: getVersion needs no
+# grant and no wallet key, so it is safe to poll before any permission exists.
+# It 400s with no Origin header (wallet-api requires one, like HTTPWalletJSON sends).
+answers() { curl -fsS -m 1 -o /dev/null -X POST "http://127.0.0.1:$1/getVersion" -H 'Content-Type: application/json' -H 'Origin: http://skein-up' -d '{}'; }
+
 start() { # name port home envfile
   local name=$1 port=$2 home=$3 env=$4
-  if ss -ltn 2>/dev/null | grep -q "127.0.0.1:$port "; then echo "$name wallet: already on 127.0.0.1:$port"; return; fi
+  if answers "$port"; then echo "$name wallet: already on 127.0.0.1:$port"; return; fi
   ( set -a; . "$env"; set +a
     export HOME="$home" ONESAT_DAPP_PORT="$port"
     nohup 1sat serve wallet-api >> "$skein/logs/wallet-$name.log" 2>&1 & )
-  for _ in $(seq 60); do ss -ltn | grep -q "127.0.0.1:$port " && break; sleep 0.5; done
-  ss -ltn | grep -q "127.0.0.1:$port " || { echo "$name wallet did not start; see $skein/logs/wallet-$name.log" >&2; exit 1; }
+  for _ in $(seq 20); do answers "$port" && break; sleep 0.5; done
+  answers "$port" || { echo "$name wallet did not start; see $skein/logs/wallet-$name.log" >&2; exit 1; }
   echo "$name wallet: started on 127.0.0.1:$port"
 }
 
