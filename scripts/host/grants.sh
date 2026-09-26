@@ -21,7 +21,8 @@ o grant skein-client --protocol "server hmac" --level 2 --counterparty self     
 o grant skein-client --protocol "auth message signature" --level 2 --counterparty "$host"    # BRC-104 with the host
 
 # Instance wallet, origin skein (the runtime's) — default HOME. Transport grants
-# for its own messagebox session, plus the envelope grants its handlers need.
+# for its own messagebox session, plus the envelope grants: decrypting what
+# arrives, signing and encrypting what it sends.
 i() { q 1sat permissions "$@"; }
 i grant skein --protocol "identity key retrieval" --level 1
 i grant skein --protocol "server hmac" --level 2 --counterparty self
@@ -29,8 +30,6 @@ i grant skein --protocol "auth message signature" --level 2 --counterparty "$hos
 i grant skein --protocol "messagebox" --level 1
 i grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone
 i grant skein --protocol "message encryption" --level 2 --counterparty "$owner"
-# The runtime's own signatures (src/runtime/log.ts): every log entry.
-i grant skein --protocol "skein log" --level 2 --counterparty anyone
 i grant skein --protocol "message encryption" --level 2 --counterparty "$infer"   # `infer` requests and `completions` replies
 
 # Inference peer wallet, origin skein-infer — HOME=~/.skein/infer-home. Its own
@@ -42,3 +41,10 @@ f grant skein-infer --protocol "auth message signature" --level 2 --counterparty
 f grant skein-infer --protocol "messagebox" --level 1
 f grant skein-infer --protocol "metanet handles envelope" --level 2 --counterparty anyone
 f grant skein-infer --protocol "message encryption" --level 2 --counterparty "$inst"
+
+# Host wallet, origin skein-host — HOME=~/.skein/host-wallet-home. It signs every
+# log entry (src/runtime/log.ts): the host's word that a message arrived, or a
+# deadline came, at the stamped time. No messagebox session of its own.
+h() { HOME="$skein/host-wallet-home" q 1sat permissions "$@"; }
+h grant skein-host --protocol "identity key retrieval" --level 1
+h grant skein-host --protocol "skein log" --level 2 --counterparty anyone

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Everything the client and the instance need on David's machine, idempotent:
 # the wallets, the messagebox host, the wallet grants, and host accounts for
-# the owner (david), the instance (skein) and the inference peer (infer); and a
+# the owner (david), the instance (skein) and the inference peer (infer) — the
+# host wallet (3324) only signs log entries and needs none; and a
 # default provider map for the peer (~/.skein/infer.json) if there is none. See README.md.
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"

@@ -72,9 +72,10 @@ test("program and genesis: validated", () => {
   assert.throws(() => program({ name: "x", code: { ts: "", wasm } as never, inputs: {}, services: [], description: "" }), TypeError);
   assert.throws(() => program({ name: "", code: { ts: "" }, inputs: {}, services: [], description: "" }), TypeError);
   const id = PrivateKey.fromRandom().toPublicKey().toString();
-  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, programs: { w: wasm }, subscriptions: [{ match: { sender: id, box: "run" }, handler: wasm }] };
+  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, host: id, programs: { w: wasm }, subscriptions: [{ match: { sender: id, box: "run" }, handler: wasm }] };
   assert.ok(isGenesis(g));
   assert.ok(!isGenesis({ ...g, identity: "nope" }));
+  assert.ok(!isGenesis({ ...g, host: undefined }), "the host identity is required");
   assert.ok(!isGenesis({ ...g, subscriptions: [{ match: {}, handler: "x" }] }));
 });
 

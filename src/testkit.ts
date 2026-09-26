@@ -87,6 +87,8 @@ export interface Instance {
   instanceKey: PrivateKey;
   wallet: WalletInterface;
   identity: string;
+  /** The host: its wallet signs every log entry; its identity is the genesis's `host`. */
+  host: { key: PrivateKey; wallet: WalletInterface; identity: string };
   owner: { key: PrivateKey; wallet: WalletInterface; identity: string };
   lines: string[];
 }
@@ -94,30 +96,33 @@ export interface Instance {
 /**
  * A memory-store instance with the modules installed, a genesis stamped T0
  * routing `owner`'s run/objects boxes, a runtime and its edge on `hub`.
- * Keys are passed in so a second instance (a restart) can reuse them.
+ * Keys are passed in so a second instance (a restart) can reuse them. The
+ * host wallet is ephemeral, like the instance's.
  */
 export async function instance(o: {
-  hub?: Hub; store?: Store; instanceKey?: PrivateKey; ownerKey?: PrivateKey; clock?: ReturnType<typeof scriptClock>;
+  hub?: Hub; store?: Store; instanceKey?: PrivateKey; ownerKey?: PrivateKey; hostKey?: PrivateKey; clock?: ReturnType<typeof scriptClock>;
   config?: Partial<InstanceConfig>; start?: boolean; freshnessMs?: number;
 } = {}): Promise<Instance> {
   const instanceKey = o.instanceKey ?? PrivateKey.fromRandom();
   const ownerKey = o.ownerKey ?? PrivateKey.fromRandom();
+  const hostKey = o.hostKey ?? PrivateKey.fromRandom();
   const wallet = ephemeralWallet(instanceKey);
   const owner = { key: ownerKey, wallet: ephemeralWallet(ownerKey), identity: ownerKey.toPublicKey().toString() };
+  const host = { key: hostKey, wallet: ephemeralWallet(hostKey), identity: hostKey.toPublicKey().toString() };
   const hub = o.hub ?? messageBoxHub();
   const clock = o.clock ?? scriptClock();
   let store = o.store;
   if (!store) {
     store = memoryStore();
     await installWasm(store);
-    await ensureGenesis(store, wallet, { owner: owner.identity, ...o.config }, T0);
+    await ensureGenesis(store, wallet, host.wallet, { owner: owner.identity, ...o.config }, T0);
   }
   const lines: string[] = [];
-  const rt = new Runtime({ store, wallet, now: clock.now, log: (l) => lines.push(l) });
+  const rt = new Runtime({ store, wallet, host: host.wallet, now: clock.now, log: (l) => lines.push(l) });
   const edge = new Edge({ runtime: rt, wallet, box: hub.as(instanceKey.toPublicKey().toString()), now: clock.now, freshnessMs: o.freshnessMs, log: (l) => lines.push(l) });
   rt.outbox = edge;
   if (o.start !== false) await rt.start();
-  return { store, rt, edge, hub, clock, instanceKey, wallet, identity: instanceKey.toPublicKey().toString(), owner, lines };
+  return { store, rt, edge, hub, clock, instanceKey, wallet, identity: instanceKey.toPublicKey().toString(), host, owner, lines };
 }
 
 /** The owner's client: seal `body` (dag-cbor of a value, or bytes) to the instance and deliver it into `box`. */

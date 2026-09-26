@@ -5,7 +5,7 @@ are an ordered log of signed entries — BRC-169 envelopes admitted from the
 host's messagebox, and wakes for sleepers; its only outputs are envelopes.
 Programs run inside it: handler programs (Go, `wasip1`) per box, and a
 bash-compatible wasm shell over git-shaped trees. Time and randomness are not
-inputs: the runtime stamps each log entry with its own clock and signs it, and
+inputs: the host stamps each log entry with its clock and signs it, and
 programs see that stamp (+1 ns per read) as "now" and a stream keyed by the
 entry's CID as random bytes. Replaying the log reproduces the graph, with no
 wallet.
@@ -48,7 +48,7 @@ wallet, wake timers).
 ## Running it
 
 Needs Node 26 (JSPI, `node:sqlite`, type stripping) and the dev host
-(`scripts/host/README.md`: instance and owner wallets, the messagebox at
+(`scripts/host/README.md`: the instance, owner, infer and host wallets, the messagebox at
 http://127.0.0.1:8100/messagebox, grants).
 
 ```
@@ -75,10 +75,13 @@ The instance wallet (`1sat serve wallet-api`, origin `skein`) needs, besides
 the transport grants in `scripts/host/grants.sh`:
 
 ```
-1sat permissions grant skein --protocol "skein log" --level 2 --counterparty anyone      # every log entry's signature
 1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone  # outbound envelopes
 1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty <owner>      # inbound and outbound content
 ```
+
+The host wallet (127.0.0.1:3324, origin `skein-host`, `SKEIN_HOST_WALLET_URL`)
+signs every log entry: `"identity key retrieval"` and
+`"skein log" --level 2 --counterparty anyone`.
 
 Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.sh`
 (the build is reproducible; the pins are the modules' raw CIDs).
@@ -87,8 +90,8 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 
 | record | shape |
 |---|---|
-| log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake, sig}` — `sig` by the instance identity over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
-| genesis | `{kind: "genesis", identity, handle, domain, owner, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, collect?: [box]}` |
+| log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake, sig}` — `sig` by the host identity (the genesis's `host`) over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
+| genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, collect?: [box]}` |
 | envelope | the BRC-169 envelope's signed part: its JSON object without `content`, as dag-cbor (its CID is the message id, the client's `replyTo`) |
 | body | the plaintext content: the sender's dag-cbor bytes, CIDv1 dag-cbor/sha2-256 — the digest is the envelope's signed `contentHash` |
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |

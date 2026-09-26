@@ -272,7 +272,7 @@ test("restart mid-turn: the runtime stops while the loop awaits the peer; a new 
   await i.rt.stop();
 
   await peer.poll(); // the peer answers while the instance is down
-  const b = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hub: i.hub, clock: i.clock });
+  const b = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
   await settle(b);
   const p2 = inferPeer(b, inferKey, (peer as unknown as { o: { fetch: typeof fetch } }).o.fetch);
   await p2.poll();

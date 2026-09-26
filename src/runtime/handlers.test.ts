@@ -92,10 +92,10 @@ test("run-handler: sealed run → messagebox → decrypted at admission, plainte
   assert.ok((body.replyTo as CID).equals(run), "replyTo is the run envelope's CID as the client computes it");
   assert.ok((body.tree as CID).equals(root), "nothing written: the tree is unchanged");
 
-  // The log: genesis, the objects envelope, the run envelope — each signed by the instance.
+  // The log: genesis, the objects envelope, the run envelope — each signed by the host.
   const log = await readLog(i.store);
   assert.deepEqual(log.map(({ entry }) => entry.genesis ? "genesis" : entry.box), ["genesis", "objects", "run"]);
-  for (const { entry } of log) assert.ok(verifyEntry(entry, i.identity), `entry #${entry.n} verifies against the instance identity`);
+  for (const { entry } of log) assert.ok(verifyEntry(entry, i.host.identity), `entry #${entry.n} verifies against the host identity`);
   const runEntry = log[2].entry;
   assert.ok(runEntry.envelope!.equals(run), "the envelope record's CID is the client's envelope CID");
   const sent = { cmd: "cat README; ls | head -3; date -u +%s", tree: root };
@@ -180,7 +180,7 @@ test("sleep: the shell rests until a wake entry, one per wake; the handler repli
   await i.rt.idle();
   const e = (await readLog(i.store)).at(-1)!.entry;
   assert.ok(e.wake!.equals(sh) && e.envelope === undefined && w!.equals((await i.store.log.tip())!), "a wake entry names the thread and nothing else");
-  assert.ok(verifyEntry(e, i.identity));
+  assert.ok(verifyEntry(e, i.host.identity));
   u = await tipOf(i.store, sh);
   assert.equal(u.state, "finished");
   const [{ body }] = await results(i);
@@ -207,7 +207,7 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   // Same keys, same clock; crash mid-sleep. Re-send the reference's exact
   // messages (a fresh hub): each signed part as logged, its body re-encrypted
   // for the wire, so the inputs are identical.
-  const a = await instance({ instanceKey: ref.instanceKey, ownerKey: ref.owner.key });
+  const a = await instance({ instanceKey: ref.instanceKey, ownerKey: ref.owner.key, hostKey: ref.host.key });
   for (const { entry } of (await readLog(ref.store)).slice(1)) {
     if (!entry.envelope) continue;
     const signed = await ref.store.get(entry.envelope);
@@ -220,9 +220,9 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   assert.ok(sh.equals(refShell), "same shell thread");
   assert.equal((await tipOf(a.store, sh)).state, "waiting");
   await a.rt.stop();
-  await appendEntry(a.store, a.wallet, { wake: sh }, [T0[0] + 5, 0]); // the timer fired while nothing ran
+  await appendEntry(a.store, a.host.wallet, { wake: sh }, [T0[0] + 5, 0]); // the timer fired while nothing ran
 
-  const b = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hub: a.hub, clock: a.clock });
+  const b = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hostKey: a.host.key, hub: a.hub, clock: a.clock });
   await b.rt.idle();
   t.diagnostic(b.lines.join("\n"));
   assert.ok(b.lines.some((l) => l.includes("re-executing")));
@@ -238,7 +238,7 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   await b.rt.stop();
 
   // A second restart after it all finished does nothing.
-  const c = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hub: a.hub, clock: a.clock });
+  const c = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hostKey: a.host.key, hub: a.hub, clock: a.clock });
   await c.rt.idle();
   assert.ok(!c.lines.some((l) => l.includes("re-executing") || l.includes("stepping")));
   await c.rt.stop();
@@ -255,7 +255,7 @@ test("restart before processing: entries admitted, runtime gone before it steppe
   await i.edge.poll(); // admits (signs entries) but the runtime never started
   assert.equal((await readLog(i.store)).length, 3);
   assert.equal((await threads(i.store)).length, 0);
-  const j = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hub: i.hub, clock: i.clock });
+  const j = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
   await j.rt.idle();
   const [{ body }] = await results(j);
   assert.equal(text(body.stdout), "README\nsrc\n");

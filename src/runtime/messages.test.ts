@@ -126,7 +126,7 @@ for (const [name, open] of stores) {
     const wasm = encode({ kind: "blob" }).cid;
     const p = program({ name: "grep", code: { wasm }, inputs: { type: "object", properties: { pattern: { type: "string" } } }, services: [], description: "search" });
     const id = await rootIdentity(ephemeralWallet());
-    const g: Genesis = { kind: "genesis", identity: id, handle: "ripper", domain: "localhost", owner: id, programs: { grep: encode(p).cid }, subscriptions: [{ match: { box: "run" }, handler: encode(p).cid }] };
+    const g: Genesis = { kind: "genesis", identity: id, handle: "ripper", domain: "localhost", owner: id, host: id, programs: { grep: encode(p).cid }, subscriptions: [{ match: { box: "run" }, handler: encode(p).cid }] };
     assert.ok(isGenesis(g));
     for (const r of [p, g]) {
       const cid = await s.put(r);

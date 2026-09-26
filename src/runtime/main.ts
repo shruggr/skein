@@ -4,8 +4,10 @@
 // (bin/skein-runtime fills it from ~/.skein):
 //   SKEIN_HOME            default ~/.skein
 //   SKEIN_DB              the store file, default $SKEIN_HOME/runtime.db
-//   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway key; nothing it signs survives)
+//   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway keys for the instance and the host; nothing they sign survives)
 //   SKEIN_WALLET_URL      the instance's BRC-100 endpoint, default http://127.0.0.1:3321 (`1sat serve wallet-api`), origin "skein"
+//   SKEIN_HOST_WALLET_URL the host's BRC-100 endpoint, default http://127.0.0.1:3324, origin "skein-host": signs every
+//                         log entry (the host's word that a message arrived, or a deadline came, at the stamped time)
 //   SKEIN_OWNER           the owner's identity key (a new instance's genesis routes its `run`/`objects` boxes)
 //   SKEIN_OWNER_HANDLE    the owner's handle for outbound envelopes, default david@localhost
 //   SKEIN_INFER           the inference peer's identity key (a new instance's genesis `peers.infer`)
@@ -15,7 +17,7 @@
 //   SKEIN_POLL_MS         how often to collect the boxes, default 1000
 //   SKEIN_FRESHNESS_MS    accept envelopes created within ± this of now, default 600000
 //
-// The wallet connection (../wallet.ts) and the messagebox edge (inbox.ts) are
+// The wallet connections (../wallet.ts) and the messagebox edge (inbox.ts) are
 // the runtime's edges; everything else here is inside the machine.
 
 import { connectWallet, ephemeralWallet } from "../wallet.ts";
@@ -31,19 +33,21 @@ const dbPath = env.SKEIN_DB || `${home}/runtime.db`;
 const say = (line: string) => process.stdout.write(`${line}\n`);
 const die = (msg: string): never => { process.stderr.write(`skein-runtime: ${msg}\n`); process.exit(1); };
 
-const wallet = env.SKEIN_WALLET === "ephemeral" ? ephemeralWallet() : await connectWallet({ kind: "remote", url: env.SKEIN_WALLET_URL, originator: "skein" });
+const ephemeral = env.SKEIN_WALLET === "ephemeral";
+const wallet = ephemeral ? ephemeralWallet() : await connectWallet({ kind: "remote", url: env.SKEIN_WALLET_URL, originator: "skein" });
+const host = ephemeral ? ephemeralWallet() : await connectWallet({ kind: "remote", url: env.SKEIN_HOST_WALLET_URL || "http://127.0.0.1:3324", originator: "skein-host" });
 const [user, domain = "localhost"] = (env.SKEIN_HANDLE || "skein@localhost").split("@");
 const store = openStore(dbPath); // SQLite creates the file; the directory must exist (bin/skein-runtime makes it)
 
 if (!(await store.log.tip())) {
   if (!env.SKEIN_OWNER) die("an empty store needs SKEIN_OWNER (the owner's identity key) for its genesis");
-  const g = await ensureGenesis(store, wallet, { owner: env.SKEIN_OWNER!, handle: user, domain, peers: env.SKEIN_INFER ? { infer: env.SKEIN_INFER } : undefined });
+  const g = await ensureGenesis(store, wallet, host, { owner: env.SKEIN_OWNER!, handle: user, domain, peers: env.SKEIN_INFER ? { infer: env.SKEIN_INFER } : undefined });
   say(`genesis ${g.entry}`);
 }
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const runtime = new Runtime({
-  store, wallet, log: say,
+  store, wallet, host, log: say,
   // Sleepers see time pass only through a wake entry: write one at each deadline.
   onSleep: (thread: CID, until: number) => {
     clearTimeout(timers.get(thread.toString()));
@@ -55,6 +59,8 @@ const runtime = new Runtime({
 });
 await runtime.start();
 const g = runtime.genesis!;
+const { publicKey: hostKey } = await host.getPublicKey({ identityKey: true });
+if (hostKey !== g.host) die(`the host wallet (${hostKey}) is not this instance's host (${g.host}): its entries would not verify`);
 
 const [ownerUser, ownerDomain = "localhost"] = (env.SKEIN_OWNER_HANDLE || "david@localhost").split("@");
 const [inferUser, inferDomain = "localhost"] = (env.SKEIN_INFER_HANDLE || "infer@localhost").split("@");
@@ -75,7 +81,7 @@ if (env.SKEIN_MESSAGEBOX) {
 } else {
   say("SKEIN_MESSAGEBOX unset: no edge; nothing will be admitted");
 }
-say(`skein runtime ${g.identity} (${g.handle}@${g.domain}) · owner ${short(g.owner)}${g.peers?.infer ? ` · infer ${short(g.peers.infer)}` : " · no infer peer"} · db ${dbPath} · boxes ${(await runtime.boxes()).join(",")} · state ${(await runtime.tip())?.toString()}`);
+say(`skein runtime ${g.identity} (${g.handle}@${g.domain}) · host ${short(g.host)} · owner ${short(g.owner)}${g.peers?.infer ? ` · infer ${short(g.peers.infer)}` : " · no infer peer"} · db ${dbPath} · boxes ${(await runtime.boxes()).join(",")} · state ${(await runtime.tip())?.toString()}`);
 
 const stop = async (sig: string) => {
   say(`${sig}: stopping`);

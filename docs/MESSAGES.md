@@ -89,10 +89,18 @@ recipient alone.
   bytes, so its sha2-256 digest *is* `contentHash`), with the box name and the
   time it observed. The ciphertext is not kept. Arrival is non-deterministic
   only until admission; the admitted order is the order of record.
-- **Every log entry is signed** by the instance's identity (`createSignature`
-  through its wallet, counterparty `anyone`), admissions and wakes alike, so
-  every stamp and every kick traces to a signature a third party can check.
-  The signature is an attested syscall result: recorded, never recomputed.
+- **Every log entry is signed by the host**, admissions and wakes alike: an
+  entry is the host's statement — "message *n* arrived at *t*", "wake at *t*"
+  — so the host wallet signs it (`createSignature`, protocol `[2, "skein
+  log"]`, key `1`, counterparty `anyone`), not the instance's. The genesis
+  records the host's identity (`host`, beside `owner`), and every stamp and
+  every kick traces to a signature a third party can check against it. Where
+  a provider hosts instances for users, this is the provider's word, and what
+  a checkpoint later binds to chain time. The signature is recorded, never
+  recomputed. The instance wallet signs nothing per message; it signs only
+  what the instance itself sends. (One wallet may be host, instance and
+  owner at once, e.g. a whole VM in a browser window: the roles collapse and
+  nothing breaks.)
 - **Routing** is by **subscription** on `(sender.identityKey, box)`, in log
   order, first match wins. The handler is the **box's handler program**, not
   a tool: `(sender: david, box: run) → run-handler`.

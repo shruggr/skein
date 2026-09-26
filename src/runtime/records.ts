@@ -137,9 +137,11 @@ export function matches(sub: Subscription, sender: Identity, box: string): boole
 
 /**
  * An instance's starting state: the record the first log entry names. Its
- * `identity` is the instance wallet's identity key, which signs every log
- * entry (log.ts); `owner` is the identity it acts for; `programs` are the
- * programs it starts with, by name, and `subscriptions` route its boxes.
+ * `identity` is the instance wallet's identity key, which its outbound
+ * envelopes are signed by; `host` is the identity of the host that delivers
+ * its inputs, which signs every log entry (log.ts); `owner` is the identity
+ * it acts for; `programs` are the programs it starts with, by name, and
+ * `subscriptions` route its boxes.
  */
 export type Genesis = {
   kind: "genesis";
@@ -147,6 +149,7 @@ export type Genesis = {
   handle: string;
   domain: string;
   owner: Identity;
+  host: Identity;
   programs: Record<string, CID>;
   subscriptions: Subscription[];
   /** Peers by role, e.g. `infer`: the identity a program sends that kind of request to. */
@@ -158,7 +161,7 @@ export type Genesis = {
 };
 
 export function isGenesis(x: unknown): x is Genesis {
-  return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && isIdentity(x.owner)
+  return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && isIdentity(x.owner) && isIdentity(x.host)
     && typeof x.handle === "string" && typeof x.domain === "string"
     && isObj(x.programs) && Object.values(x.programs).every(isCID)
     && Array.isArray(x.subscriptions) && x.subscriptions.every(isSubscription)

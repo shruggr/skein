@@ -1,7 +1,7 @@
 // The scheduler: the log consumer (docs/ARCH.md, "The kernel"; docs/MESSAGES.md).
 //
 //   for each log entry after the cursor, in order:
-//     check its signature against the instance identity;
+//     check its signature against the host identity (the genesis's `host`);
 //     genesis  → the starting state: programs and subscriptions;
 //     envelope → a reply first: if its plaintext body (a record the entry
 //                names) has `replyTo`, it goes to the thread whose tip
@@ -48,6 +48,7 @@ import { createHash } from "node:crypto";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode, isCID } from "./cid.ts";
+import type { KeyWallet } from "./identity.ts";
 import { appendEntry, genesisOf, isLogEntry, now as clockNow, short, stampMs, verifyEntry, type EntryBody, type LogEntry } from "./log.ts";
 import { advanceHead, headTree, isHeadName } from "./heads.ts";
 import { runProgram } from "./program.ts";
@@ -92,8 +93,10 @@ export interface Witness { find(thread: CID, step: number, i: number): Promise<A
 
 export interface RuntimeOptions {
   store: Store;
-  /** The instance wallet. Absent on replay: attested answers come from `witness`, and nothing can be admitted. */
+  /** The instance wallet (programs' wallet calls). Absent on replay: attested answers come from `witness`. */
   wallet?: WalletInterface;
+  /** The host wallet: signs every log entry this runtime writes. Absent on replay: nothing can be admitted. */
+  host?: KeyWallet;
   witness?: Witness;
   outbox?: Outbox;
   /** One line per transition. Default: nowhere. */
@@ -151,6 +154,7 @@ interface Resolved { thread: CID; state: ThreadState; result?: unknown; error?: 
 export class Runtime {
   readonly store: Store;
   readonly wallet?: WalletInterface;
+  private readonly host?: KeyWallet;
   outbox?: Outbox;
   private readonly witness?: Witness;
   private readonly say: (line: string) => void;
@@ -172,6 +176,7 @@ export class Runtime {
   constructor(o: RuntimeOptions) {
     this.store = o.store;
     this.wallet = o.wallet;
+    this.host = o.host;
     this.witness = o.witness;
     this.outbox = o.outbox;
     this.say = o.log ?? (() => {});
@@ -263,9 +268,9 @@ export class Runtime {
 
   /** Appends are serialised: each entry extends the tip the previous one made. */
   private append(body: EntryBody): Promise<CID> {
-    const wallet = this.wallet;
-    if (!wallet) return Promise.reject(new Error("runtime: no wallet, cannot sign a log entry"));
-    const p = this.appending.then(() => appendEntry(this.store, wallet, body, this.now()));
+    const host = this.host;
+    if (!host) return Promise.reject(new Error("runtime: no host wallet, cannot sign a log entry"));
+    const p = this.appending.then(() => appendEntry(this.store, host, body, this.now()));
     this.appending = p.catch(() => {});
     return p.then(({ cid }) => { this.kick(); return cid; });
   }
@@ -305,7 +310,7 @@ export class Runtime {
     }
     const g = this.genesis;
     if (!g) throw new Error(`#${e.n}: no genesis`);
-    if (!isLogEntry(e) || !verifyEntry(e, g.identity)) throw new Error(`#${e.n} ${short(entry)}: bad log entry signature; stopping`);
+    if (!isLogEntry(e) || !verifyEntry(e, g.host)) throw new Error(`#${e.n} ${short(entry)}: bad log entry signature; stopping`);
 
     if (e.genesis) { this.say(`#${e.n} genesis: ${g.handle}@${g.domain}, owner ${short(g.owner)}, ${g.subscriptions.length} subscriptions`); return; }
 

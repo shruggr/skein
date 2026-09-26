@@ -4,13 +4,16 @@
 #   instance  127.0.0.1:3321  HOME unchanged (~/.1sat/cli)      key ~/.skein/dev-wallet.env
 #   owner     127.0.0.1:3322  HOME=~/.skein/owner-home          key ~/.skein/owner-wallet.env
 #   infer     127.0.0.1:3323  HOME=~/.skein/infer-home          key ~/.skein/infer-wallet.env  (the inference peer)
+#   host      127.0.0.1:3324  HOME=~/.skein/host-wallet-home    key ~/.skein/host-wallet.env   (signs every log entry)
 # The 1sat CLI has no config-dir flag or env var: CONFIG_DIR is $HOME/.1sat/cli,
-# so the owner and infer wallets get their own HOME. Writes ~/.skein/{instance,owner,infer}.identity.
+# so the owner, infer and host wallets get their own HOME. Writes
+# ~/.skein/{instance,owner,infer,host-wallet}.identity. (The host wallet is not
+# the messagebox's `1sat serve`, whose key is host.env: see messagebox.sh.)
 #   scripts/host/wallets.sh            # start whatever is not running (background)
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 skein="${SKEIN_HOME:-$HOME/.skein}"
-mkdir -p "$skein/logs" "$skein/owner-home" "$skein/infer-home"
+mkdir -p "$skein/logs" "$skein/owner-home" "$skein/infer-home" "$skein/host-wallet-home"
 genkey() { node --experimental-strip-types --no-warnings "$here/genkey.ts" "$1"; }
 
 start() { # name port home envfile
@@ -28,9 +31,12 @@ start() { # name port home envfile
 genkey "$skein/owner-wallet.env" > "$skein/owner.identity"
 genkey "$skein/dev-wallet.env" > "$skein/instance.identity"
 genkey "$skein/infer-wallet.env" > "$skein/infer.identity"
+genkey "$skein/host-wallet.env" > "$skein/host-wallet.identity"
 start instance 3321 "$HOME" "$skein/dev-wallet.env"
 start owner 3322 "$skein/owner-home" "$skein/owner-wallet.env"
 start infer 3323 "$skein/infer-home" "$skein/infer-wallet.env"
+start host 3324 "$skein/host-wallet-home" "$skein/host-wallet.env"
 echo "instance identity: $(cat "$skein/instance.identity")"
 echo "owner identity:    $(cat "$skein/owner.identity")"
 echo "infer identity:    $(cat "$skein/infer.identity")"
+echo "host identity:     $(cat "$skein/host-wallet.identity")"

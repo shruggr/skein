@@ -16,9 +16,10 @@ instance. Its edges are:
 Everything else that looks like an input — a model completion, a tree of
 files, a person's line — is a message from another identity, signed by it.
 
-Time and randomness are different: they are the runtime's own observations,
-not another party's statement. When the runtime admits an input it reads its
-clock and writes the time into that log entry, unsigned and immutable.
+Time and randomness are different: they are not another party's statement
+inside a message. When the host admits an input it reads its clock and writes
+the time into that log entry, which it signs as its own word ("this arrived
+at *t*"; `MESSAGES.md`).
 Inside the machine, "now" is the entry's time plus a counter that advances
 one nanosecond per read (so time always moves forward and never backwards),
 and random bytes are a stream keyed by the entry's CID — no seed is recorded,
