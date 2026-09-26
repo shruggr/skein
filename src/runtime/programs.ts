@@ -26,10 +26,10 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreiafyv2lw5r4jfeczmqiutkjad5s63esrgz3ki2qkunkig6zfdm3lu"),
-  "objects-handler": CID.parse("bafkreickyjujwhudcx422et6rptfsrhrniwpnxaehfo6ze6xaxjpvm6hse"),
-  "head-handler": CID.parse("bafkreibt6c4zhk2myeyrv5m3aydbq3nd6zyk7yobnbqrv3hhodaub5hlq4"),
-  "loop": CID.parse("bafkreiajsrlkhsy5ttuslgrengdgkgd2nk5cabshgqilbnrevpvrf46qa4"),
+  "run-handler": CID.parse("bafkreihvgtiq6ahkiv5t6skhw5qxwjk3fxpvmfdicwezgx7j6fqrmdnbmm"),
+  "objects-handler": CID.parse("bafkreic3dxcstkn3dy6rfvsn6nhcnngfioak6jfxlbnwjpjymarlhfnhgu"),
+  "head-handler": CID.parse("bafkreicubr3evvx34chd2ve44nfeenmzekn7d5abc7ahryfstytlosfiyq"),
+  "loop": CID.parse("bafkreibf3y5c62ocedxaiegfxhr5ixjoayhtf2zdps2ezujhtks363qize"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -49,33 +49,33 @@ export const SHELL_CID = encode(SHELL_PROGRAM).cid;
 export const RUN_HANDLER = program({
   name: "run-handler",
   code: { wasm: MODULES["run-handler"] },
-  inputs: { envelope: "cid", box: "string", sender: "identity" },
-  services: ["wallet"],
-  description: "The `run` box: decrypt {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), reveal it, run the shell, reply in `results`.",
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
+  services: [],
+  description: "The `run` box: read the body {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), run the shell over it, reply in `results`.",
 });
 
 export const OBJECTS_HANDLER = program({
   name: "objects-handler",
   code: { wasm: MODULES["objects-handler"] },
-  inputs: { envelope: "cid", box: "string", sender: "identity" },
-  services: ["wallet"],
-  description: "The `objects` box: decrypt a bundle {records: [{cid, bytes}], root?}, store each record, reveal {of, root?, count}; a root becomes `main` if there is none.",
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
+  services: [],
+  description: "The `objects` box: read the bundle {records: [{cid, bytes}], root?}, store each record; a root becomes `main` if there is none.",
 });
 
 export const HEAD_HANDLER = program({
   name: "head-handler",
   code: { wasm: MODULES["head-handler"] },
-  inputs: { envelope: "cid", box: "string", sender: "identity" },
-  services: ["wallet"],
-  description: "The `head` box: decrypt {name, tree}, reveal it, advance the named head to the tree.",
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
+  services: [],
+  description: "The `head` box: read the body {name, tree}, advance the named head to the tree.",
 });
 
 export const LOOP = program({
   name: "loop",
   code: { wasm: MODULES.loop },
-  inputs: { envelope: "cid", box: "string", sender: "identity" },
-  services: ["wallet", "infer"],
-  description: "The `chat` box: the turn loop. Reveals each turn; asks the `infer` peer; runs `bash` tool calls in the shell; says the answer to David and awaits his reply.",
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
+  services: ["infer"],
+  description: "The `chat` box: the turn loop. Keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell; says the answer to David and awaits his reply.",
 });
 
 /** The programs a genesis names, by name. */

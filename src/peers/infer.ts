@@ -1,8 +1,9 @@
 // The inference peer (docs/ARCH.md, "Everything outside is a peer"): its own
 // identity and wallet, a process of its own. It collects its `infer` box on
-// the messagebox, verifies and opens each BRC-169 envelope with its wallet,
-// calls an OpenAI-compatible endpoint, and seals the completion back to the
-// sender in `completions` with `replyTo` = the request envelope's CID (which
+// the messagebox, verifies and opens each BRC-169 envelope with its wallet
+// (open() checks the plaintext against the sender-signed contentHash), calls an
+// OpenAI-compatible endpoint, and seals the completion back to the sender in
+// `completions` with `replyTo` = the request's id, its signed part's CID (which
 // is how the runtime delivers it to the loop thread awaiting it). It is the
 // only thing in skein that fetches for inference.
 //
@@ -14,9 +15,9 @@
 
 import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { isEnvelope, isoTime, open, seal, verify, type Envelope } from "../envelope.ts";
+import { isEnvelope, isoTime, open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { encode } from "../runtime/cid.ts";
-import type { Listed, MessageBox } from "../runtime/inbox.ts";
+import type { Listed, MessageBox } from "../host/messagebox.ts";
 
 export interface Provider { baseUrl: string; apiKey?: string }
 
@@ -94,7 +95,7 @@ export class InferPeer {
     if (m.sender !== undefined && m.sender !== env.sender.identityKey) return reject("messagebox sender is not envelope.sender");
     const now = (this.o.now ?? Date.now)();
     if (Math.abs(now - Date.parse(env.created)) > (this.o.freshnessMs ?? 10 * 60_000)) return reject(`created ${env.created} is not fresh`);
-    const replyTo = encode(env).cid;
+    const replyTo = encode(signedPart(env)).cid;
     let result: Completion;
     try {
       const req = dagCbor.decode((await open(this.o.wallet, env)).body) as InferRequest;

@@ -8,7 +8,7 @@ import { MessageBoxClient } from "@bsv/message-box-client";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
-import { open, seal, verify, type Envelope } from "../src/envelope.ts";
+import { open, seal, signedPart, verify, type Envelope, type Signed } from "../src/envelope.ts";
 import { chunk } from "../src/client/bundle.ts";
 import { chatBody, conversationFrom, parseSay, type Conversation } from "../src/client/conversation.ts";
 import { hashFiles, importOrder, type PickedFile } from "./tree.ts";
@@ -47,9 +47,9 @@ export interface Result {
   error?: string;
 }
 
-/** The envelope's CID: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded envelope (client.ts envelopeCid). */
-export async function envelopeCid(env: Envelope): Promise<CID> {
-  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(env)));
+/** The message's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part, without `content` (client.ts envelopeCid). */
+export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
+  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
 }
 
 const CONVERSATION = "skein.conversation";

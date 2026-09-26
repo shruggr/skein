@@ -1,7 +1,7 @@
 // The `skein` import namespace for handler programs: the machine's syscalls
 // beyond WASI (docs/ARCH.md, "The kernel"). Pure ones (input, get, put,
-// putblock, launch, await, head, advance) are answered from the store and the thread; the
-// attested ones (wallet, reveal, emit's seal) leave through the runtime and are recorded,
+// putblock, keep, launch, await, head, advance) are answered from the store and the thread; the
+// attested ones (wallet, emit's seal) leave through the runtime and are recorded,
 // and on replay are served from the record (runtime/program.ts).
 //
 // ABI. Pointers and lengths are i32; CIDs are binary. Every import that
@@ -14,10 +14,11 @@
 //   get(cid, cid_len, out, cap) → n            a record's bytes
 //   put(data, len, out, cap) → n               store dag-cbor (re-encoded canonically); → its CID
 //   putblock(cid, cid_len, data, len) → 0      store bytes under a CID minted elsewhere; the hash is checked
-//   reveal(cid, cid_len) → 0                   sign a stored record with the instance identity (attested)
+//   keep(cid, cid_len) → 0                     keep a stored record in the thread's state: listed in this
+//                                              step's update (`kept`), so later steps find it from `tip`
 //   launch(prog, prog_len, args, args_len, out, cap) → n   open a thread; → its origin CID
-//   emit(cid, cid_len, out, cap) → n           seal an outbound envelope named by an emit record (attested:
-//                                              the edge seals it now); → the envelope record's CID. Sent when the step ends.
+//   emit(cid, cid_len, out, cap) → n           sign an outbound envelope named by an emit record (attested:
+//                                              the instance wallet signs it now); → the envelope record's CID. Sent when the step ends.
 //   await(cid, cid_len) → 0                    rest on a reply to an envelope this step emitted: the step ends
 //                                              `waiting` with `awaits`, and an admitted envelope whose body's
 //                                              `replyTo` is that CID is this thread's next input
@@ -36,7 +37,7 @@ export interface ProgramHost {
   get(cid: CID): Promise<Uint8Array>;
   put(bytes: Uint8Array): Promise<CID>;
   putBlock(cid: CID, bytes: Uint8Array): Promise<void>;
-  reveal(cid: CID): Promise<void>;
+  keep(cid: CID): Promise<void>;
   launch(program: CID, args: CID): Promise<CID>;
   emit(cid: CID): Promise<CID>;
   awaitReply(envelope: CID): Promise<void>;
@@ -75,7 +76,7 @@ export function skeinImports(proc: Process, host: ProgramHost): Record<string, u
     get: async(async (c: number, cl: number, p: number, cap: number) => out(await host.get(cid(c, cl)), p, cap)),
     put: async(async (d: number, dl: number, p: number, cap: number) => out((await host.put(bytes(d, dl))).bytes, p, cap)),
     putblock: async(async (c: number, cl: number, d: number, dl: number) => { await host.putBlock(cid(c, cl), bytes(d, dl)); return 0; }),
-    reveal: async(async (c: number, cl: number) => { await host.reveal(cid(c, cl)); return 0; }),
+    keep: async(async (c: number, cl: number) => { await host.keep(cid(c, cl)); return 0; }),
     launch: async(async (pp: number, pl: number, ap: number, al: number, p: number, cap: number) =>
       out((await host.launch(cid(pp, pl), cid(ap, al))).bytes, p, cap)),
     emit: async(async (c: number, cl: number, p: number, cap: number) => out((await host.emit(cid(c, cl))).bytes, p, cap)),

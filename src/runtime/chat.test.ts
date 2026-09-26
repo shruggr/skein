@@ -1,6 +1,6 @@
 // The chat step end to end, in process: David's `chat` → the loop program →
 // `infer` to the inference peer (the real InferPeer over a scripted fetch) →
-// a completion with a bash tool call → the shell → the tool result revealed →
+// a completion with a bash tool call → the shell → the tool result kept →
 // a second `infer` → a plain answer → `say` to David, awaiting his reply → his
 // reply (correlated by `replyTo`, not by subscription) → the next step. Then:
 // stray replies, a restart mid-turn, and replay with no wallet.
@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { open, seal, verify, type Envelope } from "../envelope.ts";
+import { open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { bundlesOf, collect, installWasm, instance, iso, send, type Hub, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
@@ -66,7 +66,7 @@ function inferPeer(i: Instance, key: PrivateKey, f: typeof fetch) {
   return new InferPeer({ log: (l) => i.lines.push(`peer: ${l}`), wallet: ephemeralWallet(key), box: i.hub.as(id), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: f, now: () => stampMs(i.clock.now()) });
 }
 
-async function settle(i: Instance) { await i.edge.poll(); await i.rt.idle(); }
+async function settle(i: Instance) { await i.delivery.poll(); await i.rt.idle(); }
 
 async function loops(store: Store): Promise<CID[]> {
   return collect(store.edges.query({ kind: "thread", program: PROGRAM_CIDS.loop }));
@@ -84,15 +84,15 @@ async function says(i: Instance): Promise<Array<{ env: Envelope; cid: CID; body:
   for (const m of i.hub.pending(i.owner.identity, "say")) {
     const env = JSON.parse(m.body as string) as Envelope;
     assert.ok(verify(env));
-    out.push({ env, cid: encode(env).cid, body: dagCbor.decode((await open(i.owner.wallet, env)).body) as Json });
+    out.push({ env, cid: encode(signedPart(env)).cid, body: dagCbor.decode((await open(i.owner.wallet, env)).body) as Json });
   }
   return out;
 }
 
-/** All reveals of a thread, in order. */
-async function reveals(store: Store, th: CID): Promise<Json[]> {
+/** All turns a thread kept, in order. */
+async function turns(store: Store, th: CID): Promise<Json[]> {
   const out: Json[] = [];
-  for (const u of await history(store, th)) for (const r of (u.reveals as CID[] | undefined) ?? []) out.push(await store.get(r) as Json);
+  for (const u of await history(store, th)) for (const r of (u.kept as CID[] | undefined) ?? []) out.push(await store.get(r) as Json);
   return out;
 }
 
@@ -118,18 +118,18 @@ test("chat: a turn — infer, a bash tool call in the shell, infer again, say to
     answer({ content: "You're welcome." }),
   ]);
   const chat = await send(i, "chat", { text: "What is here?", tree: root });
-  const chatCid = encode(chat).cid;
+  const chatCid = encode(signedPart(chat)).cid;
   await settle(i);
 
-  // Step 1: the user turn revealed, `infer` emitted to the peer, the thread awaits it.
+  // Step 1: the user turn kept, `infer` emitted to the peer, the thread awaits it.
   const [loop] = await loops(i.store);
   let tip = await tipOf(i.store, loop);
   assert.equal(tip.state, "waiting");
   assert.equal(tip.awaits?.length, 1);
   const [req1] = i.hub.pending(inferId, "infer");
-  assert.ok(encode(JSON.parse(req1.body as string)).cid.equals(tip.awaits![0]), "awaits names the sealed infer envelope");
+  assert.ok(encode(signedPart(JSON.parse(req1.body as string))).cid.equals(tip.awaits![0]), "awaits names the signed infer envelope");
 
-  // The peer answers with a tool call; the loop runs it in the shell, reveals the result, asks again.
+  // The peer answers with a tool call; the loop runs it in the shell, keeps the result, asks again.
   const n1 = await peer.poll();
   assert.equal(n1, 1, i.lines.join("\n"));
   assert.equal(i.hub.pending(inferId, "infer").length, 0);
@@ -156,7 +156,7 @@ test("chat: a turn — infer, a bash tool call in the shell, infer again, say to
   assert.equal(tip.state, "waiting");
   assert.ok(tip.awaits![0].equals(s1.cid), "resting on David's reply to the say");
 
-  const rs = await reveals(i.store, loop);
+  const rs = await turns(i.store, loop);
   assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
   assert.ok((rs[0].of as CID).equals(chatCid));
   assert.equal(rs[0].text, "What is here?");
@@ -172,16 +172,16 @@ test("chat: a turn — infer, a bash tool call in the shell, infer again, say to
   await settle(i);
   assert.equal((await loops(i.store)).length, 1, "the reply is not routed by subscription");
   assert.ok(i.lines.some((l) => l.includes(`reply to ${fmt(s1.cid).slice(-8)} → ${fmt(loop).slice(-8)}`)));
-  const r2 = await reveals(i.store, loop);
+  const r2 = await turns(i.store, loop);
   assert.equal(r2.at(-1)!.role, "user");
-  assert.ok((r2.at(-1)!.of as CID).equals(encode(reply).cid));
+  assert.ok((r2.at(-1)!.of as CID).equals(encode(signedPart(reply)).cid));
   await peer.poll();
   assert.equal((api.requests[2].messages as Json[]).length, 6, "system, user, assistant, tool, assistant, user");
   await settle(i);
   const all = await says(i);
   assert.equal(all.length, 2);
   assert.equal(all[1].body.text, "You're welcome.");
-  assert.ok((all[1].body.replyTo as CID).equals(encode(reply).cid), "the second say answers the reply");
+  assert.ok((all[1].body.replyTo as CID).equals(encode(signedPart(reply)).cid), "the second say answers the reply");
 
   // Every entry the correlation used is signed; replay with no wallet reproduces every thread.
   await i.rt.stop();
@@ -202,7 +202,7 @@ test("chat: a new conversation that names no tree starts from `main`; its work s
   await peer.poll();
   await settle(i);
   const [loop] = await loops(i.store);
-  const rs = await reveals(i.store, loop);
+  const rs = await turns(i.store, loop);
   assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
   assert.ok((rs[0].tree as CID).equals(root), "the opening turn records main's tree");
   assert.equal(rs[2].stdout, "hello\n");
@@ -249,14 +249,14 @@ test("correlation: a replyTo nobody awaits, or from the wrong identity, is recor
   await replayMatches(i.store);
 });
 
-test("chat: an inference error is revealed and said to David; the thread awaits him", async (t) => {
+test("chat: an inference error is kept and said to David; the thread awaits him", async (t) => {
   const { i, root, peer } = await setup(t, [{ status: 503, text: "overloaded" }]);
   await send(i, "chat", { text: "hi", tree: root });
   await settle(i);
   await peer.poll();
   await settle(i);
   const [loop] = await loops(i.store);
-  const rs = await reveals(i.store, loop);
+  const rs = await turns(i.store, loop);
   assert.deepEqual(rs.map((r) => r.role), ["user", "error"]);
   assert.match(String(rs[1].error), /HTTP 503 overloaded/);
   const [s] = await says(i);
@@ -272,7 +272,7 @@ test("restart mid-turn: the runtime stops while the loop awaits the peer; a new 
   await i.rt.stop();
 
   await peer.poll(); // the peer answers while the instance is down
-  const b = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hub: i.hub, clock: i.clock });
+  const b = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
   await settle(b);
   const p2 = inferPeer(b, inferKey, (peer as unknown as { o: { fetch: typeof fetch } }).o.fetch);
   await p2.poll();
@@ -281,7 +281,7 @@ test("restart mid-turn: the runtime stops while the loop awaits the peer; a new 
   const [s] = await says(b);
   assert.equal(s.body.text, "It says hello.");
   const [loop] = await loops(b.store);
-  const rs = await reveals(b.store, loop);
+  const rs = await turns(b.store, loop);
   assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
   assert.equal(rs[2].stdout, "hello\n");
   await b.rt.stop();

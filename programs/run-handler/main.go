@@ -1,11 +1,9 @@
 // run-handler: the handler program for the `run` box (docs/MESSAGES.md).
 //
-// Step 1 (input: the admitted envelope and its message key): decrypt the
-// content purely (AES-256-GCM with the key record), decode the dag-cbor body {cmd, tree?, cwd?, env?}
-// (no tree: the `main` head's, else the empty tree), put a reveal
-// record {kind: "reveal", of: <envelope>, cmd, tree, cwd?, env?} and have the
-// runtime sign it, then launch the shell with that record as its arguments.
-// The step ends; the thread waits on the shell.
+// Step 1 (input: the admitted envelope and its plaintext body record): decode
+// the body {cmd, tree?, cwd?, env?} (no tree: the `main` head's, else the empty
+// tree), put the shell's arguments {cmd, tree, cwd?, env?} as a record and
+// launch the shell with it. The step ends; the thread waits on the shell.
 //
 // Step 2 (input: the shell at rest): emit a result envelope to the sender in
 // box `results`: {exitCode, stdout, stderr, tree, replyTo: <envelope>} (or
@@ -21,7 +19,7 @@ import (
 
 type args struct {
 	Envelope skein.CID `cbor:"envelope"`
-	Key      skein.CID `cbor:"key"`
+	Body     skein.CID `cbor:"body"`
 	Box      string    `cbor:"box"`
 	Sender   string    `cbor:"sender"`
 }
@@ -33,9 +31,7 @@ type runBody struct {
 	Env  map[string]string `cbor:"env,omitempty"`
 }
 
-type reveal struct {
-	Kind string            `cbor:"kind"`
-	Of   skein.CID         `cbor:"of"`
+type shellArgs struct {
 	Cmd  string            `cbor:"cmd"`
 	Tree skein.CID         `cbor:"tree"`
 	Cwd  string            `cbor:"cwd,omitempty"`
@@ -85,7 +81,7 @@ func run() error {
 }
 
 func first(step *skein.Step, a args) error {
-	_, plain, err := skein.Open(a.Envelope, a.Key)
+	_, plain, err := skein.Read(a.Envelope, a.Body)
 	if err != nil {
 		return err
 	}
@@ -101,12 +97,9 @@ func first(step *skein.Step, a args) error {
 			return err
 		}
 	}
-	rc, err := skein.Put(reveal{Kind: "reveal", Of: a.Envelope, Cmd: b.Cmd, Tree: b.Tree, Cwd: b.Cwd, Env: b.Env})
+	rc, err := skein.Put(shellArgs{Cmd: b.Cmd, Tree: b.Tree, Cwd: b.Cwd, Env: b.Env})
 	if err != nil {
-		return fmt.Errorf("put reveal: %w", err)
-	}
-	if err := skein.Reveal(rc); err != nil {
-		return fmt.Errorf("reveal: %w", err)
+		return fmt.Errorf("put shell args: %w", err)
 	}
 	shell, ok := step.Programs["shell"]
 	if !ok {

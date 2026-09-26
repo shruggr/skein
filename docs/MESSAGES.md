@@ -18,7 +18,8 @@ there; the host hands the message to the instance that owns the handle; the
 instance routes by box; subscriptions take it from there.
 
 BRC-103/104 mutual authentication between clients and the messagebox is
-transport, handled at the host edge. It is not in the VM and not in the log.
+transport, handled by the host's delivery provider. It is not in the VM and
+not in the log.
 
 ## The envelope
 
@@ -30,21 +31,28 @@ default would hide it).
 
 ```
 { metanetHandles, recipient: {handle, tag?, domain}, sender: {identityKey, handle?, domain?},
-  created, quoteId?, payment?, content, signature }
+  created, quoteId?, payment?, contentHash, content, signature }
 ```
 
 - `sender.identityKey` and `signature` are plaintext: provenance a third party
   can verify from the envelope alone.
+- `contentHash` is the hex SHA-256 of the plaintext content (the dag-cbor
+  body). It is in the signed part, so the sender's signature covers the
+  content: anyone holding the plaintext can check who wrote it, with no key
+  and no help from the recipient. A message is an authenticated call.
 - `content` is a BRC-78 portable encrypted message: security level 2,
   protocol `message encryption`, a random 256-bit key id per message carried
-  in the serialization, counterparty the recipient. Only the recipient can
-  decrypt; decrypting successfully is the content's authenticity check and
-  names the same identity the signature names.
+  in the serialization, counterparty the recipient. The encryption is
+  **wire-level only**: it keeps the messagebox operator out and nothing more.
+  The recipient decrypts it and checks the plaintext against `contentHash`.
 - `payment`, when present, is a BRC-29 payment as Atomic BEEF, unbroadcast,
   to keys derived from the recipient's identity key, internalized by the
   recipient's wallet with `internalizeAction`.
 - The box name is not in the envelope; it is the BRC-33 parameter beside it.
   BRC-169 leaves the choice of box to the sender.
+- A message's **id** is the CID of its signed part: the envelope without
+  `content`, as dag-cbor (`envelopeCid` in `src/client/client.ts`). It covers
+  `contentHash`, so it names the content too; a `replyTo` names it.
 
 ### The signature derivation (an amendment to §7.2)
 
@@ -61,63 +69,114 @@ the object, counterparty `anyone`):
   not the recipient
 
 over SHA-256 of the RFC 8785 canonical envelope with `content` and
-`signature` removed. A verifier derives the signing key from
-`sender.identityKey` with those constants. Reusing one derived key across
-envelopes is safe (RFC 6979 nonces); the identity key is already plaintext,
-so a fresh key id would add no unlinkability. This is a proposed revision
-to BRC-169 §7.2, to be raised upstream.
+`signature` removed — `contentHash` included. A verifier derives the signing
+key from `sender.identityKey` with those constants. Reusing one derived key
+across envelopes is safe (RFC 6979 nonces); the identity key is already
+plaintext, so a fresh key id would add no unlinkability. This is a proposed
+revision to BRC-169 §7.2, to be raised upstream.
+
+A second amendment: `contentHash` in the signed metadata. §7.2 as written
+signs the envelope with `content` removed, so nothing but a successful BRC-78
+decryption binds the content to the sender, and that proves authorship to the
+recipient alone.
+
+## Providers
+
+The instance's boundary is a set of interfaces, each satisfied by a
+**provider**; which provider fulfils which interface is kernel configuration
+(`src/host/main.ts` wires them; tests wire mocks). The runtime (`src/runtime`:
+scheduler and store) holds no session, no messagebox client, no clock and no
+private key. It exposes `admit(entry, records)` for a finished, provider-signed
+log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
+`outbox` for what it emits.
+
+- **Message delivery** (`src/host/messagebox.ts`, for the local `1sat serve`
+  host): a BRC-103/104 session to the messagebox as the instance, list, verify
+  the sender's signature, decrypt, check the plaintext against `contentHash`,
+  build the entry and sign it with the host wallet, `admit`, acknowledge. How a
+  provider gets its messages (a messagebox, SSE, a local queue, a browser page
+  writing entries directly) is its business; the entry it admits has one shape.
+- **Ticks** (`src/host/tick.ts`): reads the next deadline and, at that moment,
+  admits one wake entry, signed the same way. Every tick is recorded; there
+  are no idle ticks, so an instance with nothing due stays asleep.
+- **Outbound**: an `emit` stays. The step signs the envelope's signed part
+  (the instance, as sender, signing its own message) and the state records
+  only "I sent this". Encryption, queueing, retries and delivery errors are
+  the delivery provider's; nothing about delivery comes back as an error. A
+  reply, if any, is just another admitted entry; a thread whose reply never
+  comes sits `waiting` at no cost. (A delivery receipt entry, "sent", signed
+  by the provider, would be optional state the VM may consult; it is not
+  built.)
+- **Wallet**: BRC-100, however wired.
 
 ## Inside the instance
 
-- **Admission.** The instance collects its box (list-and-acknowledge, or an
-  equivalent queue) and admits each envelope as a log entry in arrival order,
-  with the box name and the time it observed. Arrival is non-deterministic
-  only until admission; the admitted order is the order of record.
-- **Every log entry is signed** by the instance's identity (`createSignature`
-  through its wallet, counterparty `anyone`), admissions and wakes alike, so
-  every stamp and every kick traces to a signature a third party can check.
-  The signature is an attested syscall result: recorded, never recomputed.
+- **Admission.** A delivery provider collects the box (list-and-acknowledge,
+  or an equivalent queue), verifies each envelope's signature, decrypts its
+  content through the instance wallet and checks it against `contentHash`,
+  and admits it as a log entry in arrival order: the envelope's signed part
+  and the plaintext body (both records; the body's CID is dag-cbor over the
+  sender's bytes, so its sha2-256 digest *is* `contentHash`), with the box
+  name and the time it observed. The ciphertext is not kept. The runtime
+  checks the entry's signature, the body against `contentHash`, and that the
+  envelope is new, before it appends. Arrival is non-deterministic only until
+  admission; the admitted order is the order of record.
+- **Every log entry is signed by the host**, admissions and wakes alike: an
+  entry is the host's statement — "message *n* arrived at *t*", "wake at *t*"
+  — so the provider that delivers it (the delivery for admissions, the tick
+  for wakes; different parties may run them) signs it with the host wallet (`createSignature`, protocol `[2, "skein
+  log"]`, key `1`, counterparty `anyone`), not the instance's. The genesis
+  records the host's identity (`host`, beside `owner`), and every stamp and
+  every kick traces to a signature a third party can check against it. Where
+  a provider hosts instances for users, this is the provider's word, and what
+  a checkpoint later binds to chain time. The signature is recorded, never
+  recomputed. The instance wallet signs nothing per message; it signs only
+  what the instance itself sends. (One wallet may be host, instance and
+  owner at once, e.g. a whole VM in a browser window: the roles collapse and
+  nothing breaks.)
 - **Routing** is by **subscription** on `(sender.identityKey, box)`, in log
   order, first match wins. The handler is the **box's handler program**, not
   a tool: `(sender: david, box: run) → run-handler`.
-- **The host delivers the decryption key with the envelope.** The host, where
-  the wallets live, derives the BRC-78 message key for each incoming envelope
-  (a per-message key: BRC-78 picks a random key id per message, so it exposes
-  nothing else) and routes envelope and key to the instance together. Both
-  are records; the admission entry references them.
-- **The handler** knows the box's message shape. It decrypts the content
-  purely (AES-256-GCM with the recorded key — a replayer recomputes the
-  plaintext and checks the tag; no wallet, no attested call), **reveals** into
-  state what it chooses as a record, **signs the reveal** with the instance
-  identity (attested, `anyone`), and launches the next thread from the
-  revealed records — for `run`, the shell over the named tree. State can
-  only build on revealed records. Keys in the state are as sensitive as the
-  plaintext: if you don't want it exposed, don't share your state.
-- **Replay protection** is at admission: an envelope whose record CID was
-  already admitted is rejected; `created` must fall within a freshness
-  window; where the messagebox reports the authenticated submitter, it must
-  equal `envelope.sender.identityKey`. The messagebox server should enforce
-  the last of these too, and dedupe by message id.
+- **The handler** knows the box's message shape. Its arguments name the
+  envelope and the plaintext body records; it reads the body and launches the
+  next thread with arguments pointing at the body or a record derived from it
+  — for `run`, the shell over the named tree. No decryption inside, no
+  attested call, no wallet.
+- **A handler that errors** ends its thread `errored`, and that is all: no
+  reply, no bounce. The sender learns nothing, as with any asynchronous
+  message.
+- **Replay protection** is at admission: an envelope whose record CID is
+  already in the log is rejected, by the runtime, whoever delivers it; where
+  the messagebox reports the authenticated submitter, it must equal
+  `envelope.sender.identityKey`. The messagebox server should enforce the
+  last of these too, and dedupe by message id. **Freshness** is not judged at
+  the edge: the provider supplies only the arrival stamp. The sender's
+  `created` (in the signed part) and the attested stamp are both in the
+  entry, so the instance can decide from `(created, stamp)` deterministically
+  if it decides at all; it mostly cares about the order received.
 - **Replies** correlate to their request through the waiting thread's own
   state: a thread that sent a request rests `waiting` with a reference to
   it; an admitted message naming that request is delivered to that thread.
 - **Results** leave as envelopes to the sender of the request that started
-  the thread, built and encrypted through the wallet the same way.
+  the thread. The step that emits signs the signed part through the instance
+  wallet (an attested call; `created` is the step's stamp), so its id is known
+  and recorded; the delivery provider encrypts the body to the recipient when
+  it sends.
 - **Nothing is a message that isn't one.** Genesis is starting state. A
   sleeper's wake is a signed, stamped log entry with no message and no
   sender, one per wake. `hello` and `tick` are gone.
 
-## Why the key, not the plaintext
+## Why the plaintext
 
-Recording the plaintext as an attested `decrypt` result would be
-deterministic too, but a replayer would have to take the runtime's word for
-it. Recording the message key makes decryption a pure computation anyone can
-verify against the ciphertext, keeps ciphertext as the canonical stored
-content (share the log without the keys and it is confidential; hand out one
-key and exactly one message is readable), and needs no wallet to replay or
-to fork under a new identity. It needs one wallet operation BRC-100 lacks:
-returning the message key rather than the plaintext — a method for the
-host's wallet, not the standard interface.
+With the content hash in the sender's signature, the plaintext needs no one
+else's word: a replayer checks the body against `contentHash` and the
+signature against `sender.identityKey`, from the log alone. So the log keeps
+the plaintext, and neither the ciphertext nor the message key is part of
+state; nothing depends on them. Replay needs the log and nothing else — no
+keys, no wallet on the message path. Sharing state is sharing the log. (An
+earlier version kept the ciphertext and a per-message key, and had handlers
+decrypt and sign "reveals" into state; the state is plaintext anyway — trees,
+output, completions — so selectively handing out keys bought nothing.)
 
 ## Bodies
 

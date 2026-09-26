@@ -1,12 +1,10 @@
 // objects-handler: the handler program for the `objects` box.
 //
-// The envelope's content decrypts (purely, with the host-delivered message key) to a dag-cbor
-// bundle {records: [{cid, bytes}], root?} of at most 1 MiB; the client chunks
-// larger sets across messages. Each record is stored under its CID with
-// putblock (the runtime checks the hash: git-raw/sha1, raw or dag-cbor/sha2-256),
-// then a reveal {kind: "reveal", of: <envelope>, root?, count} is put and signed.
-// A bundle naming a root (the client names it on the last one) makes that tree
-// the `main` head if the instance has none yet.
+// The admitted body is a dag-cbor bundle {records: [{cid, bytes}], root?} of
+// at most 1 MiB; the client chunks larger sets across messages. Each record is
+// stored under its CID with putblock (the runtime checks the hash: git-raw/sha1,
+// raw or dag-cbor/sha2-256). A bundle naming a root (the client names it on the
+// last one) makes that tree the `main` head if the instance has none yet.
 package main
 
 import (
@@ -18,7 +16,7 @@ import (
 
 type args struct {
 	Envelope skein.CID `cbor:"envelope"`
-	Key      skein.CID `cbor:"key"`
+	Body     skein.CID `cbor:"body"`
 }
 
 type bundle struct {
@@ -27,13 +25,6 @@ type bundle struct {
 		Bytes []byte    `cbor:"bytes"`
 	} `cbor:"records"`
 	Root skein.CID `cbor:"root,omitempty"`
-}
-
-type reveal struct {
-	Kind  string    `cbor:"kind"`
-	Of    skein.CID `cbor:"of"`
-	Root  *skein.CID `cbor:"root,omitempty"`
-	Count int        `cbor:"count"`
 }
 
 func main() {
@@ -52,7 +43,7 @@ func run() error {
 	if err := skein.Decode(step.Args, &a); err != nil {
 		return fmt.Errorf("args: %w", err)
 	}
-	_, plain, err := skein.Open(a.Envelope, a.Key)
+	_, plain, err := skein.Read(a.Envelope, a.Body)
 	if err != nil {
 		return err
 	}
@@ -65,18 +56,7 @@ func run() error {
 			return fmt.Errorf("record %d: %w", i, err)
 		}
 	}
-	r := reveal{Kind: "reveal", Of: a.Envelope, Count: len(b.Records)}
-	if len(b.Root) > 0 {
-		r.Root = &b.Root
-	}
-	rc, err := skein.Put(r)
-	if err != nil {
-		return err
-	}
-	if err := skein.Reveal(rc); err != nil {
-		return err
-	}
-	if r.Root == nil {
+	if len(b.Root) == 0 {
 		return nil
 	}
 	main, err := skein.Head("main")

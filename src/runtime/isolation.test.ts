@@ -1,19 +1,9 @@
 // The runtime has no disk, network, process table, clock or randomness
-// (docs/ARCH.md). This scans every non-test source file under src/runtime for
-// imports and identifiers that would give it one, and fails on any hit.
-// Allowed exceptions, each named:
-//   - inbox.ts is the instance's edge to the host's messagebox: the runtime's
-//     own tooling talking to the network (through @bsv/message-box-client,
-//     which does the fetching). It may import ../envelope.ts (sealing and
-//     verifying BRC-169 envelopes, shared with the client), use a timer (to
-//     poll the boxes), and read the wall clock inside `createdOf` only through
-//     Date.parse/new Date(<ms>) of an envelope's own `created` (not the clock;
-//     the freshness check uses log.ts's now());
-//   - main.ts may read process.env (its config: home, store path, wallet, keys,
-//     messagebox), import ../wallet.ts (the wallet edge, which reaches
-//     wallet-api over HTTP), and use timers (a wake entry at each sleeper's deadline);
-//   - log.ts may read the wall clock (Date.now / process.hrtime): the runtime
-//     stamps each admitted entry with its own time, and this is the only place.
+// (docs/ARCH.md), and no messagebox client and no private key: the providers
+// that deliver its inputs (src/host) hold those. This scans every non-test
+// source file under src/runtime for imports and identifiers that would give it
+// one, and fails on any hit. There are no exceptions: the kernel configuration
+// (src/host/main.ts) and the providers live outside src/runtime.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -26,6 +16,7 @@ const ROOT = fileURLToPath(new URL(".", import.meta.url));
 const FORBIDDEN_MODULES = [
   "fs", "fs/promises", "child_process", "http", "https", "http2", "dns", "dgram", "net", "tls",
   "worker_threads", "cluster", "os", "inspector", "vm", "module", "process", "timers", "readline",
+  "@bsv/message-box-client",
 ];
 
 const FORBIDDEN_IDENTIFIERS: Array<[RegExp, string]> = [
@@ -42,6 +33,7 @@ const FORBIDDEN_IDENTIFIERS: Array<[RegExp, string]> = [
   [/\brequire\s*\(/, "require("],
   [/\bimport\s*\(/, "dynamic import("],
   [/\bprocess\.env\b/, "process.env"],
+  [/\bPrivateKey\.from\w+/, "a private key"],
 ];
 
 function files(dir: string): string[] {
@@ -76,25 +68,15 @@ export function violations(root = ROOT): string[] {
       if (FORBIDDEN_MODULES.includes(bare) || FORBIDDEN_MODULES.some((m) => bare.startsWith(`${m}/`))) {
         out.push(`${rel}: imports ${spec}`);
       }
-      if (spec.startsWith(".")) {
-        const target = relative(root, join(f, "..", spec));
-        const allowed = (rel === "main.ts" && spec === "../wallet.ts") || (rel === "inbox.ts" && spec === "../envelope.ts");
-        if (target.startsWith("..") && !allowed) out.push(`${rel}: imports ${spec} from outside src/runtime`);
-      }
+      if (spec.startsWith(".") && relative(root, join(f, "..", spec)).startsWith("..")) out.push(`${rel}: imports ${spec} from outside src/runtime`);
     }
     const body = code(src);
-    for (const [re, name] of FORBIDDEN_IDENTIFIERS) {
-      if (!re.test(body)) continue;
-      if (name === "process.env" && rel === "main.ts") continue;
-      if (name === "timers" && (rel === "main.ts" || rel === "inbox.ts")) continue;
-      if ((name === "Date.now" || name === "process.hrtime") && rel === "log.ts") continue;
-      out.push(`${rel}: uses ${name}`);
-    }
+    for (const [re, name] of FORBIDDEN_IDENTIFIERS) if (re.test(body)) out.push(`${rel}: uses ${name}`);
   }
   return out;
 }
 
-test("isolation: src/runtime imports no disk, network, process, clock or randomness", () => {
+test("isolation: src/runtime imports no disk, network, messagebox, process, clock, randomness or key", () => {
   assert.deepEqual(violations(), []);
 });
 
@@ -109,6 +91,9 @@ test("isolation: the scan catches what it should", () => {
   assert.deepEqual(probe(`import * as cp from "node:child_process";`), ["node:child_process"]);
   assert.deepEqual(probe(`const t = Date.now();`), ["Date.now"]);
   assert.deepEqual(probe(`await fetch("http://x")`), ["fetch("]);
+  assert.deepEqual(probe(`import { MessageBoxClient } from "@bsv/message-box-client";`), ["@bsv/message-box-client"]);
+  assert.deepEqual(probe(`const k = PrivateKey.fromWif(wif);`), ["a private key"]);
+  assert.deepEqual(probe(`setTimeout(f, 1);`), ["timers"]);
   assert.deepEqual(probe(`// Date.now() in a comment is fine`), []);
   assert.deepEqual(probe("const s = `Math.random`;"), []);
 });

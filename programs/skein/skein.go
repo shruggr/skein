@@ -32,8 +32,8 @@ func _put(data unsafe.Pointer, n uint32, out unsafe.Pointer, cap uint32) int32
 //go:wasmimport skein putblock
 func _putblock(cid unsafe.Pointer, cidLen uint32, data unsafe.Pointer, n uint32) int32
 
-//go:wasmimport skein reveal
-func _reveal(cid unsafe.Pointer, cidLen uint32) int32
+//go:wasmimport skein keep
+func _keep(cid unsafe.Pointer, cidLen uint32) int32
 
 //go:wasmimport skein launch
 func _launch(prog unsafe.Pointer, progLen uint32, args unsafe.Pointer, argsLen uint32, out unsafe.Pointer, cap uint32) int32
@@ -147,10 +147,10 @@ type Resolved struct {
 
 // Answer is an admitted envelope delivered to the thread that awaited the
 // envelope its body's replyTo names (see Await). Same fields as a handler's
-// args, so Open(r.Envelope, r.Key) decrypts it.
+// args, so Read(r.Envelope, r.Body) reads it.
 type Answer struct {
 	Envelope CID    `cbor:"envelope"`
-	Key      CID    `cbor:"key"`
+	Body     CID    `cbor:"body"`
 	Box      string `cbor:"box"`
 	Sender   string `cbor:"sender"`
 	ReplyTo  CID    `cbor:"replyTo"`
@@ -174,16 +174,16 @@ type Step struct {
 // Update is the part of a thread update a program reads when walking its own
 // chain back from Step.Tip.
 type Update struct {
-	Prev    CID    `cbor:"prev"`
-	Seq     int    `cbor:"seq"`
-	State   string `cbor:"state"`
-	Reveals []CID  `cbor:"reveals,omitempty"`
-	Awaits  []CID  `cbor:"awaits,omitempty"`
+	Prev   CID    `cbor:"prev"`
+	Seq    int    `cbor:"seq"`
+	State  string `cbor:"state"`
+	Kept   []CID  `cbor:"kept,omitempty"`
+	Awaits []CID  `cbor:"awaits,omitempty"`
 }
 
-// Reveals walks the thread's chain from tip back to its origin and returns
-// every revealed record CID in order, oldest first.
-func Reveals(tip CID) ([]CID, error) {
+// Kept walks the thread's chain from tip back to its origin and returns
+// every record its steps kept (see Keep) in order, oldest first.
+func Kept(tip CID) ([]CID, error) {
 	var chain [][]CID
 	for c := tip; len(c) > 0; {
 		b, err := Get(c)
@@ -197,7 +197,7 @@ func Reveals(tip CID) ([]CID, error) {
 		if u.Seq < 1 {
 			break // the origin
 		}
-		chain = append(chain, u.Reveals)
+		chain = append(chain, u.Kept)
 		c = u.Prev
 	}
 	var out []CID
@@ -243,9 +243,10 @@ func PutBlock(c CID, data []byte) error {
 	return nil
 }
 
-// Reveal marks a record (already Put) as revealed: the runtime signs it with the instance identity.
-func Reveal(c CID) error {
-	if _reveal(ptr(c), uint32(len(c))) < 0 {
+// Keep keeps a record (already Put) in the thread's state: it is listed in this
+// step's update, so later steps find it with Kept(step.Tip).
+func Keep(c CID) error {
+	if _keep(ptr(c), uint32(len(c))) < 0 {
 		return lastError()
 	}
 	return nil
@@ -260,10 +261,10 @@ func Launch(program, args CID) (CID, error) {
 	return CID(b), err
 }
 
-// Emit seals an outbound envelope described by an emit record (already Put):
-// {kind: "emit", to, handle?, domain?, box, body: <cid>}, and returns the sealed
-// envelope record's CID (what a reply's replyTo names). Sealing is attested;
-// the envelope is sent when the step ends.
+// Emit signs an outbound envelope described by an emit record (already Put):
+// {kind: "emit", to, handle?, domain?, box, body: <cid>}, and returns the signed
+// envelope record's CID (what a reply's replyTo names). Signing is attested;
+// the envelope is encrypted and sent when the step ends.
 func Emit(c CID) (CID, error) {
 	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _emit(ptr(c), uint32(len(c)), out, cap) })
 	return CID(b), err

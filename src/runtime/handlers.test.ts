@@ -1,9 +1,9 @@
 // The message layer end to end, in process: the owner's client seals envelopes
-// into a fake messagebox; the edge screens and admits them with their message
-// keys; subscriptions route them to the Go handler programs; run-handler
-// decrypts purely, reveals (signed), runs the shell, and replies in `results`;
+// into a fake messagebox; the edge screens, decrypts and admits them with their
+// plaintext bodies; subscriptions route them to the Go handler programs;
+// run-handler reads the body, runs the shell, and replies in `results`;
 // objects-handler stores a directory's git objects. Then: restart mid-handler,
-// and replay with no wallet at all.
+// and replay with no wallet and no keys at all.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,16 +13,16 @@ import { join } from "node:path";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { envelopeCid } from "../client/client.ts";
-import { seal } from "../envelope.ts";
+import { encryptContent, seal } from "../envelope.ts";
 import { bundlesOf, collect, installWasm, instance, iso, results, send, T0, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
-import { verifyAnyone } from "./identity.ts";
-import { appendEntry, copyLog, readLog, verifyEntry } from "./log.ts";
+import { appendEntry } from "../host/entry.ts";
+import { copyLog, readLog, verifyEntry } from "./log.ts";
 import { memoryStore } from "./memory.ts";
 import { PROGRAM_CIDS } from "./programs.ts";
 import type { Attested } from "./records.ts";
-import { REVEAL_KEY_ID, REVEAL_PROTOCOL, Runtime, witnessFrom, type Outbound } from "./scheduler.ts";
+import { Runtime, witnessFrom, type Outbound } from "./scheduler.ts";
 import type { Store } from "./store.ts";
 import type { ThreadOrigin, ThreadUpdate } from "./types.ts";
 
@@ -55,7 +55,7 @@ async function importAndRun(i: Instance, dir: string, cmd: string): Promise<{ ro
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await send(i, "objects", b);
   const env = await send(i, "run", { cmd, tree: root });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   return { root, run: await envelopeCid(env) };
 }
@@ -77,7 +77,7 @@ async function replayMatches(store: Store): Promise<Outbound[]> {
   return sent;
 }
 
-test("run-handler: sealed run → messagebox → admitted with its key → decrypted purely → reveal signed → shell → result envelope to the owner", async (t) => {
+test("run-handler: sealed run → messagebox → decrypted at admission, plaintext in the entry → shell → result envelope to the owner", async (t) => {
   const dir = await fixture(t);
   const i = await instance();
   const { root, run } = await importAndRun(i, dir, "cat README; ls | head -3; date -u +%s");
@@ -93,31 +93,30 @@ test("run-handler: sealed run → messagebox → admitted with its key → decry
   assert.ok((body.replyTo as CID).equals(run), "replyTo is the run envelope's CID as the client computes it");
   assert.ok((body.tree as CID).equals(root), "nothing written: the tree is unchanged");
 
-  // The log: genesis, the objects envelope, the run envelope — each signed by the instance.
+  // The log: genesis, the objects envelope, the run envelope — each signed by the host.
   const log = await readLog(i.store);
   assert.deepEqual(log.map(({ entry }) => entry.genesis ? "genesis" : entry.box), ["genesis", "objects", "run"]);
-  for (const { entry } of log) assert.ok(verifyEntry(entry, i.identity), `entry #${entry.n} verifies against the instance identity`);
+  for (const { entry } of log) assert.ok(verifyEntry(entry, i.host.identity), `entry #${entry.n} verifies against the host identity`);
   const runEntry = log[2].entry;
   assert.ok(runEntry.envelope!.equals(run), "the envelope record's CID is the client's envelope CID");
-  const key = await i.store.get<{ kind: string; envelope: CID; key: Uint8Array }>(runEntry.key!);
-  assert.equal(key.kind, "message-key");
-  assert.equal(key.key.length, 32);
+  const sent = { cmd: "cat README; ls | head -3; date -u +%s", tree: root };
+  assert.deepEqual(await i.store.bytes(runEntry.body!), dagCbor.encode(sent), "the entry names the plaintext body");
 
-  // The handler thread: step 1 reveals and launches the shell; step 2 emits.
+  // The handler thread: step 1 launches the shell on the body's command; step 2 emits.
   const [h] = await byProgram(i.store, "run-handler");
+  const origin = await i.store.get<ThreadOrigin>(h);
+  assert.ok((origin.args as { body: CID }).body.equals(runEntry.body!), "the handler's args point at the plaintext body");
   const steps = await history(i.store, h);
   assert.deepEqual(steps.map((u) => u.state), ["waiting", "finished"]);
-  const [s1, s2] = steps as Array<ThreadUpdate & { calls?: CID[]; reveals?: CID[]; launched?: CID[]; emits?: CID[] }>;
-  assert.equal(s1.reveals!.length, 1);
-  const reveal = await i.store.get(s1.reveals![0]) as Record<string, unknown>;
-  assert.deepEqual({ ...reveal, of: String(reveal.of), tree: String(reveal.tree) }, { kind: "reveal", of: String(run), cmd: "cat README; ls | head -3; date -u +%s", tree: String(root) });
-  const [call] = await Promise.all(s1.calls!.map((c) => i.store.get<Attested>(c)));
-  assert.equal(call.op, "reveal", "the only attested call is the reveal signature: decryption is pure");
-  assert.ok(verifyAnyone(i.identity, REVEAL_PROTOCOL, REVEAL_KEY_ID, await i.store.bytes(s1.reveals![0]), call.result), "the reveal is signed by the instance identity");
+  const [s1, s2] = steps as Array<ThreadUpdate & { calls?: CID[]; kept?: CID[]; launched?: CID[]; emits?: CID[] }>;
+  assert.equal(s1.calls, undefined, "no attested call: nothing to decrypt, nothing to sign");
+  assert.equal(s1.kept, undefined);
   const shell = await i.store.get<ThreadOrigin>(s1.launched![0]);
   assert.ok(shell.program.equals(PROGRAM_CIDS.shell) && shell.launchedBy!.equals(h));
-  assert.ok(encode(shell.args).cid.equals(s1.reveals![0]), "the shell runs on exactly the revealed record");
+  assert.ok(encode(shell.args).cid.equals(encode(sent).cid), "the shell runs on the body's {cmd, tree}");
   assert.equal(s2.emits!.length, 1);
+  const [seal] = await Promise.all(s2.calls!.map((c) => i.store.get<Attested>(c)));
+  assert.equal(seal.op, "seal", "the one attested call: the instance signing its own reply");
   assert.equal(i.hub.pending(i.identity, "run").length + i.hub.pending(i.identity, "objects").length, 0, "every inbound message acknowledged");
 
   await i.rt.stop();
@@ -133,21 +132,20 @@ test("objects-handler: a directory in 1-record bundles lands as the same git obj
   const { root, bundles, records } = await bundlesOf(dir, 100); // tiny limit: one record per bundle
   assert.equal(bundles.length, records);
   for (const b of bundles) await send(i, "objects", b);
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   t.diagnostic(i.lines.join("\n"));
   const hs = await byProgram(i.store, "objects-handler");
   assert.equal(hs.length, records);
   for (const h of hs) {
-    const [u] = await history(i.store, h) as Array<ThreadUpdate & { reveals?: CID[] }>;
+    const [u] = await history(i.store, h) as Array<ThreadUpdate & { calls?: CID[] }>;
     assert.equal(u.state, "finished", text((u.result as { stderr: Uint8Array }).stderr));
-    const r = await i.store.get<{ kind: string; count: number }>(u.reveals![0]);
-    assert.deepEqual([r.kind, r.count], ["reveal", 1]);
+    assert.equal(u.calls, undefined, "no wallet call");
   }
   assert.ok(await i.store.has(root), "the root tree is in the store");
 
   await send(i, "run", { cmd: "wc -c < src/b.bin; cat src/a.txt", tree: root });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const [{ body }] = await results(i);
   assert.equal(text(body.stdout), "3000\nalpha\n");
@@ -155,7 +153,7 @@ test("objects-handler: a directory in 1-record bundles lands as the same git obj
   // A record whose bytes do not hash to its CID is refused: the handler errors, nothing is stored.
   const bad = dagCbor.encode({ records: [{ cid: root, bytes: new Uint8Array([1, 2, 3]) }] });
   await send(i, "objects", bad);
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const last = (await byProgram(i.store, "objects-handler"))[0];
   const u = await tipOf(i.store, last);
@@ -177,18 +175,19 @@ test("sleep: the shell rests until a wake entry, one per wake; the handler repli
   assert.ok(due.thread.equals(sh));
   assert.equal(due.until, u.until);
   assert.equal((await results(i)).length, 0);
+  assert.deepEqual(await i.tick.fire(), [], "before the deadline the tick admits nothing");
 
   i.clock.set([T0[0] + 5, 0]);
-  const w = await i.rt.wake(sh);
+  const [w] = await i.tick.fire();
   await i.rt.idle();
   const e = (await readLog(i.store)).at(-1)!.entry;
   assert.ok(e.wake!.equals(sh) && e.envelope === undefined && w!.equals((await i.store.log.tip())!), "a wake entry names the thread and nothing else");
-  assert.ok(verifyEntry(e, i.identity));
+  assert.ok(verifyEntry(e, i.host.identity));
   u = await tipOf(i.store, sh);
   assert.equal(u.state, "finished");
   const [{ body }] = await results(i);
   assert.equal(text(body.stdout), `${T0[0] + 5}\n`, "woken by the wake entry: its stamp is the new now");
-  assert.equal(await i.rt.wake(sh), undefined, "no second wake for a thread not sleeping");
+  assert.deepEqual(await i.tick.fire(), [], "no second wake: nothing is due, no idle tick");
   await i.rt.stop();
   await replayMatches(i.store);
 });
@@ -202,44 +201,38 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   await importAndRun(ref, dir, CMD);
   const [refShell] = await byProgram(ref.store, "shell");
   ref.clock.set([T0[0] + 5, 0]);
-  await ref.rt.wake(refShell);
+  await ref.tick.fire();
   await ref.rt.idle();
   await ref.rt.stop();
   const [refResult] = await results(ref);
 
   // Same keys, same clock; crash mid-sleep. Re-send the reference's exact
-  // envelopes (a fresh hub), so the inputs are byte-identical.
-  const a = await instance({ instanceKey: ref.instanceKey, ownerKey: ref.owner.key });
+  // messages (a fresh hub): each signed part as logged, its body re-encrypted
+  // for the wire, so the inputs are identical.
+  const a = await instance({ instanceKey: ref.instanceKey, ownerKey: ref.owner.key, hostKey: ref.host.key });
   for (const { entry } of (await readLog(ref.store)).slice(1)) {
     if (!entry.envelope) continue;
-    const env = await ref.store.get(entry.envelope);
-    await a.hub.as(a.owner.identity).send({ recipient: a.identity, box: entry.box!, body: env });
+    const signed = await ref.store.get(entry.envelope);
+    const content = await encryptContent(a.owner.wallet, a.identity, await ref.store.bytes(entry.body!));
+    await a.hub.as(a.owner.identity).send({ recipient: a.identity, box: entry.box!, body: { ...signed, content } });
   }
-  await a.edge.poll();
+  await a.delivery.poll();
   await a.rt.idle();
   const [sh] = await byProgram(a.store, "shell");
   assert.ok(sh.equals(refShell), "same shell thread");
   assert.equal((await tipOf(a.store, sh)).state, "waiting");
   await a.rt.stop();
-  await appendEntry(a.store, a.wallet, { wake: sh }, [T0[0] + 5, 0]); // the timer fired while nothing ran
+  await appendEntry(a.store, a.host.wallet, { wake: sh }, [T0[0] + 5, 0]); // the timer fired while nothing ran
 
-  const b = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hub: a.hub, clock: a.clock });
+  const b = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hostKey: a.host.key, hub: a.hub, clock: a.clock });
   await b.rt.idle();
   t.diagnostic(b.lines.join("\n"));
   assert.ok(b.lines.some((l) => l.includes("re-executing")));
-  // Identical, except where a step sealed an envelope: sealing draws a fresh
-  // BRC-78 key id and IV, so the attested seal answer (and the update listing
-  // it) differs between two runs; everything else about the update is the same.
+  // Identical, sealed replies included: a seal signs the signed part only
+  // (`created` is the step's stamp, the signature deterministic); the wire
+  // encryption, with its random key id and IV, happens at send and is not state.
   for (const th of await threads(ref.store)) {
-    if ((await b.store.chains.tip(th)).equals(await ref.store.chains.tip(th))) continue;
-    const [x, y] = [await history(b.store, th), await history(ref.store, th)];
-    assert.equal(x.length, y.length, `thread ${fmt(th)}: same number of updates`);
-    for (let k = 0; k < x.length; k++) {
-      const strip = ({ calls: _c, prev: _p, ...u }: ThreadUpdate & { calls?: unknown }) => encode(u).cid.toString();
-      assert.equal(strip(x[k]), strip(y[k]), `thread ${fmt(th)} update ${k + 1} identical but for its sealed envelope`);
-    }
-    const seals = await Promise.all(((x.at(-1) as { calls?: CID[] }).calls ?? []).map((c) => b.store.get<Attested>(c)));
-    assert.ok(seals.some((a) => a.op === "seal"), `thread ${fmt(th)}: the difference is a seal`);
+    assert.ok((await b.store.chains.tip(th)).equals(await ref.store.chains.tip(th)), `thread ${fmt(th)} identical`);
   }
   assert.ok((await b.store.log.tip())!.equals((await ref.store.log.tip())!), "identical log");
   const [r] = await results(b);
@@ -247,7 +240,7 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   await b.rt.stop();
 
   // A second restart after it all finished does nothing.
-  const c = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hub: a.hub, clock: a.clock });
+  const c = await instance({ store: a.store, instanceKey: a.instanceKey, ownerKey: a.owner.key, hostKey: a.host.key, hub: a.hub, clock: a.clock });
   await c.rt.idle();
   assert.ok(!c.lines.some((l) => l.includes("re-executing") || l.includes("stepping")));
   await c.rt.stop();
@@ -261,10 +254,10 @@ test("restart before processing: entries admitted, runtime gone before it steppe
   const { root, bundles } = await bundlesOf(dir);
   for (const bb of bundles) await send(i, "objects", bb);
   await send(i, "run", { cmd: "ls", tree: root });
-  await i.edge.poll(); // admits (signs entries) but the runtime never started
+  await i.delivery.poll(); // admits (signs entries) but the runtime never started
   assert.equal((await readLog(i.store)).length, 3);
   assert.equal((await threads(i.store)).length, 0);
-  const j = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hub: i.hub, clock: i.clock });
+  const j = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
   await j.rt.idle();
   const [{ body }] = await results(j);
   assert.equal(text(body.stdout), "README\nsrc\n");
@@ -278,7 +271,7 @@ test("routing: an envelope from a stranger is admitted and logged but runs nothi
   const env = await seal(stranger, { recipient: { identityKey: i.identity, handle: "skein", domain: "localhost" }, body: dagCbor.encode({ cmd: "ls", tree: encode({}).cid }), created: iso(i.clock.now()) });
   await i.hub.as(sk).send({ recipient: i.identity, box: "run", body: env });
   await send(i, "mail", { hello: 1 });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const log = await readLog(i.store);
   assert.deepEqual(log.map((x) => x.entry.box ?? "genesis"), ["genesis", "run"], "the stranger's run is in the log");
@@ -286,4 +279,31 @@ test("routing: an envelope from a stranger is admitted and logged but runs nothi
   assert.ok(i.lines.some((l) => l.includes("no subscription")));
   assert.equal(i.hub.pending(i.identity, "mail").length, 1, "`mail` is routed nowhere, so it is not collected");
   await i.rt.stop();
+});
+
+test("replay needs the log and nothing else: no wallet, no witness, no keys — the message path has no attested call", async (t) => {
+  const dir = await fixture(t);
+  const i = await instance();
+  const { root, bundles } = await bundlesOf(dir);
+  for (const b of bundles) await send(i, "objects", b);
+  await send(i, "head", { name: "main", tree: root });
+  await i.delivery.poll();
+  await i.rt.idle();
+  await i.rt.stop();
+  const log = await readLog(i.store);
+  for (const { entry } of log.slice(1)) assert.deepEqual(Object.keys(entry).sort(), ["body", "box", "envelope", "kind", "n", "prev", "sig", "time"], "no key in any entry");
+
+  const fresh = memoryStore();
+  await installWasm(fresh);
+  await copyLog(i.store, fresh);
+  const lines: string[] = [];
+  const rt = new Runtime({ store: fresh, log: (l) => lines.push(l) }); // no wallet, no witness, no outbox
+  await rt.start();
+  await rt.idle();
+  const ths = await threads(i.store);
+  assert.ok(ths.length > 0);
+  for (const o of ths) assert.ok((await fresh.chains.tip(o)).equals(await i.store.chains.tip(o)), `thread ${fmt(o)} replays to the same tip`);
+  assert.ok(!lines.some((l) => l.includes("cannot run")), lines.join("\n"));
+  assert.ok(await fresh.has(root), "the imported tree is rebuilt from the plaintext bodies");
+  await rt.stop();
 });

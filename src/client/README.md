@@ -2,8 +2,11 @@
 
 David's side: it signs through his wallet-api and talks only to the messagebox
 (host setup: scripts/host/README.md). Every message is a BRC-169 envelope with a
-dag-cbor body. State lives in `~/.skein/client/`: `sent.jsonl` (every envelope
-sent) and `conversation.json` (the last `say` received). `import` names the
+dag-cbor body; the envelope's signed `contentHash` binds the body to David's
+signature, and the BRC-78 content encryption is for the wire only. An
+envelope's id (a `replyTo`) is the CID of its signed part, without `content`.
+State lives in `~/.skein/client/`: `sent.jsonl` (every envelope sent) and
+`conversation.json` (the last `say` received). `import` names the
 root tree on its last bundle; the instance makes it `main` if it has none.
 
 ```

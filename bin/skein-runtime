@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
-# The skein runtime (src/runtime/main.ts): one instance, its store, its wallet
-# and its messagebox edge. Fills the runtime's environment from what
-# scripts/host/up.sh wrote under $SKEIN_HOME, unless already set:
-#   SKEIN_INSTANCE_WIF  ← PRIVATE_KEY_WIF in dev-wallet.env (the key the instance wallet runs with;
-#                         the edge derives message keys from it)
+# The skein runtime (src/host/main.ts, the kernel configuration): one
+# instance, its store, its wallets and its providers (messagebox delivery,
+# tick). Fills the runtime's environment from what scripts/host/up.sh wrote
+# under $SKEIN_HOME, unless already set:
 #   SKEIN_OWNER         ← owner.identity        SKEIN_MESSAGEBOX ← messagebox.url
 #   SKEIN_INFER         ← infer.identity (the inference peer; a new genesis's peers.infer)
+# The instance wallet (3321) and the host wallet (3324, which signs every log
+# entry) are scripts/host/wallets.sh's.
 # and puts the pinned wasm modules into the store first (skein-dev install).
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 home="${SKEIN_HOME:-$HOME/.skein}"
 export SKEIN_HOME="$home"
 mkdir -p "$home" "$(dirname "${SKEIN_DB:-$home/runtime.db}")"
-if [ -z "${SKEIN_INSTANCE_WIF:-}" ] && [ -f "$home/dev-wallet.env" ]; then
-  SKEIN_INSTANCE_WIF="$(set -a; . "$home/dev-wallet.env"; printf %s "${PRIVATE_KEY_WIF:-}")"
-  export SKEIN_INSTANCE_WIF
-fi
 [ -z "${SKEIN_OWNER:-}" ] && [ -f "$home/owner.identity" ] && export SKEIN_OWNER="$(cat "$home/owner.identity")"
 [ -z "${SKEIN_INFER:-}" ] && [ -f "$home/infer.identity" ] && export SKEIN_INFER="$(cat "$home/infer.identity")"
 [ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"
 node --experimental-strip-types --no-warnings "$root/src/dev/cli.ts" install >&2
-exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@"
+exec node --experimental-strip-types --no-warnings "$root/src/host/main.ts" "$@"

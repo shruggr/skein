@@ -1,17 +1,12 @@
 package skein
 
-import (
-	"bytes"
-	"encoding/base64"
-	"errors"
-	"fmt"
-
-	"github.com/shruggr/skein/programs/brc78"
-)
+import "fmt"
 
 // Envelope is the part of a BRC-169 envelope a handler reads, from the
-// envelope record (the JSON object as received, as dag-cbor). The runtime's
-// edge verified its signature before admitting it (src/runtime/inbox.ts).
+// envelope record: the signed part (the JSON object without `content`, as
+// dag-cbor). The delivery provider verified its signature, decrypted the content and
+// checked it against ContentHash before admitting it (src/host/messagebox.ts);
+// the plaintext is the body record beside it in the log entry.
 type Envelope struct {
 	Recipient struct {
 		Handle string `cbor:"handle"`
@@ -22,19 +17,12 @@ type Envelope struct {
 		Handle      string `cbor:"handle,omitempty"`
 		Domain      string `cbor:"domain,omitempty"`
 	} `cbor:"sender"`
-	Created string `cbor:"created"`
-	Content string `cbor:"content"`
+	Created     string `cbor:"created"`
+	ContentHash string `cbor:"contentHash"`
 }
 
-// MessageKey is the key record the host delivered with the envelope.
-type MessageKey struct {
-	Kind     string `cbor:"kind"`
-	Envelope CID    `cbor:"envelope"`
-	Key      []byte `cbor:"key"`
-}
-
-// Open reads the envelope record and its key record and decrypts the content.
-func Open(envelope, key CID) (*Envelope, []byte, error) {
+// Read reads the envelope record and its plaintext body record (dag-cbor bytes).
+func Read(envelope, body CID) (*Envelope, []byte, error) {
 	raw, err := Get(envelope)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get envelope: %w", err)
@@ -43,32 +31,14 @@ func Open(envelope, key CID) (*Envelope, []byte, error) {
 	if err := Decode(raw, &env); err != nil {
 		return nil, nil, fmt.Errorf("envelope record: %w", err)
 	}
-	kb, err := Get(key)
+	plain, err := Get(body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get key: %w", err)
-	}
-	var k MessageKey
-	if err := Decode(kb, &k); err != nil || k.Kind != "message-key" {
-		return nil, nil, fmt.Errorf("key record: %v", err)
-	}
-	if !bytes.Equal(k.Envelope, envelope) {
-		return nil, nil, errors.New("key record is for another envelope")
-	}
-	content, err := base64.StdEncoding.DecodeString(env.Content)
-	if err != nil {
-		return nil, nil, fmt.Errorf("content base64: %w", err)
-	}
-	h, plain, err := brc78.Decrypt(content, k.Key)
-	if err != nil {
-		return nil, nil, err
-	}
-	if h.Sender != env.Sender.IdentityKey {
-		return nil, nil, errors.New("BRC-78 sender is not the envelope's sender")
+		return nil, nil, fmt.Errorf("get body: %w", err)
 	}
 	return &env, plain, nil
 }
 
-// EmitRecord asks the edge to seal an envelope with content Body to To, in Box.
+// EmitRecord asks the runtime to sign and send an envelope with content Body to To, in Box.
 type EmitRecord struct {
 	Kind   string `cbor:"kind"`
 	To     string `cbor:"to"`
@@ -78,7 +48,7 @@ type EmitRecord struct {
 	Body   CID    `cbor:"body"`
 }
 
-// Send puts body as a record and emits it to `to` in box; returns the sealed envelope's CID.
+// Send puts body as a record and emits it to `to` in box; returns the signed envelope's CID.
 func Send(to, handle, domain, box string, body any) (CID, error) {
 	bc, err := Put(body)
 	if err != nil {

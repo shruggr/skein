@@ -14,7 +14,7 @@ import { scan } from "../dev/scan.ts";
 import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
-import { open, seal, verify, type Envelope } from "./envelope.ts";
+import { open, seal, signedPart, verify, type Envelope, type Signed } from "./envelope.ts";
 import { chatBody, conversationFrom, loadConversation, parseSay, saveConversation, type Conversation } from "./conversation.ts";
 
 export const BOX = { objects: "objects", run: "run", head: "head", results: "results", chat: "chat", say: "say" } as const;
@@ -22,9 +22,9 @@ export const BOX = { objects: "objects", run: "run", head: "head", results: "res
 /** The boxes David reads, in this order. */
 export const INBOX = [BOX.results, BOX.say] as const;
 
-/** The envelope's CID: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded envelope. */
-export async function envelopeCid(env: Envelope): Promise<CID> {
-  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(env)));
+/** The message's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part (the envelope without `content`). */
+export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
+  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
 }
 
 /** A directory as git objects held in memory: [root, records]. */

@@ -13,11 +13,12 @@ scripts/host/up.sh      # all of it, idempotent: wallets, messagebox, grants, ac
 | instance wallet `1sat serve wallet-api` | 127.0.0.1:3321 | `$HOME` (`~/.1sat/cli`) | `~/.skein/dev-wallet.env` | `~/.skein/logs/wallet-instance.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | `~/.skein/owner-home` | `~/.skein/owner-wallet.env` | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | `~/.skein/infer-home` | `~/.skein/infer-wallet.env` | `~/.skein/logs/wallet-infer.log` |
+| host wallet `1sat serve wallet-api` (signs log entries) | 127.0.0.1:3324 | `~/.skein/host-wallet-home` | `~/.skein/host-wallet.env` | `~/.skein/logs/wallet-host.log` |
 | messagebox host `1sat serve` | 127.0.0.1:8100, messagebox at `/messagebox` | `~/.skein/host-home` | `~/.skein/host.env` | `~/.skein/logs/messagebox.log` |
 
 Files the scripts write for the client and the runtime:
 
-- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/infer.identity`, `~/.skein/host.identity` — public keys, one line each
+- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/infer.identity`, `~/.skein/host-wallet.identity`, `~/.skein/host.identity` (the messagebox's) — public keys, one line each
 - `~/.skein/infer.json` — the inference peer's providers, `{"ripper": {"baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm"}}` (written if absent)
 - `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`
 - `~/.skein/*.env` — `PRIVATE_KEY_WIF=…`, mode 0600, created by `genkey.ts` only if absent. Never printed, never committed.
@@ -101,6 +102,10 @@ call. Each grant below answers one refusal. `grants.sh` writes them all
 1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty $OWNER
 1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty $INFER
 
+# host wallet, origin skein-host (HOME=~/.skein/host-wallet-home): it signs every log entry
+1sat permissions grant skein-host --protocol "identity key retrieval" --level 1
+1sat permissions grant skein-host --protocol "skein log" --level 2 --counterparty anyone
+
 # infer peer wallet, origin skein-infer (HOME=~/.skein/infer-home): transport, and envelopes to/from the instance
 1sat permissions grant skein-infer --protocol "identity key retrieval" --level 1
 1sat permissions grant skein-infer --protocol "server hmac" --level 2 --counterparty self
@@ -130,10 +135,11 @@ bin/skein inbox --wait                               # until a result with reply
   and David's own `results` (`{replyTo, exitCode, stdout, stderr, tree}`).
   All sent with `skipEncryption: true`: the envelope's BRC-78 `content` is the
   encryption.
-- `replyTo` is matched against the **envelope CID**: CIDv1, dag-cbor codec,
-  sha2-256 of `dagCbor.encode(envelope)` where `envelope` is the JSON object
-  exactly as sent (`envelopeCid` in `src/client/client.ts`). Sent envelopes are
-  logged in `~/.skein/client/sent.jsonl`.
+- `replyTo` is matched against the **envelope CID** (the message id): CIDv1,
+  dag-cbor codec, sha2-256 of `dagCbor.encode(signed)` where `signed` is the
+  JSON object as sent without `content` (`envelopeCid` in
+  `src/client/client.ts`). Sent envelopes are logged in
+  `~/.skein/client/sent.jsonl`.
 
 ## Checking by hand
 

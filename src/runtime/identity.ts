@@ -63,7 +63,7 @@ export async function signerFor(wallet: KeyWallet, name: string): Promise<Signer
  * The public key a wallet signs with for (protocol, keyID, counterparty
  * "anyone") under `identityKey` (BRC-42/43). Anyone can compute it: the
  * counterparty "anyone" is the private key 1, so the shared secret is the
- * identity key itself. This is how skein verifies log entries, reveals and
+ * identity key itself. This is how skein verifies log entries and
  * envelopes without a wallet.
  */
 export function anyoneKey(identityKey: string, protocol: WalletProtocol, keyID: string): PublicKey {

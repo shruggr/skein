@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { BigNumber, ECDSA, PrivateKey, PublicKey, Signature } from "@bsv/sdk";
 import { decode, encode } from "./cid.ts";
 import {
-  isAttested, isEmit, isGenesis, isMessage, isMessageKey, isProgram, isSubscription, matches, messageBytes, messageDigest, program,
+  isAttested, isEmit, isGenesis, isMessage, isProgram, isSubscription, matches, messageBytes, messageDigest, program,
   signMessage, verifyMessage, type Genesis, type Message, type Subscription,
 } from "./records.ts";
 import { ephemeralWallet, identityOf, signerFor } from "../wallet.ts";
@@ -72,17 +72,17 @@ test("program and genesis: validated", () => {
   assert.throws(() => program({ name: "x", code: { ts: "", wasm } as never, inputs: {}, services: [], description: "" }), TypeError);
   assert.throws(() => program({ name: "", code: { ts: "" }, inputs: {}, services: [], description: "" }), TypeError);
   const id = PrivateKey.fromRandom().toPublicKey().toString();
-  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, programs: { w: wasm }, subscriptions: [{ match: { sender: id, box: "run" }, handler: wasm }] };
+  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, host: id, programs: { w: wasm }, subscriptions: [{ match: { sender: id, box: "run" }, handler: wasm }] };
   assert.ok(isGenesis(g));
   assert.ok(!isGenesis({ ...g, identity: "nope" }));
+  assert.ok(!isGenesis({ ...g, host: undefined }), "the host identity is required");
   assert.ok(!isGenesis({ ...g, subscriptions: [{ match: {}, handler: "x" }] }));
 });
 
-test("emit, attested and message-key records: validated", () => {
+test("emit and attested records: validated", () => {
   const to = PrivateKey.fromRandom().toPublicKey().toString();
   assert.ok(isEmit({ kind: "emit", to, box: "results", body: wasm }));
   assert.ok(!isEmit({ kind: "emit", to, box: "", body: wasm }));
-  assert.ok(isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "reveal", request: wasm, result: new Uint8Array(70) }));
-  assert.ok(isMessageKey({ kind: "message-key", envelope: wasm, key: new Uint8Array(32) }));
-  assert.ok(!isMessageKey({ kind: "message-key", envelope: wasm, key: new Uint8Array(31) }));
+  assert.ok(isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "seal", request: wasm, result: new Uint8Array(70) }));
+  assert.ok(!isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "reveal", request: wasm, result: new Uint8Array(70) }), "no reveals any more");
 });
