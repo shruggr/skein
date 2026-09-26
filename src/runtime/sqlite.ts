@@ -425,6 +425,7 @@ export function openStore(path: string): SqliteStore {
           const ups: Array<{ cid: CID; origin: CID; seq: number; edges: EdgeRow[] }> = [];
           for (const r of q.blockAll.iterate()) {
             const cid = fromBytes(r.cid as Uint8Array);
+            if (cid.code === RAW_CODE || cid.code === GIT_RAW_CODE) continue; // wasm modules, git blobs/trees: not dag-cbor
             const block = decode<unknown>(r.bytes as Uint8Array);
             if (!isObj(block)) continue;
             if (block.kind === "message") {
@@ -514,6 +515,8 @@ export function openStore(path: string): SqliteStore {
 // ---------------------------------------------------------------- derivation
 // Pure functions of blocks. open/append and rebuild share them, which is what
 // makes the index reproducible.
+
+const RAW_CODE = 0x55, GIT_RAW_CODE = 0x78;
 
 function isObj(v: unknown): v is Obj {
   return typeof v === "object" && v !== null && !Array.isArray(v) && !isCID(v);
