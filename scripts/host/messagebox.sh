@@ -22,13 +22,16 @@ fi
 echo "http://127.0.0.1:$port/messagebox" > "$skein/messagebox.url"
 # 1sat serve does not migrate the messagebox tables itself (see messagebox-migrate.mjs).
 node "$here/messagebox-migrate.mjs" "$hosthome/.1sat/cli/data/messagebox-main.db"
-if ss -ltn 2>/dev/null | grep -q "127.0.0.1:$port "; then echo "messagebox already listening on $port"; exit 0; fi
+# `1sat serve` binds 0.0.0.0, not 127.0.0.1 (unlike the wallet-apis), so match on
+# port alone: any bind address, not a fixed one (ss's own filter, not grep).
+listening() { ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN; }
+if listening "$port"; then echo "messagebox: already on $port"; exit 0; fi
 set -a; . "$skein/host.env"; set +a
 export HOME="$hosthome" ONESAT_MONITOR=false ONESAT_PORT="$port"
 if [ "${1:-}" = "--bg" ]; then
   nohup 1sat serve >> "$skein/logs/messagebox.log" 2>&1 &
-  for _ in $(seq 60); do ss -ltn | grep -q "127.0.0.1:$port " && break; sleep 0.5; done
-  ss -ltn | grep -q "127.0.0.1:$port " || { echo "messagebox did not start; see $skein/logs/messagebox.log" >&2; exit 1; }
+  for _ in $(seq 20); do listening "$port" && break; sleep 0.5; done
+  listening "$port" || { echo "messagebox did not start; see $skein/logs/messagebox.log" >&2; exit 1; }
   echo "messagebox: $(cat "$skein/messagebox.url") (host identity $(cat "$skein/host.identity"))"
 else
   exec 1sat serve
