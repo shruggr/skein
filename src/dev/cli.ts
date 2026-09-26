@@ -21,7 +21,7 @@ import { openStore, type SqliteStore } from "../runtime/sqlite.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
 
 const skeinHome = () => process.env.SKEIN_HOME || join(homedir(), ".skein");
-const dbPath = () => process.env.SKEIN_DB || join(skeinHome(), "runtime.db");
+export const dbPath = () => process.env.SKEIN_DB || join(skeinHome(), "runtime.db");
 const WASM_DIR = fileURLToPath(new URL("../../wasm/", import.meta.url));
 
 function openDefault(): SqliteStore {
@@ -80,7 +80,7 @@ export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Pro
   return out;
 }
 
-async function resolveCid(store: SqliteStore, s: string): Promise<CID> {
+export async function resolveCid(store: Pick<SqliteStore, "findByPrefix">, s: string): Promise<CID> {
   try { return parse(s); } catch { /* a prefix or suffix */ }
   const all = await store.findByPrefix("");
   const hits = all.filter((c) => fmt(c).startsWith(s) || fmt(c).startsWith(`bafy${s}`) || fmt(c).endsWith(s));
