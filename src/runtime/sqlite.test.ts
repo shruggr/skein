@@ -1,12 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import * as Digest from "multiformats/hashes/digest";
 import { CID, encode, fmt } from "./cid.ts";
+import { rawCid } from "./programs.ts";
 import { openStore, type SqliteStore } from "./sqlite.ts";
 import { NotFound, type Store } from "./store.ts";
+import { GIT_RAW } from "./tree.ts";
 import type { NodeOrigin, ThreadOrigin, ThreadUpdate } from "./types.ts";
 
 async function all<T>(it: AsyncIterable<T>): Promise<T[]> {
@@ -241,6 +245,15 @@ test("edges.rebuild reproduces tips, updates and edges from blocks alone", async
     await s.live.handles.set(t, { pid: 7 });
     await s.put({ kind: "page", markdown: "not a chain" });
 
+    // Raw and git-raw blocks (wasm modules, git blobs/trees) are not dag-cbor
+    // and must not be decoded during rebuild.
+    const wasm = new Uint8Array([0, 97, 115, 109]);
+    const rawBlock = rawCid(wasm);
+    await s.putBlock(rawBlock, wasm);
+    const gitBytes = Buffer.from("blob 5\0hello");
+    const gitBlock = CID.createV1(GIT_RAW, Digest.create(0x11, createHash("sha1").update(gitBytes).digest()));
+    await s.putBlock(gitBlock, gitBytes);
+
     const want = snap();
     const tips = await Promise.all([root, n, t, custom].map((c) => s.chains.tip(c)));
 
@@ -253,6 +266,8 @@ test("edges.rebuild reproduces tips, updates and edges from blocks alone", async
     const again = await Promise.all([root, n, t, custom].map((c) => s.chains.tip(c)));
     assert.deepEqual(strs(again), strs(tips));
     assert.deepEqual(await s.live.handles.get(t), { pid: 7 }); // handles are not part of the index
+    assert.deepEqual(await s.bytes(rawBlock), wasm); // raw/git-raw blocks: skipped, not lost
+    assert.deepEqual(await s.bytes(gitBlock), new Uint8Array(gitBytes));
 
     await s.edges.rebuild(); // idempotent on an intact index too
     assert.deepEqual(snap(), want);

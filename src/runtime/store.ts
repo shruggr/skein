@@ -54,7 +54,7 @@ export interface Chains {
 // The index. Both directions. Rebuildable from the blocks at any time.
 
 export interface Filter {
-  kind?: "thread" | "node" | "message"; // messages are single records, not chains: only message filters apply
+  kind?: "thread" | "node" | "head" | "message"; // messages are single records, not chains: only message filters apply
   thread?: CID;           // nodes belonging to this thread
   program?: CID;          // threads running this program record
   from?: string;          // messages from this identity (implies kind "message")

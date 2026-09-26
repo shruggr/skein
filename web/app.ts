@@ -74,6 +74,9 @@ async function connect(): Promise<void> {
   if (!result) { log(out, `no wallet: ${reason === undefined ? "nothing answered" : errText(reason)}`, "err"); return; }
   skein = new WebSkein(cfg, result.wallet, store);
   $("identity").textContent = result.identityKey;
+  // A name nobody else's key already holds, e.g. a collision on "shruggr"; still editable.
+  const usernameEl = $<HTMLInputElement>("username");
+  if (!usernameEl.value.trim()) usernameEl.value = `u-${result.identityKey.slice(0, 8)}`;
   const want = cfg.expectedOwner;
   if (want && result.identityKey !== want) {
     log(out, `connected, but this is not the expected identity ${want} — the instance will not answer it`, "err");

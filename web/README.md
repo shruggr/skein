@@ -56,8 +56,9 @@ message; the inbox polls every 2 s, so a denied permission stops polling (tick
 2. Open `http://localhost:4400` in the browser that has Yours. Click
    **Connect wallet**; approve the connection in Yours. The identity line must
    read `033212a7…cd59e` (no red warning).
-3. **Register** (username `shruggr` by default; any free name — `david` is the
-   dev owner's). Approve the auth prompts. `HTTP 200` or `409 … already
+3. **Register** (username defaults to `u-<first 8 hex of the identity key>`,
+   so it doesn't collide with someone else's name; any free name — `david` is
+   the dev owner's). Approve the auth prompts. `HTTP 200` or `409 … already
    registered` are both fine; `409 … taken` means pick another name.
 4. Optional: **Choose Files** → pick a directory → **Import**. The root CID
    lands in the chat and run tree fields.
