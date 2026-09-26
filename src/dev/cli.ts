@@ -7,6 +7,8 @@
 //     (they exceed a message; docs/OPEN.md). Trees and commands come from the
 //     client (bin/skein) through the messagebox.
 //   - inspection: `log`, `ls`, `show`, `refs`, `rebuild` read the store.
+//   - verification: `replay` re-derives everything from the log alone, with
+//     no wallet, and compares it against the live store.
 
 import { readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
@@ -15,18 +17,23 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
-import { readLog } from "../runtime/log.ts";
+import { copyLog, readLog } from "../runtime/log.ts";
+import { memoryStore } from "../runtime/memory.ts";
 import { MODULES, rawCid } from "../runtime/programs.ts";
+import { Runtime, witnessFrom } from "../runtime/scheduler.ts";
 import { openStore, type SqliteStore } from "../runtime/sqlite.ts";
+import type { HeadOrigin } from "../runtime/heads.ts";
+import type { Store } from "../runtime/store.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
 
 const skeinHome = () => process.env.SKEIN_HOME || join(homedir(), ".skein");
 const dbPath = () => process.env.SKEIN_DB || join(skeinHome(), "runtime.db");
 const WASM_DIR = fileURLToPath(new URL("../../wasm/", import.meta.url));
 
-function openDefault(): SqliteStore {
-  mkdirSync(dirname(dbPath()), { recursive: true });
-  return openStore(dbPath());
+function openDefault(path?: string): SqliteStore {
+  const p = path || dbPath();
+  mkdirSync(dirname(p), { recursive: true });
+  return openStore(p);
 }
 
 // ---------------------------------------------------------------- args
@@ -80,6 +87,49 @@ export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Pro
   return out;
 }
 
+/**
+ * Replay `source`'s log alone, with no wallet, into a fresh in-memory store
+ * (the runtime's replay path: Runtime + witnessFrom, scheduler.ts), then
+ * compare it against `source`: the state hash (the log's tip entry), every
+ * thread chain tip, every head tip. Returns 0 if identical, 1 otherwise.
+ */
+export async function replay(source: Store, env: Env): Promise<number> {
+  const fresh = memoryStore();
+  await install(fresh);
+  await copyLog(source, fresh);
+
+  const rt = new Runtime({ store: fresh, witness: await witnessFrom(source) });
+  await rt.start();
+  await rt.idle();
+  await rt.stop();
+
+  let ok = true;
+  const want = await source.log.tip();
+  const got = await fresh.log.tip();
+  const stateOk = !!want && !!got && want.equals(got);
+  if (!stateOk) ok = false;
+  env.out(`state   ${got ? fmt(got) : "(empty)"}${stateOk ? " == " : " != "}${want ? fmt(want) : "(empty)"}`);
+
+  async function diff(kind: "thread" | "head", label: (c: CID) => Promise<string>): Promise<[number, number]> {
+    let n = 0, matched = 0;
+    for await (const origin of source.edges.query({ kind })) {
+      n++;
+      const wantTip = await source.chains.tip(origin);
+      const gotTip = await fresh.chains.tip(origin).catch(() => undefined);
+      if (gotTip?.equals(wantTip)) { matched++; continue; }
+      ok = false;
+      env.err(`${kind} ${await label(origin)}: tip ${gotTip ? fmt(gotTip) : "(missing)"} != ${fmt(wantTip)}`);
+    }
+    return [matched, n];
+  }
+
+  const [threadsOk, threads] = await diff("thread", async (c) => short(c));
+  const [headsOk, heads] = await diff("head", async (c) => (await source.get<HeadOrigin>(c)).name);
+
+  env.out(`threads ${threadsOk}/${threads} match · heads ${headsOk}/${heads} match`);
+  return ok ? 0 : 1;
+}
+
 async function resolveCid(store: SqliteStore, s: string): Promise<CID> {
   try { return parse(s); } catch { /* a prefix or suffix */ }
   const all = await store.findByPrefix("");
@@ -93,8 +143,8 @@ async function resolveCid(store: SqliteStore, s: string): Promise<CID> {
 interface Env { out(l: string): void; err(l: string): void; write(fd: 1 | 2, b: Uint8Array): void }
 interface Command { usage: string; flags: Record<string, FlagKind>; run(a: Parsed, env: Env): Promise<number> }
 
-async function withStore<T>(fn: (s: SqliteStore) => Promise<T>): Promise<T> {
-  const store = openDefault();
+async function withStore<T>(fn: (s: SqliteStore) => Promise<T>, path?: string): Promise<T> {
+  const store = openDefault(path);
   try { return await fn(store); } finally { await store.close(); }
 }
 
@@ -198,12 +248,24 @@ const COMMANDS: Record<string, Command> = {
       return 0;
     },
   },
+
+  replay: {
+    usage: `skein-dev replay [--db <path>]
+  Replay the log alone, with no wallet, into a fresh in-memory store (the
+  runtime's replay path) and compare it against the live store: state hash,
+  every thread chain tip, every head tip. Exits non-zero on any difference.`,
+    flags: { db: "string" },
+    async run(a, env) {
+      return withStore((store) => replay(store, env), str(a.opts.db));
+    },
+  },
 };
 
 const HELP = `skein-dev — developer tools, outside the machine
 
   skein-dev install                        put the pinned wasm modules into the store file (bootstrap)
   skein-dev log | ls | show <cid> | refs <cid> | rebuild
+  skein-dev replay [--db <path>]           re-derive the store from the log alone and compare
 
 Trees and commands come from the client (bin/skein import / run) through the
 messagebox. Env: SKEIN_HOME (~/.skein), SKEIN_DB ($SKEIN_HOME/runtime.db).`;

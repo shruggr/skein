@@ -64,6 +64,7 @@ bin/skein inbox --wait                      # the result envelope, opened by the
 bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
 bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers in David's `say` box
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
+bin/skein-dev replay [--db <path>]          re-derive the store from the log alone, no wallet, and compare
 npm test
 ```
 
