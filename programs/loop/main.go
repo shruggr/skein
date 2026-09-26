@@ -21,7 +21,6 @@
 package main
 
 import (
-	"crypto/sha1"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -222,6 +221,12 @@ func (l *loop) chat(envelope, key skein.CID) error {
 	if err := skein.Decode(plain, &b); err != nil {
 		return fmt.Errorf("chat body: %w", err)
 	}
+	if len(b.Tree) == 0 && len(l.conv) == 0 {
+		// A new conversation that names no tree starts from `main`, if there is one.
+		if b.Tree, err = skein.Head("main"); err != nil {
+			return err
+		}
+	}
 	if err := l.reveal(reveal{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model}); err != nil {
 		return err
 	}
@@ -320,7 +325,7 @@ func (l *loop) next() error {
 func (l *loop) launch(cmd string) error {
 	tree := l.tree()
 	if isEmptyTree(tree) {
-		if err := skein.PutBlock(tree, emptyTreeObject); err != nil {
+		if err := skein.PutBlock(tree, skein.EmptyTreeObject); err != nil {
 			return err
 		}
 	}
@@ -428,9 +433,9 @@ func (l *loop) pending() []toolCall {
 	return out
 }
 
-// tree: the working tree now — the latest one a chat named or a tool produced; else the empty tree.
+// tree: the working tree now — the latest one a chat named (the opening one: or `main`) or a tool produced; else the empty tree.
 func (l *loop) tree() skein.CID {
-	t := emptyTree
+	t := skein.EmptyTree
 	for _, r := range l.conv {
 		if (r.Role == "user" || r.Role == "tool") && len(r.Tree) > 0 {
 			t = r.Tree
@@ -461,11 +466,4 @@ func capText(b []byte) string {
 	return fmt.Sprintf("%s\n… (%d more bytes)", b[:outputCap], len(b)-outputCap)
 }
 
-// The empty git tree: object "tree 0\0", CIDv1 git-raw (0x78) sha1 (0x11).
-var emptyTreeObject = []byte("tree 0\x00")
-var emptyTree = func() skein.CID {
-	d := sha1.Sum(emptyTreeObject)
-	return append(skein.CID{0x01, 0x78, 0x11, 0x14}, d[:]...)
-}()
-
-func isEmptyTree(c skein.CID) bool { return string(c) == string(emptyTree) }
+func isEmptyTree(c skein.CID) bool { return string(c) == string(skein.EmptyTree) }

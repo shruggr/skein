@@ -3,7 +3,8 @@
 //
 //   skein whoami
 //   skein import <dir>
-//   skein run --tree <cid> [--cwd <path>] [--env K=V]... -- '<cmd>'
+//   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
+//   skein head <name> <tree-cid>
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
 //   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
 //   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
@@ -17,7 +18,8 @@ import { parseReplLine, parseSay, short } from "./conversation.ts";
 export type Command =
   | { cmd: "whoami" }
   | { cmd: "import"; dir: string }
-  | { cmd: "run"; tree: string; cwd?: string; env?: Record<string, string>; line: string }
+  | { cmd: "run"; tree?: string; cwd?: string; env?: Record<string, string>; line: string }
+  | { cmd: "head"; name: string; tree: string }
   | { cmd: "inbox"; wait: boolean; timeout: number; ack: boolean; json: boolean }
   | { cmd: "chat"; text: string; tree?: string; model?: string; fresh: boolean; wait: boolean; timeout: number }
   | { cmd: "talk"; tree?: string; model?: string; fresh: boolean; timeout: number }
@@ -26,7 +28,8 @@ export type Command =
 export const USAGE = `usage:
   skein whoami
   skein import <dir>
-  skein run --tree <cid> [--cwd <path>] [--env K=V]... -- '<cmd>'
+  skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
+  skein head <name> <tree-cid>
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]`;
@@ -65,14 +68,18 @@ export function parseCli(argv: string[]): Command {
         allowPositionals: true,
       });
       if (positionals.length) throw new Error(`run: unexpected ${positionals.join(" ")} (the command goes after \`--\`)`);
-      if (!values.tree) throw new Error("run: --tree <cid> is required");
       let env: Record<string, string> | undefined;
       for (const kv of values.env ?? []) {
         const i = kv.indexOf("=");
         if (i <= 0) throw new Error(`run: --env wants K=V, got ${kv}`);
         (env ??= {})[kv.slice(0, i)] = kv.slice(i + 1);
       }
-      return { cmd: "run", tree: values.tree, line, ...(values.cwd !== undefined && { cwd: values.cwd }), ...(env && { env }) };
+      return { cmd: "run", line, ...(values.tree !== undefined && { tree: values.tree }), ...(values.cwd !== undefined && { cwd: values.cwd }), ...(env && { env }) };
+    }
+    case "head": {
+      const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
+      if (positionals.length !== 2) throw new Error("head: expected <name> <tree-cid>");
+      return { cmd: "head", name: positionals[0]!, tree: positionals[1]! };
     }
     case "inbox": {
       const { values } = parseArgs({
@@ -165,6 +172,11 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "run": {
       const s = await client.run({ tree: c.tree, cmd: c.line, cwd: c.cwd, env: c.env });
+      console.log(s.cid);
+      return 0;
+    }
+    case "head": {
+      const s = await client.head(c.name, c.tree);
       console.log(s.cid);
       return 0;
     }

@@ -18,6 +18,7 @@ import { InferPeer } from "../peers/infer.ts";
 import { bundlesOf, collect, installWasm, instance, iso, send, type Hub, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
+import { headTree, MAIN } from "./heads.ts";
 import { copyLog, readLog, stampMs } from "./log.ts";
 import { memoryStore } from "./memory.ts";
 import { PROGRAM_CIDS } from "./programs.ts";
@@ -186,6 +187,30 @@ test("chat: a turn — infer, a bash tool call in the shell, infer again, say to
   await i.rt.stop();
   const sent = await replayMatches(i.store);
   assert.deepEqual(sent.map((o) => o.box), ["infer", "infer", "say", "infer", "say"]);
+});
+
+test("chat: a new conversation that names no tree starts from `main`; its work stays in the thread, main does not move", async (t) => {
+  const { i, root, peer } = await setup(t, [
+    answer({ content: "", tool_calls: [toolCall("c1", "cat README; echo z > new.txt")] }),
+    answer({ content: "done" }),
+  ]);
+  assert.ok((await headTree(i.store, MAIN))!.equals(root), "the import set main");
+  await send(i, "chat", { text: "read it" });
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  const [loop] = await loops(i.store);
+  const rs = await reveals(i.store, loop);
+  assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
+  assert.ok((rs[0].tree as CID).equals(root), "the opening turn records main's tree");
+  assert.equal(rs[2].stdout, "hello\n");
+  const [s] = await says(i);
+  assert.ok(!(s.body.tree as CID).equals(root), "the conversation's tree moved on…");
+  assert.ok((await headTree(i.store, MAIN))!.equals(root), "…main did not");
+  await i.rt.stop();
+  await replayMatches(i.store);
 });
 
 test("correlation: a replyTo nobody awaits, or from the wrong identity, is recorded only; the thread keeps waiting for the real one", async (t) => {

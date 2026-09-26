@@ -54,6 +54,26 @@ patch between them is derivable, exactly as a git commit is.
 Anything outside the tree — the host's real filesystem, the network — is not
 machine state and is unreachable from inside.
 
+### Heads
+
+A **head** is a named pointer to a tree, kept as a chain like any other
+instance state: origin `{kind: "head", name}` (so a head is found by encoding
+its name), one update per move `{tree, thread, input, at}` naming the tree,
+the thread whose step moved it, and the log entry that step processed. Replay
+writes the same chain. A name never moved has no chain.
+
+- A head moves only by an explicit act: a program's step calls the `advance`
+  import (the tree must be in the store), and the move is written when that
+  step ends without error; the step's update lists it (`heads`). Nothing moves
+  a head at turn end, and a thread's tree stays private to the thread.
+- The owner moves one by sending `{name, tree}` to box `head` (`skein head
+  <name> <tree>`): `head-handler` reveals the request and advances the head.
+- `main` is the default: `run` with no tree, and a new `chat` with no tree,
+  start from `main`'s tree (the empty tree if there is no `main`). The loop
+  records that tree in the opening turn's reveal.
+- An import sets `main` when the instance has none: the client names the root
+  on the last `objects` bundle, and `objects-handler` advances `main` to it.
+
 ## Programs and execution
 
 A **program** is an immutable record: its code (a WASI module), its input

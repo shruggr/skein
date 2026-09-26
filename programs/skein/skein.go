@@ -12,6 +12,7 @@
 package skein
 
 import (
+	"crypto/sha1"
 	"errors"
 	"fmt"
 	"unsafe"
@@ -42,6 +43,12 @@ func _emit(cid unsafe.Pointer, cidLen uint32, out unsafe.Pointer, cap uint32) in
 
 //go:wasmimport skein await
 func _await(cid unsafe.Pointer, cidLen uint32) int32
+
+//go:wasmimport skein head
+func _head(name unsafe.Pointer, nameLen uint32, out unsafe.Pointer, cap uint32) int32
+
+//go:wasmimport skein advance
+func _advance(name unsafe.Pointer, nameLen uint32, tree unsafe.Pointer, treeLen uint32) int32
 
 //go:wasmimport skein wallet
 func _wallet(req unsafe.Pointer, n uint32, out unsafe.Pointer, cap uint32) int32
@@ -271,6 +278,43 @@ func Await(env CID) error {
 		return lastError()
 	}
 	return nil
+}
+
+// Head is the tree a named head points at now, or nil if it has none.
+func Head(name string) (CID, error) {
+	n := []byte(name)
+	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _head(ptr(n), uint32(len(n)), out, cap) })
+	if err != nil || len(b) == 0 {
+		return nil, err
+	}
+	return CID(b), nil
+}
+
+// Advance moves a named head to tree (a record in the store) when this step
+// ends without error. Nothing moves a head but this.
+func Advance(name string, tree CID) error {
+	n := []byte(name)
+	if _advance(ptr(n), uint32(len(n)), ptr(tree), uint32(len(tree))) < 0 {
+		return lastError()
+	}
+	return nil
+}
+
+// The empty git tree: object "tree 0\0", CIDv1 git-raw (0x78) sha1 (0x11).
+var EmptyTreeObject = []byte("tree 0\x00")
+var EmptyTree = func() CID {
+	d := sha1.Sum(EmptyTreeObject)
+	return append(CID{0x01, 0x78, 0x11, 0x14}, d[:]...)
+}()
+
+// StartTree is the tree a `run` that names none starts from: the `main`
+// head's, else the empty tree (put into the store, so it can be run over).
+func StartTree() (CID, error) {
+	t, err := Head("main")
+	if err != nil || len(t) > 0 {
+		return t, err
+	}
+	return EmptyTree, PutBlock(EmptyTree, EmptyTreeObject)
 }
 
 // WalletCall sends one BRC-100 wallet wire request frame to the instance wallet

@@ -3,7 +3,7 @@
 # src/runtime/programs.ts to the freshly built wasm/*.wasm.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-for p in run-handler objects-handler loop; do
+for p in run-handler objects-handler head-handler loop; do
   cid=$(node --experimental-strip-types --no-warnings -e "
     const { readFileSync } = await import('node:fs');
     const { rawCid } = await import('./src/runtime/programs.ts');

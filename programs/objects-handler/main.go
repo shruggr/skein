@@ -5,6 +5,8 @@
 // larger sets across messages. Each record is stored under its CID with
 // putblock (the runtime checks the hash: git-raw/sha1, raw or dag-cbor/sha2-256),
 // then a reveal {kind: "reveal", of: <envelope>, root?, count} is put and signed.
+// A bundle naming a root (the client names it on the last one) makes that tree
+// the `main` head if the instance has none yet.
 package main
 
 import (
@@ -71,5 +73,15 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	return skein.Reveal(rc)
+	if err := skein.Reveal(rc); err != nil {
+		return err
+	}
+	if r.Root == nil {
+		return nil
+	}
+	main, err := skein.Head("main")
+	if err != nil || len(main) > 0 {
+		return err
+	}
+	return skein.Advance("main", b.Root)
 }

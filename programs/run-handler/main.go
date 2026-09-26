@@ -1,7 +1,8 @@
 // run-handler: the handler program for the `run` box (docs/MESSAGES.md).
 //
 // Step 1 (input: the admitted envelope and its message key): decrypt the
-// content purely (AES-256-GCM with the key record), decode the dag-cbor body {cmd, tree, cwd?, env?}, put a reveal
+// content purely (AES-256-GCM with the key record), decode the dag-cbor body {cmd, tree?, cwd?, env?}
+// (no tree: the `main` head's, else the empty tree), put a reveal
 // record {kind: "reveal", of: <envelope>, cmd, tree, cwd?, env?} and have the
 // runtime sign it, then launch the shell with that record as its arguments.
 // The step ends; the thread waits on the shell.
@@ -27,7 +28,7 @@ type args struct {
 
 type runBody struct {
 	Cmd  string            `cbor:"cmd"`
-	Tree skein.CID         `cbor:"tree"`
+	Tree skein.CID         `cbor:"tree,omitzero"`
 	Cwd  string            `cbor:"cwd,omitempty"`
 	Env  map[string]string `cbor:"env,omitempty"`
 }
@@ -92,8 +93,13 @@ func first(step *skein.Step, a args) error {
 	if err := skein.Decode(plain, &b); err != nil {
 		return fmt.Errorf("body: %w", err)
 	}
-	if b.Cmd == "" || len(b.Tree) == 0 {
-		return fmt.Errorf("body: want {cmd, tree, cwd?, env?}")
+	if b.Cmd == "" {
+		return fmt.Errorf("body: want {cmd, tree?, cwd?, env?}")
+	}
+	if len(b.Tree) == 0 {
+		if b.Tree, err = skein.StartTree(); err != nil {
+			return err
+		}
 	}
 	rc, err := skein.Put(reveal{Kind: "reveal", Of: a.Envelope, Cmd: b.Cmd, Tree: b.Tree, Cwd: b.Cwd, Env: b.Env})
 	if err != nil {
