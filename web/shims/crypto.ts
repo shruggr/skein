@@ -21,8 +21,9 @@ export function createHash(alg: string) {
       parts.push(typeof data === "string" ? Buffer.from(data, enc ?? "utf8") : data);
       return h;
     },
-    digest(): Buffer {
-      return Buffer.from(fn([...Buffer.concat(parts)]));
+    digest(enc?: BufferEncoding): Buffer | string {
+      const d = Buffer.from(fn([...Buffer.concat(parts)]));
+      return enc ? d.toString(enc) : d;
     },
   };
   return h;

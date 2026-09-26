@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { PrivateKey, ProtoWallet } from "@bsv/sdk";
 import { decrypt as sdkDecrypt, encrypt as sdkEncrypt } from "@bsv/sdk/messages/EncryptedMessage";
-import { brc78Decode, brc78Encode, canonical, open, seal, verify, type Envelope } from "./envelope.ts";
+import { brc78Decode, brc78Encode, canonical, contentHash, encryptContent, open, seal, sign, signedPart, verify, type Envelope } from "./envelope.ts";
 import { ephemeralWallet } from "./wallet.ts";
 
 test("envelope: canonical form reproduces BRC-169 Appendix A.7 exactly", () => {
@@ -66,9 +67,27 @@ test("envelope: BRC-78 content interoperates with @bsv/sdk's EncryptedMessage", 
   const b = new ProtoWallet(bKey), a = new ProtoWallet(aKey);
   // SDK-encrypted → opened through the wallet.
   const bytes = Uint8Array.from(sdkEncrypt([1, 2, 3, 4], aKey, bKey.toPublicKey()));
-  const env = { content: Buffer.from(bytes).toString("base64") } as Envelope;
+  const env = { content: Buffer.from(bytes).toString("base64"), contentHash: contentHash(Uint8Array.of(1, 2, 3, 4)) } as Envelope;
   assert.deepEqual((await open(b as never, env)).body, Uint8Array.of(1, 2, 3, 4));
   // Wallet-sealed → decrypted by the SDK.
   const sealed = await seal(a as never, { recipient: { identityKey: bKey.toPublicKey().toString(), handle: "b", domain: "x" }, body: Uint8Array.of(9, 8) });
   assert.deepEqual(sdkDecrypt([...Buffer.from(sealed.content, "base64")], bKey), [9, 8]);
+});
+
+test("envelope: contentHash is signed; the signed part verifies alone; open checks the plaintext against it", async () => {
+  const alice = ephemeralWallet(), bob = ephemeralWallet();
+  const bobKey = (await bob.getPublicKey({ identityKey: true })).publicKey;
+  const to = { identityKey: bobKey, handle: "bob", domain: "localhost" };
+  const body = Uint8Array.of(0xa1, 0x61, 0x62, 0x02); // {b: 2}
+  const env = await seal(alice, { recipient: to, body });
+  assert.equal(env.contentHash, createHash("sha256").update(body).digest("hex"));
+  assert.ok(canonical(env).includes(`"contentHash":"${env.contentHash}"`), "inside the signature preimage");
+  assert.ok(verify(signedPart(env)), "the signed part verifies without the content");
+  assert.equal(verify({ ...env, contentHash: contentHash(Uint8Array.of(1)) }), false, "a changed hash breaks the signature");
+  // Good: the plaintext matches. Tampered: a valid signature over one body, another body as content.
+  assert.deepEqual((await open(bob, env)).body, body);
+  const signed = await sign(alice, { recipient: to, body });
+  const swapped = { ...signed, content: await encryptContent(alice, bobKey, Uint8Array.of(0xa1, 0x61, 0x62, 0x03)) };
+  assert.ok(verify(swapped), "the signature is fine…");
+  await assert.rejects(open(bob, swapped), /does not match its signed contentHash/, "…but the content is not what was signed");
 });

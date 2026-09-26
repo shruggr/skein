@@ -130,10 +130,11 @@ bin/skein inbox --wait                               # until a result with reply
   and David's own `results` (`{replyTo, exitCode, stdout, stderr, tree}`).
   All sent with `skipEncryption: true`: the envelope's BRC-78 `content` is the
   encryption.
-- `replyTo` is matched against the **envelope CID**: CIDv1, dag-cbor codec,
-  sha2-256 of `dagCbor.encode(envelope)` where `envelope` is the JSON object
-  exactly as sent (`envelopeCid` in `src/client/client.ts`). Sent envelopes are
-  logged in `~/.skein/client/sent.jsonl`.
+- `replyTo` is matched against the **envelope CID** (the message id): CIDv1,
+  dag-cbor codec, sha2-256 of `dagCbor.encode(signed)` where `signed` is the
+  JSON object as sent without `content` (`envelopeCid` in
+  `src/client/client.ts`). Sent envelopes are logged in
+  `~/.skein/client/sent.jsonl`.
 
 ## Checking by hand
 

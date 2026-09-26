@@ -1,9 +1,10 @@
 // loop: the turn loop (README.md, "Records"; docs/MESSAGES.md), launched by the subscription
 // (owner, chat) → loop with David's opening `chat` envelope as its input.
 //
-// The conversation is the thread's own chain: every turn is a signed reveal,
-// and each step rebuilds the messages by walking the chain back from its tip.
-// Reveals ({kind: "reveal", of, role, …}):
+// The conversation is the thread's own chain: every turn is a record the step
+// keeps (skein.Keep), and each step rebuilds the messages by walking the chain
+// back from its tip. Turns ({kind: "turn", of, role, …}), built from the
+// admitted plaintext bodies and the shell's results:
 //
 //	user       {of: <chat envelope>, role: "user", text, tree?, model?}
 //	assistant  {of: <completions envelope>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
@@ -12,11 +13,11 @@
 //
 // Per step, by why it runs:
 //
-//	a chat (step 1, or a reply to our `say`)  reveal the user turn; emit `infer`; await it
-//	a completion (reply to our `infer`)      reveal it; tool calls → launch the shell for the
+//	a chat (step 1, or a reply to our `say`)  keep the user turn; emit `infer`; await it
+//	a completion (reply to our `infer`)      keep it; tool calls → launch the shell for the
 //	                                         first (one at a time); none → emit `say`, await it
-//	                                         (an error → reveal it, `say` it, await)
-//	the shell at rest                        reveal the tool result; launch the next call, or
+//	                                         (an error → keep it, `say` it, await)
+//	the shell at rest                        keep the tool result; launch the next call, or
 //	                                         emit `infer` again when none is left
 package main
 
@@ -39,7 +40,7 @@ const outputCap = 16 << 10
 
 type args struct {
 	Envelope skein.CID `cbor:"envelope"`
-	Key      skein.CID `cbor:"key"`
+	Body     skein.CID `cbor:"body"`
 	Box      string    `cbor:"box"`
 	Sender   string    `cbor:"sender"`
 }
@@ -78,8 +79,8 @@ type completionBody struct {
 	Error   string            `cbor:"error,omitempty"`
 }
 
-// reveal is every reveal the loop writes; Role says which fields apply.
-type reveal struct {
+// turn is every turn the loop keeps; Role says which fields apply.
+type turn struct {
 	Kind      string          `cbor:"kind"`
 	Of        skein.CID       `cbor:"of"`
 	Role      string          `cbor:"role"`
@@ -157,7 +158,7 @@ func main() {
 type loop struct {
 	step *skein.Step
 	a    args
-	conv []reveal
+	conv []turn
 }
 
 func run() error {
@@ -170,7 +171,7 @@ func run() error {
 		return fmt.Errorf("args: %w", err)
 	}
 	if len(step.Tip) > 0 {
-		cids, err := skein.Reveals(step.Tip)
+		cids, err := skein.Kept(step.Tip)
 		if err != nil {
 			return fmt.Errorf("chain: %w", err)
 		}
@@ -179,9 +180,9 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			var r reveal
+			var r turn
 			if err := skein.Decode(b, &r); err != nil {
-				return fmt.Errorf("reveal: %w", err)
+				return fmt.Errorf("turn: %w", err)
 			}
 			l.conv = append(l.conv, r)
 		}
@@ -190,30 +191,30 @@ func run() error {
 	case step.Reply != nil && step.Reply.Box == "completions":
 		return l.completion(step.Reply)
 	case step.Reply != nil:
-		return l.chat(step.Reply.Envelope, step.Reply.Key)
+		return l.chat(step.Reply.Envelope, step.Reply.Body)
 	case len(step.Resolved) > 0:
 		return l.toolDone(step.Resolved[0])
 	default:
-		return l.chat(l.a.Envelope, l.a.Key)
+		return l.chat(l.a.Envelope, l.a.Body)
 	}
 }
 
-func (l *loop) reveal(r reveal) error {
-	r.Kind = "reveal"
+func (l *loop) keep(r turn) error {
+	r.Kind = "turn"
 	c, err := skein.Put(r)
 	if err != nil {
-		return fmt.Errorf("put reveal: %w", err)
+		return fmt.Errorf("put turn: %w", err)
 	}
-	if err := skein.Reveal(c); err != nil {
-		return fmt.Errorf("reveal: %w", err)
+	if err := skein.Keep(c); err != nil {
+		return fmt.Errorf("keep: %w", err)
 	}
 	l.conv = append(l.conv, r)
 	return nil
 }
 
 // chat: David's line (the opening one, or a reply to our `say`).
-func (l *loop) chat(envelope, key skein.CID) error {
-	_, plain, err := skein.Open(envelope, key)
+func (l *loop) chat(envelope, body skein.CID) error {
+	_, plain, err := skein.Read(envelope, body)
 	if err != nil {
 		return err
 	}
@@ -227,7 +228,7 @@ func (l *loop) chat(envelope, key skein.CID) error {
 			return err
 		}
 	}
-	if err := l.reveal(reveal{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model}); err != nil {
+	if err := l.keep(turn{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model}); err != nil {
 		return err
 	}
 	return l.infer()
@@ -235,7 +236,7 @@ func (l *loop) chat(envelope, key skein.CID) error {
 
 // completion: the inference peer's answer to our `infer`.
 func (l *loop) completion(r *skein.Answer) error {
-	_, plain, err := skein.Open(r.Envelope, r.Key)
+	_, plain, err := skein.Read(r.Envelope, r.Body)
 	if err != nil {
 		return err
 	}
@@ -248,13 +249,13 @@ func (l *loop) completion(r *skein.Answer) error {
 		if msg == "" {
 			msg = "completion has no message"
 		}
-		if err := l.reveal(reveal{Of: r.Envelope, Role: "error", Error: msg}); err != nil {
+		if err := l.keep(turn{Of: r.Envelope, Role: "error", Error: msg}); err != nil {
 			return err
 		}
 		return l.say("inference failed: " + msg)
 	}
 	m := b.Message
-	if err := l.reveal(reveal{Of: r.Envelope, Role: "assistant", Content: m.Content, Reasoning: m.Reasoning, ToolCalls: m.ToolCalls, Model: b.Model, Ms: b.Ms, Usage: b.Usage}); err != nil {
+	if err := l.keep(turn{Of: r.Envelope, Role: "assistant", Content: m.Content, Reasoning: m.Reasoning, ToolCalls: m.ToolCalls, Model: b.Model, Ms: b.Ms, Usage: b.Usage}); err != nil {
 		return err
 	}
 	return l.next()
@@ -285,7 +286,7 @@ func (l *loop) toolDone(res skein.Resolved) error {
 		_ = skein.Decode(res.Error, &e)
 		stderr = "shell " + res.State + ": " + e.Message
 	}
-	if err := l.reveal(reveal{Of: res.Thread, Role: "tool", Call: call.ID, ExitCode: &code, Stdout: &stdout, Stderr: &stderr, Tree: tree}); err != nil {
+	if err := l.keep(turn{Of: res.Thread, Role: "tool", Call: call.ID, ExitCode: &code, Stdout: &stdout, Stderr: &stderr, Tree: tree}); err != nil {
 		return err
 	}
 	return l.next()
@@ -307,7 +308,7 @@ func (l *loop) next() error {
 			msg = "bash wants {\"cmd\": string}"
 		}
 		code, empty := 2, ""
-		if err := l.reveal(reveal{Of: l.step.Entry, Role: "tool", Call: call.ID, ExitCode: &code, Stdout: &empty, Stderr: &msg, Tree: l.tree()}); err != nil {
+		if err := l.keep(turn{Of: l.step.Entry, Role: "tool", Call: call.ID, ExitCode: &code, Stdout: &empty, Stderr: &msg, Tree: l.tree()}); err != nil {
 			return err
 		}
 	}
@@ -398,7 +399,7 @@ func (l *loop) say(text string) error {
 	return skein.Await(c)
 }
 
-func (l *loop) lastAssistant() *reveal {
+func (l *loop) lastAssistant() *turn {
 	for i := len(l.conv) - 1; i >= 0; i-- {
 		if l.conv[i].Role == "assistant" {
 			return &l.conv[i]
@@ -444,7 +445,7 @@ func (l *loop) tree() skein.CID {
 	return t
 }
 
-func toolText(r reveal) string {
+func toolText(r turn) string {
 	var b strings.Builder
 	if r.ExitCode != nil {
 		fmt.Fprintf(&b, "exit %d\n", *r.ExitCode)

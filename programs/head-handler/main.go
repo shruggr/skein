@@ -1,10 +1,9 @@
 // head-handler: the handler program for the `head` box — the owner moving a
 // named head (docs/VM.md, "Heads").
 //
-// The envelope's content decrypts (purely, with the host-delivered message key)
-// to {name, tree}. A reveal {kind: "reveal", of: <envelope>, name, tree} is put
-// and signed, then the head is advanced to the tree; the runtime writes the
-// head's update when the step ends (the tree must be in the store).
+// The admitted body is {name, tree}: the head is advanced to the tree; the
+// runtime writes the head's update when the step ends (the tree must be in the
+// store).
 package main
 
 import (
@@ -16,17 +15,10 @@ import (
 
 type args struct {
 	Envelope skein.CID `cbor:"envelope"`
-	Key      skein.CID `cbor:"key"`
+	Body     skein.CID `cbor:"body"`
 }
 
 type headBody struct {
-	Name string    `cbor:"name"`
-	Tree skein.CID `cbor:"tree"`
-}
-
-type reveal struct {
-	Kind string    `cbor:"kind"`
-	Of   skein.CID `cbor:"of"`
 	Name string    `cbor:"name"`
 	Tree skein.CID `cbor:"tree"`
 }
@@ -47,7 +39,7 @@ func run() error {
 	if err := skein.Decode(step.Args, &a); err != nil {
 		return fmt.Errorf("args: %w", err)
 	}
-	_, plain, err := skein.Open(a.Envelope, a.Key)
+	_, plain, err := skein.Read(a.Envelope, a.Body)
 	if err != nil {
 		return err
 	}
@@ -57,13 +49,6 @@ func run() error {
 	}
 	if b.Name == "" || len(b.Tree) == 0 {
 		return fmt.Errorf("body: want {name, tree}")
-	}
-	rc, err := skein.Put(reveal{Kind: "reveal", Of: a.Envelope, Name: b.Name, Tree: b.Tree})
-	if err != nil {
-		return fmt.Errorf("put reveal: %w", err)
-	}
-	if err := skein.Reveal(rc); err != nil {
-		return fmt.Errorf("reveal: %w", err)
 	}
 	return skein.Advance(b.Name, b.Tree)
 }

@@ -114,7 +114,7 @@ export async function instance(o: {
   }
   const lines: string[] = [];
   const rt = new Runtime({ store, wallet, now: clock.now, log: (l) => lines.push(l) });
-  const edge = new Edge({ runtime: rt, wallet, rootKey: instanceKey, box: hub.as(instanceKey.toPublicKey().toString()), now: clock.now, freshnessMs: o.freshnessMs, log: (l) => lines.push(l) });
+  const edge = new Edge({ runtime: rt, wallet, box: hub.as(instanceKey.toPublicKey().toString()), now: clock.now, freshnessMs: o.freshnessMs, log: (l) => lines.push(l) });
   rt.outbox = edge;
   if (o.start !== false) await rt.start();
   return { store, rt, edge, hub, clock, instanceKey, wallet, identity: instanceKey.toPublicKey().toString(), owner, lines };

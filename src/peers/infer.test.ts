@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { open, seal, verify, type Envelope } from "../envelope.ts";
+import { open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { encode } from "../runtime/cid.ts";
 import { messageBoxHub } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
@@ -71,7 +71,7 @@ test("infer peer: a sealed request in its `infer` box → a sealed completion in
   assert.ok(verify(env));
   assert.equal(env.recipient.handle, "skein");
   const body = dagCbor.decode((await open(inst, env)).body) as { replyTo: CID; message: { content: string }; model: string; ms: number };
-  assert.ok(body.replyTo.equals(encode(req).cid));
+  assert.ok(body.replyTo.equals(encode(signedPart(req)).cid), "replyTo is the request's id: its signed part's CID");
   assert.equal(body.message.content, "hello");
   assert.equal(body.model, "ripper/qwen38");
   assert.equal(typeof body.ms, "number");

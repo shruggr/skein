@@ -2,7 +2,7 @@ package main
 
 import "github.com/shruggr/skein/programs/skein"
 
-// envelopeOf reads the envelope's metadata (no decrypt: step 2 only needs the sender).
+// envelopeOf reads the envelope's signed part (step 2 only needs the sender).
 func envelopeOf(c skein.CID) (*skein.Envelope, error) {
 	raw, err := skein.Get(c)
 	if err != nil {

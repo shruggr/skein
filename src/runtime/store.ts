@@ -116,10 +116,10 @@ export type LogEntry = {
   time: Stamp;       // the runtime's clock at admission: [sec, nsec] since the epoch; never before prev's
   /** Exactly one of: the genesis record (n = 0) … */
   genesis?: CID;
-  /** … an admitted envelope (its JSON object as dag-cbor), the BRC-33 box it arrived in, and the message key record … */
+  /** … an admitted envelope's signed part (its JSON object without `content`, as dag-cbor), the BRC-33 box it arrived in, and its plaintext body … */
   envelope?: CID;
   box?: string;
-  key?: CID;
+  body?: CID;
   /** … or a wake: the thread whose `until` this entry reaches. */
   wake?: CID;
   /** DER, by the instance identity over the entry's dag-cbor without `sig` (log.ts). */

@@ -19,7 +19,7 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 ```
 src/runtime/     the machine — one process; no disk, network or randomness; one clock read, in log.ts
   main.ts          `skein-runtime`: store + wallet + edge + scheduler
-  inbox.ts         the edge to the host's messagebox: screen, derive the message key, admit; seal and send emits
+  inbox.ts         the edge to the host's messagebox: screen, decrypt, admit the plaintext; sign, encrypt and send emits
   scheduler.ts     the log consumer: route by subscription, step programs and the shell, attested calls, replay
   log.ts           the input log: signed entries (genesis | envelope | wake), stamped at admission
   program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
@@ -28,12 +28,12 @@ src/runtime/     the machine — one process; no disk, network or randomness; on
   shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
-src/envelope.ts  BRC-169 envelopes: RFC 8785 canonical form, BRC-78 content, seal/verify/open (shared with the client)
+src/envelope.ts  BRC-169 envelopes: RFC 8785 canonical form, signed contentHash, BRC-78 content, sign/seal/verify/open (shared with the client)
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        handler programs in Go: run-handler, objects-handler, head-handler, loop (the chat turn loop); skein/ (the ABI), brc78/ (pure decryption)
+programs/        handler programs in Go: run-handler, objects-handler, head-handler, loop (the chat turn loop); skein/ (the ABI)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
 wasm/            the committed modules; their CIDs are pinned in src/runtime/programs.ts
 ```
@@ -62,13 +62,11 @@ bin/skein inbox --wait                      # the result envelope, opened by the
 bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
 bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers in David's `say` box
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
-npm test                                    # includes `go test ./brc78` when go is on PATH
+npm test
 ```
 
-`bin/skein-runtime` fills the environment from `~/.skein`: `SKEIN_INSTANCE_WIF`
-(from `dev-wallet.env`: the key the instance wallet runs with; the edge derives
-each envelope's BRC-78 message key from it — BRC-100 has no call that returns
-one), `SKEIN_OWNER` (`owner.identity`), `SKEIN_MESSAGEBOX` (`messagebox.url`).
+`bin/skein-runtime` fills the environment from `~/.skein`: `SKEIN_OWNER`
+(`owner.identity`), `SKEIN_MESSAGEBOX` (`messagebox.url`).
 Also: `SKEIN_DB` (`~/.skein/runtime.db`), `SKEIN_HANDLE` (`skein@localhost`),
 `SKEIN_OWNER_HANDLE` (`david@localhost`), `SKEIN_FRESHNESS_MS` (600000),
 `SKEIN_POLL_MS` (1000), `SKEIN_WALLET=ephemeral` (a throwaway key).
@@ -78,9 +76,8 @@ the transport grants in `scripts/host/grants.sh`:
 
 ```
 1sat permissions grant skein --protocol "skein log" --level 2 --counterparty anyone      # every log entry's signature
-1sat permissions grant skein --protocol "skein reveal" --level 2 --counterparty anyone   # every reveal's signature
 1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone  # outbound envelopes
-1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty <owner>      # outbound content
+1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty <owner>      # inbound and outbound content
 ```
 
 Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.sh`
@@ -90,17 +87,16 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 
 | record | shape |
 |---|---|
-| log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+key \| wake, sig}` — `sig` by the instance identity over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
+| log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake, sig}` — `sig` by the instance identity over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
 | genesis | `{kind: "genesis", identity, handle, domain, owner, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, collect?: [box]}` |
-| envelope | the BRC-169 envelope's JSON object as received, as dag-cbor (its CID is the client's `replyTo`) |
-| message key | `{kind: "message-key", envelope, key}` — the 32-byte AES-256-GCM key its content decrypts under |
-| thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, key, box, sender}` |
-| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, reveals?, emits?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on |
-| step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, key, box, sender, replyTo}, peers?, defaults?}` |
-| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "reveal" \| "seal", request, result}` — a wire frame and its answer, a reveal's signature, or an emit record and its sealed envelope |
-| reveal | `{kind: "reveal", of: <envelope>, …}` — run: `cmd, tree, cwd?, env?`; objects: `root?, count`; head: `name, tree`; loop: see below |
+| envelope | the BRC-169 envelope's signed part: its JSON object without `content`, as dag-cbor (its CID is the message id, the client's `replyTo`) |
+| body | the plaintext content: the sender's dag-cbor bytes, CIDv1 dag-cbor/sha2-256 — the digest is the envelope's signed `contentHash` |
+| thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |
+| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
+| step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?}` |
+| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "seal", request, result}` — a wire frame and its answer, or an emit record and its signed envelope (the signed part) |
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
-| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the edge seals `body` to `to` in `box` during the step (`emit` returns the envelope CID) and sends it after |
+| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the edge signs the envelope for `body` to `to` in `box` during the step (`emit` returns the envelope CID; `created` is the step's stamp) and encrypts and sends it after |
 
 Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
 `root` on the last) → objects-handler, which sets `main` to `root` if there is
@@ -116,13 +112,13 @@ content?, reasoning?, tool_calls?}, usage?, model, ms}` or `{replyTo, error}`),
 and says `{text, page?, tree?, thread, replyTo: <chat>}` to David in `say`.
 David's next `chat` carries `replyTo: <say>`.
 
-**Replies.** An admitted envelope whose body (decrypted purely with its key
-record) has `replyTo` goes only to the thread whose tip `awaits` that envelope,
+**Replies.** An admitted envelope whose plaintext body has `replyTo` goes
+only to the thread whose tip `awaits` that envelope,
 and only if its sender is the identity it was sealed to; it becomes that step's
 `reply` input. Otherwise it is recorded and nothing runs. It is never routed by
 subscription.
 
-Loop reveals, one per turn, in its chain (the conversation is rebuilt from them each step):
+Loop turns (`{kind: "turn", of, role, …}`), one per turn, kept in its chain (the conversation is rebuilt from them each step):
 `{of: <chat>, role: "user", text, tree?, model?}`,
 `{of: <completions>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}`,
 `{of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}` (16 KiB caps),

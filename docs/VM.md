@@ -67,10 +67,11 @@ writes the same chain. A name never moved has no chain.
   step ends without error; the step's update lists it (`heads`). Nothing moves
   a head at turn end, and a thread's tree stays private to the thread.
 - The owner moves one by sending `{name, tree}` to box `head` (`skein head
-  <name> <tree>`): `head-handler` reveals the request and advances the head.
+  <name> <tree>`): `head-handler` reads the request (the plaintext body the
+  log entry names) and advances the head.
 - `main` is the default: `run` with no tree, and a new `chat` with no tree,
   start from `main`'s tree (the empty tree if there is no `main`). The loop
-  records that tree in the opening turn's reveal.
+  records that tree in the opening turn it keeps.
 - An import sets `main` when the instance has none: the client names the root
   on the last `objects` bundle, and `objects-handler` advances `main` to it.
 

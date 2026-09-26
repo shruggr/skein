@@ -3,8 +3,10 @@
 //
 //   { kind: "log", prev: <entry | null>, n, time: [sec, nsec],
 //     genesis: <cid>                  n = 0: the starting state
-//   | envelope: <cid>, box: <name>,   an admitted BRC-169 envelope (its JSON object as dag-cbor), its
-//     key: <cid>                      BRC-33 box, and the message key the host derived for it
+//   | envelope: <cid>, box: <name>,   an admitted BRC-169 envelope's signed part (its JSON object
+//     body: <cid>                     without `content`, as dag-cbor), its BRC-33 box, and its
+//                                     plaintext body (the dag-cbor bytes, whose sha2-256 is the
+//                                     envelope's signed contentHash)
 //   | wake: <thread origin>           a sleeper's deadline reached; no message, no sender
 //     sig }
 //
@@ -46,7 +48,8 @@ export const stampMs = (s: Stamp): Ms => s[0] * 1000 + Math.floor(s[1] / 1_000_0
 export function isLogEntry(x: unknown): x is LogEntry {
   const e = x as Partial<LogEntry> | null;
   return !!e && e.kind === "log" && typeof e.n === "number" && e.sig instanceof Uint8Array
-    && [e.genesis, e.envelope, e.wake].filter((v) => v !== undefined).length === 1;
+    && [e.genesis, e.envelope, e.wake].filter((v) => v !== undefined).length === 1
+    && (e.envelope === undefined) === (e.body === undefined);
 }
 
 /** The signed bytes: the entry's dag-cbor with `sig` removed. */
@@ -60,7 +63,7 @@ export function verifyEntry(e: LogEntry, identity: Identity): boolean {
   return verifyAnyone(identity, LOG_PROTOCOL, LOG_KEY_ID, entryBytes(e), e.sig);
 }
 
-export type EntryBody = { genesis: CID } | { envelope: CID; box: string; key: CID } | { wake: CID };
+export type EntryBody = { genesis: CID } | { envelope: CID; box: string; body: CID } | { wake: CID };
 
 /**
  * Write the next entry: extend the tip, stamp it (never before the tip's
@@ -145,15 +148,15 @@ export async function genesisOf(store: Store): Promise<Genesis> {
 
 /**
  * Copy a log into another store — its entries exactly as signed, and the
- * records they name (genesis, programs, envelopes, keys) — verifying every
- * signature. What replay feeds a fresh runtime. No wallet.
+ * records they name (genesis, programs, envelopes, bodies) — verifying every
+ * signature. What replay feeds a fresh runtime. No wallet, no keys.
  */
 export async function copyLog(from: Store, to: Store): Promise<void> {
   const g = await genesisOf(from);
   for (const p of Object.values(g.programs)) await to.putBlock(p, await from.bytes(p));
   for await (const { cid, entry } of from.log.entries()) {
     if (!verifyEntry(entry, g.identity)) throw new Error(`log: entry #${entry.n} (${short(cid)}) has a bad signature`);
-    for (const c of [entry.genesis, entry.envelope, entry.key]) if (c) await to.putBlock(c, await from.bytes(c));
+    for (const c of [entry.genesis, entry.envelope, entry.body]) if (c) await to.putBlock(c, await from.bytes(c));
     const copied = await to.log.append(entry);
     if (!copied.equals(cid)) throw new Error(`log: entry #${entry.n} copied to a different CID`);
   }

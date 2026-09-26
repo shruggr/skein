@@ -7,6 +7,7 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
+import { signedPart } from "../envelope.ts";
 import { bundlesOf, instance, results, send, T0 } from "../testkit.ts";
 import { encode } from "./cid.ts";
 import { anyoneKey } from "./identity.ts";
@@ -31,7 +32,7 @@ test("log: entries chain, are stamped (never backwards) and signed by the instan
   assert.ok(log[1].entry.prev!.equals(log[0].cid));
   assert.deepEqual(log[1].entry.n, 1);
   assert.deepEqual(log[1].entry.time, T0, "…is raised to the previous stamp");
-  assert.ok(log[1].entry.envelope!.equals(encode(env).cid));
+  assert.ok(log[1].entry.envelope!.equals(encode(signedPart(env)).cid));
 
   for (const { entry } of log) {
     assert.ok(verifyEntry(entry, i.identity));
@@ -48,7 +49,7 @@ test("log: entries chain, are stamped (never backwards) and signed by the instan
   // The store refuses an entry that does not extend the tip, and a second admission of an envelope.
   await assert.rejects(i.store.log.append({ ...e }), /already admitted/);
   await assert.rejects(i.store.log.append({ kind: "log", prev: log[0].cid, n: 1, time: T0, wake: encode({}).cid, sig: e.sig }), /does not extend the tip/);
-  await assert.rejects(appendEntry(i.store, i.wallet, { envelope: e.envelope!, box: "run", key: e.key! }), /already admitted/);
+  await assert.rejects(appendEntry(i.store, i.wallet, { envelope: e.envelope!, box: "run", body: e.body! }), /already admitted/);
 
   // copyLog verifies every signature; a store holding a forged entry does not copy.
   const fresh = memoryStore();

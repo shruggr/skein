@@ -3,14 +3,14 @@
 //   for each log entry after the cursor, in order:
 //     check its signature against the instance identity;
 //     genesis  → the starting state: programs and subscriptions;
-//     envelope → a reply first: if its body (decrypted purely with the message
-//                key record) has `replyTo`, it goes to the thread whose tip
+//     envelope → a reply first: if its plaintext body (a record the entry
+//                names) has `replyTo`, it goes to the thread whose tip
 //                `awaits` that envelope, provided the sender is the identity the
 //                awaited envelope was sealed to — as that thread's next step
 //                input — or, if none, nowhere (recorded, nothing runs). Never
 //                also by subscription. Otherwise route by subscription on
 //                (sender, box), first match wins: launch the handler program's
-//                thread {program, args: {envelope, key, box, sender},
+//                thread {program, args: {envelope, body, box, sender},
 //                launchedBy: <envelope>, input: <entry>} and step it;
 //     wake     → resume the sleeping thread it names, if its deadline is reached;
 //     step every thread that touches until each rests or ends, and hand the
@@ -33,10 +33,12 @@
 //   emitted (`awaits`). When the launched threads are all at rest the program
 //   runs again with their resolution as input; when a reply is admitted it runs
 //   again with that envelope as input (`reply`). A step's attested calls
-//   (wallet wire frames, reveal signatures, sealed envelopes) are records
-//   listed in its update (`calls`); a Witness serves them on replay, so replay
-//   needs no wallet. A step may move named heads (`advance`, heads.ts): the
-//   moves are written when it ends without error, and listed in its update.
+//   (wallet wire frames, signed outbound envelopes) are records listed in its
+//   update (`calls`); a Witness serves them on replay, so replay needs no
+//   wallet. A step may keep records in its thread's state (`keep`: the loop's
+//   turns), listed in its update (`kept`), and move named heads (`advance`,
+//   heads.ts): the moves are written when it ends without error, and listed
+//   in its update.
 //
 // Determinism: every record the runtime writes carries `input` (the entry
 // whose processing wrote it) and `at` (that entry's stamp, in ms). Nothing
@@ -46,48 +48,44 @@ import { createHash } from "node:crypto";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode, isCID } from "./cid.ts";
-import { signAnyone } from "./identity.ts";
 import { appendEntry, genesisOf, isLogEntry, now as clockNow, short, stampMs, verifyEntry, type EntryBody, type LogEntry } from "./log.ts";
-import { brc78Decrypt, brc78Header } from "./brc78.ts";
 import { advanceHead, headTree, isHeadName } from "./heads.ts";
 import { runProgram } from "./program.ts";
 import { isShellArgs, loadModule, loadShellModules } from "./programs.ts";
-import { isAttested, isEmit, isGenesis, isProgram, matches, type Attested, type Emit, type Genesis, type MessageKey, type Program } from "./records.ts";
+import { isAttested, isEmit, isGenesis, isProgram, matches, type Attested, type Emit, type Genesis, type Program } from "./records.ts";
 import { runShell } from "./shell.ts";
 import { Rejected, type Store } from "./store.ts";
 import { entropy, stampNs, ThreadClock, type Stamp } from "./syscalls.ts";
 import type { Ms, ThreadOrigin, ThreadState, ThreadUpdate } from "./types.ts";
-
-/** A reveal's signature: the instance identity, over the revealed record's dag-cbor bytes. */
-export const REVEAL_PROTOCOL: [2, "skein reveal"] = [2, "skein reveal"];
-export const REVEAL_KEY_ID = "1";
 
 /** Wallet wire calls a program may make (BRC-100 call codes): key derivation and crypto only — no actions, no certificates. */
 export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
   [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],
 ]);
 
-/** An emitted envelope, sealed during the step that emitted it, for the edge to send. */
+/** An emitted envelope, signed during the step that emitted it, for the edge to encrypt and send. */
 export interface Outbound extends Emit {
   emit: CID;         // the emit record
   bytes: Uint8Array; // the body record's dag-cbor: the envelope's plaintext content
   thread: CID;
-  envelope: object;  // the sealed BRC-169 envelope (JSON object)
+  envelope: object;  // the signed part of the BRC-169 envelope (JSON object, no `content`)
   cid: CID;          // its record CID: what a reply's `replyTo` names
 }
 
 /**
- * Where emitted envelopes go: the edge (inbox.ts). `seal` is called inside the
- * step that emits (an attested call: its answer is recorded), `send` after the
- * step is recorded. Tests may capture; replay needs no `seal` (the witness answers).
+ * Where emitted envelopes go: the edge (inbox.ts). `seal` signs the envelope's
+ * signed part inside the step that emits (an attested call: its answer is
+ * recorded), `created` being the step's `at`; `send` encrypts and delivers it
+ * after the step is recorded. Tests may capture; replay needs no `seal` (the
+ * witness answers).
  */
 export interface Outbox {
-  seal?(e: Emit, bytes: Uint8Array): Promise<object>;
+  seal?(e: Emit, bytes: Uint8Array, at: Ms): Promise<object>;
   send(o: Outbound): void | Promise<void>;
 }
 
 /** A reply delivered to the thread awaiting it: the handler-args shape, plus what it answers. */
-interface Reply { envelope: CID; key: CID; box: string; sender: string; replyTo: CID }
+interface Reply { envelope: CID; body: CID; box: string; sender: string; replyTo: CID }
 
 /** Answers to attested calls, by position: what replay serves instead of a wallet. */
 export interface Witness { find(thread: CID, step: number, i: number): Promise<Attested | undefined> }
@@ -239,18 +237,22 @@ export class Runtime {
   // ------------------------------------------------------------ admission
 
   /**
-   * Admit a BRC-169 envelope that arrived in `box`, with the message key the
-   * host derived for it: store the envelope (its JSON object as received, as
-   * dag-cbor) and a key record, write a signed log entry naming both, and
-   * schedule processing. The edge has verified and screened it (inbox.ts).
-   * An envelope already in the log is Rejected "duplicate-envelope".
+   * Admit a BRC-169 envelope that arrived in `box`, as its signed part (the
+   * JSON object without `content`) and its plaintext body (canonical dag-cbor,
+   * decrypted by the edge): store both, write a signed log entry naming them,
+   * and schedule processing. The edge has verified the sender's signature and
+   * screened it (inbox.ts); here the body must hash to the signed
+   * `contentHash`. An envelope already in the log is Rejected "duplicate-envelope".
    */
-  async admitEnvelope(envelope: object, box: string, key: Uint8Array): Promise<{ entry: CID; envelope: CID }> {
-    const env = await this.store.put(envelope as never);
+  async admitEnvelope(signed: object, box: string, body: Uint8Array): Promise<{ entry: CID; envelope: CID; body: CID }> {
+    const { cid: bodyCid, bytes } = encode(decode(body));
+    if (!Buffer.from(bytes).equals(body)) throw new TypeError("admit: the body is not canonical dag-cbor");
+    if ((signed as { contentHash?: unknown }).contentHash !== Buffer.from(bodyCid.multihash.digest).toString("hex")) throw new TypeError("admit: the body does not match the envelope's contentHash");
+    if ("content" in signed) throw new TypeError("admit: keep the signed part only, not the wire `content`");
+    const env = await this.store.put(signed as never);
     if (await this.store.log.byEnvelope(env)) throw new Rejected("duplicate-envelope", `envelope ${env} is already admitted`);
-    const k: MessageKey = { kind: "message-key", envelope: env, key };
-    const keyCid = await this.store.put(k);
-    return { entry: await this.append({ envelope: env, box, key: keyCid }), envelope: env };
+    await this.store.putBlock(bodyCid, body);
+    return { entry: await this.append({ envelope: env, box, body: bodyCid }), envelope: env, body: bodyCid };
   }
 
   /** Write a wake entry for a sleeper whose deadline has come (main.ts's timer). No-op if it is not sleeping. */
@@ -320,19 +322,19 @@ export class Runtime {
       const env = await this.store.get(e.envelope).catch(() => undefined);
       const sender = senderOf(env);
       const what = `#${e.n} envelope ${short(e.envelope)} in ${box} from ${sender ? short(sender) : "?"}`;
-      const replyTo = await this.replyToOf(env, e.key);
+      const replyTo = await this.replyToOf(e.body);
       if (replyTo !== undefined) {
         if (replyTo === null || !sender) { this.say(`${what}: replyTo is not a CID; recorded, nothing runs`); return; }
         const t = await this.awaiter(replyTo, sender);
         if (!t) { this.say(`${what}: reply to ${short(replyTo)}, which no thread awaits from this sender; recorded, nothing runs`); return; }
         this.say(`${what}: reply to ${short(replyTo)} → ${short(t)}`);
-        await this.step(t, entry, e, undefined, { envelope: e.envelope, key: e.key!, box, sender, replyTo });
+        await this.step(t, entry, e, undefined, { envelope: e.envelope, body: e.body!, box, sender, replyTo });
         return;
       }
       const sub = sender ? g.subscriptions.find((s) => matches(s, sender, box)) : undefined;
       if (!sub || !sender) { this.say(`${what}: no subscription; recorded, nothing runs`); return; }
       const origin: ThreadOrigin = {
-        kind: "thread", program: sub.handler, args: { envelope: e.envelope, key: e.key, box, sender },
+        kind: "thread", program: sub.handler, args: { envelope: e.envelope, body: e.body, box, sender },
         launchedBy: e.envelope, input: entry, at: stampMs(e.time),
       };
       const t = await this.store.chains.open(origin);
@@ -342,32 +344,35 @@ export class Runtime {
   }
 
   /**
-   * The `replyTo` of an admitted envelope's body, read by decrypting purely
-   * with its message key record: a CID, null if present but not a CID, or
-   * undefined if the body has none (or cannot be read: then it is not a reply).
+   * The `replyTo` of an admitted envelope's plaintext body: a CID, null if
+   * present but not a CID, or undefined if the body has none (or cannot be
+   * read: then it is not a reply).
    */
-  private async replyToOf(env: unknown, key: CID | undefined): Promise<CID | null | undefined> {
-    const content = (env as { content?: unknown } | undefined)?.content;
-    if (!key || typeof content !== "string") return undefined;
+  private async replyToOf(body: CID | undefined): Promise<CID | null | undefined> {
+    if (!body) return undefined;
     try {
-      const k = await this.store.get<MessageKey>(key);
-      const body = decode<Record<string, unknown>>(brc78Decrypt(Buffer.from(content, "base64"), k.key).plaintext);
-      if (!body || typeof body !== "object" || !("replyTo" in body)) return undefined;
-      return isCID(body.replyTo) ? body.replyTo : null;
+      const b = decode<Record<string, unknown>>(await this.store.bytes(body));
+      if (!b || typeof b !== "object" || !("replyTo" in b)) return undefined;
+      return isCID(b.replyTo) ? b.replyTo : null;
     } catch {
       return undefined;
     }
   }
 
-  /** The thread whose tip awaits `envelope`, which was sealed to `sender`. */
+  /**
+   * The thread whose tip awaits `envelope`, which was sealed to `sender`: the
+   * tip's seal call for it names the emit record, and that names the recipient.
+   */
   private async awaiter(envelope: CID, sender: string): Promise<CID | undefined> {
-    const awaited = await this.store.get(envelope).catch(() => undefined) as { content?: unknown } | undefined;
-    let to: string | undefined;
-    try { to = brc78Header(Buffer.from(String(awaited?.content), "base64")).recipient; } catch { return undefined; }
-    if (to !== sender) return undefined;
     for await (const t of this.store.live.awaiting(envelope)) {
-      const tip = await this.tipOf(t);
-      if (tip?.state === "waiting" && tip.awaits?.some((a) => a.equals(envelope))) return t;
+      const tip = await this.tipOf(t) as (ThreadUpdate & { calls?: CID[] }) | undefined;
+      if (tip?.state !== "waiting" || !tip.awaits?.some((a) => a.equals(envelope))) continue;
+      for (const c of tip.calls ?? []) {
+        const a = await this.store.get(c).catch(() => undefined);
+        if (!isAttested(a) || a.op !== "seal" || !encode(decode(a.result)).cid.equals(envelope)) continue;
+        const e = await this.store.get(a.request as CID).catch(() => undefined);
+        if (isEmit(e) && e.to === sender) return t;
+      }
     }
     return undefined;
   }
@@ -459,7 +464,7 @@ export class Runtime {
       clock.drive(stampNs(e.time));
       const random = entropy(entry, origin);
 
-      const calls: CID[] = [], launched: CID[] = [], reveals: CID[] = [], emits: CID[] = [], sealed: CID[] = [], awaits: CID[] = [], heads: CID[] = [];
+      const calls: CID[] = [], launched: CID[] = [], kept: CID[] = [], emits: CID[] = [], sealed: CID[] = [], awaits: CID[] = [], heads: CID[] = [];
       const moves: Array<{ name: string; tree: CID }> = [];
       const children: ThreadOrigin[] = [];
       const g = this.genesis!;
@@ -495,11 +500,9 @@ export class Runtime {
           if (!hashMatches(c, bytes)) throw new Error(`putblock: bytes do not hash to ${c}`);
           await this.store.putBlock(c, bytes);
         },
-        reveal: async (c) => {
-          const bytes = await this.store.bytes(c);
-          if (decode<{ kind?: unknown }>(bytes)?.kind !== "reveal") throw new Error("reveal: the record is not {kind: \"reveal\", …}");
-          await attest("reveal", c, () => signAnyone(this.wallet!, REVEAL_PROTOCOL, REVEAL_KEY_ID, bytes));
-          reveals.push(c);
+        keep: async (c) => {
+          if (!(await this.store.has(c))) throw new Error(`keep: ${c} is not in the store`);
+          kept.push(c);
         },
         launch: async (program, args) => {
           if (awaits.length) throw new Error("launch: this step already awaits a reply; a step waits on threads or on replies, not both");
@@ -516,7 +519,7 @@ export class Runtime {
           const bytes = await this.store.bytes(rec.body);
           const env = await attest("seal", c, async () => {
             if (!this.outbox?.seal) throw new Error("emit: no edge to seal the envelope");
-            return encode(await this.outbox.seal(rec, bytes)).bytes;
+            return encode(await this.outbox.seal(rec, bytes, at)).bytes;
           });
           const cid = await this.store.put(decode(env));
           emits.push(c);
@@ -552,13 +555,13 @@ export class Runtime {
         awaits: state === "waiting" && awaits.length ? awaits : undefined,
         calls: calls.length ? calls : undefined,
         launched: launched.length ? launched : undefined,
-        reveals: reveals.length ? reveals : undefined,
+        kept: kept.length ? kept : undefined,
         emits: emits.length ? emits : undefined,
         heads: heads.length ? heads : undefined,
         result: { exitCode: out.exitCode, stdout: out.stdout, stderr: out.stderr },
         error: state === "errored" ? { kind: "blew-up", message: text(out.stderr).split("\n").at(-1) || `exit ${out.exitCode}` } : undefined,
       }));
-      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${reveals.length ? ` · ${reveals.length} revealed` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${heads.length ? ` · moved ${moves.map((m) => `${m.name}→${short(m.tree)}`).join(",")}` : ""}${awaits.length ? ` · awaits ${awaits.map(short).join(",")}` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
+      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${kept.length ? ` · ${kept.length} kept` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${heads.length ? ` · moved ${moves.map((m) => `${m.name}→${short(m.tree)}`).join(",")}` : ""}${awaits.length ? ` · awaits ${awaits.map(short).join(",")}` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
       after = { emits: emits.map((emit, i) => ({ emit, envelope: sealed[i] })), launched, rested: state !== "waiting" };
     } catch (err) {
       if (err instanceof Stopped || this.stopped) return;

@@ -29,9 +29,8 @@ i grant skein --protocol "auth message signature" --level 2 --counterparty "$hos
 i grant skein --protocol "messagebox" --level 1
 i grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone
 i grant skein --protocol "message encryption" --level 2 --counterparty "$owner"
-# The runtime's own signatures (src/runtime/log.ts, scheduler.ts): every log entry, and every reveal.
+# The runtime's own signatures (src/runtime/log.ts): every log entry.
 i grant skein --protocol "skein log" --level 2 --counterparty anyone
-i grant skein --protocol "skein reveal" --level 2 --counterparty anyone
 i grant skein --protocol "message encryption" --level 2 --counterparty "$infer"   # `infer` requests and `completions` replies
 
 # Inference peer wallet, origin skein-infer — HOME=~/.skein/infer-home. Its own

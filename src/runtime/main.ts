@@ -6,8 +6,6 @@
 //   SKEIN_DB              the store file, default $SKEIN_HOME/runtime.db
 //   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway key; nothing it signs survives)
 //   SKEIN_WALLET_URL      the instance's BRC-100 endpoint, default http://127.0.0.1:3321 (`1sat serve wallet-api`), origin "skein"
-//   SKEIN_INSTANCE_WIF    the instance's root key (the one its wallet was started with); the edge derives
-//                         message keys from it (inbox.ts). Required with a remote wallet.
 //   SKEIN_OWNER           the owner's identity key (a new instance's genesis routes its `run`/`objects` boxes)
 //   SKEIN_OWNER_HANDLE    the owner's handle for outbound envelopes, default david@localhost
 //   SKEIN_INFER           the inference peer's identity key (a new instance's genesis `peers.infer`)
@@ -20,7 +18,6 @@
 // The wallet connection (../wallet.ts) and the messagebox edge (inbox.ts) are
 // the runtime's edges; everything else here is inside the machine.
 
-import { PrivateKey } from "@bsv/sdk";
 import { connectWallet, ephemeralWallet } from "../wallet.ts";
 import { Edge, messageBoxClient } from "./inbox.ts";
 import { ensureGenesis, now, short, stampMs } from "./log.ts";
@@ -34,11 +31,7 @@ const dbPath = env.SKEIN_DB || `${home}/runtime.db`;
 const say = (line: string) => process.stdout.write(`${line}\n`);
 const die = (msg: string): never => { process.stderr.write(`skein-runtime: ${msg}\n`); process.exit(1); };
 
-const ephemeral = env.SKEIN_WALLET === "ephemeral";
-const rootKey = ephemeral ? PrivateKey.fromRandom()
-  : env.SKEIN_INSTANCE_WIF ? PrivateKey.fromWif(env.SKEIN_INSTANCE_WIF)
-  : die("SKEIN_INSTANCE_WIF is not set: the edge derives each envelope's message key from the instance's root key (bin/skein-runtime reads it from ~/.skein/dev-wallet.env)");
-const wallet = ephemeral ? ephemeralWallet(rootKey) : await connectWallet({ kind: "remote", url: env.SKEIN_WALLET_URL, originator: "skein" });
+const wallet = env.SKEIN_WALLET === "ephemeral" ? ephemeralWallet() : await connectWallet({ kind: "remote", url: env.SKEIN_WALLET_URL, originator: "skein" });
 const [user, domain = "localhost"] = (env.SKEIN_HANDLE || "skein@localhost").split("@");
 const store = openStore(dbPath); // SQLite creates the file; the directory must exist (bin/skein-runtime makes it)
 
@@ -68,7 +61,7 @@ const [inferUser, inferDomain = "localhost"] = (env.SKEIN_INFER_HANDLE || "infer
 let edge: Edge | undefined;
 if (env.SKEIN_MESSAGEBOX) {
   edge = new Edge({
-    runtime, wallet, rootKey,
+    runtime, wallet,
     box: messageBoxClient(wallet, env.SKEIN_MESSAGEBOX),
     freshnessMs: env.SKEIN_FRESHNESS_MS ? Number(env.SKEIN_FRESHNESS_MS) : undefined,
     handles: {
@@ -77,7 +70,6 @@ if (env.SKEIN_MESSAGEBOX) {
     },
     log: say,
   });
-  await edge.check().catch((e) => die((e as Error).message));
   runtime.outbox = edge;
   edge.start(Number(env.SKEIN_POLL_MS || 1000));
 } else {

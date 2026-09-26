@@ -1,9 +1,9 @@
 // The instance's edge to the host's messagebox (docs/MESSAGES.md): the one
 // file under src/runtime that talks to the network. It is the runtime's own
 // tooling, host-side by definition, and isolation.test.ts allows it by name:
-// it may import ../envelope.ts (outside src/runtime), use a timer to poll, and
-// hold the instance's root key to derive message keys. Nothing inside the
-// machine calls it; it calls the runtime's admission and receives its emits.
+// it may import ../envelope.ts (outside src/runtime) and use a timer to poll.
+// Nothing inside the machine calls it; it calls the runtime's admission and
+// receives its emits.
 //
 // In: for every box the subscriptions route, list the instance's messages
 // and, in order, for each one:
@@ -12,33 +12,27 @@
 //   messagebox's authenticated sender is not envelope.sender.identityKey, if
 //   `created` is outside the freshness window (±$SKEIN_FRESHNESS_MS of the
 //   runtime's clock, default 10 minutes), if it is not addressed to this
-//   instance, or if its record CID is already admitted; derive the BRC-78
-//   message key; admit {envelope, key} with its box (a signed log entry);
-//   acknowledge. A rejection is logged and acknowledged too, so it does not
-//   come back.
+//   instance, or if its record CID is already admitted; decrypt the content
+//   through the instance wallet (the wire encryption ends here) and check it
+//   against the signed contentHash; admit the signed part and the plaintext
+//   body with its box (a signed log entry); acknowledge. A rejection is logged
+//   and acknowledged too, so it does not come back.
 //
-// Out: an emit (scheduler.ts) is sealed as an envelope through the instance
-// wallet during the step that emits it (so the program learns its CID and can
-// await a reply naming it), and sent to its recipient's box once the step is
-// recorded.
-//
-// The message key. Decryption inside is pure (AES-256-GCM with a recorded
-// key), so the edge must hand in the per-message key, which BRC-100 has no
-// call for (decrypt returns plaintext). The host holds the instance's root key
-// — it is what starts the instance wallet — so the edge derives the key itself
-// with the SDK's BRC-42 math (deriveMessageKey), byte-for-byte what
-// ProtoWallet.decrypt uses. The scheduler and everything inside never see
-// the root key.
+// Out: an emit (scheduler.ts) is signed through the instance wallet during the
+// step that emits it (so the program learns its CID and can await a reply
+// naming it), then encrypted to its recipient and sent to its box once the
+// step is recorded.
 
 import { MessageBoxClient } from "@bsv/message-box-client";
-import { PrivateKey, PublicKey, type WalletInterface } from "@bsv/sdk";
-import { brc78Decode, isEnvelope, isoTime, seal, verify, type Envelope } from "../envelope.ts";
-import { encode } from "./cid.ts";
+import type { WalletInterface } from "@bsv/sdk";
+import { brc78Decode, encryptContent, isEnvelope, isoTime, open, sign, signedPart, verify, type Envelope, type Signed } from "../envelope.ts";
+import { decode, encode } from "./cid.ts";
 import { now as clockNow, short, stampMs } from "./log.ts";
 import type { Emit } from "./records.ts";
 import type { Runtime, Outbound } from "./scheduler.ts";
 import { Rejected } from "./store.ts";
 import type { Stamp } from "./syscalls.ts";
+import type { Ms } from "./types.ts";
 
 // ---------------------------------------------------------------- the messagebox
 
@@ -72,32 +66,12 @@ export function messageBoxClient(wallet: WalletInterface, host: string, originat
   };
 }
 
-// ---------------------------------------------------------------- message keys
-
-/**
- * The BRC-78 message key for a message addressed to `root`'s identity: the
- * x coordinate of the ECDH between the recipient's and the sender's BRC-42
- * children under invoice "2-message encryption-<base64 key id>" — exactly the
- * symmetric key ProtoWallet.decrypt uses for that ciphertext (KeyDeriver.deriveSymmetricKey).
- */
-export function deriveMessageKey(root: PrivateKey, header: { sender: string; recipient: string; keyId: Uint8Array }): Uint8Array {
-  const me = root.toPublicKey().toString();
-  if (header.recipient !== me) throw new Error(`message key: addressed to ${header.recipient}, not this instance (${me})`);
-  const invoice = `2-message encryption-${Buffer.from(header.keyId).toString("base64")}`;
-  const sender = PublicKey.fromString(header.sender);
-  const childPub = sender.deriveChild(root, invoice);
-  const childPriv = root.deriveChild(sender, invoice);
-  return Uint8Array.from(childPriv.deriveSharedSecret(childPub).getX().toArray("be", 32));
-}
-
 // ---------------------------------------------------------------- the edge
 
 export interface EdgeOptions {
   runtime: Runtime;
-  /** The instance wallet (seals outbound envelopes). */
+  /** The instance wallet: decrypts inbound content, signs and encrypts outbound envelopes. */
   wallet: WalletInterface;
-  /** The instance's root key: its identity must be the wallet's. Held here only. */
-  rootKey: PrivateKey;
   box: MessageBox;
   /** Accept `created` within ±this of the runtime's clock. Default 10 minutes. */
   freshnessMs?: number;
@@ -108,7 +82,7 @@ export interface EdgeOptions {
   now?: () => Stamp;
 }
 
-export type Screened = { ok: true; envelope: Envelope } | { ok: false; reason: string };
+export type Screened = { ok: true; envelope: Envelope; body: Uint8Array } | { ok: false; reason: string };
 
 export class Edge {
   private readonly o: EdgeOptions;
@@ -121,13 +95,6 @@ export class Edge {
     this.o = o;
     this.say = o.log ?? (() => {});
     this.freshnessMs = o.freshnessMs ?? 10 * 60_000;
-  }
-
-  /** Check that the root key is the wallet's identity. Call before start. */
-  async check(): Promise<void> {
-    const { publicKey } = await this.o.wallet.getPublicKey({ identityKey: true });
-    const mine = this.o.rootKey.toPublicKey().toString();
-    if (publicKey !== mine) throw new Error(`edge: the instance key (${mine}) is not the wallet's identity (${publicKey})`);
   }
 
   /** Poll every `ms` until stop(). */
@@ -166,7 +133,7 @@ export class Edge {
     return admitted;
   }
 
-  /** Screen one message (docs/MESSAGES.md, "Replay protection"). Pure apart from the admitted-envelope lookup. */
+  /** Screen one message (docs/MESSAGES.md, "Replay protection") and decrypt it through the wallet. */
   async screen(m: Listed): Promise<Screened> {
     let env: unknown = m.body;
     try {
@@ -184,19 +151,34 @@ export class Edge {
     if (!Number.isFinite(created) || Math.abs(nowMs - created) > this.freshnessMs) {
       return { ok: false, reason: `created ${env.created} is outside ±${this.freshnessMs} ms of now` };
     }
-    const me = this.o.rootKey.toPublicKey().toString();
-    if (brc78Decode(Buffer.from(env.content, "base64")).recipient !== me) return { ok: false, reason: "not addressed to this instance" };
-    if (await this.o.runtime.store.log.byEnvelope(encode(env).cid)) return { ok: false, reason: `envelope ${short(encode(env).cid)} was already admitted` };
-    return { ok: true, envelope: env };
+    const { publicKey: me } = await this.o.wallet.getPublicKey({ identityKey: true });
+    try {
+      if (brc78Decode(Buffer.from(env.content, "base64")).recipient !== me) return { ok: false, reason: "not addressed to this instance" };
+    } catch (e) {
+      return { ok: false, reason: (e as Error).message };
+    }
+    const id = encode(signedPart(env)).cid;
+    if (await this.o.runtime.store.log.byEnvelope(id)) return { ok: false, reason: `envelope ${short(id)} was already admitted` };
+    let body: Uint8Array;
+    try {
+      body = (await open(this.o.wallet, env)).body;
+    } catch (e) {
+      return { ok: false, reason: (e as Error).message };
+    }
+    try {
+      if (!Buffer.from(encode(decode(body)).bytes).equals(body)) return { ok: false, reason: "the body is not canonical dag-cbor" };
+    } catch {
+      return { ok: false, reason: "the body is not dag-cbor" };
+    }
+    return { ok: true, envelope: env, body };
   }
 
-  /** Screen, derive the key, admit. Undefined when rejected (logged). */
+  /** Screen, decrypt, admit. Undefined when rejected (logged). */
   async ingest(box: string, m: Listed): Promise<{ envelope: string; entry: string } | undefined> {
     const s = await this.screen(m);
     if (!s.ok) { this.say(`inbox ${box} ${m.messageId}: rejected: ${s.reason}`); return undefined; }
-    const key = deriveMessageKey(this.o.rootKey, brc78Decode(Buffer.from(s.envelope.content, "base64")));
     try {
-      const { entry, envelope } = await this.o.runtime.admitEnvelope(s.envelope, box, key);
+      const { entry, envelope } = await this.o.runtime.admitEnvelope(signedPart(s.envelope), box, s.body);
       this.say(`inbox ${box} ${m.messageId}: admitted ${short(envelope)} as ${short(entry)}`);
       return { envelope: envelope.toString(), entry: entry.toString() };
     } catch (e) {
@@ -206,26 +188,26 @@ export class Edge {
   }
 
   /**
-   * The runtime's outbox, part 1: seal an emit as an envelope through the
-   * instance wallet, during the step that emits it (the scheduler records the
-   * envelope as an attested answer, so its CID is known before the step ends).
-   * `created` is this edge's clock.
+   * The runtime's outbox, part 1: sign an emit's envelope (its signed part,
+   * contentHash and all) through the instance wallet, during the step that
+   * emits it (the scheduler records it as an attested answer, so its CID is
+   * known before the step ends). `created` is the step's `at`.
    */
-  async seal(e: Emit, bytes: Uint8Array): Promise<Envelope> {
+  async seal(e: Emit, bytes: Uint8Array, at: Ms): Promise<Signed> {
     const g = this.o.runtime.genesis!;
     const named = e.handle ? { handle: e.handle, domain: e.domain ?? g.domain } : this.o.handles?.[e.to] ?? { handle: e.to.slice(0, 16), domain: g.domain };
-    const s = (this.o.now ?? clockNow)();
-    return seal(this.o.wallet, {
+    return sign(this.o.wallet, {
       recipient: { identityKey: e.to, ...named },
       sender: { handle: g.handle, domain: g.domain },
       body: bytes,
-      created: isoTime(stampMs(s)),
+      created: isoTime(at),
     });
   }
 
-  /** The runtime's outbox, part 2: send the sealed envelope, once the step is recorded. */
+  /** The runtime's outbox, part 2: encrypt the body to the recipient and send the envelope, once the step is recorded. */
   async send(o: Outbound): Promise<void> {
-    await this.o.box.send({ recipient: o.to, box: o.box, body: o.envelope });
+    const content = await encryptContent(this.o.wallet, o.to, o.bytes);
+    await this.o.box.send({ recipient: o.to, box: o.box, body: { ...o.envelope, content } });
     this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)} (emit ${short(o.emit)})`);
   }
 }
