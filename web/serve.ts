@@ -28,5 +28,5 @@ export function serve(port: number, host = "127.0.0.1") {
 
 if (import.meta.main) {
   const port = Number(process.argv[2] ?? 4400);
-  serve(port).on("listening", () => console.log(`skein web: http://localhost:${port}`));
+  serve(port, process.env.SKEIN_WEB_HOST ?? "127.0.0.1").on("listening", () => console.log(`skein web: http://localhost:${port}`));
 }

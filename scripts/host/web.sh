@@ -14,8 +14,8 @@ node --experimental-strip-types --no-warnings "$root/web/build.ts"
 if ss -ltn 2>/dev/null | grep -qE "(127.0.0.1|\*|0.0.0.0):$port "; then echo "web already listening on $port (rebuilt; reload the page)"; exit 0; fi
 if [ "${1:-}" = "--bg" ]; then
   nohup node --experimental-strip-types --no-warnings "$root/web/serve.ts" "$port" >> "$skein/logs/web.log" 2>&1 &
-  for _ in $(seq 20); do ss -ltn | grep -q "127.0.0.1:$port " && break; sleep 0.25; done
-  ss -ltn | grep -q "127.0.0.1:$port " || { echo "web did not start; see $skein/logs/web.log" >&2; exit 1; }
+  for _ in $(seq 20); do ss -ltn | grep -qE "(127.0.0.1|\*|0.0.0.0):$port " && break; sleep 0.25; done
+  ss -ltn | grep -qE "(127.0.0.1|\*|0.0.0.0):$port " || { echo "web did not start; see $skein/logs/web.log" >&2; exit 1; }
   echo "skein web: http://localhost:$port"
 else
   exec node --experimental-strip-types --no-warnings "$root/web/serve.ts" "$port"
