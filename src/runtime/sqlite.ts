@@ -108,28 +108,36 @@ export interface SqliteStore extends Store {
   findByPrefix(prefix: string): Promise<CID[]>;
 }
 
-export function openStore(path: string): SqliteStore {
-  const db = new DatabaseSync(path);
-  db.exec(`
-    PRAGMA journal_mode = WAL;
-    PRAGMA synchronous = NORMAL;
-    PRAGMA foreign_keys = ON;
-    PRAGMA busy_timeout = 5000;
-  `);
-  const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
-  db.exec(DDL);
-  // Older files: add missing derived columns, then rebuild once the store
-  // exists. A new messages table beside old chains may owe rows to old blocks.
-  const cols = new Set(db.prepare("PRAGMA table_info(chains)").all().map((c) => c.name));
-  const added = [["tip_at", "INTEGER"], ["program", "BLOB"], ["waiting_from", "TEXT"], ["awaits", "TEXT"]].filter(([c]) => !cols.has(c));
-  for (const [c, type] of added) db.exec(`ALTER TABLE chains ADD COLUMN ${c} ${type}`);
-  const stale = added.length > 0 || (tables.has("chains") && !tables.has("messages"));
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS chains_tip_at       ON chains(kind, tip_at);
-    CREATE INDEX IF NOT EXISTS chains_program      ON chains(program) WHERE program IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS chains_waiting_from ON chains(waiting_from) WHERE waiting_from IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS chains_awaits       ON chains(kind) WHERE awaits IS NOT NULL;
-  `);
+/**
+ * `readOnly`: open an existing file for reading only (the explorer beside a
+ * live runtime): no schema, no migration, no journal change; writes throw.
+ */
+export function openStore(path: string, o: { readOnly?: boolean } = {}): SqliteStore {
+  const db = new DatabaseSync(path, { readOnly: o.readOnly ?? false });
+  let stale = false;
+  if (o.readOnly) db.exec("PRAGMA busy_timeout = 5000;");
+  else {
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = NORMAL;
+      PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 5000;
+    `);
+    const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
+    db.exec(DDL);
+    // Older files: add missing derived columns, then rebuild once the store
+    // exists. A new messages table beside old chains may owe rows to old blocks.
+    const cols = new Set(db.prepare("PRAGMA table_info(chains)").all().map((c) => c.name));
+    const added = [["tip_at", "INTEGER"], ["program", "BLOB"], ["waiting_from", "TEXT"], ["awaits", "TEXT"]].filter(([c]) => !cols.has(c));
+    for (const [c, type] of added) db.exec(`ALTER TABLE chains ADD COLUMN ${c} ${type}`);
+    stale = added.length > 0 || (tables.has("chains") && !tables.has("messages"));
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS chains_tip_at       ON chains(kind, tip_at);
+      CREATE INDEX IF NOT EXISTS chains_program      ON chains(program) WHERE program IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS chains_waiting_from ON chains(waiting_from) WHERE waiting_from IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS chains_awaits       ON chains(kind) WHERE awaits IS NOT NULL;
+    `);
+  }
 
   const q = {
     begin: db.prepare("BEGIN IMMEDIATE"),

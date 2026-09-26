@@ -6,6 +6,7 @@
   "bin": {
     "skein": "./bin/skein",
     "skein-dev": "./bin/skein-dev",
+    "skein-explore": "./bin/skein-explore",
     "skein-runtime": "./bin/skein-runtime",
     "skein-infer": "./bin/skein-infer"
   },

@@ -36,6 +36,7 @@ src/envelope.ts  BRC-169 envelopes: RFC 8785 canonical form, signed contentHash,
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
+  explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
 programs/        handler programs in Go: run-handler, objects-handler, head-handler, loop (the chat turn loop); skein/ (the ABI)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
