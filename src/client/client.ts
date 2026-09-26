@@ -17,7 +17,7 @@ import type { ClientConfig } from "./config.ts";
 import { open, seal, verify, type Envelope } from "./envelope.ts";
 import { chatBody, conversationFrom, loadConversation, parseSay, saveConversation, type Conversation } from "./conversation.ts";
 
-export const BOX = { objects: "objects", run: "run", results: "results", chat: "chat", say: "say" } as const;
+export const BOX = { objects: "objects", run: "run", head: "head", results: "results", chat: "chat", say: "say" } as const;
 
 /** The boxes David reads, in this order. */
 export const INBOX = [BOX.results, BOX.say] as const;
@@ -83,7 +83,7 @@ export class SkeinClient {
       if (r.cid.toString() === rootKey) return 2;
       return new TextDecoder().decode(r.bytes.subarray(0, 5)) === "tree " ? 1 : 0;
     }
-    const bundles = [...chunk(records)];
+    const bundles = [...chunk(records, undefined, root)];
     const sent: Sent[] = [];
     for (const [i, bytes] of bundles.entries()) {
       onBundle?.(i, bundles.length, bytes.length);
@@ -109,11 +109,18 @@ export class SkeinClient {
     return sent;
   }
 
-  async run(args: { tree: string; cmd: string; cwd?: string; env?: Record<string, string> }): Promise<Sent> {
-    const body: Record<string, unknown> = { cmd: args.cmd, tree: CID.parse(args.tree) };
+  /** Run a command (box `run`). No tree: the instance's `main` head, else the empty tree. */
+  async run(args: { tree?: string; cmd: string; cwd?: string; env?: Record<string, string> }): Promise<Sent> {
+    const body: Record<string, unknown> = { cmd: args.cmd };
+    if (args.tree !== undefined) body.tree = CID.parse(args.tree);
     if (args.cwd !== undefined) body.cwd = args.cwd;
     if (args.env !== undefined) body.env = args.env;
     return this.send(BOX.run, body, { tree: args.tree, cmd: args.cmd });
+  }
+
+  /** Move a named head to a tree the instance holds (box `head`): "`name` is now `tree`". */
+  head(name: string, tree: string): Promise<Sent> {
+    return this.send(BOX.head, { name, tree: CID.parse(tree) }, { tree });
   }
 
   /**

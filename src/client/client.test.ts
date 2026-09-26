@@ -55,6 +55,13 @@ test("chunk: bundles stay under the limit and keep every record in order", () =>
   back.forEach((r, i) => { assert.ok(r.cid.equals(recs[i]!.cid)); assert.deepEqual(r.bytes, recs[i]!.bytes); });
 });
 
+test("chunk: the root rides on the last bundle only", () => {
+  const recs: Rec[] = [1, 2, 3].map((n) => { const bytes = new Uint8Array(100).fill(n); return { cid: blobCid(bytes), bytes }; });
+  const root = recs[2]!.cid;
+  const roots = [...chunk(recs, 200, root)].map((b) => (dagCbor.decode(b) as { root?: CID }).root?.toString());
+  assert.deepEqual(roots, [undefined, undefined, root.toString()]);
+});
+
 test("chunk: an oversized record travels alone; default limit is 1 MiB", () => {
   const small = new Uint8Array(10), big = new Uint8Array(BUNDLE_LIMIT + 5);
   const bundles = [...chunk([{ cid: blobCid(small), bytes: small }, { cid: blobCid(big), bytes: big }, { cid: blobCid(small), bytes: small }])];
@@ -95,7 +102,9 @@ test("parseCli", () => {
   assert.deepEqual(parseCli(["whoami"]), { cmd: "whoami" });
   assert.deepEqual(parseCli([]), { cmd: "help" });
   assert.throws(() => parseCli(["run", "--tree", "x", "ls"]), /after `--`/);
-  assert.throws(() => parseCli(["run", "--", "ls"]), /--tree/);
+  assert.deepEqual(parseCli(["run", "--", "ls"]), { cmd: "run", line: "ls" }, "no --tree: the instance's `main`");
+  assert.deepEqual(parseCli(["head", "main", "baf"]), { cmd: "head", name: "main", tree: "baf" });
+  assert.throws(() => parseCli(["head", "baf"]), /<name> <tree-cid>/);
   assert.throws(() => parseCli(["run", "--tree", "x", "--env", "NOEQ", "--", "ls"]), /K=V/);
   assert.throws(() => parseCli(["import"]), /one <dir>/);
   assert.throws(() => parseCli(["inbox", "--bogus"]));

@@ -76,11 +76,11 @@ export async function appendEntry(store: Store, wallet: KeyWallet, body: EntryBo
 }
 
 export interface InstanceConfig {
-  /** The identity the instance acts for; the default subscriptions route its `run` and `objects` boxes. */
+  /** The identity the instance acts for; the default subscriptions route its `run`, `objects`, `head` and `chat` boxes. */
   owner: Identity;
   handle?: string;  // default "skein"
   domain?: string;  // default "localhost"
-  /** Default: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, chat) → loop. */
+  /** Default: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop. */
   subscriptions?: Subscription[];
   /** Peers by role: `infer` is the inference peer the loop asks. */
   peers?: Record<string, Identity>;
@@ -104,6 +104,7 @@ export async function genesisFor(wallet: KeyWallet, c: InstanceConfig): Promise<
     subscriptions: c.subscriptions ?? [
       { match: { sender: c.owner, box: "run" }, handler: PROGRAM_CIDS["run-handler"] },
       { match: { sender: c.owner, box: "objects" }, handler: PROGRAM_CIDS["objects-handler"] },
+      { match: { sender: c.owner, box: "head" }, handler: PROGRAM_CIDS["head-handler"] },
       { match: { sender: c.owner, box: "chat" }, handler: PROGRAM_CIDS.loop },
     ],
     ...(c.peers && Object.keys(c.peers).length ? { peers: c.peers } : {}),

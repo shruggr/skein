@@ -23,7 +23,8 @@ src/runtime/     the machine — one process; no disk, network or randomness; on
   scheduler.ts     the log consumer: route by subscription, step programs and the shell, attested calls, replay
   log.ts           the input log: signed entries (genesis | envelope | wake), stamped at admission
   program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
-  programs.ts      the program records (shell, run-handler, objects-handler) and pinned module CIDs
+  programs.ts      the program records (shell, run-handler, objects-handler, head-handler, loop) and pinned module CIDs
+  heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
   shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
@@ -32,7 +33,7 @@ src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        handler programs in Go: run-handler, objects-handler, loop (the chat turn loop); skein/ (the ABI), brc78/ (pure decryption)
+programs/        handler programs in Go: run-handler, objects-handler, head-handler, loop (the chat turn loop); skein/ (the ABI), brc78/ (pure decryption)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
 wasm/            the committed modules; their CIDs are pinned in src/runtime/programs.ts
 ```
@@ -55,7 +56,8 @@ npm install
 scripts/host/up.sh                          # wallets, messagebox, grants, accounts (idempotent)
 bin/skein-runtime                           # the instance: installs modules, writes a genesis into an empty store
 bin/skein import ~/Work/easel               # the client: tree objects into `objects`; prints the tree CID
-bin/skein run --tree <cid> -- 'ls | head -3'
+bin/skein run --tree <cid> -- 'ls | head -3'   # no --tree: the `main` head (the first import sets it)
+bin/skein head main <cid>                   # move `main` to a tree the instance holds
 bin/skein inbox --wait                      # the result envelope, opened by the owner
 bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
 bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers in David's `say` box
@@ -93,18 +95,22 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | envelope | the BRC-169 envelope's JSON object as received, as dag-cbor (its CID is the client's `replyTo`) |
 | message key | `{kind: "message-key", envelope, key}` — the 32-byte AES-256-GCM key its content decrypts under |
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, key, box, sender}` |
-| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, reveals?, emits?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on |
+| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, reveals?, emits?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on |
 | step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, key, box, sender, replyTo}, peers?, defaults?}` |
 | attested | `{kind: "attested", thread, step, i, op: "wallet" \| "reveal" \| "seal", request, result}` — a wire frame and its answer, a reveal's signature, or an emit record and its sealed envelope |
-| reveal | `{kind: "reveal", of: <envelope>, …}` — run: `cmd, tree, cwd?, env?`; objects: `root?, count`; loop: see below |
+| reveal | `{kind: "reveal", of: <envelope>, …}` — run: `cmd, tree, cwd?, env?`; objects: `root?, count`; head: `name, tree`; loop: see below |
+| head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
 | emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the edge seals `body` to `to` in `box` during the step (`emit` returns the envelope CID) and sends it after |
 
-Boxes: `objects` (`{records: [{cid, bytes}]}` ≤ 1 MiB, blobs first) →
-objects-handler; `run` (`{cmd, tree, cwd?, env?}`) → run-handler, which replies
-in the sender's `results` box with `{exitCode, stdout, stderr, tree, replyTo}`.
+Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
+`root` on the last) → objects-handler, which sets `main` to `root` if there is
+no `main`; `run` (`{cmd, tree?, cwd?, env?}`; no tree: `main`'s, else the empty
+tree) → run-handler, which replies in the sender's `results` box with
+`{exitCode, stdout, stderr, tree, replyTo}`; `head` (`{name, tree}`) →
+head-handler, which moves the head (no reply).
 
 Chat: `chat` (`{text, tree?, model?, replyTo?}`) with no `replyTo` → a new loop
-thread; the loop sends `infer` (`{model, messages, tools?, thinking?}`) to
+thread, over `tree` or else `main`'s; the loop sends `infer` (`{model, messages, tools?, thinking?}`) to
 `peers.infer`, which answers in `completions` (`{replyTo, message: {role,
 content?, reasoning?, tool_calls?}, usage?, model, ms}` or `{replyTo, error}`),
 and says `{text, page?, tree?, thread, replyTo: <chat>}` to David in `say`.

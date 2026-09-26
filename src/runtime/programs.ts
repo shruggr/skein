@@ -1,6 +1,6 @@
 // The programs this runtime starts with. `shell` is the wasm shell (brush +
 // uutils coreutils) driven from TypeScript; its record names the two WASI
-// modules by CID. `run-handler`, `objects-handler` and `loop` are handler programs
+// modules by CID. `run-handler`, `objects-handler`, `head-handler` and `loop` are handler programs
 // (Go, GOOS=wasip1; programs/, built by scripts/build-programs.sh) stepped
 // through the `skein` imports (program.ts). The runtime loads every module
 // from the store by CID and never from a disk; `skein-dev install` puts the
@@ -26,9 +26,10 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreigml6yyeclbxf35bdyp5m7v3thyt5a4refqmxszt74k5ktgp64orm"),
-  "objects-handler": CID.parse("bafkreih6xihakii6omi36c2gbbw4csmzcyjllhzl6sigzpklrgligx6hsq"),
-  "loop": CID.parse("bafkreidnpowxg55l2vcria5rwurtbtozxecr7nku63m2tskdvojmupnlsi"),
+  "run-handler": CID.parse("bafkreiafyv2lw5r4jfeczmqiutkjad5s63esrgz3ki2qkunkig6zfdm3lu"),
+  "objects-handler": CID.parse("bafkreickyjujwhudcx422et6rptfsrhrniwpnxaehfo6ze6xaxjpvm6hse"),
+  "head-handler": CID.parse("bafkreibt6c4zhk2myeyrv5m3aydbq3nd6zyk7yobnbqrv3hhodaub5hlq4"),
+  "loop": CID.parse("bafkreiajsrlkhsy5ttuslgrengdgkgd2nk5cabshgqilbnrevpvrf46qa4"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -50,7 +51,7 @@ export const RUN_HANDLER = program({
   code: { wasm: MODULES["run-handler"] },
   inputs: { envelope: "cid", box: "string", sender: "identity" },
   services: ["wallet"],
-  description: "The `run` box: decrypt {cmd, tree, cwd?, env?}, reveal it, run the shell, reply in `results`.",
+  description: "The `run` box: decrypt {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), reveal it, run the shell, reply in `results`.",
 });
 
 export const OBJECTS_HANDLER = program({
@@ -58,7 +59,15 @@ export const OBJECTS_HANDLER = program({
   code: { wasm: MODULES["objects-handler"] },
   inputs: { envelope: "cid", box: "string", sender: "identity" },
   services: ["wallet"],
-  description: "The `objects` box: decrypt a bundle {records: [{cid, bytes}], root?}, store each record, reveal {of, root?, count}.",
+  description: "The `objects` box: decrypt a bundle {records: [{cid, bytes}], root?}, store each record, reveal {of, root?, count}; a root becomes `main` if there is none.",
+});
+
+export const HEAD_HANDLER = program({
+  name: "head-handler",
+  code: { wasm: MODULES["head-handler"] },
+  inputs: { envelope: "cid", box: "string", sender: "identity" },
+  services: ["wallet"],
+  description: "The `head` box: decrypt {name, tree}, reveal it, advance the named head to the tree.",
 });
 
 export const LOOP = program({
@@ -70,11 +79,12 @@ export const LOOP = program({
 });
 
 /** The programs a genesis names, by name. */
-export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER, loop: LOOP } as const;
+export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER, "head-handler": HEAD_HANDLER, loop: LOOP } as const;
 export const PROGRAM_CIDS: Record<keyof typeof PROGRAMS, CID> = {
   shell: SHELL_CID,
   "run-handler": encode(RUN_HANDLER).cid,
   "objects-handler": encode(OBJECTS_HANDLER).cid,
+  "head-handler": encode(HEAD_HANDLER).cid,
   loop: encode(LOOP).cid,
 };
 

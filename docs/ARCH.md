@@ -78,7 +78,9 @@ is exactly the set of messages peers sent it.
 
 In: a peer (the client) hashes a directory into git blob and tree objects,
 sends them, and sends a message naming the root CID. The runtime stores the
-objects and the message; a thread's working tree is that CID.
+objects and the message; a thread's working tree is that CID. A message that
+names no tree starts from the instance's `main` head, which only an explicit
+act moves (`VM.md`, "Heads").
 
 Out: a thread's result names a tree CID. A peer that wants bytes on a disk
 fetches the objects and materializes them, or pushes them as a git commit

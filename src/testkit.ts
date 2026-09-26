@@ -128,13 +128,13 @@ export async function send(i: Instance, box: string, body: unknown, created = is
   return env;
 }
 
-/** A directory as the client sends it: {root, bundles of ≤ 1 MiB}. */
+/** A directory as the client sends it: {root, bundles of ≤ 1 MiB, the last naming the root}. */
 export async function bundlesOf(dir: string, limit?: number): Promise<{ root: CID; bundles: Uint8Array[]; records: number }> {
   const { root, records } = await hashDir(dir);
   // Blobs, then trees, the root tree last (as the client sends them).
   const rank = (r: { cid: CID; bytes: Uint8Array }) => (r.cid.equals(root) ? 2 : Buffer.from(r.bytes.subarray(0, 5)).toString() === "tree " ? 1 : 0);
   records.sort((a, b) => rank(a) - rank(b));
-  return { root, bundles: [...chunk(records, limit)], records: records.length };
+  return { root, bundles: [...chunk(records, limit, root)], records: records.length };
 }
 
 /** The owner reads its `results` box: verified, opened, decoded. */

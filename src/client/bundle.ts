@@ -1,4 +1,5 @@
-// Records into ≤1 MiB dag-cbor bundles: { records: [{ cid, bytes }] }. A record
+// Records into ≤1 MiB dag-cbor bundles: { records: [{ cid, bytes }], root? }; `root`
+// (the imported tree) rides on the last bundle only. A record
 // that alone exceeds the limit travels alone in an oversized bundle (the
 // messagebox takes up to its body limit; 1sat serve: 30 MB of JSON).
 
@@ -12,7 +13,7 @@ export interface Rec { cid: CID; bytes: Uint8Array }
 const PER_RECORD = 64;
 const HEADER = 16;
 
-export function* chunk(records: Iterable<Rec>, limit = BUNDLE_LIMIT): Generator<Uint8Array> {
+export function* chunk(records: Iterable<Rec>, limit = BUNDLE_LIMIT, root?: CID): Generator<Uint8Array> {
   let batch: Rec[] = [];
   let size = HEADER;
   for (const r of records) {
@@ -25,11 +26,11 @@ export function* chunk(records: Iterable<Rec>, limit = BUNDLE_LIMIT): Generator<
     batch.push(r);
     size += n;
   }
-  if (batch.length) yield encodeBundle(batch);
+  if (batch.length) yield encodeBundle(batch, root);
 }
 
-export function encodeBundle(records: Rec[]): Uint8Array {
-  return dagCbor.encode({ records: records.map((r) => ({ cid: r.cid, bytes: r.bytes })) });
+export function encodeBundle(records: Rec[], root?: CID): Uint8Array {
+  return dagCbor.encode({ records: records.map((r) => ({ cid: r.cid, bytes: r.bytes })), ...(root && { root }) });
 }
 
 export function decodeBundle(bytes: Uint8Array): Rec[] {

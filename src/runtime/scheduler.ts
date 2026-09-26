@@ -35,7 +35,8 @@
 //   again with that envelope as input (`reply`). A step's attested calls
 //   (wallet wire frames, reveal signatures, sealed envelopes) are records
 //   listed in its update (`calls`); a Witness serves them on replay, so replay
-//   needs no wallet.
+//   needs no wallet. A step may move named heads (`advance`, heads.ts): the
+//   moves are written when it ends without error, and listed in its update.
 //
 // Determinism: every record the runtime writes carries `input` (the entry
 // whose processing wrote it) and `at` (that entry's stamp, in ms). Nothing
@@ -48,6 +49,7 @@ import { decode, encode, isCID } from "./cid.ts";
 import { signAnyone } from "./identity.ts";
 import { appendEntry, genesisOf, isLogEntry, now as clockNow, short, stampMs, verifyEntry, type EntryBody, type LogEntry } from "./log.ts";
 import { brc78Decrypt, brc78Header } from "./brc78.ts";
+import { advanceHead, headTree, isHeadName } from "./heads.ts";
 import { runProgram } from "./program.ts";
 import { isShellArgs, loadModule, loadShellModules } from "./programs.ts";
 import { isAttested, isEmit, isGenesis, isProgram, matches, type Attested, type Emit, type Genesis, type MessageKey, type Program } from "./records.ts";
@@ -457,7 +459,8 @@ export class Runtime {
       clock.drive(stampNs(e.time));
       const random = entropy(entry, origin);
 
-      const calls: CID[] = [], launched: CID[] = [], reveals: CID[] = [], emits: CID[] = [], sealed: CID[] = [], awaits: CID[] = [];
+      const calls: CID[] = [], launched: CID[] = [], reveals: CID[] = [], emits: CID[] = [], sealed: CID[] = [], awaits: CID[] = [], heads: CID[] = [];
+      const moves: Array<{ name: string; tree: CID }> = [];
       const children: ThreadOrigin[] = [];
       const g = this.genesis!;
       const input = encode(compact({
@@ -525,6 +528,12 @@ export class Runtime {
           if (launched.length) throw new Error("await: this step launched threads; a step waits on threads or on replies, not both");
           if (!awaits.some((a) => a.equals(c))) awaits.push(c);
         },
+        head: (name) => headTree(this.store, name),
+        advance: async (name, tree) => {
+          if (!isHeadName(name)) throw new Error(`advance: bad head name ${JSON.stringify(name)}`);
+          if (!(await this.store.has(tree))) throw new Error(`advance: tree ${tree} is not in the store`);
+          moves.push({ name, tree });
+        },
         wallet: async (frame) => {
           if (!WALLET_CALLS.has(frame[0])) throw new Error(`wallet: call ${frame[0]} is not allowed to programs`);
           return attest("wallet", frame, async () => Uint8Array.from(await this.wire!.transmitToWallet([...frame])));
@@ -535,6 +544,7 @@ export class Runtime {
       if (this.stopped) return;
       const state: ThreadState = out.exitCode !== 0 ? "errored" : launched.length || awaits.length ? "waiting" : "finished";
       for (const c of children) await this.store.chains.open(c);
+      if (state !== "errored") for (const m of moves) heads.push(await advanceHead(this.store, m.name, m.tree, { thread: origin, input: entry, at }));
       const text = (b: Uint8Array) => Buffer.from(b).toString("utf8").trim();
       await this.store.chains.append(origin, compact({
         state, step: n, input: entry, at,
@@ -544,10 +554,11 @@ export class Runtime {
         launched: launched.length ? launched : undefined,
         reveals: reveals.length ? reveals : undefined,
         emits: emits.length ? emits : undefined,
+        heads: heads.length ? heads : undefined,
         result: { exitCode: out.exitCode, stdout: out.stdout, stderr: out.stderr },
         error: state === "errored" ? { kind: "blew-up", message: text(out.stderr).split("\n").at(-1) || `exit ${out.exitCode}` } : undefined,
       }));
-      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${reveals.length ? ` · ${reveals.length} revealed` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${awaits.length ? ` · awaits ${awaits.map(short).join(",")}` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
+      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${reveals.length ? ` · ${reveals.length} revealed` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${heads.length ? ` · moved ${moves.map((m) => `${m.name}→${short(m.tree)}`).join(",")}` : ""}${awaits.length ? ` · awaits ${awaits.map(short).join(",")}` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
       after = { emits: emits.map((emit, i) => ({ emit, envelope: sealed[i] })), launched, rested: state !== "waiting" };
     } catch (err) {
       if (err instanceof Stopped || this.stopped) return;

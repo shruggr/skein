@@ -1,6 +1,6 @@
 // The `skein` import namespace for handler programs: the machine's syscalls
 // beyond WASI (docs/ARCH.md, "The kernel"). Pure ones (input, get, put,
-// putblock, launch, await) are answered from the store and the thread; the
+// putblock, launch, await, head, advance) are answered from the store and the thread; the
 // attested ones (wallet, reveal, emit's seal) leave through the runtime and are recorded,
 // and on replay are served from the record (runtime/program.ts).
 //
@@ -21,6 +21,9 @@
 //   await(cid, cid_len) → 0                    rest on a reply to an envelope this step emitted: the step ends
 //                                              `waiting` with `awaits`, and an admitted envelope whose body's
 //                                              `replyTo` is that CID is this thread's next input
+//   head(name, name_len, out, cap) → n         the tree CID a named head points at; n = 0 if it has none (docs/VM.md "Heads")
+//   advance(name, name_len, tree, tree_len) → 0   move a named head to a tree in the store, when the step
+//                                              ends without error
 //   wallet(frame, len, out, cap) → n           a BRC-100 wallet wire request frame → result frame (attested)
 //   take(out, cap) → n                         the held result of the last call
 //   error(out, cap) → n                        the last error's message
@@ -37,6 +40,8 @@ export interface ProgramHost {
   launch(program: CID, args: CID): Promise<CID>;
   emit(cid: CID): Promise<CID>;
   awaitReply(envelope: CID): Promise<void>;
+  head(name: string): Promise<CID | undefined>;
+  advance(name: string, tree: CID): Promise<void>;
   wallet(frame: Uint8Array): Promise<Uint8Array>;
   /** Errors that must end the run rather than be returned to the program (the runtime stopping, a replay diverging). */
   fatal?(e: unknown): boolean;
@@ -48,6 +53,7 @@ export function skeinImports(proc: Process, host: ProgramHost): Record<string, u
   const u8 = () => new Uint8Array(proc.memory.buffer);
   const bytes = (p: number, n: number) => u8().slice(p, p + n);
   const cid = (p: number, n: number) => CID.decode(bytes(p, n));
+  const str = (p: number, n: number) => Buffer.from(bytes(p, n)).toString("utf8");
 
   /** Write `r` to (out, cap) if it fits; hold it either way; return its length. */
   const out = (r: Uint8Array, p: number, cap: number) => {
@@ -74,6 +80,8 @@ export function skeinImports(proc: Process, host: ProgramHost): Record<string, u
       out((await host.launch(cid(pp, pl), cid(ap, al))).bytes, p, cap)),
     emit: async(async (c: number, cl: number, p: number, cap: number) => out((await host.emit(cid(c, cl))).bytes, p, cap)),
     await: async(async (c: number, cl: number) => { await host.awaitReply(cid(c, cl)); return 0; }),
+    head: async(async (n: number, nl: number, p: number, cap: number) => out((await host.head(str(n, nl)))?.bytes ?? new Uint8Array(0), p, cap)),
+    advance: async(async (n: number, nl: number, c: number, cl: number) => { await host.advance(str(n, nl), cid(c, cl)); return 0; }),
     wallet: async(async (f: number, fl: number, p: number, cap: number) => out(await host.wallet(bytes(f, fl)), p, cap)),
     take: (p: number, cap: number) => sync(() => { if (held.length > cap) throw new Error("take: buffer too small"); u8().set(held, p); return held.length; })(),
     error: (p: number, cap: number) => {

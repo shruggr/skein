@@ -3,12 +3,14 @@
 David's side: it signs through his wallet-api and talks only to the messagebox
 (host setup: scripts/host/README.md). Every message is a BRC-169 envelope with a
 dag-cbor body. State lives in `~/.skein/client/`: `sent.jsonl` (every envelope
-sent) and `conversation.json` (the last `say` received).
+sent) and `conversation.json` (the last `say` received). `import` names the
+root tree on its last bundle; the instance makes it `main` if it has none.
 
 ```
 skein whoami
 skein import <dir>                                   # tree objects -> box objects; prints the tree CID
-skein run --tree <cid> [--cwd p] [--env K=V]... -- '<cmd>'
+skein run [--tree <cid>] [--cwd p] [--env K=V]... -- '<cmd>'   # no --tree: the instance's `main` head
+skein head <name> <cid>                              # box head: "<name> is now <cid>"
 skein inbox [--wait] [--timeout s] [--no-ack] [--json]
 skein chat "<text>" [--tree <cid>] [--model ripper/qwen38] [--new] [--wait] [--timeout s]
 skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
@@ -21,10 +23,12 @@ skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
 | `chat` | david → instance | `{ text, tree?: CID, model?: string, replyTo?: CID }` |
 | `say` | instance → david | `{ text, page?: markdown, tree?: CID, thread: CID, replyTo: CID }` (replyTo = the chat it answers) |
 | `results` | instance → david | `{ exitCode, stdout, stderr, tree, replyTo }` (answers a `run`) |
+| `head` | david → instance | `{ name, tree: CID }` — moves the named head; no reply |
 
 - `chat` continues the conversation: `replyTo` = the CID of the last `say`
   envelope in `conversation.json`, and `--tree` defaults to that say's `tree`.
-  `--new` (or no conversation yet) sends no `replyTo` and no default tree.
+  `--new` (or no conversation yet) sends no `replyTo` and no default tree: the
+  instance starts the conversation from its `main` head.
 - `chat --wait` polls (1 s) until the `say` answering it arrives, then prints it.
 - `inbox` reads `results` then `say`, prints them, acknowledges, and records the
   newest verified `say` in `conversation.json`. A `say` prints as its text, the
