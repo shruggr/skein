@@ -293,3 +293,17 @@ the store before the step ends; only the send is still fire-once.
     replay protection beyond the messagebox's messageId dedupe; it keeps no
     record of what it answered. It is a peer, so that is its business, but a
     peer that bills would want both.
+
+## Bootstrapping (David, 2026-09-26)
+
+- Bootstrap from an arbitrary node you can clone: a git tree or a gib commit
+  holding the system tree (`/bin` modules, config, subscriptions as files).
+  The platform supplies the objects — an admin peer sending `objects`, or the
+  host's shared store already holding them; the owner is not in the loop.
+- An admin must be able to bootstrap any state, with or without
+  subscriptions. Subscriptions become mutable records handlers can change;
+  the admin message set (add subscription, register program, install tree,
+  set owner/peer/defaults) is what's missing.
+- A "claim" (first caller becomes admin, one-shot) suits local single-user
+  setups only. Commercial hosting gets a host API route to register an
+  instance, behind payment middleware; pricing later.
