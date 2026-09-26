@@ -13,7 +13,11 @@
     "skein": "bin/skein",
     "skein-dev": "bin/skein-dev",
     "test": "node --experimental-strip-types --no-warnings --test 'src/**/*.test.ts'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "web:build": "node --experimental-strip-types --no-warnings web/build.ts",
+    "web:serve": "scripts/host/web.sh",
+    "web:test": "node --experimental-strip-types --no-warnings --test 'web/*.test.ts'",
+    "web:typecheck": "tsc --noEmit -p web/tsconfig.json"
   },
   "license": "MIT",
   "dependencies": {
@@ -23,7 +27,10 @@
     "multiformats": "^14.0.5"
   },
   "devDependencies": {
+    "@1sat/connect": "^0.0.97",
     "@types/node": "^26.6.2",
+    "buffer": "^6.0.3",
+    "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
   }
 }

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skein</title>
+<style>
+  :root { --bg: #fbfaf7; --fg: #1d1d1b; --mut: #6b6860; --line: #dedad2; --card: #fff; --acc: #2f5d8a; --ok: #2d6a3e; --err: #a3261c; --code: #f1efe9; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #e8e6e1; --mut: #9a968d; --line: #33322f; --card: #1f1e1c; --acc: #7fb0e0; --ok: #7cc48e; --err: #f08b80; --code: #2a2926; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 48px; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  h2 { font-size: 15px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; color: var(--mut); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 12px 0; }
+  .small, .meta, #cfg { font-size: 12px; color: var(--mut); }
+  .mono, code, pre, #identity, #root, #expected { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; word-break: break-all; }
+  input[type=text], textarea { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); font: inherit; }
+  textarea { min-height: 72px; resize: vertical; }
+  button { padding: 7px 14px; border: 1px solid var(--acc); border-radius: 6px; background: var(--acc); color: var(--card); font: inherit; cursor: pointer; }
+  button.plain { background: transparent; color: var(--acc); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .row > input[type=text] { flex: 1 1 180px; width: auto; }
+  label { display: inline-flex; gap: 4px; align-items: center; }
+  .status { margin-top: 6px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); }
+  body:not(.connected) .needs-wallet { opacity: .55; }
+  .msg { border-top: 1px solid var(--line); padding: 10px 0; }
+  .msg.err .error { color: var(--err); }
+  .msg .text { margin: 4px 0; white-space: pre-wrap; }
+  .page { border-left: 3px solid var(--line); padding-left: 10px; margin: 6px 0; }
+  .page h1, .page h2, .page h3 { font-size: 16px; text-transform: none; letter-spacing: 0; color: var(--fg); margin: 8px 0 4px; }
+  pre { background: var(--code); padding: 8px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; margin: 6px 0; }
+  code { background: var(--code); padding: 0 3px; border-radius: 3px; }
+  pre code { padding: 0; background: none; }
+  .stderr { color: var(--err); }
+  .ids .cid { font-family: ui-monospace, monospace; font-size: 12px; color: var(--mut); margin-right: 10px; }
+  .ids .cid.tree { color: var(--acc); cursor: pointer; }
+  .tag { background: var(--acc); color: var(--card); border-radius: 4px; padding: 0 5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>skein</h1>
+  <div id="cfg">loading config…</div>
+
+  <section id="s-connect">
+    <h2>Wallet</h2>
+    <div class="row"><button id="connect">Connect wallet</button></div>
+    <div class="small">identity: <span id="identity">—</span></div>
+    <div class="small">expected: <span id="expected">—</span></div>
+    <div id="connect-status" class="status"></div>
+  </section>
+
+  <section class="needs-wallet">
+    <h2>Register on the host</h2>
+    <div class="row"><input type="text" id="username" value="shruggr" aria-label="username"><button id="register">Register</button></div>
+    <div class="small">Once per identity. HTTP 409 "already registered" is fine.</div>
+    <div id="register-status" class="status"></div>
+  </section>
+
+  <section class="needs-wallet">
+    <h2>Import a directory</h2>
+    <div class="row"><input type="file" id="dir" webkitdirectory multiple><button id="import">Import</button></div>
+    <div class="small">root: <span id="root">—</span></div>
+    <div id="import-status" class="status"></div>
+  </section>
+
+  <section class="needs-wallet">
+    <h2>Chat</h2>
+    <div id="conversation" class="small"></div>
+    <textarea id="chat-text" placeholder="message (ctrl+enter sends)"></textarea>
+    <div class="row">
+      <input type="text" id="chat-tree" placeholder="tree CID (optional)" aria-label="tree">
+      <input type="text" id="chat-model" placeholder="model (optional)" aria-label="model">
+    </div>
+    <div class="row"><label><input type="checkbox" id="chat-new"> new conversation</label><button id="chat-send">Send</button></div>
+    <div id="chat-status" class="status"></div>
+  </section>
+
+  <section class="needs-wallet">
+    <h2>Run</h2>
+    <div class="row"><input type="text" id="run-tree" placeholder="tree CID" aria-label="tree"><input type="text" id="run-cwd" placeholder="cwd (optional)" aria-label="cwd"></div>
+    <div class="row"><input type="text" id="run-cmd" placeholder="command, e.g. ls | head -3" aria-label="command" class="mono"><button id="run-send">Run</button></div>
+    <div id="run-status" class="status"></div>
+  </section>
+
+  <section class="needs-wallet">
+    <h2>Inbox</h2>
+    <div class="row"><label><input type="checkbox" id="poll" checked> poll every 2 s</label><button class="plain" id="check">Check now</button><button class="plain" id="clear">Clear</button></div>
+    <div id="inbox-status" class="status"></div>
+    <div id="messages"></div>
+  </section>
+</main>
+<script type="module" src="dist/app.js"></script>
+</body>
+</html>
