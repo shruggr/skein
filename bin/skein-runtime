@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The skein runtime (src/runtime/main.ts): one instance, its store, its wallet
-# and its messagebox edge. Fills the runtime's environment from what
-# scripts/host/up.sh wrote under $SKEIN_HOME, unless already set:
+# The skein runtime (src/host/main.ts, the kernel configuration): one
+# instance, its store, its wallets and its providers (messagebox delivery,
+# tick). Fills the runtime's environment from what scripts/host/up.sh wrote
+# under $SKEIN_HOME, unless already set:
 #   SKEIN_OWNER         ← owner.identity        SKEIN_MESSAGEBOX ← messagebox.url
 #   SKEIN_INFER         ← infer.identity (the inference peer; a new genesis's peers.infer)
 # The instance wallet (3321) and the host wallet (3324, which signs every log
@@ -16,4 +17,4 @@ mkdir -p "$home" "$(dirname "${SKEIN_DB:-$home/runtime.db}")"
 [ -z "${SKEIN_INFER:-}" ] && [ -f "$home/infer.identity" ] && export SKEIN_INFER="$(cat "$home/infer.identity")"
 [ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"
 node --experimental-strip-types --no-warnings "$root/src/dev/cli.ts" install >&2
-exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@"
+exec node --experimental-strip-types --no-warnings "$root/src/host/main.ts" "$@"

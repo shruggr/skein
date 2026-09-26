@@ -8,7 +8,7 @@
 //   SKEIN_POLL_MS           default 1000
 
 import { readFileSync } from "node:fs";
-import { messageBoxClient } from "../runtime/inbox.ts";
+import { messageBoxClient } from "../host/messagebox.ts";
 import { connectWallet } from "../wallet.ts";
 import { InferPeer, type Provider } from "./infer.ts";
 

@@ -156,7 +156,7 @@ export type Genesis = {
   peers?: Record<string, Identity>;
   /** Defaults programs fall back on, e.g. `model` for the loop. */
   defaults?: Record<string, string>;
-  /** Boxes the edge collects besides the subscribed ones: replies (e.g. `completions`), routed only by `replyTo`. */
+  /** Boxes the delivery provider collects besides the subscribed ones: replies (e.g. `completions`), routed only by `replyTo`. */
   collect?: string[];
 };
 

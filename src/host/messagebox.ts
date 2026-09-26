@@ -1,45 +1,50 @@
-// The instance's edge to the host's messagebox (docs/MESSAGES.md): the one
-// file under src/runtime that talks to the network. It is the runtime's own
-// tooling, host-side by definition, and isolation.test.ts allows it by name:
-// it may import ../envelope.ts (outside src/runtime) and use a timer to poll.
-// Nothing inside the machine calls it; it calls the runtime's admission and
-// receives its emits.
+// The messagebox delivery provider (docs/MESSAGES.md): one provider of the
+// instance's message interface, for the local `1sat serve` host. Outside the
+// machine: main.ts, the kernel configuration, wires it to a runtime; the
+// runtime never calls a messagebox and holds no session. It holds the
+// instance wallet (the messagebox session is the instance's identity, and the
+// wire encryption ends here) and the host wallet (it signs what it delivers).
 //
 // In: for every box the subscriptions route, list the instance's messages
 // and, in order, for each one:
 //   parse the BRC-169 envelope from the BRC-33 body (sent with the messagebox
 //   client's body encryption off); verify its signature; reject it if the
 //   messagebox's authenticated sender is not envelope.sender.identityKey, if
-//   `created` is outside the freshness window (±$SKEIN_FRESHNESS_MS of the
-//   runtime's clock, default 10 minutes), if it is not addressed to this
-//   instance, or if its record CID is already admitted; decrypt the content
-//   through the instance wallet (the wire encryption ends here) and check it
-//   against the signed contentHash; admit the signed part and the plaintext
-//   body with its box (a signed log entry); acknowledge. A rejection is logged
-//   and acknowledged too, so it does not come back.
+//   it is not addressed to this instance, or if its record CID is already
+//   admitted; decrypt the content through the instance wallet and check it
+//   against the signed contentHash; build the log entry — the signed part, the
+//   plaintext body, the box, the host's arrival stamp — sign it with the host
+//   wallet and admit it (Runtime.admit); acknowledge. A rejection is logged
+//   and acknowledged too, so it does not come back. Freshness is not judged
+//   here: the entry carries the sender's `created` and the arrival stamp, and
+//   the instance decides from those if it decides at all.
 //
 // Out: an emit (scheduler.ts) is signed through the instance wallet during the
 // step that emits it (so the program learns its CID and can await a reply
-// naming it), then encrypted to its recipient and sent to its box once the
-// step is recorded.
+// naming it); once the step is recorded it is handed here, encrypted to its
+// recipient and sent to its box. A send that fails is kept and tried again at
+// the next poll: delivery is this provider's business, and nothing about it
+// goes back into the instance.
 
 import { MessageBoxClient } from "@bsv/message-box-client";
 import type { WalletInterface } from "@bsv/sdk";
 import { brc78Decode, encryptContent, isEnvelope, isoTime, open, sign, signedPart, verify, type Envelope, type Signed } from "../envelope.ts";
-import { decode, encode } from "./cid.ts";
-import { now as clockNow, short, stampMs } from "./log.ts";
-import type { Emit } from "./records.ts";
-import type { Runtime, Outbound } from "./scheduler.ts";
-import { Rejected } from "./store.ts";
-import type { Stamp } from "./syscalls.ts";
-import type { Ms } from "./types.ts";
+import { decode, encode } from "../runtime/cid.ts";
+import type { KeyWallet } from "../runtime/identity.ts";
+import { short } from "../runtime/log.ts";
+import type { Emit } from "../runtime/records.ts";
+import type { Runtime, Outbound } from "../runtime/scheduler.ts";
+import { Rejected } from "../runtime/store.ts";
+import type { Stamp } from "../runtime/syscalls.ts";
+import type { Ms } from "../runtime/types.ts";
+import { admitEntry, now as clockNow } from "./entry.ts";
 
 // ---------------------------------------------------------------- the messagebox
 
 /** One listed message: BRC-33 fields as the messagebox reports them. */
 export interface Listed { messageId: string; sender?: string; body: unknown; created_at?: string }
 
-/** The part of a BRC-33 messagebox the edge uses, as one identity. */
+/** The part of a BRC-33 messagebox the provider uses, as one identity. */
 export interface MessageBox {
   list(box: string): Promise<Listed[]>;
   ack(ids: string[]): Promise<void>;
@@ -66,35 +71,34 @@ export function messageBoxClient(wallet: WalletInterface, host: string, originat
   };
 }
 
-// ---------------------------------------------------------------- the edge
+// ---------------------------------------------------------------- the provider
 
-export interface EdgeOptions {
+export interface DeliveryOptions {
   runtime: Runtime;
   /** The instance wallet: decrypts inbound content, signs and encrypts outbound envelopes. */
   wallet: WalletInterface;
+  /** The host wallet: signs every entry this provider delivers. */
+  host: KeyWallet;
   box: MessageBox;
-  /** Accept `created` within ±this of the runtime's clock. Default 10 minutes. */
-  freshnessMs?: number;
   /** Handles for outbound recipients the emit record does not name (e.g. the owner's). */
   handles?: Record<string, { handle: string; domain: string }>;
   log?: (line: string) => void;
-  /** Tests: the clock freshness is judged by. Default log.ts's. */
+  /** Tests: the clock arrivals are stamped with. Default entry.ts's. */
   now?: () => Stamp;
 }
 
 export type Screened = { ok: true; envelope: Envelope; body: Uint8Array } | { ok: false; reason: string };
 
-export class Edge {
-  private readonly o: EdgeOptions;
+export class Delivery {
+  private readonly o: DeliveryOptions;
   private readonly say: (line: string) => void;
   private timer?: ReturnType<typeof setInterval>;
   private polling?: Promise<unknown>;
-  readonly freshnessMs: number;
+  private unsent: Outbound[] = [];
 
-  constructor(o: EdgeOptions) {
+  constructor(o: DeliveryOptions) {
     this.o = o;
     this.say = o.log ?? (() => {});
-    this.freshnessMs = o.freshnessMs ?? 10 * 60_000;
   }
 
   /** Poll every `ms` until stop(). */
@@ -110,12 +114,14 @@ export class Edge {
   }
 
   /**
-   * Collect every routed box once: admit what passes, acknowledge everything.
-   * Messages from all boxes are admitted in the sender's order (envelope
-   * `created`, then the messagebox's arrival time), so an `objects` bundle
-   * sent before a `run` over it is admitted first. Returns what was admitted.
+   * Retry what failed to send, then collect every routed box once: admit what
+   * passes, acknowledge everything. Messages from all boxes are admitted in
+   * the sender's order (envelope `created`, then the messagebox's arrival
+   * time), so an `objects` bundle sent before a `run` over it is admitted
+   * first. Returns what was admitted.
    */
   async poll(): Promise<Array<{ box: string; envelope: string; entry: string }>> {
+    for (const o of this.unsent.splice(0)) await this.send(o);
     const admitted: Array<{ box: string; envelope: string; entry: string }> = [];
     const all: Array<{ box: string; m: Listed; key: string }> = [];
     for (const box of await this.o.runtime.boxes()) for (const m of await this.o.box.list(box)) all.push({ box, m, key: `${createdOf(m.body)} ${m.created_at ?? ""}` });
@@ -133,7 +139,7 @@ export class Edge {
     return admitted;
   }
 
-  /** Screen one message (docs/MESSAGES.md, "Replay protection") and decrypt it through the wallet. */
+  /** Screen one message (docs/MESSAGES.md, "Replay protection") and decrypt it through the instance wallet. */
   async screen(m: Listed): Promise<Screened> {
     let env: unknown = m.body;
     try {
@@ -145,11 +151,6 @@ export class Edge {
     if (!verify(env)) return { ok: false, reason: "envelope signature does not verify" };
     if (m.sender !== undefined && m.sender !== env.sender.identityKey) {
       return { ok: false, reason: `messagebox sender ${short(m.sender)} is not envelope.sender ${short(env.sender.identityKey)}` };
-    }
-    const created = Date.parse(env.created);
-    const nowMs = stampMs((this.o.now ?? clockNow)());
-    if (!Number.isFinite(created) || Math.abs(nowMs - created) > this.freshnessMs) {
-      return { ok: false, reason: `created ${env.created} is outside ±${this.freshnessMs} ms of now` };
     }
     const { publicKey: me } = await this.o.wallet.getPublicKey({ identityKey: true });
     try {
@@ -173,12 +174,14 @@ export class Edge {
     return { ok: true, envelope: env, body };
   }
 
-  /** Screen, decrypt, admit. Undefined when rejected (logged). */
+  /** Screen, decrypt, stamp, sign, admit. Undefined when rejected (logged). */
   async ingest(box: string, m: Listed): Promise<{ envelope: string; entry: string } | undefined> {
     const s = await this.screen(m);
     if (!s.ok) { this.say(`inbox ${box} ${m.messageId}: rejected: ${s.reason}`); return undefined; }
+    const signed = signedPart(s.envelope);
+    const envelope = encode(signed).cid;
     try {
-      const { entry, envelope } = await this.o.runtime.admitEnvelope(signedPart(s.envelope), box, s.body);
+      const entry = await admitEntry(this.o.runtime, this.o.host, { envelope, box, body: encode(decode(s.body)).cid }, { envelope: signed, body: s.body }, (this.o.now ?? clockNow)());
       this.say(`inbox ${box} ${m.messageId}: admitted ${short(envelope)} as ${short(entry)}`);
       return { envelope: envelope.toString(), entry: entry.toString() };
     } catch (e) {
@@ -204,10 +207,20 @@ export class Edge {
     });
   }
 
-  /** The runtime's outbox, part 2: encrypt the body to the recipient and send the envelope, once the step is recorded. */
+  /**
+   * The runtime's outbox, part 2, once the step is recorded: encrypt the body
+   * to the recipient and send the envelope. A failure is logged and kept for
+   * the next poll; it never reaches the instance.
+   */
   async send(o: Outbound): Promise<void> {
-    const content = await encryptContent(this.o.wallet, o.to, o.bytes);
-    await this.o.box.send({ recipient: o.to, box: o.box, body: { ...o.envelope, content } });
+    try {
+      const content = await encryptContent(this.o.wallet, o.to, o.bytes);
+      await this.o.box.send({ recipient: o.to, box: o.box, body: { ...o.envelope, content } });
+    } catch (e) {
+      this.unsent.push(o);
+      this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)}: ${(e as Error).message} (will retry)`);
+      return;
+    }
     this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)} (emit ${short(o.emit)})`);
   }
 }

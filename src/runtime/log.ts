@@ -15,33 +15,30 @@
 // signature (the host wallet, not the instance's) over the entry's dag-cbor
 // without `sig`: protocol [2, "skein log"], key "1", counterparty anyone, so
 // anyone holding the genesis's `host` can check every stamp and every kick
-// (verifyEntry). It is made once, through the host wallet, when the entry is
-// written; replay copies the entry and verifies it, never re-signs.
+// (verifyEntry). It is made once, by the provider that delivers the entry
+// (src/host: the messagebox delivery for admissions, the tick for wakes),
+// through the host wallet; the runtime admits the finished entry
+// (Runtime.admit) and verifies it. Replay copies the entry and verifies it,
+// never re-signs.
 //
-// `time` is the host's clock at admission, never before the previous
-// entry's. This file is the ONE place in src/runtime that reads the wall clock
-// (isolation.test.ts allows it here only); everything inside derives time from
+// `time` is the host's clock at admission, never before the previous entry's.
+// Nothing in src/runtime reads a clock; everything inside derives time from
 // these stamps (syscalls.ts).
 
 import type { WalletProtocol } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { encode } from "./cid.ts";
-import { rootIdentity, signAnyone, verifyAnyone, type KeyWallet } from "./identity.ts";
+import { rootIdentity, verifyAnyone, type KeyWallet } from "./identity.ts";
 import { isGenesis, type Genesis, type Identity, type Subscription } from "./records.ts";
-import { PROGRAM_CIDS, PROGRAMS } from "./programs.ts";
+import { PROGRAM_CIDS } from "./programs.ts";
 import type { LogEntry, Store } from "./store.ts";
-import { maxStamp, msStamp, type Stamp } from "./syscalls.ts";
+import { maxStamp, type Stamp } from "./syscalls.ts";
 import type { Ms } from "./types.ts";
 
 export type { LogEntry };
 
 export const LOG_PROTOCOL: WalletProtocol = [2, "skein log"];
 export const LOG_KEY_ID = "1";
-
-/** The runtime's clock: wall time now, ms resolution, as a stamp. */
-export function now(): Stamp {
-  return msStamp(Date.now());
-}
 
 /** A stamp as the `at` (ms) of the records written while processing its entry. */
 export const stampMs = (s: Stamp): Ms => s[0] * 1000 + Math.floor(s[1] / 1_000_000);
@@ -67,16 +64,14 @@ export function verifyEntry(e: LogEntry, host: Identity): boolean {
 export type EntryBody = { genesis: CID } | { envelope: CID; box: string; body: CID } | { wake: CID };
 
 /**
- * Write the next entry: extend the tip, stamp it (never before the tip's
- * stamp), sign it through the host wallet, append. The caller serialises
- * appends (the store refuses an entry that does not extend its tip).
+ * The next entry, unsigned: extending the tip, stamped `time` (raised to the
+ * tip's stamp if earlier). What a provider signs; the store refuses an entry
+ * that no longer extends its tip.
  */
-export async function appendEntry(store: Store, host: KeyWallet, body: EntryBody, time: Stamp = now()): Promise<{ cid: CID; entry: LogEntry }> {
+export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Promise<Omit<LogEntry, "sig">> {
   const tipCid = await store.log.tip();
   const tip = tipCid ? await store.get<LogEntry>(tipCid) : undefined;
-  const unsigned = { kind: "log" as const, prev: tipCid ?? null, n: tip ? tip.n + 1 : 0, time: tip ? maxStamp(time, tip.time) : time, ...body };
-  const entry: LogEntry = { ...unsigned, sig: await signAnyone(host, LOG_PROTOCOL, LOG_KEY_ID, entryBytes(unsigned)) };
-  return { cid: await store.log.append(entry), entry };
+  return { kind: "log" as const, prev: tipCid ?? null, n: tip ? tip.n + 1 : 0, time: tip ? maxStamp(time, tip.time) : time, ...body };
 }
 
 export interface InstanceConfig {
@@ -90,7 +85,7 @@ export interface InstanceConfig {
   peers?: Record<string, Identity>;
   /** Default: {model: "ripper/qwen38", thinking: "off"}. */
   defaults?: Record<string, string>;
-  /** Reply-only boxes the edge collects. Default: ["completions"]. */
+  /** Reply-only boxes the delivery provider collects. Default: ["completions"]. */
   collect?: string[];
 }
 
@@ -116,20 +111,6 @@ export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: Instance
     defaults: c.defaults ?? DEFAULTS,
     collect: c.collect ?? ["completions"],
   };
-}
-
-/**
- * An empty log starts with the genesis entry, signed by the host like every
- * entry. The program records it names are put into the store (their modules
- * are not: `skein-dev install`).
- */
-export async function ensureGenesis(store: Store, wallet: KeyWallet, host: KeyWallet, c: InstanceConfig, time: Stamp = now()): Promise<{ created: boolean; entry?: CID }> {
-  for (const p of Object.values(PROGRAMS)) await store.put(p);
-  if (await store.log.tip()) return { created: false };
-  const g = await genesisFor(wallet, host, c);
-  if (!isGenesis(g)) throw new TypeError("genesis: malformed config");
-  const { cid } = await appendEntry(store, host, { genesis: await store.put(g) }, time);
-  return { created: true, entry: cid };
 }
 
 /** The log as records, in order. */

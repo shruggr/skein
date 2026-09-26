@@ -4,8 +4,8 @@ import "fmt"
 
 // Envelope is the part of a BRC-169 envelope a handler reads, from the
 // envelope record: the signed part (the JSON object without `content`, as
-// dag-cbor). The edge verified its signature, decrypted the content and
-// checked it against ContentHash before admitting it (src/runtime/inbox.ts);
+// dag-cbor). The delivery provider verified its signature, decrypted the content and
+// checked it against ContentHash before admitting it (src/host/messagebox.ts);
 // the plaintext is the body record beside it in the log entry.
 type Envelope struct {
 	Recipient struct {
@@ -38,7 +38,7 @@ func Read(envelope, body CID) (*Envelope, []byte, error) {
 	return &env, plain, nil
 }
 
-// EmitRecord asks the edge to sign and send an envelope with content Body to To, in Box.
+// EmitRecord asks the runtime to sign and send an envelope with content Body to To, in Box.
 type EmitRecord struct {
 	Kind   string `cbor:"kind"`
 	To     string `cbor:"to"`

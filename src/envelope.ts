@@ -1,6 +1,6 @@
 // BRC-169 §7.2 envelopes, as skein sends and receives them (docs/MESSAGES.md).
-// Shared by the client (src/client) and the instance's edge
-// (src/runtime/inbox.ts). Outside src/runtime: sealing draws a random BRC-78
+// Shared by the client (src/client) and the instance's messagebox provider
+// (src/host/messagebox.ts). Outside src/runtime: sealing draws a random BRC-78
 // key id and reads the clock for `created`, which the machine never does.
 //
 //   contentHash  hex SHA-256 of the plaintext content (the dag-cbor body): in

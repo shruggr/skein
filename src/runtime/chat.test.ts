@@ -66,7 +66,7 @@ function inferPeer(i: Instance, key: PrivateKey, f: typeof fetch) {
   return new InferPeer({ log: (l) => i.lines.push(`peer: ${l}`), wallet: ephemeralWallet(key), box: i.hub.as(id), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: f, now: () => stampMs(i.clock.now()) });
 }
 
-async function settle(i: Instance) { await i.edge.poll(); await i.rt.idle(); }
+async function settle(i: Instance) { await i.delivery.poll(); await i.rt.idle(); }
 
 async function loops(store: Store): Promise<CID[]> {
   return collect(store.edges.query({ kind: "thread", program: PROGRAM_CIDS.loop }));

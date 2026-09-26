@@ -18,7 +18,8 @@ there; the host hands the message to the instance that owns the handle; the
 instance routes by box; subscriptions take it from there.
 
 BRC-103/104 mutual authentication between clients and the messagebox is
-transport, handled at the host edge. It is not in the VM and not in the log.
+transport, handled by the host's delivery provider. It is not in the VM and
+not in the log.
 
 ## The envelope
 
@@ -79,19 +80,51 @@ signs the envelope with `content` removed, so nothing but a successful BRC-78
 decryption binds the content to the sender, and that proves authorship to the
 recipient alone.
 
+## Providers
+
+The instance's boundary is a set of interfaces, each satisfied by a
+**provider**; which provider fulfils which interface is kernel configuration
+(`src/host/main.ts` wires them; tests wire mocks). The runtime (`src/runtime`:
+scheduler and store) holds no session, no messagebox client, no clock and no
+private key. It exposes `admit(entry, records)` for a finished, provider-signed
+log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
+`outbox` for what it emits.
+
+- **Message delivery** (`src/host/messagebox.ts`, for the local `1sat serve`
+  host): a BRC-103/104 session to the messagebox as the instance, list, verify
+  the sender's signature, decrypt, check the plaintext against `contentHash`,
+  build the entry and sign it with the host wallet, `admit`, acknowledge. How a
+  provider gets its messages (a messagebox, SSE, a local queue, a browser page
+  writing entries directly) is its business; the entry it admits has one shape.
+- **Ticks** (`src/host/tick.ts`): reads the next deadline and, at that moment,
+  admits one wake entry, signed the same way. Every tick is recorded; there
+  are no idle ticks, so an instance with nothing due stays asleep.
+- **Outbound**: an `emit` stays. The step signs the envelope's signed part
+  (the instance, as sender, signing its own message) and the state records
+  only "I sent this". Encryption, queueing, retries and delivery errors are
+  the delivery provider's; nothing about delivery comes back as an error. A
+  reply, if any, is just another admitted entry; a thread whose reply never
+  comes sits `waiting` at no cost. (A delivery receipt entry, "sent", signed
+  by the provider, would be optional state the VM may consult; it is not
+  built.)
+- **Wallet**: BRC-100, however wired.
+
 ## Inside the instance
 
-- **Admission.** The instance collects its box (list-and-acknowledge, or an
-  equivalent queue), verifies each envelope's signature, decrypts its content
-  through the instance wallet and checks it against `contentHash`, and admits
-  it as a log entry in arrival order: the envelope's signed part and the
-  plaintext body (both records; the body's CID is dag-cbor over the sender's
-  bytes, so its sha2-256 digest *is* `contentHash`), with the box name and the
-  time it observed. The ciphertext is not kept. Arrival is non-deterministic
-  only until admission; the admitted order is the order of record.
+- **Admission.** A delivery provider collects the box (list-and-acknowledge,
+  or an equivalent queue), verifies each envelope's signature, decrypts its
+  content through the instance wallet and checks it against `contentHash`,
+  and admits it as a log entry in arrival order: the envelope's signed part
+  and the plaintext body (both records; the body's CID is dag-cbor over the
+  sender's bytes, so its sha2-256 digest *is* `contentHash`), with the box
+  name and the time it observed. The ciphertext is not kept. The runtime
+  checks the entry's signature, the body against `contentHash`, and that the
+  envelope is new, before it appends. Arrival is non-deterministic only until
+  admission; the admitted order is the order of record.
 - **Every log entry is signed by the host**, admissions and wakes alike: an
   entry is the host's statement — "message *n* arrived at *t*", "wake at *t*"
-  — so the host wallet signs it (`createSignature`, protocol `[2, "skein
+  — so the provider that delivers it (the delivery for admissions, the tick
+  for wakes; different parties may run them) signs it with the host wallet (`createSignature`, protocol `[2, "skein
   log"]`, key `1`, counterparty `anyone`), not the instance's. The genesis
   records the host's identity (`host`, beside `owner`), and every stamp and
   every kick traces to a signature a third party can check against it. Where
@@ -109,18 +142,26 @@ recipient alone.
   next thread with arguments pointing at the body or a record derived from it
   — for `run`, the shell over the named tree. No decryption inside, no
   attested call, no wallet.
-- **Replay protection** is at admission: an envelope whose record CID was
-  already admitted is rejected; `created` must fall within a freshness
-  window; where the messagebox reports the authenticated submitter, it must
-  equal `envelope.sender.identityKey`. The messagebox server should enforce
-  the last of these too, and dedupe by message id.
+- **A handler that errors** ends its thread `errored`, and that is all: no
+  reply, no bounce. The sender learns nothing, as with any asynchronous
+  message.
+- **Replay protection** is at admission: an envelope whose record CID is
+  already in the log is rejected, by the runtime, whoever delivers it; where
+  the messagebox reports the authenticated submitter, it must equal
+  `envelope.sender.identityKey`. The messagebox server should enforce the
+  last of these too, and dedupe by message id. **Freshness** is not judged at
+  the edge: the provider supplies only the arrival stamp. The sender's
+  `created` (in the signed part) and the attested stamp are both in the
+  entry, so the instance can decide from `(created, stamp)` deterministically
+  if it decides at all; it mostly cares about the order received.
 - **Replies** correlate to their request through the waiting thread's own
   state: a thread that sent a request rests `waiting` with a reference to
   it; an admitted message naming that request is delivered to that thread.
 - **Results** leave as envelopes to the sender of the request that started
   the thread. The step that emits signs the signed part through the instance
   wallet (an attested call; `created` is the step's stamp), so its id is known
-  and recorded; the edge encrypts the body to the recipient when it sends.
+  and recorded; the delivery provider encrypts the body to the recipient when
+  it sends.
 - **Nothing is a message that isn't one.** Genesis is starting state. A
   sleeper's wake is a signed, stamped log entry with no message and no
   sender, one per wake. `hello` and `tick` are gone.

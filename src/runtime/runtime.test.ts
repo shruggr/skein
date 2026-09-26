@@ -11,7 +11,8 @@ import { signedPart } from "../envelope.ts";
 import { bundlesOf, instance, results, send, T0 } from "../testkit.ts";
 import { encode } from "./cid.ts";
 import { anyoneKey } from "./identity.ts";
-import { appendEntry, copyLog, entryBytes, genesisOf, LOG_KEY_ID, LOG_PROTOCOL, readLog, verifyEntry } from "./log.ts";
+import { appendEntry } from "../host/entry.ts";
+import { copyLog, entryBytes, genesisOf, LOG_KEY_ID, LOG_PROTOCOL, readLog, verifyEntry } from "./log.ts";
 import { memoryStore } from "./memory.ts";
 import { openStore } from "./sqlite.ts";
 import { stampNs, ThreadClock } from "./syscalls.ts";
@@ -24,7 +25,7 @@ test("log: entries chain, are stamped (never backwards) and signed by the host i
   const i = await instance();
   const env = await send(i, "run", { cmd: "true", tree: encode({}).cid });
   i.clock.set([T0[0] - 100, 0]); // an earlier clock reading…
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const log = await readLog(i.store);
   assert.equal(log.length, 2);
@@ -105,7 +106,7 @@ test("time and random inside: the run entry's stamp is now, +1 ns per read; $RAN
   for (const b of bundles) await send(i, "objects", b);
   i.clock.set([1_790_000_123, 400_000_000]);
   await send(i, "run", { cmd: "date -u +%s; ls; echo $RANDOM; echo $RANDOM; date +%s%N; date +%s%N", tree: root });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const [{ body }] = await results(i);
   const out = text(body.stdout).trim().split("\n");

@@ -1,8 +1,9 @@
 # skein
 
 A deterministic WASI machine over a content-addressed graph. Its only inputs
-are an ordered log of signed entries — BRC-169 envelopes admitted from the
-host's messagebox, and wakes for sleepers; its only outputs are envelopes.
+are an ordered log of host-signed entries — BRC-169 messages (the sender's
+signed metadata and the plaintext) delivered from the host's messagebox, and
+wakes for sleepers; its only outputs are envelopes.
 Programs run inside it: handler programs (Go, `wasip1`) per box, and a
 bash-compatible wasm shell over git-shaped trees. Time and randomness are not
 inputs: the host stamps each log entry with its clock and signs it, and
@@ -17,17 +18,20 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 ## Layout
 
 ```
-src/runtime/     the machine — one process; no disk, network or randomness; one clock read, in log.ts
-  main.ts          `skein-runtime`: store + wallet + edge + scheduler
-  inbox.ts         the edge to the host's messagebox: screen, decrypt, admit the plaintext; sign, encrypt and send emits
-  scheduler.ts     the log consumer: route by subscription, step programs and the shell, attested calls, replay
-  log.ts           the input log: signed entries (genesis | envelope | wake), stamped at admission
+src/runtime/     the machine — no disk, network, clock, randomness, messagebox or private key
+  scheduler.ts     the log consumer: admit, route by subscription, step programs and the shell, attested calls, replay
+  log.ts           the input log: host-signed entries (genesis | envelope | wake), verified at admission
   program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
   programs.ts      the program records (shell, run-handler, objects-handler, head-handler, loop) and pinned module CIDs
   heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
   shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
+src/host/        the providers and the kernel configuration, outside the machine
+  main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers
+  messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; sign, encrypt and send emits
+  tick.ts          wakes: the next deadline → one host-signed wake entry
+  entry.ts         the host's clock and entry signing; genesis
 src/envelope.ts  BRC-169 envelopes: RFC 8785 canonical form, signed contentHash, BRC-78 content, sign/seal/verify/open (shared with the client)
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
@@ -39,11 +43,9 @@ wasm/            the committed modules; their CIDs are pinned in src/runtime/pro
 ```
 
 `src/runtime/isolation.test.ts` fails if anything under `src/runtime` imports
-`node:fs`, `child_process`, `http(s)`, `net`…, or uses `fetch`, `Date.now`
-(except `log.ts`, which stamps entries), `Math.random`, `randomBytes`, timers
-or `process.env` — with named exceptions: `inbox.ts` (the network edge: the
-messagebox client, `../envelope.ts`, a poll timer) and `main.ts` (env, the
-wallet, wake timers).
+`node:fs`, `child_process`, `http(s)`, `net`…, `@bsv/message-box-client` or
+anything outside `src/runtime`, or uses `fetch`, `Date.now`, `Math.random`,
+`randomBytes`, timers, `process.env` or a private key — with no exceptions.
 
 ## Running it
 
@@ -68,8 +70,9 @@ npm test
 `bin/skein-runtime` fills the environment from `~/.skein`: `SKEIN_OWNER`
 (`owner.identity`), `SKEIN_MESSAGEBOX` (`messagebox.url`).
 Also: `SKEIN_DB` (`~/.skein/runtime.db`), `SKEIN_HANDLE` (`skein@localhost`),
-`SKEIN_OWNER_HANDLE` (`david@localhost`), `SKEIN_FRESHNESS_MS` (600000),
-`SKEIN_POLL_MS` (1000), `SKEIN_WALLET=ephemeral` (a throwaway key).
+`SKEIN_OWNER_HANDLE` (`david@localhost`), `SKEIN_HOST_WALLET_URL`
+(`http://127.0.0.1:3324`), `SKEIN_POLL_MS` (1000), `SKEIN_WALLET=ephemeral`
+(throwaway keys).
 
 The instance wallet (`1sat serve wallet-api`, origin `skein`) needs, besides
 the transport grants in `scripts/host/grants.sh`:
@@ -99,7 +102,7 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?}` |
 | attested | `{kind: "attested", thread, step, i, op: "wallet" \| "seal", request, result}` — a wire frame and its answer, or an emit record and its signed envelope (the signed part) |
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
-| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the edge signs the envelope for `body` to `to` in `box` during the step (`emit` returns the envelope CID; `created` is the step's stamp) and encrypts and sends it after |
+| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the delivery provider signs the envelope for `body` to `to` in `box` during the step (`emit` returns the envelope CID; `created` is the step's stamp) and encrypts and sends it after |
 
 Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
 `root` on the last) → objects-handler, which sets `main` to `root` if there is

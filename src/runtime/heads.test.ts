@@ -59,7 +59,7 @@ async function dir(t: { after(fn: () => Promise<void>): void }, files: Record<st
   return d;
 }
 
-async function settle(i: Instance) { await i.edge.poll(); await i.rt.idle(); }
+async function settle(i: Instance) { await i.delivery.poll(); await i.rt.idle(); }
 
 async function importDir(i: Instance, d: string): Promise<CID> {
   const { root, bundles } = await bundlesOf(d);

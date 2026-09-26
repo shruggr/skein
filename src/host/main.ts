@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-runtime`: the runtime process (docs/ARCH.md). One instance, one store
-// file, one wallet, one messagebox edge. It reads only its environment
+// file, its wallets, and its providers. It reads only its environment
 // (bin/skein-runtime fills it from ~/.skein):
 //   SKEIN_HOME            default ~/.skein
 //   SKEIN_DB              the store file, default $SKEIN_HOME/runtime.db
@@ -15,17 +15,20 @@
 //   SKEIN_HANDLE          the instance's handle, default skein@localhost
 //   SKEIN_MESSAGEBOX      the messagebox host, e.g. http://127.0.0.1:8100/messagebox
 //   SKEIN_POLL_MS         how often to collect the boxes, default 1000
-//   SKEIN_FRESHNESS_MS    accept envelopes created within ± this of now, default 600000
 //
-// The wallet connections (../wallet.ts) and the messagebox edge (inbox.ts) are
-// the runtime's edges; everything else here is inside the machine.
+// This file is the kernel configuration: it opens the store, connects the
+// wallets (../wallet.ts), and wires the instance's interfaces to providers —
+// message delivery and outbound messages to the messagebox (messagebox.ts),
+// wakes to the tick (tick.ts). The runtime (src/runtime) is the machine; it
+// only admits the entries they deliver and hands them its emits.
 
 import { connectWallet, ephemeralWallet } from "../wallet.ts";
-import { Edge, messageBoxClient } from "./inbox.ts";
-import { ensureGenesis, now, short, stampMs } from "./log.ts";
-import { Runtime } from "./scheduler.ts";
-import { openStore } from "./sqlite.ts";
-import type { CID } from "multiformats/cid";
+import { genesisOf, short } from "../runtime/log.ts";
+import { Runtime } from "../runtime/scheduler.ts";
+import { openStore } from "../runtime/sqlite.ts";
+import { ensureGenesis } from "./entry.ts";
+import { Delivery, messageBoxClient } from "./messagebox.ts";
+import { Tick } from "./tick.ts";
 
 const env = process.env;
 const home = env.SKEIN_HOME || `${env.HOME}/.skein`;
@@ -45,48 +48,43 @@ if (!(await store.log.tip())) {
   say(`genesis ${g.entry}`);
 }
 
-const timers = new Map<string, ReturnType<typeof setTimeout>>();
-const runtime = new Runtime({
-  store, wallet, host, log: say,
-  // Sleepers see time pass only through a wake entry: write one at each deadline.
-  onSleep: (thread: CID, until: number) => {
-    clearTimeout(timers.get(thread.toString()));
-    timers.set(thread.toString(), setTimeout(() => {
-      timers.delete(thread.toString());
-      runtime.wake(thread).catch((e) => say(`wake ${short(thread)}: ${(e as Error).message}`));
-    }, Math.max(0, until - stampMs(now())) + 1));
-  },
-});
-await runtime.start();
-const g = runtime.genesis!;
+const g = await genesisOf(store);
 const { publicKey: hostKey } = await host.getPublicKey({ identityKey: true });
 if (hostKey !== g.host) die(`the host wallet (${hostKey}) is not this instance's host (${g.host}): its entries would not verify`);
 
+const runtime = new Runtime({ store, wallet, log: say });
+
+// Wakes: the tick provider, watching the runtime's sleepers from before it starts.
+const tick = new Tick({ runtime, host, log: say });
+tick.start();
+
+// Messages in and out: the messagebox provider, as the instance's identity.
 const [ownerUser, ownerDomain = "localhost"] = (env.SKEIN_OWNER_HANDLE || "david@localhost").split("@");
 const [inferUser, inferDomain = "localhost"] = (env.SKEIN_INFER_HANDLE || "infer@localhost").split("@");
-let edge: Edge | undefined;
+let delivery: Delivery | undefined;
 if (env.SKEIN_MESSAGEBOX) {
-  edge = new Edge({
-    runtime, wallet,
+  delivery = new Delivery({
+    runtime, wallet, host,
     box: messageBoxClient(wallet, env.SKEIN_MESSAGEBOX),
-    freshnessMs: env.SKEIN_FRESHNESS_MS ? Number(env.SKEIN_FRESHNESS_MS) : undefined,
     handles: {
       [g.owner]: { handle: ownerUser, domain: ownerDomain },
       ...(g.peers?.infer ? { [g.peers.infer]: { handle: inferUser, domain: inferDomain } } : {}),
     },
     log: say,
   });
-  runtime.outbox = edge;
-  edge.start(Number(env.SKEIN_POLL_MS || 1000));
+  runtime.outbox = delivery;
 } else {
-  say("SKEIN_MESSAGEBOX unset: no edge; nothing will be admitted");
+  say("SKEIN_MESSAGEBOX unset: no message provider; nothing will be delivered");
 }
+
+await runtime.start();
+delivery?.start(Number(env.SKEIN_POLL_MS || 1000));
 say(`skein runtime ${g.identity} (${g.handle}@${g.domain}) · host ${short(g.host)} · owner ${short(g.owner)}${g.peers?.infer ? ` · infer ${short(g.peers.infer)}` : " · no infer peer"} · db ${dbPath} · boxes ${(await runtime.boxes()).join(",")} · state ${(await runtime.tip())?.toString()}`);
 
 const stop = async (sig: string) => {
   say(`${sig}: stopping`);
-  for (const t of timers.values()) clearTimeout(t);
-  await edge?.stop();
+  await tick.stop();
+  await delivery?.stop();
   await runtime.stop();
   await store.close();
   process.exit(0);

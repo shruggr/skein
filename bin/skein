@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # skein — David's client (src/client/cli.ts): whoami | import | run | head | inbox | chat | talk | help.
 # Compatibility: with no arguments, or `skein runtime`, this still starts the
-# runtime (src/runtime/main.ts) as it did before the client existed; that
+# runtime (src/host/main.ts) as it did before the client existed; that
 # launcher belongs in its own script (bin/skein-runtime) once the runtime side moves it.
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -16,7 +16,7 @@ case "${1:-}" in
     # A socket file left by a crashed runtime blocks listen(); the runtime cannot
     # remove it (no filesystem access), so do it here if nothing is listening on it.
     if [ -S "$sock" ] && ! ss -xl 2>/dev/null | grep -qF "$sock"; then rm -f "$sock"; fi
-    exec node --experimental-strip-types --no-warnings "$root/src/runtime/main.ts" "$@" ;;
+    exec node --experimental-strip-types --no-warnings "$root/src/host/main.ts" "$@" ;;
   *)
     exec node --experimental-strip-types --no-warnings "$root/src/client/cli.ts" "$@" ;;
 esac

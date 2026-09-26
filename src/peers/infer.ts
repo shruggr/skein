@@ -17,7 +17,7 @@ import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { isEnvelope, isoTime, open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { encode } from "../runtime/cid.ts";
-import type { Listed, MessageBox } from "../runtime/inbox.ts";
+import type { Listed, MessageBox } from "../host/messagebox.ts";
 
 export interface Provider { baseUrl: string; apiKey?: string }
 

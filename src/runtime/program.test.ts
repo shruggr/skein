@@ -28,7 +28,7 @@ test("wallet wire: a Go program's getPublicKey and createSignature are attested 
   // The genesis above routed `probe`; restart so the runtime reads it with the program present.
   const j = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
   await send(j, "probe", { hi: 1 });
-  await j.edge.poll();
+  await j.delivery.poll();
   await j.rt.idle();
   const [th] = await (async () => { const out: CID[] = []; for await (const t of j.store.edges.query({ kind: "thread", program: probeCid })) out.push(t); return out; })();
   const u = await j.store.get<ThreadUpdate & { calls: CID[] }>(await j.store.chains.tip(th));

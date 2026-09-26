@@ -18,7 +18,7 @@
 //                                              step's update (`kept`), so later steps find it from `tip`
 //   launch(prog, prog_len, args, args_len, out, cap) → n   open a thread; → its origin CID
 //   emit(cid, cid_len, out, cap) → n           sign an outbound envelope named by an emit record (attested:
-//                                              the edge signs it now); → the envelope record's CID. Sent when the step ends.
+//                                              the instance wallet signs it now); → the envelope record's CID. Sent when the step ends.
 //   await(cid, cid_len) → 0                    rest on a reply to an envelope this step emitted: the step ends
 //                                              `waiting` with `awaits`, and an admitted envelope whose body's
 //                                              `replyTo` is that CID is this thread's next input

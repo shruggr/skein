@@ -16,6 +16,14 @@ instance. Its edges are:
 Everything else that looks like an input — a model completion, a tree of
 files, a person's line — is a message from another identity, signed by it.
 
+Each edge is an interface, satisfied by a **provider** outside `src/runtime`
+(`MESSAGES.md`, "Providers"): message delivery (`src/host/messagebox.ts`),
+ticks (`src/host/tick.ts`), the wallet. Which provider serves which interface
+is kernel configuration (`src/host/main.ts`), so a test wires mocks and one
+host can serve all of them or different parties each. The runtime only
+`admit`s the finished, host-signed entries they deliver and hands its emits
+to the delivery provider.
+
 Time and randomness are different: they are not another party's statement
 inside a message. When the host admits an input it reads its clock and writes
 the time into that log entry, which it signs as its own word ("this arrived
@@ -89,9 +97,10 @@ through gib. The runtime never writes to a disk.
 
 ## Processes on David's machines, today
 
-- `skein` — the runtime: one process, one instance, one store file. Talks to
-  the wallet, and to peers over a local socket or a messagebox.
-- `1sat serve wallet-api` — the wallet.
+- `skein` — the runtime: one process, one instance, one store file, with its
+  providers (the messagebox delivery, the tick) wired by `src/host/main.ts`.
+- `1sat serve wallet-api` — the wallets: the instance's, and the host's,
+  which signs every log entry.
 - a **client** — David's terminal or easel: scans, prompts, renders, signs as
   David.
 - **peers** — inference (ripper), a machine runner for commands that cannot

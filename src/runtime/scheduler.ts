@@ -1,4 +1,7 @@
 // The scheduler: the log consumer (docs/ARCH.md, "The kernel"; docs/MESSAGES.md).
+// Entries come in finished and signed through `admit`, from the providers the
+// kernel configuration wires (src/host: messagebox delivery, tick); the
+// runtime checks them and consumes them in order:
 //
 //   for each log entry after the cursor, in order:
 //     check its signature against the host identity (the genesis's `host`);
@@ -21,7 +24,8 @@
 //
 // - The shell (program code {ts: "shell"}): the wasm shell run from TypeScript
 //   in one go. A sleep rests the thread (`waiting`, `until`) with its instance
-//   parked (JSPI); main.ts writes a wake entry at the deadline. Nothing about
+//   parked (JSPI); the tick provider reads the deadline (sleepersDue) and
+//   admits a wake entry when it comes. Nothing about
 //   the handle is durable: on start it is re-executed from its origin, and
 //   re-execution *verifies* — each update it would write must equal the one in
 //   its chain (same CID), else the run diverged and the thread stops.
@@ -48,8 +52,7 @@ import { createHash } from "node:crypto";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode, isCID } from "./cid.ts";
-import type { KeyWallet } from "./identity.ts";
-import { appendEntry, genesisOf, isLogEntry, now as clockNow, short, stampMs, verifyEntry, type EntryBody, type LogEntry } from "./log.ts";
+import { genesisOf, isLogEntry, short, stampMs, verifyEntry, type LogEntry } from "./log.ts";
 import { advanceHead, headTree, isHeadName } from "./heads.ts";
 import { runProgram } from "./program.ts";
 import { isShellArgs, loadModule, loadShellModules } from "./programs.ts";
@@ -64,7 +67,7 @@ export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
   [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],
 ]);
 
-/** An emitted envelope, signed during the step that emitted it, for the edge to encrypt and send. */
+/** An emitted envelope, signed during the step that emitted it, for the delivery provider to encrypt and send. */
 export interface Outbound extends Emit {
   emit: CID;         // the emit record
   bytes: Uint8Array; // the body record's dag-cbor: the envelope's plaintext content
@@ -74,11 +77,13 @@ export interface Outbound extends Emit {
 }
 
 /**
- * Where emitted envelopes go: the edge (inbox.ts). `seal` signs the envelope's
- * signed part inside the step that emits (an attested call: its answer is
- * recorded), `created` being the step's `at`; `send` encrypts and delivers it
- * after the step is recorded. Tests may capture; replay needs no `seal` (the
- * witness answers).
+ * Where emitted envelopes go: the delivery provider (src/host/messagebox.ts).
+ * `seal` signs the envelope's signed part through the instance wallet inside
+ * the step that emits (an attested call: its answer is recorded), `created`
+ * being the step's `at`; `send` hands it over after the step is recorded. The
+ * state is only "I sent this": encryption, queueing, retries and delivery
+ * errors are the provider's, and nothing about delivery comes back. Tests may
+ * capture; replay needs no `seal` (the witness answers).
  */
 export interface Outbox {
   seal?(e: Emit, bytes: Uint8Array, at: Ms): Promise<object>;
@@ -95,15 +100,11 @@ export interface RuntimeOptions {
   store: Store;
   /** The instance wallet (programs' wallet calls). Absent on replay: attested answers come from `witness`. */
   wallet?: WalletInterface;
-  /** The host wallet: signs every log entry this runtime writes. Absent on replay: nothing can be admitted. */
-  host?: KeyWallet;
   witness?: Witness;
   outbox?: Outbox;
   /** One line per transition. Default: nowhere. */
   log?: (line: string) => void;
-  /** The clock admission stamps entries with. Default: log.ts's wall clock. Tests pass a script. */
-  now?: () => Stamp;
-  /** Called when a thread starts sleeping: main.ts writes a wake entry at `until`. */
+  /** Called when a thread starts sleeping: the tick provider reads the next deadline. */
   onSleep?: (thread: CID, until: Ms) => void;
 }
 
@@ -154,12 +155,11 @@ interface Resolved { thread: CID; state: ThreadState; result?: unknown; error?: 
 export class Runtime {
   readonly store: Store;
   readonly wallet?: WalletInterface;
-  private readonly host?: KeyWallet;
   outbox?: Outbox;
+  /** A thread started sleeping: the tick provider's cue to read sleepersDue(). */
+  onSleep?: (thread: CID, until: Ms) => void;
   private readonly witness?: Witness;
   private readonly say: (line: string) => void;
-  private readonly now: () => Stamp;
-  private readonly onSleep?: (thread: CID, until: Ms) => void;
   private readonly wire?: WalletWireProcessor;
 
   genesis?: Genesis;
@@ -176,11 +176,9 @@ export class Runtime {
   constructor(o: RuntimeOptions) {
     this.store = o.store;
     this.wallet = o.wallet;
-    this.host = o.host;
     this.witness = o.witness;
     this.outbox = o.outbox;
     this.say = o.log ?? (() => {});
-    this.now = o.now ?? clockNow;
     this.onSleep = o.onSleep;
     if (o.wallet) this.wire = new WalletWireProcessor(o.wallet);
   }
@@ -203,7 +201,7 @@ export class Runtime {
       .map((t) => ({ thread: t.origin, until: Number((t.deadline! + 999_999n) / 1_000_000n) }));
   }
 
-  /** The boxes the subscriptions route (what the edge collects). Reads the genesis if not yet started. */
+  /** The boxes the subscriptions route (what the delivery provider collects). Reads the genesis if not yet started. */
   async boxes(): Promise<string[]> {
     if (!this.genesis && (await this.store.log.tip())) this.genesis = await genesisOf(this.store);
     const subscribed = (this.genesis?.subscriptions ?? []).map((s) => s.match.box).filter((b): b is string => !!b);
@@ -242,37 +240,38 @@ export class Runtime {
   // ------------------------------------------------------------ admission
 
   /**
-   * Admit a BRC-169 envelope that arrived in `box`, as its signed part (the
-   * JSON object without `content`) and its plaintext body (canonical dag-cbor,
-   * decrypted by the edge): store both, write a signed log entry naming them,
-   * and schedule processing. The edge has verified the sender's signature and
-   * screened it (inbox.ts); here the body must hash to the signed
-   * `contentHash`. An envelope already in the log is Rejected "duplicate-envelope".
+   * Admit a finished log entry: made and signed by the provider that delivers
+   * it (its signature must verify against the genesis's `host`), extending the
+   * tip, with the records it names — for an envelope entry, the envelope's
+   * signed part (the JSON object without `content`) and the plaintext body
+   * (canonical dag-cbor that hashes to the signed `contentHash`). Checked,
+   * stored, appended, and scheduled for processing. The provider has verified
+   * the sender's signature. An envelope already in the log is Rejected
+   * "duplicate-envelope"; an entry that no longer extends the tip, "out-of-order"
+   * (the provider signs the next one and tries again). Appends are serialised.
    */
-  async admitEnvelope(signed: object, box: string, body: Uint8Array): Promise<{ entry: CID; envelope: CID; body: CID }> {
+  admit(entry: LogEntry, records: { envelope?: object; body?: Uint8Array } = {}): Promise<CID> {
+    const p = this.appending.then(() => this.check(entry, records)).then(() => this.store.log.append(entry));
+    this.appending = p.catch(() => {});
+    return p.then((cid) => { this.kick(); return cid; });
+  }
+
+  private async check(entry: LogEntry, records: { envelope?: object; body?: Uint8Array }): Promise<void> {
+    if (!isLogEntry(entry) || entry.genesis) throw new TypeError("admit: want a signed envelope or wake entry");
+    if (!this.genesis && (await this.store.log.tip())) this.genesis = await genesisOf(this.store);
+    if (!this.genesis) throw new Error("admit: no genesis");
+    if (!verifyEntry(entry, this.genesis.host)) throw new Rejected("bad-signature", `admit: entry #${entry.n} is not signed by the host ${short(this.genesis.host)}`);
+    if (!entry.envelope) return;
+    const { envelope: signed, body } = records;
+    if (!signed || !body) throw new TypeError("admit: an envelope entry needs its envelope and body records");
+    if ("content" in signed) throw new TypeError("admit: keep the signed part only, not the wire `content`");
     const { cid: bodyCid, bytes } = encode(decode(body));
     if (!Buffer.from(bytes).equals(body)) throw new TypeError("admit: the body is not canonical dag-cbor");
     if ((signed as { contentHash?: unknown }).contentHash !== Buffer.from(bodyCid.multihash.digest).toString("hex")) throw new TypeError("admit: the body does not match the envelope's contentHash");
-    if ("content" in signed) throw new TypeError("admit: keep the signed part only, not the wire `content`");
-    const env = await this.store.put(signed as never);
-    if (await this.store.log.byEnvelope(env)) throw new Rejected("duplicate-envelope", `envelope ${env} is already admitted`);
+    if (!bodyCid.equals(entry.body!) || !encode(signed).cid.equals(entry.envelope)) throw new TypeError("admit: the records are not the ones the entry names");
+    if (await this.store.log.byEnvelope(entry.envelope)) throw new Rejected("duplicate-envelope", `envelope ${entry.envelope} is already admitted`);
+    await this.store.put(signed as never);
     await this.store.putBlock(bodyCid, body);
-    return { entry: await this.append({ envelope: env, box, body: bodyCid }), envelope: env, body: bodyCid };
-  }
-
-  /** Write a wake entry for a sleeper whose deadline has come (main.ts's timer). No-op if it is not sleeping. */
-  async wake(thread: CID): Promise<CID | undefined> {
-    if (!this.sleepers.has(thread.toString())) return undefined;
-    return this.append({ wake: thread });
-  }
-
-  /** Appends are serialised: each entry extends the tip the previous one made. */
-  private append(body: EntryBody): Promise<CID> {
-    const host = this.host;
-    if (!host) return Promise.reject(new Error("runtime: no host wallet, cannot sign a log entry"));
-    const p = this.appending.then(() => appendEntry(this.store, host, body, this.now()));
-    this.appending = p.catch(() => {});
-    return p.then(({ cid }) => { this.kick(); return cid; });
   }
 
   // ------------------------------------------------------------ the loop
@@ -523,7 +522,7 @@ export class Runtime {
           if (!isEmit(rec)) throw new Error("emit: want {kind: \"emit\", to, handle?, domain?, box, body}");
           const bytes = await this.store.bytes(rec.body);
           const env = await attest("seal", c, async () => {
-            if (!this.outbox?.seal) throw new Error("emit: no edge to seal the envelope");
+            if (!this.outbox?.seal) throw new Error("emit: no delivery provider to seal the envelope");
             return encode(await this.outbox.seal(rec, bytes, at)).bytes;
           });
           const cid = await this.store.put(decode(env));

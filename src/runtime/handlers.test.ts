@@ -17,7 +17,8 @@ import { encryptContent, seal } from "../envelope.ts";
 import { bundlesOf, collect, installWasm, instance, iso, results, send, T0, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
-import { appendEntry, copyLog, readLog, verifyEntry } from "./log.ts";
+import { appendEntry } from "../host/entry.ts";
+import { copyLog, readLog, verifyEntry } from "./log.ts";
 import { memoryStore } from "./memory.ts";
 import { PROGRAM_CIDS } from "./programs.ts";
 import type { Attested } from "./records.ts";
@@ -54,7 +55,7 @@ async function importAndRun(i: Instance, dir: string, cmd: string): Promise<{ ro
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await send(i, "objects", b);
   const env = await send(i, "run", { cmd, tree: root });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   return { root, run: await envelopeCid(env) };
 }
@@ -131,7 +132,7 @@ test("objects-handler: a directory in 1-record bundles lands as the same git obj
   const { root, bundles, records } = await bundlesOf(dir, 100); // tiny limit: one record per bundle
   assert.equal(bundles.length, records);
   for (const b of bundles) await send(i, "objects", b);
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   t.diagnostic(i.lines.join("\n"));
   const hs = await byProgram(i.store, "objects-handler");
@@ -144,7 +145,7 @@ test("objects-handler: a directory in 1-record bundles lands as the same git obj
   assert.ok(await i.store.has(root), "the root tree is in the store");
 
   await send(i, "run", { cmd: "wc -c < src/b.bin; cat src/a.txt", tree: root });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const [{ body }] = await results(i);
   assert.equal(text(body.stdout), "3000\nalpha\n");
@@ -152,7 +153,7 @@ test("objects-handler: a directory in 1-record bundles lands as the same git obj
   // A record whose bytes do not hash to its CID is refused: the handler errors, nothing is stored.
   const bad = dagCbor.encode({ records: [{ cid: root, bytes: new Uint8Array([1, 2, 3]) }] });
   await send(i, "objects", bad);
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const last = (await byProgram(i.store, "objects-handler"))[0];
   const u = await tipOf(i.store, last);
@@ -174,9 +175,10 @@ test("sleep: the shell rests until a wake entry, one per wake; the handler repli
   assert.ok(due.thread.equals(sh));
   assert.equal(due.until, u.until);
   assert.equal((await results(i)).length, 0);
+  assert.deepEqual(await i.tick.fire(), [], "before the deadline the tick admits nothing");
 
   i.clock.set([T0[0] + 5, 0]);
-  const w = await i.rt.wake(sh);
+  const [w] = await i.tick.fire();
   await i.rt.idle();
   const e = (await readLog(i.store)).at(-1)!.entry;
   assert.ok(e.wake!.equals(sh) && e.envelope === undefined && w!.equals((await i.store.log.tip())!), "a wake entry names the thread and nothing else");
@@ -185,7 +187,7 @@ test("sleep: the shell rests until a wake entry, one per wake; the handler repli
   assert.equal(u.state, "finished");
   const [{ body }] = await results(i);
   assert.equal(text(body.stdout), `${T0[0] + 5}\n`, "woken by the wake entry: its stamp is the new now");
-  assert.equal(await i.rt.wake(sh), undefined, "no second wake for a thread not sleeping");
+  assert.deepEqual(await i.tick.fire(), [], "no second wake: nothing is due, no idle tick");
   await i.rt.stop();
   await replayMatches(i.store);
 });
@@ -199,7 +201,7 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   await importAndRun(ref, dir, CMD);
   const [refShell] = await byProgram(ref.store, "shell");
   ref.clock.set([T0[0] + 5, 0]);
-  await ref.rt.wake(refShell);
+  await ref.tick.fire();
   await ref.rt.idle();
   await ref.rt.stop();
   const [refResult] = await results(ref);
@@ -214,7 +216,7 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
     const content = await encryptContent(a.owner.wallet, a.identity, await ref.store.bytes(entry.body!));
     await a.hub.as(a.owner.identity).send({ recipient: a.identity, box: entry.box!, body: { ...signed, content } });
   }
-  await a.edge.poll();
+  await a.delivery.poll();
   await a.rt.idle();
   const [sh] = await byProgram(a.store, "shell");
   assert.ok(sh.equals(refShell), "same shell thread");
@@ -252,7 +254,7 @@ test("restart before processing: entries admitted, runtime gone before it steppe
   const { root, bundles } = await bundlesOf(dir);
   for (const bb of bundles) await send(i, "objects", bb);
   await send(i, "run", { cmd: "ls", tree: root });
-  await i.edge.poll(); // admits (signs entries) but the runtime never started
+  await i.delivery.poll(); // admits (signs entries) but the runtime never started
   assert.equal((await readLog(i.store)).length, 3);
   assert.equal((await threads(i.store)).length, 0);
   const j = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
@@ -269,7 +271,7 @@ test("routing: an envelope from a stranger is admitted and logged but runs nothi
   const env = await seal(stranger, { recipient: { identityKey: i.identity, handle: "skein", domain: "localhost" }, body: dagCbor.encode({ cmd: "ls", tree: encode({}).cid }), created: iso(i.clock.now()) });
   await i.hub.as(sk).send({ recipient: i.identity, box: "run", body: env });
   await send(i, "mail", { hello: 1 });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   const log = await readLog(i.store);
   assert.deepEqual(log.map((x) => x.entry.box ?? "genesis"), ["genesis", "run"], "the stranger's run is in the log");
@@ -285,7 +287,7 @@ test("replay needs the log and nothing else: no wallet, no witness, no keys — 
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await send(i, "objects", b);
   await send(i, "head", { name: "main", tree: root });
-  await i.edge.poll();
+  await i.delivery.poll();
   await i.rt.idle();
   await i.rt.stop();
   const log = await readLog(i.store);
