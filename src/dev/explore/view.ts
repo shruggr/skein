@@ -9,10 +9,11 @@ import { headOrigin, MAIN, type HeadUpdate } from "../../runtime/heads.ts";
 import { genesisOf, readLog, type LogEntry } from "../../runtime/log.ts";
 import { isProgram, matches, type Genesis, type Subscription } from "../../runtime/records.ts";
 import { NotFound, type Store } from "../../runtime/store.ts";
+import { fold, subscriptionUpdates, type SubscriptionUpdate } from "../../runtime/subscriptions.ts";
 import type { ThreadOrigin, ThreadUpdate } from "../../runtime/types.ts";
 
 export type Update = ThreadUpdate & {
-  step?: number; calls?: CID[]; launched?: CID[]; kept?: CID[]; emits?: CID[]; heads?: CID[];
+  step?: number; calls?: CID[]; launched?: CID[]; kept?: CID[]; emits?: CID[]; heads?: CID[]; subscriptions?: CID[];
 };
 
 export interface Thread {
@@ -35,6 +36,7 @@ export interface World {
   byThread: Map<string, Thread>;
   touched: Map<string, Touch[]>;             // entry CID → the threads it launched or stepped
   envelopes: Map<string, EnvelopeRecord>;    // admitted envelopes, by CID
+  subscriptions?: Array<{ cid: CID; u: SubscriptionUpdate }>; // the subscriptions chain, oldest first; absent: never opened
   cursor: number;
 }
 
@@ -62,7 +64,7 @@ export async function load(store: Store): Promise<World> {
     if (env) envelopes.set(entry.envelope!.toString(), env);
   }
   return {
-    store, genesis, log, threads, touched, envelopes,
+    store, genesis, log, threads, touched, envelopes, subscriptions: await subscriptionUpdates(store),
     entries: new Map(log.map((x) => [x.cid.toString(), x])),
     byThread: new Map(threads.map((t) => [t.cid.toString(), t])),
     cursor: await store.live.cursor.get(),
@@ -89,16 +91,23 @@ export interface EnvelopeRecord {
 
 export const senderOf = (env: EnvelopeRecord | undefined) => env?.sender?.identityKey;
 
-/** How the runtime routed an envelope entry: a reply (by its body's `replyTo`) or the first matching subscription. */
-export function routeOf(w: World, sender: string | undefined, box: string | undefined, body: unknown):
+/** The subscriptions as they stood when entry `n` was processed (the updates written by earlier entries); all of them if n is absent. */
+export function rulesAt(w: World, n?: number): Subscription[] {
+  const before = (u: SubscriptionUpdate) => n === undefined || (w.entries.get(u.input.toString())?.entry.n ?? Infinity) < n;
+  return fold((w.subscriptions ?? []).map((x) => x.u).filter(before));
+}
+
+/** How the runtime routed envelope entry `n`: a reply (by its body's `replyTo`) or the first subscription matching then. */
+export function routeOf(w: World, n: number, sender: string | undefined, box: string | undefined, body: unknown):
   { reply: CID | null } | { sub: Subscription; i: number } | undefined {
   if (body && typeof body === "object" && "replyTo" in body) {
     const r = (body as { replyTo: unknown }).replyTo;
     return { reply: isCID(r) ? r : null };
   }
   if (!sender || box === undefined) return undefined;
-  const i = w.genesis?.subscriptions.findIndex((s) => matches(s, sender, box)) ?? -1;
-  return i < 0 ? undefined : { sub: w.genesis!.subscriptions[i], i };
+  const rules = rulesAt(w, n);
+  const i = rules.findIndex((s) => matches(s, sender, box));
+  return i < 0 ? undefined : { sub: rules[i], i };
 }
 
 /** Who an identity is, as far as this instance knows. */

@@ -122,6 +122,19 @@ export async function deployFiles(o: DeployFilesOptions): Promise<Deployed> {
   return ship(o, store, await setFiles(blocks, base, o.files), m);
 }
 
+/**
+ * Change the row's instance's subscriptions as the owner (#3): one `subscribe`
+ * envelope (body {op, sender?, box, handler}, client.ts subscribeBody) — what
+ * a changed rule sends, instead of a new genesis. Queued in the messagebox
+ * like a deploy; the store, if given, is checked as for one.
+ */
+export async function subscribeRow(o: { row: InstanceRow; owner: WalletInterface; box: MessageBox; store?: Store; now?: () => number }, body: Record<string, unknown>): Promise<void> {
+  await checked(o);
+  const { row } = o;
+  const env = await seal(o.owner, { recipient: { identityKey: row.identity!, handle: row.handle, domain: row.domain }, body: dagCbor.encode(body), created: isoTime((o.now ?? Date.now)()) });
+  await o.box.send({ recipient: row.identity!, box: "subscribe", body: env });
+}
+
 /** The genesis checks; the store if it has a log. */
 async function checked(o: { row: InstanceRow; owner: WalletInterface; store?: Store }): Promise<Store | undefined> {
   const { row } = o;

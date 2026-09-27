@@ -5,6 +5,7 @@
 import type { CID } from "multiformats/cid";
 import { decode, encode, isCID } from "../../runtime/cid.ts";
 import { headTree, type HeadUpdate } from "../../runtime/heads.ts";
+import type { SubscriptionUpdate } from "../../runtime/subscriptions.ts";
 import { short, stampMs } from "../../runtime/log.ts";
 import { RAW } from "../../runtime/programs.ts";
 import type { Attested, Emit } from "../../runtime/records.ts";
@@ -13,7 +14,7 @@ import { GIT_RAW, lookup, parseTree, readBlob, readTree } from "../../runtime/tr
 import type { Ref } from "../../runtime/types.ts";
 import { signedPart, verify } from "../../envelope.ts";
 import { escapeHtml, markdownToHtml } from "../../../web/markdown.ts";
-import { ancestry, headMoves, headNames, label, maybe, routeOf, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
+import { ancestry, headMoves, headNames, label, maybe, routeOf, rulesAt, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
 
 const DAG_CBOR = 0x71;
 const esc = (x: unknown) => escapeHtml(String(x));
@@ -117,9 +118,10 @@ export async function overview(w: World): Promise<string> {
     const tree = await headTree(w.store, n);
     return `<tr><td><a href="/h/${encodeURIComponent(n)}">${esc(n)}</a></td><td>${tree ? link(w, tree, tree.toString()) : `<span class="mut">never moved</span>`}</td></tr>`;
   }));
-  const subs = g.subscriptions.map((s, i) => `<tr><td>${i}</td><td>${s.match.sender ? key(w, s.match.sender) : `<span class="mut">anyone</span>`}</td><td>${esc(s.match.box ?? "any")}</td><td>${link(w, s.handler, programOf(w, s.handler))}</td></tr>`).join("");
+  const rules = rulesAt(w);
+  const subs = rules.map((s, i) => `<tr><td>${i}</td><td>${s.match.sender ? key(w, s.match.sender) : `<span class="mut">anyone</span>`}</td><td>${esc(s.match.box ?? "any")}</td><td>${link(w, s.handler, programOf(w, s.handler))}</td></tr>`).join("");
   const boxes = new Map<string, number>();
-  for (const b of [...g.subscriptions.map((s) => s.match.box), ...(g.collect ?? [])]) if (b) boxes.set(b, 0);
+  for (const b of [...rules.map((s) => s.match.box), ...(g.collect ?? [])]) if (b) boxes.set(b, 0);
   for (const { entry } of w.log) if (entry.box) boxes.set(entry.box, (boxes.get(entry.box) ?? 0) + 1);
   const states = new Map<string, number>();
   for (const t of w.threads) states.set(t.state, (states.get(t.state) ?? 0) + 1);
@@ -137,13 +139,25 @@ ${kv([
     ["defaults", esc(Object.entries(g.defaults ?? {}).map(([k, v]) => `${k}=${v}`).join(" "))],
   ])}
 <h2>heads</h2><table>${heads.join("")}</table>
-<h2>subscriptions</h2><table><tr><th>#</th><th>sender</th><th>box</th><th>handler</th></tr>${subs}</table>
+<h2>subscriptions</h2><div class="small mut">${w.subscriptions ? `${w.subscriptions.length} change${w.subscriptions.length === 1 ? "" : "s"} · <a href="/s">chain</a>` : "no subscriptions chain: this log predates it"}</div><table><tr><th>#</th><th>sender</th><th>box</th><th>handler</th></tr>${subs}</table>
 <h2>programs</h2><table>${Object.entries(g.programs).map(([n, c]) => `<tr><td>${esc(n)}</td><td>${link(w, c, c.toString())}</td></tr>`).join("")}</table>
-<h2>boxes</h2><table><tr><th>box</th><th>routed</th><th>entries</th></tr>${[...boxes].map(([b, n]) => `<tr><td>${esc(b)}</td><td class="small mut">${g.subscriptions.some((s) => s.match.box === b) ? "subscription" : (g.collect ?? []).includes(b) ? "collected (replies)" : "—"}</td><td>${n}</td></tr>`).join("")}</table>`);
+<h2>boxes</h2><table><tr><th>box</th><th>routed</th><th>entries</th></tr>${[...boxes].map(([b, n]) => `<tr><td>${esc(b)}</td><td class="small mut">${rules.some((s) => s.match.box === b) ? "subscription" : (g.collect ?? []).includes(b) ? "collected (replies)" : "—"}</td><td>${n}</td></tr>`).join("")}</table>`);
 }
 
 function programOf(w: World, c: CID): string {
   return Object.entries(w.genesis?.programs ?? {}).find(([, p]) => p.equals(c))?.[0] ?? short(c);
+}
+
+// ---------------------------------------------------------------- /s
+
+export function subscriptionsPage(w: World): string {
+  const ups = w.subscriptions ?? [];
+  const rows = ups.map(({ cid, u }) => {
+    const t = u.thread ? w.byThread.get(u.thread.toString()) : undefined;
+    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${esc(u.op)}</td><td>${u.sender ? key(w, u.sender) : `<span class="mut">anyone</span>`}</td><td>${esc(u.box)}</td><td>${link(w, u.handler, programOf(w, u.handler))}</td><td>${t ? threadLink(w, t) : u.thread ? link(w, u.thread) : `<span class="mut">genesis seed</span>`}</td><td>${entryLink(w, u.input)}</td></tr>`;
+  }).reverse().join("");
+  return layout("subscriptions", `<h1>subscriptions</h1><div class="small mut">${w.subscriptions ? `${ups.length} change${ups.length === 1 ? "" : "s"}, newest first` : "no subscriptions chain: this log predates it"}</div>
+<table><tr><th>seq</th><th>at</th><th>op</th><th>sender</th><th>box</th><th>handler</th><th>by thread</th><th>input</th></tr>${rows}</table>`);
 }
 
 // ---------------------------------------------------------------- /log
@@ -195,7 +209,7 @@ export async function entryPage(w: World, cid: CID): Promise<string> {
       ["contentHash", `<code>${esc(env?.contentHash ?? "")}</code> ${hashOk ? `<span class="ok">= body digest</span>` : `<span class="bad">≠ body digest</span>`}`],
       ["signature", env && safe(() => verify(env as never)) ? `<span class="ok">verifies</span>` : `<span class="bad">does not verify</span>`],
     ])}<h2>body ${e.body ? link(w, e.body) : ""}</h2>${json(w, body)}`);
-    const r = routeOf(w, senderOf(env), e.box, body);
+    const r = routeOf(w, e.n, senderOf(env), e.box, body);
     parts.push(`<h2>routing</h2><p>${!r ? `no subscription matches (${key(w, senderOf(env))}, ${esc(e.box ?? "")}): recorded, nothing runs`
       : "reply" in r ? (r.reply ? `a reply to ${link(w, r.reply)}: goes only to the thread awaiting it` : "a <code>replyTo</code> that is not a CID: recorded, nothing runs")
       : `subscription #${r.i} (${r.sub.match.sender ? key(w, r.sub.match.sender) : "anyone"}, ${esc(r.sub.match.box ?? "any box")}) → ${link(w, r.sub.handler, programOf(w, r.sub.handler))}`}</p>`);
@@ -277,6 +291,10 @@ async function updateCard(w: World, t: Thread, cid: CID, u: Update): Promise<str
     const hu = await maybe<HeadUpdate>(w.store, h);
     const name = (await maybe<{ name?: string }>(w.store, hu?.origin))?.name ?? "?";
     parts.push(`<div class="small">moved head <a href="/h/${encodeURIComponent(name)}">${esc(name)}</a> → ${hu ? link(w, hu.tree) : ""} ${link(w, h, "(move)")}</div>`);
+  }
+  for (const s of u.subscriptions ?? []) {
+    const su = await maybe<SubscriptionUpdate>(w.store, s);
+    if (su) parts.push(`<div class="small"><a href="/s">subscription</a> ${esc(su.op)} (${su.sender ? key(w, su.sender) : "anyone"}, ${esc(su.box)}) → ${link(w, su.handler, programOf(w, su.handler))} ${link(w, s, "(change)")}</div>`);
   }
   if (calls.length) {
     parts.push(details(`${calls.length} attested call${calls.length === 1 ? "" : "s"}`, `<ul class="plain small">${calls.map(({ c, a }) => `<li>${link(w, c)} ${a ? `${a.i} ${esc(a.op)} ${a.op === "wallet" && a.request instanceof Uint8Array ? esc(WALLET_CALLS.get(a.request[0]) ?? `call ${a.request[0]}`) : isCID(a.request) ? `emit ${link(w, a.request)}` : ""}` : ""}</li>`).join("")}</ul>`, `calls-${cid}`));
@@ -382,6 +400,7 @@ export async function recordPage(w: World, cid: CID, path = ""): Promise<string>
   if (w.byThread.has(cid.toString())) notes.push(`a thread origin · <a href="/t/${cid}">thread view</a>`);
   if (w.entries.has(cid.toString())) notes.push(`a log entry · <a href="/e/${cid}">entry view</a>`);
   if (v?.kind === "head" && typeof v.name === "string") notes.push(`a head origin · <a href="/h/${encodeURIComponent(v.name)}">moves</a>`);
+  if (v?.kind === "subscriptions") notes.push(`the subscriptions origin · <a href="/s">changes</a>`);
   if (origin && !origin.equals(cid)) notes.push(`update #${esc(v.seq)} of ${link(w, origin)}`);
   const admitted = await w.store.log.byEnvelope(cid);
   if (admitted) notes.push(`an admitted envelope · ${entryLink(w, admitted)}`);

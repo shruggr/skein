@@ -10,7 +10,8 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { blobCid, gitSha } from "../runtime/tree.ts";
 import { chunk, decodeBundle, BUNDLE_LIMIT, type Rec } from "./bundle.ts";
-import { SkeinClient, hashDir, envelopeCid } from "./client.ts";
+import { SkeinClient, hashDir, envelopeCid, handlerCid, subscribeBody } from "./client.ts";
+import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import { parseCli } from "./cli.ts";
 import { open, seal, verify, type Envelope } from "./envelope.ts";
 import type { ClientConfig } from "./config.ts";
@@ -105,6 +106,10 @@ test("parseCli", () => {
   assert.deepEqual(parseCli(["run", "--", "ls"]), { cmd: "run", line: "ls" }, "no --tree: the instance's `main`");
   assert.deepEqual(parseCli(["head", "main", "baf"]), { cmd: "head", name: "main", tree: "baf" });
   assert.throws(() => parseCli(["head", "baf"]), /<name> <tree-cid>/);
+  assert.deepEqual(parseCli(["subscribe", "add", "--sender", "02ab", "chat", "loop"]), { cmd: "subscribe", op: "add", sender: "02ab", box: "chat", handler: "loop" });
+  assert.deepEqual(parseCli(["subscribe", "remove", "chat", "baf"]), { cmd: "subscribe", op: "remove", box: "chat", handler: "baf" });
+  assert.throws(() => parseCli(["subscribe", "swap", "chat", "loop"]), /add\|remove/);
+  assert.throws(() => parseCli(["subscribe", "add", "chat"]), /add\|remove/);
   assert.throws(() => parseCli(["run", "--tree", "x", "--env", "NOEQ", "--", "ls"]), /K=V/);
   assert.throws(() => parseCli(["import"]), /one <dir>/);
   assert.throws(() => parseCli(["inbox", "--bogus"]));
@@ -169,4 +174,13 @@ test("messagebox round trip: run out, result back (real local server)", async (t
   assert.equal(r.body!.exitCode, 0);
   assert.equal(new TextDecoder().decode(r.body!.stdout as Uint8Array), "a\nb\nc\n");
   assert.deepEqual(await client.inbox(), [], "acknowledged");
+});
+
+test("subscribe body: a handler by built-in name or by CID; sender only when given", () => {
+  assert.ok(handlerCid("loop").equals(PROGRAM_CIDS.loop));
+  assert.ok(handlerCid(PROGRAM_CIDS["run-handler"].toString()).equals(PROGRAM_CIDS["run-handler"]));
+  assert.throws(() => handlerCid("nope"), /not a program name/);
+  const b = subscribeBody({ op: "add", box: "chat", handler: "loop" });
+  assert.deepEqual(Object.keys(b), ["op", "box", "handler"]);
+  assert.equal(subscribeBody({ op: "remove", sender: "02ab", box: "chat", handler: "loop" }).sender, "02ab");
 });

@@ -20,6 +20,7 @@ import { readLog, stampMs } from "../runtime/log.ts";
 import { memoryStore } from "../runtime/memory.ts";
 import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import type { Store } from "../runtime/store.ts";
+import { currentSubscriptions } from "../runtime/subscriptions.ts";
 import { gitCid, readFile, readTree, walk } from "../runtime/tree.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
@@ -211,6 +212,33 @@ test("skein-host deploy: records the root and source in the row; again: unchange
   assert.equal(await main(["deploy", "martha", dir], { ...env, vars: { ...env.vars, SKEIN_OWNER: "02" + "e".repeat(64) } }), 1);
   assert.match(err.at(-1)!, /not SKEIN_OWNER/);
   db.close();
+  await r.stop();
+});
+
+test("skein-host subscribe: a `subscribe` message as the owner changes a running instance's subscriptions; no new genesis", async (t) => {
+  const h = await setup();
+  const r = await startInstance(rowOf("martha"), h.o);
+  const home = await tmp(t);
+  const out: string[] = [], err: string[] = [];
+  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: h.owner, store: () => r.store };
+  const cli = (...argv: string[]) => main(argv, env);
+  assert.equal(await cli("add", "martha", "--identity", r.identity, "--store", "mem:martha"), 0);
+  const genesis = (await readLog(r.store))[0].cid;
+  const peer = PrivateKey.fromRandom().toPublicKey().toString();
+  const last = async () => (await currentSubscriptions(r.store))!.at(-1)!;
+
+  assert.equal(await cli("subscribe", "martha", "add", "--sender", peer, "run", "run-handler"), 0, err.join("\n"));
+  await settle(r);
+  assert.deepEqual([(await last()).match, String((await last()).handler)], [{ sender: peer, box: "run" }, String(PROGRAM_CIDS["run-handler"])]);
+  assert.equal(await cli("subscribe", "martha", "remove", "--sender", peer, "run", String(PROGRAM_CIDS["run-handler"])), 0);
+  await settle(r);
+  assert.equal((await last()).match.box, "chat", "removed: the open chat is last again");
+  assert.ok((await readLog(r.store))[0].cid.equals(genesis), "the same genesis");
+
+  assert.equal(await cli("subscribe", "martha", "swap", "run", "loop"), 2);
+  assert.equal(await cli("subscribe", "nobody", "add", "run", "loop"), 1);
+  assert.equal(await cli("subscribe", "martha", "add", "run", "no-such-program"), 1);
+  assert.match(err.at(-1)!, /not a program name/);
   await r.stop();
 });
 

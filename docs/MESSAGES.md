@@ -148,9 +148,13 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   what the instance itself sends. (One wallet may be host, instance and
   owner at once, e.g. a whole VM in a browser window: the roles collapse and
   nothing breaks.)
-- **Routing** is by **subscription** on `(sender.identityKey, box)`, in log
-  order, first match wins. The handler is the **box's handler program**, not
-  a tool: `(sender: david, box: run) → run-handler`.
+- **Routing** is by **subscription** on `(sender.identityKey, box)`, first
+  match wins, over the rules as they stand when the entry is processed: the
+  instance's subscriptions chain (docs/VM.md, "Subscriptions"), seeded by the
+  genesis and changed only by `subscribe` messages from whoever is subscribed
+  to that box (the owner, and whomever the owner delegates to). The handler
+  is the **box's handler program**, not a tool: `(sender: david, box: run) →
+  run-handler`.
 - **The handler** knows the box's message shape. Its arguments name the
   envelope and the plaintext body records; it reads the body and launches the
   next thread with arguments pointing at the body or a record derived from it
@@ -261,8 +265,8 @@ message {to: "@handle@domain", text}
   tool calls in one completion run in order, each `bash` a shell thread and
   each `message` a reply-await.
 - **Inbound.** The receiving instance routes a new `chat` (no `replyTo`) by
-  subscription; to accept agents, not only its owner, its genesis subscribes
-  `{box: "chat"}` with no sender. A stalled reply is a delivery failure — the
+  subscription; to accept agents, not only its owner, its genesis seeds
+  `{box: "chat"}` with no sender (or the owner subscribes it later). A stalled reply is a delivery failure — the
   thread just waits.
 
 ## Why the plaintext

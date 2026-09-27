@@ -174,8 +174,8 @@ get message encryption with the new instance, as `grants.sh` does.
 `SKEIN_POLL_MS`, `SKEIN_WALLET=ephemeral`; `bin/skein-host` fills the first
 three from `~/.skein`). For each enabled row it installs the modules into the
 store, writes a genesis if the store is empty (`handle`/`domain` from the row;
-subscriptions: the owner's `run`, `objects`, `head`, `chat`, then `chat` from
-any sender → loop; `collect`: `completions`; `names`: the owner as
+the seed subscriptions: the owner's `run`, `objects`, `head`, `chat`,
+`subscribe`, then `chat` from any sender → loop; `collect`: `completions`; `names`: the owner as
 `SKEIN_OWNER_HANDLE`, the infer peer as `SKEIN_INFER_HANDLE`), connects the
 row's wallet, and wires its own messagebox delivery (its own BRC-104 session)
 and tick. The host wallet signs every entry of every instance. A row that
@@ -193,6 +193,32 @@ against `metanet.trust.publicKey`), then, last, at the paymail PKI
 `metanet.handles` (and its `/.well-known/metanet-handles/*` answers 401), so
 here a handle that is not a row resolves by paymail. The recorded answer is
 the whole response (`docs/MESSAGES.md`, "Resolution").
+
+### Changing an instance's subscriptions: `skein-host subscribe`
+
+The genesis carries only the seed of an instance's subscriptions; the
+routing table is a chain in the instance (docs/VM.md, "Subscriptions"), so a
+change is a message, not a new genesis. `skein-host subscribe <handle>
+add|remove [--sender <key>] <box> <handler>` sends one `subscribe` envelope
+`{op, sender?, box, handler}` to the row's instance as the owner, through the
+owner's wallet and messagebox exactly as `deploy` does (same checks, same
+queueing). `<handler>` is a built-in program's name (`loop`, `run-handler`,
+…) or a program record's CID (registering a program: its record and module
+go in through `objects` first). No reply; the change shows on the
+explorer's `/s` and in the log (`[handle] … subscribe-handler step 1 →
+finished · 1 subscription change`). Nothing in host.db maps to rules yet
+(`knows` is only ROSTER.md), so nothing sends these automatically.
+
+```
+bin/skein-host subscribe martha add --sender <key> run run-handler
+bin/skein-host subscribe martha remove --sender <key> run run-handler
+```
+
+**Stores from before the chain** (genesis written before #3) have no
+subscriptions chain: the runtime refuses to start them ("predates the
+subscriptions chain … it needs a new genesis"). Move the runtime.db aside,
+restart `skein-host run` on this build, and `deploy` again; host.db is
+untouched.
 
 ### Deploying an agent: `skein-host deploy`
 

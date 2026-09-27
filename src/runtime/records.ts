@@ -114,8 +114,9 @@ export function isProgram(x: unknown): x is Program {
 
 /**
  * Routing for admitted envelopes (docs/MESSAGES.md): on (sender identity key,
- * BRC-33 box), tried in genesis order, first match wins. An absent field
- * matches anything. The handler is a program record's CID.
+ * BRC-33 box), tried in the subscriptions chain's order (subscriptions.ts),
+ * first match wins. An absent field matches anything. The handler is a
+ * program record's CID.
  */
 export type Subscription = {
   match: { sender?: Identity; box?: string };
@@ -141,7 +142,9 @@ export function matches(sub: Subscription, sender: Identity, box: string): boole
  * envelopes are signed by; `host` is the identity of the host that delivers
  * its inputs, which signs every log entry (log.ts); `owner` is the identity
  * it acts for; `programs` are the programs it starts with, by name, and
- * `subscriptions` route its boxes.
+ * `subscriptions` are the seed of its subscriptions chain (subscriptions.ts):
+ * written as the chain's first updates when the entry is processed, never
+ * read for routing.
  */
 export type Genesis = {
   kind: "genesis";

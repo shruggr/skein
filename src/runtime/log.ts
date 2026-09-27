@@ -75,11 +75,11 @@ export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Pro
 }
 
 export interface InstanceConfig {
-  /** The identity the instance acts for; the default subscriptions route its `run`, `objects`, `head` and `chat` boxes. */
+  /** The identity the instance acts for; the default subscriptions route its `run`, `objects`, `head`, `chat` and `subscribe` boxes. */
   owner: Identity;
   handle?: string;  // default "skein"
   domain?: string;  // default "localhost"
-  /** Default: defaultSubscriptions(owner). */
+  /** The seed of the subscriptions chain (subscriptions.ts): its first updates, in order. Every rule names a box. Default: defaultSubscriptions(owner). */
   subscriptions?: Subscription[];
   /** Peers by role: `infer` is the inference peer the loop asks. */
   peers?: Record<string, Identity>;
@@ -93,13 +93,14 @@ export interface InstanceConfig {
 
 export const DEFAULTS: Record<string, string> = { model: "ripper/qwen38", thinking: "off" };
 
-/** The owner's boxes: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop. */
+/** The owner's boxes: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop, (owner, subscribe) → subscribe-handler. */
 export function defaultSubscriptions(owner: Identity): Subscription[] {
   return [
     { match: { sender: owner, box: "run" }, handler: PROGRAM_CIDS["run-handler"] },
     { match: { sender: owner, box: "objects" }, handler: PROGRAM_CIDS["objects-handler"] },
     { match: { sender: owner, box: "head" }, handler: PROGRAM_CIDS["head-handler"] },
     { match: { sender: owner, box: "chat" }, handler: PROGRAM_CIDS.loop },
+    { match: { sender: owner, box: "subscribe" }, handler: PROGRAM_CIDS["subscribe-handler"] },
   ];
 }
 
@@ -108,6 +109,7 @@ export const OPEN_CHAT: Subscription = { match: { box: "chat" }, handler: PROGRA
 
 /** The genesis record for a config: the instance identity is the instance wallet's, `host` the host wallet's. */
 export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: InstanceConfig): Promise<Genesis> {
+  for (const s of c.subscriptions ?? []) if (!s.match.box) throw new TypeError("genesis: every seed subscription names a box");
   return {
     kind: "genesis",
     identity: await rootIdentity(wallet),

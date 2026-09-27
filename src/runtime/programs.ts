@@ -1,6 +1,6 @@
 // The programs this runtime starts with. `shell` is the wasm shell (brush +
 // uutils coreutils) driven from TypeScript; its record names the two WASI
-// modules by CID. `run-handler`, `objects-handler`, `head-handler` and `loop` are handler programs
+// modules by CID. `run-handler`, `objects-handler`, `head-handler`, `subscribe-handler` and `loop` are handler programs
 // (Go, GOOS=wasip1; programs/, built by scripts/build-programs.sh) stepped
 // through the `skein` imports (program.ts). The runtime loads every module
 // from the store by CID and never from a disk; `skein-dev install` puts the
@@ -26,10 +26,11 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreic3mux3ar7xheiiaqjbez63wjkpcofk4nvwtnuai5d5d2t3tvjkka"),
-  "objects-handler": CID.parse("bafkreicy3bgn7hnipptms2kd2zks5zupgjtk5uv3wwzjh5mgqlhfi6enre"),
-  "head-handler": CID.parse("bafkreihkjiy6ivkivjpnotffu5k7q5fd5redrxd6ihwxkphdoxvf2opq4a"),
-  "loop": CID.parse("bafkreiahcii4usiyndg257rsxammnfb4rgmatgqt5yvwogazvyjmnh7geq"),
+  "run-handler": CID.parse("bafkreiawt6fpfgcnjokta75shlzu7ej3o3jzyon2bqhdu3q5gl7gywezjm"),
+  "objects-handler": CID.parse("bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4"),
+  "head-handler": CID.parse("bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q"),
+  "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
+  "loop": CID.parse("bafkreifforoghf7swk2k5jibqvorfbqtz7fj3a3ak2lbrdgpm3bhfe3juu"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -70,6 +71,14 @@ export const HEAD_HANDLER = program({
   description: "The `head` box: read the body {name, tree}, advance the named head to the tree.",
 });
 
+export const SUBSCRIBE_HANDLER = program({
+  name: "subscribe-handler",
+  code: { wasm: MODULES["subscribe-handler"] },
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
+  services: [],
+  description: "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store).",
+});
+
 export const LOOP = program({
   name: "loop",
   code: { wasm: MODULES.loop },
@@ -79,12 +88,13 @@ export const LOOP = program({
 });
 
 /** The programs a genesis names, by name. */
-export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER, "head-handler": HEAD_HANDLER, loop: LOOP } as const;
+export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER, "head-handler": HEAD_HANDLER, "subscribe-handler": SUBSCRIBE_HANDLER, loop: LOOP } as const;
 export const PROGRAM_CIDS: Record<keyof typeof PROGRAMS, CID> = {
   shell: SHELL_CID,
   "run-handler": encode(RUN_HANDLER).cid,
   "objects-handler": encode(OBJECTS_HANDLER).cid,
   "head-handler": encode(HEAD_HANDLER).cid,
+  "subscribe-handler": encode(SUBSCRIBE_HANDLER).cid,
   loop: encode(LOOP).cid,
 };
 

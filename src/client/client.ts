@@ -11,13 +11,14 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
+import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
 import { open, seal, signedPart, verify, type Envelope, type Signed } from "./envelope.ts";
 import { chatBody, conversationFrom, loadConversation, parseReply, saveConversation, type Conversation } from "./conversation.ts";
 
-export const BOX = { objects: "objects", run: "run", head: "head", results: "results", chat: "chat" } as const;
+export const BOX = { objects: "objects", run: "run", head: "head", subscribe: "subscribe", results: "results", chat: "chat" } as const;
 
 /** The boxes David reads, in this order: `run` results, then `chat` (the instance's replies, and chats from others). */
 export const INBOX = [BOX.results, BOX.chat] as const;
@@ -25,6 +26,21 @@ export const INBOX = [BOX.results, BOX.chat] as const;
 /** The message's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part (the envelope without `content`). */
 export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
   return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
+}
+
+/** A subscription change as the `subscribe` box takes it. */
+export interface SubscribeArgs { op: "add" | "remove"; sender?: string; box: string; handler: string }
+
+/** A handler: a built-in program's name (run-handler, loop, …) or a program record's CID. */
+export function handlerCid(s: string): CID {
+  const named = (PROGRAM_CIDS as Record<string, CID>)[s];
+  if (named) return named;
+  try { return CID.parse(s); } catch { throw new Error(`handler ${JSON.stringify(s)}: not a program name (${Object.keys(PROGRAM_CIDS).join(", ")}) or a CID`); }
+}
+
+/** The `subscribe` body: {op, sender?, box, handler}. */
+export function subscribeBody(a: SubscribeArgs): Record<string, unknown> {
+  return { op: a.op, ...(a.sender ? { sender: a.sender } : {}), box: a.box, handler: handlerCid(a.handler) };
 }
 
 /** A directory as git objects held in memory: [root, records]. `opts.ignore` as scan's. */
@@ -140,6 +156,11 @@ export class SkeinClient {
   /** Move a named head to a tree the instance holds (box `head`): "`name` is now `tree`". */
   head(name: string, tree: string): Promise<Sent> {
     return this.send(BOX.head, { name, tree: CID.parse(tree) }, { tree });
+  }
+
+  /** Change the instance's subscriptions (box `subscribe`): add or remove (sender, box) → handler. No reply. */
+  subscribe(a: SubscribeArgs): Promise<Sent> {
+    return this.send(BOX.subscribe, subscribeBody(a));
   }
 
   /**
