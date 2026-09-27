@@ -357,6 +357,18 @@ test("prompt: a chat naming a tree without SOUL.md gets the fixed prompt (IDENTI
   await replayMatches(i.store);
 });
 
+test("prompt: a tree with SOUL.md, IDENTITY.md and ROSTER.md gets all three, in that order", async (t) => {
+  const roster = "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager.\n";
+  const { i, peer, api } = await setup(t, [answer({ content: "hi" })], { files: { "SOUL.md": "You are Martha.\n\n\n", "IDENTITY.md": "- Name: Martha\n", "ROSTER.md": roster } });
+  await send(i, "chat", { text: "who do you know?" });
+  await settle(i);
+  await peer.poll();
+  assert.equal((api.requests[0].messages as Json[])[0].content, `You are Martha.\n\n- Name: Martha\n\n${roster}`);
+  await settle(i);
+  await i.rt.stop();
+  await replayMatches(i.store);
+});
+
 // ---------------------------------------------------------------- the message tool: two instances
 
 /** An instance on a shared hub and clock with its own scripted inference peer; `chat` open to anyone when `open`. */
