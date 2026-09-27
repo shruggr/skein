@@ -8,6 +8,7 @@
     "skein-dev": "./bin/skein-dev",
     "skein-explore": "./bin/skein-explore",
     "skein-runtime": "./bin/skein-runtime",
+    "skein-host": "./bin/skein-host",
     "skein-infer": "./bin/skein-infer"
   },
   "scripts": {

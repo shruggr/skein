@@ -21,6 +21,7 @@ if [ ! -f "$hosthome/.1sat/cli/config.json" ]; then
 fi
 echo "http://127.0.0.1:$port/messagebox" > "$skein/messagebox.url"
 # 1sat serve does not migrate the messagebox tables itself (see messagebox-migrate.mjs).
+mkdir -p "$hosthome/.1sat/cli/data"   # a fresh host has no data dir until its first start
 node "$here/messagebox-migrate.mjs" "$hosthome/.1sat/cli/data/messagebox-main.db"
 # `1sat serve` binds 0.0.0.0, not 127.0.0.1 (unlike the wallet-apis), so match on
 # port alone: any bind address, not a fixed one (ss's own filter, not grep).

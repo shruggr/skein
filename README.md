@@ -29,6 +29,7 @@ src/runtime/     the machine — no disk, network, clock, randomness, messagebox
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
 src/host/        the providers and the kernel configuration, outside the machine
   main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers
+  cli.ts host.ts   `skein-host`: the management database (instances.ts, host.db) and `run`, every enabled instance in one process
   messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; sign, encrypt and send emits
   tick.ts          wakes: the next deadline → one host-signed wake entry
   entry.ts         the host's clock and entry signing; genesis
@@ -75,6 +76,26 @@ Also: `SKEIN_DB` (`~/.skein/runtime.db`), `SKEIN_HANDLE` (`skein@localhost`),
 `SKEIN_OWNER_HANDLE` (`david@localhost`), `SKEIN_HOST_WALLET_URL`
 (`http://127.0.0.1:3324`), `SKEIN_POLL_MS` (1000), `SKEIN_WALLET=ephemeral`
 (throwaway keys).
+
+### Many instances: `skein-host`
+
+One host process runs every enabled row of its management database,
+`$SKEIN_HOME/host.db` (#23): each row its own store, runtime, wallet,
+messagebox session and tick; the host wallet (3324), which signs every entry,
+is all they share. A new instance's genesis is `skein-runtime`'s plus `chat`
+from anyone (an open subscription), and the host resolves `handle@domain` for
+its programs (host.db, then the messagebox's paymail PKI).
+
+```
+scripts/host/up.sh                          # as above: the messagebox, the host and owner wallets
+scripts/host/instance.sh martha             # a wallet-api on the next free port from 3401, grants, account, host.db row (idempotent)
+scripts/host/instance.sh kurt
+bin/skein-host list                         # handle, status, identity, wallet, store, tree
+bin/skein-host run                          # every enabled row; lines prefixed [handle]
+bin/skein-host disable kurt                 # also: add <handle> [--wallet-url --store --tree --domain --identity], enable, remove
+```
+
+`scripts/host/README.md`, "Instances", has the details.
 
 The instance wallet (`1sat serve wallet-api`, origin `skein`) needs, besides
 the transport grants in `scripts/host/grants.sh`:

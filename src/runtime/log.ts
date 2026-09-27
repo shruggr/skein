@@ -79,7 +79,7 @@ export interface InstanceConfig {
   owner: Identity;
   handle?: string;  // default "skein"
   domain?: string;  // default "localhost"
-  /** Default: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop. */
+  /** Default: defaultSubscriptions(owner). */
   subscriptions?: Subscription[];
   /** Peers by role: `infer` is the inference peer the loop asks. */
   peers?: Record<string, Identity>;
@@ -91,6 +91,19 @@ export interface InstanceConfig {
 
 export const DEFAULTS: Record<string, string> = { model: "ripper/qwen38", thinking: "off" };
 
+/** The owner's boxes: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop. */
+export function defaultSubscriptions(owner: Identity): Subscription[] {
+  return [
+    { match: { sender: owner, box: "run" }, handler: PROGRAM_CIDS["run-handler"] },
+    { match: { sender: owner, box: "objects" }, handler: PROGRAM_CIDS["objects-handler"] },
+    { match: { sender: owner, box: "head" }, handler: PROGRAM_CIDS["head-handler"] },
+    { match: { sender: owner, box: "chat" }, handler: PROGRAM_CIDS.loop },
+  ];
+}
+
+/** `chat` from anyone → loop: no sender, so it matches every sender (records.ts `matches`); after the owner's, first match wins. */
+export const OPEN_CHAT: Subscription = { match: { box: "chat" }, handler: PROGRAM_CIDS.loop };
+
 /** The genesis record for a config: the instance identity is the instance wallet's, `host` the host wallet's. */
 export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: InstanceConfig): Promise<Genesis> {
   return {
@@ -101,12 +114,7 @@ export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: Instance
     owner: c.owner,
     host: await rootIdentity(host),
     programs: { ...PROGRAM_CIDS },
-    subscriptions: c.subscriptions ?? [
-      { match: { sender: c.owner, box: "run" }, handler: PROGRAM_CIDS["run-handler"] },
-      { match: { sender: c.owner, box: "objects" }, handler: PROGRAM_CIDS["objects-handler"] },
-      { match: { sender: c.owner, box: "head" }, handler: PROGRAM_CIDS["head-handler"] },
-      { match: { sender: c.owner, box: "chat" }, handler: PROGRAM_CIDS.loop },
-    ],
+    subscriptions: c.subscriptions ?? defaultSubscriptions(c.owner),
     ...(c.peers && Object.keys(c.peers).length ? { peers: c.peers } : {}),
     defaults: c.defaults ?? DEFAULTS,
     collect: c.collect ?? ["completions", "say"],
