@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { contentHash, sign, signedPart, type Signed } from "../envelope.ts";
+import { contentHash, open, sign, signedPart, verify, type Envelope, type Signed } from "../envelope.ts";
 import { instance, iso, T0, type Instance } from "../testkit.ts";
 import { encode } from "../runtime/cid.ts";
 import { nextEntry, readLog, verifyEntry } from "../runtime/log.ts";
@@ -29,7 +29,7 @@ async function deliver(i: Instance, box: string, value: unknown): Promise<{ sign
 test("mock delivery: a host-signed entry admitted with no messagebox runs its handler; the emit reaches the mock outbox", async () => {
   const i = await instance();
   const sent: Outbound[] = [];
-  i.rt.outbox = { seal: (e, bytes, at) => i.delivery.seal(e, bytes, at), send: (o) => { sent.push(o); } };
+  i.rt.outbox = { send: (o) => { sent.push(o); } };
   const { signed, entry } = await deliver(i, "run", { cmd: "echo hi", tree: encode({}).cid });
   await i.rt.idle();
   const [, e] = await readLog(i.store);
@@ -40,8 +40,11 @@ test("mock delivery: a host-signed entry admitted with no messagebox runs its ha
   assert.equal(sent.length, 1, "run-handler replied");
   assert.equal(sent[0].box, "results");
   assert.equal(sent[0].to, i.owner.identity);
-  assert.equal((sent[0].envelope as Signed).contentHash, contentHash(sent[0].bytes), "the reply's signed part carries its body's hash");
-  assert.equal("content" in sent[0].envelope, false, "encryption is the provider's, at send");
+  const env = sent[0].envelope as unknown as Envelope, bytes = await i.store.bytes(sent[0].body);
+  assert.equal(env.contentHash, contentHash(bytes), "the reply's signed part carries its body's hash");
+  assert.ok(verify(env) && env.sender.identityKey === i.identity, "signed by the instance, in the step");
+  assert.deepEqual((await open(i.owner.wallet, env)).body, bytes, "encrypted to the owner in the step: the outbox gets it complete");
+  assert.ok(encode(signedPart(env)).cid.equals(sent[0].cid), "the message id is its signed part's CID");
   await i.rt.stop();
 });
 

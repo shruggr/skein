@@ -1,7 +1,7 @@
 // The `skein` import namespace for handler programs: the machine's syscalls
 // beyond WASI (docs/ARCH.md, "The kernel"). Pure ones (input, get, put,
 // putblock, keep, launch, await, head, advance) are answered from the store and the thread; the
-// attested ones (wallet, emit's seal, resolve) leave through the runtime and are recorded,
+// attested ones (wallet, resolve) leave through the runtime and are recorded,
 // and on replay are served from the record (runtime/program.ts).
 //
 // ABI. Pointers and lengths are i32; CIDs are binary. Every import that
@@ -17,13 +17,15 @@
 //   keep(cid, cid_len) → 0                     keep a stored record in the thread's state: listed in this
 //                                              step's update (`kept`), so later steps find it from `tip`
 //   launch(prog, prog_len, args, args_len, out, cap) → n   open a thread; → its origin CID
-//   emit(cid, cid_len, out, cap) → n           sign an outbound envelope named by an emit record (attested:
-//                                              the instance wallet signs it now); → the envelope record's CID. Sent when the step ends.
+//   emit(cid, cid_len, out, cap) → n           an outbound message: an emit record carrying the complete envelope,
+//                                              signed and encrypted by the program through `wallet`; checked, not
+//                                              attested; → its signed part's record CID. Handed on when the step ends.
 //   await(cid, cid_len) → 0                    rest on a reply to an envelope this step emitted: the step ends
 //                                              `waiting` with `awaits`, and an admitted envelope whose body's
 //                                              `replyTo` is that CID is this thread's next input
-//   resolve(name, name_len, out, cap) → n     a handle "handle@domain" → the identity key it names (hex;
-//                                              attested: the host's resolver answers, the answer is recorded)
+//   resolve(name, name_len, out, cap) → n     a handle "handle@domain" → the resolver's whole answer (dag-cbor
+//                                              {identityKey, …}; attested: the host's resolver answers, the
+//                                              answer is recorded); an error if it did not resolve
 //   head(name, name_len, out, cap) → n         the tree CID a named head points at; n = 0 if it has none (docs/VM.md "Heads")
 //   advance(name, name_len, tree, tree_len) → 0   move a named head to a tree in the store, when the step
 //                                              ends without error
@@ -43,7 +45,7 @@ export interface ProgramHost {
   launch(program: CID, args: CID): Promise<CID>;
   emit(cid: CID): Promise<CID>;
   awaitReply(envelope: CID): Promise<void>;
-  resolve(name: string): Promise<string>;
+  resolve(name: string): Promise<Uint8Array>;
   head(name: string): Promise<CID | undefined>;
   advance(name: string, tree: CID): Promise<void>;
   wallet(frame: Uint8Array): Promise<Uint8Array>;
@@ -84,7 +86,7 @@ export function skeinImports(proc: Process, host: ProgramHost): Record<string, u
       out((await host.launch(cid(pp, pl), cid(ap, al))).bytes, p, cap)),
     emit: async(async (c: number, cl: number, p: number, cap: number) => out((await host.emit(cid(c, cl))).bytes, p, cap)),
     await: async(async (c: number, cl: number) => { await host.awaitReply(cid(c, cl)); return 0; }),
-    resolve: async(async (n: number, nl: number, p: number, cap: number) => out(Buffer.from(await host.resolve(str(n, nl)), "utf8"), p, cap)),
+    resolve: async(async (n: number, nl: number, p: number, cap: number) => out(await host.resolve(str(n, nl)), p, cap)),
     head: async(async (n: number, nl: number, p: number, cap: number) => out((await host.head(str(n, nl)))?.bytes ?? new Uint8Array(0), p, cap)),
     advance: async(async (n: number, nl: number, c: number, cl: number) => { await host.advance(str(n, nl), cid(c, cl)); return 0; }),
     wallet: async(async (f: number, fl: number, p: number, cap: number) => out(await host.wallet(bytes(f, fl)), p, cap)),

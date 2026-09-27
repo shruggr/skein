@@ -168,10 +168,19 @@ type Step struct {
 	Args     cbor.RawMessage   `cbor:"args"`
 	Programs map[string]CID    `cbor:"programs"`
 	Resolved []Resolved        `cbor:"resolved,omitempty"`
-	Tip      CID               `cbor:"tip,omitzero"`      // the thread's latest update before this step; absent on step 1
-	Reply    *Answer            `cbor:"reply,omitempty"`
-	Peers    map[string]string `cbor:"peers,omitempty"`    // genesis peers by role (e.g. "infer")
-	Defaults map[string]string `cbor:"defaults,omitempty"` // genesis defaults (e.g. "model")
+	Tip      CID               `cbor:"tip,omitzero"` // the thread's latest update before this step; absent on step 1
+	Reply    *Answer           `cbor:"reply,omitempty"`
+	At       int64             `cbor:"at"`              // the entry's stamp, ms since the epoch: an envelope's `created`
+	Self     Name              `cbor:"self"`            // the instance's handle and domain (the genesis's)
+	Peers    map[string]string `cbor:"peers,omitempty"` // genesis peers by role (e.g. "infer")
+	Defaults map[string]string `cbor:"defaults,omitempty"`
+	Names    map[string]Name   `cbor:"names,omitempty"` // genesis names: handles for identities (the owner, peers) by key // genesis defaults (e.g. "model")
+}
+
+// Name is a handle at a domain.
+type Name struct {
+	Handle string `cbor:"handle"`
+	Domain string `cbor:"domain"`
 }
 
 // Update is the part of a thread update a program reads when walking its own
@@ -264,10 +273,12 @@ func Launch(program, args CID) (CID, error) {
 	return CID(b), err
 }
 
-// Emit signs an outbound envelope described by an emit record (already Put):
-// {kind: "emit", to, handle?, domain?, box, body: <cid>}, and returns the signed
-// envelope record's CID (what a reply's replyTo names). Signing is attested;
-// the envelope is encrypted and sent when the step ends.
+// Emit an outbound message: an emit record (already Put, see EmitRecord)
+// carrying the complete envelope, signed and encrypted through the wallet
+// (package envelope does both). The runtime checks it — signed by this
+// instance, content from it to `to`, contentHash the body's — and returns the
+// CID of its signed part (the message's id: what a reply's replyTo names). It
+// is handed to the delivery provider, as it is, when the step ends.
 func Emit(c CID) (CID, error) {
 	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _emit(ptr(c), uint32(len(c)), out, cap) })
 	return CID(b), err
@@ -284,14 +295,45 @@ func Await(env CID) error {
 	return nil
 }
 
+// Resolution is the host's answer to a resolve, as recorded: the resolution
+// endpoint's whole response (BRC-169 §5.2: identityKey, certificate,
+// messagebox, ttl, …) plus how the host got it and what it checked.
+type Resolution struct {
+	IdentityKey string          `cbor:"identityKey"`
+	Via         string          `cbor:"via,omitempty"`
+	Messagebox  string          `cbor:"messagebox,omitempty"`
+	TTL         int64           `cbor:"ttl,omitempty"`
+	Certificate cbor.RawMessage `cbor:"certificate,omitempty"`
+	Checked     []string        `cbor:"checked,omitempty"`
+	Unchecked   []string        `cbor:"unchecked,omitempty"`
+	Error       string          `cbor:"error,omitempty"`
+}
+
 // Resolve a BRC-169 handle ("handle@domain") to the identity key it names,
-// through the host's resolver. Attested: the answer is recorded, and served
-// from the record on replay. An envelope to a handle is sealed to this key
-// (Send's `to`), and a reply is taken only from it.
+// through the host's resolver. Attested: the whole answer is recorded, and
+// served from the record on replay. An envelope to a handle is sealed to this
+// key (envelope.Send's `to`), and a reply is taken only from it. A handle
+// that does not resolve is an error.
 func Resolve(handle, domain string) (string, error) {
+	r, err := ResolveAll(handle, domain)
+	if err != nil {
+		return "", err
+	}
+	return r.IdentityKey, nil
+}
+
+// ResolveAll is Resolve with the whole recorded answer.
+func ResolveAll(handle, domain string) (*Resolution, error) {
 	n := []byte(handle + "@" + domain)
 	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _resolve(ptr(n), uint32(len(n)), out, cap) })
-	return string(b), err
+	if err != nil {
+		return nil, err
+	}
+	var r Resolution
+	if err := Decode(b, &r); err != nil {
+		return nil, fmt.Errorf("resolve: %w", err)
+	}
+	return &r, nil
 }
 
 // Head is the tree a named head points at now, or nil if it has none.

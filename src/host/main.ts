@@ -9,9 +9,9 @@
 //   SKEIN_HOST_WALLET_URL the host's BRC-100 endpoint, default http://127.0.0.1:3324, origin "skein-host": signs every
 //                         log entry (the host's word that a message arrived, or a deadline came, at the stamped time)
 //   SKEIN_OWNER           the owner's identity key (a new instance's genesis routes its `run`/`objects` boxes)
-//   SKEIN_OWNER_HANDLE    the owner's handle for outbound envelopes, default david@localhost
+//   SKEIN_OWNER_HANDLE    the owner's handle (a new genesis's `names`: outbound envelopes call it that), default david@localhost
 //   SKEIN_INFER           the inference peer's identity key (a new instance's genesis `peers.infer`)
-//   SKEIN_INFER_HANDLE    its handle for outbound envelopes, default infer@localhost
+//   SKEIN_INFER_HANDLE    its handle (a new genesis's `names`), default infer@localhost
 //   SKEIN_HANDLE          the instance's handle, default skein@localhost
 //   SKEIN_MESSAGEBOX      the messagebox host, e.g. http://127.0.0.1:8100/messagebox
 //   SKEIN_POLL_MS         how often to collect the boxes, default 1000
@@ -44,7 +44,9 @@ const store = openStore(dbPath); // SQLite creates the file; the directory must 
 
 if (!(await store.log.tip())) {
   if (!env.SKEIN_OWNER) die("an empty store needs SKEIN_OWNER (the owner's identity key) for its genesis");
-  const g = await ensureGenesis(store, wallet, host, { owner: env.SKEIN_OWNER!, handle: user, domain, peers: env.SKEIN_INFER ? { infer: env.SKEIN_INFER } : undefined });
+  const named = (s: string) => { const [handle, domain = "localhost"] = s.split("@"); return { handle, domain }; };
+  const names = { [env.SKEIN_OWNER!]: named(env.SKEIN_OWNER_HANDLE || "david@localhost"), ...(env.SKEIN_INFER ? { [env.SKEIN_INFER]: named(env.SKEIN_INFER_HANDLE || "infer@localhost") } : {}) };
+  const g = await ensureGenesis(store, wallet, host, { owner: env.SKEIN_OWNER!, handle: user, domain, peers: env.SKEIN_INFER ? { infer: env.SKEIN_INFER } : undefined, names });
   say(`genesis ${g.entry}`);
 }
 
@@ -59,19 +61,9 @@ const tick = new Tick({ runtime, host, log: say });
 tick.start();
 
 // Messages in and out: the messagebox provider, as the instance's identity.
-const [ownerUser, ownerDomain = "localhost"] = (env.SKEIN_OWNER_HANDLE || "david@localhost").split("@");
-const [inferUser, inferDomain = "localhost"] = (env.SKEIN_INFER_HANDLE || "infer@localhost").split("@");
 let delivery: Delivery | undefined;
 if (env.SKEIN_MESSAGEBOX) {
-  delivery = new Delivery({
-    runtime, wallet, host,
-    box: messageBoxClient(wallet, env.SKEIN_MESSAGEBOX),
-    handles: {
-      [g.owner]: { handle: ownerUser, domain: ownerDomain },
-      ...(g.peers?.infer ? { [g.peers.infer]: { handle: inferUser, domain: inferDomain } } : {}),
-    },
-    log: say,
-  });
+  delivery = new Delivery({ runtime, wallet, host, box: messageBoxClient(wallet, env.SKEIN_MESSAGEBOX), log: say });
   runtime.outbox = delivery;
 } else {
   say("SKEIN_MESSAGEBOX unset: no message provider; nothing will be delivered");

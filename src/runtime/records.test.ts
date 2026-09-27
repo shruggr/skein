@@ -81,8 +81,11 @@ test("program and genesis: validated", () => {
 
 test("emit and attested records: validated", () => {
   const to = PrivateKey.fromRandom().toPublicKey().toString();
-  assert.ok(isEmit({ kind: "emit", to, box: "results", body: wasm }));
-  assert.ok(!isEmit({ kind: "emit", to, box: "", body: wasm }));
-  assert.ok(isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "seal", request: wasm, result: new Uint8Array(70) }));
+  const envelope = { metanetHandles: "1.0", content: "QkIQMw==" };
+  assert.ok(isEmit({ kind: "emit", to, box: "results", body: wasm, envelope }));
+  assert.ok(!isEmit({ kind: "emit", to, box: "", body: wasm, envelope }));
+  assert.ok(!isEmit({ kind: "emit", to, box: "results", body: wasm }), "the program seals: an emit carries its envelope");
+  assert.ok(isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "resolve", request: wasm, result: new Uint8Array(70) }));
+  assert.ok(!isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "seal", request: wasm, result: new Uint8Array(70) }), "no seal calls: the program signs through the wallet");
   assert.ok(!isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "reveal", request: wasm, result: new Uint8Array(70) }), "no reveals any more");
 });

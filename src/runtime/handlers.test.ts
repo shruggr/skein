@@ -13,7 +13,7 @@ import { join } from "node:path";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { envelopeCid } from "../client/client.ts";
-import { encryptContent, seal } from "../envelope.ts";
+import { encryptContent, seal, signedPart } from "../envelope.ts";
 import { bundlesOf, collect, installWasm, instance, iso, results, send, T0, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
@@ -21,7 +21,7 @@ import { appendEntry } from "../host/entry.ts";
 import { copyLog, readLog, verifyEntry } from "./log.ts";
 import { memoryStore } from "./memory.ts";
 import { PROGRAM_CIDS } from "./programs.ts";
-import type { Attested } from "./records.ts";
+import type { Attested, Emit } from "./records.ts";
 import { Runtime, witnessFrom, type Outbound } from "./scheduler.ts";
 import type { Store } from "./store.ts";
 import type { ThreadOrigin, ThreadUpdate } from "./types.ts";
@@ -115,14 +115,18 @@ test("run-handler: sealed run → messagebox → decrypted at admission, plainte
   assert.ok(shell.program.equals(PROGRAM_CIDS.shell) && shell.launchedBy!.equals(h));
   assert.ok(encode(shell.args).cid.equals(encode(sent).cid), "the shell runs on the body's {cmd, tree}");
   assert.equal(s2.emits!.length, 1);
-  const [seal] = await Promise.all(s2.calls!.map((c) => i.store.get<Attested>(c)));
-  assert.equal(seal.op, "seal", "the one attested call: the instance signing its own reply");
+  const calls = await Promise.all(s2.calls!.map((c) => i.store.get<Attested>(c)));
+  assert.deepEqual(calls.map((a) => [a.op, (a.request as Uint8Array)[0]]), [["wallet", 8], ["wallet", 15], ["wallet", 11]],
+    "the attested calls: the program's own identity, signing its reply, encrypting it to the owner — all through the wallet import");
+  const emitted = await i.store.get<Emit>(s2.emits![0]);
+  assert.deepEqual(emitted.envelope, env, "the emit record carries the envelope exactly as the owner received it");
   assert.equal(i.hub.pending(i.identity, "run").length + i.hub.pending(i.identity, "objects").length, 0, "every inbound message acknowledged");
 
   await i.rt.stop();
   const again = await replayMatches(i.store);
   assert.equal(again.length, 1, "replay recomputes the one emit");
-  assert.deepEqual(again[0].bytes, await i.store.bytes(again[0].body), "…with the same body");
+  assert.ok(again[0].body.equals(emitted.body), "…with the same body");
+  assert.deepEqual(again[0].envelope, env, "…and the same envelope, ciphertext and all, from the record: no wallet");
 });
 
 test("objects-handler: a directory in 1-record bundles lands as the same git objects, and a run over it works", async (t) => {
@@ -228,12 +232,23 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   await b.rt.idle();
   t.diagnostic(b.lines.join("\n"));
   assert.ok(b.lines.some((l) => l.includes("re-executing")));
-  // Identical, sealed replies included: a seal signs the signed part only
-  // (`created` is the step's stamp, the signature deterministic); the wire
-  // encryption, with its random key id and IV, happens at send and is not state.
+  // Identical, up to the reply's ciphertext. The program seals its reply in the
+  // step: the signed part is deterministic (`created` is the step's stamp, the
+  // key id from the step's random stream, the signature RFC 6979), so the
+  // message id is the same; the wallet's encryption draws a fresh AES-GCM IV,
+  // and that answer is recorded — state now, which replay serves (below).
+  const [refHandler] = await byProgram(ref.store, "run-handler");
   for (const th of await threads(ref.store)) {
+    if (th.equals(refHandler)) continue;
     assert.ok((await b.store.chains.tip(th)).equals(await ref.store.chains.tip(th)), `thread ${fmt(th)} identical`);
   }
+  const hs = [await history(ref.store, refHandler), await history(b.store, refHandler)];
+  assert.ok(encode(hs[0][0]).cid.equals(encode(hs[1][0]).cid), "the handler's first step identical");
+  const emitOf = async (st: Store) => st.get<Emit>(((await tipOf(st, refHandler)) as ThreadUpdate & { emits: CID[] }).emits[0]);
+  const [re, be] = [await emitOf(ref.store), await emitOf(b.store)];
+  assert.ok(re.body.equals(be.body), "the same reply body");
+  assert.ok(encode(signedPart(re.envelope as never)).cid.equals(encode(signedPart(be.envelope as never)).cid), "the same message id (signed part)");
+  assert.notEqual(re.envelope.content, be.envelope.content, "only the ciphertext differs");
   assert.ok((await b.store.log.tip())!.equals((await ref.store.log.tip())!), "identical log");
   const [r] = await results(b);
   assert.deepEqual(r.body, refResult.body, "identical result body");

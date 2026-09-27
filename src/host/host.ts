@@ -31,7 +31,7 @@ export interface HostOptions {
   owner?: Identity;
   /** The inference peer (a new genesis's `peers.infer`). */
   infer?: Identity;
-  /** Handles for outbound envelopes to the owner and the peer. Default david@localhost, infer@localhost. */
+  /** A new genesis's names for the owner and the peer (what outbound envelopes call them). Default david@localhost, infer@localhost. */
   ownerHandle?: Named;
   inferHandle?: Named;
   /** The row's instance wallet. */
@@ -50,12 +50,16 @@ export interface HostOptions {
   now?: () => Stamp;
 }
 
-/** A new instance's genesis config for a row: the owner's boxes, then `chat` from anyone. */
-export function configFor(row: Pick<InstanceRow, "handle" | "domain">, o: { owner: Identity; infer?: Identity }): InstanceConfig {
+/** A new instance's genesis config for a row: the owner's boxes, then `chat` from anyone; the owner's and the peer's names. */
+export function configFor(row: Pick<InstanceRow, "handle" | "domain">, o: { owner: Identity; infer?: Identity; ownerHandle?: Named; inferHandle?: Named }): InstanceConfig {
   return {
     owner: o.owner, handle: row.handle, domain: row.domain,
     subscriptions: [...defaultSubscriptions(o.owner), OPEN_CHAT],
     peers: o.infer ? { infer: o.infer } : undefined,
+    names: {
+      [o.owner]: o.ownerHandle ?? { handle: "david", domain: "localhost" },
+      ...(o.infer ? { [o.infer]: o.inferHandle ?? { handle: "infer", domain: "localhost" } } : {}),
+    },
   };
 }
 
@@ -84,7 +88,7 @@ export async function startInstance(row: InstanceRow, o: HostOptions): Promise<R
   try {
     if (!(await store.log.tip())) {
       if (!o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-      const g = await ensureGenesis(store, wallet, o.host, configFor(row, { owner: o.owner, infer: o.infer }), o.now?.());
+      const g = await ensureGenesis(store, wallet, o.host, configFor(row, { ...o, owner: o.owner }), o.now?.());
       say(`genesis ${g.entry}`);
     }
     const g = await genesisOf(store);
@@ -99,12 +103,7 @@ export async function startInstance(row: InstanceRow, o: HostOptions): Promise<R
     tick.start();
     let delivery: Delivery | undefined;
     if (o.box) {
-      const owner = o.ownerHandle ?? { handle: "david", domain: "localhost" };
-      const infer = o.inferHandle ?? { handle: "infer", domain: "localhost" };
-      delivery = new Delivery({
-        runtime, wallet, host: o.host, box: o.box(row, wallet), log: say, now: o.now,
-        handles: { [g.owner]: owner, ...(g.peers?.infer ? { [g.peers.infer]: infer } : {}) },
-      });
+      delivery = new Delivery({ runtime, wallet, host: o.host, box: o.box(row, wallet), log: say, now: o.now });
       runtime.outbox = delivery;
     } else {
       say("no messagebox (SKEIN_MESSAGEBOX): nothing will be delivered");

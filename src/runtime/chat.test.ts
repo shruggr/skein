@@ -398,7 +398,7 @@ test("message: the model messages another instance by handle; the loop sends `ch
   ]);
   const bob = await agent(hub, clock, "bob", [answer({ content: "4" }), answer({ content: "5" })], true);
   const directory: Record<string, string> = { "bob@localhost": bob.i.identity };
-  alice.i.rt.resolver = { resolve: async (h, d) => directory[`${h}@${d}`] ?? Promise.reject(new Error("unknown handle")) };
+  alice.i.rt.resolver = { resolve: async (h, d) => directory[`${h}@${d}`] ? { identityKey: directory[`${h}@${d}`] } : Promise.reject(new Error("unknown handle")) };
   const both = async () => { await settle(alice.i); await settle(bob.i); await settle(alice.i); };
 
   await send(alice.i, "chat", { text: "ask bob" });
@@ -500,7 +500,7 @@ test("message: two agents alternate on one thread each — Kurt's `message` back
     answer({ content: "Red is 6." }),
   ], true);
   const directory: Record<string, string> = { "kurt@localhost": kurt.i.identity, "martha@localhost": martha.i.identity };
-  const resolver = { resolve: async (h: string, d: string) => directory[`${h}@${d}`] ?? Promise.reject(new Error("unknown handle")) };
+  const resolver = { resolve: async (h: string, d: string) => directory[`${h}@${d}`] ? { identityKey: directory[`${h}@${d}`] } : Promise.reject(new Error("unknown handle")) };
   martha.i.rt.resolver = resolver;
   kurt.i.rt.resolver = resolver;
   const counts = async () => [(await loops(martha.i.store)).length, (await loops(kurt.i.store)).length];

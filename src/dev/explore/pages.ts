@@ -11,7 +11,7 @@ import type { Attested, Emit } from "../../runtime/records.ts";
 import { WALLET_CALLS } from "../../runtime/scheduler.ts";
 import { GIT_RAW, lookup, parseTree, readBlob, readTree } from "../../runtime/tree.ts";
 import type { Ref } from "../../runtime/types.ts";
-import { verify } from "../../envelope.ts";
+import { signedPart, verify } from "../../envelope.ts";
 import { escapeHtml, markdownToHtml } from "../../../web/markdown.ts";
 import { ancestry, headMoves, headNames, label, maybe, routeOf, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
 
@@ -269,8 +269,7 @@ async function updateCard(w: World, t: Thread, cid: CID, u: Update): Promise<str
     }).join("")}</ul>`);
   }
   const calls = await Promise.all((u.calls ?? []).map((c) => maybe<Attested>(w.store, c).then((a) => ({ c, a }))));
-  const seals = calls.filter(({ a }) => a?.op === "seal");
-  for (const [i, e] of (u.emits ?? []).entries()) parts.push(await emitted(w, e, seals[i]?.a));
+  for (const e of u.emits ?? []) parts.push(await emitted(w, e));
   if (u.awaits?.length) parts.push(`<div class="small">awaits a reply to ${u.awaits.map((a) => link(w, a)).join(", ")}</div>`);
   if (u.waitingOn?.length) parts.push(`<div class="small">waiting on ${u.waitingOn.map((c) => link(w, c)).join(", ")}</div>`);
   if (u.until) parts.push(`<div class="small">until ${time(u.until)}</div>`);
@@ -329,15 +328,15 @@ function argsOf(a: string | undefined): string {
   } catch { return a ?? ""; }
 }
 
-async function emitted(w: World, c: CID, seal: Attested | undefined): Promise<string> {
+async function emitted(w: World, c: CID): Promise<string> {
   const e = await maybe<Emit>(w.store, c);
   if (!e) return `<div class="small">emitted ${link(w, c)}</div>`;
   const body = await maybe<Record<string, unknown>>(w.store, e.body);
-  const envelope = seal ? tryDecode(seal.result) : undefined;
-  const env = envelope && typeof envelope === "object" ? encode(envelope).cid : undefined;
+  const r = (e.envelope as { recipient?: { handle?: unknown; domain?: unknown } } | undefined)?.recipient;
+  const env = e.envelope && typeof e.envelope === "object" ? encode(signedPart(e.envelope as never)).cid : undefined;
   const summary = typeof body?.text === "string" ? `<div class="say">${esc(body.text)}</div>`
     : Array.isArray(body?.messages) ? `<div class="small mut">${esc(String(body.model ?? ""))} · ${body.messages.length} messages${Array.isArray(body.tools) ? ` · ${body.tools.length} tools` : ""}</div>` : "";
-  return `<div class="small">emitted → <b>${esc(e.box)}</b> to ${key(w, e.to)}${e.handle ? ` <span class="mut">${esc(e.handle)}@${esc(e.domain ?? "")}</span>` : ""} · emit ${link(w, c)} · body ${link(w, e.body)}${env ? ` · envelope ${link(w, env)}` : ""}</div>${summary}${details("body", json(w, body), `b-${c}`)}`;
+  return `<div class="small">emitted → <b>${esc(e.box)}</b> to ${key(w, e.to)}${r?.handle ? ` <span class="mut">${esc(String(r.handle))}@${esc(String(r.domain ?? ""))}</span>` : ""} · emit ${link(w, c)} · body ${link(w, e.body)}${env ? ` · envelope ${link(w, env)}` : ""}</div>${summary}${details("body", json(w, body), `b-${c}`)}`;
 }
 
 // Polls the thread's tip; when it moves, re-renders the fragment, keeping open <details> open.

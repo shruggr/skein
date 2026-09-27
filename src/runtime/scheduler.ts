@@ -37,7 +37,8 @@
 //   emitted (`awaits`). When the launched threads are all at rest the program
 //   runs again with their resolution as input; when a reply is admitted it runs
 //   again with that envelope as input (`reply`). A step's attested calls
-//   (wallet wire frames, signed outbound envelopes) are records listed in its
+//   (wallet wire frames — among them the signature and the encryption of every
+//   envelope it sends — and handle resolutions) are records listed in its
 //   update (`calls`); a Witness serves them on replay, so replay needs no
 //   wallet. A step may keep records in its thread's state (`keep`: the loop's
 //   turns), listed in its update (`kept`), and move named heads (`advance`,
@@ -51,6 +52,7 @@
 import { createHash } from "node:crypto";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
+import { brc78Decode, contentHash, isEnvelope, signedPart, verify } from "./envelope.ts";
 import { decode, encode, isCID } from "./cid.ts";
 import { genesisOf, isLogEntry, short, stampMs, verifyEntry, type LogEntry } from "./log.ts";
 import { advanceHead, headTree, isHeadName } from "./heads.ts";
@@ -67,37 +69,40 @@ export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
   [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],
 ]);
 
-/** An emitted envelope, signed during the step that emitted it, for the delivery provider to encrypt and send. */
+/** An emitted message, as the program sealed it, for the delivery provider to carry. */
 export interface Outbound extends Emit {
-  emit: CID;         // the emit record
-  bytes: Uint8Array; // the body record's dag-cbor: the envelope's plaintext content
+  emit: CID;   // the emit record
   thread: CID;
-  envelope: object;  // the signed part of the BRC-169 envelope (JSON object, no `content`)
-  cid: CID;          // its record CID: what a reply's `replyTo` names
+  cid: CID;    // the record CID of the envelope's signed part: the message's id, what a reply's `replyTo` names
 }
 
 /**
- * Where emitted envelopes go: the delivery provider (src/host/messagebox.ts).
- * `seal` signs the envelope's signed part through the instance wallet inside
- * the step that emits (an attested call: its answer is recorded), `created`
- * being the step's `at`; `send` hands it over after the step is recorded. The
- * state is only "I sent this": encryption, queueing, retries and delivery
- * errors are the provider's, and nothing about delivery comes back. Tests may
- * capture; replay needs no `seal` (the witness answers).
+ * Where emitted messages go: the delivery provider (src/host/messagebox.ts),
+ * after the step that emitted them is recorded. The envelope is complete —
+ * signed and encrypted inside the step, through the instance wallet — so the
+ * provider carries bytes: queueing, retries and delivery errors are its, and
+ * nothing about delivery comes back. Tests may capture.
  */
 export interface Outbox {
-  seal?(e: Emit, bytes: Uint8Array, at: Ms): Promise<object>;
   send(o: Outbound): void | Promise<void>;
 }
 
 /**
+ * A resolver's answer for a handle: the identity key ("" if it did not
+ * resolve) and whatever the resolution endpoint said beside it (BRC-169 §5.2:
+ * certificate, messagebox, ttl, …), how it was got (`via`) and what was
+ * checked. Recorded whole.
+ */
+export type Resolution = { identityKey: string; error?: string } & Record<string, unknown>;
+
+/**
  * Handle resolution: a BRC-169 handle (`handle@domain`) to the identity key an
- * emit is sealed to. The host's (its registry; later a domain's resolve
- * endpoint). An attested call: the answer is recorded, and replay serves it
- * from the record.
+ * emit is sealed to. The host's (src/host/host.ts `hostResolver`: its rows,
+ * then the domain's BRC-169 resolve endpoint). An attested call: the whole
+ * answer is recorded, and replay serves it from the record.
  */
 export interface Resolver {
-  resolve(handle: string, domain: string): Promise<string>;
+  resolve(handle: string, domain: string): Promise<Resolution>;
 }
 
 /** A reply delivered to the thread awaiting it: the handler-args shape, plus what it answers. */
@@ -378,17 +383,15 @@ export class Runtime {
 
   /**
    * The thread whose tip awaits `envelope`, which was sealed to `sender`: the
-   * tip's seal call for it names the emit record, and that names the recipient.
+   * tip's emit whose envelope it is names the recipient.
    */
   private async awaiter(envelope: CID, sender: string): Promise<CID | undefined> {
     for await (const t of this.store.live.awaiting(envelope)) {
-      const tip = await this.tipOf(t) as (ThreadUpdate & { calls?: CID[] }) | undefined;
+      const tip = await this.tipOf(t) as (ThreadUpdate & { emits?: CID[] }) | undefined;
       if (tip?.state !== "waiting" || !tip.awaits?.some((a) => a.equals(envelope))) continue;
-      for (const c of tip.calls ?? []) {
-        const a = await this.store.get(c).catch(() => undefined);
-        if (!isAttested(a) || a.op !== "seal" || !encode(decode(a.result)).cid.equals(envelope)) continue;
-        const e = await this.store.get(a.request as CID).catch(() => undefined);
-        if (isEmit(e) && e.to === sender) return t;
+      for (const c of tip.emits ?? []) {
+        const e = await this.store.get(c).catch(() => undefined);
+        if (isEmit(e) && e.to === sender && encode(signedPart(e.envelope as never)).cid.equals(envelope)) return t;
       }
     }
     return undefined;
@@ -486,8 +489,8 @@ export class Runtime {
       const children: ThreadOrigin[] = [];
       const g = this.genesis!;
       const input = encode(compact({
-        kind: "step", thread: origin, step: n, entry, args: o.args, programs: g.programs, resolved,
-        tip: tipCid.equals(origin) ? undefined : tipCid, reply: reply && compact({ ...reply }), peers: g.peers, defaults: g.defaults,
+        kind: "step", thread: origin, step: n, entry, at, self: { handle: g.handle, domain: g.domain }, args: o.args, programs: g.programs, resolved,
+        tip: tipCid.equals(origin) ? undefined : tipCid, reply: reply && compact({ ...reply }), peers: g.peers, defaults: g.defaults, names: g.names,
       })).bytes;
 
       const attest = async (op: Attested["op"], request: Uint8Array | CID, perform: () => Promise<Uint8Array>): Promise<Uint8Array> => {
@@ -532,13 +535,10 @@ export class Runtime {
         },
         emit: async (c) => {
           const rec = await this.store.get(c);
-          if (!isEmit(rec)) throw new Error("emit: want {kind: \"emit\", to, handle?, domain?, box, body}");
-          const bytes = await this.store.bytes(rec.body);
-          const env = await attest("seal", c, async () => {
-            if (!this.outbox?.seal) throw new Error("emit: no delivery provider to seal the envelope");
-            return encode(await this.outbox.seal(rec, bytes, at)).bytes;
-          });
-          const cid = await this.store.put(decode(env));
+          if (!isEmit(rec)) throw new Error("emit: want {kind: \"emit\", to, box, body, envelope}");
+          const bad = emitProblem(rec, await this.store.bytes(rec.body), this.identity);
+          if (bad) throw new Error(`emit: ${bad}`);
+          const cid = await this.store.put(signedPart(rec.envelope as never) as never);
           emits.push(c);
           sealed.push(cid);
           return cid;
@@ -551,19 +551,21 @@ export class Runtime {
         resolve: async (name) => {
           const m = /^([^@\s]+)@([^@\s]+)$/.exec(name);
           if (!m) throw new Error(`resolve: want handle@domain, not ${JSON.stringify(name)}`);
-          // A failure is an answer too (recorded as ""), so replay meets the same one.
-          const key = Buffer.from(await attest("resolve", new TextEncoder().encode(name), async () => {
-            let k = "";
+          // The whole answer is recorded; a failure is an answer too ({identityKey: "", error}), so replay meets the same one.
+          const answer = await attest("resolve", new TextEncoder().encode(name), async () => {
+            let r: Resolution;
             try {
               if (!this.resolver) throw new Error("no resolver");
-              k = await this.resolver.resolve(m[1], m[2]);
+              r = await this.resolver.resolve(m[1], m[2]);
             } catch (e) {
-              this.say(`${short(origin)} resolve ${name}: ${(e as Error).message}`);
+              r = { identityKey: "", error: (e as Error).message };
             }
-            return new TextEncoder().encode(k);
-          })).toString("utf8");
-          if (!isIdentity(key)) throw new Error(`resolve: ${name} did not resolve to an identity key`);
-          return key;
+            if (r.error) this.say(`${short(origin)} resolve ${name}: ${r.error}`);
+            return encode(r).bytes;
+          });
+          const r = decode<Resolution>(answer);
+          if (!isIdentity(r?.identityKey)) throw new Error(`resolve: ${name} did not resolve to an identity key`);
+          return answer;
         },
         head: (name) => headTree(this.store, name),
         advance: async (name, tree) => {
@@ -617,7 +619,7 @@ export class Runtime {
     if (!this.outbox) return;
     const rec = await this.store.get<Emit>(emit);
     try {
-      await this.outbox.send({ ...rec, emit, thread, bytes: await this.store.bytes(rec.body), envelope: await this.store.get(envelope), cid: envelope });
+      await this.outbox.send({ ...rec, emit, thread, cid: envelope });
     } catch (e) {
       this.say(`${short(thread)} emit ${short(emit)}: ${(e as Error).message}`);
     }
@@ -797,4 +799,23 @@ function compact(o: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(o)) if (v !== undefined) out[k] = v;
   return out;
+}
+
+/**
+ * Why an emitted envelope may not leave, or undefined: it must be a complete
+ * BRC-169 envelope signed by this instance (the signature checks against
+ * sender.identityKey with no wallet), its BRC-78 content from this instance
+ * to the emit's `to`, and its contentHash the body record's. The content
+ * itself is opaque here: only the recipient can open it.
+ */
+function emitProblem(e: Emit, body: Uint8Array, identity: string): string | undefined {
+  const env = e.envelope;
+  if (!isEnvelope(env)) return "the envelope is not a complete BRC-169 envelope";
+  if (env.sender.identityKey !== identity) return `the envelope's sender is ${short(env.sender.identityKey)}, not this instance`;
+  if (!verify(env)) return "the envelope's signature does not verify";
+  let m: ReturnType<typeof brc78Decode>;
+  try { m = brc78Decode(Buffer.from(env.content, "base64")); } catch (err) { return (err as Error).message; }
+  if (m.recipient !== e.to) return `the content is encrypted to ${short(m.recipient)}, not ${short(e.to)}`;
+  if (env.contentHash !== contentHash(body)) return "contentHash is not the body's";
+  return undefined;
 }
