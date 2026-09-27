@@ -1,0 +1,27 @@
+diff --git i/src/sed/mod.rs w/src/sed/mod.rs
+index 07c4001..89039d1 100644
+--- i/src/sed/mod.rs
++++ w/src/sed/mod.rs
+@@ -100,11 +100,22 @@ pub fn uu_app() -> Command {
+                 .help("Follow symlinks when processing in place.")
+                 .action(clap::ArgAction::SetTrue),
+             // Access with .get_one::<String>("in-place")
++            //
++            // GNU sed's -i[SUFFIX] takes the suffix only when it is directly
++            // attached (-i.bak), never as a separate argv entry — but clap's
++            // num_args(0..=1) alone eats the *next* argv entry as the value,
++            // so `sed -i 's/x/y/' f` treats the script as the suffix and `f`
++            // as the script (bug, reproducible outside skein/wasm: native
++            // build, no patch, same failure). require_equals(true) fixes the
++            // common case (bare -i) at the cost of GNU's attached-without-'='
++            // short form: a suffix now needs -i=.bak (or --in-place=.bak)
++            // instead of -i.bak. Bare -i matters far more for an agent shell.
+             Arg::new("in-place")
+                 .short('i')
+                 .long("in-place")
+                 .help("Edit files in place, making a backup if SUFFIX is supplied.")
+                 .num_args(0..=1)
++                .require_equals(true)
+                 .default_missing_value(""),
+             // Access with .get_one::<u32>("line-length")
+             arg!(-l --length <NUM> "Specify the 'l' command line-wrap length.")

@@ -1,0 +1,60 @@
+diff --git i/jaq/Cargo.toml w/jaq/Cargo.toml
+index 32052fc..ce96fb4 100644
+--- i/jaq/Cargo.toml
++++ w/jaq/Cargo.toml
+@@ -17,9 +17,14 @@ default = ["mimalloc"]
+ [dependencies]
+ jaq-all  = { workspace = true, features = ["formats", "std-all"] }
+ 
+-dirs = { version = "6.0" }
+ env_logger = { version = "0.10.0", default-features = false }
+ log = { version = "0.4.17" }
+ mimalloc = { version = "0.1.29", default-features = false, optional = true }
+-rustyline = { version = "13.0.0", default-features = false, features = ["with-file-history"] }
+ tempfile = "3.3.0"
++
++# rustyline (the `repl` builtin) needs a real terminal (termios/ioctl) that
++# WASI preview1 does not have; skein's shell has no interactive terminal
++# either, so the wasm build drops it (funs.rs stubs `repl` there instead).
++[target.'cfg(not(target_os = "wasi"))'.dependencies]
++dirs = { version = "6.0" }
++rustyline = { version = "13.0.0", default-features = false, features = ["with-file-history"] }
+diff --git i/jaq/src/funs.rs w/jaq/src/funs.rs
+index 77803a7..2a3a0de 100644
+--- i/jaq/src/funs.rs
++++ w/jaq/src/funs.rs
+@@ -2,7 +2,9 @@ use crate::{filter, run, with_stdout, write, Error, ErrorColor, Runner, Val};
+ use jaq_all::data::DataKind;
+ use jaq_all::jaq_core::native::{self, v, Filter, Fun};
+ use jaq_all::jaq_core::{RunPtr, Vars};
++#[cfg(not(target_os = "wasi"))]
+ use rustyline::error::ReadlineError;
++#[cfg(not(target_os = "wasi"))]
+ use rustyline::DefaultEditor;
+ use std::sync::atomic::{AtomicUsize, Ordering};
+ 
+@@ -13,6 +15,7 @@ pub fn funs() -> impl Iterator<Item = Fun<DataKind>> {
+ /// counter that increases for each nested invocation of `repl`
+ static REPL_DEPTH: AtomicUsize = AtomicUsize::new(0);
+ /// immediately abort REPL if REPL_DEPTH + 1 == REPL_KILL_DEPTH
++#[cfg(not(target_os = "wasi"))]
+ static REPL_KILL_DEPTH: AtomicUsize = AtomicUsize::new(0);
+ 
+ pub fn repl() -> Filter<RunPtr<DataKind>> {
+@@ -42,6 +45,16 @@ fn eval(runner: &Runner, code: String, input: Val) -> Result<(), Error> {
+     Ok(())
+ }
+ 
++// No terminal under WASI (no termios/ioctl): the `repl` builtin errors
++// instead of silently doing nothing, same as it would over a non-tty stdin.
++#[cfg(target_os = "wasi")]
++fn repl_with(_runner: &Runner, _depth: usize, _f: impl Fn(String)) -> Result<(), std::io::Error> {
++    Err(std::io::Error::other(
++        "repl: not available (no terminal under the skein WASI host)",
++    ))
++}
++
++#[cfg(not(target_os = "wasi"))]
+ fn repl_with(runner: &Runner, depth: usize, f: impl Fn(String)) -> Result<(), ReadlineError> {
+     use rustyline::config::{Behavior, Config};
+     let config = Config::builder()
