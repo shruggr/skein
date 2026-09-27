@@ -20,7 +20,7 @@ import type { Store } from "../runtime/store.ts";
 import type { ThreadOrigin } from "../runtime/types.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
-import { configFor, startInstance, type HostOptions, type Running } from "./host.ts";
+import { configFor, hostResolver, startInstance, type HostOptions, type Running } from "./host.ts";
 import { HostDb, type InstanceRow } from "./instances.ts";
 
 async function tmp(t: { after(fn: () => Promise<void>): void }): Promise<string> {
@@ -109,7 +109,7 @@ test("genesis from a row: its handle and domain, the owner's boxes, then `chat` 
   assert.deepEqual(subs(g.subscriptions), subs(c.subscriptions!));
   assert.deepEqual(subs(g.subscriptions).at(-1), { box: "chat", handler: PROGRAM_CIDS.loop.toString() }, "the open subscription names no sender");
   assert.deepEqual(g.subscriptions.slice(0, 4).map((s) => [s.match.sender, s.match.box]), [[o.owner, "run"], [o.owner, "objects"], [o.owner, "head"], [o.owner, "chat"]]);
-  assert.deepEqual(await r.runtime.boxes(), ["run", "objects", "head", "chat", "completions"]);
+  assert.deepEqual(await r.runtime.boxes(), ["run", "objects", "head", "chat", "completions", "say"]);
   await r.stop();
 });
 
@@ -181,4 +181,30 @@ test("a row is refused when its wallet is not its genesis's identity, or the hos
   h.stores.delete("martha");
   await (await startInstance(row("martha"), h.o)).stop();
   await assert.rejects(startInstance(row("martha"), other), /not this instance's host/);
+});
+
+test("resolver: the host's rows first, then the messagebox's paymail PKI; \"\" when neither knows the handle; wired into each runtime", async (t) => {
+  const db = new HostDb(join(await tmp(t), "host.db"));
+  const martha = "02" + "a".repeat(64), david = "03" + "d".repeat(64);
+  db.add("martha", { store: "/s", identity: martha });
+  db.add("kurt", { store: "/s" }); // no identity yet
+  const asked: string[] = [];
+  const f = (async (url: string) => {
+    asked.push(url);
+    return url.endsWith("/bsvalias/id/david@localhost") ? Response.json({ bsvalias: "1.0", handle: "david@localhost", pubkey: david }) : Response.json({ error: "paymail not found" }, { status: 404 });
+  }) as unknown as typeof fetch;
+  const resolve = hostResolver((h, d) => db.identityOf(h, d), "http://127.0.0.1:8100/messagebox", f);
+  assert.equal(await resolve("martha", "localhost"), martha);
+  assert.deepEqual(asked, [], "a row answers without the network");
+  assert.equal(await resolve("david", "localhost"), david);
+  assert.equal(await resolve("kurt", "localhost"), "");
+  assert.equal(await resolve("martha", "elsewhere.example"), "", "the domain is part of the handle");
+  assert.deepEqual(asked, ["http://127.0.0.1:8100/bsvalias/id/david@localhost", "http://127.0.0.1:8100/bsvalias/id/kurt@localhost", "http://127.0.0.1:8100/bsvalias/id/martha@elsewhere.example"]);
+  assert.equal(await hostResolver(() => undefined)("david", "localhost"), "", "no messagebox: rows only");
+
+  const h = await hostFor();
+  const r = await startInstance(row("martha"), { ...h.o, resolve });
+  assert.equal(await (r.runtime as unknown as { resolver: { resolve: typeof resolve } }).resolver.resolve("martha", "localhost"), martha);
+  await r.stop();
+  db.close();
 });

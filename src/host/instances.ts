@@ -68,6 +68,12 @@ export class HostDb {
     return r ? { ...r } as unknown as InstanceRow : undefined; // node:sqlite rows have a null prototype
   }
 
+  /** The recorded identity for handle@domain (the resolver's first answer), if any. */
+  identityOf(handle: string, domain: string): string | undefined {
+    const r = this.db.prepare("SELECT identity FROM instances WHERE handle = ? AND domain = ?").get(handle, domain) as { identity: string | null } | undefined;
+    return r?.identity ?? undefined;
+  }
+
   list(status?: Status): InstanceRow[] {
     const q = status ? this.db.prepare("SELECT * FROM instances WHERE status = ? ORDER BY created_at, handle").all(status) : this.db.prepare("SELECT * FROM instances ORDER BY created_at, handle").all();
     return q.map((r) => ({ ...r }) as unknown as InstanceRow);

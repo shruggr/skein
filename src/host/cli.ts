@@ -21,7 +21,7 @@ import { install } from "../dev/cli.ts";
 import { short } from "../runtime/log.ts";
 import { openStore } from "../runtime/sqlite.ts";
 import { connectWallet, ephemeralWallet } from "../wallet.ts";
-import { startInstance, type Running } from "./host.ts";
+import { hostResolver, startInstance, type Running } from "./host.ts";
 import { HostDb, type RowFields } from "./instances.ts";
 import { messageBoxClient } from "./messagebox.ts";
 
@@ -88,6 +88,7 @@ async function run(db: HostDb, env: Env): Promise<number> {
   const host = ephemeral ? ephemeralWallet() : await connectWallet({ kind: "remote", url: v.SKEIN_HOST_WALLET_URL || "http://127.0.0.1:3324", originator: "skein-host" });
   const named = (s: string) => { const [handle, domain = "localhost"] = s.split("@"); return { handle, domain }; };
   const log = (handle: string, line: string) => env.out(`[${handle}] ${line}`);
+  const resolve = hostResolver((h, d) => db.identityOf(h, d), v.SKEIN_MESSAGEBOX);
   const running: Running[] = [];
   for (const row of db.list("enabled")) {
     try {
@@ -106,6 +107,7 @@ async function run(db: HostDb, env: Env): Promise<number> {
           return s;
         },
         box: v.SKEIN_MESSAGEBOX ? (row, wallet) => messageBoxClient(wallet, v.SKEIN_MESSAGEBOX!, row.wallet_originator) : undefined,
+        resolve,
         pollMs: Number(v.SKEIN_POLL_MS || 1000),
         log,
       });

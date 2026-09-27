@@ -4,13 +4,15 @@
 // provider, and tick; they share nothing but the host wallet, which signs every
 // log entry for all of them (#9: the host's identity is the genesis's `host`).
 // A new instance's genesis is main.ts's plus an open `chat` subscription:
-// anyone may open a conversation with it (#24, item 3); replies to what it sent
-// are matched before subscriptions, so agent↔agent needs nothing more.
+// anyone may open a conversation with it (#24, item 3). Replies to what it sent
+// are matched before subscriptions, and the genesis's `collect` has `say`,
+// where another agent answers its chat, so agent↔agent needs nothing more
+// than the resolver: a handle → the identity key its `message` is sealed to.
 
 import type { WalletInterface } from "@bsv/sdk";
 import { rootIdentity, type KeyWallet } from "../runtime/identity.ts";
 import { defaultSubscriptions, genesisOf, OPEN_CHAT, short, type InstanceConfig } from "../runtime/log.ts";
-import type { Identity } from "../runtime/records.ts";
+import { isIdentity, type Identity } from "../runtime/records.ts";
 import { Runtime } from "../runtime/scheduler.ts";
 import type { Store } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
@@ -37,6 +39,8 @@ export interface HostOptions {
   store(row: InstanceRow): Promise<Store>;
   /** A messagebox session as the row's wallet; absent: no delivery provider. */
   box?(row: InstanceRow, wallet: WalletInterface): MessageBox;
+  /** Handle → identity key for the runtime's `resolve` (hostResolver); "" when unknown. Absent: every resolve fails. */
+  resolve?(handle: string, domain: string): Promise<string>;
   /** Delivery poll interval; 0 = do not poll (tests call delivery.poll()). Default 1000. */
   pollMs?: number;
   /** Lines, prefixed by the caller. */
@@ -88,6 +92,8 @@ export async function startInstance(row: InstanceRow, o: HostOptions): Promise<R
     if (g.identity !== identity) throw new Error(`the wallet (${short(identity)}) is not this instance's identity (${short(g.identity)})`);
 
     const runtime = new Runtime({ store, wallet, log: say });
+    // runtime.resolver (the `resolve` import's Resolver), set untyped so this builds on a runtime without it.
+    if (o.resolve) Object.assign(runtime, { resolver: { resolve: o.resolve } });
     const tick = new Tick({ runtime, host: o.host, log: say, now: o.now });
     tick.start();
     let delivery: Delivery | undefined;
@@ -114,4 +120,23 @@ export async function startInstance(row: InstanceRow, o: HostOptions): Promise<R
     await store.close();
     throw e;
   }
+}
+
+/**
+ * The host's resolver: its own rows first (`rows`, e.g. HostDb.identityOf),
+ * then the messagebox host's paymail PKI (`<origin>/bsvalias/id/handle@domain`,
+ * which `1sat serve` answers for every registered account); "" if neither
+ * knows the handle.
+ */
+export function hostResolver(rows: (handle: string, domain: string) => string | null | undefined, messagebox?: string, f: typeof fetch = fetch): (handle: string, domain: string) => Promise<string> {
+  const origin = messagebox ? new URL(messagebox).origin : undefined;
+  return async (handle, domain) => {
+    const known = rows(handle, domain);
+    if (known) return known;
+    if (!origin) return "";
+    const res = await f(`${origin}/bsvalias/id/${encodeURIComponent(handle)}@${encodeURIComponent(domain)}`);
+    if (!res.ok) return "";
+    const { pubkey } = (await res.json()) as { pubkey?: unknown };
+    return typeof pubkey === "string" && isIdentity(pubkey) ? pubkey : "";
+  };
 }
