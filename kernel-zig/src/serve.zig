@@ -1,0 +1,385 @@
+// `skein-kernel serve`: the runtime process, a drop-in for bin/skein-runtime
+// (src/host/main.ts). Same environment, same stdout lines — among them
+// `skein runtime <identity> (<handle>@<domain>) · pid … · db …`, which the
+// supervisor waits for — same stop on SIGINT/SIGTERM or when the supervisor's
+// IPC channel closes.
+//
+// The kernel is this process: the store, the log, the scheduler, the
+// programs. The providers stay TypeScript and are peers, as in main.ts: the
+// messagebox delivery and its outcomes, the tick, the host's resolver and the
+// wallets. They run in one child process (peer/peer.ts, started here), which
+// reaches the kernel through the same surface they use on the TS runtime —
+// admit, boxes, sleepersDue/onSleep, idle, the outbox, the store's log — over
+// a pipe of length-prefixed dag-cbor frames (ipc.zig). The kernel calls it for
+// the instance wallet (programs' wallet frames) and handle resolution.
+const std = @import("std");
+const cbor = @import("cbor.zig");
+const cidm = @import("cid.zig");
+const ipc = @import("ipc.zig");
+const logm = @import("log.zig");
+const runner = @import("runner.zig");
+const scheduler = @import("scheduler.zig");
+const replay = @import("replay.zig");
+const storem = @import("store.zig");
+const SqliteStore = @import("sqlite_store.zig").SqliteStore;
+const Value = cbor.Value;
+
+var sig_pipe: [2]std.posix.fd_t = .{ -1, -1 };
+var sig_name: []const u8 = "";
+
+fn onSignal(sig: c_int) callconv(.c) void {
+    sig_name = if (sig == std.posix.SIG.INT) "SIGINT" else "SIGTERM";
+    _ = std.posix.write(sig_pipe[1], "x") catch {};
+}
+
+fn say(line: []const u8) void {
+    var f = std.fs.File.stdout();
+    f.writeAll(line) catch {};
+    f.writeAll("\n") catch {};
+}
+
+fn sayf(comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    say(s);
+}
+
+fn die(comptime fmt: []const u8, args: anytype) noreturn {
+    var buf: [4096]u8 = undefined;
+    const s = std.fmt.bufPrint(&buf, "skein-runtime: " ++ fmt ++ "\n", args) catch "skein-runtime: error\n";
+    std.fs.File.stderr().writeAll(s) catch {};
+    std.process.exit(1);
+}
+
+const Server = struct {
+    gpa: std.mem.Allocator,
+    ss: *SqliteStore,
+    store: storem.Store,
+    rt: *scheduler.Runtime,
+    to_peer: std.posix.fd_t,
+    from_peer: ipc.Reader,
+    next_id: i64 = 1,
+    idle_waiters: std.array_list.Managed(i64),
+    last_sleepers: []u8 = "",
+    handle: []const u8,
+    domain: []const u8,
+    db_path: []const u8,
+    host_db: ?[]const u8,
+    running: bool = false,
+    stopping: bool = false,
+
+    // ------------------------------------------------------------ frames
+
+    fn frame(a: std.mem.Allocator, entries: []const cbor.Entry) Value {
+        return .{ .map = a.dupe(cbor.Entry, entries) catch &.{} };
+    }
+
+    fn notify(s: *Server, a: std.mem.Allocator, op: []const u8, payload: ?Value) void {
+        var m = cbor.MapBuilder.init(a);
+        m.put("op", cbor.string(op)) catch return;
+        m.put("v", payload) catch return;
+        ipc.write(s.to_peer, a, m.value()) catch |err| std.log.err("peer write: {s}", .{@errorName(err)});
+    }
+
+    fn reply(s: *Server, a: std.mem.Allocator, id: i64, ok: ?Value, err: ?[]const u8, rejected: ?[]const u8) void {
+        var m = cbor.MapBuilder.init(a);
+        m.put("re", cbor.int(id)) catch return;
+        if (ok) |v| m.put("ok", v) catch return else if (err == null and rejected == null) m.put("ok", .null) catch return;
+        m.put("error", cbor.optStr(err)) catch return;
+        m.put("rejected", cbor.optStr(rejected)) catch return;
+        ipc.write(s.to_peer, a, m.value()) catch |e| std.log.err("peer write: {s}", .{@errorName(e)});
+    }
+
+    /// A request to the peer; serves the peer's own requests while it waits.
+    fn request(s: *Server, a: std.mem.Allocator, op: []const u8, payload: Value) !Value {
+        const id = s.next_id;
+        s.next_id += 1;
+        var m = cbor.MapBuilder.init(a);
+        try m.put("id", cbor.int(id));
+        try m.put("op", cbor.string(op));
+        try m.put("v", payload);
+        try ipc.write(s.to_peer, a, m.value());
+        while (true) {
+            const f = (try s.from_peer.read(a)) orelse return error.PeerGone;
+            if (Value.intOf(f.get("re"))) |re| {
+                if (re != id) continue;
+                if (Value.str(f.get("error"))) |e| {
+                    last_peer_error = try a.dupe(u8, e);
+                    return error.PeerError;
+                }
+                return f.get("ok") orelse .null;
+            }
+            s.onFrame(a, f);
+        }
+    }
+
+    var last_peer_error: []const u8 = "";
+
+    // ------------------------------------------------------------ the peer's requests
+
+    fn onFrame(s: *Server, a: std.mem.Allocator, f: Value) void {
+        const op = Value.str(f.get("op")) orelse return;
+        const id = Value.intOf(f.get("id")) orelse 0;
+        const v = f.get("v") orelse .null;
+        s.handleOp(a, op, @intCast(id), v) catch |err| s.reply(a, @intCast(id), null, @errorName(err), null);
+    }
+
+    fn handleOp(s: *Server, a: std.mem.Allocator, op: []const u8, id: i64, v: Value) !void {
+        const eq = std.mem.eql;
+        if (eq(u8, op, "say")) {
+            say(Value.str(v) orelse "");
+        } else if (eq(u8, op, "fatal")) {
+            die("{s}", .{Value.str(v) orelse "peer failed"});
+        } else if (eq(u8, op, "tip")) {
+            s.reply(a, id, cbor.optCid(try s.store.logTip(a)) orelse .null, null, null);
+        } else if (eq(u8, op, "get")) {
+            const c = Value.cidOf(v) orelse return error.BadRequest;
+            s.reply(a, id, (try s.store.get(a, c)) orelse .null, null, null);
+        } else if (eq(u8, op, "put")) {
+            s.reply(a, id, cbor.cidv(try s.store.put(a, v)), null, null);
+        } else if (eq(u8, op, "append")) {
+            switch (try s.store.logAppend(a, v)) {
+                .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
+                .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
+            }
+        } else if (eq(u8, op, "genesis")) {
+            s.reply(a, id, logm.genesisOf(a, s.store) catch .null, null, null);
+        } else if (eq(u8, op, "boxes")) {
+            const bs = try s.rt.boxes(a);
+            const arr = try a.alloc(Value, bs.len);
+            for (bs, 0..) |b, i| arr[i] = cbor.string(b);
+            s.reply(a, id, .{ .array = arr }, null, null);
+        } else if (eq(u8, op, "byEnvelope")) {
+            const c = Value.cidOf(v) orelse return error.BadRequest;
+            s.reply(a, id, cbor.optCid(try s.store.byEnvelope(a, c)) orelse .null, null, null);
+        } else if (eq(u8, op, "admit")) {
+            const entry = v.get("entry") orelse return error.BadRequest;
+            const res = try s.rt.admit(a, entry, v.get("envelope"), Value.bytesOf(v.get("body")));
+            switch (res) {
+                .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
+                .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
+                .invalid => |m| s.reply(a, id, null, m, null),
+            }
+            // Now process it (mid-step, a drain is running: it loops again when the step is done).
+            if (res == .ok) s.rt.kick();
+            s.afterDrain(a);
+        } else if (eq(u8, op, "idle")) {
+            try s.idle_waiters.append(id);
+            s.afterDrain(a);
+        } else if (eq(u8, op, "start")) {
+            s.rt.start() catch |err| die("{s}@{s}: {s}", .{ s.handle, s.domain, @errorName(err) });
+            s.reply(a, id, .null, null, null);
+            s.rt.kick();
+            s.afterDrain(a);
+        } else if (eq(u8, op, "running")) {
+            s.running = true;
+            const ident = Value.str(v) orelse "";
+            if (s.host_db) |h| {
+                sayf("skein runtime {s} ({s}@{s}) · pid {d} · db {s} · rows {s}", .{ ident, s.handle, s.domain, std.c.getpid(), s.db_path, h });
+            } else {
+                sayf("skein runtime {s} ({s}@{s}) · pid {d} · db {s}", .{ ident, s.handle, s.domain, std.c.getpid(), s.db_path });
+            }
+        } else {
+            s.reply(a, id, null, "unknown op", null);
+        }
+    }
+
+    /// After processing: the tick's view of the sleepers, and whoever waits for idle.
+    fn afterDrain(s: *Server, a: std.mem.Allocator) void {
+        if (s.rt.draining) return;
+        s.syncSleepers(a);
+        for (s.idle_waiters.items) |w| s.reply(a, w, .null, null, null);
+        s.idle_waiters.clearRetainingCapacity();
+    }
+
+    fn syncSleepers(s: *Server, a: std.mem.Allocator) void {
+        const due = s.rt.sleepersDue(a) catch return;
+        var list = std.array_list.Managed(Value).init(a);
+        for (due) |d| {
+            var m = cbor.MapBuilder.init(a);
+            m.put("thread", cbor.cidv(d.thread)) catch return;
+            m.put("until", cbor.int(d.until)) catch return;
+            list.append(m.value()) catch return;
+        }
+        const v = Value{ .array = list.items };
+        const enc = cbor.encode(a, v) catch return;
+        if (std.mem.eql(u8, enc, s.last_sleepers)) return;
+        s.gpa.free(s.last_sleepers);
+        s.last_sleepers = s.gpa.dupe(u8, enc) catch "";
+        s.notify(a, "sleepers", v);
+    }
+
+    // ------------------------------------------------------------ the runtime's peers
+
+    fn ctx(p: *anyopaque) *Server {
+        return @ptrCast(@alignCast(p));
+    }
+
+    fn pWallet(p: *anyopaque, a: std.mem.Allocator, fr: []const u8) anyerror![]u8 {
+        const r = try ctx(p).request(a, "wallet", .{ .bytes = fr });
+        return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+    }
+
+    fn pResolve(p: *anyopaque, a: std.mem.Allocator, h: []const u8, d: []const u8) Value {
+        var m = cbor.MapBuilder.init(a);
+        m.put("handle", cbor.string(h)) catch {};
+        m.put("domain", cbor.string(d)) catch {};
+        return ctx(p).request(a, "resolve", m.value()) catch |err| blk: {
+            var e = cbor.MapBuilder.init(a);
+            e.put("identityKey", cbor.string("")) catch {};
+            e.put("error", cbor.string(if (err == error.PeerError) last_peer_error else @errorName(err))) catch {};
+            break :blk e.value();
+        };
+    }
+
+    fn pSend(p: *anyopaque, a: std.mem.Allocator, o: Value) anyerror!void {
+        ctx(p).notify(a, "send", o);
+    }
+
+    fn pOnSleep(p: *anyopaque, _: []const u8, _: i64) void {
+        const s = ctx(p);
+        var arena = std.heap.ArenaAllocator.init(s.gpa);
+        defer arena.deinit();
+        s.syncSleepers(arena.allocator());
+        s.notify(arena.allocator(), "onSleep", null);
+    }
+
+    fn pSay(_: *anyopaque, line: []const u8) void {
+        say(line);
+    }
+};
+
+fn peerScript(gpa: std.mem.Allocator) ![]const u8 {
+    if (std.posix.getenv("SKEIN_KERNEL_PEER")) |p| return p;
+    const exe = try std.fs.selfExeDirPathAlloc(gpa);
+    return std.fs.path.join(gpa, &.{ exe, "..", "..", "peer", "peer.ts" });
+}
+
+pub fn main(gpa: std.mem.Allocator) !void {
+    const home = std.posix.getenv("SKEIN_HOME") orelse try std.fmt.allocPrint(gpa, "{s}/.skein", .{std.posix.getenv("HOME") orelse "."});
+    const db_path = std.posix.getenv("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
+    const handle_full = std.posix.getenv("SKEIN_HANDLE") orelse "skein@localhost";
+    var handle: []const u8 = handle_full;
+    var domain: []const u8 = "localhost";
+    if (std.mem.indexOfScalar(u8, handle_full, '@')) |i| {
+        handle = handle_full[0..i];
+        const rest = handle_full[i + 1 ..];
+        domain = rest[0 .. std.mem.indexOfScalar(u8, rest, '@') orelse rest.len];
+    }
+    const host_db_path = std.posix.getenv("SKEIN_HOST_DB") orelse try std.fmt.allocPrint(gpa, "{s}/host.db", .{home});
+    const host_db: ?[]const u8 = if (std.fs.cwd().access(host_db_path, .{})) host_db_path else |_| null;
+
+    // Signals and the supervisor's channel.
+    sig_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    const sa = std.posix.Sigaction{ .handler = .{ .handler = onSignal }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+    const ign = std.posix.Sigaction{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    std.posix.sigaction(std.posix.SIG.PIPE, &ign, null);
+    var channel: ?std.posix.fd_t = null;
+    if (std.posix.getenv("NODE_CHANNEL_FD")) |s| {
+        if (std.fmt.parseInt(std.posix.fd_t, s, 10)) |fd| {
+            channel = fd;
+            _ = std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch {};
+        } else |_| {}
+    }
+
+    // The store, with the pinned modules installed (main.ts does this through skein-dev install).
+    if (std.fs.path.dirname(db_path)) |d| std.fs.cwd().makePath(d) catch {};
+    const ss = SqliteStore.open(gpa, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
+    replay.install(gpa, ss, say) catch |err| die("{s}@{s}: install: {s}", .{ handle, domain, @errorName(err) });
+    if (std.posix.getenv("SKEIN_MESSAGEBOX") == null) say("SKEIN_MESSAGEBOX unset: no message provider; nothing will be delivered");
+
+    // The peer process.
+    var env = try std.process.getEnvMap(gpa);
+    env.remove("NODE_CHANNEL_FD");
+    env.remove("NODE_CHANNEL_SERIALIZATION_MODE");
+    const script = try peerScript(gpa);
+    var child = std.process.Child.init(&.{ "node", "--experimental-strip-types", "--no-warnings", script }, gpa);
+    child.env_map = &env;
+    child.stdin_behavior = .Pipe;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    child.spawn() catch |err| die("{s}@{s}: cannot start the peer ({s}): {s}", .{ handle, domain, script, @errorName(err) });
+
+    const r = try runner.Runner.init(gpa);
+    var server = Server{
+        .gpa = gpa,
+        .ss = ss,
+        .store = ss.store(),
+        .rt = undefined,
+        .to_peer = child.stdin.?.handle,
+        .from_peer = ipc.Reader.init(gpa, child.stdout.?.handle),
+        .idle_waiters = .init(gpa),
+        .handle = handle,
+        .domain = domain,
+        .db_path = db_path,
+        .host_db = host_db,
+    };
+    server.rt = try scheduler.Runtime.init(gpa, server.store, r, .{
+        .ctx = &server,
+        .wallet = Server.pWallet,
+        .resolve = Server.pResolve,
+        .send = Server.pSend,
+        .on_sleep = Server.pOnSleep,
+        .say = Server.pSay,
+    });
+
+    var fds_buf: [3]std.posix.pollfd = undefined;
+    var stop_deadline: ?i64 = null;
+    while (true) {
+        var n: usize = 0;
+        fds_buf[n] = .{ .fd = server.from_peer.fd, .events = std.posix.POLL.IN, .revents = 0 };
+        n += 1;
+        fds_buf[n] = .{ .fd = sig_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
+        n += 1;
+        if (channel) |c| {
+            fds_buf[n] = .{ .fd = c, .events = std.posix.POLL.IN, .revents = 0 };
+            n += 1;
+        }
+        const timeout: i32 = if (stop_deadline) |d| @intCast(@max(0, d - std.time.milliTimestamp())) else -1;
+        _ = try std.posix.poll(fds_buf[0..n], timeout);
+        if (stop_deadline) |d| if (std.time.milliTimestamp() >= d) break;
+
+        var reason: ?[]const u8 = null;
+        if (fds_buf[1].revents != 0) {
+            var b: [16]u8 = undefined;
+            _ = std.posix.read(sig_pipe[0], &b) catch {};
+            reason = sig_name;
+        }
+        if (channel != null and fds_buf[2].revents != 0) {
+            var b: [4096]u8 = undefined;
+            const got = std.posix.read(channel.?, &b) catch 0;
+            if (got == 0 or fds_buf[2].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
+                reason = "supervisor gone";
+                channel = null;
+            }
+        }
+        if (reason) |why| if (!server.stopping) {
+            server.stopping = true;
+            sayf("{s}: stopping", .{why});
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            server.notify(arena.allocator(), "stop", null);
+            stop_deadline = std.time.milliTimestamp() + 10_000;
+        };
+        if (fds_buf[0].revents != 0) {
+            if (!try server.from_peer.fill()) {
+                if (!server.stopping) die("{s}@{s}: the peer process exited", .{ handle, domain });
+                break;
+            }
+            while (true) {
+                var arena = std.heap.ArenaAllocator.init(gpa);
+                defer arena.deinit();
+                const a = arena.allocator();
+                const b = (try server.from_peer.next(a)) orelse break;
+                const f = cbor.decode(a, b) catch continue;
+                server.onFrame(a, f);
+            }
+        }
+    }
+    server.rt.stop();
+    _ = child.kill() catch {};
+    ss.close();
+    std.process.exit(0);
+}
