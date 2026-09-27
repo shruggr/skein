@@ -68,14 +68,14 @@ async function setup() {
   return { david, inst, box, page, instBox: box.forWallet(inst) };
 }
 
-/** The instance's reply into david's `say`, sealed with the node envelope code. */
-async function say(inst: WalletInterface, david: WalletInterface, instBox: ReturnType<ReturnType<typeof fakeBox>["forWallet"]>, body: Record<string, unknown>) {
+/** The instance's `chat` reply to david, sealed with the node envelope code. */
+async function reply(inst: WalletInterface, david: WalletInterface, instBox: ReturnType<ReturnType<typeof fakeBox>["forWallet"]>, body: Record<string, unknown>) {
   const env = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode(body) });
-  await instBox.sendMessage({ recipient: await idk(david), messageBox: "say", body: env, skipEncryption: true });
+  await instBox.sendMessage({ recipient: await idk(david), messageBox: "chat", body: env, skipEncryption: true });
   return (await nodeEnvelopeCid(env)).toString();
 }
 
-test("chat → say → chat: the bundled page seals, the instance opens, replyTo chains", async () => {
+test("chat → chat reply → chat: the bundled page seals, the instance opens, replyTo chains", async () => {
   const { david, inst, box, page, instBox } = await setup();
   const tcid = blobCid(new Uint8Array([1])).toString();
 
@@ -92,20 +92,28 @@ test("chat → say → chat: the bundled page seals, the instance opens, replyTo
   await instBox.acknowledgeMessage({ messageIds: [m1!.messageId] });
 
   const thread = CID.parse(s1.cid); // any CID will do for the thread
-  const sayCid = await say(inst, david, instBox, { text: "hi", page: "# Title\n\n- a\n- b", tree: CID.parse(tcid), thread, replyTo: CID.parse(s1.cid) });
+  const replyCid = await reply(inst, david, instBox, { text: "hi", page: "# Title\n\n- a\n- b", tree: CID.parse(tcid), thread, replyTo: CID.parse(s1.cid) });
   const got = await page.inbox();
   assert.equal(got.length, 1);
   assert.ok(got[0]!.verified, got[0]!.error ?? "unverified");
   assert.equal(got[0]!.error, undefined);
-  assert.equal(got[0]!.cid, sayCid);
+  assert.equal(got[0]!.cid, replyCid);
   assert.equal(got[0]!.body!.text, "hi");
-  assert.deepEqual(page.conversation()?.say, sayCid);
+  assert.deepEqual(page.conversation()?.reply, replyCid);
   assert.deepEqual(await page.inbox(), [], "acknowledged");
 
-  // The next chat replies to that say and inherits its tree.
+  // A chat that is not a reply (a new conversation), or a reply from anyone but the instance, is shown, not continued.
+  const other = wallet();
+  await reply(inst, david, instBox, { text: "new topic" }); // no replyTo
+  await reply(other, david, box.forWallet(other), { text: "not the instance", replyTo: CID.parse(s1.cid) });
+  const shown = await page.inbox();
+  assert.deepEqual(shown.map((r) => [r.body?.text, r.error]), [["new topic", undefined], ["not the instance", undefined]]);
+  assert.deepEqual(page.conversation()?.reply, replyCid);
+
+  // The next chat replies to that reply and inherits its tree.
   await page.chat({ text: "more" });
   const b2 = dagCbor.decode((await open(inst, box.boxes.get("chat")!.at(-1)!.body as Envelope)).body) as Record<string, unknown>;
-  assert.equal(String(b2.replyTo), sayCid);
+  assert.equal(String(b2.replyTo), replyCid);
   assert.equal(String(b2.tree), tcid);
   // --new: neither.
   await page.chat({ text: "fresh", fresh: true });
@@ -159,7 +167,7 @@ async function hostUp(): Promise<boolean> {
   try { await fetch(`${HOST}/exchange-rate`, { signal: AbortSignal.timeout(1000) }); return true; } catch { return false; }
 }
 
-test("live: the bundled page registers, chats and reads a say through the real messagebox", async (t) => {
+test("live: the bundled page registers, chats and reads a chat reply through the real messagebox", async (t) => {
   if (!(await hostUp())) { t.skip(`no messagebox at ${HOST}`); return; }
   const david = wallet(), inst = wallet();
   const cfg: Core.WebConfig = { instance: { identityKey: await idk(inst), handle: "skein", domain: "localhost" }, messageboxUrl: `${HOST}/messagebox`, hostUrl: HOST };
@@ -181,11 +189,11 @@ test("live: the bundled page registers, chats and reads a say through the real m
   assert.equal((dagCbor.decode((await open(inst, env)).body) as { text: string }).text, "live hello");
   await mb.acknowledgeMessage({ messageIds: [got[0]!.messageId], host: cfg.messageboxUrl });
 
-  const reply = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode({ text: "live hi", thread: CID.parse(sent.cid), replyTo: CID.parse(sent.cid) }) });
-  await mb.sendMessage({ recipient: await idk(david), messageBox: "say", body: reply as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
+  const answer = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode({ text: "live hi", thread: CID.parse(sent.cid), replyTo: CID.parse(sent.cid) }) });
+  await mb.sendMessage({ recipient: await idk(david), messageBox: "chat", body: answer as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
   const rs = await page.inbox();
   assert.equal(rs.length, 1);
   assert.ok(rs[0]!.verified, rs[0]!.error ?? "unverified");
   assert.equal(rs[0]!.body!.text, "live hi");
-  assert.equal(page.conversation()?.say, (await nodeEnvelopeCid(reply)).toString());
+  assert.equal(page.conversation()?.reply, (await nodeEnvelopeCid(answer)).toString());
 });

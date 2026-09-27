@@ -6,7 +6,7 @@ dag-cbor body; the envelope's signed `contentHash` binds the body to David's
 signature, and the BRC-78 content encryption is for the wire only. An
 envelope's id (a `replyTo`) is the CID of its signed part, without `content`.
 State lives in `~/.skein/client/`: `sent.jsonl` (every envelope sent) and
-`conversation.json` (the last `say` received). `import` names the
+`conversation.json` (the instance's last `chat` reply received). `import` names the
 root tree on its last bundle; the instance makes it `main` if it has none.
 
 ```
@@ -24,20 +24,22 @@ skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
 | box | direction | body |
 |---|---|---|
 | `chat` | david → instance | `{ text, tree?: CID, model?: string, replyTo?: CID }` |
-| `say` | instance → david | `{ text, page?: markdown, tree?: CID, thread: CID, replyTo: CID }` (replyTo = the chat it answers) |
+| `chat` | instance → david | `{ text, page?: markdown, tree?: CID, thread?: CID, replyTo: CID }` — a reply (replyTo = the envelope it answers); the answer at the end of a turn names tree and thread |
 | `results` | instance → david | `{ exitCode, stdout, stderr, tree, replyTo }` (answers a `run`) |
 | `head` | david → instance | `{ name, tree: CID }` — moves the named head; no reply |
 
-- `chat` continues the conversation: `replyTo` = the CID of the last `say`
-  envelope in `conversation.json`, and `--tree` defaults to that say's `tree`.
+- `chat` continues the conversation: `replyTo` = the CID of the instance's
+  last `chat` reply in `conversation.json`, and `--tree` defaults to its `tree`
+  (a reply that names none keeps the one before).
   `--new` (or no conversation yet) sends no `replyTo` and no default tree: the
   instance starts the conversation from its `main` head.
-- `chat --wait` polls (1 s) until the `say` answering it arrives, then prints it.
-- `inbox` reads `results` then `say`, prints them, acknowledges, and records the
-  newest verified `say` in `conversation.json`. A `say` prints as its text, the
-  page as plain markdown, then `[tree … thread …]` as short CIDs.
-  `--wait` stops at the `say` answering the last `chat` sent, or the result
+- `chat --wait` polls (1 s) until the `chat` replying to it arrives, then prints it.
+- `inbox` reads `results` then `chat`, prints them, acknowledges, and records the
+  newest verified `chat` reply from the instance in `conversation.json` (a chat
+  with no `replyTo`, or from anyone else, is shown only). A reply prints as its
+  text, the page as plain markdown, then `[tree … thread …]` as short CIDs.
+  `--wait` stops at the `chat` replying to the last `chat` sent, or the result
   answering the last `run`. `--timeout` defaults to 120 s.
 - `talk` is a REPL: each line is a `chat` (chained by replyTo), then it waits
-  for the `say`. `/new` starts a new conversation, `/tree <cid>` sets the tree
-  for the next message (after that the say's tree carries on), `/quit` exits.
+  for the reply. `/new` starts a new conversation, `/tree <cid>` sets the tree
+  for the next message (after that the reply's tree carries on), `/quit` exits.

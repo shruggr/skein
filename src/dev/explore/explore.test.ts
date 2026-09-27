@@ -1,6 +1,6 @@
 // The explorer over a small instance, in process: a directory imported
 // (objects → `main`), a chat turn with one bash tool call (loop → shell → loop
-// → say), then every page rendered from the memory store.
+// → a chat reply), then every page rendered from the memory store.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -78,7 +78,7 @@ test("explore: overview, log, entry, threads, the loop's conversation, a tree, a
   const [loop] = (await load(i.store)).threads.filter((x) => x.program === "loop");
   const [shell] = (await load(i.store)).threads.filter((x) => x.program === "shell");
   const th = await get(`/t/${loop.cid}`);
-  for (const s of ["What is here?", "tool call", "ls | head -3", "README", "<strong>src</strong>", "emitted → <b>say</b>", "awaits a reply to", "attested call"]) assert.ok(th.text.includes(s), `thread: ${s}`);
+  for (const s of ["What is here?", "tool call", "ls | head -3", "README", "<strong>src</strong>", "emitted → <b>chat</b>", "awaits a reply to", "attested call"]) assert.ok(th.text.includes(s), `thread: ${s}`);
   assert.ok(th.text.includes("setTimeout(poll"), "a waiting thread polls");
   const tip = JSON.parse((await get(`/t/${loop.cid}?tip=1`)).text);
   assert.equal(tip.state, "waiting");

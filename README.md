@@ -64,7 +64,7 @@ bin/skein run --tree <cid> -- 'ls | head -3'   # no --tree: the `main` head (the
 bin/skein head main <cid>                   # move `main` to a tree the instance holds
 bin/skein inbox --wait                      # the result envelope, opened by the owner
 bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
-bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers in David's `say` box
+bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers with a `chat` reply in David's `chat` box
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
 bin/skein-dev replay [--db <path>]          re-derive the store from the log alone, no wallet, and compare
 npm test
@@ -139,12 +139,16 @@ Chat: `chat` (`{text, tree?, model?, replyTo?}`) with no `replyTo` → a new loo
 thread, over `tree` or else `main`'s; the loop sends `infer` (`{model, messages, tools?, thinking?}`) to
 `peers.infer`, which answers in `completions` (`{replyTo, message: {role,
 content?, reasoning?, tool_calls?}, usage?, model, ms}` or `{replyTo, error}`),
-and says `{text, page?, tree?, thread, replyTo: <chat>}` to David in `say`.
-David's next `chat` carries `replyTo: <say>`. The system prompt is the
+and answers David with a `chat` reply `{text, tree, thread, replyTo: <his chat>}`
+(the same box, both directions; there is no `say`). David's next `chat` carries
+`replyTo: <that reply>` and continues the thread. The system prompt is the
 starting tree's `/SOUL.md` (else a fixed one), then `/IDENTITY.md`. Besides
 `bash`, the model has `message` (`{to: "@handle@domain", text}`): the loop
-sends `chat` to another instance and rests on its `say`, which is the tool
-result (docs/MESSAGES.md, "Chat between instances").
+sends `chat` to another party and rests on their `chat` reply, which is the
+tool result. A chat to a party the thread already talks with (its opener, or
+one that answered its messages) is a reply to that party's latest envelope,
+so their waiting thread resumes; two agents alternate on one thread each
+(docs/MESSAGES.md, "Chat between instances").
 
 **Replies.** An admitted envelope whose plaintext body has `replyTo` goes
 only to the thread whose tip `awaits` that envelope,
@@ -157,5 +161,5 @@ Loop turns (`{kind: "turn", of, role, …}`), one per turn, kept in its chain (t
 `{of: <chat>, role: "user", text, tree?, model?}`,
 `{of: <completions>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}`,
 `{of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}` (16 KiB caps),
-`{of: <their say>, role: "tool", call, to, sent: <our chat>, text}` (a `message` answered; `{of: <entry>, role: "tool", call, to?, error}` if it could not be sent),
+`{of: <their chat reply>, role: "tool", call, to, sent: <our chat>, text}` (a `message` answered; `{of: <entry>, role: "tool", call, to?, error}` if it could not be sent),
 `{of: <completions>, role: "error", error}`.

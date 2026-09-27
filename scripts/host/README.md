@@ -175,7 +175,7 @@ get message encryption with the new instance, as `grants.sh` does.
 three from `~/.skein`). For each enabled row it installs the modules into the
 store, writes a genesis if the store is empty (`handle`/`domain` from the row;
 subscriptions: the owner's `run`, `objects`, `head`, `chat`, then `chat` from
-any sender → loop; `collect`: `completions`, `say`), connects the row's
+any sender → loop; `collect`: `completions`), connects the row's
 wallet, and wires its own messagebox delivery (its own BRC-104 session) and
 tick. The host wallet signs every entry of every instance. A row that fails
 (wallet down, identity or host mismatch) is logged and skipped. Handles the
@@ -295,7 +295,7 @@ Two limits of the dev wallets and messagebox, not of skein:
   --level 2 --counterparty <sender>`"), logged as rejected and acknowledged.
   Provisioned instances, the owner and the infer peer are granted.
 - **A reply needs the recipient's account.** The messagebox stores messages
-  only for registered identities, so a `say` to a sender with no account is
+  only for registered identities, so a reply to a sender with no account is
   kept and retried at every poll.
 
 ## The client
