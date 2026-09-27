@@ -55,7 +55,7 @@ async function world(t: { after(fn: () => Promise<void>): void }) {
   return { i, root, chat: encode(signedPart(chat)).cid, get };
 }
 
-test("explore: overview, log, entry, threads, the loop's conversation, a tree, a head", async (t) => {
+test("explore: overview, log, entry, threads, the loop's conversation, a tree, a head, the subscriptions chain", async (t) => {
   const { i, root, chat, get } = await world(t);
   assert.ok((await headTree(i.store, MAIN))?.equals(root), i.lines.join("\n"));
 
@@ -95,6 +95,10 @@ test("explore: overview, log, entry, threads, the loop's conversation, a tree, a
 
   const head = await get(`/h/${MAIN}`);
   assert.ok(head.text.includes(root.toString()) && head.text.includes("objects-handler"));
+
+  const subs = await get("/s");
+  for (const s of ["genesis seed", "subscribe-handler", "add", "owner"]) assert.ok(subs.text.includes(s), `subscriptions: ${s}`);
+  assert.ok(home.text.includes(`href="/s"`), "the overview links the chain");
 
   const rec = await get(`/r/${loop.cid}`);
   assert.ok(rec.text.includes("thread view") && rec.text.includes("kind <b>thread</b>"));

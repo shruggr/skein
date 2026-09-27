@@ -8,6 +8,7 @@
 //   skein-host run
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
 //   skein-host roster [--for <handle> | --deploy]
+//   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
 // `add` inserts, or updates the given fields of an existing row. `deploy`
 // sends a directory into an instance through its `objects` box as the owner
 // (deploy.ts) and records its root as the row's `tree` (and the directory as
@@ -16,7 +17,10 @@
 // `roster` prints the front end's roster (roster.ts), which `run` also serves
 // at /roster.json; `roster --for h` prints h's ROSTER.md; `roster --deploy`
 // sends every enabled row whose ROSTER.md changed its deployed tree (from the
-// instance's store) with the new one. `run` reads
+// instance's store) with the new one. `subscribe` changes an instance's
+// subscriptions (#3) by a `subscribe` message as the owner, as `deploy` sends
+// (a new instance's genesis carries only the seed: the owner's boxes and
+// `chat` from anyone). `run` reads
 // its environment like skein-runtime (bin/skein-host fills it from $SKEIN_HOME):
 //   SKEIN_HOME            default ~/.skein; host.db lives here
 //   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway keys for every instance and the host)
@@ -25,7 +29,7 @@
 //   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE its genesis name, default infer@localhost
 //   SKEIN_MESSAGEBOX      the messagebox host;   SKEIN_POLL_MS default 1000
 //   SKEIN_HOST_PORT       the roster server's port on 127.0.0.1, default 4600
-// `deploy` reads SKEIN_MESSAGEBOX, SKEIN_OWNER (checked against the wallet),
+// `deploy` and `subscribe` read SKEIN_MESSAGEBOX, SKEIN_OWNER (checked against the wallet),
 // and signs through the owner's wallet as bin/skein does:
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
@@ -38,7 +42,8 @@ import { openStore } from "../runtime/sqlite.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { connectWallet, ephemeralWallet, remoteWallet, type WalletInterface } from "../wallet.ts";
-import { DEFAULT_ONLY, deploy, deployFiles, type Deployed } from "./deploy.ts";
+import { subscribeBody } from "../client/client.ts";
+import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
 import { hostResolver, startInstance, type Running } from "./host.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { messageBoxClient, type MessageBox } from "./messagebox.ts";
@@ -64,7 +69,8 @@ const USAGE = `usage:
   skein-host deploy --all [--only glob,glob]              every enabled row, from its last deployed directory
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
-  skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed`;
+  skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed
+  skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>`;
 
 export const homeOf = (vars: Env["vars"]) => vars.SKEIN_HOME || join(vars.HOME ?? ".", ".skein");
 
@@ -108,6 +114,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return knowsCmd(db, rest, env);
       case "roster":
         return await rosterCmd(db, rest, env);
+      case "subscribe":
+        return await subscribeCmd(db, rest, env);
       default:
         env.err(USAGE);
         return 2;
@@ -131,6 +139,26 @@ function knowsCmd(db: HostDb, rest: string[], env: Env): number {
   const k = knowsOf(db.get(handle)!);
   env.out(`${handle} knows ${k === "all" ? "everyone" : k.length ? k.join(", ") : "nobody"}`);
   return 0;
+}
+
+async function subscribeCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [handle, op, box, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { sender: { type: "string" } } });
+  if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(USAGE); return 2; }
+  const row = db.get(handle!);
+  if (!row) { env.err(`skein-host subscribe: no instance ${handle}`); return 1; }
+  const owner = await ownerOf(env, "skein-host subscribe");
+  if (typeof owner === "number") return owner;
+  const s = openRow(row, env);
+  try {
+    await subscribeRow({ row, owner: owner.wallet, box: owner.box, store: s.blocks }, subscribeBody({ op, sender: v.sender, box: box!, handler }));
+    env.out(`${row.handle}: subscribe ${op} (${v.sender ? short(v.sender) : "anyone"}, ${box}) → ${handler} sent`);
+    return 0;
+  } catch (e) {
+    env.err(`${row.handle}: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await s.close?.();
+  }
 }
 
 /**

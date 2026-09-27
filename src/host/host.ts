@@ -4,7 +4,10 @@
 // provider, and tick; they share nothing but the host wallet, which signs every
 // log entry for all of them (#9: the host's identity is the genesis's `host`).
 // A new instance's genesis is main.ts's plus an open `chat` subscription:
-// anyone may open a conversation with it (#24, item 3). Replies to what it sent
+// anyone may open a conversation with it (#24, item 3). That list is only the
+// seed of its subscriptions chain (#3, runtime/subscriptions.ts); later
+// changes are `subscribe` messages from the owner (`skein-host subscribe`),
+// never a new genesis. Replies to what it sent
 // are matched before subscriptions — another agent's reply arrives in `chat`
 // with `replyTo`, and resumes the thread that awaits it instead of opening a
 // new one — so agent↔agent needs nothing more than the resolver: a handle →
@@ -51,7 +54,7 @@ export interface HostOptions {
   now?: () => Stamp;
 }
 
-/** A new instance's genesis config for a row: the owner's boxes, then `chat` from anyone; the owner's and the peer's names. */
+/** A new instance's genesis config for a row: the seed subscriptions — the owner's boxes, then `chat` from anyone — and the owner's and the peer's names. */
 export function configFor(row: Pick<InstanceRow, "handle" | "domain">, o: { owner: Identity; infer?: Identity; ownerHandle?: Named; inferHandle?: Named }): InstanceConfig {
   return {
     owner: o.owner, handle: row.handle, domain: row.domain,
