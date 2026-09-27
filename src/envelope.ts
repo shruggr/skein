@@ -30,7 +30,7 @@ import { brc78Decode, brc78Encode, canonical, contentHash, ENVELOPE_KEY_ID, ENVE
 
 export * from "./runtime/envelope.ts";
 
-// ---------------------------------------------------------------- seal, verify, open
+// ---------------------------------------------------------------- sign, seal, open
 
 /** A `created` value: ISO 8601 of a time in ms since the epoch. */
 export const isoTime = (ms: number): string => new Date(ms).toISOString();
