@@ -134,7 +134,8 @@ host's management database, `~/.skein/host.db` (src/host/instances.ts):
 | `identity` | the instance wallet's identity key; written by `instance.sh`, or by `run` the first time it starts the row |
 | `wallet_url`, `wallet_originator` | its BRC-100 endpoint, origin (default `skein`) |
 | `store` | its runtime.db (default `~/.skein/instances/<handle>/runtime.db`) |
-| `tree` | the CID its genesis's `main` should point at; recorded only, booting from a tree is #4 |
+| `tree` | the root CID of the directory last deployed into it (`skein-host deploy`) |
+| `source` | that directory, which `deploy --all` sends again |
 | `status` | `enabled` / `disabled` |
 | `created_at` | ISO time |
 
@@ -142,7 +143,10 @@ host's management database, `~/.skein/host.db` (src/host/instances.ts):
 scripts/host/instance.sh <handle>     # provision one: idempotent
 bin/skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--disabled]
 bin/skein-host list | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store and wallet
-bin/skein-host run                    # every enabled row
+bin/skein-host run                    # every enabled row, and the roster server
+bin/skein-host deploy <handle> <dir> [--only glob,glob]
+bin/skein-host deploy --all [--only glob,glob]   # every enabled row, from its `source`
+bin/skein-host roster                 # the roster JSON, printed
 ```
 
 `instance.sh <handle>` does for one instance what `up.sh` does for the single
@@ -173,6 +177,56 @@ tick. The host wallet signs every entry of every instance. A row that fails
 (wallet down, identity or host mismatch) is logged and skipped. Handles the
 instances' programs `resolve` are looked up in host.db, then at the
 messagebox's paymail PKI (`/bsvalias/id/<handle>@<domain>`).
+
+### Deploying an agent: `skein-host deploy`
+
+Genesis is only the core image; the agent's personality arrives as a
+message (#23, "Deployment via `objects`"). `skein-host deploy <handle> <dir>`
+does what `bin/skein import` does, for the row's instance: it hashes `<dir>`
+into git objects, sends them in ≤ 1 MiB bundles to the instance's `objects`
+box (blobs, then trees, the root tree on the last bundle), and records the
+root CID as the row's `tree` and `<dir>` as its `source`. Each envelope is
+signed and encrypted by the **owner** — the identity the genesis subscribes
+to `objects` and `head` — through the owner's wallet as `bin/skein` does
+(`SKEIN_OWNER_WALLET`, default http://127.0.0.1:3322, origin
+`SKEIN_ORIGINATOR`, default `skein-client`); it refuses if that wallet is not
+`SKEIN_OWNER` or not the store's genesis owner. The messagebox queues the
+envelopes; the instance admits them as host-signed entries when its delivery
+polls, so the instance need not be running.
+
+- **First deploy**: objects-handler makes the root `main` (there is none yet).
+- **Redeploy of a changed directory**: only the records the instance's store
+  lacks (read-only look at the store, if it exists), then `head` `{name:
+  "main", tree: root}`, so the next *new* conversation starts from the new
+  tree (a SOUL.md edit takes effect there; running conversations keep their
+  prompt).
+- **Unchanged directory** (root = the row's `tree`): nothing is sent.
+- `deploy --all`: every enabled row that has a `source`.
+
+**The filter.** Only what the loop uses goes in, not the code around it
+(b-open-io/prompts' `.agents/<name>/` also holds `src/`, `package.json`,
+`bun.lock`, `data/`, …). Default `--only SOUL.md,IDENTITY.md,skills`.
+Patterns are paths from the directory's root, comma-separated, `*`/`?`
+within one segment; a pattern naming a directory takes all of it;
+`.git` and `node_modules` are never sent. `--only '*'` sends everything else.
+
+### The roster: `/roster.json`
+
+`skein-host run` serves `http://127.0.0.1:$SKEIN_HOST_PORT/roster.json`
+(default 4600; CORS `*`, for a static front end on another origin), and
+`skein-host roster` prints the same JSON: one entry per enabled row,
+
+```
+[{"handle": "martha", "domain": "localhost", "identity": "02…", "displayName": "Martha",
+  "description": "Organization front desk …", "emoji": ":woman_office_worker:", "status": "live"}]
+```
+
+`displayName`, `description`, `emoji`, `avatar` are IDENTITY.md's `- Name:`,
+`- Description:`, `- Emoji:`, `- Avatar:` lines, read from the instance's
+store by the row's `tree` (read-only); empty (or absent) when nothing is
+deployed or the deploy has not been admitted yet. `status` is `live` if the
+instance runs in this host process, else `idle` (so `skein-host roster`,
+its own process, says `idle` for every row).
 
 Two limits of the dev wallets and messagebox, not of skein:
 

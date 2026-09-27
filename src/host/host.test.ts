@@ -32,7 +32,7 @@ async function tmp(t: { after(fn: () => Promise<void>): void }): Promise<string>
 test("host.db: add (defaults, then an update of given fields), get, list by status, enable/disable, remove", async (t) => {
   const db = new HostDb(join(await tmp(t), "host.db"));
   const a = db.add("martha", { store: "/s/martha.db", wallet_url: "http://127.0.0.1:3401" }, new Date(0));
-  assert.deepEqual(a, { handle: "martha", domain: "localhost", identity: null, wallet_url: "http://127.0.0.1:3401", wallet_originator: "skein", store: "/s/martha.db", tree: null, status: "enabled", created_at: "1970-01-01T00:00:00.000Z" });
+  assert.deepEqual(a, { handle: "martha", domain: "localhost", identity: null, wallet_url: "http://127.0.0.1:3401", wallet_originator: "skein", store: "/s/martha.db", tree: null, source: null, status: "enabled", created_at: "1970-01-01T00:00:00.000Z" });
   db.add("kurt", { store: "/s/kurt.db", domain: "example.com" }, new Date(1));
   const updated = db.add("martha", { identity: "02" + "a".repeat(64), tree: "bafy" });
   assert.equal(updated.identity, "02" + "a".repeat(64));
@@ -70,7 +70,7 @@ test("skein-host: add / list / disable / enable / remove through the CLI, store 
 // ---------------------------------------------------------------- instances from rows
 
 const row = (handle: string): InstanceRow => ({
-  handle, domain: "localhost", identity: null, wallet_url: null, wallet_originator: "skein", store: `mem:${handle}`, tree: null, status: "enabled", created_at: iso(T0),
+  handle, domain: "localhost", identity: null, wallet_url: null, wallet_originator: "skein", store: `mem:${handle}`, tree: null, source: null, status: "enabled", created_at: iso(T0),
 });
 
 /** Host options over memory stores and in-process wallets: one host key, one wallet key per handle. */

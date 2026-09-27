@@ -5,7 +5,13 @@
 //   skein-host list
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
-// `add` inserts, or updates the given fields of an existing row. `run` reads
+//   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
+//   skein-host roster
+// `add` inserts, or updates the given fields of an existing row. `deploy`
+// sends a directory into an instance through its `objects` box as the owner
+// (deploy.ts) and records its root as the row's `tree` (and the directory as
+// its `source`, which `--all` deploys again). `roster` prints the front end's
+// roster (roster.ts), which `run` also serves at /roster.json. `run` reads
 // its environment like skein-runtime (bin/skein-host fills it from $SKEIN_HOME):
 //   SKEIN_HOME            default ~/.skein; host.db lives here
 //   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway keys for every instance and the host)
@@ -13,29 +19,44 @@
 //   SKEIN_OWNER           a new instance's owner;   SKEIN_OWNER_HANDLE default david@localhost
 //   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE default infer@localhost
 //   SKEIN_MESSAGEBOX      the messagebox host;   SKEIN_POLL_MS default 1000
+//   SKEIN_HOST_PORT       the roster server's port on 127.0.0.1, default 4600
+// `deploy` reads SKEIN_MESSAGEBOX, SKEIN_OWNER (checked against the wallet),
+// and signs through the owner's wallet as bin/skein does:
+//   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
-import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { install } from "../dev/cli.ts";
 import { short } from "../runtime/log.ts";
 import { openStore } from "../runtime/sqlite.ts";
-import { connectWallet, ephemeralWallet } from "../wallet.ts";
+import { rootIdentity } from "../runtime/identity.ts";
+import type { Store } from "../runtime/store.ts";
+import { connectWallet, ephemeralWallet, remoteWallet, type WalletInterface } from "../wallet.ts";
+import { DEFAULT_ONLY, deploy } from "./deploy.ts";
 import { hostResolver, startInstance, type Running } from "./host.ts";
-import { HostDb, type RowFields } from "./instances.ts";
-import { messageBoxClient } from "./messagebox.ts";
+import { HostDb, type InstanceRow, type RowFields } from "./instances.ts";
+import { messageBoxClient, type MessageBox } from "./messagebox.ts";
+import { roster, serveRoster } from "./roster.ts";
 
 export interface Env {
   vars: Record<string, string | undefined>;
   out(line: string): void;
   err(line: string): void;
+  /** Tests: the owner's wallet and messagebox session `deploy` uses instead of SKEIN_OWNER_WALLET / SKEIN_MESSAGEBOX. */
+  owner?: { wallet: WalletInterface; box: MessageBox };
+  /** Tests: a row's store, instead of opening its file read-only. */
+  store?(row: InstanceRow): Store | undefined;
 }
 
 const USAGE = `usage:
   skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--disabled]
   skein-host list
   skein-host enable|disable|remove <handle>
-  skein-host run`;
+  skein-host run
+  skein-host deploy <handle> <dir> [--only glob,glob]     default --only ${DEFAULT_ONLY.join(",")}
+  skein-host deploy --all [--only glob,glob]              every enabled row, from its last deployed directory
+  skein-host roster`;
 
 export const homeOf = (vars: Env["vars"]) => vars.SKEIN_HOME || join(vars.HOME ?? ".", ".skein");
 
@@ -72,6 +93,11 @@ export async function main(argv: string[], env: Env): Promise<number> {
       }
       case "run":
         return await run(db, env);
+      case "deploy":
+        return await deployCmd(db, rest, env);
+      case "roster":
+        env.out(JSON.stringify(await roster(db.list("enabled"), async (row) => openRow(row, env), () => false), null, 2));
+        return 0;
       default:
         env.err(USAGE);
         return 2;
@@ -79,6 +105,65 @@ export async function main(argv: string[], env: Env): Promise<number> {
   } finally {
     if (cmd !== "run") db.close(); // run keeps it (and closes it on a signal)
   }
+}
+
+/** A row's store to read while something else may be writing it: read-only, if it exists. */
+function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promise<void> } {
+  const given = env.store?.(row);
+  if (given) return { blocks: given };
+  if (!existsSync(row.store)) return {};
+  const s = openStore(row.store, { readOnly: true });
+  return { blocks: s, close: () => s.close() };
+}
+
+async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { all: { type: "boolean" }, only: { type: "string" } } });
+  const only = v.only !== undefined ? v.only.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
+  let jobs: Array<{ row: InstanceRow; dir: string }>;
+  if (v.all) {
+    if (positionals.length) { env.err(USAGE); return 2; }
+    jobs = [];
+    for (const row of db.list("enabled")) {
+      if (row.source) jobs.push({ row, dir: row.source });
+      else env.out(`${row.handle}: never deployed (no source directory); skipped`);
+    }
+  } else {
+    const [handle, dir] = positionals;
+    if (!handle || !dir || positionals.length > 2) { env.err(USAGE); return 2; }
+    const row = db.get(handle);
+    if (!row) { env.err(`skein-host deploy: no instance ${handle}`); return 1; }
+    jobs = [{ row, dir: resolve(dir) }];
+  }
+  if (!jobs.length) return 0;
+  let owner = env.owner;
+  if (!owner) {
+    const mb = env.vars.SKEIN_MESSAGEBOX;
+    if (!mb) { env.err("skein-host deploy: SKEIN_MESSAGEBOX is not set (bin/skein-host reads messagebox.url)"); return 1; }
+    const wallet = remoteWallet(env.vars.SKEIN_OWNER_WALLET || "http://127.0.0.1:3322", env.vars.SKEIN_ORIGINATOR || "skein-client");
+    owner = { wallet, box: messageBoxClient(wallet, mb, env.vars.SKEIN_ORIGINATOR || "skein-client") };
+  }
+  const me = await rootIdentity(owner.wallet);
+  if (env.vars.SKEIN_OWNER && env.vars.SKEIN_OWNER !== me) {
+    env.err(`skein-host deploy: the owner wallet is ${short(me)}, not SKEIN_OWNER ${short(env.vars.SKEIN_OWNER)}: instances would not admit what it signs`);
+    return 1;
+  }
+  let failed = 0;
+  for (const { row, dir } of jobs) {
+    const s = openRow(row, env);
+    try {
+      const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box, store: s.blocks });
+      db.add(row.handle, { tree: r.root, source: dir });
+      env.out(r.unchanged
+        ? `${row.handle}: unchanged ${r.root}`
+        : `${row.handle}: deployed ${r.root} · ${r.records} objects in ${r.bundles} envelope(s) to objects${r.head ? " · head main" : ""}`);
+    } catch (e) {
+      failed++;
+      env.err(`${row.handle}: ${(e as Error).message}`);
+    } finally {
+      await s.close?.();
+    }
+  }
+  return failed ? 1 : 0;
 }
 
 /** Start every enabled row; stop them all on SIGINT/SIGTERM. A row that fails to start is logged and skipped. */
@@ -112,7 +197,6 @@ async function run(db: HostDb, env: Env): Promise<number> {
         log,
       });
       if (!row.identity && !ephemeral) db.add(row.handle, { identity: r.identity });
-      if (row.tree) log(row.handle, `tree ${row.tree} recorded; booting main from it is #4, not done yet`);
       running.push(r);
     } catch (e) {
       log(row.handle, `not started: ${(e as Error).message}`);
@@ -120,8 +204,13 @@ async function run(db: HostDb, env: Env): Promise<number> {
   }
   env.out(`skein-host: ${running.length} of ${db.list("enabled").length} enabled instances running (${running.map((r) => r.row.handle).join(", ") || "none"})`);
   if (!running.length) { db.close(); return 1; }
+  const live = new Map(running.map((r) => [r.row.handle, r]));
+  const port = Number(v.SKEIN_HOST_PORT || 4600);
+  const server = await serveRoster(port, () => roster(db.list("enabled"), async (row) => live.has(row.handle) ? { blocks: live.get(row.handle)!.store } : openRow(row, env), (row) => live.has(row.handle)))
+    .then((s) => { env.out(`skein-host: roster at http://127.0.0.1:${port}/roster.json`); return s; }, (e: Error) => { env.err(`skein-host: roster server: ${e.message}`); return undefined; });
   const stop = async (sig: string) => {
     env.out(`${sig}: stopping`);
+    server?.close();
     for (const r of running) await r.stop().catch((e) => log(r.row.handle, `stop: ${(e as Error).message}`));
     db.close();
     process.exit(0); // the messagebox clients' sockets would keep the process alive (as in main.ts)

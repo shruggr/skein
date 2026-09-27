@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS instances (
   wallet_url        TEXT,                             -- its BRC-100 endpoint, e.g. http://127.0.0.1:3401
   wallet_originator TEXT NOT NULL DEFAULT 'skein',
   store             TEXT NOT NULL,                    -- its runtime.db
-  tree              TEXT,                             -- the CID the genesis's main should point at (#4; recorded, not acted on yet)
+  tree              TEXT,                             -- the root CID of the directory last deployed into it (skein-host deploy)
+  source            TEXT,                             -- that directory, for skein-host deploy --all
   status            TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
   created_at        TEXT NOT NULL
 );`;
@@ -29,6 +30,7 @@ export interface InstanceRow {
   wallet_originator: string;
   store: string;
   tree: string | null;
+  source: string | null;
   status: Status;
   created_at: string;
 }
@@ -36,14 +38,18 @@ export interface InstanceRow {
 /** The fields `add` sets; absent ones keep their value (or the column's default on insert). */
 export type RowFields = Partial<Omit<InstanceRow, "handle" | "created_at">>;
 
-const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "status"] as const;
+const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "source", "status"] as const;
 
 export class HostDb {
   readonly db: DatabaseSync;
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    this.db.exec("PRAGMA busy_timeout = 5000;"); // `run` holds it open while `deploy`/`add` write
     this.db.exec(DDL);
+    // Older files: columns added since.
+    const cols = new Set(this.db.prepare("PRAGMA table_info(instances)").all().map((c) => c.name));
+    if (!cols.has("source")) this.db.exec("ALTER TABLE instances ADD COLUMN source TEXT");
   }
 
   /**
