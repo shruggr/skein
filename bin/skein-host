@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # skein-host (src/host/cli.ts): the host's management database ($SKEIN_HOME/host.db)
 # and `run`, the one process that runs every enabled instance in it. For `run`
-# (and `deploy`: owner and messagebox) it fills the environment from what
+# (and `deploy`, `roster --deploy`: owner and messagebox) it fills the environment from what
 # scripts/host/up.sh wrote under $SKEIN_HOME, unless already set, like bin/skein-runtime:
 #   SKEIN_OWNER ← owner.identity   SKEIN_INFER ← infer.identity   SKEIN_MESSAGEBOX ← messagebox.url
 # Each instance's pinned wasm modules are installed into its store at start.
@@ -9,7 +9,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 home="${SKEIN_HOME:-$HOME/.skein}"
 export SKEIN_HOME="$home"
-if [ "${1:-}" = run ] || [ "${1:-}" = deploy ]; then
+if [ "${1:-}" = run ] || [ "${1:-}" = deploy ] || [ "${1:-}" = roster ]; then
   [ -z "${SKEIN_OWNER:-}" ] && [ -f "$home/owner.identity" ] && export SKEIN_OWNER="$(cat "$home/owner.identity")"
   [ -z "${SKEIN_INFER:-}" ] && [ -f "$home/infer.identity" ] && export SKEIN_INFER="$(cat "$home/infer.identity")"
   [ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"

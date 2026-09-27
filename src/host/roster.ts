@@ -5,11 +5,15 @@
 // store by the row's `tree`; `status` is `live` when the instance runs in this
 // host process, else `idle`. `skein-host roster` prints it; `skein-host run`
 // serves it at /roster.json (CORS *) for a static page on another origin.
+//
+// Each agent's own roster (#27) is a file, ROSTER.md, which deploy puts in its
+// tree and the loop appends to the system prompt: the colleagues the row
+// `knows` (host.db), each with its address — `- @kurt@localhost — Kurt: …`.
 
 import { createServer, type Server } from "node:http";
 import { CID } from "multiformats/cid";
-import { readFile, type TreeBlocks } from "../runtime/tree.ts";
-import type { InstanceRow } from "./instances.ts";
+import { lookup, readBlob, readFile, type TreeBlocks } from "../runtime/tree.ts";
+import { knowsOf, type InstanceRow } from "./instances.ts";
 
 export interface RosterEntry {
   handle: string;
@@ -49,6 +53,41 @@ export async function rosterEntry(row: InstanceRow, blocks: TreeBlocks | undefin
     } catch { /* no IDENTITY.md, or the deploy has not been admitted yet */ }
   }
   return { handle: row.handle, domain: row.domain, identity: row.identity ?? "", ...id, status: live ? "live" : "idle" };
+}
+
+/**
+ * IDENTITY.md's fields in the row's deployed tree: empty ones if the tree has
+ * none, undefined if there is no tree or `blocks` does not have it (yet).
+ */
+export async function deployedIdentity(row: InstanceRow, blocks: TreeBlocks | undefined): Promise<IdentityFields | undefined> {
+  if (!row.tree || !blocks) return undefined;
+  const tree = CID.parse(row.tree);
+  if (!(await blocks.has(tree))) return undefined;
+  const leaf = await lookup(blocks, tree, "IDENTITY.md");
+  return leaf ? parseIdentity(new TextDecoder().decode(await readBlob(blocks, leaf.cid))) : { displayName: "", description: "" };
+}
+
+/** The heading of every ROSTER.md. */
+export const ROSTER_HEADING = "## Colleagues";
+
+/**
+ * `row`'s ROSTER.md: the rows it knows among `rows` (in their order; itself
+ * never; `knows` naming no row is skipped), one line each —
+ * `- @handle@domain — Name: description` (no name: the handle; no
+ * description: no ": …"). Undefined when it knows nobody: no file.
+ */
+export async function rosterFor(row: InstanceRow, rows: InstanceRow[], fields: (row: InstanceRow) => Promise<IdentityFields>): Promise<string | undefined> {
+  const k = knowsOf(row);
+  const known = rows.filter((r) => r.handle !== row.handle && (k === "all" || k.includes(r.handle)));
+  if (!known.length) return undefined;
+  const lines: string[] = [];
+  for (const r of known) {
+    const f = await fields(r);
+    const oneLine = (x: string) => x.replace(/\s+/g, " ").trim();
+    const name = oneLine(f.displayName) || r.handle, description = oneLine(f.description);
+    lines.push(`- @${r.handle}@${r.domain} — ${name}${description ? `: ${description}` : ""}`);
+  }
+  return `${ROSTER_HEADING}\n\n${lines.join("\n")}\n`;
 }
 
 /**

@@ -3,6 +3,7 @@
 // the open `chat` subscription); two instances started from two rows, sharing
 // a messagebox hub and the host wallet and nothing else.
 
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
@@ -21,7 +22,7 @@ import type { ThreadOrigin } from "../runtime/types.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
 import { configFor, hostResolver, startInstance, type HostOptions, type Running } from "./host.ts";
-import { HostDb, type InstanceRow } from "./instances.ts";
+import { HostDb, knowsColumn, knowsOf, type InstanceRow } from "./instances.ts";
 
 async function tmp(t: { after(fn: () => Promise<void>): void }): Promise<string> {
   const dir = await fs.mkdtemp(join(tmpdir(), "skein-host-"));
@@ -32,7 +33,7 @@ async function tmp(t: { after(fn: () => Promise<void>): void }): Promise<string>
 test("host.db: add (defaults, then an update of given fields), get, list by status, enable/disable, remove", async (t) => {
   const db = new HostDb(join(await tmp(t), "host.db"));
   const a = db.add("martha", { store: "/s/martha.db", wallet_url: "http://127.0.0.1:3401" }, new Date(0));
-  assert.deepEqual(a, { handle: "martha", domain: "localhost", identity: null, wallet_url: "http://127.0.0.1:3401", wallet_originator: "skein", store: "/s/martha.db", tree: null, source: null, status: "enabled", created_at: "1970-01-01T00:00:00.000Z" });
+  assert.deepEqual(a, { handle: "martha", domain: "localhost", identity: null, wallet_url: "http://127.0.0.1:3401", wallet_originator: "skein", store: "/s/martha.db", tree: null, source: null, knows: null, status: "enabled", created_at: "1970-01-01T00:00:00.000Z" });
   db.add("kurt", { store: "/s/kurt.db", domain: "example.com" }, new Date(1));
   const updated = db.add("martha", { identity: "02" + "a".repeat(64), tree: "bafy" });
   assert.equal(updated.identity, "02" + "a".repeat(64));
@@ -47,6 +48,27 @@ test("host.db: add (defaults, then an update of given fields), get, list by stat
   assert.ok(db.remove("kurt"));
   assert.ok(!db.remove("kurt") && !db.setStatus("kurt", "enabled"));
   assert.deepEqual(db.list().map((r) => r.handle), ["martha"]);
+  db.close();
+});
+
+test("host.db: `knows` — a list of handles, [\"*\"] for everyone, null for nobody; an older file gains the column", async (t) => {
+  const dir = await tmp(t);
+  const old = new DatabaseSync(join(dir, "host.db"));
+  old.exec("CREATE TABLE instances (handle TEXT PRIMARY KEY, domain TEXT NOT NULL DEFAULT 'localhost', identity TEXT, wallet_url TEXT, wallet_originator TEXT NOT NULL DEFAULT 'skein', store TEXT NOT NULL, tree TEXT, status TEXT NOT NULL DEFAULT 'enabled', created_at TEXT NOT NULL)");
+  old.exec("INSERT INTO instances (handle, store, created_at) VALUES ('martha', '/s/m.db', '1970-01-01T00:00:00.000Z')");
+  old.close();
+  const db = new HostDb(join(dir, "host.db"));
+  assert.equal(db.get("martha")!.knows, null);
+  assert.deepEqual(knowsOf(db.get("martha")!), []);
+  assert.ok(db.setKnows("martha", "all"));
+  assert.equal(db.get("martha")!.knows, '["*"]');
+  assert.equal(knowsOf(db.get("martha")!), "all");
+  db.add("kurt", { store: "/s/k.db", knows: knowsColumn(["martha", "martha"]) });
+  assert.deepEqual(knowsOf(db.get("kurt")!), ["martha"]);
+  assert.equal(knowsColumn(["a", "*"]), '["*"]');
+  assert.ok(db.setKnows("kurt", []));
+  assert.equal(db.get("kurt")!.knows, null);
+  assert.ok(!db.setKnows("nobody", ["kurt"]));
   db.close();
 });
 
@@ -70,7 +92,7 @@ test("skein-host: add / list / disable / enable / remove through the CLI, store 
 // ---------------------------------------------------------------- instances from rows
 
 const row = (handle: string): InstanceRow => ({
-  handle, domain: "localhost", identity: null, wallet_url: null, wallet_originator: "skein", store: `mem:${handle}`, tree: null, source: null, status: "enabled", created_at: iso(T0),
+  handle, domain: "localhost", identity: null, wallet_url: null, wallet_originator: "skein", store: `mem:${handle}`, tree: null, source: null, knows: null, status: "enabled", created_at: iso(T0),
 });
 
 /** Host options over memory stores and in-process wallets: one host key, one wallet key per handle. */
