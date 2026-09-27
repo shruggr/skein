@@ -36,9 +36,10 @@ the runtime uses (`MODULES` in `src/runtime/programs.ts`; `skein-dev install`
 puts them there), or from a directory with `-wasm`; either way the bytes are
 checked against those CIDs. Out of fuel exits 3.
 
-Compiling both modules takes ~0.6 s per process (Cranelift, parallel, arm64);
-after that the 52 test cases run in ~0.25 s. Node takes ~0.55 s for the same batch
-including its compile.
+Compiling all modules takes ~1 s per process (Cranelift, parallel, arm64,
+now brush + coreutils + the toolset's nine extra modules); after that the
+64 test cases run in ~0.3 s. Node takes proportionally longer for the same
+batch including its compile.
 
 ## Behaviour
 
@@ -70,11 +71,13 @@ line in `src/runtime/shell.test.ts` (reads, writes, renames, `cp`, symlinks,
 pipelines, command substitution, here-docs, `yes | head`, exit codes, pipefail,
 the determinism line with stdin/`date`/`$RANDOM`/`ls -la`/`od`/`sleep`/`mktemp`,
 `-time`, `-seed`, escaping the root, `/dev`, cwd + env, a refused cwd, scripts
-in the tree, the 2 MB round trip: 32) and 20 more (hard links, `ls -R`, `realpath`,
+in the tree, the 2 MB round trip: 32) and 32 more (hard links, `ls -R`, `realpath`,
 `cp -r`/`rm -r`, `rmdir` of a non-empty dir, `truncate`, `sort > same file`,
 `dd`/`tail -c`, moving a dir into itself, dangling symlinks written through,
 NUL bytes, globs, nested substitution, `/dev/std*`, stdin, `printenv`,
-`$SRANDOM`/`shuf`/`mktemp`, `test`). **All 52 match.**
+`$SRANDOM`/`shuf`/`mktemp`, `test`, and the toolset of issue #13: `grep -rn`/
+`-il`, `find | xargs`, `which`, `sed -i`/`-n`, `awk '{print}'`, `diff`, `cmp`,
+`jq`/`jq -r`, a `grep -rl | xargs | sed | awk` pipeline). **All 64 match.**
 `TestTreeMatchesNodeScan` checks that Go's tree hashing agrees with
 `src/dev/scan.ts` (and, checked by hand, a scanned tree's CID is its `git write-tree` id).
 

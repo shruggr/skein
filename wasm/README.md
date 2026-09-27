@@ -1,21 +1,50 @@
 # wasm/
 
-The programs the wasm shell (`src/runtime/shell.ts`) runs. Both are WASI preview1
+The programs the wasm shell (`src/runtime/shell.ts`) runs: brush + uutils
+coreutils, and the toolset of issue #13 (search/edit/structured-data
+commands beyond coreutils, registered in `Modules.extra`). All WASI preview1
 modules (`wasm32-wasip1`), built with Rust 1.98.1 and stripped of symbols.
-`scripts/build-wasm.sh` rebuilds both from the pinned sources plus
-`patches/`, byte-identically on the same machine (paths of the build
-machine appear in panic strings, so another machine gets other bytes).
+`scripts/build-wasm.sh` rebuilds all of them from the pinned sources plus
+`patches/`, byte-identically on the same machine in the same checkout
+layout (paths of the build machine and even line numbers within a patched
+file appear in panic-location strings baked into the binary, so a
+different machine, or a differently-named `.build/` checkout dir, gets
+other bytes — verified the hard way while pinning `sed.wasm`, see the
+`tools` branch history).
 
 | file             | size    | source                                                                  |
 |------------------|---------|-------------------------------------------------------------------------|
 | `brush.wasm`     | 4.9 MB  | reubeno/brush `739a15d` (main, 2026-09-25), `--no-default-features --features minimal`, + `patches/brush.patch` |
 | `coreutils.wasm` | 10.0 MB | uutils/coreutils `0.12.0` (`dc1efd8`), `--no-default-features --features feat_wasm`, + `patches/coreutils.patch` |
+| `find.wasm`      | 1.86 MB | uutils/findutils `0.10.0` (`28be1fa2`), `--bin find`, + `patches/findutils.patch` |
+| `xargs.wasm`     | 0.38 MB | uutils/findutils `0.10.0` (`28be1fa2`), `--bin xargs`, + `patches/findutils.patch` |
+| `diff.wasm`      | 1.28 MB | uutils/diffutils `v0.5.0` (`60f65858`), + `patches/diffutils.patch` |
+| `cmp.wasm`       | 1.28 MB | same build as `diff.wasm` (one multicall binary, same bytes/CID), registered under the name `cmp` too |
+| `jq.wasm`        | 3.00 MB | 01mf02/jaq `v3.1.1` (`c866e703`), `-p jaq --no-default-features`, + `patches/jaq.patch` |
+| `sed.wasm`       | 2.04 MB | uutils/sed `0.2.0` (`2ce633cb`), + `patches/sed.patch` |
+| `awk.wasm`       | 1.54 MB | quinnjr/rawk (crate `awk-rs`) `v0.2.0` (`4addaefa`), unpatched |
+| `tree.wasm`      | 0.69 MB | peteretelej/tree (crate `rust_tree`) `v1.3.0` (`dfed2820`), unpatched |
+| `which.wasm`     | 0.07 MB | first-party, `wasm/tools/which` — no Rust `which` CLI exists (library only) |
+| `grep.wasm`      | 1.57 MB | first-party, `wasm/tools/grep` on grep-matcher/grep-regex/grep-searcher (ripgrep's own libraries) — no GNU-grep-compatible CLI exists in Rust |
+
+Base image growth: **10 files / 9 unique binaries, 13.71 MB committed
+(12.43 MB unique bytes** — `diff.wasm`/`cmp.wasm` are identical).
 
 sha256 (as committed):
 
 ```
 8cb0968d6ffa31244a7d7dd7d15bd92e1b8cd37f2e5cd172f9e53f6896bc1417  brush.wasm
 6e3be82e9b08e5e2ebace2dfbf1c74ea7a2f30045f92dba9a06419201b08c491  coreutils.wasm
+3f6b7a9d9f12db354bf599b5da494332795d4d2da6ea4541d5af96cdd53ebc0d  find.wasm
+08cd95d5c0a5d075b53dd57c8cb60a7db89cd2fdbcee57922b0f5d5a94a6064d  xargs.wasm
+a788351b50909b76f825e92b1c138fc31212725e3cf13051363d3cb6661035f2  diff.wasm
+a788351b50909b76f825e92b1c138fc31212725e3cf13051363d3cb6661035f2  cmp.wasm
+fad7b15e0c4eb00f8ca22e8325d8f8fc57d8b45265d29e97ed4b7145250cddf1  jq.wasm
+769c2f20af007c6807bc7aa50a51fb7b9a3d932327e99164484bdf161a0a7916  sed.wasm
+2e7ee785f7565367015ec6c7681d6025968f65ff5d9a117bcd0d8dd6c0aceb4d  awk.wasm
+140e2277a4e5d37ceb0e1cbcc6465cb4f0425ccb6314a5249eed73ab2b7bf83f  tree.wasm
+43612217922c4a6ddbebcf4b9503d8360c9a22c0c3b7b797689a37a6c67368c1  which.wasm
+e167efd302749254f77dd7b28fcdae6fafdd205b8902100e78f95fe80f7075c1  grep.wasm
 ```
 
 ## Why patched builds and not the releases
@@ -55,3 +84,147 @@ All changes are `#[cfg(target_os = "wasi")]`; native builds are unaffected.
 
 Still unsupported under this patch: process substitution `<(…)`/`>(…)`,
 coprocesses, background jobs `&` that must run concurrently.
+
+## The toolset (issue #13)
+
+### Inventory: what `feat_wasm` coreutils already has
+
+`coreutils --list` under `feat_wasm` (79 names): `arch b2sum base32 base64
+basename basenc cat cksum comm cp csplit cut date dd dir dircolors dirname
+echo expand expr factor false fmt fold head hostid join link ln ls md5sum
+mkdir mktemp mv nice nl nproc numfmt od paste pathchk pr printenv printf ptx
+pwd readlink realpath rm rmdir seq sha1sum sha224sum sha256sum sha384sum
+sha512sum shred shuf sleep sort split sum tail tee test touch tr true
+truncate tsort tty uname unexpand uniq unlink vdir wc yes`.
+
+Against the issue's list, already covered: `tr`, `cut`, `sort`, `uniq`,
+`tee`, `head`, `tail`, `wc`, `cat`, `printf`/`echo`, `base64`,
+`sha256sum`/`md5sum` (plus sha1/224/384/512, b2sum), `paste`, `join`,
+`comm`, `fold`, `basename`/`dirname`/`realpath`. **Not** in `feat_wasm`
+despite being in full coreutils: `stat`, `du`, `env`, `chmod`/`chown` —
+these need filesystem-mode support (`skein.chmod`, the "File modes" item
+in issue #13, explicitly out of scope here) and aren't re-enabled by this
+change. `file` and `column` were never coreutils (separate GNU/util-linux
+projects); see "not attempted" below for `file`. Missing and built here:
+`grep`, `find`, `xargs`, `which`, `sed`, `awk`, `diff`/`cmp`, `jq`, `tree`.
+
+### The new modules
+
+- **find, xargs** — uutils/findutils. `find` builds unpatched (needs a
+  WASI C toolchain for its `onig` dependency — see "wasi-sdk" below —
+  but no source changes). `xargs` needed a real patch: it spawns children
+  with `std::process::Command`, which traps under WASI preview1
+  ("operation not supported on this platform") the same way brush's did
+  before its own patch. `patches/findutils.patch` adds `src/skein.rs`
+  (a `skein.spawn` binding, the same wire format as brush's
+  `sys/wasm/skein.rs`) and switches `xargs`'s command execution to it
+  under `#[cfg(target_os = "wasi")]`; the native code path is untouched.
+  Tested: `find . -name '*.go'`, `find . -name '*.go' | xargs wc -l`,
+  `xargs -n1`, `xargs -I{}` (multiple invocations per line).
+- **diff, cmp** — uutils/diffutils, one multicall binary (like coreutils'
+  own) dispatching on argv[0]/binary name, registered under both names
+  (same CID). `patches/diffutils.patch`: `cmp.rs` used
+  `std::os::unix::fs::MetadataExt` unconditionally for an optimization
+  (skip comparing when stdout is `/dev/null`) and `.size()` for file
+  sizes; WASI's equivalent (`std::os::wasi::fs::MetadataExt`) exists but
+  is nightly-only (`wasi_ext`, rust-lang/rust#71213) on stable 1.98.1, so
+  the patch drops the `/dev/null` fast path under wasi (behavior is
+  unaffected beyond that one optimization) and uses the portable
+  `Metadata::len()` for sizes.
+- **jq** — 01mf02/jaq (a jq clone), built `-p jaq --no-default-features`
+  (drops the `mimalloc` allocator; `jaq-all`'s own defaults, formats +
+  std-all, stay on — so `--from yaml`/`--to yaml` etc. work). Unpatched
+  build still fails: `rustyline` (for the `repl` filter builtin, callable
+  from inside a jq program) is a required, not optional, dependency, and
+  pulls in `fd-lock` via its `with-file-history` feature, which does not
+  build for wasm32-wasip1 at all (`sys::AsOpenFile`/`RwLockWriteGuard` not
+  found — no `wasi` backend in that crate version). `patches/jaq.patch`
+  moves `rustyline`/`dirs` into
+  `[target.'cfg(not(target_os = "wasi"))'.dependencies]` and stubs
+  `repl()`'s implementation under wasi to return an error ("not available
+  (no terminal under the skein WASI host)") instead of silently doing
+  nothing — WASI has no termios/ioctl, so there is no real terminal to
+  back a REPL either way, same as the skein shell itself.
+- **which** — no Rust `which` CLI exists on crates.io, only a library
+  (`which`). First-party, `wasm/tools/which` (~50 lines): checks `$PATH`
+  entries as files first (`std::env::split_paths` is unimplemented under
+  wasm32-wasip1 — "unsupported" panic — so `PATH` is split on `:` by
+  hand), then falls back to the host's `skein.cmd_exists` import (the
+  same one brush uses to resolve builtins/coreutils/other extra modules
+  that are never files in the tree) and prints the bare name — matching
+  how brush itself resolves a name not on `$PATH` (see `brush.patch`
+  above). Supports `-a`/`--all`.
+- **grep** — no GNU-grep-flag-compatible CLI exists in Rust (ripgrep is
+  the closest but explicitly disclaims GNU/POSIX flag compatibility:
+  different defaults, no `-E`, always-recursive). First-party,
+  `wasm/tools/grep`, built directly on the libraries ripgrep itself is
+  built from (`grep-matcher`, `grep-regex`, `grep-searcher`, all pure
+  Rust). Covers `-r -R -n -i -E -l -v -c -H -h -o -e`, multiple files,
+  stdin, and a plain single-threaded deterministic recursive walk (no
+  `ignore::WalkParallel`; sorted, since the skein host needs deterministic
+  output). Memory maps are never used (`grep-searcher`'s
+  `MmapChoice::never()` is already its default — `memmap2` is a
+  dependency but is a no-op/errors under WASI at runtime, so this
+  matters). **Known gap**: `-E` is accepted but has no effect — patterns
+  are always parsed in `grep-regex`'s own syntax (close to POSIX ERE /
+  Rust `regex` syntax), never true POSIX BRE (where `( ) { } + ? |` are
+  literal unless backslash-escaped). Only affects patterns that lean on
+  that BRE/ERE distinction; literal-word searches (`grep -rn TODO`) and
+  already-ERE-style patterns behave identically either way.
+- **sed** — uutils/sed 0.2.0, unpatched build compiles clean, but has a
+  real bug reproducible outside skein/wasm entirely (checked with a
+  native build, no patch): `-i`'s clap `Arg` is `num_args(0..=1)` with a
+  `default_missing_value`, and clap's optional-value handling for that
+  combination swallows the *next* argv entry as the backup suffix even
+  though GNU sed only ever takes an attached suffix (`-i.bak`). So
+  `sed -i 's/x/y/' f` — overwhelmingly the most common form, and the
+  one issue #13 asks to test — treated `'s/x/y/'` as the suffix and `f`
+  as the script, and failed. `patches/sed.patch` adds
+  `.require_equals(true)`, which fixes the common bare-`-i` case at the
+  cost of GNU's attached-without-`=` short form: a backup suffix now
+  needs `-i=.bak` (or `--in-place=.bak`) instead of `-i.bak`. Tested:
+  `sed -i 's/x/y/'`, `sed -n '2,4p'`, multiple `-e`, `--in-place`.
+- **awk** — quinnjr/rawk (crate `awk-rs`) v0.2.0, unpatched; minimal deps
+  (`regex`, `thiserror`) build clean. The only other Rust awk
+  implementations (`frawk`, its `zawk` fork, `awkrs`) hard-depend on a
+  `cranelift`-JIT or similar exec-page-needing backend and cannot run
+  under WASI at all — not a build failure, a fundamental incompatibility
+  (no interpreter fallback). Tested: field splitting (`$1`/`$2`), `-F`,
+  `BEGIN`/`END` blocks, multi-line input over a pipe.
+- **tree** — peteretelej/tree (crate `rust_tree`) v1.3.0, unpatched.
+
+### wasi-sdk
+
+findutils' `onig` dependency (Oniguruma, the regex engine behind `-regex`/
+`-iregex`/`-name`) is a C library compiled via the `cc`/`onig_sys` build
+script; the Rust `wasm32-wasip1` target's bundled wasi-libc is not a C
+*compiler*, so `cc` has nothing to compile C with and fails
+(`fatal error: 'stdlib.h' file not found`). `scripts/build-wasm.sh` fetches
+[wasi-sdk](https://github.com/WebAssembly/wasi-sdk) 34.0 into
+`.build/wasi-sdk/` (once; ~190 MB, cached after) and points `CC_wasm32_wasip1`/
+`CFLAGS_wasm32_wasip1` at its clang + sysroot, only for the findutils step.
+
+### Not attempted
+
+- **`tar`, `gzip`/`gunzip`, `zip`/`unzip`** — no Rust project publishes a
+  GNU-tar- or gzip-flag-compatible CLI (only libraries: `tar`, `flate2`,
+  the `zip` crate); the closest all-in-one CLI, `ouch`, hard-depends on
+  `rayon` (real threads, unlikely to run under WASI preview1) and has its
+  own flag syntax regardless. The issue's own phrasing ("if a Rust port
+  builds") treats these as opportunistic, unlike `which`/`grep` which it
+  asks for outright — building bespoke wrapper CLIs for three formats was
+  out of scope for this pass; flagging honestly rather than shipping a
+  half-compatible wrapper.
+- **`xxd`/`hexdump`** — no xxd-flag-compatible Rust CLI exists (`hexyl` is
+  a real, maintained hex *viewer* but a different output format, no `-r`
+  reverse mode; `xxd-rs` is stale, pre-1.0 deps). `od` (already in
+  `feat_wasm`, e.g. `od -A x -t x1z`) covers the practical need already,
+  so this was not pursued further.
+- **`yq`** — no standalone pure-Rust `yq` CLI exists (the closest,
+  `clux/lq`, literally shells out to a `jq` binary — impossible for us,
+  no subprocess). Not a gap in practice: jaq's own format flags cover it —
+  `jq --from yaml <filter> file.yaml` (or `--to yaml`) — since `jq.wasm`
+  is already built with jaq-all's `formats` feature on. No separate `yq`
+  command is registered (registering one under a different argv0 without
+  it defaulting to YAML would be a false advertisement of `yq`'s actual
+  ergonomics).
