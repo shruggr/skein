@@ -26,10 +26,10 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreihvgtiq6ahkiv5t6skhw5qxwjk3fxpvmfdicwezgx7j6fqrmdnbmm"),
-  "objects-handler": CID.parse("bafkreic3dxcstkn3dy6rfvsn6nhcnngfioak6jfxlbnwjpjymarlhfnhgu"),
-  "head-handler": CID.parse("bafkreicubr3evvx34chd2ve44nfeenmzekn7d5abc7ahryfstytlosfiyq"),
-  "loop": CID.parse("bafkreibf3y5c62ocedxaiegfxhr5ixjoayhtf2zdps2ezujhtks363qize"),
+  "run-handler": CID.parse("bafkreias2nml273mrb4va37jvcoygdvr5unv2y4nktcgw6cpbve2r2xxvu"),
+  "objects-handler": CID.parse("bafkreigftxfxwqemfzfqxlqjfxd5eyrotm2jg7hm4hp5uplsercis3zgje"),
+  "head-handler": CID.parse("bafkreihtcs3i4b7u4unznafm5aob5szjpfyzygd4yx7ydtw5jcnmxit7sa"),
+  "loop": CID.parse("bafkreicfxgmfolyxlkhfbfqwq4onmd6dzsh7v3qqiiflppyxwrdyo3ilhi"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -75,7 +75,7 @@ export const LOOP = program({
   code: { wasm: MODULES.loop },
   inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
   services: ["infer"],
-  description: "The `chat` box: the turn loop. Keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell; says the answer to David and awaits his reply.",
+  description: "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another agent, resting on its `say`; says the answer to whoever chatted and awaits their reply.",
 });
 
 /** The programs a genesis names, by name. */

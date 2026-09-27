@@ -166,6 +166,41 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   sleeper's wake is a signed, stamped log entry with no message and no
   sender, one per wake. `hello` and `tick` are gone.
 
+## Chat between instances
+
+An instance talks to another the way David talks to it: a `chat`. The loop
+(`programs/loop`) gives the model a `message` tool beside `bash`:
+
+```
+message {to: "@handle@domain", text}
+```
+
+- **Addressing.** The loop resolves the handle to an identity key through the
+  host (`skein.Resolve`, the `resolve` import: an attested call — the host's
+  `Resolver` answers, the answer is recorded, replay serves it; a handle that
+  does not resolve is recorded as `""` and becomes an error result). The emit
+  is sealed to that key with the handle in the envelope's `recipient`; which
+  messagebox it goes to is the delivery provider's business (on localhost, the
+  one configured).
+- **The call.** The loop emits `chat` `{text, replyTo?}` — no tree: trees do not
+  cross instances — and rests `waiting` on it, as on an `infer`. The first
+  message to a handle in a conversation opens a new conversation there; a later
+  one to the same handle carries `replyTo: <their last say>`, continuing it.
+- **The answer.** The other instance's loop answers with `say` `{text, …,
+  replyTo: <our chat>}` to our identity, in our `say` box. It is a reply: the
+  scheduler matches `replyTo` against the thread that `awaits` it (and the
+  sender against the key the chat was sealed to) before any subscription, so
+  no `say` subscription is needed — only that the delivery provider collects
+  the box (genesis `collect`, default `["completions", "say"]`). Its text is the
+  tool result, kept as `{of: <their say>, role: "tool", call, to, sent: <our
+  chat>, text}`.
+- **One at a time.** A step waits on threads or on replies, not both: several
+  tool calls in one completion run in order, each `bash` a shell thread and
+  each `message` a reply-await.
+- **Inbound.** The receiving instance routes the `chat` by subscription; to
+  accept agents, not only its owner, its genesis subscribes `{box: "chat"}`
+  with no sender. A stalled reply is a delivery failure — the thread just waits.
+
 ## Why the plaintext
 
 With the content hash in the sender's signature, the plaintext needs no one

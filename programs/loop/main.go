@@ -1,23 +1,40 @@
-// loop: the turn loop (README.md, "Records"; docs/MESSAGES.md), launched by the subscription
-// (owner, chat) → loop with David's opening `chat` envelope as its input.
+// loop: the turn loop (README.md, "Records"; docs/MESSAGES.md), launched by a
+// subscription (…, chat) → loop with the opening `chat` envelope as its input:
+// David's, or another agent's (the `message` tool of another instance).
 //
 // The conversation is the thread's own chain: every turn is a record the step
 // keeps (skein.Keep), and each step rebuilds the messages by walking the chain
 // back from its tip. Turns ({kind: "turn", of, role, …}), built from the
 // admitted plaintext bodies and the shell's results:
 //
+//	system     {of: <tree>, role: "system", content}   (first, once: the conversation's prompt)
 //	user       {of: <chat envelope>, role: "user", text, tree?, model?}
 //	assistant  {of: <completions envelope>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
-//	tool       {of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}   (outputs capped at 16 KiB)
+//	tool       {of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}   (bash; outputs capped at 16 KiB)
+//	tool       {of: <their say envelope>, role: "tool", call, to, sent: <our chat envelope>, text}   (message)
+//	tool       {of: <entry>, role: "tool", call, to?, error}   (a message that could not be sent)
 //	error      {of: <completions envelope>, role: "error", error}
+//
+// The prompt: a new conversation reads /SOUL.md from the tree it starts on
+// (the chat's tree, else `main`'s) — else the fixed one below — and appends
+// /IDENTITY.md after it if there is one. It is kept as the system turn, so the
+// conversation keeps it however the tree moves on.
+//
+// Tools: `bash` (a command in the shell over the working tree) and `message`
+// ({to: "@handle@domain", text}: a `chat` to another agent, sealed to the
+// identity the handle resolves to through the host — skein.Resolve, attested
+// — then rest on the reply as on an `infer`; their `say` is the tool result.
+// A second message to the same handle in this conversation replies to their
+// last say, continuing their conversation). Calls run one at a time, in order.
 //
 // Per step, by why it runs:
 //
 //	a chat (step 1, or a reply to our `say`)  keep the user turn; emit `infer`; await it
-//	a completion (reply to our `infer`)      keep it; tool calls → launch the shell for the
-//	                                         first (one at a time); none → emit `say`, await it
+//	a completion (reply to our `infer`)      keep it; tool calls → run the first (one at
+//	                                         a time); none → emit `say`, await it
 //	                                         (an error → keep it, `say` it, await)
-//	the shell at rest                        keep the tool result; launch the next call, or
+//	a reply to our `message`                 keep it as the tool result; run the next call
+//	the shell at rest                        keep the tool result; run the next call, or
 //	                                         emit `infer` again when none is left
 package main
 
@@ -26,6 +43,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/fxamacker/cbor/v2"
@@ -93,6 +111,8 @@ type turn struct {
 	Ms        int64           `cbor:"ms,omitempty"`
 	Usage     cbor.RawMessage `cbor:"usage,omitempty"`
 	Call      string          `cbor:"call,omitempty"`
+	To        string          `cbor:"to,omitempty"`
+	Sent      skein.CID       `cbor:"sent,omitzero"`
 	ExitCode  *int            `cbor:"exitCode,omitempty"`
 	Stdout    *string         `cbor:"stdout,omitempty"`
 	Stderr    *string         `cbor:"stderr,omitempty"`
@@ -132,6 +152,22 @@ type shellResult struct {
 	Stdout   []byte    `cbor:"stdout"`
 	Stderr   []byte    `cbor:"stderr"`
 	Tree     skein.CID `cbor:"tree"`
+}
+
+var messageTool = map[string]any{
+	"type": "function",
+	"function": map[string]any{
+		"name":        "message",
+		"description": "Message a colleague — another agent — and wait for their answer. `to` is their handle, @handle@domain; `text` is what you want to tell or ask them. Their reply comes back as the result.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"to":   map[string]any{"type": "string", "description": "their handle, @handle@domain"},
+				"text": map[string]any{"type": "string", "description": "what to say"},
+			},
+			"required": []string{"to", "text"},
+		},
+	},
 }
 
 var bashTool = map[string]any{
@@ -190,6 +226,8 @@ func run() error {
 	switch {
 	case step.Reply != nil && step.Reply.Box == "completions":
 		return l.completion(step.Reply)
+	case step.Reply != nil && l.messaging() != nil:
+		return l.messageDone(step.Reply)
 	case step.Reply != nil:
 		return l.chat(step.Reply.Envelope, step.Reply.Body)
 	case len(step.Resolved) > 0:
@@ -222,9 +260,22 @@ func (l *loop) chat(envelope, body skein.CID) error {
 	if err := skein.Decode(plain, &b); err != nil {
 		return fmt.Errorf("chat body: %w", err)
 	}
-	if len(b.Tree) == 0 && len(l.conv) == 0 {
+	if len(l.conv) == 0 {
 		// A new conversation that names no tree starts from `main`, if there is one.
-		if b.Tree, err = skein.Head("main"); err != nil {
+		if len(b.Tree) == 0 {
+			if b.Tree, err = skein.Head("main"); err != nil {
+				return err
+			}
+		}
+		// Its system prompt, from that tree, kept for the whole conversation.
+		of := b.Tree
+		if len(of) == 0 {
+			of = skein.EmptyTree
+			if err := skein.PutBlock(of, skein.EmptyTreeObject); err != nil {
+				return err
+			}
+		}
+		if err := l.keep(turn{Of: of, Role: "system", Content: prompt(b.Tree)}); err != nil {
 			return err
 		}
 	}
@@ -296,6 +347,20 @@ func (l *loop) toolDone(res skein.Resolved) error {
 // if the last answer called tools, else say its content to David.
 func (l *loop) next() error {
 	for _, call := range l.pending() {
+		if call.Function.Name == "message" {
+			to, h, d, text, msg := messageArgs(call)
+			if msg == "" {
+				key, err := skein.Resolve(h, d)
+				if err == nil {
+					return l.message(key, to, h, d, text)
+				}
+				msg = err.Error()
+			}
+			if err := l.keep(turn{Of: l.step.Entry, Role: "tool", Call: call.ID, To: to, Error: msg}); err != nil {
+				return err
+			}
+			continue
+		}
 		var a struct {
 			Cmd string `json:"cmd"`
 		}
@@ -321,6 +386,70 @@ func (l *loop) next() error {
 		text = last.Content
 	}
 	return l.say(text)
+}
+
+// messageArgs: a `message` call's arguments — the handle as "@handle@domain"
+// and its parts, the text — or what is wrong with them.
+func messageArgs(call toolCall) (to, handle, domain, text, problem string) {
+	var a struct {
+		To   string `json:"to"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &a); err != nil || a.Text == "" {
+		return "", "", "", "", "message wants {\"to\": \"@handle@domain\", \"text\": string}"
+	}
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(a.To), "@"), "@")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return a.To, "", "", "", "message: `to` must be a handle, @handle@domain, not " + strconv.Quote(a.To)
+	}
+	return "@" + parts[0] + "@" + parts[1], parts[0], parts[1], a.Text, ""
+}
+
+// message: a `chat` to another agent (sealed to the identity its handle
+// resolved to); rest on its `say`, as on an `infer`. A second message to the
+// same handle in this conversation continues theirs: it replies to their last say.
+func (l *loop) message(key, to, handle, domain, text string) error {
+	var replyTo skein.CID
+	for _, r := range l.conv {
+		if r.Role == "tool" && r.To == to && r.Error == "" && len(r.Sent) > 0 {
+			replyTo = r.Of
+		}
+	}
+	env, err := skein.Send(key, handle, domain, "chat", chatBody{Text: text, ReplyTo: replyTo})
+	if err != nil {
+		return err
+	}
+	return skein.Await(env)
+}
+
+// messaging: the `message` call this thread rests on, if it rests on one (the
+// first pending call is a message; the step that emitted it awaited the answer).
+func (l *loop) messaging() *toolCall {
+	p := l.pending()
+	if len(p) == 0 || p[0].Function.Name != "message" {
+		return nil
+	}
+	return &p[0]
+}
+
+// messageDone: the other agent's answer (their `say`) to our message: kept as its tool result.
+func (l *loop) messageDone(r *skein.Answer) error {
+	call := l.messaging()
+	to, _, _, _, _ := messageArgs(*call)
+	_, plain, err := skein.Read(r.Envelope, r.Body)
+	if err != nil {
+		return err
+	}
+	var b struct {
+		Text string `cbor:"text"`
+	}
+	if err := skein.Decode(plain, &b); err != nil {
+		return fmt.Errorf("message answer: %w", err)
+	}
+	if err := l.keep(turn{Of: r.Envelope, Role: "tool", Call: call.ID, To: to, Sent: r.ReplyTo, Text: b.Text}); err != nil {
+		return err
+	}
+	return l.next()
 }
 
 func (l *loop) launch(cmd string) error {
@@ -352,7 +481,14 @@ func (l *loop) infer() error {
 	if model == "" {
 		model = defaultModel
 	}
-	msgs := []message{{Role: "system", Content: system}}
+	sys := system // a conversation from before prompts were kept
+	for _, r := range l.conv {
+		if r.Role == "system" {
+			sys = r.Content
+			break
+		}
+	}
+	msgs := []message{{Role: "system", Content: sys}}
 	for _, r := range l.conv {
 		switch r.Role {
 		case "user":
@@ -366,7 +502,7 @@ func (l *loop) infer() error {
 			msgs = append(msgs, message{Role: "tool", ToolCallID: r.Call, Content: toolText(r)})
 		}
 	}
-	env, err := skein.Send(peer, "", "", "infer", inferBody{Model: model, Messages: msgs, Tools: []any{bashTool}, Thinking: l.step.Defaults["thinking"]})
+	env, err := skein.Send(peer, "", "", "infer", inferBody{Model: model, Messages: msgs, Tools: []any{bashTool, messageTool}, Thinking: l.step.Defaults["thinking"]})
 	if err != nil {
 		return err
 	}
@@ -445,7 +581,30 @@ func (l *loop) tree() skein.CID {
 	return t
 }
 
+// prompt: a new conversation's system prompt, from the tree it starts on:
+// /SOUL.md (else the fixed one), then /IDENTITY.md after it if there is one.
+// A tree that cannot be read counts as having neither.
+func prompt(tree skein.CID) string {
+	p := system
+	if len(tree) == 0 {
+		return p
+	}
+	if soul, ok, err := skein.ReadFile(tree, "SOUL.md"); err == nil && ok {
+		p = string(soul)
+	}
+	if id, ok, err := skein.ReadFile(tree, "IDENTITY.md"); err == nil && ok {
+		p = strings.TrimRight(p, "\n") + "\n\n" + string(id)
+	}
+	return p
+}
+
 func toolText(r turn) string {
+	if r.ExitCode == nil { // a message: the answer, or what went wrong
+		if r.Error != "" {
+			return "error: " + r.Error
+		}
+		return r.Text
+	}
 	var b strings.Builder
 	if r.ExitCode != nil {
 		fmt.Fprintf(&b, "exit %d\n", *r.ExitCode)

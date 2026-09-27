@@ -44,6 +44,9 @@ func _emit(cid unsafe.Pointer, cidLen uint32, out unsafe.Pointer, cap uint32) in
 //go:wasmimport skein await
 func _await(cid unsafe.Pointer, cidLen uint32) int32
 
+//go:wasmimport skein resolve
+func _resolve(name unsafe.Pointer, nameLen uint32, out unsafe.Pointer, cap uint32) int32
+
 //go:wasmimport skein head
 func _head(name unsafe.Pointer, nameLen uint32, out unsafe.Pointer, cap uint32) int32
 
@@ -279,6 +282,16 @@ func Await(env CID) error {
 		return lastError()
 	}
 	return nil
+}
+
+// Resolve a BRC-169 handle ("handle@domain") to the identity key it names,
+// through the host's resolver. Attested: the answer is recorded, and served
+// from the record on replay. An envelope to a handle is sealed to this key
+// (Send's `to`), and a reply is taken only from it.
+func Resolve(handle, domain string) (string, error) {
+	n := []byte(handle + "@" + domain)
+	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _resolve(ptr(n), uint32(len(n)), out, cap) })
+	return string(b), err
 }
 
 // Head is the tree a named head points at now, or nil if it has none.

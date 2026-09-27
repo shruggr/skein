@@ -102,7 +102,7 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |
 | program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
 | step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?}` |
-| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "seal", request, result}` — a wire frame and its answer, or an emit record and its signed envelope (the signed part) |
+| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "seal" \| "resolve", request, result}` — a wire frame and its answer, an emit record and its signed envelope (the signed part), or a handle `handle@domain` and the identity key the host resolved it to (`""`: none) |
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
 | emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the delivery provider signs the envelope for `body` to `to` in `box` during the step (`emit` returns the envelope CID; `created` is the step's stamp) and encrypts and sends it after |
 
@@ -118,7 +118,11 @@ thread, over `tree` or else `main`'s; the loop sends `infer` (`{model, messages,
 `peers.infer`, which answers in `completions` (`{replyTo, message: {role,
 content?, reasoning?, tool_calls?}, usage?, model, ms}` or `{replyTo, error}`),
 and says `{text, page?, tree?, thread, replyTo: <chat>}` to David in `say`.
-David's next `chat` carries `replyTo: <say>`.
+David's next `chat` carries `replyTo: <say>`. The system prompt is the
+starting tree's `/SOUL.md` (else a fixed one), then `/IDENTITY.md`. Besides
+`bash`, the model has `message` (`{to: "@handle@domain", text}`): the loop
+sends `chat` to another instance and rests on its `say`, which is the tool
+result (docs/MESSAGES.md, "Chat between instances").
 
 **Replies.** An admitted envelope whose plaintext body has `replyTo` goes
 only to the thread whose tip `awaits` that envelope,
@@ -127,7 +131,9 @@ and only if its sender is the identity it was sealed to; it becomes that step's
 subscription.
 
 Loop turns (`{kind: "turn", of, role, …}`), one per turn, kept in its chain (the conversation is rebuilt from them each step):
+`{of: <tree>, role: "system", content}` (first: the conversation's prompt),
 `{of: <chat>, role: "user", text, tree?, model?}`,
 `{of: <completions>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}`,
 `{of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}` (16 KiB caps),
+`{of: <their say>, role: "tool", call, to, sent: <our chat>, text}` (a `message` answered; `{of: <entry>, role: "tool", call, to?, error}` if it could not be sent),
 `{of: <completions>, role: "error", error}`.
