@@ -135,3 +135,21 @@ test("explore: a store file opened read-only renders and refuses writes", async 
   assert.equal((await render(ro, new URL("/", "http://x"))).status, 200);
   await assert.rejects(ro.put({ kind: "note", text: "no" }), /readonly/);
 });
+
+test("explore: delivery outcomes — in the log, on their entry, on each emit in its thread, and on the emit record", async (t) => {
+  const { i, get } = await world(t);
+  const w = await load(i.store);
+  const outs = w.log.filter(({ entry }) => entry.outcome);
+  assert.equal(outs.length, 3, "two infers and the answer, each delivered");
+  const log = (await get("/log")).text;
+  assert.match(log, /outcome <span class="st delivered">delivered<\/span>/);
+  const o = outs[0];
+  const entry = (await get(`/e/${o.cid}`)).text;
+  assert.match(entry, /log entry #\d+ <span class="mut small">outcome<\/span>/);
+  assert.match(entry, /emitted by/);
+  const loop = w.threads.find((x) => x.program === "loop")!;
+  const thread = (await get(`/t/${loop.cid}`)).text;
+  assert.equal(thread.match(/class="st delivered"/g)?.length, 3, "each emit shows its outcome");
+  const rec = (await get(`/r/${o.entry.outcome!.emit}`)).text;
+  assert.match(rec, /outcome <span class="st delivered">/);
+});

@@ -324,3 +324,21 @@ test("a file from before tip_at is migrated: column added, index rebuilt", async
     f.done();
   }
 });
+
+test("log: one outcome per emit; outcomeOf and byEnvelope each find only their own kind (memory and sqlite)", async () => {
+  const { memoryStore } = await import("./memory.ts");
+  for (const s of [memoryStore(), openStore(":memory:")] as Store[]) {
+    const time: [number, number] = [1, 0];
+    const sig = new Uint8Array([1]);
+    const env = encode({ env: 1 }).cid, emit = encode({ kind: "emit", n: 1 }).cid;
+    const g = await s.log.append({ kind: "log", prev: null, n: 0, time, genesis: encode({ g: 1 }).cid, sig });
+    const e1 = await s.log.append({ kind: "log", prev: g, n: 1, time, envelope: env, box: "chat", body: encode({ b: 1 }).cid, sig });
+    const o = await s.log.append({ kind: "log", prev: e1, n: 2, time, outcome: { emit, status: "failed", reason: "no account" }, sig });
+    await assert.rejects(s.log.append({ kind: "log", prev: o, n: 3, time, outcome: { emit, status: "delivered" }, sig }), (e: Error & { reason?: string }) => e.reason === "duplicate-outcome");
+    assert.ok((await s.log.outcomeOf(emit))!.equals(o));
+    assert.equal(await s.log.outcomeOf(env), undefined);
+    assert.ok((await s.log.byEnvelope(env))!.equals(e1));
+    assert.equal(await s.log.byEnvelope(emit), undefined);
+    await s.close();
+  }
+});

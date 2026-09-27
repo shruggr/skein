@@ -1,8 +1,11 @@
-// Many instances in one host process (#23): the kernel configuration of
-// main.ts, once per management-database row (instances.ts). Each instance gets
-// its own store, runtime (scheduler), wallet, messagebox session and delivery
-// provider, and tick; they share nothing but the host wallet, which signs every
-// log entry for all of them (#9: the host's identity is the genesis's `host`).
+// One instance from a management-database row (instances.ts): the kernel
+// configuration main.ts runs, in its own process — `skein-host run`
+// (supervisor.ts) starts one main.ts per row (#23, "a process per instance").
+// The instance gets its own store, runtime (scheduler), wallet, messagebox
+// session and delivery provider, and tick; it shares nothing with the others
+// but the host wallet, which signs every log entry for all of them (#9: the
+// host's identity is the genesis's `host`), the messagebox, and host.db, which
+// its resolver reads. Tests start several in one process over memory stores.
 // A new instance's genesis is main.ts's plus an open `chat` subscription:
 // anyone may open a conversation with it (#24, item 3). That list is only the
 // seed of its subscriptions chain (#3, runtime/subscriptions.ts); later
@@ -23,7 +26,7 @@ import type { Store } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ensureGenesis } from "./entry.ts";
 import type { InstanceRow } from "./instances.ts";
-import { Delivery, type MessageBox } from "./messagebox.ts";
+import { Delivery, type MessageBox, type RetryPolicy } from "./messagebox.ts";
 import { Tick } from "./tick.ts";
 
 type Named = { handle: string; domain: string };
@@ -48,6 +51,8 @@ export interface HostOptions {
   resolve?(handle: string, domain: string): Promise<Resolution>;
   /** Delivery poll interval; 0 = do not poll (tests call delivery.poll()). Default 1000. */
   pollMs?: number;
+  /** How long the delivery retries a transiently failing send (messagebox.ts DEFAULT_RETRY). */
+  retry?: Partial<RetryPolicy>;
   /** Lines, prefixed by the caller. */
   log?(handle: string, line: string): void;
   /** Tests: the clock entries are stamped with. */
@@ -106,7 +111,7 @@ export async function startInstance(row: InstanceRow, o: HostOptions): Promise<R
     tick.start();
     let delivery: Delivery | undefined;
     if (o.box) {
-      delivery = new Delivery({ runtime, wallet, host: o.host, box: o.box(row, wallet), log: say, now: o.now });
+      delivery = new Delivery({ runtime, wallet, host: o.host, box: o.box(row, wallet), log: say, now: o.now, retry: o.retry });
       runtime.outbox = delivery;
     } else {
       say("no messagebox (SKEIN_MESSAGEBOX): nothing will be delivered");

@@ -8,15 +8,19 @@
 //                                     plaintext body (the dag-cbor bytes, whose sha2-256 is the
 //                                     envelope's signed contentHash)
 //   | wake: <thread origin>           a sleeper's deadline reached; no message, no sender
+//   | outcome: {emit: <emit record>,  what the delivery provider made of an emit: sent
+//       status: "delivered"           (once per emit), or refused for good — a permanent
+//             | "failed", reason?}    refusal, or transient errors past its retry bound
 //     sig }
 //
 // The tip entry's CID is the instance's **state hash**. An entry is the host's
-// statement — "message n arrived at t", "wake at t" — so `sig` is the host's
+// statement — "message n arrived at t", "wake at t", "emit e was delivered
+// (or failed) at t" — so `sig` is the host's
 // signature (the host wallet, not the instance's) over the entry's dag-cbor
 // without `sig`: protocol [2, "skein log"], key "1", counterparty anyone, so
 // anyone holding the genesis's `host` can check every stamp and every kick
 // (verifyEntry). It is made once, by the provider that delivers the entry
-// (src/host: the messagebox delivery for admissions, the tick for wakes),
+// (src/host: the messagebox delivery for admissions and outcomes, the tick for wakes),
 // through the host wallet; the runtime admits the finished entry
 // (Runtime.admit) and verifies it. Replay copies the entry and verifies it,
 // never re-signs.
@@ -26,16 +30,16 @@
 // these stamps (syscalls.ts).
 
 import type { WalletProtocol } from "@bsv/sdk";
-import type { CID } from "multiformats/cid";
+import { CID } from "multiformats/cid";
 import { encode } from "./cid.ts";
 import { rootIdentity, verifyAnyone, type KeyWallet } from "./identity.ts";
 import { isGenesis, type Genesis, type Identity, type Subscription } from "./records.ts";
 import { PROGRAM_CIDS } from "./programs.ts";
-import type { LogEntry, Store } from "./store.ts";
+import type { LogEntry, Outcome, Store } from "./store.ts";
 import { maxStamp, type Stamp } from "./syscalls.ts";
 import type { Ms } from "./types.ts";
 
-export type { LogEntry };
+export type { LogEntry, Outcome };
 
 export const LOG_PROTOCOL: WalletProtocol = [2, "skein log"];
 export const LOG_KEY_ID = "1";
@@ -46,8 +50,16 @@ export const stampMs = (s: Stamp): Ms => s[0] * 1000 + Math.floor(s[1] / 1_000_0
 export function isLogEntry(x: unknown): x is LogEntry {
   const e = x as Partial<LogEntry> | null;
   return !!e && e.kind === "log" && typeof e.n === "number" && e.sig instanceof Uint8Array
-    && [e.genesis, e.envelope, e.wake].filter((v) => v !== undefined).length === 1
-    && (e.envelope === undefined) === (e.body === undefined);
+    && [e.genesis, e.envelope, e.wake, e.outcome].filter((v) => v !== undefined).length === 1
+    && (e.envelope === undefined) === (e.body === undefined)
+    && (e.outcome === undefined || isOutcome(e.outcome));
+}
+
+export function isOutcome(x: unknown): x is Outcome {
+  const o = x as Partial<Outcome> | null;
+  return !!o && typeof o === "object" && CID.asCID(o.emit) !== null
+    && (o.status === "delivered" || o.status === "failed")
+    && (o.reason === undefined || typeof o.reason === "string");
 }
 
 /** The signed bytes: the entry's dag-cbor with `sig` removed. */
@@ -61,7 +73,7 @@ export function verifyEntry(e: LogEntry, host: Identity): boolean {
   return verifyAnyone(host, LOG_PROTOCOL, LOG_KEY_ID, entryBytes(e), e.sig);
 }
 
-export type EntryBody = { genesis: CID } | { envelope: CID; box: string; body: CID } | { wake: CID };
+export type EntryBody = { genesis: CID } | { envelope: CID; box: string; body: CID } | { wake: CID } | { outcome: Outcome };
 
 /**
  * The next entry, unsigned: extending the tip, stamped `time` (raised to the

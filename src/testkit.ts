@@ -70,6 +70,34 @@ export function messageBoxHub() {
 }
 export type Hub = ReturnType<typeof messageBoxHub>;
 
+/**
+ * The hub, but a send for which `fail` returns an error throws it instead of
+ * delivering (a messagebox refusing, or down). `sent` counts every send tried,
+ * by recipient.
+ */
+export function faultyHub(hub: Hub, fail: (m: { sender: string; recipient: string; box: string }) => Error | undefined) {
+  const sent = new Map<string, number>();
+  return {
+    ...hub,
+    sent,
+    as(identity: string): MessageBox {
+      const b = hub.as(identity);
+      return {
+        ...b,
+        send: async (m) => {
+          sent.set(m.recipient, (sent.get(m.recipient) ?? 0) + 1);
+          const e = fail({ sender: identity, recipient: m.recipient, box: m.box });
+          if (e) throw e;
+          return b.send(m);
+        },
+      };
+    },
+  };
+}
+
+/** @bsv/message-box-client's refusal for a recipient with no account on the messagebox. */
+export const noAccount = () => new Error("Message Box send failed with HTTP 403 (ERR_ACCOUNT_REQUIRED).");
+
 export const T0: Stamp = [1_790_000_000, 250_000_000];
 export const iso = (s: Stamp) => new Date(s[0] * 1000 + Math.floor(s[1] / 1e6)).toISOString();
 

@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { contentHash, open, sign, signedPart, verify, type Envelope, type Signed } from "../envelope.ts";
-import { instance, iso, T0, type Instance } from "../testkit.ts";
+import { faultyHub, instance, iso, messageBoxHub, noAccount, results, T0, type Instance } from "../testkit.ts";
 import { encode } from "../runtime/cid.ts";
 import { nextEntry, readLog, verifyEntry } from "../runtime/log.ts";
 import { PROGRAM_CIDS } from "../runtime/programs.ts";
@@ -17,6 +17,7 @@ import { Rejected } from "../runtime/store.ts";
 import type { Outbound } from "../runtime/scheduler.ts";
 import type { ThreadUpdate } from "../runtime/types.ts";
 import { admitEntry, signEntry } from "./entry.ts";
+import { Delivery, sendFailure } from "./messagebox.ts";
 
 /** A delivery with no transport: the owner's signed part and body, straight into the runtime. */
 async function deliver(i: Instance, box: string, value: unknown): Promise<{ signed: Signed; body: Uint8Array; entry: CID }> {
@@ -62,7 +63,7 @@ test("admit: refuses an entry not signed by the genesis's host, records that do 
   const good = await signEntry(i.host.wallet, await nextEntry(i.store, env, T0));
   await assert.rejects(i.rt.admit(good, { envelope: signed, body: dagCbor.encode({ name: "y" }) }), /contentHash/);
   await assert.rejects(i.rt.admit(good, {}), /needs its envelope and body/);
-  await assert.rejects(i.rt.admit({ ...good, envelope: undefined, body: undefined, box: undefined, genesis: env.body }), /want a signed envelope or wake entry/);
+  await assert.rejects(i.rt.admit({ ...good, envelope: undefined, body: undefined, box: undefined, genesis: env.body }), /want a signed envelope, wake or outcome entry/);
   assert.equal((await readLog(i.store)).length, 1, "nothing admitted");
 
   // A wake built on a tip that has since moved: out of order.
@@ -102,4 +103,93 @@ test("tick: started, it reads the next deadline and admits one host-signed wake 
   assert.equal((await readLog(i.store)).filter(({ entry }) => entry.wake).length, 1, "no idle ticks");
   await i.tick.stop();
   await i.rt.stop();
+});
+
+// ---------------------------------------------------------------- outcomes (#10)
+
+const outcomes = async (i: Instance) => (await readLog(i.store)).filter(({ entry }) => entry.outcome).map(({ entry }) => entry.outcome!);
+
+test("outcome: success is one `delivered` entry, host-signed, naming the emit; the runtime refuses a second outcome for it, or one for a record that is not an emit", async () => {
+  const i = await instance();
+  await deliver(i, "run", { cmd: "echo hi", tree: encode({}).cid });
+  await i.rt.idle();
+  const log = await readLog(i.store);
+  const last = log.at(-1)!;
+  assert.equal(last.entry.outcome?.status, "delivered", i.lines.join("\n"));
+  assert.equal(last.entry.outcome?.reason, undefined);
+  assert.ok(verifyEntry(last.entry, i.host.identity), "the host's word, like a wake");
+  const [th] = await (async () => { const o: CID[] = []; for await (const t of i.store.edges.query({ kind: "thread", program: PROGRAM_CIDS["run-handler"] })) o.push(t); return o; })();
+  const tip = await i.store.get<ThreadUpdate & { emits: CID[] }>(await i.store.chains.tip(th));
+  assert.ok(last.entry.outcome!.emit.equals(tip.emits[0]));
+  assert.ok((await i.store.log.outcomeOf(tip.emits[0]))!.equals(last.cid));
+  assert.equal((await results(i)).length, 1);
+  await assert.rejects(admitEntry(i.rt, i.host.wallet, { outcome: { emit: tip.emits[0], status: "failed", reason: "late" } }, {}, T0), (e) => e instanceof Rejected && e.reason === "duplicate-outcome");
+  await assert.rejects(admitEntry(i.rt, i.host.wallet, { outcome: { emit: th, status: "delivered" } }, {}, T0), /not an emit/);
+  assert.equal((await outcomes(i)).length, 1);
+  await i.rt.stop();
+});
+
+test("outcome: transient failures are retried after a backoff, then `delivered` once; past the attempts they are `failed`; a permanent refusal fails at once; nothing awaits a run's reply, so nothing runs", async () => {
+  // Down twice (no HTTP answer), then up.
+  let down = 2;
+  const hub = faultyHub(messageBoxHub(), (m) => m.box === "results" && down-- > 0 ? new Error("Failed to send message.") : undefined);
+  const i = await instance({ hub });
+  await deliver(i, "run", { cmd: "echo hi", tree: encode({}).cid });
+  await i.rt.idle();
+  assert.deepEqual(await outcomes(i), [], "not yet: queued");
+  assert.equal(i.delivery.pending, 1);
+  await i.delivery.poll();
+  assert.equal(hub.sent.get(i.owner.identity), 1, "not due before its backoff (1 s)");
+  i.clock.set([T0[0] + 1, T0[1]]);
+  await i.delivery.poll();
+  assert.equal(hub.sent.get(i.owner.identity), 2);
+  i.clock.set([T0[0] + 2, T0[1]]);
+  await i.delivery.poll();
+  assert.equal(hub.sent.get(i.owner.identity), 2, "the second backoff is 2 s");
+  i.clock.set([T0[0] + 3, T0[1]]);
+  await i.delivery.poll();
+  await i.rt.idle();
+  assert.equal(hub.sent.get(i.owner.identity), 3);
+  assert.deepEqual((await outcomes(i)).map((o) => o.status), ["delivered"], i.lines.join("\n"));
+  assert.equal((await results(i)).length, 1);
+  assert.equal(i.delivery.pending, 0);
+  await i.rt.stop();
+
+  // Always down, two attempts allowed: `failed`, saying so.
+  const hub2 = faultyHub(messageBoxHub(), (m) => m.box === "results" ? Object.assign(new Error("bad gateway"), { status: 502 }) : undefined);
+  const j = await instance({ hub: hub2 });
+  const d = new Delivery({ runtime: j.rt, wallet: j.wallet, host: j.host.wallet, box: hub2.as(j.identity), now: j.clock.now, retry: { attempts: 2, backoffMs: 0 }, log: (l) => j.lines.push(l) });
+  j.rt.outbox = d;
+  await deliver(j, "run", { cmd: "echo hi", tree: encode({}).cid });
+  await j.rt.idle();
+  await d.poll();
+  await j.rt.idle();
+  const [o] = await outcomes(j);
+  assert.deepEqual([o.status, o.reason], ["failed", "bad gateway (gave up after 2 attempts)"], j.lines.join("\n"));
+  await d.poll();
+  assert.equal(hub2.sent.get(j.owner.identity), 2, "no retry after `failed`");
+  assert.ok(j.lines.some((l) => /outcome failed for emit .*: no thread awaits it; recorded, nothing runs/.test(l)), j.lines.join("\n"));
+  await j.rt.stop();
+
+  // No account: failed at the first attempt.
+  const hub3 = faultyHub(messageBoxHub(), (m) => m.box === "results" ? noAccount() : undefined);
+  const k = await instance({ hub: hub3 });
+  await deliver(k, "run", { cmd: "echo hi", tree: encode({}).cid });
+  await k.rt.idle();
+  assert.deepEqual((await outcomes(k)).map((x) => [x.status, x.reason]), [["failed", "Message Box send failed with HTTP 403 (ERR_ACCOUNT_REQUIRED)."]]);
+  assert.equal(k.delivery.pending, 0);
+  await k.rt.stop();
+});
+
+test("sendFailure: 4xx is permanent except 408/425/429; 5xx, 429 and no answer are transient; a request the client cannot make is permanent", () => {
+  const f = (m: string, status?: number) => sendFailure(Object.assign(new Error(m), status ? { status } : {})).permanent;
+  assert.equal(f("Message Box send failed with HTTP 403 (ERR_ACCOUNT_REQUIRED)."), true);
+  assert.equal(f("Message Box send failed with HTTP 400."), true);
+  assert.equal(f("Message Box send failed with HTTP 429."), false);
+  assert.equal(f("Message Box send failed with HTTP 408."), false);
+  assert.equal(f("Message Box send failed with HTTP 503."), false);
+  assert.equal(f("Failed to send message."), false);
+  assert.equal(f("nope", 404), true);
+  assert.equal(f("nope", 500), false);
+  assert.equal(sendFailure(new TypeError("Encrypted Message Box body must not exceed 1 bytes")).permanent, true);
 });

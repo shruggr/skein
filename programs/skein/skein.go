@@ -162,8 +162,20 @@ type Answer struct {
 	ReplyTo  CID    `cbor:"replyTo"`
 }
 
+// DeliveryFailed is an awaited envelope the host's delivery provider could not
+// deliver (a `failed` outcome entry): the emit, its envelope's id, to whom, in
+// which box, and why. The reply it awaited will not come.
+type DeliveryFailed struct {
+	Emit     CID    `cbor:"emit"`
+	Envelope CID    `cbor:"envelope"`
+	To       string `cbor:"to"`
+	Box      string `cbor:"box"`
+	Reason   string `cbor:"reason"`
+}
+
 // Step is what input() returns: which thread, which step, and why it runs now
-// (the first step; Resolved: launched threads at rest; Reply: an awaited reply).
+// (the first step; Resolved: launched threads at rest; Reply: an awaited reply;
+// DeliveryFailed: an awaited envelope that could not be delivered).
 type Step struct {
 	Thread   CID               `cbor:"thread"`
 	N        int               `cbor:"step"`
@@ -173,6 +185,7 @@ type Step struct {
 	Resolved []Resolved        `cbor:"resolved,omitempty"`
 	Tip      CID               `cbor:"tip,omitzero"` // the thread's latest update before this step; absent on step 1
 	Reply    *Answer           `cbor:"reply,omitempty"`
+	Failed   *DeliveryFailed   `cbor:"deliveryFailed,omitempty"`
 	At       int64             `cbor:"at"`              // the entry's stamp, ms since the epoch: an envelope's `created`
 	Self     Name              `cbor:"self"`            // the instance's handle and domain (the genesis's)
 	Peers    map[string]string `cbor:"peers,omitempty"` // genesis peers by role (e.g. "infer")

@@ -93,9 +93,9 @@ test("run-handler: sealed run → messagebox → decrypted at admission, plainte
   assert.ok((body.replyTo as CID).equals(run), "replyTo is the run envelope's CID as the client computes it");
   assert.ok((body.tree as CID).equals(root), "nothing written: the tree is unchanged");
 
-  // The log: genesis, the objects envelope, the run envelope — each signed by the host.
+  // The log: genesis, the objects envelope, the run envelope, the reply's outcome — each signed by the host.
   const log = await readLog(i.store);
-  assert.deepEqual(log.map(({ entry }) => entry.genesis ? "genesis" : entry.box), ["genesis", "objects", "run"]);
+  assert.deepEqual(log.map(({ entry }) => entry.genesis ? "genesis" : entry.outcome ? `outcome ${entry.outcome.status}` : entry.box), ["genesis", "objects", "run", "outcome delivered"]);
   for (const { entry } of log) assert.ok(verifyEntry(entry, i.host.identity), `entry #${entry.n} verifies against the host identity`);
   const runEntry = log[2].entry;
   assert.ok(runEntry.envelope!.equals(run), "the envelope record's CID is the client's envelope CID");
@@ -119,6 +119,7 @@ test("run-handler: sealed run → messagebox → decrypted at admission, plainte
   assert.deepEqual(calls.map((a) => [a.op, (a.request as Uint8Array)[0]]), [["wallet", 8], ["wallet", 15], ["wallet", 11]],
     "the attested calls: the program's own identity, signing its reply, encrypting it to the owner — all through the wallet import");
   const emitted = await i.store.get<Emit>(s2.emits![0]);
+  assert.ok(log[3].entry.outcome!.emit.equals(s2.emits![0]), "the outcome names the emit it reports on");
   assert.deepEqual(emitted.envelope, env, "the emit record carries the envelope exactly as the owner received it");
   assert.equal(i.hub.pending(i.identity, "run").length + i.hub.pending(i.identity, "objects").length, 0, "every inbound message acknowledged");
 
@@ -184,8 +185,9 @@ test("sleep: the shell rests until a wake entry, one per wake; the handler repli
   i.clock.set([T0[0] + 5, 0]);
   const [w] = await i.tick.fire();
   await i.rt.idle();
-  const e = (await readLog(i.store)).at(-1)!.entry;
-  assert.ok(e.wake!.equals(sh) && e.envelope === undefined && w!.equals((await i.store.log.tip())!), "a wake entry names the thread and nothing else");
+  const [e, after] = (await readLog(i.store)).slice(-2).map((x) => x.entry);
+  assert.ok(e.wake!.equals(sh) && e.envelope === undefined && e.n === after.n - 1, "a wake entry names the thread and nothing else");
+  assert.equal(after.outcome?.status, "delivered", "then the reply's outcome");
   assert.ok(verifyEntry(e, i.host.identity));
   u = await tipOf(i.store, sh);
   assert.equal(u.state, "finished");
@@ -249,7 +251,10 @@ test("restart mid-handler: dropped while the shell sleeps, the wake logged while
   assert.ok(re.body.equals(be.body), "the same reply body");
   assert.ok(encode(signedPart(re.envelope as never)).cid.equals(encode(signedPart(be.envelope as never)).cid), "the same message id (signed part)");
   assert.notEqual(re.envelope.content, be.envelope.content, "only the ciphertext differs");
-  assert.ok((await b.store.log.tip())!.equals((await ref.store.log.tip())!), "identical log");
+  // The log is identical up to the outcome, which names each run's own emit record (its ciphertext differs).
+  const [refLog, bLog] = [await readLog(ref.store), await readLog(b.store)];
+  assert.ok(refLog.at(-2)!.cid.equals(bLog.at(-2)!.cid), "identical log up to the outcome");
+  assert.ok(refLog.at(-1)!.entry.outcome!.emit.equals(encode(re).cid) && bLog.at(-1)!.entry.outcome!.emit.equals(encode(be).cid));
   const [r] = await results(b);
   assert.deepEqual(r.body, refResult.body, "identical result body");
   await b.rt.stop();

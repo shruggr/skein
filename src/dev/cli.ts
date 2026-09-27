@@ -172,7 +172,8 @@ const COMMANDS: Record<string, Command> = {
         const lim = a.opts.limit ? Number(a.opts.limit) : all.length;
         for (const { cid, entry } of all.slice(-lim)) {
           const when = new Date(entry.time[0] * 1000 + Math.floor(entry.time[1] / 1e6)).toISOString();
-          const what = entry.genesis ? `genesis ${fmt(entry.genesis)}` : entry.envelope ? `${entry.box} envelope ${fmt(entry.envelope)}` : `wake ${entry.wake ? fmt(entry.wake) : "?"}`;
+          const what = entry.genesis ? `genesis ${fmt(entry.genesis)}` : entry.envelope ? `${entry.box} envelope ${fmt(entry.envelope)}`
+            : entry.outcome ? `outcome ${entry.outcome.status} emit ${fmt(entry.outcome.emit)}${entry.outcome.reason ? `: ${entry.outcome.reason}` : ""}` : `wake ${entry.wake ? fmt(entry.wake) : "?"}`;
           env.out(`${String(entry.n).padStart(4)}  ${when}  ${fmt(cid)}  ${what}`);
         }
         const tip = await store.log.tip();

@@ -13,8 +13,8 @@
 //	assistant  {of: <completions envelope>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
 //	tool       {of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}   (bash; outputs capped at 16 KiB)
 //	tool       {of: <their chat reply>, role: "tool", call, to, sent: <our chat envelope>, text}   (message)
-//	tool       {of: <entry>, role: "tool", call, to?, error}   (a message that could not be sent)
-//	error      {of: <completions envelope>, role: "error", error}
+//	tool       {of: <entry>, role: "tool", call, to?, error}   (a message that could not be sent, or delivered)
+//	error      {of: <completions envelope | outcome entry>, role: "error", error}
 //
 // The prompt: a new conversation reads /SOUL.md from the tree it starts on
 // (the chat's tree, else `main`'s) — else the fixed one below — and appends
@@ -49,6 +49,11 @@
 //	a reply to our `message`                   keep it as the tool result; run the next call
 //	the shell at rest                          keep the tool result; run the next call, or
 //	                                           emit `infer` again when none is left
+//	an awaited envelope was not delivered      (the host's `failed` outcome) a `message` →
+//	                                           an error tool result, run the next call; the
+//	                                           `infer` → an error, answered as an inference
+//	                                           error; the answer → an error turn, and the
+//	                                           thread ends (no reply can come)
 package main
 
 import (
@@ -234,6 +239,8 @@ func run() error {
 		}
 	}
 	switch {
+	case step.Failed != nil:
+		return l.undelivered(step.Failed)
 	case step.Reply != nil && step.Reply.Box == "completions":
 		return l.completion(step.Reply)
 	case step.Reply != nil && l.messaging() != nil:
@@ -464,6 +471,29 @@ func (l *loop) messaging() *toolCall {
 		return nil
 	}
 	return &p[0]
+}
+
+// undelivered: the host could not deliver what this thread rests on. A
+// `message` becomes an error result for the model ("could not deliver to
+// @h@d: reason"), as an unresolvable handle is; the `infer`, an inference
+// error answered to the opener; the answer itself is noted and the turn ends:
+// the thread finishes, since the reply it awaited cannot come.
+func (l *loop) undelivered(f *skein.DeliveryFailed) error {
+	if call := l.messaging(); call != nil && f.Box == "chat" {
+		to, _, _, _, _ := messageArgs(*call)
+		if err := l.keep(turn{Of: l.step.Entry, Role: "tool", Call: call.ID, To: to, Error: "could not deliver to " + to + ": " + f.Reason}); err != nil {
+			return err
+		}
+		return l.next()
+	}
+	if f.Box == "infer" {
+		msg := "could not deliver to the inference peer: " + f.Reason
+		if err := l.keep(turn{Of: l.step.Entry, Role: "error", Error: msg}); err != nil {
+			return err
+		}
+		return l.answer("inference failed: " + msg)
+	}
+	return l.keep(turn{Of: l.step.Entry, Role: "error", Error: "could not deliver the answer: " + f.Reason})
 }
 
 // messageDone: the other party's reply to our message: kept as its tool result.

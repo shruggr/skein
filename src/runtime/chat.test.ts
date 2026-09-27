@@ -16,14 +16,15 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { InferPeer } from "../peers/infer.ts";
-import { brc169Host, bundlesOf, collect, deggenResolution, installWasm, instance, iso, LKUP, messageBoxHub, scriptClock, send, type Hub, type Instance } from "../testkit.ts";
+import { brc169Host, bundlesOf, collect, deggenResolution, faultyHub, installWasm, instance, iso, LKUP, messageBoxHub, noAccount, scriptClock, send, type Hub, type Instance } from "../testkit.ts";
+import { render } from "../dev/explore/server.ts";
 import { hostResolver } from "../host/host.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
 import { headTree, MAIN } from "./heads.ts";
 import { copyLog, readLog, stampMs } from "./log.ts";
 import { memoryStore } from "./memory.ts";
-import { PROGRAM_CIDS } from "./programs.ts";
+import { LOOP, PROGRAM_CIDS } from "./programs.ts";
 import { Runtime, witnessFrom, type Outbound } from "./scheduler.ts";
 import type { Store } from "./store.ts";
 import type { ThreadUpdate } from "./types.ts";
@@ -605,4 +606,112 @@ test("message: two agents alternate on one thread each — Kurt's `message` back
   assert.deepEqual(mSent.map((o) => o.box), ["infer", "chat", "infer", "chat", "infer", "chat", "infer", "chat", "infer", "chat"]);
   const kSent = await replayMatches(kurt.i.store);
   assert.deepEqual(kSent.map((o) => o.box), ["infer", "chat", "infer", "chat", "infer", "chat"]);
+});
+
+// ---------------------------------------------------------------- delivery outcomes (#10)
+
+test("outcome: a `message` the messagebox refuses for good (403, no account) → one `failed` entry; the waiting step resumes with an error result; the model is asked again; nothing is sent again; replay reproduces it", async (t) => {
+  const bob = PrivateKey.fromRandom().toPublicKey().toString();
+  const hub = faultyHub(messageBoxHub(), (m) => m.recipient === bob ? noAccount() : undefined);
+  const alice = await agent(hub, scriptClock(), "alice", [
+    answer({ content: "", tool_calls: [messageCall("m1", "@bob@localhost", "hi bob")] }),
+    answer({ content: "Bob cannot be reached." }),
+  ]);
+  alice.i.rt.resolver = { resolve: async () => ({ identityKey: bob }) };
+  await send(alice.i, "chat", { text: "ask bob" });
+  await settle(alice.i);
+  await alice.peer.poll();
+  await settle(alice.i);
+  const [aloop] = await loops(alice.i.store);
+
+  // One outcome for the chat to bob: failed, with the messagebox's reason; tried once, never again.
+  const outcomes = (await readLog(alice.i.store)).filter(({ entry }) => entry.outcome);
+  const failed = outcomes.filter(({ entry }) => entry.outcome!.status === "failed");
+  assert.equal(failed.length, 1, alice.i.lines.join("\n"));
+  const emit = await alice.i.store.get<Emit>(failed[0].entry.outcome!.emit);
+  assert.deepEqual([emit.box, emit.to], ["chat", bob]);
+  assert.match(failed[0].entry.outcome!.reason!, /HTTP 403 \(ERR_ACCOUNT_REQUIRED\)/);
+  assert.equal(hub.sent.get(bob), 1);
+  assert.equal(alice.i.delivery.pending, 0, "a permanent refusal is not queued");
+  await settle(alice.i);
+  assert.equal(hub.sent.get(bob), 1, "no retry after `failed`");
+
+  // The loop took the failure as the message's result and asked the model again.
+  await alice.peer.poll();
+  assert.equal(alice.api.requests.length, 2, alice.i.lines.join("\n"));
+  const msgs = alice.api.requests[1].messages as Json[];
+  assert.deepEqual([msgs.at(-1)!.role, msgs.at(-1)!.tool_call_id], ["tool", "m1"]);
+  assert.equal(msgs.at(-1)!.content, "error: could not deliver to @bob@localhost: Message Box send failed with HTTP 403 (ERR_ACCOUNT_REQUIRED).");
+  const tool = (await turns(alice.i.store, aloop)).find((r) => r.role === "tool")!;
+  assert.ok((tool.of as CID).equals(failed[0].cid), "the tool turn is of the outcome entry");
+  const resumed = (await history(alice.i.store, aloop)).find((u) => u.input!.equals(failed[0].cid));
+  assert.ok(resumed, "a step driven by the outcome entry");
+  await settle(alice.i);
+  assert.equal((await answers(alice.i))[0].body.text, "Bob cannot be reached.");
+  assert.ok(outcomes.filter(({ entry }) => entry.outcome!.status === "delivered").length >= 1, "the infer went out: delivered");
+
+  // The explorer shows it on the entry and in the log.
+  const page = (await render(alice.i.store, new URL(`/e/${failed[0].cid}`, "http://x"))).body;
+  assert.match(page, /outcome/);
+  assert.match(page, /class="st failed"/);
+  assert.match(page, /ERR_ACCOUNT_REQUIRED/);
+
+  await alice.i.rt.stop();
+  const sent = await replayMatches(alice.i.store);
+  assert.deepEqual(sent.map((o) => o.box), ["infer", "chat", "infer", "chat"], "replay steps through the failure from the log alone");
+});
+
+test("outcome: the `infer` refused → an inference error answered to the opener; the answer refused → noted, and the thread ends", async (t) => {
+  // The inference peer has no account: the loop answers the owner with the failure.
+  const inferKey = PrivateKey.fromRandom();
+  const inferId = inferKey.toPublicKey().toString();
+  const a = await instance({ hub: faultyHub(messageBoxHub(), (m) => m.recipient === inferId ? noAccount() : undefined), config: { peers: { infer: inferId } } });
+  await send(a, "chat", { text: "hi" });
+  await settle(a);
+  await settle(a);
+  const [la] = await loops(a.store);
+  const ra = await turns(a.store, la);
+  assert.deepEqual(ra.map((r) => r.role), ["system", "user", "error"], a.lines.join("\n"));
+  assert.match(String(ra[2].error), /^could not deliver to the inference peer: .*ERR_ACCOUNT_REQUIRED/);
+  const [ans] = await answers(a);
+  assert.match(String(ans.body.text), /^inference failed: could not deliver to the inference peer/);
+  assert.equal((await tipOf(a.store, la)).state, "waiting", "the answer went out: the thread awaits the owner");
+
+  // No inference peer, and the owner has no account: the answer fails; the thread notes it and finishes.
+  let owner = "";
+  const b = await instance({ hub: faultyHub(messageBoxHub(), (m) => m.recipient === owner ? noAccount() : undefined) });
+  owner = b.owner.identity;
+  await send(b, "chat", { text: "hi" });
+  await settle(b);
+  const [lb] = await loops(b.store);
+  const rb = await turns(b.store, lb);
+  assert.deepEqual(rb.map((r) => r.role), ["system", "user", "error"], b.lines.join("\n"));
+  assert.match(String(rb[2].error), /^could not deliver the answer: .*ERR_ACCOUNT_REQUIRED/);
+  const tip = await tipOf(b.store, lb);
+  assert.equal(tip.state, "finished", "nothing left to wait for");
+  assert.equal(tip.awaits, undefined);
+  await a.rt.stop();
+  await b.rt.stop();
+  await replayMatches(a.store);
+  await replayMatches(b.store);
+});
+
+test("outcome: a program that does not list \"outcomes\" among its services (a loop from before them) is not resumed by a failure; it keeps waiting", async (t) => {
+  let owner = "";
+  const i = await instance({ hub: faultyHub(messageBoxHub(), (m) => m.recipient === owner ? noAccount() : undefined) });
+  owner = i.owner.identity;
+  const old = { ...LOOP, services: ["infer"] };
+  const handler = await i.store.put(old);
+  await i.rt.idle();
+  const { subscribe } = await import("./subscriptions.ts");
+  await subscribe(i.store, { op: "add", box: "oldchat", handler }, { input: (await i.store.log.tip())!, at: 0 });
+  await send(i, "oldchat", { text: "hi" });
+  await settle(i);
+  const [th] = await collect(i.store.edges.query({ kind: "thread", program: handler }));
+  assert.ok(th, i.lines.join("\n"));
+  const tip = await tipOf(i.store, th);
+  assert.equal(tip.state, "waiting", "still waiting on the answer it could not deliver");
+  assert.ok(i.lines.some((l) => /outcome failed .* loop does not take delivery failures/.test(l)), i.lines.join("\n"));
+  assert.equal((await turns(i.store, th)).at(-1)!.role, "user", "no step ran on the failure");
+  await i.rt.stop();
 });

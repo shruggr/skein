@@ -182,8 +182,9 @@ test("two rows, one host: a chat from a stranger to A is admitted and routed to 
   assert.equal(lb.length, 1);
   assert.equal((lb[0].args as { sender: string }).sender, h.o.owner, "the owner's chat still routes (its own subscription, first)");
 
-  // Isolation: each log holds only its own entries, every one signed by the one host.
-  for (const [r, n] of [[a, 3], [b, 2]] as const) {
+  // Isolation: each log holds only its own entries, every one signed by the one host
+  // (genesis, what arrived, and the outcome of the loop's answer: no infer peer, so it answers at once).
+  for (const [r, n] of [[a, 4], [b, 3]] as const) {
     const log = await readLog(r.store);
     assert.equal(log.length, n);
     for (const { entry } of log) assert.ok(verifyEntry(entry, hostId));

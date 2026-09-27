@@ -28,7 +28,8 @@ test("log: entries chain, are stamped (never backwards) and signed by the host i
   await i.delivery.poll();
   await i.rt.idle();
   const log = await readLog(i.store);
-  assert.equal(log.length, 2);
+  assert.equal(log.length, 3, "genesis, the run, the outcome of its reply");
+  assert.equal(log[2].entry.outcome?.status, "delivered");
   assert.equal(log[0].entry.prev, null);
   assert.ok(log[1].entry.prev!.equals(log[0].cid));
   assert.deepEqual(log[1].entry.n, 1);
