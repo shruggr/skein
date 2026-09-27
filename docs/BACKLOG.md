@@ -1,6 +1,8 @@
 # Backlog
 
 The backlog lives in GitHub issues: https://github.com/shruggr/skein/issues.
+**Agents start at the pinned tracker, issue #31** — conventions, the questions
+waiting on David (label `needs-david`), and what is `ready-to-build`.
 Each issue is the design record for its item — decisions are written into the
 issue body as they are made with David, one item at a time, and an issue is
 closed when the thing is built and merged. Raw notes behind the older items
