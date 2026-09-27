@@ -139,8 +139,8 @@ async function doImport(): Promise<void> {
 
 function renderConversation(): void {
   const c = skein?.conversation();
-  $("conversation").textContent = c ? `continuing: reply to say ${short(c.say)}${c.tree ? `, tree ${short(c.tree)}` : ""}` : "no conversation yet: the next chat starts one";
-  $<HTMLInputElement>("chat-tree").placeholder = c?.tree ? `default: ${short(c.tree)} (last say)` : "tree CID (optional)";
+  $("conversation").textContent = c ? `continuing: reply to ${short(c.reply)}${c.tree ? `, tree ${short(c.tree)}` : ""}` : "no conversation yet: the next chat starts one";
+  $<HTMLInputElement>("chat-tree").placeholder = c?.tree ? `default: ${short(c.tree)} (last reply)` : "tree CID (optional)";
 }
 
 async function chat(): Promise<void> {
@@ -151,7 +151,7 @@ async function chat(): Promise<void> {
     const model = $<HTMLInputElement>("chat-model").value.trim() || undefined;
     const fresh = $<HTMLInputElement>("chat-new").checked;
     const s = await requireSkein().chat({ text, tree, model, fresh });
-    log(out, `sent ${short(s.cid)}${s.replyTo ? ` (reply to ${short(s.replyTo)})` : " (new conversation)"}; waiting for the say`, "ok");
+    log(out, `sent ${short(s.cid)}${s.replyTo ? ` (reply to ${short(s.replyTo)})` : " (new conversation)"}; waiting for the reply`, "ok");
     $<HTMLTextAreaElement>("chat-text").value = "";
     $<HTMLInputElement>("chat-new").checked = false;
     $<HTMLInputElement>("chat-tree").value = "";
@@ -210,7 +210,7 @@ function cidLink(label: string, cid: string | undefined, useAsTree = false): str
 function renderInbox(): void {
   const lastChat = skein?.lastSent(BOX.chat)?.cid, lastRun = skein?.lastSent(BOX.run)?.cid;
   $("messages").innerHTML = loadHistory().map((v) => {
-    const answers = v.replyTo && (v.replyTo === lastChat || v.replyTo === lastRun) ? ` <span class="tag">answers your last ${v.box === BOX.say ? "chat" : "run"}</span>` : "";
+    const answers = v.replyTo && (v.replyTo === lastChat || v.replyTo === lastRun) ? ` <span class="tag">answers your last ${v.box === BOX.chat ? "chat" : "run"}</span>` : "";
     const head = `<div class="meta">${escapeHtml(v.box)} · ${escapeHtml(v.created ?? "?")} · ${v.verified ? "verified" : "<b>UNVERIFIED</b>"}${answers}</div>`;
     if (v.error) return `<article class="msg err">${head}<pre class="error">${escapeHtml(v.error)}</pre></article>`;
     const parts: string[] = [];

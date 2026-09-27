@@ -10,11 +10,12 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import { open, seal, signedPart, verify, type Envelope, type Signed } from "../src/envelope.ts";
 import { chunk } from "../src/client/bundle.ts";
-import { chatBody, conversationFrom, parseSay, type Conversation } from "../src/client/conversation.ts";
+import { asConversation, chatBody, conversationFrom, parseReply, type Conversation } from "../src/client/conversation.ts";
 import { hashFiles, importOrder, type PickedFile } from "./tree.ts";
 
-export const BOX = { objects: "objects", run: "run", results: "results", chat: "chat", say: "say" } as const;
-export const INBOX = [BOX.results, BOX.say] as const;
+export const BOX = { objects: "objects", run: "run", results: "results", chat: "chat" } as const;
+/** `run` results, then `chat`: the instance's replies (`replyTo` set), and chats from others. */
+export const INBOX = [BOX.results, BOX.chat] as const;
 
 export interface WebConfig {
   /** The instance: its identity key and handle (skein@localhost). */
@@ -128,8 +129,7 @@ export class WebSkein {
 
   conversation(): Conversation | undefined {
     try {
-      const c = JSON.parse(this.store.get(CONVERSATION) ?? "null") as Conversation | null;
-      return c && typeof c.say === "string" ? c : undefined;
+      return asConversation(JSON.parse(this.store.get(CONVERSATION) ?? "null"));
     } catch { return undefined; }
   }
 
@@ -139,7 +139,7 @@ export class WebSkein {
     try { return JSON.parse(this.store.get(`${SENT}.${box}`) ?? "null") ?? undefined; } catch { return undefined; }
   }
 
-  /** Read (and by default acknowledge) `results` then `say`; the newest verified say becomes the conversation. */
+  /** Read (and by default acknowledge) `results` then `chat`; the newest verified `chat` reply from the instance becomes the conversation. */
   async inbox(opts: { ack?: boolean } = {}): Promise<Result[]> {
     const out: Result[] = [];
     for (const box of INBOX) {
@@ -151,9 +151,9 @@ export class WebSkein {
     }
     let newest: Conversation | undefined = this.conversation();
     for (const r of out) {
-      if (r.box !== BOX.say || r.error || !r.cid) continue;
+      if (r.box !== BOX.chat || r.error || !r.cid || r.sender !== this.cfg.instance.identityKey || r.body?.replyTo === undefined) continue;
       try {
-        const c = conversationFrom(r.cid, parseSay(r.body), r.created);
+        const c = conversationFrom(r.cid, parseReply(r.body), r.created, newest);
         if (!newest || c.at >= newest.at) newest = c;
       } catch (e) {
         r.error = (e as Error).message;

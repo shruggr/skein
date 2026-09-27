@@ -62,9 +62,10 @@ message; the inbox polls every 2 s, so a denied permission stops polling (tick
    registered` are both fine; `409 … taken` means pick another name.
 4. Optional: **Choose Files** → pick a directory → **Import**. The root CID
    lands in the chat and run tree fields.
-5. Type in **Chat**, **Send** (approve encrypt + signature). The say arrives in
+5. Type in **Chat**, **Send** (approve encrypt + signature). The reply (a `chat`
+   with `replyTo` = your chat) arrives in
    **Inbox** within a couple of seconds of the instance answering (approve
-   decrypt). The next chat replies to it (`replyTo` = that say, tree defaults to
+   decrypt). The next chat replies to it (`replyTo` = that reply, tree defaults to
    its tree); tick **new conversation** to start over.
 6. **Run**: a tree CID and a command; the result shows in the inbox.
 

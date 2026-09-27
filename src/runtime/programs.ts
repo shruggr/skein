@@ -29,7 +29,7 @@ export const MODULES = {
   "run-handler": CID.parse("bafkreias2nml273mrb4va37jvcoygdvr5unv2y4nktcgw6cpbve2r2xxvu"),
   "objects-handler": CID.parse("bafkreigftxfxwqemfzfqxlqjfxd5eyrotm2jg7hm4hp5uplsercis3zgje"),
   "head-handler": CID.parse("bafkreihtcs3i4b7u4unznafm5aob5szjpfyzygd4yx7ydtw5jcnmxit7sa"),
-  "loop": CID.parse("bafkreifc7fr4sy2m5awddqrhliw2kw6dd5hg7oweplbxavwquks6uv7hg4"),
+  "loop": CID.parse("bafkreihijdzgdpqgxzrvumwf66a37j7b2oh3p36pigduposuiuugcwd5nu"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
@@ -75,7 +75,7 @@ export const LOOP = program({
   code: { wasm: MODULES.loop },
   inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
   services: ["infer"],
-  description: "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another agent, resting on its `say`; says the answer to whoever chatted and awaits their reply.",
+  description: "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs.",
 });
 
 /** The programs a genesis names, by name. */

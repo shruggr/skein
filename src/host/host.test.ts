@@ -131,7 +131,7 @@ test("genesis from a row: its handle and domain, the owner's boxes, then `chat` 
   assert.deepEqual(subs(g.subscriptions), subs(c.subscriptions!));
   assert.deepEqual(subs(g.subscriptions).at(-1), { box: "chat", handler: PROGRAM_CIDS.loop.toString() }, "the open subscription names no sender");
   assert.deepEqual(g.subscriptions.slice(0, 4).map((s) => [s.match.sender, s.match.box]), [[o.owner, "run"], [o.owner, "objects"], [o.owner, "head"], [o.owner, "chat"]]);
-  assert.deepEqual(await r.runtime.boxes(), ["run", "objects", "head", "chat", "completions", "say"]);
+  assert.deepEqual(await r.runtime.boxes(), ["run", "objects", "head", "chat", "completions"]);
   await r.stop();
 });
 

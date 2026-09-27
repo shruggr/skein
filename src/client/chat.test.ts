@@ -9,14 +9,14 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { blobCid } from "../runtime/tree.ts";
 import { SkeinClient, envelopeCid } from "./client.ts";
-import { formatSay, parseCli } from "./cli.ts";
-import { chatBody, conversationFrom, loadConversation, parseReplLine, parseSay, saveConversation, type Conversation } from "./conversation.ts";
+import { formatReply, parseCli } from "./cli.ts";
+import { asConversation, chatBody, conversationFrom, loadConversation, parseReplLine, parseReply, saveConversation, type Conversation } from "./conversation.ts";
 import { open, seal, verify, type Envelope } from "./envelope.ts";
 import type { ClientConfig } from "./config.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "skein-chat-"));
 const cid = (s: string) => blobCid(new TextEncoder().encode(s));
-const conv: Conversation = { say: cid("say").toString(), thread: cid("thread").toString(), tree: cid("tree").toString(), at: "2026-09-25T00:00:00.000Z" };
+const conv: Conversation = { reply: cid("reply").toString(), thread: cid("thread").toString(), tree: cid("tree").toString(), at: "2026-09-25T00:00:00.000Z" };
 
 test("chatBody: new conversation has no replyTo and no default tree", () => {
   assert.deepEqual(chatBody({ text: "hi" }), { text: "hi" });
@@ -26,9 +26,9 @@ test("chatBody: new conversation has no replyTo and no default tree", () => {
   assert.throws(() => chatBody({ text: "  " }), /empty/);
 });
 
-test("chatBody: continuing replies to the last say; tree defaults to its tree", () => {
+test("chatBody: continuing replies to the last reply; tree defaults to its tree", () => {
   const b = chatBody({ text: "more" }, conv);
-  assert.ok(b.replyTo?.equals(CID.parse(conv.say)));
+  assert.ok(b.replyTo?.equals(CID.parse(conv.reply)));
   assert.ok(b.tree?.equals(CID.parse(conv.tree!)));
   const other = cid("other").toString();
   assert.equal(chatBody({ text: "more", tree: other }, conv).tree?.toString(), other);
@@ -44,22 +44,29 @@ test("conversation.json round trip", () => {
   assert.equal(loadConversation(d), undefined);
   saveConversation(join(d, "client"), conv);
   assert.deepEqual(loadConversation(join(d, "client")), conv);
+  // An older file names the envelope `say`: read as `reply`.
+  const { reply, ...rest } = conv;
+  assert.deepEqual(asConversation({ ...rest, say: reply }), conv);
+  assert.equal(asConversation({ at: "x" }), undefined);
 });
 
-test("parseSay / conversationFrom / formatSay", () => {
+test("parseReply / conversationFrom / formatReply", () => {
   const body = dagCbor.decode(dagCbor.encode({ text: "done", page: "# Title\n\n- a\n", tree: cid("t"), thread: cid("th"), replyTo: cid("c") })) as Record<string, unknown>;
-  const s = parseSay(body);
+  const s = parseReply(body);
   assert.equal(s.text, "done");
   assert.equal(s.page, "# Title\n\n- a\n");
   const c = conversationFrom("bafyenv", s, "2026-01-01T00:00:00Z");
-  assert.deepEqual(c, { say: "bafyenv", thread: cid("th").toString(), tree: cid("t").toString(), at: "2026-01-01T00:00:00Z" });
-  const out = formatSay(body);
+  assert.deepEqual(c, { reply: "bafyenv", thread: cid("th").toString(), tree: cid("t").toString(), at: "2026-01-01T00:00:00Z" });
+  // A reply naming no tree or thread (a message mid-turn) keeps the previous ones.
+  assert.deepEqual(conversationFrom("bafy2", parseReply({ text: "q?", replyTo: cid("c") }), "2026-01-02T00:00:00Z", c), { reply: "bafy2", thread: cid("th").toString(), tree: cid("t").toString(), at: "2026-01-02T00:00:00Z" });
+  const out = formatReply(body);
   assert.match(out, /^done\n\n# Title\n\n- a\n\n  \[tree \S+…\S+  thread \S+…\S+\]$/);
-  assert.equal(formatSay({ text: "x", thread: cid("th"), replyTo: cid("c") }).split("\n").length, 2);
-  assert.throws(() => parseSay({ text: "x", replyTo: cid("c") }), /thread/);
-  assert.throws(() => parseSay({ thread: cid("th"), replyTo: cid("c") }), /text/);
-  assert.throws(() => parseSay({ text: "x", thread: "nope", replyTo: cid("c") }), /thread/);
-  assert.throws(() => parseSay({ text: "x", thread: cid("th"), replyTo: cid("c"), page: 3 }), /page/);
+  assert.equal(formatReply({ text: "x", thread: cid("th"), replyTo: cid("c") }).split("\n").length, 2);
+  assert.equal(formatReply({ text: "x", replyTo: cid("c") }), "x");
+  assert.throws(() => parseReply({ text: "x" }), /not a reply/);
+  assert.throws(() => parseReply({ thread: cid("th"), replyTo: cid("c") }), /text/);
+  assert.throws(() => parseReply({ text: "x", thread: "nope", replyTo: cid("c") }), /thread/);
+  assert.throws(() => parseReply({ text: "x", thread: cid("th"), replyTo: cid("c"), page: 3 }), /page/);
 });
 
 test("parseCli: chat and talk", () => {
@@ -103,7 +110,7 @@ async function register(w: WalletInterface): Promise<void> {
   assert.equal(res.status, 200, await res.text());
 }
 
-test("messagebox: chat out, say back, the next chat continues (real local server)", async (t) => {
+test("messagebox: chat out, a chat reply back, the next chat continues (real local server)", async (t) => {
   if (!(await hostUp())) { t.skip(`no messagebox at ${HOST} (scripts/host/messagebox.sh --bg)`); return; }
   const david = wallet(), inst = wallet();
   await register(david); await register(inst);
@@ -133,23 +140,23 @@ test("messagebox: chat out, say back, the next chat continues (real local server
     recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" },
     body: dagCbor.encode({ text: "hi David", page: "# notes\n", tree: newTree, thread: cid("thread"), replyTo: CID.parse(first.cid) }),
   });
-  await mb.sendMessage({ recipient: await idk(david), messageBox: "say", body: reply as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
+  await mb.sendMessage({ recipient: await idk(david), messageBox: "chat", body: reply as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
 
   const seen: string[] = [];
-  const hit = await client.waitFor([{ box: "say", replyTo: first.cid }], { timeoutMs: 10_000, intervalMs: 200, onResult: (r) => seen.push(r.box) });
-  assert.ok(hit, "say arrived");
+  const hit = await client.waitFor([{ box: "chat", replyTo: first.cid }], { timeoutMs: 10_000, intervalMs: 200, onResult: (r) => seen.push(r.box) });
+  assert.ok(hit, "the reply arrived");
   assert.equal(hit!.body!.text, "hi David");
-  const sayCid = (await envelopeCid(reply)).toString();
-  assert.equal(hit!.cid, sayCid);
-  assert.deepEqual(client.conversation()?.say, sayCid);
+  const replyCid = (await envelopeCid(reply)).toString();
+  assert.equal(hit!.cid, replyCid);
+  assert.deepEqual(client.conversation()?.reply, replyCid);
   assert.equal(client.conversation()?.tree, newTree.toString());
 
   const second = await client.chat({ text: "more" });
-  assert.equal(second.replyTo, sayCid);
+  assert.equal(second.replyTo, replyCid);
   assert.equal(second.tree, newTree.toString());
   const got2 = await mb.listMessagesLite({ messageBox: "chat", host: cfg.messageboxUrl });
   const req2 = dagCbor.decode((await open(inst, got2[0]!.body as unknown as Envelope)).body) as Record<string, unknown>;
-  assert.equal(String(req2.replyTo), sayCid);
+  assert.equal(String(req2.replyTo), replyCid);
   assert.equal(String(req2.tree), newTree.toString());
   await mb.acknowledgeMessage({ messageIds: got2.map((m) => m.messageId), host: cfg.messageboxUrl });
 });

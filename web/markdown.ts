@@ -1,4 +1,4 @@
-// A `say` page (markdown) as simple, escaped HTML: headings, fenced code,
+// A reply's page (markdown) as simple, escaped HTML: headings, fenced code,
 // inline code, bullet and numbered lists, bold/italic, paragraphs. Nothing
 // from the page is ever inserted unescaped.
 

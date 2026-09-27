@@ -15,12 +15,12 @@ import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
 import { open, seal, signedPart, verify, type Envelope, type Signed } from "./envelope.ts";
-import { chatBody, conversationFrom, loadConversation, parseSay, saveConversation, type Conversation } from "./conversation.ts";
+import { chatBody, conversationFrom, loadConversation, parseReply, saveConversation, type Conversation } from "./conversation.ts";
 
-export const BOX = { objects: "objects", run: "run", head: "head", results: "results", chat: "chat", say: "say" } as const;
+export const BOX = { objects: "objects", run: "run", head: "head", results: "results", chat: "chat" } as const;
 
-/** The boxes David reads, in this order. */
-export const INBOX = [BOX.results, BOX.say] as const;
+/** The boxes David reads, in this order: `run` results, then `chat` (the instance's replies, and chats from others). */
+export const INBOX = [BOX.results, BOX.chat] as const;
 
 /** The message's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part (the envelope without `content`). */
 export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
@@ -66,13 +66,18 @@ export interface Sent { cid: string; box: string; messageId: string; at: string;
 export interface Result {
   box: string;
   messageId: string;
-  /** CID of the received envelope (a `say`'s CID is the next chat's replyTo). */
+  /** CID of the received envelope (the instance's `chat` reply's CID is the next chat's replyTo). */
   cid?: string;
   sender: string;
   verified: boolean;
   created?: string;
   body?: Record<string, unknown>;
   error?: string;
+}
+
+/** A verified `chat` from the instance that is a reply (`replyTo` set): what the next chat continues from. */
+export function isInstanceReply(r: Result, instance: string): boolean {
+  return r.box === BOX.chat && !r.error && !!r.cid && r.sender === instance && r.body?.replyTo !== undefined;
 }
 
 export class SkeinClient {
@@ -139,7 +144,7 @@ export class SkeinClient {
 
   /**
    * Chat with the instance (box `chat`). Continues the conversation in
-   * conversation.json (replyTo = the last say, tree defaults to its tree)
+   * conversation.json (replyTo = the instance's last reply, tree defaults to its tree)
    * unless `fresh`.
    */
   chat(args: { text: string; tree?: string; model?: string; fresh?: boolean }): Promise<Sent> {
@@ -156,8 +161,9 @@ export class SkeinClient {
   }
 
   /**
-   * Read (and by default acknowledge) David's boxes, `results` then `say`.
-   * The newest well-formed, verified `say` becomes the conversation state.
+   * Read (and by default acknowledge) David's boxes, `results` then `chat`.
+   * The newest well-formed, verified `chat` reply from the instance becomes
+   * the conversation state.
    */
   async inbox(opts: { ack?: boolean } = {}): Promise<Result[]> {
     const out: Result[] = [];
@@ -168,11 +174,12 @@ export class SkeinClient {
         await this.mb.acknowledgeMessage({ messageIds: msgs.map((m) => m.messageId), host: this.cfg.messageboxUrl });
       }
     }
+    const prev = this.conversation();
     let newest: Conversation | undefined;
     for (const r of out) {
-      if (r.box !== BOX.say || r.error || !r.cid) continue;
+      if (!isInstanceReply(r, this.cfg.instance.identityKey)) continue;
       try {
-        const c = conversationFrom(r.cid, parseSay(r.body), r.created);
+        const c = conversationFrom(r.cid!, parseReply(r.body), r.created, newest ?? prev);
         if (!newest || c.at >= newest.at) newest = c;
       } catch (e) {
         r.error = (e as Error).message;

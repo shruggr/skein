@@ -168,8 +168,14 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
 
 ## Chat between instances
 
-An instance talks to another the way David talks to it: a `chat`. The loop
-(`programs/loop`) gives the model a `message` tool beside `bash`:
+An instance talks to another the way David talks to it: a `chat`. There is
+one chat envelope, the same in both directions, whoever the parties are: a
+new conversation has no `replyTo`; everything after it is a `chat` **reply**
+(`replyTo` = the envelope it answers). There is no `say`. A conversation is
+pairwise — one sender, one recipient, `replyTo` one parent — and a thread is
+one party's participation in one conversation.
+
+The loop (`programs/loop`) gives the model a `message` tool beside `bash`:
 
 ```
 message {to: "@handle@domain", text}
@@ -182,24 +188,47 @@ message {to: "@handle@domain", text}
   is sealed to that key with the handle in the envelope's `recipient`; which
   messagebox it goes to is the delivery provider's business (on localhost, the
   one configured).
-- **The call.** The loop emits `chat` `{text, replyTo?}` — no tree: trees do not
-  cross instances — and rests `waiting` on it, as on an `infer`. The first
-  message to a handle in a conversation opens a new conversation there; a later
-  one to the same handle carries `replyTo: <their last say>`, continuing it.
-- **The answer.** The other instance's loop answers with `say` `{text, …,
-  replyTo: <our chat>}` to our identity, in our `say` box. It is a reply: the
-  scheduler matches `replyTo` against the thread that `awaits` it (and the
-  sender against the key the chat was sealed to) before any subscription, so
-  no `say` subscription is needed — only that the delivery provider collects
-  the box (genesis `collect`, default `["completions", "say"]`). Its text is the
-  tool result, kept as `{of: <their say>, role: "tool", call, to, sent: <our
-  chat>, text}`.
+- **Who the loop sends to, and what it replies to.** Every chat the loop sends
+  replies to the recipient's latest envelope in this thread, if it has one —
+  the chats of the party that opened the thread (its user turns), or a party's
+  replies to our messages — and rests `waiting` on the answer, as on an
+  `infer`:
+
+  | situation | box | to | replyTo |
+  |---|---|---|---|
+  | the turn's answer (plain text, or an inference error) | `chat` | the opener | the opener's latest envelope here (the chat that opened the turn, or their reply to a message) |
+  | `message` to the opener, or to a party that replied to one of our messages | `chat` | that party | their latest envelope here |
+  | `message` to anyone else | `chat` | that party | none: a new conversation there |
+
+  The answer carries `{text, tree, thread, replyTo}` (the working tree and the
+  thread, for David's client); a `message` carries `{text, replyTo?}` — no
+  tree: trees do not cross instances.
+- **The other side.** A chat with `replyTo` is a reply: the scheduler matches
+  it against the thread whose tip `awaits` that envelope (and the sender
+  against the key it was sealed to) before any subscription, in any box — so
+  a reply in `chat` resumes the waiting thread and never opens a new one
+  through the `chat` subscription (a reply nothing awaits is recorded and
+  nothing runs). A resumed thread that rests on a `message` takes the reply
+  as that call's result, kept as `{of: <their chat>, role: "tool", call, to,
+  sent: <our chat>, text}`; one that rests on its answer takes it as the next
+  user turn. Replies to `infer` arrive in `completions`, which the genesis
+  `collect`s (default `["completions"]`); `chat` is collected because it is
+  subscribed.
+- **Two agents alternate on one thread each.** Martha's `message` to Kurt
+  opens a conversation on Kurt's side (one thread there); inside Martha's
+  thread it is one step: emit, wait, resume. If Kurt calls `message` back to
+  Martha, that is a reply to her chat and resumes her waiting step with it as
+  the result; her next `message` to Kurt replies to his and resumes his; his
+  plain answer at the end of his turn replies to her latest too. Martha's own
+  answer goes to whoever opened her thread (the user), as a reply to their
+  chat, and the user's next chat, replying to it, continues her thread.
 - **One at a time.** A step waits on threads or on replies, not both: several
   tool calls in one completion run in order, each `bash` a shell thread and
   each `message` a reply-await.
-- **Inbound.** The receiving instance routes the `chat` by subscription; to
-  accept agents, not only its owner, its genesis subscribes `{box: "chat"}`
-  with no sender. A stalled reply is a delivery failure — the thread just waits.
+- **Inbound.** The receiving instance routes a new `chat` (no `replyTo`) by
+  subscription; to accept agents, not only its owner, its genesis subscribes
+  `{box: "chat"}` with no sender. A stalled reply is a delivery failure — the
+  thread just waits.
 
 ## Why the plaintext
 

@@ -13,7 +13,7 @@ import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { loadConfig } from "./config.ts";
 import { BOX, SkeinClient, type Result } from "./client.ts";
-import { parseReplLine, parseSay, short } from "./conversation.ts";
+import { parseReplLine, parseReply, short } from "./conversation.ts";
 
 export type Command =
   | { cmd: "whoami" }
@@ -117,13 +117,13 @@ function text(v: unknown): string {
   return v === undefined || v === null ? "" : String(v);
 }
 
-/** A `say` as text: the text line, the page (markdown, as is), then tree/thread. */
-export function formatSay(body: Record<string, unknown> | undefined): string {
-  const s = parseSay(body);
+/** A `chat` reply as text: the text line, the page (markdown, as is), then tree/thread. */
+export function formatReply(body: Record<string, unknown> | undefined): string {
+  const s = parseReply(body);
   const out = [s.text];
   if (s.page) out.push("", s.page.replace(/\s+$/, ""), "");
-  const ids = [s.tree && `tree ${short(s.tree.toString())}`, `thread ${short(s.thread.toString())}`].filter(Boolean);
-  out.push(`  [${ids.join("  ")}]`);
+  const ids = [s.tree && `tree ${short(s.tree.toString())}`, s.thread && `thread ${short(s.thread.toString())}`].filter(Boolean);
+  if (ids.length) out.push(`  [${ids.join("  ")}]`);
   return out.join("\n");
 }
 
@@ -135,9 +135,10 @@ function show(r: Result, json: boolean): void {
   const b = r.body ?? {};
   console.log(`— ${r.box} ${r.created ?? "?"} from ${r.sender.slice(0, 16)}… ${r.verified ? "verified" : "UNVERIFIED"} msg ${r.messageId.slice(0, 12)}`);
   if (r.error) { console.log(`  error: ${r.error}`); return; }
-  if (r.box === BOX.say) {
-    try { console.log(formatSay(b)); return; } catch (e) { console.log(`  malformed say: ${(e as Error).message}`); }
+  if (r.box === BOX.chat && b.replyTo !== undefined) {
+    try { console.log(formatReply(b)); return; } catch (e) { console.log(`  malformed reply: ${(e as Error).message}`); }
   }
+  if (r.box === BOX.chat && typeof b.text === "string") { console.log(`  (new conversation) ${b.text}`); return; }
   if (b.replyTo !== undefined) console.log(`  replyTo:  ${text(b.replyTo)}`);
   if (b.exitCode !== undefined) console.log(`  exitCode: ${text(b.exitCode)}`);
   if (b.tree !== undefined) console.log(`  tree:     ${text(b.tree)}`);
@@ -184,7 +185,7 @@ export async function main(argv: string[]): Promise<number> {
       if (!c.wait) { for (const r of await client.inbox({ ack: c.ack })) show(r, c.json); return 0; }
       const want = [];
       const chat = client.lastSent(BOX.chat), run = client.lastSent(BOX.run);
-      if (chat) want.push({ box: BOX.say, replyTo: chat.cid });
+      if (chat) want.push({ box: BOX.chat, replyTo: chat.cid });
       if (run) want.push({ box: BOX.results, replyTo: run.cid });
       if (!want.length) throw new Error("inbox --wait: no chat or run sent from this machine yet (~/.skein/client/sent.jsonl)");
       return wait(client, want, c.timeout, (r) => show(r, c.json), c.ack);
@@ -193,7 +194,7 @@ export async function main(argv: string[]): Promise<number> {
       const s = await client.chat(c);
       if (!c.wait) { console.log(s.cid); return 0; }
       process.stderr.write(`sent ${short(s.cid)}${s.replyTo ? ` (reply to ${short(s.replyTo)})` : " (new conversation)"}\n`);
-      return wait(client, [{ box: BOX.say, replyTo: s.cid }], c.timeout, (r) => show(r, false));
+      return wait(client, [{ box: BOX.chat, replyTo: s.cid }], c.timeout, (r) => show(r, false));
     }
     case "talk":
       return talk(client, c);
@@ -207,7 +208,7 @@ async function wait(client: SkeinClient, want: { box: string; replyTo: string }[
   return 1;
 }
 
-/** The REPL: each line is a chat continuing the last say; waits for its say. */
+/** The REPL: each line is a chat continuing the last reply; waits for the reply to it. */
 async function talk(client: SkeinClient, c: Extract<Command, { cmd: "talk" }>): Promise<number> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   let fresh = c.fresh, tree = c.tree;
@@ -225,10 +226,10 @@ async function talk(client: SkeinClient, c: Extract<Command, { cmd: "talk" }>): 
         case "tree": tree = cmd.cid; console.log(`(tree ${short(cmd.cid)} for the next message)`); continue;
         case "chat": {
           const s = await client.chat({ text: cmd.text, fresh, tree, model: c.model });
-          fresh = false; tree = undefined; // after this, the say's tree carries the conversation
-          const hit = await client.waitFor([{ box: BOX.say, replyTo: s.cid }], {
+          fresh = false; tree = undefined; // after this, the reply's tree carries the conversation
+          const hit = await client.waitFor([{ box: BOX.chat, replyTo: s.cid }], {
             timeoutMs: c.timeout * 1000,
-            onResult: (r) => { if (r.box === BOX.say && String(r.body?.replyTo) === s.cid && !r.error) console.log(formatSay(r.body)); else show(r, false); },
+            onResult: (r) => { if (r.box === BOX.chat && String(r.body?.replyTo) === s.cid && !r.error) console.log(formatReply(r.body)); else show(r, false); },
           });
           if (!hit) console.log(`(no answer within ${c.timeout}s; \`skein inbox\` picks it up later)`);
         }

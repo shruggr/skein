@@ -5,9 +5,10 @@
 // log entry for all of them (#9: the host's identity is the genesis's `host`).
 // A new instance's genesis is main.ts's plus an open `chat` subscription:
 // anyone may open a conversation with it (#24, item 3). Replies to what it sent
-// are matched before subscriptions, and the genesis's `collect` has `say`,
-// where another agent answers its chat, so agent↔agent needs nothing more
-// than the resolver: a handle → the identity key its `message` is sealed to.
+// are matched before subscriptions — another agent's reply arrives in `chat`
+// with `replyTo`, and resumes the thread that awaits it instead of opening a
+// new one — so agent↔agent needs nothing more than the resolver: a handle →
+// the identity key its `message` is sealed to.
 
 import type { WalletInterface } from "@bsv/sdk";
 import { rootIdentity, type KeyWallet } from "../runtime/identity.ts";
