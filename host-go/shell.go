@@ -37,9 +37,19 @@ var (
 // ExtraCIDs are the single-purpose WASI programs beyond brush/coreutils, keyed
 // by the command name the shell runs them under (src/runtime/programs.ts
 // MODULES; kept in sync by hand — a `wasm/<name>.wasm` and this entry are
-// added together, never one without the other).
+// added together, never one without the other). diff and cmp are two names
+// for the one uutils/diffutils multicall binary (same CID).
 var ExtraCIDs = map[string]CID{
-	// filled in as tools land; see wasm/README.md
+	"find":  mustCID("bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu"),
+	"xargs": mustCID("bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju"),
+	"diff":  mustCID("bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i"),
+	"cmp":   mustCID("bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i"),
+	"jq":    mustCID("bafkreih226yv4dcowahyziroqms5r6h4k7mliutf2kpjp3klofcskdg56e"),
+	"which": mustCID("bafkreicdmerbpermjjw5x26pjokqhwbwbsncfqgdw63zo2e2g6tmm43iye"),
+	"grep":  mustCID("bafkreihbm7x5gatusjkpo7oxwkh43ltpv7osaw4jaiia46hzl7ua64dvye"),
+	"tree":  mustCID("bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4"),
+	"awk":   mustCID("bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju"),
+	"sed":   mustCID("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
 }
 
 func mustCID(s string) CID {

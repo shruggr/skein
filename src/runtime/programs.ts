@@ -43,7 +43,7 @@ export const MODULES = {
   grep: CID.parse("bafkreihbm7x5gatusjkpo7oxwkh43ltpv7osaw4jaiia46hzl7ua64dvye"),
   tree: CID.parse("bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4"),
   awk: CID.parse("bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju"),
-  sed: CID.parse("bafkreidhpl6whdk2lflk5kkns3pok5iuhtsz36w7xnluhgk7twmoico5gq"),
+  sed: CID.parse("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
 } as const;
 
 /** The command names of the toolset (issue #13), each mapped to its module in MODULES by the same key. */
