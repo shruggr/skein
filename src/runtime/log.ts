@@ -85,7 +85,7 @@ export interface InstanceConfig {
   peers?: Record<string, Identity>;
   /** Default: {model: "ripper/qwen38", thinking: "off"}. */
   defaults?: Record<string, string>;
-  /** Reply-only boxes the delivery provider collects. Default: ["completions"]. */
+  /** Reply-only boxes the delivery provider collects. Default: ["completions", "say"] (answers to `infer`, and other agents' answers to the loop's `message`). */
   collect?: string[];
 }
 
@@ -109,7 +109,7 @@ export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: Instance
     ],
     ...(c.peers && Object.keys(c.peers).length ? { peers: c.peers } : {}),
     defaults: c.defaults ?? DEFAULTS,
-    collect: c.collect ?? ["completions"],
+    collect: c.collect ?? ["completions", "say"],
   };
 }
 

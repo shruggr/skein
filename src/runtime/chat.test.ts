@@ -15,7 +15,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { InferPeer } from "../peers/infer.ts";
-import { bundlesOf, collect, installWasm, instance, iso, send, type Hub, type Instance } from "../testkit.ts";
+import { bundlesOf, collect, installWasm, instance, iso, messageBoxHub, scriptClock, send, type Hub, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
 import { headTree, MAIN } from "./heads.ts";
@@ -27,6 +27,9 @@ import type { Store } from "./store.ts";
 import type { ThreadUpdate } from "./types.ts";
 
 type Json = Record<string, unknown>;
+
+/** The loop's fixed system prompt, for a tree with no SOUL.md (programs/loop/main.go). */
+const DEFAULT_PROMPT = "You are working with David through skein. Use the bash tool to run commands over the working tree; when you are done or need David, answer in plain text; keep answers short.";
 
 /** A scripted OpenAI-compatible endpoint: answers in order, records each request body. */
 function scripted(answers: Array<Json | { status: number; text: string }>) {
@@ -42,14 +45,16 @@ function scripted(answers: Array<Json | { status: number; text: string }>) {
 }
 
 const toolCall = (id: string, cmd: string) => ({ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ cmd }) } });
+const messageCall = (id: string, to: string, text: string) => ({ id, type: "function", function: { name: "message", arguments: JSON.stringify({ to, text }) } });
 const answer = (message: Json) => ({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" });
 
-async function setup(t: { after(fn: () => Promise<void>): void }, answers: Array<Json | { status: number; text: string }>, o: { hub?: Hub } = {}) {
+async function setup(t: { after(fn: () => Promise<void>): void }, answers: Array<Json | { status: number; text: string }>, o: { hub?: Hub; files?: Record<string, string> } = {}) {
   const dir = await fs.mkdtemp(join(tmpdir(), "skein-chat-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.mkdir(join(dir, "src"));
   await fs.writeFile(join(dir, "src/a.txt"), "alpha\n");
   await fs.writeFile(join(dir, "README"), "hello\n");
+  for (const [name, text] of Object.entries(o.files ?? {})) await fs.writeFile(join(dir, name), text);
   const inferKey = PrivateKey.fromRandom();
   const inferId = inferKey.toPublicKey().toString();
   const i = await instance({ hub: o.hub, config: { peers: { infer: inferId } } });
@@ -156,7 +161,9 @@ test("chat: a turn — infer, a bash tool call in the shell, infer again, say to
   assert.equal(tip.state, "waiting");
   assert.ok(tip.awaits![0].equals(s1.cid), "resting on David's reply to the say");
 
-  const rs = await turns(i.store, loop);
+  const [sys, ...rs] = await turns(i.store, loop);
+  assert.deepEqual([sys.role, sys.content], ["system", DEFAULT_PROMPT], "no SOUL.md: the fixed prompt, kept");
+  assert.ok((sys.of as CID).equals(root));
   assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
   assert.ok((rs[0].of as CID).equals(chatCid));
   assert.equal(rs[0].text, "What is here?");
@@ -202,7 +209,7 @@ test("chat: a new conversation that names no tree starts from `main`; its work s
   await peer.poll();
   await settle(i);
   const [loop] = await loops(i.store);
-  const rs = await turns(i.store, loop);
+  const [, ...rs] = await turns(i.store, loop);
   assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
   assert.ok((rs[0].tree as CID).equals(root), "the opening turn records main's tree");
   assert.equal(rs[2].stdout, "hello\n");
@@ -257,8 +264,8 @@ test("chat: an inference error is kept and said to David; the thread awaits him"
   await settle(i);
   const [loop] = await loops(i.store);
   const rs = await turns(i.store, loop);
-  assert.deepEqual(rs.map((r) => r.role), ["user", "error"]);
-  assert.match(String(rs[1].error), /HTTP 503 overloaded/);
+  assert.deepEqual(rs.map((r) => r.role), ["system", "user", "error"]);
+  assert.match(String(rs[2].error), /HTTP 503 overloaded/);
   const [s] = await says(i);
   assert.match(String(s.body.text), /inference failed: .*503/);
   assert.ok((await tipOf(i.store, loop)).awaits![0].equals(s.cid));
@@ -281,9 +288,183 @@ test("restart mid-turn: the runtime stops while the loop awaits the peer; a new 
   const [s] = await says(b);
   assert.equal(s.body.text, "It says hello.");
   const [loop] = await loops(b.store);
-  const rs = await turns(b.store, loop);
+  const [, ...rs] = await turns(b.store, loop);
   assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
   assert.equal(rs[2].stdout, "hello\n");
   await b.rt.stop();
   await replayMatches(b.store);
+});
+
+// ---------------------------------------------------------------- the prompt from the tree
+
+test("prompt: a new conversation's system prompt is the tree's SOUL.md then IDENTITY.md, kept as a turn; continuing keeps it though the tree changes", async (t) => {
+  const soul = "You are Martha, a careful archivist.\n";
+  const identity = "name: Martha\nemoji: 📚\n";
+  const { i, root, peer, api } = await setup(t, [
+    answer({ content: "", tool_calls: [toolCall("c1", "echo 'You are someone else.' > SOUL.md; rm IDENTITY.md")] }),
+    answer({ content: "Changed it." }),
+    answer({ content: "Still Martha." }),
+  ], { files: { "SOUL.md": soul, "IDENTITY.md": identity } });
+  await send(i, "chat", { text: "who are you?" }); // no tree: main's
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  const expected = "You are Martha, a careful archivist.\n\nname: Martha\nemoji: 📚\n";
+  const sys = (n: number) => (api.requests[n].messages as Json[])[0];
+  assert.deepEqual(sys(0), { role: "system", content: expected });
+  assert.deepEqual(sys(1), { role: "system", content: expected });
+  const [loop] = await loops(i.store);
+  const [kept] = await turns(i.store, loop);
+  assert.equal(kept.role, "system");
+  assert.equal(kept.content, expected);
+  assert.ok((kept.of as CID).equals(root), "the prompt names the tree it was read from");
+
+  // David continues after the tree lost its SOUL.md: the conversation keeps its prompt.
+  const [s1] = await says(i);
+  assert.ok(!(s1.body.tree as CID).equals(root));
+  await send(i, "chat", { text: "and now?", replyTo: s1.cid });
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  assert.deepEqual(sys(2), { role: "system", content: expected });
+  assert.equal((await turns(i.store, loop)).filter((r) => r.role === "system").length, 1);
+  await i.rt.stop();
+  await replayMatches(i.store);
+});
+
+test("prompt: a chat naming a tree without SOUL.md gets the fixed prompt (IDENTITY.md alone is appended to it)", async (t) => {
+  const { i, peer, api } = await setup(t, [answer({ content: "hi" }), answer({ content: "hi" })], { files: { "SOUL.md": "Soul.\n" } });
+  // A tree with only IDENTITY.md: the fixed prompt, then it.
+  const other = await fs.mkdtemp(join(tmpdir(), "skein-chat-"));
+  t.after(() => fs.rm(other, { recursive: true, force: true }));
+  await fs.writeFile(join(other, "IDENTITY.md"), "name: Nobody\n");
+  const { root: idOnly, bundles } = await bundlesOf(other);
+  for (const b of bundles) await send(i, "objects", b);
+  await settle(i);
+  await send(i, "chat", { text: "hello", tree: idOnly });
+  await settle(i);
+  await peer.poll();
+  assert.equal((api.requests[0].messages as Json[])[0].content, `${DEFAULT_PROMPT}\n\nname: Nobody\n`);
+  // The main tree has SOUL.md; a new conversation from it uses it.
+  await send(i, "chat", { text: "hello again" });
+  await settle(i);
+  await peer.poll();
+  assert.equal((api.requests[1].messages as Json[])[0].content, "Soul.\n");
+  await settle(i);
+  await i.rt.stop();
+  await replayMatches(i.store);
+});
+
+// ---------------------------------------------------------------- the message tool: two instances
+
+/** An instance on a shared hub and clock with its own scripted inference peer; `chat` open to anyone when `open`. */
+async function agent(hub: Hub, clock: ReturnType<typeof scriptClock>, handle: string, answers: Json[], open = false) {
+  const inferKey = PrivateKey.fromRandom();
+  const inferId = inferKey.toPublicKey().toString();
+  const i = await instance({
+    hub, clock,
+    config: {
+      handle, peers: { infer: inferId },
+      ...(open ? { subscriptions: [{ match: { box: "chat" }, handler: PROGRAM_CIDS.loop }] } : {}),
+    },
+  });
+  const api = scripted(answers);
+  return { i, api, peer: inferPeer(i, inferKey, api.fetch) };
+}
+
+test("message: the model messages another instance by handle; the loop sends `chat`, rests on the reply, and the other agent's `say` is the tool result; a second message continues that conversation", async (t) => {
+  const hub = messageBoxHub();
+  const clock = scriptClock();
+  const alice = await agent(hub, clock, "alice", [
+    answer({ content: "", tool_calls: [toolCall("c1", "echo checked"), messageCall("m1", "@bob@localhost", "What is 2+2?")] }),
+    answer({ content: "", tool_calls: [messageCall("m2", "bob@localhost", "And 2+3?")] }),
+    answer({ content: "Bob says 4 and 5." }),
+  ]);
+  const bob = await agent(hub, clock, "bob", [answer({ content: "4" }), answer({ content: "5" })], true);
+  const directory: Record<string, string> = { "bob@localhost": bob.i.identity };
+  alice.i.rt.resolver = { resolve: async (h, d) => directory[`${h}@${d}`] ?? Promise.reject(new Error("unknown handle")) };
+  const both = async () => { await settle(alice.i); await settle(bob.i); await settle(alice.i); };
+
+  await send(alice.i, "chat", { text: "ask bob" });
+  await settle(alice.i);
+  await alice.peer.poll(); // bash, then message
+  await both();
+  const [aloop] = await loops(alice.i.store);
+  let tip = await tipOf(alice.i.store, aloop);
+  assert.equal(tip.state, "waiting");
+  assert.equal(hub.pending(bob.i.identity, "chat").length, 0, "bob's delivery collected the chat");
+  const [bloop] = await loops(bob.i.store);
+  assert.ok(bloop, alice.i.lines.concat(bob.i.lines).join("\n"));
+  const bturns = await turns(bob.i.store, bloop);
+  assert.deepEqual(bturns.map((r) => r.role), ["system", "user"]);
+  assert.equal(bturns[0].content, DEFAULT_PROMPT, "bob has no main tree: the fixed prompt");
+  assert.equal(bturns[1].text, "What is 2+2?");
+  assert.equal(bturns[1].tree, undefined, "no tree crosses instances");
+  const chatEnv = bturns[1].of as CID;
+  assert.ok(tip.awaits![0].equals(chatEnv), "alice rests on the chat she sent bob");
+
+  // Bob's model answers; bob says it to alice (her `say` box); it resumes her thread.
+  await bob.peer.poll();
+  await both();
+  await alice.peer.poll(); // her second infer: the answer is another message to bob
+  assert.ok(alice.i.lines.some((l) => l.includes(" in say from ") && l.includes(`→ ${fmt(aloop).slice(-8)}`)), alice.i.lines.join("\n"));
+  const second = alice.api.requests[1].messages as Json[];
+  assert.deepEqual(second.map((m) => m.role), ["system", "user", "assistant", "tool", "tool"]);
+  assert.deepEqual([second[3].tool_call_id, second[3].content], ["c1", "exit 0\nchecked\n"]);
+  assert.deepEqual([second[4].tool_call_id, second[4].content], ["m1", "4"]);
+  const tools = (alice.api.requests[0].tools as Json[]).map((x) => (x.function as Json).name);
+  assert.deepEqual(tools, ["bash", "message"]);
+
+  // The second message to bob replies to his say: his conversation continues (one thread).
+  await both();
+  await bob.peer.poll();
+  await both();
+  assert.equal((await loops(bob.i.store)).length, 1, "bob's thread continued, no new conversation");
+  assert.deepEqual((await turns(bob.i.store, bloop)).map((r) => r.role), ["system", "user", "assistant", "user", "assistant"]);
+  await alice.peer.poll();
+  await settle(alice.i);
+  const [final] = await says(alice.i);
+  assert.equal(final.body.text, "Bob says 4 and 5.");
+
+  const aturns = await turns(alice.i.store, aloop);
+  const results = aturns.filter((r) => r.role === "tool" && r.to);
+  assert.deepEqual(results.map((r) => [r.call, r.to, r.text]), [["m1", "@bob@localhost", "4"], ["m2", "@bob@localhost", "5"]]);
+  assert.ok((results[0].sent as CID).equals(chatEnv), "`sent` names the chat alice sent");
+  const bobSays = (await history(bob.i.store, bloop)).filter((u) => u.awaits).map((u) => u.awaits![0]);
+  assert.ok((results[0].of as CID).equals(bobSays[1]), "`of` names bob's say");
+
+  // Replay, both instances, no wallet: alice's resolve and seals come from the record.
+  await alice.i.rt.stop();
+  await bob.i.rt.stop();
+  const aSent = await replayMatches(alice.i.store);
+  assert.deepEqual(aSent.map((o) => o.box), ["infer", "chat", "infer", "chat", "infer", "say"]);
+  const bSent = await replayMatches(bob.i.store);
+  assert.deepEqual(bSent.map((o) => o.box), ["infer", "say", "infer", "say"]);
+});
+
+test("message: a handle that does not resolve, or bad arguments, is an error result; the loop asks the model again; replay needs no resolver", async (t) => {
+  const hub = messageBoxHub();
+  const alice = await agent(hub, scriptClock(), "alice", [
+    answer({ content: "", tool_calls: [messageCall("m1", "@nobody@localhost", "hi"), messageCall("m2", "nobody", "hi")] }),
+    answer({ content: "Nobody is there." }),
+  ]);
+  alice.i.rt.resolver = { resolve: async () => { throw new Error("unknown handle"); } };
+  await send(alice.i, "chat", { text: "ask nobody" });
+  await settle(alice.i);
+  await alice.peer.poll();
+  await settle(alice.i);
+  await alice.peer.poll();
+  await settle(alice.i);
+  assert.equal(alice.api.requests.length, 2, alice.i.lines.join("\n"));
+  const msgs = alice.api.requests[1].messages as Json[];
+  assert.deepEqual(msgs.slice(3).map((m) => [m.tool_call_id, m.content]), [
+    ["m1", "error: resolve: nobody@localhost did not resolve to an identity key"],
+    ["m2", "error: message: `to` must be a handle, @handle@domain, not \"nobody\""],
+  ]);
+  assert.ok(alice.i.lines.some((l) => l.includes("resolve nobody@localhost: unknown handle")));
+  assert.equal((await says(alice.i))[0].body.text, "Nobody is there.");
+  await alice.i.rt.stop();
+  await replayMatches(alice.i.store);
 });

@@ -188,20 +188,22 @@ export function isEmit(x: unknown): x is Emit {
  *   op "seal":   request = the emit record's CID, result = the signed part of the outbound
  *                BRC-169 envelope (no `content`; as dag-cbor: the envelope record), signed by
  *                the instance wallet — a signature needs the wallet, so it is an answer
+ *   op "resolve": request = "handle@domain" (UTF-8), result = the identity key it resolved to
+ *                (hex, UTF-8), as the host's resolver answered it
  */
 export type Attested = {
   kind: "attested";
   thread: CID;
   step: number;
   i: number;
-  op: "wallet" | "seal";
+  op: "wallet" | "seal" | "resolve";
   request: Uint8Array | CID;
   result: Uint8Array;
 };
 
 export function isAttested(x: unknown): x is Attested {
   return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
-    && (x.op === "wallet" || x.op === "seal") && x.result instanceof Uint8Array;
+    && (x.op === "wallet" || x.op === "seal" || x.op === "resolve") && x.result instanceof Uint8Array;
 }
 
 // ---------------------------------------------------------------- helpers

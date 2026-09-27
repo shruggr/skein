@@ -56,7 +56,7 @@ import { genesisOf, isLogEntry, short, stampMs, verifyEntry, type LogEntry } fro
 import { advanceHead, headTree, isHeadName } from "./heads.ts";
 import { runProgram } from "./program.ts";
 import { isShellArgs, loadModule, loadShellModules } from "./programs.ts";
-import { isAttested, isEmit, isGenesis, isProgram, matches, type Attested, type Emit, type Genesis, type Program } from "./records.ts";
+import { isAttested, isEmit, isGenesis, isIdentity, isProgram, matches, type Attested, type Emit, type Genesis, type Program } from "./records.ts";
 import { runShell } from "./shell.ts";
 import { Rejected, type Store } from "./store.ts";
 import { entropy, stampNs, ThreadClock, type Stamp } from "./syscalls.ts";
@@ -90,6 +90,16 @@ export interface Outbox {
   send(o: Outbound): void | Promise<void>;
 }
 
+/**
+ * Handle resolution: a BRC-169 handle (`handle@domain`) to the identity key an
+ * emit is sealed to. The host's (its registry; later a domain's resolve
+ * endpoint). An attested call: the answer is recorded, and replay serves it
+ * from the record.
+ */
+export interface Resolver {
+  resolve(handle: string, domain: string): Promise<string>;
+}
+
 /** A reply delivered to the thread awaiting it: the handler-args shape, plus what it answers. */
 interface Reply { envelope: CID; body: CID; box: string; sender: string; replyTo: CID }
 
@@ -102,6 +112,7 @@ export interface RuntimeOptions {
   wallet?: WalletInterface;
   witness?: Witness;
   outbox?: Outbox;
+  resolver?: Resolver;
   /** One line per transition. Default: nowhere. */
   log?: (line: string) => void;
   /** Called when a thread starts sleeping: the tick provider reads the next deadline. */
@@ -156,6 +167,7 @@ export class Runtime {
   readonly store: Store;
   readonly wallet?: WalletInterface;
   outbox?: Outbox;
+  resolver?: Resolver;
   /** A thread started sleeping: the tick provider's cue to read sleepersDue(). */
   onSleep?: (thread: CID, until: Ms) => void;
   private readonly witness?: Witness;
@@ -178,6 +190,7 @@ export class Runtime {
     this.wallet = o.wallet;
     this.witness = o.witness;
     this.outbox = o.outbox;
+    this.resolver = o.resolver;
     this.say = o.log ?? (() => {});
     this.onSleep = o.onSleep;
     if (o.wallet) this.wire = new WalletWireProcessor(o.wallet);
@@ -534,6 +547,23 @@ export class Runtime {
           if (!sealed.some((s) => s.equals(c))) throw new Error("await: not an envelope this step emitted");
           if (launched.length) throw new Error("await: this step launched threads; a step waits on threads or on replies, not both");
           if (!awaits.some((a) => a.equals(c))) awaits.push(c);
+        },
+        resolve: async (name) => {
+          const m = /^([^@\s]+)@([^@\s]+)$/.exec(name);
+          if (!m) throw new Error(`resolve: want handle@domain, not ${JSON.stringify(name)}`);
+          // A failure is an answer too (recorded as ""), so replay meets the same one.
+          const key = Buffer.from(await attest("resolve", new TextEncoder().encode(name), async () => {
+            let k = "";
+            try {
+              if (!this.resolver) throw new Error("no resolver");
+              k = await this.resolver.resolve(m[1], m[2]);
+            } catch (e) {
+              this.say(`${short(origin)} resolve ${name}: ${(e as Error).message}`);
+            }
+            return new TextEncoder().encode(k);
+          })).toString("utf8");
+          if (!isIdentity(key)) throw new Error(`resolve: ${name} did not resolve to an identity key`);
+          return key;
         },
         head: (name) => headTree(this.store, name),
         advance: async (name, tree) => {
