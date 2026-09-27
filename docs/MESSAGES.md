@@ -148,7 +148,10 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   reply to it, driven by the outcome entry, with `deliveryFailed: {emit,
   envelope, to, box, reason}` as the step's input in place of a `reply`; if
   nothing awaits it, it is recorded and nothing runs. So no thread waits on
-  an envelope that will not arrive. Outcomes are entries: replay reads them
+  an envelope that will not arrive. A program opts in by listing `outcomes`
+  among its record's `services` (the loop does); one that does not — a loop
+  pinned by a genesis from before outcomes, which would read such a step as
+  its first — is not resumed and keeps waiting, as it did. Outcomes are entries: replay reads them
   back like any other.
 - **Wallet**: BRC-100, however wired.
 

@@ -83,7 +83,7 @@ export const LOOP = program({
   name: "loop",
   code: { wasm: MODULES.loop },
   inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
-  services: ["infer"],
+  services: ["infer", "outcomes"],
   description: "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs.",
 });
 

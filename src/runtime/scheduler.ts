@@ -22,7 +22,8 @@
 //     outcome  → `failed`: the thread whose tip emitted that emit and awaits a
 //                reply to it resumes with the failure as its next step's
 //                input (`deliveryFailed`), so it never waits on a message that
-//                will not arrive; `delivered`: a record, nothing runs;
+//                will not arrive — if its program takes them (services lists
+//                "outcomes"); `delivered`: a record, nothing runs;
 //     step every thread that touches until each rests or ends, and hand the
 //     envelopes they emitted to the outbox;
 //   then advance the cursor.
@@ -78,6 +79,13 @@ import type { Ms, ThreadOrigin, ThreadState, ThreadUpdate } from "./types.ts";
 export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
   [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],
 ]);
+
+/**
+ * A program that lists this among its `services` takes `deliveryFailed` steps.
+ * Others — e.g. a loop from before outcomes, which would read such a step as
+ * its first — are not resumed by a failure: they keep waiting, as they did.
+ */
+export const OUTCOMES = "outcomes";
 
 /** An emitted message, as the program sealed it, for the delivery provider to carry. */
 export interface Outbound extends Emit {
@@ -385,6 +393,8 @@ export class Runtime {
       const envelope = encode(signedPart(rec.envelope as never)).cid;
       const t = await this.awaiter(envelope, (c) => c.equals(emit));
       if (!t) { this.say(`${what}: no thread awaits it; recorded, nothing runs`); return; }
+      const p = await this.programOf(await this.store.get<ThreadOrigin>(t)).catch(() => undefined);
+      if (!p?.services.includes(OUTCOMES)) { this.say(`${what}: ${short(t)} ${p?.name ?? "?"} does not take delivery failures (services: no "${OUTCOMES}"); recorded, it keeps waiting`); return; }
       this.say(`${what} → ${short(t)}`);
       await this.step(t, entry, e, undefined, undefined, { emit, envelope, to: rec.to, box: rec.box, reason: reason ?? "" });
       return;

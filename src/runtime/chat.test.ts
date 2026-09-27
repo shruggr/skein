@@ -24,7 +24,7 @@ import { encode, fmt } from "./cid.ts";
 import { headTree, MAIN } from "./heads.ts";
 import { copyLog, readLog, stampMs } from "./log.ts";
 import { memoryStore } from "./memory.ts";
-import { PROGRAM_CIDS } from "./programs.ts";
+import { LOOP, PROGRAM_CIDS } from "./programs.ts";
 import { Runtime, witnessFrom, type Outbound } from "./scheduler.ts";
 import type { Store } from "./store.ts";
 import type { ThreadUpdate } from "./types.ts";
@@ -694,4 +694,24 @@ test("outcome: the `infer` refused → an inference error answered to the opener
   await b.rt.stop();
   await replayMatches(a.store);
   await replayMatches(b.store);
+});
+
+test("outcome: a program that does not list \"outcomes\" among its services (a loop from before them) is not resumed by a failure; it keeps waiting", async (t) => {
+  let owner = "";
+  const i = await instance({ hub: faultyHub(messageBoxHub(), (m) => m.recipient === owner ? noAccount() : undefined) });
+  owner = i.owner.identity;
+  const old = { ...LOOP, services: ["infer"] };
+  const handler = await i.store.put(old);
+  await i.rt.idle();
+  const { subscribe } = await import("./subscriptions.ts");
+  await subscribe(i.store, { op: "add", box: "oldchat", handler }, { input: (await i.store.log.tip())!, at: 0 });
+  await send(i, "oldchat", { text: "hi" });
+  await settle(i);
+  const [th] = await collect(i.store.edges.query({ kind: "thread", program: handler }));
+  assert.ok(th, i.lines.join("\n"));
+  const tip = await tipOf(i.store, th);
+  assert.equal(tip.state, "waiting", "still waiting on the answer it could not deliver");
+  assert.ok(i.lines.some((l) => /outcome failed .* loop does not take delivery failures/.test(l)), i.lines.join("\n"));
+  assert.equal((await turns(i.store, th)).at(-1)!.role, "user", "no step ran on the failure");
+  await i.rt.stop();
 });
