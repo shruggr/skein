@@ -1,17 +1,22 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-host`: the host's management database (instances.ts, $SKEIN_HOME/host.db)
 // and the one process that runs every enabled row (host.ts).
-//   skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--disabled]
+//   skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
+//   skein-host knows <handle> [a,b | --all | --none]
 //   skein-host list
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
-//   skein-host roster
+//   skein-host roster [--for <handle> | --deploy]
 // `add` inserts, or updates the given fields of an existing row. `deploy`
 // sends a directory into an instance through its `objects` box as the owner
 // (deploy.ts) and records its root as the row's `tree` (and the directory as
-// its `source`, which `--all` deploys again). `roster` prints the front end's
-// roster (roster.ts), which `run` also serves at /roster.json. `run` reads
+// its `source`, which `--all` deploys again), with the row's generated
+// ROSTER.md at the tree's root (#27: the rows it `knows`; `knows` sets them).
+// `roster` prints the front end's roster (roster.ts), which `run` also serves
+// at /roster.json; `roster --for h` prints h's ROSTER.md; `roster --deploy`
+// sends every enabled row whose ROSTER.md changed its deployed tree (from the
+// instance's store) with the new one. `run` reads
 // its environment like skein-runtime (bin/skein-host fills it from $SKEIN_HOME):
 //   SKEIN_HOME            default ~/.skein; host.db lives here
 //   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway keys for every instance and the host)
@@ -24,7 +29,7 @@
 // and signs through the owner's wallet as bin/skein does:
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { install } from "../dev/cli.ts";
@@ -33,11 +38,11 @@ import { openStore } from "../runtime/sqlite.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { connectWallet, ephemeralWallet, remoteWallet, type WalletInterface } from "../wallet.ts";
-import { DEFAULT_ONLY, deploy } from "./deploy.ts";
+import { DEFAULT_ONLY, deploy, deployFiles, type Deployed } from "./deploy.ts";
 import { hostResolver, startInstance, type Running } from "./host.ts";
-import { HostDb, type InstanceRow, type RowFields } from "./instances.ts";
+import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { messageBoxClient, type MessageBox } from "./messagebox.ts";
-import { roster, serveRoster } from "./roster.ts";
+import { deployedIdentity, parseIdentity, roster, rosterFor, serveRoster, type IdentityFields } from "./roster.ts";
 
 export interface Env {
   vars: Record<string, string | undefined>;
@@ -50,13 +55,16 @@ export interface Env {
 }
 
 const USAGE = `usage:
-  skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--disabled]
+  skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
+  skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
   skein-host list
   skein-host enable|disable|remove <handle>
   skein-host run
   skein-host deploy <handle> <dir> [--only glob,glob]     default --only ${DEFAULT_ONLY.join(",")}
   skein-host deploy --all [--only glob,glob]              every enabled row, from its last deployed directory
-  skein-host roster`;
+  skein-host roster                                       the front end's roster JSON
+  skein-host roster --for <handle>                        that agent's ROSTER.md
+  skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed`;
 
 export const homeOf = (vars: Env["vars"]) => vars.SKEIN_HOME || join(vars.HOME ?? ".", ".skein");
 
@@ -71,10 +79,11 @@ export async function main(argv: string[], env: Env): Promise<number> {
       case "add": {
         const { values: v, positionals: [handle] } = parseArgs({
           args: rest, allowPositionals: true,
-          options: { domain: { type: "string" }, identity: { type: "string" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, disabled: { type: "boolean" } },
+          options: { domain: { type: "string" }, identity: { type: "string" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" } },
         });
         if (!handle) { env.err(USAGE); return 2; }
         const f: RowFields = { domain: v.domain, identity: v.identity, wallet_url: v["wallet-url"], wallet_originator: v.originator, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
+        if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
         const r = db.add(handle, f);
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
@@ -95,9 +104,10 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await run(db, env);
       case "deploy":
         return await deployCmd(db, rest, env);
+      case "knows":
+        return knowsCmd(db, rest, env);
       case "roster":
-        env.out(JSON.stringify(await roster(db.list("enabled"), async (row) => openRow(row, env), () => false), null, 2));
-        return 0;
+        return await rosterCmd(db, rest, env);
       default:
         env.err(USAGE);
         return 2;
@@ -105,6 +115,108 @@ export async function main(argv: string[], env: Env): Promise<number> {
   } finally {
     if (cmd !== "run") db.close(); // run keeps it (and closes it on a signal)
   }
+}
+
+const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+function knowsCmd(db: HostDb, rest: string[], env: Env): number {
+  const { values: v, positionals: [handle, list, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { all: { type: "boolean" }, none: { type: "boolean" } } });
+  if (!handle || more.length || [list !== undefined, v.all, v.none].filter(Boolean).length > 1) { env.err(USAGE); return 2; }
+  if (!db.get(handle)) { env.err(`skein-host knows: no instance ${handle}`); return 1; }
+  if (list !== undefined || v.all || v.none) {
+    const k = v.all ? "all" : v.none ? [] : handles(list!);
+    for (const h of k === "all" ? [] : k) if (h !== "*" && !db.get(h)) env.err(`skein-host knows: no instance ${h} (yet): kept, listed once it exists`);
+    db.setKnows(handle, k);
+  }
+  const k = knowsOf(db.get(handle)!);
+  env.out(`${handle} knows ${k === "all" ? "everyone" : k.length ? k.join(", ") : "nobody"}`);
+  return 0;
+}
+
+/**
+ * IDENTITY.md's fields per row, for ROSTER.md: from `pending` (the directory
+ * about to be deployed into that row), else the row's deployed tree in its
+ * store, else (not admitted yet) its `source` directory; else empty.
+ */
+function identities(env: Env, pending: Map<string, string> = new Map()): (row: InstanceRow) => Promise<IdentityFields> {
+  const seen = new Map<string, IdentityFields>();
+  const fromDir = (dir: string): IdentityFields | undefined => {
+    const p = join(dir, "IDENTITY.md");
+    return existsSync(p) ? parseIdentity(readFileSync(p, "utf8")) : undefined;
+  };
+  return async (row) => {
+    let f = seen.get(row.handle);
+    if (f) return f;
+    const dir = pending.get(row.handle);
+    if (dir) f = fromDir(dir);
+    else {
+      const s = openRow(row, env);
+      try { f = await deployedIdentity(row, s.blocks); } finally { await s.close?.(); }
+      if (!f && row.source) f = fromDir(row.source);
+    }
+    f ??= { displayName: "", description: "" };
+    seen.set(row.handle, f);
+    return f;
+  };
+}
+
+async function rosterCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { for: { type: "string" }, deploy: { type: "boolean" } } });
+  if (positionals.length || (v.for !== undefined && v.deploy)) { env.err(USAGE); return 2; }
+  const rows = db.list("enabled");
+  if (v.for !== undefined) {
+    const row = db.get(v.for);
+    if (!row) { env.err(`skein-host roster: no instance ${v.for}`); return 1; }
+    const text = await rosterFor(row, rows, identities(env));
+    if (text) env.out(text.trimEnd());
+    else env.err(`${row.handle} knows nobody: no ROSTER.md`);
+    return 0;
+  }
+  if (!v.deploy) {
+    env.out(JSON.stringify(await roster(rows, async (row) => openRow(row, env), () => false), null, 2));
+    return 0;
+  }
+  const owner = await ownerOf(env, "skein-host roster");
+  if (typeof owner === "number") return owner;
+  const fields = identities(env);
+  let failed = 0;
+  for (const row of rows) {
+    if (!row.tree) { env.out(`${row.handle}: never deployed; skipped`); continue; }
+    const s = openRow(row, env);
+    try {
+      if (!s.blocks) throw new Error(`no store at ${row.store}: deploy the directory instead`);
+      const r = await deployFiles({ row, owner: owner.wallet, box: owner.box, store: s.blocks, files: { "ROSTER.md": (await rosterFor(row, rows, fields)) ?? null } });
+      db.add(row.handle, { tree: r.root });
+      env.out(deployedLine(row, r));
+    } catch (e) {
+      failed++;
+      env.err(`${row.handle}: ${(e as Error).message}`);
+    } finally {
+      await s.close?.();
+    }
+  }
+  return failed ? 1 : 0;
+}
+
+const deployedLine = (row: InstanceRow, r: Deployed) => r.unchanged
+  ? `${row.handle}: unchanged ${r.root}`
+  : `${row.handle}: deployed ${r.root} · ${r.records} objects in ${r.bundles} envelope(s) to objects${r.head ? " · head main" : ""}`;
+
+/** The owner's wallet and messagebox session (env.owner in tests), checked against SKEIN_OWNER; else an exit code. */
+async function ownerOf(env: Env, cmd: string): Promise<{ wallet: WalletInterface; box: MessageBox } | number> {
+  let owner = env.owner;
+  if (!owner) {
+    const mb = env.vars.SKEIN_MESSAGEBOX;
+    if (!mb) { env.err(`${cmd}: SKEIN_MESSAGEBOX is not set (bin/skein-host reads messagebox.url)`); return 1; }
+    const wallet = remoteWallet(env.vars.SKEIN_OWNER_WALLET || "http://127.0.0.1:3322", env.vars.SKEIN_ORIGINATOR || "skein-client");
+    owner = { wallet, box: messageBoxClient(wallet, mb, env.vars.SKEIN_ORIGINATOR || "skein-client") };
+  }
+  const me = await rootIdentity(owner.wallet);
+  if (env.vars.SKEIN_OWNER && env.vars.SKEIN_OWNER !== me) {
+    env.err(`${cmd}: the owner wallet is ${short(me)}, not SKEIN_OWNER ${short(env.vars.SKEIN_OWNER)}: instances would not admit what it signs`);
+    return 1;
+  }
+  return owner;
 }
 
 /** A row's store to read while something else may be writing it: read-only, if it exists. */
@@ -135,27 +247,19 @@ async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
     jobs = [{ row, dir: resolve(dir) }];
   }
   if (!jobs.length) return 0;
-  let owner = env.owner;
-  if (!owner) {
-    const mb = env.vars.SKEIN_MESSAGEBOX;
-    if (!mb) { env.err("skein-host deploy: SKEIN_MESSAGEBOX is not set (bin/skein-host reads messagebox.url)"); return 1; }
-    const wallet = remoteWallet(env.vars.SKEIN_OWNER_WALLET || "http://127.0.0.1:3322", env.vars.SKEIN_ORIGINATOR || "skein-client");
-    owner = { wallet, box: messageBoxClient(wallet, mb, env.vars.SKEIN_ORIGINATOR || "skein-client") };
-  }
-  const me = await rootIdentity(owner.wallet);
-  if (env.vars.SKEIN_OWNER && env.vars.SKEIN_OWNER !== me) {
-    env.err(`skein-host deploy: the owner wallet is ${short(me)}, not SKEIN_OWNER ${short(env.vars.SKEIN_OWNER)}: instances would not admit what it signs`);
-    return 1;
-  }
+  const owner = await ownerOf(env, "skein-host deploy");
+  if (typeof owner === "number") return owner;
+  // Every ROSTER.md from the IDENTITY.md about to go in, for the rows deployed now.
+  const rows = db.list("enabled");
+  const fields = identities(env, new Map(jobs.map((j) => [j.row.handle, j.dir])));
   let failed = 0;
   for (const { row, dir } of jobs) {
     const s = openRow(row, env);
     try {
-      const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box, store: s.blocks });
+      const files = { "ROSTER.md": (await rosterFor(row, rows, fields)) ?? null };
+      const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box, store: s.blocks, files });
       db.add(row.handle, { tree: r.root, source: dir });
-      env.out(r.unchanged
-        ? `${row.handle}: unchanged ${r.root}`
-        : `${row.handle}: deployed ${r.root} · ${r.records} objects in ${r.bundles} envelope(s) to objects${r.head ? " · head main" : ""}`);
+      env.out(deployedLine(row, r));
     } catch (e) {
       failed++;
       env.err(`${row.handle}: ${(e as Error).message}`);

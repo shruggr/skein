@@ -48,6 +48,11 @@ export async function hashDir(dir: string, opts: ScanOptions = {}): Promise<{ ro
  */
 export async function dirBundles(dir: string, o: ScanOptions & { limit?: number; skip?: (cid: CID) => Promise<boolean> } = {}): Promise<{ root: CID; records: number; bundles: Uint8Array[] }> {
   const { root, records: all } = await hashDir(dir, o);
+  return recordBundles(root, all, o);
+}
+
+/** dirBundles for records already in hand (every object of the tree `root`). */
+export async function recordBundles(root: CID, all: Rec[], o: { limit?: number; skip?: (cid: CID) => Promise<boolean> } = {}): Promise<{ root: CID; records: number; bundles: Uint8Array[] }> {
   const rootKey = root.toString();
   const records: Rec[] = [];
   if (!(await o.skip?.(root))) for (const r of all) if (r.cid.toString() === rootKey || !(await o.skip?.(r.cid))) records.push(r);

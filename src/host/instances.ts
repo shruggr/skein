@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS instances (
   store             TEXT NOT NULL,                    -- its runtime.db
   tree              TEXT,                             -- the root CID of the directory last deployed into it (skein-host deploy)
   source            TEXT,                             -- that directory, for skein-host deploy --all
+  knows             TEXT,                             -- JSON array of the handles this agent knows (its ROSTER.md); ["*"]: everyone; NULL: nobody
   status            TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
   created_at        TEXT NOT NULL
 );`;
@@ -31,6 +32,8 @@ export interface InstanceRow {
   store: string;
   tree: string | null;
   source: string | null;
+  /** JSON array of handles, `["*"]` for every other row; null: none. See knowsOf. */
+  knows: string | null;
   status: Status;
   created_at: string;
 }
@@ -38,7 +41,20 @@ export interface InstanceRow {
 /** The fields `add` sets; absent ones keep their value (or the column's default on insert). */
 export type RowFields = Partial<Omit<InstanceRow, "handle" | "created_at">>;
 
-const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "source", "status"] as const;
+const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "source", "knows", "status"] as const;
+
+/** The handles a row knows: a list, or "all" (every other enabled row). */
+export function knowsOf(row: Pick<InstanceRow, "knows">): string[] | "all" {
+  const k = row.knows ? (JSON.parse(row.knows) as string[]) : [];
+  return k.includes("*") ? "all" : k;
+}
+
+/** The `knows` column for a list of handles (`*` among them: everyone); an empty list is null. */
+export function knowsColumn(handles: string[] | "all"): string | null {
+  if (handles === "all" || handles.includes("*")) return JSON.stringify(["*"]);
+  const k = [...new Set(handles)];
+  return k.length ? JSON.stringify(k) : null;
+}
 
 export class HostDb {
   readonly db: DatabaseSync;
@@ -50,6 +66,7 @@ export class HostDb {
     // Older files: columns added since.
     const cols = new Set(this.db.prepare("PRAGMA table_info(instances)").all().map((c) => c.name));
     if (!cols.has("source")) this.db.exec("ALTER TABLE instances ADD COLUMN source TEXT");
+    if (!cols.has("knows")) this.db.exec("ALTER TABLE instances ADD COLUMN knows TEXT");
   }
 
   /**
@@ -83,6 +100,11 @@ export class HostDb {
   list(status?: Status): InstanceRow[] {
     const q = status ? this.db.prepare("SELECT * FROM instances WHERE status = ? ORDER BY created_at, handle").all(status) : this.db.prepare("SELECT * FROM instances ORDER BY created_at, handle").all();
     return q.map((r) => ({ ...r }) as unknown as InstanceRow);
+  }
+
+  /** Set which handles a row knows (knowsColumn); false if there is no such row. */
+  setKnows(handle: string, handles: string[] | "all"): boolean {
+    return Number(this.db.prepare("UPDATE instances SET knows = ? WHERE handle = ?").run(knowsColumn(handles), handle).changes) > 0;
   }
 
   /** Set a row's status; false if there is no such row. */

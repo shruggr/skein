@@ -17,7 +17,8 @@
 //
 // The prompt: a new conversation reads /SOUL.md from the tree it starts on
 // (the chat's tree, else `main`'s) — else the fixed one below — and appends
-// /IDENTITY.md after it if there is one. It is kept as the system turn, so the
+// /IDENTITY.md, then /ROSTER.md (the colleagues the host says this agent
+// knows, with their addresses), after it if there are. It is kept as the system turn, so the
 // conversation keeps it however the tree moves on.
 //
 // Tools: `bash` (a command in the shell over the working tree) and `message`
@@ -582,8 +583,8 @@ func (l *loop) tree() skein.CID {
 }
 
 // prompt: a new conversation's system prompt, from the tree it starts on:
-// /SOUL.md (else the fixed one), then /IDENTITY.md after it if there is one.
-// A tree that cannot be read counts as having neither.
+// /SOUL.md (else the fixed one), then /IDENTITY.md and /ROSTER.md after it,
+// each if there is one. A tree that cannot be read counts as having none.
 func prompt(tree skein.CID) string {
 	p := system
 	if len(tree) == 0 {
@@ -592,8 +593,10 @@ func prompt(tree skein.CID) string {
 	if soul, ok, err := skein.ReadFile(tree, "SOUL.md"); err == nil && ok {
 		p = string(soul)
 	}
-	if id, ok, err := skein.ReadFile(tree, "IDENTITY.md"); err == nil && ok {
-		p = strings.TrimRight(p, "\n") + "\n\n" + string(id)
+	for _, name := range []string{"IDENTITY.md", "ROSTER.md"} {
+		if f, ok, err := skein.ReadFile(tree, name); err == nil && ok {
+			p = strings.TrimRight(p, "\n") + "\n\n" + string(f)
+		}
 	}
 	return p
 }
