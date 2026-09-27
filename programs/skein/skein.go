@@ -53,6 +53,9 @@ func _head(name unsafe.Pointer, nameLen uint32, out unsafe.Pointer, cap uint32) 
 //go:wasmimport skein advance
 func _advance(name unsafe.Pointer, nameLen uint32, tree unsafe.Pointer, treeLen uint32) int32
 
+//go:wasmimport skein subscribe
+func _subscribe(op unsafe.Pointer, opLen uint32, sender unsafe.Pointer, senderLen uint32, box unsafe.Pointer, boxLen uint32, handler unsafe.Pointer, handlerLen uint32) int32
+
 //go:wasmimport skein wallet
 func _wallet(req unsafe.Pointer, n uint32, out unsafe.Pointer, cap uint32) int32
 
@@ -351,6 +354,18 @@ func Head(name string) (CID, error) {
 func Advance(name string, tree CID) error {
 	n := []byte(name)
 	if _advance(ptr(n), uint32(len(n)), ptr(tree), uint32(len(tree))) < 0 {
+		return lastError()
+	}
+	return nil
+}
+
+// Subscribe changes the instance's subscriptions when this step ends without
+// error (docs/VM.md, "Subscriptions"): op "add" appends the rule (sender, box)
+// → handler, "remove" deletes it. sender "" is any sender; handler is a
+// program record in the store.
+func Subscribe(op, sender, box string, handler CID) error {
+	o, s, b := []byte(op), []byte(sender), []byte(box)
+	if _subscribe(ptr(o), uint32(len(o)), ptr(s), uint32(len(s)), ptr(b), uint32(len(b)), ptr(handler), uint32(len(handler))) < 0 {
 		return lastError()
 	}
 	return nil

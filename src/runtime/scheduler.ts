@@ -5,14 +5,17 @@
 //
 //   for each log entry after the cursor, in order:
 //     check its signature against the host identity (the genesis's `host`);
-//     genesis  → the starting state: programs and subscriptions;
+//     genesis  → the starting state: programs, and the seed subscriptions
+//                written as the subscriptions chain's first updates
+//                (subscriptions.ts);
 //     envelope → a reply first: if its plaintext body (a record the entry
 //                names) has `replyTo`, it goes to the thread whose tip
 //                `awaits` that envelope, provided the sender is the identity the
 //                awaited envelope was sealed to — as that thread's next step
 //                input — or, if none, nowhere (recorded, nothing runs). Never
-//                also by subscription. Otherwise route by subscription on
-//                (sender, box), first match wins: launch the handler program's
+//                also by subscription. Otherwise route by the subscriptions
+//                chain as it stands, on (sender, box), first match wins:
+//                launch the handler program's
 //                thread {program, args: {envelope, body, box, sender},
 //                launchedBy: <envelope>, input: <entry>} and step it;
 //     wake     → resume the sleeping thread it names, if its deadline is reached;
@@ -41,9 +44,10 @@
 //   envelope it sends — and handle resolutions) are records listed in its
 //   update (`calls`); a Witness serves them on replay, so replay needs no
 //   wallet. A step may keep records in its thread's state (`keep`: the loop's
-//   turns), listed in its update (`kept`), and move named heads (`advance`,
-//   heads.ts): the moves are written when it ends without error, and listed
-//   in its update.
+//   turns), listed in its update (`kept`), move named heads (`advance`,
+//   heads.ts) and change the subscriptions (`subscribe`, subscriptions.ts):
+//   both are written when it ends without error, and listed in its update
+//   (`heads`, `subscriptions`).
 //
 // Determinism: every record the runtime writes carries `input` (the entry
 // whose processing wrote it) and `at` (that entry's stamp, in ms). Nothing
@@ -56,6 +60,7 @@ import { brc78Decode, contentHash, isEnvelope, signedPart, verify } from "./enve
 import { decode, encode, isCID } from "./cid.ts";
 import { genesisOf, isLogEntry, short, stampMs, verifyEntry, type LogEntry } from "./log.ts";
 import { advanceHead, headTree, isHeadName } from "./heads.ts";
+import { currentSubscriptions, openSubscriptions, ruleProblem, subscribe, subscriptionsOrigin, type Rule } from "./subscriptions.ts";
 import { runProgram } from "./program.ts";
 import { isShellArgs, loadModule, loadShellModules } from "./programs.ts";
 import { isAttested, isEmit, isGenesis, isIdentity, isProgram, matches, type Attested, type Emit, type Genesis, type Program } from "./records.ts";
@@ -219,10 +224,16 @@ export class Runtime {
       .map((t) => ({ thread: t.origin, until: Number((t.deadline! + 999_999n) / 1_000_000n) }));
   }
 
-  /** The boxes the subscriptions route (what the delivery provider collects). Reads the genesis if not yet started. */
+  /**
+   * The boxes the subscriptions route (what the delivery provider collects):
+   * the chain's rules as they stand — before the genesis entry is processed,
+   * its seed — and the genesis's `collect`. Reads the genesis if not yet started.
+   */
   async boxes(): Promise<string[]> {
     if (!this.genesis && (await this.store.log.tip())) this.genesis = await genesisOf(this.store);
-    const subscribed = (this.genesis?.subscriptions ?? []).map((s) => s.match.box).filter((b): b is string => !!b);
+    const seeded = (await this.store.live.cursor.get()) > 0;
+    const rules = (seeded ? await currentSubscriptions(this.store) : undefined) ?? this.genesis?.subscriptions ?? [];
+    const subscribed = rules.map((s) => s.match.box).filter((b): b is string => !!b);
     return [...new Set([...subscribed, ...(this.genesis?.collect ?? [])])];
   }
 
@@ -231,6 +242,9 @@ export class Runtime {
   async start(): Promise<void> {
     if (await this.store.log.tip()) this.genesis = await genesisOf(this.store);
     this.cursor = await this.store.live.cursor.get();
+    if (this.cursor > 0 && !(await this.store.chains.tip(subscriptionsOrigin()).catch(() => undefined))) {
+      throw new Error("this store's log predates the subscriptions chain (docs/VM.md, \"Subscriptions\"): nothing would route; it needs a new genesis");
+    }
     this.say(`runtime ${short(this.identity)} · log ${this.cursor} processed${this.wallet ? "" : " · no wallet (replay)"}`);
     this.started = true;
 
@@ -329,7 +343,15 @@ export class Runtime {
     if (!g) throw new Error(`#${e.n}: no genesis`);
     if (!isLogEntry(e) || !verifyEntry(e, g.host)) throw new Error(`#${e.n} ${short(entry)}: bad log entry signature; stopping`);
 
-    if (e.genesis) { this.say(`#${e.n} genesis: ${g.handle}@${g.domain}, owner ${short(g.owner)}, ${g.subscriptions.length} subscriptions`); return; }
+    if (e.genesis) {
+      // The seed: the chain's first updates. Nothing routes from the genesis after this.
+      await openSubscriptions(this.store);
+      for (const s of g.subscriptions) {
+        await subscribe(this.store, { op: "add", ...(s.match.sender ? { sender: s.match.sender } : {}), box: s.match.box!, handler: s.handler }, { input: entry, at: stampMs(e.time) });
+      }
+      this.say(`#${e.n} genesis: ${g.handle}@${g.domain}, owner ${short(g.owner)}, ${g.subscriptions.length} subscriptions`);
+      return;
+    }
 
     if (e.wake) {
       const t = this.sleepers.get(e.wake.toString());
@@ -353,7 +375,7 @@ export class Runtime {
         await this.step(t, entry, e, undefined, { envelope: e.envelope, body: e.body!, box, sender, replyTo });
         return;
       }
-      const sub = sender ? g.subscriptions.find((s) => matches(s, sender, box)) : undefined;
+      const sub = sender ? ((await currentSubscriptions(this.store)) ?? []).find((s) => matches(s, sender, box)) : undefined;
       if (!sub || !sender) { this.say(`${what}: no subscription; recorded, nothing runs`); return; }
       const origin: ThreadOrigin = {
         kind: "thread", program: sub.handler, args: { envelope: e.envelope, body: e.body, box, sender },
@@ -484,8 +506,9 @@ export class Runtime {
       clock.drive(stampNs(e.time));
       const random = entropy(entry, origin);
 
-      const calls: CID[] = [], launched: CID[] = [], kept: CID[] = [], emits: CID[] = [], sealed: CID[] = [], awaits: CID[] = [], heads: CID[] = [];
+      const calls: CID[] = [], launched: CID[] = [], kept: CID[] = [], emits: CID[] = [], sealed: CID[] = [], awaits: CID[] = [], heads: CID[] = [], subs: CID[] = [];
       const moves: Array<{ name: string; tree: CID }> = [];
+      const rules: Rule[] = [];
       const children: ThreadOrigin[] = [];
       const g = this.genesis!;
       const input = encode(compact({
@@ -573,6 +596,14 @@ export class Runtime {
           if (!(await this.store.has(tree))) throw new Error(`advance: tree ${tree} is not in the store`);
           moves.push({ name, tree });
         },
+        subscribe: async (rule) => {
+          const bad = ruleProblem(rule);
+          if (bad) throw new Error(`subscribe: ${bad}`);
+          const p = await this.store.get(rule.handler).catch(() => undefined);
+          if (!isProgram(p)) throw new Error(`subscribe: handler ${rule.handler} is not a program record in the store`);
+          if ("wasm" in p.code && !(await this.store.has(p.code.wasm))) throw new Error(`subscribe: ${p.name}'s module ${p.code.wasm} is not in the store`);
+          rules.push(rule);
+        },
         wallet: async (frame) => {
           if (!WALLET_CALLS.has(frame[0])) throw new Error(`wallet: call ${frame[0]} is not allowed to programs`);
           return attest("wallet", frame, async () => Uint8Array.from(await this.wire!.transmitToWallet([...frame])));
@@ -584,6 +615,7 @@ export class Runtime {
       const state: ThreadState = out.exitCode !== 0 ? "errored" : launched.length || awaits.length ? "waiting" : "finished";
       for (const c of children) await this.store.chains.open(c);
       if (state !== "errored") for (const m of moves) heads.push(await advanceHead(this.store, m.name, m.tree, { thread: origin, input: entry, at }));
+      if (state !== "errored") for (const r of rules) { const c = await subscribe(this.store, r, { thread: origin, input: entry, at }); if (c) subs.push(c); }
       const text = (b: Uint8Array) => Buffer.from(b).toString("utf8").trim();
       await this.store.chains.append(origin, compact({
         state, step: n, input: entry, at,
@@ -594,10 +626,11 @@ export class Runtime {
         kept: kept.length ? kept : undefined,
         emits: emits.length ? emits : undefined,
         heads: heads.length ? heads : undefined,
+        subscriptions: subs.length ? subs : undefined,
         result: { exitCode: out.exitCode, stdout: out.stdout, stderr: out.stderr },
         error: state === "errored" ? { kind: "blew-up", message: text(out.stderr).split("\n").at(-1) || `exit ${out.exitCode}` } : undefined,
       }));
-      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${kept.length ? ` · ${kept.length} kept` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${heads.length ? ` · moved ${moves.map((m) => `${m.name}→${short(m.tree)}`).join(",")}` : ""}${awaits.length ? ` · awaits ${awaits.map(short).join(",")}` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
+      this.say(`${short(origin)} ${prog.name} step ${n} → ${state}${calls.length ? ` · ${calls.length} attested` : ""}${kept.length ? ` · ${kept.length} kept` : ""}${launched.length ? ` · launched ${launched.map(short).join(",")}` : ""}${emits.length ? ` · ${emits.length} emitted` : ""}${heads.length ? ` · moved ${moves.map((m) => `${m.name}→${short(m.tree)}`).join(",")}` : ""}${subs.length ? ` · ${subs.length} subscription change${subs.length === 1 ? "" : "s"}` : ""}${awaits.length ? ` · awaits ${awaits.map(short).join(",")}` : ""}${state === "errored" ? ` · ${text(out.stderr)}` : ""}`);
       after = { emits: emits.map((emit, i) => ({ emit, envelope: sealed[i] })), launched, rested: state !== "waiting" };
     } catch (err) {
       if (err instanceof Stopped || this.stopped) return;

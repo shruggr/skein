@@ -18,6 +18,7 @@ import { memoryStore } from "../runtime/memory.ts";
 import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import type { Subscription } from "../runtime/records.ts";
 import type { Store } from "../runtime/store.ts";
+import { currentSubscriptions } from "../runtime/subscriptions.ts";
 import type { ThreadOrigin } from "../runtime/types.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
@@ -131,7 +132,10 @@ test("genesis from a row: its handle and domain, the owner's boxes, then `chat` 
   assert.deepEqual(subs(g.subscriptions), subs(c.subscriptions!));
   assert.deepEqual(subs(g.subscriptions).at(-1), { box: "chat", handler: PROGRAM_CIDS.loop.toString() }, "the open subscription names no sender");
   assert.deepEqual(g.subscriptions.slice(0, 4).map((s) => [s.match.sender, s.match.box]), [[o.owner, "run"], [o.owner, "objects"], [o.owner, "head"], [o.owner, "chat"]]);
-  assert.deepEqual(await r.runtime.boxes(), ["run", "objects", "head", "chat", "completions"]);
+  assert.deepEqual(subs(g.subscriptions).at(-2), { sender: o.owner, box: "subscribe", handler: PROGRAM_CIDS["subscribe-handler"].toString() });
+  await r.runtime.idle();
+  assert.deepEqual(subs((await currentSubscriptions(r.store))!), subs(g.subscriptions), "the seed is the chain's first updates");
+  assert.deepEqual(await r.runtime.boxes(), ["run", "objects", "head", "chat", "subscribe", "completions"]);
   await r.stop();
 });
 

@@ -1,6 +1,6 @@
 // The `skein` import namespace for handler programs: the machine's syscalls
 // beyond WASI (docs/ARCH.md, "The kernel"). Pure ones (input, get, put,
-// putblock, keep, launch, await, head, advance) are answered from the store and the thread; the
+// putblock, keep, launch, await, head, advance, subscribe) are answered from the store and the thread; the
 // attested ones (wallet, resolve) leave through the runtime and are recorded,
 // and on replay are served from the record (runtime/program.ts).
 //
@@ -29,11 +29,17 @@
 //   head(name, name_len, out, cap) → n         the tree CID a named head points at; n = 0 if it has none (docs/VM.md "Heads")
 //   advance(name, name_len, tree, tree_len) → 0   move a named head to a tree in the store, when the step
 //                                              ends without error
+//   subscribe(op, op_len, sender, sender_len, box, box_len, handler, handler_len) → 0
+//                                              change the subscriptions (docs/VM.md "Subscriptions"): op "add"
+//                                              or "remove" the rule (sender, box) → handler (a program record
+//                                              in the store; sender_len 0: any sender), when the step ends
+//                                              without error
 //   wallet(frame, len, out, cap) → n           a BRC-100 wallet wire request frame → result frame (attested)
 //   take(out, cap) → n                         the held result of the last call
 //   error(out, cap) → n                        the last error's message
 
 import { CID } from "multiformats/cid";
+import type { Rule } from "../subscriptions.ts";
 import { JSPI, type Process } from "./host.ts";
 
 export interface ProgramHost {
@@ -48,6 +54,7 @@ export interface ProgramHost {
   resolve(name: string): Promise<Uint8Array>;
   head(name: string): Promise<CID | undefined>;
   advance(name: string, tree: CID): Promise<void>;
+  subscribe(rule: Rule): Promise<void>;
   wallet(frame: Uint8Array): Promise<Uint8Array>;
   /** Errors that must end the run rather than be returned to the program (the runtime stopping, a replay diverging). */
   fatal?(e: unknown): boolean;
@@ -89,6 +96,11 @@ export function skeinImports(proc: Process, host: ProgramHost): Record<string, u
     resolve: async(async (n: number, nl: number, p: number, cap: number) => out(await host.resolve(str(n, nl)), p, cap)),
     head: async(async (n: number, nl: number, p: number, cap: number) => out((await host.head(str(n, nl)))?.bytes ?? new Uint8Array(0), p, cap)),
     advance: async(async (n: number, nl: number, c: number, cl: number) => { await host.advance(str(n, nl), cid(c, cl)); return 0; }),
+    subscribe: async(async (o: number, ol: number, sp: number, sl: number, b: number, bl: number, h: number, hl: number) => {
+      const op = str(o, ol);
+      await host.subscribe({ op: op as Rule["op"], ...(sl ? { sender: str(sp, sl) } : {}), box: str(b, bl), handler: cid(h, hl) });
+      return 0;
+    }),
     wallet: async(async (f: number, fl: number, p: number, cap: number) => out(await host.wallet(bytes(f, fl)), p, cap)),
     take: (p: number, cap: number) => sync(() => { if (held.length > cap) throw new Error("take: buffer too small"); u8().set(held, p); return held.length; })(),
     error: (p: number, cap: number) => {
