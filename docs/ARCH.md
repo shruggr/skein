@@ -45,7 +45,7 @@ Inside the runtime:
 - the **store**: records (skein records, git-shaped file objects), chains,
   the tip index;
 - the **scheduler**: consumes the message log in order, routes by
-  subscription, steps programs;
+  subscription (the subscriptions chain), steps programs;
 - **programs**: WASI modules stepped by the scheduler, with imports only for
   the virtual filesystem, the store by CID, the wallet, and message
   emission;

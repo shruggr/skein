@@ -75,6 +75,43 @@ writes the same chain. A name never moved has no chain.
 - An import sets `main` when the instance has none: the client names the root
   on the last `objects` bundle, and `objects-handler` advances `main` to it.
 
+### Subscriptions
+
+The routing table is a chain too, one per instance: origin `{kind:
+"subscriptions"}` (found by encoding it, like a head by its name), one update
+per change `{op: "add" | "remove", sender?, box, handler, thread?, input,
+at}`. The rules are the updates folded in order: `add` appends the rule
+`(sender, box) → handler` at the end of the list, `remove` deletes it; an add
+of a rule already listed, or a remove of one that is not, writes nothing. No
+`sender` is any sender. The scheduler routes each envelope by the rules as
+they stand when its entry is processed, first match wins, replies before any
+of them (docs/MESSAGES.md). Replay writes the same chain.
+
+- **The genesis carries only the seed.** Its `subscriptions` are written as
+  the chain's first updates when the genesis entry is processed (no
+  `thread`); nothing reads them for routing afterwards. By default: the
+  owner's `run`, `objects`, `head`, `chat` and `subscribe` boxes; the host
+  adds `chat` from anyone.
+- The chain changes only by an explicit act: a program's step calls the
+  `subscribe` import (the handler must be a program record in the store, a
+  wasm program's module too), and the change is written when that step ends
+  without error; the step's update lists it (`subscriptions`).
+- The owner changes it by sending `{op, sender?, box, handler}` to box
+  `subscribe` (`skein subscribe add|remove [--sender key] <box> <handler>`,
+  `skein-host subscribe <handle> …`): `subscribe-handler` checks the handler
+  is a program record and calls the import. No reply.
+- **A subscription is the permission.** Who may change subscriptions is
+  whoever is subscribed to `subscribe`: the genesis subscribes the owner, and
+  delegating is the owner subscribing another sender to `subscribe`. A
+  `subscribe` from anyone else is recorded, and nothing runs.
+- **Registering a program** is subscribing a box to its CID. Its record (and
+  module) must be in the store first: `objects` delivers them.
+- `runtime.boxes()` — what the delivery provider collects — is the boxes the
+  rules name plus the genesis's `collect`, re-read every poll, so a box
+  subscribed at runtime is collected from the next poll.
+- A store whose log predates the chain has no chain, so nothing would route:
+  the runtime refuses to start it. It needs a new genesis (no migration).
+
 ## Programs and execution
 
 A **program** is an immutable record: its code (a WASI module), its input
@@ -180,16 +217,11 @@ dependent work continues; optimistic versus gated is policy, deferred.
 
 ## Subscriptions
 
-Routing is a **subscription**, a record written by the admin key, not a
-permission check made at delivery time:
-
-```
-subscription { kind: "subscription", match: { from?, to?, kind?, … },
-               handler: <program CID | "resolve-waiter">, at }
-```
-
-Delivery is a pure function of the message and the subscription set as of
-that point in the log. No match → recorded, nothing runs.
+Routing is a **subscription**, not a permission check made at delivery time:
+a rule `(sender?, box) → handler` in the instance's subscriptions chain
+("Subscriptions" under "The filesystem" above, beside "Heads"). Delivery is
+a pure function of the message and the rules as of that point in the log. No
+match → recorded, nothing runs.
 
 ## Host
 

@@ -225,10 +225,10 @@ wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
 29. **`get` is not gated by reachability.** A program can read any record in
     the store by CID. VM.md's gating (reachable from the thread's inputs)
     is not implemented.
-30. **Subscriptions are fixed at genesis.** There is no config entry kind to
-    add a box or change a handler; a new instance (new genesis) is the only
-    way. A `config` box from the owner, routed to a config handler whose
-    reveals the scheduler honours, would be the in-log way.
+30. ~~**Subscriptions are fixed at genesis.**~~ Done (#3): subscriptions are a
+    chain the genesis only seeds; the `subscribe` box (subscribe-handler, the
+    `subscribe` import) changes them in the log (docs/VM.md,
+    "Subscriptions"). Owner, peers and defaults are still fixed at genesis.
 31. **Handler binaries are big.** 4 MB each (Go runtime + fxamacker/cbor +
     crypto); those that link go-sdk — wire-probe, and since #26 run-handler
     and loop, which seal their own envelopes — are 8–9 MB. fxamacker was chosen over

@@ -22,8 +22,9 @@ src/runtime/     the machine — no disk, network, clock, randomness, messagebox
   scheduler.ts     the log consumer: admit, route by subscription, step programs and the shell, attested calls, replay
   log.ts           the input log: host-signed entries (genesis | envelope | wake), verified at admission
   program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
-  programs.ts      the program records (shell, run-handler, objects-handler, head-handler, loop) and pinned module CIDs
+  programs.ts      the program records (shell, run-handler, objects-handler, head-handler, subscribe-handler, loop) and pinned module CIDs
   heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
+  subscriptions.ts the routing table: one chain per instance, seeded by the genesis, changed by `subscribe`
   shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
@@ -40,7 +41,7 @@ src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        handler programs in Go: run-handler, objects-handler, head-handler, loop (the chat turn loop); skein/ (the ABI)
+programs/        handler programs in Go: run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop); skein/ (the ABI)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
 wasm/            the committed modules; their CIDs are pinned in src/runtime/programs.ts
 ```
@@ -63,6 +64,7 @@ bin/skein-runtime                           # the instance: installs modules, wr
 bin/skein import ~/Work/easel               # the client: tree objects into `objects`; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'   # no --tree: the `main` head (the first import sets it)
 bin/skein head main <cid>                   # move `main` to a tree the instance holds
+bin/skein subscribe add --sender <key> chat loop   # route that sender's `chat` to the loop (remove: undo); a handler by name or program CID
 bin/skein inbox --wait                      # the result envelope, opened by the owner
 bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
 bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers with a `chat` reply in David's `chat` box
@@ -84,7 +86,8 @@ One host process runs every enabled row of its management database,
 `$SKEIN_HOME/host.db` (#23): each row its own store, runtime, wallet,
 messagebox session and tick; the host wallet (3324), which signs every entry,
 is all they share. A new instance's genesis is `skein-runtime`'s plus `chat`
-from anyone (an open subscription), and the host resolves `handle@domain` for
+from anyone (an open subscription) — only the seed of its subscriptions
+chain; `skein-host subscribe` changes it later — and the host resolves `handle@domain` for
 its programs: host.db, then BRC-169 (the domain's manifest and resolve
 endpoint, the handle certificate checked), then the paymail PKI last
 (`docs/MESSAGES.md`, "Resolution").
@@ -96,6 +99,7 @@ scripts/host/instance.sh kurt
 bin/skein-host list                         # handle, status, identity, wallet, store, tree
 bin/skein-host run                          # every enabled row; lines prefixed [handle]; roster at :4600/roster.json
 bin/skein-host deploy martha <dir>          # SOUL.md, IDENTITY.md, skills/ into it through `objects`, as the owner; sets/moves main
+bin/skein-host subscribe martha add --sender <key> run run-handler   # a `subscribe` message as the owner; no new genesis
 bin/skein-host disable kurt                 # also: add <handle> [--wallet-url --store --tree --domain --identity], enable, remove
 ```
 
@@ -121,14 +125,15 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | record | shape |
 |---|---|
 | log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake, sig}` — `sig` by the host identity (the genesis's `host`) over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
-| genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, names?: {<identity>: {handle, domain}}, collect?: [box]}` — `names`: what outbound envelopes call the owner and the peers |
+| genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box}, handler}], peers?: {infer}, defaults?: {model, thinking}, names?: {<identity>: {handle, domain}}, collect?: [box]}` — `subscriptions` is only the seed of the subscriptions chain; `names`: what outbound envelopes call the owner and the peers |
 | envelope | the BRC-169 envelope's signed part: its JSON object without `content`, as dag-cbor (its CID is the message id, the client's `replyTo`) |
 | body | the plaintext content: the sender's dag-cbor bytes, CIDv1 dag-cbor/sha2-256 — the digest is the envelope's signed `contentHash` |
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |
-| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
+| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, subscriptions?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
 | step input | `{kind: "step", thread, step, entry, at, self: {handle, domain}, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?, names?}` |
 | attested | `{kind: "attested", thread, step, i, op: "wallet" \| "resolve", request, result}` — a wire frame and its answer (among them each envelope's signature and encryption), or a handle `handle@domain` and the host resolver's whole answer as dag-cbor (`{identityKey, …the resolve endpoint's response, via, checked?, unchecked?}`; `identityKey: ""` and `error`: none) |
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
+| subscriptions | origin `{kind: "subscriptions"}`, one per instance; update `{op: "add" \| "remove", sender?, box, handler, thread?, input, at}` — the genesis entry writes the seed (no `thread`), later ones are written when a step that called `subscribe` ends without error, listed in its `subscriptions`; the scheduler routes by the fold of them (docs/VM.md, "Subscriptions") |
 | emit | `{kind: "emit", to, box, body: <cid>, envelope}` — `envelope` is complete: the program signed it and encrypted `body` to `to` through the wallet import in the step (`programs/envelope`; `created` is the step's stamp); the runtime checks it, `emit` returns its signed part's CID (the message id), and the delivery provider sends it as it is after the step |
 
 Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
@@ -136,7 +141,10 @@ Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
 no `main`; `run` (`{cmd, tree?, cwd?, env?}`; no tree: `main`'s, else the empty
 tree) → run-handler, which replies in the sender's `results` box with
 `{exitCode, stdout, stderr, tree, replyTo}`; `head` (`{name, tree}`) →
-head-handler, which moves the head (no reply).
+head-handler, which moves the head (no reply); `subscribe` (`{op: "add" |
+"remove", sender?, box, handler}`) → subscribe-handler, which adds or removes
+that subscription (no reply; the handler must be a program record in the
+store — registering a program is subscribing a box to its CID).
 
 Chat: `chat` (`{text, tree?, model?, replyTo?}`) with no `replyTo` → a new loop
 thread, over `tree` or else `main`'s; the loop sends `infer` (`{model, messages, tools?, thinking?}`) to
