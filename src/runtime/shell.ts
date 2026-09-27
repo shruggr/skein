@@ -51,6 +51,12 @@ export interface ShellResult {
 export interface Modules {
   brush: WebAssembly.Module;
   coreutils: WebAssembly.Module;
+  /**
+   * Single-purpose WASI programs beyond brush/coreutils, keyed by the command
+   * name the shell runs them under (argv[0] is that name). See wasm/README.md
+   * for what each one is built from.
+   */
+  extra?: Record<string, WebAssembly.Module>;
 }
 
 const SHELLS = new Set(["sh", "bash", "brush"]);
@@ -76,7 +82,7 @@ function utilities(coreutils: WebAssembly.Module): Promise<Set<string>> {
 
 /** The names the shell can run besides its builtins. */
 export async function commands(modules: Modules): Promise<string[]> {
-  return [...SHELLS, "coreutils", ...(await utilities(modules.coreutils))].sort();
+  return [...SHELLS, "coreutils", ...(await utilities(modules.coreutils)), ...Object.keys(modules.extra ?? {})].sort();
 }
 
 // The empty tree, for the one run that needs no filesystem.
@@ -160,9 +166,9 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
   const clock = o.clock ?? (() => fixed);
   const random = o.random ?? prng(o.seed ?? 0);
   const sleep = o.sleep;
-  const { brush, coreutils } = o.modules;
+  const { brush, coreutils, extra = {} } = o.modules;
   const utils = await utilities(coreutils);
-  const exists = (name: string) => SHELLS.has(name) || name === "coreutils" || utils.has(name);
+  const exists = (name: string) => SHELLS.has(name) || name === "coreutils" || utils.has(name) || name in extra;
 
   const envList = (env: Record<string, string>) => Object.entries(env).map(([k, v]) => `${k}=${v}`);
 
@@ -173,6 +179,7 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
       if (SHELLS.has(req.program)) { file = brush; args = ["bash", "--disable-color", ...req.argv.slice(1)]; }
       else if (req.program === "coreutils") { file = coreutils; args = ["coreutils", ...req.argv.slice(1)]; }
       else if (utils.has(req.program)) { file = coreutils; args = [req.program, ...req.argv.slice(1)]; }
+      else if (req.program in extra) { file = extra[req.program]; args = [req.program, ...req.argv.slice(1)]; }
       else return undefined;
     } else {
       // A path in the tree: scripts run under the shell; nothing else is executable.
