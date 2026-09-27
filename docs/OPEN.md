@@ -230,14 +230,17 @@ wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
     way. A `config` box from the owner, routed to a config handler whose
     reveals the scheduler honours, would be the in-log way.
 31. **Handler binaries are big.** 4 MB each (Go runtime + fxamacker/cbor +
-    crypto); wire-probe, which links go-sdk, is 8 MB. fxamacker was chosen over
+    crypto); those that link go-sdk — wire-probe, and since #26 run-handler
+    and loop, which seal their own envelopes — are 8–9 MB. fxamacker was chosen over
     go-ipld-prime for size and a plain struct API; TinyGo could cut both by
     an order of magnitude if its wasip1 target handles `go:wasmimport` with
     JSPI as Go does.
-32. **Owner handles are config.** Outbound envelopes need
-    `recipient.{handle, domain}`; the run-handler copies the sender's from its
-    envelope and the edge falls back to `SKEIN_OWNER_HANDLE`. BRC-169
-    resolution (handle → identity, and back) is not used.
+32. **Owner handles are genesis config.** Outbound envelopes need
+    `recipient.{handle, domain}`; the program copies the sender's from its
+    envelope or uses the handle it resolved, else the genesis's `names`
+    (from `SKEIN_OWNER_HANDLE`/`SKEIN_INFER_HANDLE`), else the key's first 16
+    hex digits. Resolution (handle → identity) goes through BRC-169 where a
+    domain publishes it (#26); reverse resolution is not used.
 33. **Step outputs are stored.** A handler step's update carries its
     stdout/stderr, and the shell's `finished` update its whole result
     (VM.md: recomputable cache). Same size question as item 10.

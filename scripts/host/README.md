@@ -175,12 +175,24 @@ get message encryption with the new instance, as `grants.sh` does.
 three from `~/.skein`). For each enabled row it installs the modules into the
 store, writes a genesis if the store is empty (`handle`/`domain` from the row;
 subscriptions: the owner's `run`, `objects`, `head`, `chat`, then `chat` from
-any sender → loop; `collect`: `completions`), connects the row's
-wallet, and wires its own messagebox delivery (its own BRC-104 session) and
-tick. The host wallet signs every entry of every instance. A row that fails
-(wallet down, identity or host mismatch) is logged and skipped. Handles the
-instances' programs `resolve` are looked up in host.db, then at the
-messagebox's paymail PKI (`/bsvalias/id/<handle>@<domain>`).
+any sender → loop; `collect`: `completions`; `names`: the owner as
+`SKEIN_OWNER_HANDLE`, the infer peer as `SKEIN_INFER_HANDLE`), connects the
+row's wallet, and wires its own messagebox delivery (its own BRC-104 session)
+and tick. The host wallet signs every entry of every instance. A row that
+fails (wallet down, identity or host mismatch) is logged and skipped.
+
+The instances' programs seal what they send themselves — sign and encrypt
+through the instance wallet, inside the step — so the delivery sends bytes;
+it uses the instance wallet only for its messagebox session and to decrypt
+what arrives. Handles the programs `resolve` are looked up in host.db, then
+by BRC-169 at the domain (`<origin>/manifest.json`; if it publishes
+`metanet.handles`, its resolve endpoint, the handle certificate checked
+against `metanet.trust.publicKey`), then, last, at the paymail PKI
+(`/bsvalias/id/<handle>@<domain>`). The origin is the messagebox's
+(`SKEIN_MESSAGEBOX`). The local `1sat serve` publishes `metanet.trust` but no
+`metanet.handles` (and its `/.well-known/metanet-handles/*` answers 401), so
+here a handle that is not a row resolves by paymail. The recorded answer is
+the whole response (`docs/MESSAGES.md`, "Resolution").
 
 ### Deploying an agent: `skein-host deploy`
 
