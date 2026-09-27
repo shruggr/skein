@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # skein-host (src/host/cli.ts): the host's management database ($SKEIN_HOME/host.db)
-# and `run`, the one process that runs every enabled instance in it. For `run`
+# and `run`, the supervisor: one bin/skein-runtime process per enabled row. For `run`
 # (and `deploy`, `roster --deploy`: owner and messagebox) it fills the environment from what
 # scripts/host/up.sh wrote under $SKEIN_HOME, unless already set, like bin/skein-runtime:
 #   SKEIN_OWNER ← owner.identity   SKEIN_INFER ← infer.identity   SKEIN_MESSAGEBOX ← messagebox.url
