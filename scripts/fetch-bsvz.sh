@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fetch bsvz (b-open-io/bsvz, the BSV primitives wallet-zig builds on) at a
 # pinned revision into .build/bsvz and apply wallet-zig/patches/bsvz.patch
-# (what it takes to build for wasm32-wasi; see wallet-zig/README.md).
+# (what it takes to build for wasm32-wasi; see docs/WALLET.md).
 # wallet-zig/build.zig.zon names .build/bsvz as a path dependency.
 # BSVZ_SRC may point at a local clone to fetch from instead of GitHub.
 set -euo pipefail
