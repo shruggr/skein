@@ -131,7 +131,11 @@ func buildFixture() error {
 	if fix.big, err = scanDir(fix.store, tree); err != nil {
 		return err
 	}
-	for _, name := range []string{"brush", "coreutils"} {
+	names := []string{"brush", "coreutils"}
+	for name := range ExtraCIDs {
+		names = append(names, name)
+	}
+	for _, name := range names {
 		b, err := os.ReadFile(filepath.Join(wasmDir, name+".wasm"))
 		if err != nil {
 			return err
@@ -215,6 +219,19 @@ func cases(f *fixture) []shellCase {
 		c("printenv | sort; export X=1; printenv X"),
 		c("echo $((RANDOM % 100)) $SRANDOM; shuf -n2 -e a b c d; mktemp; ls tmp* 2>/dev/null; ls"),
 		c("test -x a.txt && echo exec; test -d sub && echo dir; [ -e nope ] || echo none; cut -c1-2 a.txt | paste -sd,"),
+		// the toolset (issue #13): src/runtime/shell.test.ts "toolset: ..." cases
+		c("mkdir -p src && printf '// TODO: fix\\nconst x = 1;\\n' > src/a.go && printf 'package p\\n// TODO later\\n' > src/sub.go && printf 'FOO bar\\n' > readme.md && printf 'nothing here\\n' > other.md && grep -rn TODO src/"),
+		c("printf 'FOO bar\\n' > readme.md && printf 'nothing here\\n' > other.md && grep -il foo *.md"),
+		c("mkdir -p src && printf 'x\\n' > src/a.go && printf 'x\\n' > src/sub.go && find . -name '*.go' | xargs wc -l"),
+		c("which cat; which nosuchcmd; echo $?"),
+		c("printf 'x\\nfoo x bar\\nx x x\\n' > f && sed -i 's/x/y/' f && cat f"),
+		c("printf 'one\\ntwo\\nthree\\nfour\\n' > f && sed -n '2,4p' f"),
+		c("printf 'a b\\nc d\\n' > f && awk '{print $2}' f"),
+		c("printf 'a\\nb\\nc\\n' > x.txt && printf 'a\\nB\\nc\\n' > y.txt && diff x.txt y.txt"),
+		c("printf 'same\\n' > x.txt && cp x.txt y.txt && cmp x.txt y.txt; echo $?"),
+		c(`echo '{"name":"widget","id":3}' > file.json && jq .name file.json`),
+		c(`echo '[{"id":"a"},{"id":"b"}]' > list.json && jq -r '.[] | .id' list.json`),
+		c("mkdir -p src && printf 'TODO: a\\nkeep\\n' > src/one.txt && printf 'nothing\\nTODO: b\\n' > src/two.txt && grep -rl TODO src/ | xargs wc -l | sed -n '1,2p' | awk '{print $2, $1}'"),
 	}
 	return out
 }
