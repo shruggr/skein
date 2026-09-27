@@ -99,6 +99,9 @@ through gib. The runtime never writes to a disk.
 
 - `skein` — the runtime: one process, one instance, one store file, with its
   providers (the messagebox delivery, the tick) wired by `src/host/main.ts`.
+  `skein-host run` is the same per row of the host's management database
+  (`host.db`): many instances in one process, each with its own store and
+  providers, sharing only the host wallet (`src/host/host.ts`).
 - `1sat serve wallet-api` — the wallets: the instance's, and the host's,
   which signs every log entry.
 - a **client** — David's terminal or easel: scans, prompts, renders, signs as

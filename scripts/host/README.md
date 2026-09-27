@@ -121,6 +121,71 @@ call. Each grant below answers one refusal. `grants.sh` writes them all
 A level-2 grant without `--counterparty` means `self`, which is never what an
 envelope needs.
 
+## Instances
+
+`up.sh` sets up the one instance `skein-runtime` runs. For many instances in
+one process (`bin/skein-host run`, src/host/host.ts), each is a row in the
+host's management database, `~/.skein/host.db` (src/host/instances.ts):
+
+| column | |
+|---|---|
+| `handle` | primary key; the messagebox account and the genesis's `handle`, e.g. `martha` |
+| `domain` | default `localhost` |
+| `identity` | the instance wallet's identity key; written by `instance.sh`, or by `run` the first time it starts the row |
+| `wallet_url`, `wallet_originator` | its BRC-100 endpoint, origin (default `skein`) |
+| `store` | its runtime.db (default `~/.skein/instances/<handle>/runtime.db`) |
+| `tree` | the CID its genesis's `main` should point at; recorded only, booting from a tree is #4 |
+| `status` | `enabled` / `disabled` |
+| `created_at` | ISO time |
+
+```
+scripts/host/instance.sh <handle>     # provision one: idempotent
+bin/skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--disabled]
+bin/skein-host list | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store and wallet
+bin/skein-host run                    # every enabled row
+```
+
+`instance.sh <handle>` does for one instance what `up.sh` does for the single
+one: a key (`~/.skein/instances/<handle>/wallet.env`), a `1sat serve
+wallet-api` under `HOME=~/.skein/instances/<handle>/home` on the next free
+port from `SKEIN_INSTANCE_PORT` (default 3401; kept in `wallet.port`, reused
+on the next run; log `~/.skein/logs/wallet-<handle>.log`), the grants below,
+its account on the messagebox (`register.ts`) and its row (`skein-host add`).
+It needs the messagebox and `host.identity`/`owner.identity` from `up.sh`.
+
+Grants, origin `skein`, in the instance's wallet: `grants.sh`'s instance set
+(identity key retrieval, server hmac, auth message signature with the
+messagebox host, messagebox, metanet handles envelope to anyone, message
+encryption with the owner and the infer peer), plus message encryption with
+every other provisioned instance and, in each of theirs, with this one, so
+the roster can message itself. The infer peer's and the dev owner's wallets
+get message encryption with the new instance, as `grants.sh` does.
+
+`skein-host run` reads the environment as `skein-runtime` does
+(`SKEIN_OWNER`, `SKEIN_INFER`, `SKEIN_MESSAGEBOX`, `SKEIN_HOST_WALLET_URL`,
+`SKEIN_POLL_MS`, `SKEIN_WALLET=ephemeral`; `bin/skein-host` fills the first
+three from `~/.skein`). For each enabled row it installs the modules into the
+store, writes a genesis if the store is empty (`handle`/`domain` from the row;
+subscriptions: the owner's `run`, `objects`, `head`, `chat`, then `chat` from
+any sender → loop; `collect`: `completions`, `say`), connects the row's
+wallet, and wires its own messagebox delivery (its own BRC-104 session) and
+tick. The host wallet signs every entry of every instance. A row that fails
+(wallet down, identity or host mismatch) is logged and skipped. Handles the
+instances' programs `resolve` are looked up in host.db, then at the
+messagebox's paymail PKI (`/bsvalias/id/<handle>@<domain>`).
+
+Two limits of the dev wallets and messagebox, not of skein:
+
+- **The open subscription needs a grant per sender.** wallet-api has no
+  any-counterparty grant, so a `chat` from an identity the instance's wallet
+  has no "message encryption" grant for is refused at decryption ("permission
+  denied … run `1sat permissions grant skein --protocol "message encryption"
+  --level 2 --counterparty <sender>`"), logged as rejected and acknowledged.
+  Provisioned instances, the owner and the infer peer are granted.
+- **A reply needs the recipient's account.** The messagebox stores messages
+  only for registered identities, so a `say` to a sender with no account is
+  kept and retried at every poll.
+
 ## The client
 
 ```
