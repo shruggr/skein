@@ -1,0 +1,12 @@
+[package]
+name = "which-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "which"
+path = "src/main.rs"
+
+[profile.release]
+strip = true
+lto = true

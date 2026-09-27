@@ -31,14 +31,34 @@ export const MODULES = {
   "head-handler": CID.parse("bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q"),
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
   "loop": CID.parse("bafkreifforoghf7swk2k5jibqvorfbqtz7fj3a3ak2lbrdgpm3bhfe3juu"),
+  // The toolset of issue #13 — single-purpose WASI programs the shell runs
+  // beyond brush/coreutils (Modules.extra in shell.ts). find/xargs are two
+  // binaries from one build (uutils/findutils); diff and cmp are two names
+  // for the one uutils/diffutils multicall binary (same bytes, same CID).
+  find: CID.parse("bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu"),
+  xargs: CID.parse("bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju"),
+  diff: CID.parse("bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i"),
+  cmp: CID.parse("bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i"),
+  jq: CID.parse("bafkreih226yv4dcowahyziroqms5r6h4k7mliutf2kpjp3klofcskdg56e"),
+  which: CID.parse("bafkreicdmerbpermjjw5x26pjokqhwbwbsncfqgdw63zo2e2g6tmm43iye"),
+  grep: CID.parse("bafkreihbm7x5gatusjkpo7oxwkh43ltpv7osaw4jaiia46hzl7ua64dvye"),
+  tree: CID.parse("bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4"),
+  awk: CID.parse("bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju"),
+  sed: CID.parse("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
 } as const;
+
+/** The command names of the toolset (issue #13), each mapped to its module in MODULES by the same key. */
+const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed"] as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
 export const SHELL_PROGRAM = {
   kind: "program",
   name: "shell",
   code: { ts: "shell" },
-  modules: { brush: MODULES.brush, coreutils: MODULES.coreutils },
+  modules: {
+    brush: MODULES.brush, coreutils: MODULES.coreutils,
+    ...Object.fromEntries(TOOL_NAMES.map((n) => [n, MODULES[n]])),
+  },
   inputs: { cmd: "string", tree: "cid", cwd: "string?", env: "map?" },
   services: [],
   description: "Run a bash command in the wasm shell over a tree; result {exitCode, stdout, stderr, tree}.",
@@ -132,6 +152,11 @@ export function loadModule(blocks: Pick<Blocks, "bytes">, cid: CID): Promise<Web
 }
 
 export async function loadShellModules(blocks: Pick<Blocks, "bytes">): Promise<Modules> {
-  const [brush, coreutils] = await Promise.all([loadModule(blocks, MODULES.brush), loadModule(blocks, MODULES.coreutils)]);
-  return { brush, coreutils };
+  const [brush, coreutils, ...tools] = await Promise.all([
+    loadModule(blocks, MODULES.brush),
+    loadModule(blocks, MODULES.coreutils),
+    ...TOOL_NAMES.map((n) => loadModule(blocks, MODULES[n])),
+  ]);
+  const extra = Object.fromEntries(TOOL_NAMES.map((n, i) => [n, tools[i]]));
+  return { brush, coreutils, extra };
 }

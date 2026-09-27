@@ -153,6 +153,41 @@ test("scripts in the tree run under the shell", async (t) => {
   assert.equal(r.out, "script one\nscript two\nnested\n");
 });
 
+test("toolset: search (grep, find, xargs, which)", async (t) => {
+  const { sh } = await fixture(t);
+  const setup = "mkdir -p src && printf '// TODO: fix\\nconst x = 1;\\n' > src/a.go && printf 'package p\\n// TODO later\\n' > src/sub.go && printf 'FOO bar\\n' > readme.md && printf 'nothing here\\n' > other.md";
+  assert.equal((await sh(`${setup} && grep -rn TODO src/`)).out, "src/a.go:1:// TODO: fix\nsrc/sub.go:2:// TODO later\n");
+  assert.equal((await sh(`${setup} && grep -il foo *.md`)).out, "readme.md\n");
+  assert.equal((await sh(`${setup} && find . -name '*.go'`)).out, "./src/a.go\n./src/sub.go\n");
+  assert.equal((await sh(`${setup} && find . -name '*.go' | xargs wc -l`)).out, " 2 ./src/a.go\n 2 ./src/sub.go\n 4 total\n");
+  assert.equal((await sh("which cat; which nosuchcmd; echo $?")).out, "cat\n1\n");
+});
+
+test("toolset: edit (sed, awk, diff, cmp)", async (t) => {
+  const { sh } = await fixture(t);
+  assert.equal((await sh("printf 'x\\nfoo x bar\\nx x x\\n' > f && sed -i 's/x/y/' f && cat f")).out, "y\nfoo y bar\ny x x\n");
+  assert.equal((await sh("printf 'one\\ntwo\\nthree\\nfour\\n' > f && sed -n '2,4p' f")).out, "two\nthree\nfour\n");
+  assert.equal((await sh("printf 'a b\\nc d\\n' > f && awk '{print $2}' f")).out, "b\nd\n");
+  const diff = await sh("printf 'a\\nb\\nc\\n' > a.txt && printf 'a\\nB\\nc\\n' > b.txt && diff a.txt b.txt");
+  assert.equal(diff.exitCode, 1);
+  assert.equal(diff.out, "2c2\n< b\n---\n> B\n");
+  assert.equal((await sh("printf 'same\\n' > a.txt && cp a.txt b.txt && cmp a.txt b.txt; echo $?")).out, "0\n");
+});
+
+test("toolset: structured data (jq)", async (t) => {
+  const { sh } = await fixture(t);
+  assert.equal((await sh(`echo '{"name":"widget","id":3}' > file.json && jq .name file.json`)).out, "\"widget\"\n");
+  assert.equal((await sh(`echo '[{"id":"a"},{"id":"b"}]' > list.json && jq -r '.[] | .id' list.json`)).out, "a\nb\n");
+});
+
+test("toolset: multi-file pipelines across tools", async (t) => {
+  const { sh } = await fixture(t);
+  const setup = "mkdir -p src && printf 'TODO: a\\nkeep\\n' > src/one.txt && printf 'nothing\\nTODO: b\\n' > src/two.txt";
+  const r = await sh(`${setup} && grep -rl TODO src/ | xargs wc -l | sed -n '1,2p' | awk '{print $2, $1}'`);
+  assert.equal(r.exitCode, 0, r.err);
+  assert.equal(r.out, "src/one.txt 2\nsrc/two.txt 2\n");
+});
+
 test("a 2 MB file round-trips", async (t) => {
   const { blocks, dir } = await fixture(t);
   const big = Buffer.alloc(2 << 20);

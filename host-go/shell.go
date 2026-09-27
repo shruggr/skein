@@ -34,6 +34,24 @@ var (
 	CoreutilsCID = mustCID("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese")
 )
 
+// ExtraCIDs are the single-purpose WASI programs beyond brush/coreutils, keyed
+// by the command name the shell runs them under (src/runtime/programs.ts
+// MODULES; kept in sync by hand — a `wasm/<name>.wasm` and this entry are
+// added together, never one without the other). diff and cmp are two names
+// for the one uutils/diffutils multicall binary (same CID).
+var ExtraCIDs = map[string]CID{
+	"find":  mustCID("bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu"),
+	"xargs": mustCID("bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju"),
+	"diff":  mustCID("bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i"),
+	"cmp":   mustCID("bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i"),
+	"jq":    mustCID("bafkreih226yv4dcowahyziroqms5r6h4k7mliutf2kpjp3klofcskdg56e"),
+	"which": mustCID("bafkreicdmerbpermjjw5x26pjokqhwbwbsncfqgdw63zo2e2g6tmm43iye"),
+	"grep":  mustCID("bafkreihbm7x5gatusjkpo7oxwkh43ltpv7osaw4jaiia46hzl7ua64dvye"),
+	"tree":  mustCID("bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4"),
+	"awk":   mustCID("bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju"),
+	"sed":   mustCID("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
+}
+
 func mustCID(s string) CID {
 	c, err := ParseCID(s)
 	if err != nil {
@@ -48,22 +66,25 @@ var shells = map[string]bool{"sh": true, "bash": true, "brush": true}
 
 // ---------------------------------------------------------------- modules
 
-// Modules are brush and coreutils compiled for one engine, and the utilities
-// that coreutils build contains.
+// Modules are brush and coreutils compiled for one engine, the utilities that
+// coreutils build contains, and the single-purpose programs in ExtraCIDs.
 type Modules struct {
 	engine    *wasmtime.Engine
 	fuel      bool
 	brush     *wasmtime.Module
 	coreutils *wasmtime.Module
 	utils     map[string]bool
+	extra     map[string]*wasmtime.Module
 }
 
 // LoadModules compiles the shell's modules from their bytes, checking each
-// against the CID the runtime knows it by. With fuel, execution is metered.
-func LoadModules(brush, coreutils []byte, fuel bool) (*Modules, error) {
+// against the CID the runtime knows it by. extra is keyed by command name
+// (ExtraCIDs); a name it does not contain is an error. With fuel, execution
+// is metered.
+func LoadModules(brush, coreutils []byte, extra map[string][]byte, fuel bool) (*Modules, error) {
 	cfg := wasmtime.NewConfig()
 	cfg.SetConsumeFuel(fuel)
-	m := &Modules{engine: wasmtime.NewEngineWithConfig(cfg), fuel: fuel}
+	m := &Modules{engine: wasmtime.NewEngineWithConfig(cfg), fuel: fuel, extra: map[string]*wasmtime.Module{}}
 	for _, x := range []struct {
 		name  string
 		want  CID
@@ -78,6 +99,20 @@ func LoadModules(brush, coreutils []byte, fuel bool) (*Modules, error) {
 			return nil, fmt.Errorf("%s: %w", x.name, err)
 		}
 		*x.into = mod
+	}
+	for name, b := range extra {
+		want, ok := ExtraCIDs[name]
+		if !ok {
+			return nil, fmt.Errorf("%s: not a known extra module", name)
+		}
+		if got := rawCID(b); got != want {
+			return nil, fmt.Errorf("%s: bytes hash to %s, want %s", name, got, want)
+		}
+		mod, err := wasmtime.NewModule(m.engine, b)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		m.extra[name] = mod
 	}
 	// The utilities, from the build's own --list. Pure: fixed clock, zero random.
 	out := NewPipe(64<<20, nil)
@@ -102,10 +137,19 @@ func LoadModulesFromStore(s *Store, fuel bool) (*Modules, error) {
 	if err != nil {
 		return nil, fmt.Errorf("coreutils not in store (skein-dev install puts it there): %w", err)
 	}
-	return LoadModules(b, c, fuel)
+	extra := map[string][]byte{}
+	for name, cid := range ExtraCIDs {
+		b, err := s.Get(cid)
+		if err != nil {
+			return nil, fmt.Errorf("%s not in store (skein-dev install puts it there): %w", name, err)
+		}
+		extra[name] = b
+	}
+	return LoadModules(b, c, extra, fuel)
 }
 
-// LoadModulesFromDir reads brush.wasm and coreutils.wasm from a directory (the repo's wasm/).
+// LoadModulesFromDir reads brush.wasm, coreutils.wasm and every ExtraCIDs
+// module from a directory (the repo's wasm/).
 func LoadModulesFromDir(dir string, fuel bool) (*Modules, error) {
 	b, err := os.ReadFile(filepath.Join(dir, "brush.wasm"))
 	if err != nil {
@@ -115,7 +159,15 @@ func LoadModulesFromDir(dir string, fuel bool) (*Modules, error) {
 	if err != nil {
 		return nil, err
 	}
-	return LoadModules(b, c, fuel)
+	extra := map[string][]byte{}
+	for name := range ExtraCIDs {
+		b, err := os.ReadFile(filepath.Join(dir, name+".wasm"))
+		if err != nil {
+			return nil, err
+		}
+		extra[name] = b
+	}
+	return LoadModules(b, c, extra, fuel)
 }
 
 // Commands are the names the shell can run besides its builtins.
@@ -126,6 +178,9 @@ func (m *Modules) Commands() []string {
 	}
 	for u := range m.utils {
 		out = append(out, u)
+	}
+	for x := range m.extra {
+		out = append(out, x)
 	}
 	sort.Strings(out)
 	return slices.Compact(out)
@@ -186,7 +241,7 @@ func (r *run) pipeDesc(p *Pipe, write bool) *Desc {
 }
 
 func (r *run) exists(name string) bool {
-	return shells[name] || name == "coreutils" || r.mods.utils[name]
+	return shells[name] || name == "coreutils" || r.mods.utils[name] || r.mods.extra[name] != nil
 }
 
 // Run runs a command line in the shell over a tree. New objects go to the store.
@@ -267,6 +322,8 @@ func (r *run) spawn(parent *Process, req SpawnRequest) (code int32, found bool, 
 			mod, args = r.mods.coreutils, append([]string{"coreutils"}, rest...)
 		case r.mods.utils[req.Program]:
 			mod, args = r.mods.coreutils, append([]string{req.Program}, rest...)
+		case r.mods.extra[req.Program] != nil:
+			mod, args = r.mods.extra[req.Program], append([]string{req.Program}, rest...)
 		default:
 			return 0, false, nil
 		}
