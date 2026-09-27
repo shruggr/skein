@@ -21,8 +21,8 @@
 //   SKEIN_HOME            default ~/.skein; host.db lives here
 //   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway keys for every instance and the host)
 //   SKEIN_HOST_WALLET_URL the host wallet, default http://127.0.0.1:3324, origin "skein-host": signs every entry of every instance
-//   SKEIN_OWNER           a new instance's owner;   SKEIN_OWNER_HANDLE default david@localhost
-//   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE default infer@localhost
+//   SKEIN_OWNER           a new instance's owner;   SKEIN_OWNER_HANDLE its genesis name, default david@localhost
+//   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE its genesis name, default infer@localhost
 //   SKEIN_MESSAGEBOX      the messagebox host;   SKEIN_POLL_MS default 1000
 //   SKEIN_HOST_PORT       the roster server's port on 127.0.0.1, default 4600
 // `deploy` reads SKEIN_MESSAGEBOX, SKEIN_OWNER (checked against the wallet),

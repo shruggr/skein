@@ -2,8 +2,9 @@
 // instance's message interface, for the local `1sat serve` host. Outside the
 // machine: main.ts, the kernel configuration, wires it to a runtime; the
 // runtime never calls a messagebox and holds no session. It holds the
-// instance wallet (the messagebox session is the instance's identity, and the
-// wire encryption ends here) and the host wallet (it signs what it delivers).
+// instance wallet (the messagebox session is the instance's identity, and
+// inbound wire encryption ends here) and the host wallet (it signs what it
+// delivers).
 //
 // In: for every box the subscriptions route, list the instance's messages
 // and, in order, for each one:
@@ -19,24 +20,22 @@
 //   here: the entry carries the sender's `created` and the arrival stamp, and
 //   the instance decides from those if it decides at all.
 //
-// Out: an emit (scheduler.ts) is signed through the instance wallet during the
-// step that emits it (so the program learns its CID and can await a reply
-// naming it); once the step is recorded it is handed here, encrypted to its
-// recipient and sent to its box. A send that fails is kept and tried again at
-// the next poll: delivery is this provider's business, and nothing about it
-// goes back into the instance.
+// Out: an emit (scheduler.ts) is a complete envelope — the program signed it
+// and encrypted its content to the recipient through the instance wallet,
+// inside the step — so once the step is recorded it is handed here and sent to
+// its box as it is: this side makes no wallet call. A send that fails is kept
+// and tried again at the next poll: delivery is this provider's business, and
+// nothing about it goes back into the instance.
 
 import { MessageBoxClient } from "@bsv/message-box-client";
 import type { WalletInterface } from "@bsv/sdk";
-import { brc78Decode, encryptContent, isEnvelope, isoTime, open, sign, signedPart, verify, type Envelope, type Signed } from "../envelope.ts";
+import { brc78Decode, isEnvelope, open, signedPart, verify, type Envelope } from "../envelope.ts";
 import { decode, encode } from "../runtime/cid.ts";
 import type { KeyWallet } from "../runtime/identity.ts";
 import { short } from "../runtime/log.ts";
-import type { Emit } from "../runtime/records.ts";
 import type { Runtime, Outbound } from "../runtime/scheduler.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import type { Ms } from "../runtime/types.ts";
 import { admitEntry, now as clockNow } from "./entry.ts";
 
 // ---------------------------------------------------------------- the messagebox
@@ -75,13 +74,11 @@ export function messageBoxClient(wallet: WalletInterface, host: string, originat
 
 export interface DeliveryOptions {
   runtime: Runtime;
-  /** The instance wallet: decrypts inbound content, signs and encrypts outbound envelopes. */
+  /** The instance wallet: decrypts inbound content. Outbound envelopes come sealed. */
   wallet: WalletInterface;
   /** The host wallet: signs every entry this provider delivers. */
   host: KeyWallet;
   box: MessageBox;
-  /** Handles for outbound recipients the emit record does not name (e.g. the owner's). */
-  handles?: Record<string, { handle: string; domain: string }>;
   log?: (line: string) => void;
   /** Tests: the clock arrivals are stamped with. Default entry.ts's. */
   now?: () => Stamp;
@@ -191,31 +188,13 @@ export class Delivery {
   }
 
   /**
-   * The runtime's outbox, part 1: sign an emit's envelope (its signed part,
-   * contentHash and all) through the instance wallet, during the step that
-   * emits it (the scheduler records it as an attested answer, so its CID is
-   * known before the step ends). `created` is the step's `at`.
-   */
-  async seal(e: Emit, bytes: Uint8Array, at: Ms): Promise<Signed> {
-    const g = this.o.runtime.genesis!;
-    const named = e.handle ? { handle: e.handle, domain: e.domain ?? g.domain } : this.o.handles?.[e.to] ?? { handle: e.to.slice(0, 16), domain: g.domain };
-    return sign(this.o.wallet, {
-      recipient: { identityKey: e.to, ...named },
-      sender: { handle: g.handle, domain: g.domain },
-      body: bytes,
-      created: isoTime(at),
-    });
-  }
-
-  /**
-   * The runtime's outbox, part 2, once the step is recorded: encrypt the body
-   * to the recipient and send the envelope. A failure is logged and kept for
-   * the next poll; it never reaches the instance.
+   * The runtime's outbox, once the step is recorded: send the envelope the
+   * program sealed, as it is. A failure is logged and kept for the next poll;
+   * it never reaches the instance.
    */
   async send(o: Outbound): Promise<void> {
     try {
-      const content = await encryptContent(this.o.wallet, o.to, o.bytes);
-      await this.o.box.send({ recipient: o.to, box: o.box, body: { ...o.envelope, content } });
+      await this.o.box.send({ recipient: o.to, box: o.box, body: o.envelope });
     } catch (e) {
       this.unsent.push(o);
       this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)}: ${(e as Error).message} (will retry)`);

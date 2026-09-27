@@ -85,6 +85,8 @@ export interface InstanceConfig {
   peers?: Record<string, Identity>;
   /** Default: {model: "ripper/qwen38", thinking: "off"}. */
   defaults?: Record<string, string>;
+  /** Handles for the owner and peers, by identity: what the programs' outbound envelopes name them. */
+  names?: Record<Identity, { handle: string; domain: string }>;
   /** Reply-only boxes the delivery provider collects, beyond the subscribed ones. Default: ["completions"] (answers to `infer`). Other parties' replies to the loop arrive in `chat`, which the subscriptions route. */
   collect?: string[];
 }
@@ -117,6 +119,7 @@ export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: Instance
     subscriptions: c.subscriptions ?? defaultSubscriptions(c.owner),
     ...(c.peers && Object.keys(c.peers).length ? { peers: c.peers } : {}),
     defaults: c.defaults ?? DEFAULTS,
+    ...(c.names && Object.keys(c.names).length ? { names: c.names } : {}),
     collect: c.collect ?? ["completions"],
   };
 }

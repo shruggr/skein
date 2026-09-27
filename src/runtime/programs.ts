@@ -26,10 +26,10 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  "run-handler": CID.parse("bafkreias2nml273mrb4va37jvcoygdvr5unv2y4nktcgw6cpbve2r2xxvu"),
-  "objects-handler": CID.parse("bafkreigftxfxwqemfzfqxlqjfxd5eyrotm2jg7hm4hp5uplsercis3zgje"),
-  "head-handler": CID.parse("bafkreihtcs3i4b7u4unznafm5aob5szjpfyzygd4yx7ydtw5jcnmxit7sa"),
-  "loop": CID.parse("bafkreihijdzgdpqgxzrvumwf66a37j7b2oh3p36pigduposuiuugcwd5nu"),
+  "run-handler": CID.parse("bafkreic3mux3ar7xheiiaqjbez63wjkpcofk4nvwtnuai5d5d2t3tvjkka"),
+  "objects-handler": CID.parse("bafkreicy3bgn7hnipptms2kd2zks5zupgjtk5uv3wwzjh5mgqlhfi6enre"),
+  "head-handler": CID.parse("bafkreihkjiy6ivkivjpnotffu5k7q5fd5redrxd6ihwxkphdoxvf2opq4a"),
+  "loop": CID.parse("bafkreiahcii4usiyndg257rsxammnfb4rgmatgqt5yvwogazvyjmnh7geq"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */

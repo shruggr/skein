@@ -30,10 +30,11 @@ src/runtime/     the machine — no disk, network, clock, randomness, messagebox
 src/host/        the providers and the kernel configuration, outside the machine
   main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers
   cli.ts host.ts   `skein-host`: the management database (instances.ts, host.db) and `run`, every enabled instance in one process
-  messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; sign, encrypt and send emits
+  messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; send emits as sealed (no wallet call)
   tick.ts          wakes: the next deadline → one host-signed wake entry
   entry.ts         the host's clock and entry signing; genesis
-src/envelope.ts  BRC-169 envelopes: RFC 8785 canonical form, signed contentHash, BRC-78 content, sign/seal/verify/open (shared with the client)
+src/envelope.ts  BRC-169 envelopes: sign/seal/open through a wallet (shared with the client); the pure part (canonical form, contentHash, BRC-78 framing, verify) is src/runtime/envelope.ts
+programs/        the handler programs (Go, wasip1): skein (the imports), envelope (sealing through the wallet import), wallet, the handlers
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
@@ -73,7 +74,7 @@ npm test
 `bin/skein-runtime` fills the environment from `~/.skein`: `SKEIN_OWNER`
 (`owner.identity`), `SKEIN_MESSAGEBOX` (`messagebox.url`).
 Also: `SKEIN_DB` (`~/.skein/runtime.db`), `SKEIN_HANDLE` (`skein@localhost`),
-`SKEIN_OWNER_HANDLE` (`david@localhost`), `SKEIN_HOST_WALLET_URL`
+`SKEIN_OWNER_HANDLE` (`david@localhost`: a new genesis's `names`), `SKEIN_HOST_WALLET_URL`
 (`http://127.0.0.1:3324`), `SKEIN_POLL_MS` (1000), `SKEIN_WALLET=ephemeral`
 (throwaway keys).
 
@@ -84,7 +85,9 @@ One host process runs every enabled row of its management database,
 messagebox session and tick; the host wallet (3324), which signs every entry,
 is all they share. A new instance's genesis is `skein-runtime`'s plus `chat`
 from anyone (an open subscription), and the host resolves `handle@domain` for
-its programs (host.db, then the messagebox's paymail PKI).
+its programs: host.db, then BRC-169 (the domain's manifest and resolve
+endpoint, the handle certificate checked), then the paymail PKI last
+(`docs/MESSAGES.md`, "Resolution").
 
 ```
 scripts/host/up.sh                          # as above: the messagebox, the host and owner wallets
@@ -102,8 +105,8 @@ The instance wallet (`1sat serve wallet-api`, origin `skein`) needs, besides
 the transport grants in `scripts/host/grants.sh`:
 
 ```
-1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone  # outbound envelopes
-1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty <owner>      # inbound and outbound content
+1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone  # outbound envelopes, signed by the program in the step
+1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty <owner>      # inbound content (the provider) and outbound (the program)
 ```
 
 The host wallet (127.0.0.1:3324, origin `skein-host`, `SKEIN_HOST_WALLET_URL`)
@@ -118,15 +121,15 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | record | shape |
 |---|---|
 | log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake, sig}` — `sig` by the host identity (the genesis's `host`) over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
-| genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, collect?: [box]}` |
+| genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box?}, handler}], peers?: {infer}, defaults?: {model, thinking}, names?: {<identity>: {handle, domain}}, collect?: [box]}` — `names`: what outbound envelopes call the owner and the peers |
 | envelope | the BRC-169 envelope's signed part: its JSON object without `content`, as dag-cbor (its CID is the message id, the client's `replyTo`) |
 | body | the plaintext content: the sender's dag-cbor bytes, CIDv1 dag-cbor/sha2-256 — the digest is the envelope's signed `contentHash` |
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |
 | program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
-| step input | `{kind: "step", thread, step, entry, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?}` |
-| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "seal" \| "resolve", request, result}` — a wire frame and its answer, an emit record and its signed envelope (the signed part), or a handle `handle@domain` and the identity key the host resolved it to (`""`: none) |
+| step input | `{kind: "step", thread, step, entry, at, self: {handle, domain}, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?, names?}` |
+| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "resolve", request, result}` — a wire frame and its answer (among them each envelope's signature and encryption), or a handle `handle@domain` and the host resolver's whole answer as dag-cbor (`{identityKey, …the resolve endpoint's response, via, checked?, unchecked?}`; `identityKey: ""` and `error`: none) |
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
-| emit | `{kind: "emit", to, handle?, domain?, box, body: <cid>}` — the delivery provider signs the envelope for `body` to `to` in `box` during the step (`emit` returns the envelope CID; `created` is the step's stamp) and encrypts and sends it after |
+| emit | `{kind: "emit", to, box, body: <cid>, envelope}` — `envelope` is complete: the program signed it and encrypted `body` to `to` through the wallet import in the step (`programs/envelope`; `created` is the step's stamp); the runtime checks it, `emit` returns its signed part's CID (the message id), and the delivery provider sends it as it is after the step |
 
 Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
 `root` on the last) → objects-handler, which sets `main` to `root` if there is

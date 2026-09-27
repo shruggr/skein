@@ -24,11 +24,12 @@ export async function runProgram(mod: WebAssembly.Module, host: ProgramHost, o: 
 }): Promise<StepOutput> {
   const limit = o.limit ?? 1 << 20;
   const stdout = new Pipe(limit), stderr = new Pipe(limit);
+  const vfs = new Vfs(emptyBlocks, EMPTY_TREE);
   const exitCode = await runModule(mod, {
-    vfs: new Vfs(emptyBlocks, EMPTY_TREE),
+    vfs,
     args: [o.name],
     env: [],
-    stdio: [nullDesc(), pipeDesc(stdout, "w"), pipeDesc(stderr, "w")],
+    stdio: [nullDesc(vfs), pipeDesc(vfs, stdout, "w"), pipeDesc(vfs, stderr, "w")],
     clock: o.clock,
     random: o.random,
   }, (proc) => ({ skein: skeinImports(proc, host) }));

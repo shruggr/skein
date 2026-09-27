@@ -156,6 +156,8 @@ export type Genesis = {
   peers?: Record<string, Identity>;
   /** Defaults programs fall back on, e.g. `model` for the loop. */
   defaults?: Record<string, string>;
+  /** Handles of identities programs send to whose envelopes may not name them (the owner, the peers): an outbound envelope's `recipient`. */
+  names?: Record<Identity, { handle: string; domain: string }>;
   /** Boxes the delivery provider collects besides the subscribed ones: replies (e.g. `completions`), routed only by `replyTo`. */
   collect?: string[];
 };
@@ -167,17 +169,23 @@ export function isGenesis(x: unknown): x is Genesis {
     && Array.isArray(x.subscriptions) && x.subscriptions.every(isSubscription)
     && (x.peers === undefined || (isObj(x.peers) && Object.values(x.peers).every(isIdentity)))
     && (x.defaults === undefined || (isObj(x.defaults) && Object.values(x.defaults).every((v) => typeof v === "string")))
+    && (x.names === undefined || (isObj(x.names) && Object.entries(x.names).every(([k, v]) => isIdentity(k) && isObj(v) && typeof v.handle === "string" && typeof v.domain === "string")))
     && (x.collect === undefined || (Array.isArray(x.collect) && x.collect.every((b) => typeof b === "string" && b !== "")));
 }
 
 // ---------------------------------------------------------------- program-written records
 
-/** What a handler emits: an outbound envelope to `to` in `box`, whose content is the record `body`. */
-export type Emit = { kind: "emit"; to: Identity; handle?: string; domain?: string; box: string; body: CID };
+/**
+ * What a handler emits: an outbound message to `to` in `box`. `envelope` is the
+ * complete BRC-169 envelope (signed metadata and BRC-78 content), which the
+ * program sealed through the instance wallet; `body` is its plaintext content,
+ * a record. The runtime checks the envelope (scheduler.ts) before accepting it.
+ */
+export type Emit = { kind: "emit"; to: Identity; box: string; body: CID; envelope: Record<string, unknown> & { content: string } };
 
 export function isEmit(x: unknown): x is Emit {
   return isObj(x) && x.kind === "emit" && isIdentity(x.to) && typeof x.box === "string" && x.box !== "" && isCID(x.body)
-    && (x.handle === undefined || typeof x.handle === "string") && (x.domain === undefined || typeof x.domain === "string");
+    && isObj(x.envelope) && typeof x.envelope.content === "string";
 }
 
 /**
@@ -185,25 +193,23 @@ export function isEmit(x: unknown): x is Emit {
  * the answer, at (thread, step, i). Referenced, in order, from the step's
  * update (`calls`); on replay the answer is served from here, not the wallet.
  *   op "wallet": request = a BRC-100 wire request frame, result = the result frame
- *   op "seal":   request = the emit record's CID, result = the signed part of the outbound
- *                BRC-169 envelope (no `content`; as dag-cbor: the envelope record), signed by
- *                the instance wallet — a signature needs the wallet, so it is an answer
- *   op "resolve": request = "handle@domain" (UTF-8), result = the identity key it resolved to
- *                (hex, UTF-8), as the host's resolver answered it
+ *   op "resolve": request = "handle@domain" (UTF-8), result = the host resolver's whole
+ *                answer as dag-cbor (a Resolution, scheduler.ts: identityKey — "" if it did not
+ *                resolve — and the resolution endpoint's response, how it was got, what was checked)
  */
 export type Attested = {
   kind: "attested";
   thread: CID;
   step: number;
   i: number;
-  op: "wallet" | "seal" | "resolve";
+  op: "wallet" | "resolve";
   request: Uint8Array | CID;
   result: Uint8Array;
 };
 
 export function isAttested(x: unknown): x is Attested {
   return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
-    && (x.op === "wallet" || x.op === "seal" || x.op === "resolve") && x.result instanceof Uint8Array;
+    && (x.op === "wallet" || x.op === "resolve") && x.result instanceof Uint8Array;
 }
 
 // ---------------------------------------------------------------- helpers

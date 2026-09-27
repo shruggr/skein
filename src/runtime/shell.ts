@@ -64,7 +64,7 @@ function utilities(coreutils: WebAssembly.Module): Promise<Set<string>> {
       const out = new Pipe();
       const vfs = new Vfs(emptyBlocks, EMPTY_TREE);
       await runModule(coreutils, {
-        vfs, args: ["coreutils", "--list"], env: [], stdio: [nullDesc(), pipeDesc(out, "w"), nullDesc()],
+        vfs, args: ["coreutils", "--list"], env: [], stdio: [nullDesc(vfs), pipeDesc(vfs, out, "w"), nullDesc(vfs)],
         clock: () => 0n, random: (n) => new Uint8Array(n),
       });
       return new Set(Buffer.from(out.drain()).toString("utf8").split(/\s+/).filter(Boolean));
@@ -194,7 +194,7 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
     vfs,
     args: ["bash", "--disable-color", "-c", o.cmd],
     env: envList(env),
-    stdio: [pipeDesc(stdin, "r"), pipeDesc(stdout, "w"), pipeDesc(stderr, "w")],
+    stdio: [pipeDesc(vfs, stdin, "r"), pipeDesc(vfs, stdout, "w"), pipeDesc(vfs, stderr, "w")],
     clock, random, sleep, spawn, commandExists: exists,
   });
   return { exitCode, stdout: stdout.drain(), stderr: stderr.drain(), tree: await vfs.commit() };

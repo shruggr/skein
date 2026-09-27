@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { seal } from "../envelope.ts";
-import { collect, installWasm, messageBoxHub, scriptClock, iso, T0 } from "../testkit.ts";
+import { brc169Host, collect, deggenResolution, installWasm, LKUP, messageBoxHub, scriptClock, iso, T0 } from "../testkit.ts";
 import { genesisOf, readLog, verifyEntry } from "../runtime/log.ts";
 import { memoryStore } from "../runtime/memory.ts";
 import { PROGRAM_CIDS } from "../runtime/programs.ts";
@@ -205,28 +205,73 @@ test("a row is refused when its wallet is not its genesis's identity, or the hos
   await assert.rejects(startInstance(row("martha"), other), /not this instance's host/);
 });
 
-test("resolver: the host's rows first, then the messagebox's paymail PKI; \"\" when neither knows the handle; wired into each runtime", async (t) => {
+test("resolver: the host's rows first; a domain with no BRC-169 handles falls back to the messagebox's paymail PKI; unknown is identityKey \"\"; wired into each runtime", async (t) => {
   const db = new HostDb(join(await tmp(t), "host.db"));
   const martha = "02" + "a".repeat(64), david = "03" + "d".repeat(64);
   db.add("martha", { store: "/s", identity: martha });
   db.add("kurt", { store: "/s" }); // no identity yet
   const asked: string[] = [];
+  // The live `1sat serve` shape: a manifest with metanet.trust and no metanet.handles, and paymail.
   const f = (async (url: string) => {
     asked.push(url);
+    if (url.endsWith("/manifest.json")) return Response.json({ name: "127.0.0.1", metanet: { trust: { name: "127.0.0.1", publicKey: LKUP.certifier } } });
     return url.endsWith("/bsvalias/id/david@localhost") ? Response.json({ bsvalias: "1.0", handle: "david@localhost", pubkey: david }) : Response.json({ error: "paymail not found" }, { status: 404 });
   }) as unknown as typeof fetch;
   const resolve = hostResolver((h, d) => db.identityOf(h, d), "http://127.0.0.1:8100/messagebox", f);
-  assert.equal(await resolve("martha", "localhost"), martha);
+  assert.deepEqual(await resolve("martha", "localhost"), { identityKey: martha, via: "host" });
   assert.deepEqual(asked, [], "a row answers without the network");
-  assert.equal(await resolve("david", "localhost"), david);
-  assert.equal(await resolve("kurt", "localhost"), "");
-  assert.equal(await resolve("martha", "elsewhere.example"), "", "the domain is part of the handle");
-  assert.deepEqual(asked, ["http://127.0.0.1:8100/bsvalias/id/david@localhost", "http://127.0.0.1:8100/bsvalias/id/kurt@localhost", "http://127.0.0.1:8100/bsvalias/id/martha@elsewhere.example"]);
-  assert.equal(await hostResolver(() => undefined)("david", "localhost"), "", "no messagebox: rows only");
+  assert.deepEqual(await resolve("david", "localhost"), { bsvalias: "1.0", handle: "david@localhost", pubkey: david, identityKey: david, via: "paymail" }, "the whole paymail response is the answer");
+  assert.equal((await resolve("kurt", "localhost")).identityKey, "");
+  assert.match(String((await resolve("martha", "elsewhere.example")).error), /no paymail/, "the domain is part of the handle");
+  assert.deepEqual(asked, ["manifest.json", "bsvalias/id/david@localhost", "manifest.json", "bsvalias/id/kurt@localhost", "manifest.json", "bsvalias/id/martha@elsewhere.example"].map((p) => `http://127.0.0.1:8100/${p}`),
+    "no metanet.handles: no probing the well-known resolve path (BRC-169 §5.1), paymail last");
+  const offline = (async () => { throw new Error("offline"); }) as unknown as typeof fetch;
+  assert.match(String((await hostResolver(() => undefined, undefined, offline)("david", "localhost")).error), /offline/, "no network: unknown, not a throw");
 
   const h = await hostFor();
   const r = await startInstance(row("martha"), { ...h.o, resolve });
-  assert.equal(await (r.runtime as unknown as { resolver: { resolve: typeof resolve } }).resolver.resolve("martha", "localhost"), martha);
+  assert.deepEqual(await r.runtime.resolver!.resolve("martha", "localhost"), { identityKey: martha, via: "host" });
   await r.stop();
   db.close();
+});
+
+test("resolver, BRC-169: the domain's manifest names its resolve endpoint; the whole response is the answer, its handle certificate checked against the manifest's certifier key", async (t) => {
+  const host = await brc169Host({ answers: { deggen: deggenResolution() } });
+  t.after(() => host.close());
+  const resolve = hostResolver(() => undefined, `${host.origin}/messagebox`);
+  const r = await resolve("deggen", "lkup.net");
+  assert.equal(r.identityKey, LKUP.deggen);
+  assert.equal(r.via, "brc169");
+  assert.deepEqual(r.certificate, LKUP.certificate, "the certificate is part of the answer");
+  assert.deepEqual([r.messagebox, r.ttl], ["https://messagebox.lkup.net", 3600]);
+  assert.deepEqual(r.checked, ["echo", "certifier", "subject", "signature", "fields.handle", "fields.domain"]);
+  assert.deepEqual(r.unchecked, ["revocation"], "revocation (§4.2) is not checked by anyone: unknown, not revoked");
+  assert.deepEqual(host.asked, ["/manifest.json", "/resolve?handle=deggen"]);
+  const none = await resolve("nobody", "lkup.net");
+  assert.deepEqual([none.identityKey, none.via], ["", "brc169"]);
+  assert.match(String(none.error), /404 handle-not-found/);
+  assert.equal(host.asked.filter((p) => p.includes("bsvalias")).length, 0, "a BRC-169 domain's answer is final: no paymail fallback");
+});
+
+test("resolver, BRC-169: a certificate that does not match is refused — another certifier, another handle, a tampered field, another subject", async (t) => {
+  const deggen = deggenResolution();
+  const cert = LKUP.certificate;
+  const other = "02" + "b".repeat(64);
+  const cases: Array<[string, Record<string, unknown>, string | undefined, RegExp]> = [
+    ["another certifier", deggen, "03" + "c".repeat(64), /certifier .* is not the manifest's/],
+    ["deggen's certificate for kurt", { ...deggen, handle: "kurt" }, undefined, /fields\.handle is "deggen", not "kurt"/],
+    ["a tampered field", { ...deggen, certificate: { ...cert, fields: { ...cert.fields, handle: Buffer.from("kurt").toString("base64") } } }, undefined, /signature does not verify/],
+    ["another subject", { ...deggen, identityKey: other }, undefined, /subject is not identityKey/],
+  ];
+  for (const [what, answer, certifier, why] of cases) {
+    const host = await brc169Host({ certifier, answers: { [String(answer.handle)]: answer } });
+    try {
+      const r = await hostResolver(() => undefined, host.origin)(String(answer.handle), "lkup.net");
+      assert.equal(r.identityKey, "", what);
+      assert.match(String(r.error), why, what);
+      assert.deepEqual(r.response, answer, `${what}: the refused response is recorded beside the refusal`);
+    } finally {
+      await host.close();
+    }
+  }
 });

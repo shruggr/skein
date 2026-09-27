@@ -38,31 +38,13 @@ func Read(envelope, body CID) (*Envelope, []byte, error) {
 	return &env, plain, nil
 }
 
-// EmitRecord asks the runtime to sign and send an envelope with content Body to To, in Box.
+// EmitRecord is an outbound message: the complete envelope (signed and
+// encrypted by the program, package envelope), its plaintext body record, the
+// identity it is sealed to, and the box. Emit checks it and hands it on.
 type EmitRecord struct {
-	Kind   string `cbor:"kind"`
-	To     string `cbor:"to"`
-	Handle string `cbor:"handle,omitempty"`
-	Domain string `cbor:"domain,omitempty"`
-	Box    string `cbor:"box"`
-	Body   CID    `cbor:"body"`
-}
-
-// Send puts body as a record and emits it to `to` in box; returns the signed envelope's CID.
-func Send(to, handle, domain, box string, body any) (CID, error) {
-	bc, err := Put(body)
-	if err != nil {
-		return nil, fmt.Errorf("put body: %w", err)
-	}
-	ec, err := Put(EmitRecord{Kind: "emit", To: to, Handle: handle, Domain: domain, Box: box, Body: bc})
-	if err != nil {
-		return nil, fmt.Errorf("put emit: %w", err)
-	}
-	return Emit(ec)
-}
-
-// Reply puts body as a record and emits it to env's sender in box.
-func Reply(env *Envelope, box string, body any) error {
-	_, err := Send(env.Sender.IdentityKey, env.Sender.Handle, env.Sender.Domain, box, body)
-	return err
+	Kind     string `cbor:"kind"`
+	To       string `cbor:"to"`
+	Box      string `cbor:"box"`
+	Body     CID    `cbor:"body"`
+	Envelope any    `cbor:"envelope"`
 }

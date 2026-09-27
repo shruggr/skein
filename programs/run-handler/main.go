@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/shruggr/skein/programs/envelope"
 	"github.com/shruggr/skein/programs/skein"
 )
 
@@ -125,11 +126,11 @@ func second(step *skein.Step, a args) error {
 		if len(r.Error) > 0 && skein.Decode(r.Error, &e) == nil && e.Message != "" {
 			msg = e.Message
 		}
-		return skein.Reply(env, "results", errorBody{Error: msg, ReplyTo: a.Envelope})
+		return envelope.Reply(env, "results", errorBody{Error: msg, ReplyTo: a.Envelope})
 	}
 	var res shellResult
 	if err := skein.Decode(r.Result, &res); err != nil {
 		return fmt.Errorf("shell result: %w", err)
 	}
-	return skein.Reply(env, "results", resultBody{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, Tree: res.Tree, ReplyTo: a.Envelope})
+	return envelope.Reply(env, "results", resultBody{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, Tree: res.Tree, ReplyTo: a.Envelope})
 }

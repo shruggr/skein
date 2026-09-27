@@ -41,10 +41,12 @@ default would hide it).
   content: anyone holding the plaintext can check who wrote it, with no key
   and no help from the recipient. A message is an authenticated call.
 - `content` is a BRC-78 portable encrypted message: security level 2,
-  protocol `message encryption`, a random 256-bit key id per message carried
-  in the serialization, counterparty the recipient. The encryption is
-  **wire-level only**: it keeps the messagebox operator out and nothing more.
-  The recipient decrypts it and checks the plaintext against `contentHash`.
+  protocol `message encryption`, a 256-bit key id per message carried in the
+  serialization (random for a client; from the step's random stream for an
+  instance, which only needs it to differ per message), counterparty the
+  recipient. The encryption is **wire-level only**: it keeps the messagebox
+  operator out and nothing more. The recipient decrypts it and checks the
+  plaintext against `contentHash`.
 - `payment`, when present, is a BRC-29 payment as Atomic BEEF, unbroadcast,
   to keys derived from the recipient's identity key, internalized by the
   recipient's wallet with `internalizeAction`.
@@ -99,14 +101,26 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
 - **Ticks** (`src/host/tick.ts`): reads the next deadline and, at that moment,
   admits one wake entry, signed the same way. Every tick is recorded; there
   are no idle ticks, so an instance with nothing due stays asleep.
-- **Outbound**: an `emit` stays. The step signs the envelope's signed part
-  (the instance, as sender, signing its own message) and the state records
-  only "I sent this". Encryption, queueing, retries and delivery errors are
-  the delivery provider's; nothing about delivery comes back as an error. A
-  reply, if any, is just another admitted entry; a thread whose reply never
-  comes sits `waiting` at no cost. (A delivery receipt entry, "sent", signed
-  by the provider, would be optional state the VM may consult; it is not
-  built.)
+- **Outbound**: an `emit` stays, and it carries the **complete envelope**.
+  The program seals it inside the step, through the instance's own wallet
+  (the `wallet` import; `programs/envelope`), in this order: `getPublicKey`
+  (its identity, the sender), `createSignature` over the signed part
+  (`created` is the step's stamp, `sender` the genesis's handle and domain,
+  `recipient` the handle the program resolved or the genesis's `names`),
+  `encrypt` of the body to the recipient's key (BRC-78). Each wallet call is
+  attested — recorded, and served from the record on replay, so replay needs
+  no wallet. The runtime checks the emit with no wallet (signed by this
+  instance, content from it to the emit's `to`, `contentHash` the body's),
+  stores its signed part — whose CID is the message id, what a reply's
+  `replyTo` names — and, once the step is recorded, hands it to the delivery
+  provider, which **carries bytes**: it makes no wallet call on the send path.
+  (It still uses the instance wallet for its BRC-103/104 messagebox session —
+  the instance authenticating its own session — and to decrypt inbound
+  content.) Queueing, retries and delivery errors are the provider's; nothing
+  about delivery comes back as an error. A reply, if any, is just another
+  admitted entry; a thread whose reply never comes sits `waiting` at no cost.
+  (A delivery receipt entry, "sent", signed by the provider, would be optional
+  state the VM may consult; it is not built.)
 - **Wallet**: BRC-100, however wired.
 
 ## Inside the instance
@@ -158,10 +172,8 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   state: a thread that sent a request rests `waiting` with a reference to
   it; an admitted message naming that request is delivered to that thread.
 - **Results** leave as envelopes to the sender of the request that started
-  the thread. The step that emits signs the signed part through the instance
-  wallet (an attested call; `created` is the step's stamp), so its id is known
-  and recorded; the delivery provider encrypts the body to the recipient when
-  it sends.
+  the thread, sealed — signed and encrypted — by the step that emits them
+  ("Outbound" above), so the id is known and recorded before the step ends.
 - **Nothing is a message that isn't one.** Genesis is starting state. A
   sleeper's wake is a signed, stamped log entry with no message and no
   sender, one per wake. `hello` and `tick` are gone.
@@ -182,12 +194,35 @@ message {to: "@handle@domain", text}
 ```
 
 - **Addressing.** The loop resolves the handle to an identity key through the
-  host (`skein.Resolve`, the `resolve` import: an attested call — the host's
-  `Resolver` answers, the answer is recorded, replay serves it; a handle that
-  does not resolve is recorded as `""` and becomes an error result). The emit
-  is sealed to that key with the handle in the envelope's `recipient`; which
-  messagebox it goes to is the delivery provider's business (on localhost, the
-  one configured).
+  host (`skein.Resolve`, the `resolve` import): an attested call — the host's
+  `Resolver` answers, the **whole answer** is recorded, replay serves it. A
+  handle that does not resolve is recorded as `{identityKey: "", error}` and
+  becomes an error result. The emit is sealed to that key with the handle in
+  the envelope's `recipient`; which messagebox it goes to is the delivery
+  provider's business (on localhost, the one configured).
+- **Resolution** (`hostResolver`, `src/host/host.ts`), in order:
+  1. the host's own rows (host.db): `{identityKey, via: "host"}`;
+  2. BRC-169 (§5.1–5.2): the domain's `/manifest.json`; if it publishes
+     `metanet.handles`, `GET <resolve>?handle=<handle>` answers, final either
+     way. The answer is the endpoint's whole response — `identityKey`,
+     `certificate`, `messagebox`, `ttl`, … — plus `via: "brc169"`, `checked`
+     and `unchecked`. The BRC-52 handle certificate is checked (§4.1) against
+     the manifest's certifier key (`metanet.trust.publicKey`) when there is
+     one: its type, certifier, subject = `identityKey`, signature, and
+     `fields.handle`/`fields.domain` when they are plaintext (encrypted fields
+     need a keyring we are not given: `unchecked`). Any failure refuses the
+     handle; the refused response is recorded beside the error. **Revocation
+     (§4.2) is not implemented anywhere**: it is always in `unchecked`, which
+     means unknown, not revoked;
+  3. last, for a domain whose manifest has no `metanet.handles` (§5.1: then
+     no probing the well-known path), the paymail PKI,
+     `<origin>/bsvalias/id/<handle>@<domain>`: `{…its response, identityKey,
+     via: "paymail"}`.
+
+  A domain's origin is the messagebox host's when one is configured (dev: one
+  host serves every domain it is asked about), else `https://<domain>`. The
+  local `1sat serve` publishes a manifest with `metanet.trust` only and
+  answers paymail, so on localhost handles resolve by row or by paymail.
 - **Who the loop sends to, and what it replies to.** Every chat the loop sends
   replies to the recipient's latest envelope in this thread, if it has one —
   the chats of the party that opened the thread (its user turns), or a party's
@@ -235,9 +270,14 @@ message {to: "@handle@domain", text}
 With the content hash in the sender's signature, the plaintext needs no one
 else's word: a replayer checks the body against `contentHash` and the
 signature against `sender.identityKey`, from the log alone. So the log keeps
-the plaintext, and neither the ciphertext nor the message key is part of
-state; nothing depends on them. Replay needs the log and nothing else — no
-keys, no wallet on the message path. Sharing state is sharing the log. (An
+the plaintext, and an inbound message's ciphertext is not part of state;
+nothing depends on it. What the instance sends is different only in that the
+program produced it: its emit record carries the envelope complete,
+ciphertext and all, and the wallet's answers to the sign and encrypt calls
+are recorded like any attested call (the encryption's IV is the wallet's, so
+two live runs of one input differ there, and nowhere else; replay serves the
+recorded answer). Replay needs the log and nothing else — no keys, no wallet
+on the message path. Sharing state is sharing the log. (An
 earlier version kept the ciphertext and a per-message key, and had handlers
 decrypt and sign "reveals" into state; the state is plaintext anyway — trees,
 output, completions — so selectively handing out keys bought nothing.)

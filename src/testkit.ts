@@ -154,3 +154,57 @@ export async function results(i: Instance): Promise<Array<{ env: Envelope; body:
   }
   return out;
 }
+
+// ---------------------------------------------------------------- a BRC-169 domain host, on 127.0.0.1
+
+import { createServer } from "node:http";
+
+/** BRC-169 Appendix A: lkup.net's certifier key, deggen's identity key and handle certificate (A.3), which verify. */
+export const LKUP = {
+  certifier: "0371f0ec5992a9d38e09fe528e367890969c66eaebdb01b4d35a2fc0d61251b3f9",
+  deggen: "0359c5f3bfe249f6c0ca99d0e9cc1517da51a511f3d04f18e47a5d7ae55f04008c",
+  certificate: {
+    type: "XgCFdUfxEcI+3xtDjsIuSAjMl5EwzCUjsQc45ds1lC8=",
+    serialNumber: "JMNxKTvlkhOO88EJZRgnpTKL78dC1XwxQ9REUysjy08=",
+    subject: "0359c5f3bfe249f6c0ca99d0e9cc1517da51a511f3d04f18e47a5d7ae55f04008c",
+    certifier: "0371f0ec5992a9d38e09fe528e367890969c66eaebdb01b4d35a2fc0d61251b3f9",
+    revocationOutpoint: { txid: "2b09f724127b5213ead87842deade00ef6cb1a834c951d1612e162f5891fb3cb", vout: 0 },
+    fields: { domain: "bGt1cC5uZXQ=", handle: "ZGVnZ2Vu" },
+    signature: "30450221008becb25058954be7cf6f8c46d3a0411a85a9aed55ef90466651fc75374e2bdcf02205a232796a1c2dd0bd7096428a5e6fb766eee404f441a93a261986486ba3b553c",
+  },
+};
+
+/** A.4: the resolution response for deggen@lkup.net. */
+export const deggenResolution = (): Record<string, unknown> => ({
+  metanetHandles: "1.0", handle: "deggen", domain: "lkup.net", identityKey: LKUP.deggen,
+  certificate: LKUP.certificate, messagebox: "https://messagebox.lkup.net", ttl: 3600, revoked: false,
+});
+
+/**
+ * A domain's host: `/manifest.json` with `metanet.trust.publicKey` = `certifier`
+ * and, unless `handles` is false, `metanet.handles` naming its resolve
+ * endpoint, which answers `answers[handle]` (404 handle-not-found otherwise).
+ * `asked` lists every path requested.
+ */
+export async function brc169Host(o: { certifier?: string; handles?: boolean; answers: Record<string, Record<string, unknown>> }): Promise<{ origin: string; asked: string[]; close(): Promise<void> }> {
+  const asked: string[] = [];
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://x");
+    asked.push(`${url.pathname}${url.search}`);
+    const json = (status: number, body: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(body)); };
+    if (url.pathname === "/manifest.json") {
+      return json(200, { name: "test", metanet: {
+        trust: { name: "test", publicKey: o.certifier ?? LKUP.certifier },
+        ...(o.handles === false ? {} : { handles: { version: "1.0", resolve: `http://127.0.0.1:${(server.address() as { port: number }).port}/resolve` } }),
+      } });
+    }
+    if (url.pathname === "/resolve") {
+      const a = o.answers[url.searchParams.get("handle") ?? ""];
+      return a ? json(200, a) : json(404, { metanetHandles: "1.0", error: { code: "handle-not-found", message: "no such handle" } });
+    }
+    json(404, { error: "not found" });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address() as { port: number };
+  return { origin: `http://127.0.0.1:${port}`, asked, close: () => new Promise((r) => server.close(() => r())) };
+}

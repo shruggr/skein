@@ -16,7 +16,8 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { InferPeer } from "../peers/infer.ts";
-import { bundlesOf, collect, installWasm, instance, iso, messageBoxHub, scriptClock, send, type Hub, type Instance } from "../testkit.ts";
+import { brc169Host, bundlesOf, collect, deggenResolution, installWasm, instance, iso, LKUP, messageBoxHub, scriptClock, send, type Hub, type Instance } from "../testkit.ts";
+import { hostResolver } from "../host/host.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { encode, fmt } from "./cid.ts";
 import { headTree, MAIN } from "./heads.ts";
@@ -26,6 +27,7 @@ import { PROGRAM_CIDS } from "./programs.ts";
 import { Runtime, witnessFrom, type Outbound } from "./scheduler.ts";
 import type { Store } from "./store.ts";
 import type { ThreadUpdate } from "./types.ts";
+import type { Attested, Emit } from "./records.ts";
 
 type Json = Record<string, unknown>;
 
@@ -398,7 +400,7 @@ test("message: the model messages another instance by handle; the loop sends `ch
   ]);
   const bob = await agent(hub, clock, "bob", [answer({ content: "4" }), answer({ content: "5" })], true);
   const directory: Record<string, string> = { "bob@localhost": bob.i.identity };
-  alice.i.rt.resolver = { resolve: async (h, d) => directory[`${h}@${d}`] ?? Promise.reject(new Error("unknown handle")) };
+  alice.i.rt.resolver = { resolve: async (h, d) => directory[`${h}@${d}`] ? { identityKey: directory[`${h}@${d}`] } : Promise.reject(new Error("unknown handle")) };
   const both = async () => { await settle(alice.i); await settle(bob.i); await settle(alice.i); };
 
   await send(alice.i, "chat", { text: "ask bob" });
@@ -484,6 +486,34 @@ test("message: a handle that does not resolve, or bad arguments, is an error res
   await replayMatches(alice.i.store);
 });
 
+test("message: a handle resolved through BRC-169 (the domain's manifest and resolve endpoint); the whole response is recorded; replay serves it with no network", async (t) => {
+  const host = await brc169Host({ answers: { deggen: deggenResolution() } });
+  const alice = await agent(messageBoxHub(), scriptClock(), "alice", [
+    answer({ content: "", tool_calls: [messageCall("m1", "@deggen@lkup.net", "hi")] }),
+  ]);
+  alice.i.rt.resolver = { resolve: hostResolver(() => undefined, host.origin) };
+  await send(alice.i, "chat", { text: "ask deggen" });
+  await settle(alice.i);
+  await alice.peer.poll();
+  await settle(alice.i);
+  await host.close(); // the network is gone for good
+  const [aloop] = await loops(alice.i.store);
+  const tip = await tipOf(alice.i.store, aloop) as ThreadUpdate & { calls: CID[]; emits: CID[] };
+  assert.equal(tip.state, "waiting", alice.i.lines.join("\n"));
+  const emit = await alice.i.store.get<Emit>(tip.emits[0]);
+  assert.equal(emit.to, LKUP.deggen, "sealed to the key the domain's resolve endpoint answered");
+  assert.deepEqual(emit.envelope.recipient, { handle: "deggen", domain: "lkup.net" });
+  const calls = await Promise.all(tip.calls.map((c) => alice.i.store.get<Attested>(c)));
+  const res = calls.find((a) => a.op === "resolve")!;
+  assert.equal(Buffer.from(res.request as Uint8Array).toString(), "deggen@lkup.net");
+  const recorded = dagCbor.decode(res.result) as Json;
+  assert.deepEqual({ ...recorded, checked: undefined, unchecked: undefined, via: undefined }, { ...deggenResolution(), checked: undefined, unchecked: undefined, via: undefined }, "the whole response is the recorded answer");
+  assert.deepEqual([recorded.via, recorded.unchecked], ["brc169", ["revocation"]]);
+  await alice.i.rt.stop();
+  const sent = await replayMatches(alice.i.store); // no wallet, no resolver, no network
+  assert.deepEqual(sent.map((o) => [o.box, o.to]), [["infer", alice.i.rt.genesis!.peers!.infer], ["chat", LKUP.deggen]], "the same sends, the chat to deggen's recorded key");
+});
+
 test("message: two agents alternate on one thread each — Kurt's `message` back to Martha replies to her chat and resumes her waiting step; her next message resumes his; three exchanges; Martha answers the user with a `chat` reply", async (t) => {
   const hub = messageBoxHub();
   const clock = scriptClock();
@@ -500,7 +530,7 @@ test("message: two agents alternate on one thread each — Kurt's `message` back
     answer({ content: "Red is 6." }),
   ], true);
   const directory: Record<string, string> = { "kurt@localhost": kurt.i.identity, "martha@localhost": martha.i.identity };
-  const resolver = { resolve: async (h: string, d: string) => directory[`${h}@${d}`] ?? Promise.reject(new Error("unknown handle")) };
+  const resolver = { resolve: async (h: string, d: string) => directory[`${h}@${d}`] ? { identityKey: directory[`${h}@${d}`] } : Promise.reject(new Error("unknown handle")) };
   martha.i.rt.resolver = resolver;
   kurt.i.rt.resolver = resolver;
   const counts = async () => [(await loops(martha.i.store)).length, (await loops(kurt.i.store)).length];

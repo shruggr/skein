@@ -60,6 +60,7 @@ import (
 	"strings"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/shruggr/skein/programs/envelope"
 	"github.com/shruggr/skein/programs/skein"
 )
 
@@ -424,7 +425,7 @@ func (l *loop) message(key, to, handle, domain, text string) error {
 	if err != nil {
 		return err
 	}
-	env, err := skein.Send(key, handle, domain, "chat", chatBody{Text: text, ReplyTo: replyTo})
+	env, err := envelope.Send(key, handle, domain, "chat", chatBody{Text: text, ReplyTo: replyTo})
 	if err != nil {
 		return err
 	}
@@ -535,7 +536,7 @@ func (l *loop) infer() error {
 			msgs = append(msgs, message{Role: "tool", ToolCallID: r.Call, Content: toolText(r)})
 		}
 	}
-	env, err := skein.Send(peer, "", "", "infer", inferBody{Model: model, Messages: msgs, Tools: []any{bashTool, messageTool}, Thinking: l.step.Defaults["thinking"]})
+	env, err := envelope.Send(peer, "", "", "infer", inferBody{Model: model, Messages: msgs, Tools: []any{bashTool, messageTool}, Thinking: l.step.Defaults["thinking"]})
 	if err != nil {
 		return err
 	}
@@ -561,7 +562,7 @@ func (l *loop) answer(text string) error {
 	if err := skein.Decode(opening, &env); err != nil {
 		return err
 	}
-	c, err := skein.Send(l.a.Sender, env.Sender.Handle, env.Sender.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
+	c, err := envelope.Send(l.a.Sender, env.Sender.Handle, env.Sender.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
 	if err != nil {
 		return err
 	}
