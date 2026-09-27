@@ -97,11 +97,22 @@ through gib. The runtime never writes to a disk.
 
 ## Processes on David's machines, today
 
-- `skein` — the runtime: one process, one instance, one store file, with its
-  providers (the messagebox delivery, the tick) wired by `src/host/main.ts`.
-  `skein-host run` is the same per row of the host's management database
-  (`host.db`): many instances in one process, each with its own store and
-  providers, sharing only the host wallet (`src/host/host.ts`).
+- `skein-runtime` — the runtime: one process, one instance, one store file,
+  with its providers (the messagebox delivery and its outcomes, the tick, the
+  host's resolver) wired by `src/host/main.ts`.
+- `skein-host run` — the host, a **supervisor** (#23, "a process per
+  instance"; `src/host/supervisor.ts`): for each enabled row of its
+  management database (`host.db`) it spawns one `skein-runtime` with that row
+  in its environment (`SKEIN_DB`, `SKEIN_HANDLE`, `SKEIN_WALLET_URL`,
+  `SKEIN_IDENTITY`, `SKEIN_HOST_DB`, …), restarts a child that exits (with a
+  backoff), prefixes each child's lines with `[handle]`, and stops them all on
+  SIGINT/SIGTERM (a child whose supervisor dies stops too: its IPC channel
+  closes). Each instance is its own OS process; nothing of any instance runs
+  in the supervisor. What they share is the host's: host.db (read-only for
+  the children's resolvers), the host wallet, which signs every entry, and the
+  messagebox. The supervisor also serves an operator page and the roster
+  (`:4600`, `/` and `/roster.json`) and one read-only `skein-explore` per
+  ready row.
 - `1sat serve wallet-api` — the wallets: the instance's, and the host's,
   which signs every log entry.
 - a **client** — David's terminal or easel: scans, prompts, renders, signs as

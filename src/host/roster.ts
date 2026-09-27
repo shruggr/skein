@@ -2,9 +2,11 @@
 //   {handle, domain, identity, displayName, description, emoji?, avatar?, status}
 // with the display fields from the deployed tree's IDENTITY.md (`- Name:`,
 // `- Emoji:`, `- Description:`, `- Avatar:` lines), read from the instance's
-// store by the row's `tree`; `status` is `live` when the instance runs in this
-// host process, else `idle`. `skein-host roster` prints it; `skein-host run`
-// serves it at /roster.json (CORS *) for a static page on another origin.
+// store by the row's `tree`; `status` is `live` when the instance's process,
+// supervised by this host (`skein-host run`), is up and ready, else `idle`.
+// `skein-host roster` prints it; `skein-host run` serves it at /roster.json
+// (CORS *) for a static page on another origin, and an operator page at /
+// (hostPage): every instance, its process, a link to its explorer.
 //
 // Each agent's own roster (#27) is a file, ROSTER.md, which deploy puts in its
 // tree and the loop appends to the system prompt: the colleagues the row
@@ -103,14 +105,49 @@ export async function roster(rows: InstanceRow[], open: (row: InstanceRow) => Pr
   return out;
 }
 
-/** GET /roster.json → get(), CORS *. Resolves once listening (port 0: any; see server.address()). */
-export function serveRoster(port: number, get: () => Promise<RosterEntry[]>, host = "127.0.0.1"): Promise<Server> {
+/** One instance as the operator page shows it. */
+export interface HostRow {
+  handle: string; domain: string; identity: string; status: "live" | "idle" | "not run";
+  store: string; tree: string; pid?: number; restarts: number; explorer?: string;
+}
+
+const esc = (x: unknown) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** The host's operator page (#23, "Host explorer"): read-only, one row per enabled instance, a link to each one's explorer. */
+export function hostPage(rows: HostRow[]): string {
+  const body = rows.map((r) => `<tr><td><b>${esc(r.handle)}</b>@${esc(r.domain)}</td><td class="k" title="${esc(r.identity)}">${r.identity ? `${esc(r.identity.slice(0, 16))}…` : "—"}</td>
+<td class="${r.status === "live" ? "ok" : "mut"}">${esc(r.status)}${r.restarts ? ` <span class="mut">(${r.restarts} restart${r.restarts === 1 ? "" : "s"})</span>` : ""}</td><td>${r.pid ?? "—"}</td>
+<td class="k">${esc(r.store)}</td><td class="k" title="${esc(r.tree)}">${r.tree ? `…${esc(r.tree.slice(-12))}` : "—"}</td><td>${r.explorer ? `<a href="${esc(r.explorer)}">explore</a>` : "—"}</td></tr>`).join("\n");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>skein host</title>
+<style>:root{--bg:#fbfaf7;--fg:#1d1c1a;--mut:#6b6760;--line:#e3e0d8;--acc:#2f5fd0;--ok:#1f7a3d}
+@media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#e8e6e1;--mut:#9a968e;--line:#2c2b28;--acc:#8fb0ff;--ok:#6fcf8f}}
+body{margin:0 auto;max-width:1100px;padding:14px 16px;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+a{color:var(--acc)}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+th{font-size:13px;color:var(--mut);font-weight:600}.k{font-family:ui-monospace,monospace;font-size:13px}.mut{color:var(--mut)}.ok{color:var(--ok)}</style></head>
+<body><h1 style="font-size:19px">skein host <span class="mut" style="font-size:13px">${rows.length} instance${rows.length === 1 ? "" : "s"} · <a href="/roster.json">roster.json</a></span></h1>
+<table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>explorer</th></tr>
+${body}</table></body></html>`;
+}
+
+/**
+ * GET /roster.json → get(), CORS *; GET / → page(), if given. Resolves once
+ * listening (port 0: any; see server.address()).
+ */
+export function serveRoster(port: number, get: () => Promise<RosterEntry[]>, host = "127.0.0.1", page?: () => Promise<string>): Promise<Server> {
   const server = createServer(async (req, res) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "*");
     if (req.method === "OPTIONS") { res.writeHead(204).end(); return; }
     const path = new URL(req.url ?? "/", "http://x").pathname;
+    if (req.method === "GET" && path === "/" && page) {
+      try {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(await page());
+      } catch (e) {
+        res.writeHead(500, { "content-type": "text/plain" }).end(`${(e as Error).message}\n`);
+      }
+      return;
+    }
     if (req.method !== "GET" || path !== "/roster.json") { res.writeHead(404, { "content-type": "text/plain" }).end("not found\n"); return; }
     try {
       const body = JSON.stringify(await get());

@@ -30,8 +30,9 @@ src/runtime/     the machine — no disk, network, clock, randomness, messagebox
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
 src/host/        the providers and the kernel configuration, outside the machine
-  main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers
-  cli.ts host.ts   `skein-host`: the management database (instances.ts, host.db) and `run`, every enabled instance in one process
+  main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers (host.ts startInstance)
+  cli.ts host.ts   `skein-host`: the management database (instances.ts, host.db); host.ts: one instance from a row, the resolver
+  supervisor.ts    `skein-host run`: one `skein-runtime` process per enabled row, restarted, prefixed, stopped; host page, roster, explorers
   messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; send emits as sealed (no wallet call), retry, admit each one's outcome
   tick.ts          wakes: the next deadline → one host-signed wake entry
   entry.ts         the host's clock and entry signing; genesis
@@ -61,7 +62,7 @@ http://127.0.0.1:8100/messagebox, grants).
 ```
 npm install
 scripts/host/up.sh                          # wallets, messagebox, grants, accounts (idempotent)
-bin/skein-runtime                           # the instance: installs modules, writes a genesis into an empty store
+bin/skein-runtime                           # the instance: installs modules, writes a genesis (the owner's boxes, chat from anyone) into an empty store
 bin/skein import ~/Work/easel               # the client: tree objects into `objects`; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'   # no --tree: the `main` head (the first import sets it)
 bin/skein head main <cid>                   # move `main` to a tree the instance holds
@@ -77,28 +78,34 @@ npm test
 `bin/skein-runtime` fills the environment from `~/.skein`: `SKEIN_OWNER`
 (`owner.identity`), `SKEIN_MESSAGEBOX` (`messagebox.url`).
 Also: `SKEIN_DB` (`~/.skein/runtime.db`), `SKEIN_HANDLE` (`skein@localhost`),
-`SKEIN_OWNER_HANDLE` (`david@localhost`: a new genesis's `names`), `SKEIN_HOST_WALLET_URL`
-(`http://127.0.0.1:3324`), `SKEIN_POLL_MS` (1000), `SKEIN_WALLET=ephemeral`
-(throwaway keys).
+`SKEIN_OWNER_HANDLE` (`david@localhost`: a new genesis's `names`), `SKEIN_WALLET_URL`
+(`http://127.0.0.1:3321`), `SKEIN_HOST_WALLET_URL` (`http://127.0.0.1:3324`),
+`SKEIN_HOST_DB` (`~/.skein/host.db` if it exists: handles its rows answer),
+`SKEIN_POLL_MS` (1000), `SKEIN_SEND_ATTEMPTS` (8) and `SKEIN_SEND_BACKOFF_MS`
+(1000: retrying a send that fails transiently, before its outcome is `failed`),
+`SKEIN_WALLET=ephemeral` (throwaway keys). The full list is at the top of
+`src/host/main.ts`.
 
 ### Many instances: `skein-host`
 
-One host process runs every enabled row of its management database,
-`$SKEIN_HOME/host.db` (#23): each row its own store, runtime, wallet,
-messagebox session and tick; the host wallet (3324), which signs every entry,
-is all they share. A new instance's genesis is `skein-runtime`'s plus `chat`
-from anyone (an open subscription) — only the seed of its subscriptions
-chain; `skein-host subscribe` changes it later — and the host resolves `handle@domain` for
-its programs: host.db, then BRC-169 (the domain's manifest and resolve
-endpoint, the handle certificate checked), then the paymail PKI last
-(`docs/MESSAGES.md`, "Resolution").
+`skein-host run` supervises every enabled row of its management database,
+`$SKEIN_HOME/host.db` (#23): one `skein-runtime` process per row, given the
+row in its environment, restarted if it exits, stopped with the supervisor.
+Each has its own store, runtime, wallet, messagebox session and tick; host.db
+(read-only for them), the host wallet (3324), which signs every entry, and the
+messagebox are all they share. A new instance's genesis is the owner's boxes
+plus `chat` from anyone (an open subscription) — only the seed of its
+subscriptions chain; `skein-host subscribe` changes it later — and the host
+resolves `handle@domain` for its programs: host.db, then BRC-169 (the
+domain's manifest and resolve endpoint, the handle certificate checked), then
+the paymail PKI last (`docs/MESSAGES.md`, "Resolution").
 
 ```
 scripts/host/up.sh                          # as above: the messagebox, the host and owner wallets
 scripts/host/instance.sh martha             # a wallet-api on the next free port from 3401, grants, account, host.db row (idempotent)
 scripts/host/instance.sh kurt
 bin/skein-host list                         # handle, status, identity, wallet, store, tree
-bin/skein-host run                          # every enabled row; lines prefixed [handle]; roster at :4600/roster.json
+bin/skein-host run [--only martha,kurt]     # a process per enabled row; lines prefixed [handle]; host page :4600/, roster /roster.json, explorers :4610+
 bin/skein-host deploy martha <dir>          # SOUL.md, IDENTITY.md, skills/ into it through `objects`, as the owner; sets/moves main
 bin/skein-host subscribe martha add --sender <key> run run-handler   # a `subscribe` message as the owner; no new genesis
 bin/skein-host disable kurt                 # also: add <handle> [--wallet-url --store --tree --domain --identity], enable, remove

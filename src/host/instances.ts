@@ -2,7 +2,7 @@
 // row each, in $SKEIN_HOME/host.db. Host-side state, outside every instance's
 // graph: nothing in src/runtime reads it. Rows get here by hand (`skein-host
 // add`), by script (scripts/host/instance.sh) or later by an API; `skein-host
-// run` starts every enabled one (host.ts).
+// run` supervises one runtime process per enabled row (supervisor.ts).
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -59,9 +59,11 @@ export function knowsColumn(handles: string[] | "all"): string | null {
 export class HostDb {
   readonly db: DatabaseSync;
 
-  constructor(path: string) {
-    this.db = new DatabaseSync(path);
+  /** `readOnly`: an existing file, read only (an instance's resolver beside the supervisor): no schema, no migration. */
+  constructor(path: string, o: { readOnly?: boolean } = {}) {
+    this.db = new DatabaseSync(path, { readOnly: o.readOnly ?? false });
     this.db.exec("PRAGMA busy_timeout = 5000;"); // `run` holds it open while `deploy`/`add` write
+    if (o.readOnly) return;
     this.db.exec(DDL);
     // Older files: columns added since.
     const cols = new Set(this.db.prepare("PRAGMA table_info(instances)").all().map((c) => c.name));

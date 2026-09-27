@@ -1,8 +1,11 @@
-// Many instances in one host process (#23): the kernel configuration of
-// main.ts, once per management-database row (instances.ts). Each instance gets
-// its own store, runtime (scheduler), wallet, messagebox session and delivery
-// provider, and tick; they share nothing but the host wallet, which signs every
-// log entry for all of them (#9: the host's identity is the genesis's `host`).
+// One instance from a management-database row (instances.ts): the kernel
+// configuration main.ts runs, in its own process — `skein-host run`
+// (supervisor.ts) starts one main.ts per row (#23, "a process per instance").
+// The instance gets its own store, runtime (scheduler), wallet, messagebox
+// session and delivery provider, and tick; it shares nothing with the others
+// but the host wallet, which signs every log entry for all of them (#9: the
+// host's identity is the genesis's `host`), the messagebox, and host.db, which
+// its resolver reads. Tests start several in one process over memory stores.
 // A new instance's genesis is main.ts's plus an open `chat` subscription:
 // anyone may open a conversation with it (#24, item 3). That list is only the
 // seed of its subscriptions chain (#3, runtime/subscriptions.ts); later

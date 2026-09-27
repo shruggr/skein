@@ -123,9 +123,10 @@ envelope needs.
 
 ## Instances
 
-`up.sh` sets up the one instance `skein-runtime` runs. For many instances in
-one process (`bin/skein-host run`, src/host/host.ts), each is a row in the
-host's management database, `~/.skein/host.db` (src/host/instances.ts):
+`up.sh` sets up the one instance `skein-runtime` runs. For many instances
+(`bin/skein-host run`, a supervisor running one `skein-runtime` process per
+instance: src/host/supervisor.ts), each is a row in the host's management
+database, `~/.skein/host.db` (src/host/instances.ts):
 
 | column | |
 |---|---|
@@ -145,7 +146,7 @@ scripts/host/instance.sh <handle>     # provision one: idempotent
 bin/skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 bin/skein-host knows <handle> [a,b | --all | --none]   # who its ROSTER.md lists; no list: print it
 bin/skein-host list | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store and wallet
-bin/skein-host run                    # every enabled row, and the roster server
+bin/skein-host run [--only a,b]       # one process per enabled row (or those), the host page and roster, an explorer each
 bin/skein-host deploy <handle> <dir> [--only glob,glob]
 bin/skein-host deploy --all [--only glob,glob]   # every enabled row, from its `source`
 bin/skein-host roster                 # the roster JSON, printed
@@ -169,17 +170,68 @@ every other provisioned instance and, in each of theirs, with this one, so
 the roster can message itself. The infer peer's and the dev owner's wallets
 get message encryption with the new instance, as `grants.sh` does.
 
-`skein-host run` reads the environment as `skein-runtime` does
-(`SKEIN_OWNER`, `SKEIN_INFER`, `SKEIN_MESSAGEBOX`, `SKEIN_HOST_WALLET_URL`,
-`SKEIN_POLL_MS`, `SKEIN_WALLET=ephemeral`; `bin/skein-host` fills the first
-three from `~/.skein`). For each enabled row it installs the modules into the
-store, writes a genesis if the store is empty (`handle`/`domain` from the row;
-the seed subscriptions: the owner's `run`, `objects`, `head`, `chat`,
-`subscribe`, then `chat` from any sender → loop; `collect`: `completions`; `names`: the owner as
+### Running them: `skein-host run`
+
+`skein-host run` is a **supervisor**: for each enabled row (`--only a,b`:
+just those; a disabled or unknown handle is said and skipped) it spawns one
+`bin/skein-runtime` — the same entry point and kernel configuration
+(src/host/main.ts) as a single instance — with the row in its environment:
+
+| variable | from the row |
+|---|---|
+| `SKEIN_DB` | `store` |
+| `SKEIN_HANDLE` | `handle@domain` |
+| `SKEIN_WALLET_URL`, `SKEIN_WALLET_ORIGINATOR` | `wallet_url`, `wallet_originator` |
+| `SKEIN_IDENTITY` | `identity` (the child refuses a wallet that is not it) |
+| `SKEIN_HOST_DB` | `~/.skein/host.db`, which the child opens read-only for its resolver |
+
+and everything else from its own environment, which it reads as
+`skein-runtime` does (`SKEIN_OWNER`, `SKEIN_INFER`, `SKEIN_MESSAGEBOX`,
+`SKEIN_HOST_WALLET_URL`, `SKEIN_POLL_MS`, `SKEIN_SEND_ATTEMPTS`,
+`SKEIN_SEND_BACKOFF_MS`, `SKEIN_WALLET=ephemeral`; `bin/skein-host` fills the
+first three from `~/.skein`). A row with no `wallet_url` is not started
+(unless ephemeral).
+
+Each child installs the modules into its store, writes a genesis if the
+store is empty (`handle`/`domain` from the row; the seed subscriptions: the
+owner's `run`, `objects`, `head`, `chat`, `subscribe`, then `chat` from any
+sender → loop; `collect`: `completions`; `names`: the owner as
 `SKEIN_OWNER_HANDLE`, the infer peer as `SKEIN_INFER_HANDLE`), connects the
-row's wallet, and wires its own messagebox delivery (its own BRC-104 session)
-and tick. The host wallet signs every entry of every instance. A row that
-fails (wallet down, identity or host mismatch) is logged and skipped.
+row's wallet, and wires its own messagebox delivery (its own BRC-104
+session), tick and resolver. It prints `skein runtime <identity> (<handle>@<domain>) …`
+when it is up: the supervisor then calls it `live`, records the identity in
+the row if the row had none (not for ephemeral wallets), and starts its
+explorer. The host wallet signs every entry of every instance; host.db, the
+host wallet and the messagebox are all the instances share — nothing of one
+runs in another's process, or in the supervisor's.
+
+- **Lines**: every line a child writes, stdout or stderr, is the
+  supervisor's, prefixed `[handle]` (`[handle explore]` for its explorer).
+- **Restarts**: a child that exits (a crash, a wallet that is down, an
+  identity or host mismatch — the child logs why) is started again after 1 s,
+  doubling to at most 60 s; one that ran 30 s or more starts again at 1 s.
+- **Stopping**: SIGINT/SIGTERM stops restarting and sends every child
+  SIGTERM (SIGKILL after 10 s); each stops its runtime cleanly. A child
+  whose supervisor is killed stops by itself (its IPC channel closes).
+- **Ephemeral** (`SKEIN_WALLET=ephemeral`): every child makes its own
+  throwaway keys, host key included, each time it starts; a restarted child
+  cannot continue its store ("not this instance's host"). For tests and
+  trials only.
+
+**Ports** (127.0.0.1):
+
+| | |
+|---|---|
+| `SKEIN_HOST_PORT` (default 4600) | `/`: the host page; `/roster.json`: the roster |
+| `SKEIN_EXPLORE_BASE_PORT` (default 4610; `off`: none) | row *i*'s explorer on base + *i*, *i* its place among the enabled rows (`list` order), so a row keeps its port whatever `--only` says |
+
+**The host page** (`http://127.0.0.1:4600/`, read-only, #23 "Host
+explorer"): one line per enabled instance — handle, identity, status
+(`live`, `idle`, or `not run` under `--only`), pid and restarts, store path,
+deployed tree — and a link to its explorer: `bin/skein-explore <port>` over
+the row's store, read-only (src/dev/explore, unchanged), started by the
+supervisor once the row is live and supervised like it. This is the host
+operator's view, not the end-user UI.
 
 The instances' programs seal what they send themselves — sign and encrypt
 through the instance wallet, inside the step — so the delivery sends bytes;
@@ -272,8 +324,8 @@ within one segment; a pattern naming a directory takes all of it;
 `- Description:`, `- Emoji:`, `- Avatar:` lines, read from the instance's
 store by the row's `tree` (read-only); empty (or absent) when nothing is
 deployed or the deploy has not been admitted yet. `status` is `live` if the
-instance runs in this host process, else `idle` (so `skein-host roster`,
-its own process, says `idle` for every row).
+instance's process, supervised by this `skein-host run`, is up, else `idle`
+(so `skein-host roster`, its own process, says `idle` for every row).
 
 ### Each agent's colleagues: `ROSTER.md`
 

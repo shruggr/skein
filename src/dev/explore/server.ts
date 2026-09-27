@@ -76,4 +76,5 @@ if (import.meta.main) {
   const port = Number(process.argv[2] ?? 4500);
   const store = openStore(dbPath(), { readOnly: true });
   serve(store, port, process.env.SKEIN_WEB_HOST ?? "127.0.0.1").on("listening", () => console.log(`skein explore: http://localhost:${port} (${dbPath()}, read-only)`));
+  if (process.connected) process.once("disconnect", () => process.exit(0)); // started by `skein-host run`, which is gone
 }
