@@ -10,20 +10,21 @@ are in `OPEN.md`.
 - #1 named heads; #7 signed-plaintext messages; #9 host-signed log entries;
   #20 dev-tool fixes; #27 per-agent rosters; #28 pairwise conversations, chat
   replies; #24 the bopen.ai proof of concept (agents as instances that message
-  each other); #22 the bopen.ai mapping (research).
+  each other); #22 the bopen.ai mapping (research); #3 subscriptions as a
+  chain + `subscribe`; #13 shell toolset; #26 encryption inside the step,
+  BRC-169 resolve.
 
 ## Open, by area
-- **Machine core:** #2 git as a client for repos in the graph · #3 subscriptions
-  as records · #4 bootstrap from a system tree / a packet · #5 metering ·
-  #6 store boundary · #26 resolution and encryption inside the step.
-- **Messages and host:** #10 providers per interface (delivery outcomes still
-  to build) · #23 host service (process per instance, registration API) ·
+- **Machine core:** #2 git as a client for repos in the graph · #4 bootstrap
+  from a system tree / a packet · #5 metering · #6 store boundary · #30 index
+  as an IPLD structure.
+- **Messages and host:** #10 providers per interface (outcomes built; pull side
+  open) · #23 host service (process per instance built; wallets, registration) ·
   #18 a real wallet per instance · #29 wallet split: signing oracle outside,
   wallet state as records · #11 payment negotiation · #8 group encryption ·
   #21 data format (bytes, CBOR end to end).
 - **Inference:** #12 inference proxy protocol (bitplan gateway peer noted there).
-- **Programs and runtime:** #13 shell toolset / streaming · #25 JS and Python on
-  WASI · #14 WASI 0.2 components, wasmtime + browser backends · #15 wasi:http
+- **Programs and runtime:** #25 JS and Python on WASI · #14 WASI 0.2 components, wasmtime + browser backends · #15 wasi:http
   over messages.
 - **Interface:** #16 easel is one front end · #19 typed emissions from the loop.
 - **Specs upstream:** #17 (draft PR bsv-blockchain/BRCs#274).
