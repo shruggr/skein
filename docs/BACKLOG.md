@@ -33,5 +33,5 @@ are in `OPEN.md`.
 
 ## Where to look
 Issues on GitHub are the ordered record; this file only points at them.
-`OPEN.md` keeps the raw notes; `ARCH.md`, `MESSAGES.md`, `VM.md` describe what
+`OPEN.md` keeps the raw notes; `ARCH.md`, `MESSAGES.md`, `VM.md`, `WALLET.md` describe what
 is built.
