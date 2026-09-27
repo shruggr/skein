@@ -91,7 +91,8 @@ scripts/host/up.sh                          # as above: the messagebox, the host
 scripts/host/instance.sh martha             # a wallet-api on the next free port from 3401, grants, account, host.db row (idempotent)
 scripts/host/instance.sh kurt
 bin/skein-host list                         # handle, status, identity, wallet, store, tree
-bin/skein-host run                          # every enabled row; lines prefixed [handle]
+bin/skein-host run                          # every enabled row; lines prefixed [handle]; roster at :4600/roster.json
+bin/skein-host deploy martha <dir>          # SOUL.md, IDENTITY.md, skills/ into it through `objects`, as the owner; sets/moves main
 bin/skein-host disable kurt                 # also: add <handle> [--wallet-url --store --tree --domain --identity], enable, remove
 ```
 
