@@ -8,7 +8,7 @@ import type { CID } from "multiformats/cid";
 import { diff, gitSha, lookup, readFile, type TreeBlocks } from "./tree.ts";
 import { materialize, scan } from "../dev/scan.ts";
 import { wasmModules } from "../testkit.ts";
-import { runShell, type ShellOptions } from "./shell.ts";
+import { EMPTY_TREE, emptyBlocks, runShell, type ShellOptions } from "./shell.ts";
 
 class MapBlocks implements TreeBlocks {
   m = new Map<string, Uint8Array>();
@@ -165,4 +165,40 @@ test("a 2 MB file round-trips", async (t) => {
   assert.equal(text(r.stdout), "2097152\n1\n", text(r.stderr));
   assert.ok(Buffer.from(await readFile(blocks, r.tree, "piped.bin")).equals(big));
   assert.ok((await lookup(blocks, r.tree, "copy.bin"))!.cid.equals((await lookup(blocks, tree, "big.bin"))!.cid));
+});
+
+/**
+ * A minimal WASI command, assembled by hand (no coreutils tool prints an
+ * inode): fd_filestat_get(1) and write the stat's 8-byte inode to stdout.
+ */
+function inoProbe(): WebAssembly.Module {
+  const leb = (n: number) => { const o: number[] = []; do { let b = n & 0x7f; n >>>= 7; if (n) b |= 0x80; o.push(b); } while (n); return o; };
+  const str = (s: string) => [...leb(s.length), ...Buffer.from(s)];
+  const sec = (id: number, b: number[]) => [id, ...leb(b.length), ...b];
+  const I32 = 0x7f, W = "wasi_snapshot_preview1";
+  const body = [
+    0x00, // no locals
+    0x41, 1, 0x41, 0xc0, 0, 0x10, 0, 0x1a, //           fd_filestat_get(1, 64); drop (i32.const is signed LEB128)
+    0x41, 0, 0x41, 0xc8, 0, 0x36, 2, 0, //              iov.ptr = 72 (the stat's ino)
+    0x41, 4, 0x41, 8, 0x36, 2, 0, //                     iov.len = 8
+    0x41, 1, 0x41, 0, 0x41, 1, 0x41, 16, 0x10, 1, 0x1a, // fd_write(1, iov, 1, 16); drop
+    0x0b,
+  ];
+  return new WebAssembly.Module(Uint8Array.from([
+    0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+    ...sec(1, [3, 0x60, 2, I32, I32, 1, I32, 0x60, 4, I32, I32, I32, I32, 1, I32, 0x60, 0, 0]),
+    ...sec(2, [2, ...str(W), ...str("fd_filestat_get"), 0, 0, ...str(W), ...str("fd_write"), 0, 1]),
+    ...sec(3, [1, 2]),
+    ...sec(5, [1, 0, 1]),
+    ...sec(7, [2, ...str("memory"), 2, 0, ...str("_start"), 0, 2]),
+    ...sec(10, [1, ...leb(body.length), ...body]),
+  ]));
+}
+
+test("pipe inode numbers are per run: two identical runs in one process see the same inode on stdout", async () => {
+  const probe = inoProbe();
+  const run = async () => Buffer.from((await runShell(emptyBlocks, { tree: EMPTY_TREE, cmd: "", modules: { brush: probe, coreutils: probe } })).stdout).readBigUInt64LE(0);
+  const a = await run(), b = await run();
+  assert.ok(a >= 1n << 30n, `a pipe's inode is far from the tree's (${a})`);
+  assert.equal(b, a);
 });

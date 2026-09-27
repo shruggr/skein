@@ -32,6 +32,8 @@ const MAX_LINKS = 40;
 export class Vfs {
   readonly root: DirNode;
   private nextIno = 1;
+  /** Inode numbers for this run's pipes and /dev/null (wasi/host.ts): far from the tree's. */
+  descIno = 1 << 30;
   private readonly blocks: TreeBlocks;
 
   constructor(blocks: TreeBlocks, root: CID) {

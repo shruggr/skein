@@ -59,10 +59,10 @@ export type Desc =
   | { t: "pipe"; pipe: Pipe; end: "r" | "w"; ino: number }
   | { t: "null"; ino: number };
 
-// Pipes and null get inode numbers far from the tree's.
-let descIno = 1 << 30;
-export const nullDesc = (): Desc => ({ t: "null", ino: descIno++ });
-export const pipeDesc = (pipe: Pipe, end: "r" | "w"): Desc => ({ t: "pipe", pipe, end, ino: descIno++ });
+// Pipes and null get inode numbers far from the tree's, counted per run (the
+// run's Vfs), so identical runs number them identically.
+export const nullDesc = (vfs: Vfs): Desc => ({ t: "null", ino: vfs.descIno++ });
+export const pipeDesc = (vfs: Vfs, pipe: Pipe, end: "r" | "w"): Desc => ({ t: "pipe", pipe, end, ino: vfs.descIno++ });
 
 // ---------------------------------------------------------------- constants
 
@@ -241,7 +241,7 @@ export class Process {
       cmd_exists: (p: number, l: number) => (this.o.commandExists?.(this.str(p, l)) ? 1 : 0),
       pipe: (out: number) => {
         const pipe = new Pipe();
-        const r = this.add(pipeDesc(pipe, "r")), w = this.add(pipeDesc(pipe, "w"));
+        const r = this.add(pipeDesc(this.o.vfs, pipe, "r")), w = this.add(pipeDesc(this.o.vfs, pipe, "w"));
         this.dv.setUint32(out, r, true);
         this.dv.setUint32(out + 4, w, true);
         return 0;
@@ -458,7 +458,7 @@ export class Process {
     const p = path.split("/").filter((x) => x && x !== ".").join("/");
     if (!p.startsWith("dev/") || root.entries?.has("dev")) return undefined;
     switch (p) {
-      case "dev/null": return nullDesc();
+      case "dev/null": return nullDesc(this.o.vfs);
       case "dev/stdin": return this.fds.get(0);
       case "dev/stdout": return this.fds.get(1);
       case "dev/stderr": return this.fds.get(2);
@@ -611,7 +611,7 @@ export class Process {
     const argv = fields.slice(i, i + argc); i += argc;
     const envc = Number(fields[i++]);
     const env = fields.slice(i, i + envc);
-    const descs = stdio.map((fd) => (fd < 0 ? nullDesc() : this.fds.get(fd) ?? nullDesc())) as [Desc, Desc, Desc];
+    const descs = stdio.map((fd) => (fd < 0 ? nullDesc(this.o.vfs) : this.fds.get(fd) ?? nullDesc(this.o.vfs))) as [Desc, Desc, Desc];
     const rc = await this.o.spawn({ program, cwd, argv, env, stdio: descs });
     if (rc === undefined) return E.NOENT;
     this.dv.setInt32(code, rc, true);
