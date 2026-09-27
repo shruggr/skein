@@ -2,8 +2,9 @@
 
 A deterministic WASI machine over a content-addressed graph. Its only inputs
 are an ordered log of host-signed entries — BRC-169 messages (the sender's
-signed metadata and the plaintext) delivered from the host's messagebox, and
-wakes for sleepers; its only outputs are envelopes.
+signed metadata and the plaintext) delivered from the host's messagebox,
+wakes for sleepers, and the host's report on each envelope it sent (delivered,
+or failed); its only outputs are envelopes.
 Programs run inside it: handler programs (Go, `wasip1`) per box, and a
 bash-compatible wasm shell over git-shaped trees. Time and randomness are not
 inputs: the host stamps each log entry with its clock and signs it, and
@@ -20,7 +21,7 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 ```
 src/runtime/     the machine — no disk, network, clock, randomness, messagebox or private key
   scheduler.ts     the log consumer: admit, route by subscription, step programs and the shell, attested calls, replay
-  log.ts           the input log: host-signed entries (genesis | envelope | wake), verified at admission
+  log.ts           the input log: host-signed entries (genesis | envelope | wake | outcome), verified at admission
   program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
   programs.ts      the program records (shell, run-handler, objects-handler, head-handler, subscribe-handler, loop) and pinned module CIDs
   heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
@@ -31,7 +32,7 @@ src/runtime/     the machine — no disk, network, clock, randomness, messagebox
 src/host/        the providers and the kernel configuration, outside the machine
   main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers
   cli.ts host.ts   `skein-host`: the management database (instances.ts, host.db) and `run`, every enabled instance in one process
-  messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; send emits as sealed (no wallet call)
+  messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; send emits as sealed (no wallet call), retry, admit each one's outcome
   tick.ts          wakes: the next deadline → one host-signed wake entry
   entry.ts         the host's clock and entry signing; genesis
 src/envelope.ts  BRC-169 envelopes: sign/seal/open through a wallet (shared with the client); the pure part (canonical form, contentHash, BRC-78 framing, verify) is src/runtime/envelope.ts
@@ -124,7 +125,7 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 
 | record | shape |
 |---|---|
-| log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake, sig}` — `sig` by the host identity (the genesis's `host`) over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
+| log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake \| outcome: {emit, status: delivered \| failed, reason?}, sig}` — `sig` by the host identity (the genesis's `host`) over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
 | genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box}, handler}], peers?: {infer}, defaults?: {model, thinking}, names?: {<identity>: {handle, domain}}, collect?: [box]}` — `subscriptions` is only the seed of the subscriptions chain; `names`: what outbound envelopes call the owner and the peers |
 | envelope | the BRC-169 envelope's signed part: its JSON object without `content`, as dag-cbor (its CID is the message id, the client's `replyTo`) |
 | body | the plaintext content: the sender's dag-cbor bytes, CIDv1 dag-cbor/sha2-256 — the digest is the envelope's signed `contentHash` |

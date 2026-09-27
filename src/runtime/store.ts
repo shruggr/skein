@@ -14,7 +14,7 @@ export class NotFound extends Error {
 
 /** putMessage refused the record. The store is unchanged. */
 export class Rejected extends Error {
-  readonly reason: "bad-signature" | "duplicate-seq" | "duplicate-envelope" | "out-of-order";
+  readonly reason: "bad-signature" | "duplicate-seq" | "duplicate-envelope" | "duplicate-outcome" | "out-of-order";
   constructor(reason: Rejected["reason"], message: string) { super(message); this.reason = reason; }
 }
 
@@ -120,18 +120,24 @@ export type LogEntry = {
   envelope?: CID;
   box?: string;
   body?: CID;
-  /** … or a wake: the thread whose `until` this entry reaches. */
+  /** … a wake: the thread whose `until` this entry reaches … */
   wake?: CID;
+  /** … or a delivery outcome: what became of an emit (docs/MESSAGES.md, "Outcomes"). At most one per emit. */
+  outcome?: Outcome;
   /** DER, by the instance identity over the entry's dag-cbor without `sig` (log.ts). */
   sig: Uint8Array;
 };
+
+/** What the delivery provider reports of an emit: sent, or refused for good (`reason`). */
+export type Outcome = { emit: CID; status: "delivered" | "failed"; reason?: string };
 
 export interface Log {
   /**
    * Append a signed entry. It must extend the tip (prev = tip, n = tip.n + 1,
    * time not before tip's) or it is Rejected "out-of-order"; an envelope
-   * already in the log is Rejected "duplicate-envelope". The store does not
-   * check the signature (log.ts does).
+   * already in the log is Rejected "duplicate-envelope", a second outcome for
+   * one emit "duplicate-outcome". The store does not check the signature
+   * (log.ts does).
    */
   append(entry: LogEntry): Promise<CID>;
   /** The latest entry (the state hash), or undefined for an empty log. */
@@ -140,6 +146,8 @@ export interface Log {
   entries(from?: number): AsyncIterable<{ cid: CID; entry: LogEntry }>;
   /** The entry that admitted an envelope record, if any. */
   byEnvelope(envelope: CID): Promise<CID | undefined>;
+  /** The outcome entry for an emit record, if any. */
+  outcomeOf(emit: CID): Promise<CID | undefined>;
 }
 
 // ---------------------------------------------------------------- the store

@@ -333,8 +333,11 @@ Two limits of the dev wallets and messagebox, not of skein:
   --level 2 --counterparty <sender>`"), logged as rejected and acknowledged.
   Provisioned instances, the owner and the infer peer are granted.
 - **A reply needs the recipient's account.** The messagebox stores messages
-  only for registered identities, so a reply to a sender with no account is
-  kept and retried at every poll.
+  only for registered identities (`403 ERR_ACCOUNT_REQUIRED`). That refusal is
+  permanent: the delivery reports it into the instance as a `failed` outcome
+  entry and never sends it again (docs/MESSAGES.md, "Outcomes"); a `message`
+  to such an agent becomes an error result for the model, an answer to such
+  a sender ends the thread.
 
 ## The client
 

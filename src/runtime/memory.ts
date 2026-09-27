@@ -43,6 +43,7 @@ export function memoryStore(): Store {
   const locks = new Map<string, Promise<unknown>>();
   const log: CID[] = [];                            // entry CIDs, in order; not derived, survives rebuild
   const logged = new Map<string, CID>();            // envelope → entry
+  const outcomes = new Map<string, CID>();          // emit → its outcome entry
   let cursor = 0;
   let order = 0;
 
@@ -185,6 +186,7 @@ export function memoryStore(): Store {
       async append(entry) {
         // No await before the push: appends must not interleave.
         if (entry.envelope && logged.has(entry.envelope.toString())) throw new Rejected("duplicate-envelope", `log: envelope ${entry.envelope} is already admitted`);
+        if (entry.outcome && outcomes.has(entry.outcome.emit.toString())) throw new Rejected("duplicate-outcome", `log: emit ${entry.outcome.emit} already has an outcome`);
         const n = log.length;
         const tipEntry = n ? (dagCbor.decode(bytes.get(log[n - 1].toString())!) as LogEntry) : undefined;
         checkExtends(entry, log.at(-1), tipEntry);
@@ -192,9 +194,11 @@ export function memoryStore(): Store {
         bytes.set(e.cid.toString(), e.bytes);
         log.push(e.cid);
         if (entry.envelope) logged.set(entry.envelope.toString(), e.cid);
+        if (entry.outcome) outcomes.set(entry.outcome.emit.toString(), e.cid);
         return e.cid;
       },
       async byEnvelope(envelope) { return logged.get(envelope.toString()); },
+      async outcomeOf(emit) { return outcomes.get(emit.toString()); },
       async tip() { return log.at(-1); },
       async *entries(from = 0) {
         for (let i = from; i < log.length; i++) yield { cid: log[i], entry: await get<LogEntry>(log[i]) };

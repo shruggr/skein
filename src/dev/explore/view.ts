@@ -36,6 +36,7 @@ export interface World {
   byThread: Map<string, Thread>;
   touched: Map<string, Touch[]>;             // entry CID → the threads it launched or stepped
   envelopes: Map<string, EnvelopeRecord>;    // admitted envelopes, by CID
+  outcomes: Map<string, { cid: CID; entry: LogEntry }>; // outcome entries, by the emit they report on
   subscriptions?: Array<{ cid: CID; u: SubscriptionUpdate }>; // the subscriptions chain, oldest first; absent: never opened
   cursor: number;
 }
@@ -65,6 +66,7 @@ export async function load(store: Store): Promise<World> {
   }
   return {
     store, genesis, log, threads, touched, envelopes, subscriptions: await subscriptionUpdates(store),
+    outcomes: new Map(log.filter((x) => x.entry.outcome).map((x) => [x.entry.outcome!.emit.toString(), x])),
     entries: new Map(log.map((x) => [x.cid.toString(), x])),
     byThread: new Map(threads.map((t) => [t.cid.toString(), t])),
     cursor: await store.live.cursor.get(),
@@ -75,6 +77,13 @@ async function programName(store: Store, cid: CID): Promise<string> {
   const p = await store.get(cid).catch(() => undefined);
   return isProgram(p) ? p.name : cid.toString().slice(-8);
 }
+
+/** What a log entry is. */
+export const kindOf = (e: LogEntry) => e.genesis ? "genesis" : e.envelope ? "envelope" : e.outcome ? "outcome" : "wake";
+
+/** The thread whose step emitted `emit`, if any. */
+export const emitter = (w: World, emit: CID): Thread | undefined =>
+  w.threads.find((t) => t.updates.some(({ u }) => u.emits?.some((c) => c.equals(emit))));
 
 /** A record, or undefined when the store has no such block (or it is not dag-cbor). */
 export async function maybe<T>(store: Store, cid: CID | undefined): Promise<T | undefined> {

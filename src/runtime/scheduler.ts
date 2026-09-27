@@ -19,6 +19,10 @@
 //                thread {program, args: {envelope, body, box, sender},
 //                launchedBy: <envelope>, input: <entry>} and step it;
 //     wake     → resume the sleeping thread it names, if its deadline is reached;
+//     outcome  → `failed`: the thread whose tip emitted that emit and awaits a
+//                reply to it resumes with the failure as its next step's
+//                input (`deliveryFailed`), so it never waits on a message that
+//                will not arrive; `delivered`: a record, nothing runs;
 //     step every thread that touches until each rests or ends, and hand the
 //     envelopes they emitted to the outbox;
 //   then advance the cursor.
@@ -39,7 +43,8 @@
 //   launched (`waitingOn`), which start after it, or on replies to envelopes it
 //   emitted (`awaits`). When the launched threads are all at rest the program
 //   runs again with their resolution as input; when a reply is admitted it runs
-//   again with that envelope as input (`reply`). A step's attested calls
+//   again with that envelope as input (`reply`); when the delivery provider
+//   reports an awaited envelope `failed`, with the failure (`deliveryFailed`). A step's attested calls
 //   (wallet wire frames — among them the signature and the encryption of every
 //   envelope it sends — and handle resolutions) are records listed in its
 //   update (`calls`); a Witness serves them on replay, so replay needs no
@@ -85,8 +90,9 @@ export interface Outbound extends Emit {
  * Where emitted messages go: the delivery provider (src/host/messagebox.ts),
  * after the step that emitted them is recorded. The envelope is complete —
  * signed and encrypted inside the step, through the instance wallet — so the
- * provider carries bytes: queueing, retries and delivery errors are its, and
- * nothing about delivery comes back. Tests may capture.
+ * provider carries bytes: queueing and retries are its. What became of each
+ * emit comes back only as a host-signed `outcome` entry the provider admits
+ * (log.ts), never as an error here. Tests may capture.
  */
 export interface Outbox {
   send(o: Outbound): void | Promise<void>;
@@ -112,6 +118,9 @@ export interface Resolver {
 
 /** A reply delivered to the thread awaiting it: the handler-args shape, plus what it answers. */
 interface Reply { envelope: CID; body: CID; box: string; sender: string; replyTo: CID }
+
+/** An emit the thread awaits a reply to could not be delivered (a `failed` outcome entry): what, to whom, why. */
+interface DeliveryFailed { emit: CID; envelope: CID; to: string; box: string; reason: string }
 
 /** Answers to attested calls, by position: what replay serves instead of a wallet. */
 export interface Witness { find(thread: CID, step: number, i: number): Promise<Attested | undefined> }
@@ -276,7 +285,8 @@ export class Runtime {
    * it (its signature must verify against the genesis's `host`), extending the
    * tip, with the records it names — for an envelope entry, the envelope's
    * signed part (the JSON object without `content`) and the plaintext body
-   * (canonical dag-cbor that hashes to the signed `contentHash`). Checked,
+   * (canonical dag-cbor that hashes to the signed `contentHash`); an outcome
+   * names an emit this instance recorded, at most once. Checked,
    * stored, appended, and scheduled for processing. The provider has verified
    * the sender's signature. An envelope already in the log is Rejected
    * "duplicate-envelope"; an entry that no longer extends the tip, "out-of-order"
@@ -289,10 +299,15 @@ export class Runtime {
   }
 
   private async check(entry: LogEntry, records: { envelope?: object; body?: Uint8Array }): Promise<void> {
-    if (!isLogEntry(entry) || entry.genesis) throw new TypeError("admit: want a signed envelope or wake entry");
+    if (!isLogEntry(entry) || entry.genesis) throw new TypeError("admit: want a signed envelope, wake or outcome entry");
     if (!this.genesis && (await this.store.log.tip())) this.genesis = await genesisOf(this.store);
     if (!this.genesis) throw new Error("admit: no genesis");
     if (!verifyEntry(entry, this.genesis.host)) throw new Rejected("bad-signature", `admit: entry #${entry.n} is not signed by the host ${short(this.genesis.host)}`);
+    if (entry.outcome) {
+      if (!isEmit(await this.store.get(entry.outcome.emit).catch(() => undefined))) throw new TypeError(`admit: outcome for ${entry.outcome.emit}, which is not an emit in this store`);
+      if (await this.store.log.outcomeOf(entry.outcome.emit)) throw new Rejected("duplicate-outcome", `emit ${entry.outcome.emit} already has an outcome`);
+      return;
+    }
     if (!entry.envelope) return;
     const { envelope: signed, body } = records;
     if (!signed || !body) throw new TypeError("admit: an envelope entry needs its envelope and body records");
@@ -361,6 +376,20 @@ export class Runtime {
       return;
     }
 
+    if (e.outcome) {
+      const { emit, status, reason } = e.outcome;
+      const what = `#${e.n} outcome ${status} for emit ${short(emit)}${reason ? `: ${reason}` : ""}`;
+      if (status !== "failed") { this.say(what); return; }
+      const rec = await this.store.get(emit).catch(() => undefined);
+      if (!isEmit(rec)) { this.say(`${what}: not an emit; recorded, nothing runs`); return; }
+      const envelope = encode(signedPart(rec.envelope as never)).cid;
+      const t = await this.awaiter(envelope, (c) => c.equals(emit));
+      if (!t) { this.say(`${what}: no thread awaits it; recorded, nothing runs`); return; }
+      this.say(`${what} → ${short(t)}`);
+      await this.step(t, entry, e, undefined, undefined, { emit, envelope, to: rec.to, box: rec.box, reason: reason ?? "" });
+      return;
+    }
+
     if (e.envelope) {
       const box = e.box ?? "";
       const env = await this.store.get(e.envelope).catch(() => undefined);
@@ -369,7 +398,7 @@ export class Runtime {
       const replyTo = await this.replyToOf(e.body);
       if (replyTo !== undefined) {
         if (replyTo === null || !sender) { this.say(`${what}: replyTo is not a CID; recorded, nothing runs`); return; }
-        const t = await this.awaiter(replyTo, sender);
+        const t = await this.awaiter(replyTo, (_, x) => x.to === sender);
         if (!t) { this.say(`${what}: reply to ${short(replyTo)}, which no thread awaits from this sender; recorded, nothing runs`); return; }
         this.say(`${what}: reply to ${short(replyTo)} → ${short(t)}`);
         await this.step(t, entry, e, undefined, { envelope: e.envelope, body: e.body!, box, sender, replyTo });
@@ -404,16 +433,17 @@ export class Runtime {
   }
 
   /**
-   * The thread whose tip awaits `envelope`, which was sealed to `sender`: the
-   * tip's emit whose envelope it is names the recipient.
+   * The thread whose tip awaits `envelope` and emitted it, the emit passing
+   * `which`: a reply must come from the identity it was sealed to (`to`); an
+   * outcome names the emit record itself.
    */
-  private async awaiter(envelope: CID, sender: string): Promise<CID | undefined> {
+  private async awaiter(envelope: CID, which: (emit: CID, e: Emit) => boolean): Promise<CID | undefined> {
     for await (const t of this.store.live.awaiting(envelope)) {
       const tip = await this.tipOf(t) as (ThreadUpdate & { emits?: CID[] }) | undefined;
       if (tip?.state !== "waiting" || !tip.awaits?.some((a) => a.equals(envelope))) continue;
       for (const c of tip.emits ?? []) {
         const e = await this.store.get(c).catch(() => undefined);
-        if (isEmit(e) && e.to === sender && encode(signedPart(e.envelope as never)).cid.equals(envelope)) return t;
+        if (isEmit(e) && which(c, e) && encode(signedPart(e.envelope as never)).cid.equals(envelope)) return t;
       }
     }
     return undefined;
@@ -489,7 +519,7 @@ export class Runtime {
   // ------------------------------------------------------------ program steps
 
   /** One step of a handler program over `entry`: run it, record its update, send what it emitted, start what it launched. */
-  private async step(origin: CID, entry: CID, e: LogEntry, resolved: Resolved[] | undefined, reply?: Reply): Promise<void> {
+  private async step(origin: CID, entry: CID, e: LogEntry, resolved: Resolved[] | undefined, reply?: Reply, failed?: DeliveryFailed): Promise<void> {
     const key = origin.toString();
     if (this.stepping.has(key) || this.stopped) return;
     this.stepping.add(key);
@@ -513,7 +543,8 @@ export class Runtime {
       const g = this.genesis!;
       const input = encode(compact({
         kind: "step", thread: origin, step: n, entry, at, self: { handle: g.handle, domain: g.domain }, args: o.args, programs: g.programs, resolved,
-        tip: tipCid.equals(origin) ? undefined : tipCid, reply: reply && compact({ ...reply }), peers: g.peers, defaults: g.defaults, names: g.names,
+        tip: tipCid.equals(origin) ? undefined : tipCid, reply: reply && compact({ ...reply }), deliveryFailed: failed && compact({ ...failed }),
+        peers: g.peers, defaults: g.defaults, names: g.names,
       })).bytes;
 
       const attest = async (op: Attested["op"], request: Uint8Array | CID, perform: () => Promise<Uint8Array>): Promise<Uint8Array> => {

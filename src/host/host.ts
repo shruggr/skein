@@ -23,7 +23,7 @@ import type { Store } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ensureGenesis } from "./entry.ts";
 import type { InstanceRow } from "./instances.ts";
-import { Delivery, type MessageBox } from "./messagebox.ts";
+import { Delivery, type MessageBox, type RetryPolicy } from "./messagebox.ts";
 import { Tick } from "./tick.ts";
 
 type Named = { handle: string; domain: string };
@@ -48,6 +48,8 @@ export interface HostOptions {
   resolve?(handle: string, domain: string): Promise<Resolution>;
   /** Delivery poll interval; 0 = do not poll (tests call delivery.poll()). Default 1000. */
   pollMs?: number;
+  /** How long the delivery retries a transiently failing send (messagebox.ts DEFAULT_RETRY). */
+  retry?: Partial<RetryPolicy>;
   /** Lines, prefixed by the caller. */
   log?(handle: string, line: string): void;
   /** Tests: the clock entries are stamped with. */
@@ -106,7 +108,7 @@ export async function startInstance(row: InstanceRow, o: HostOptions): Promise<R
     tick.start();
     let delivery: Delivery | undefined;
     if (o.box) {
-      delivery = new Delivery({ runtime, wallet, host: o.host, box: o.box(row, wallet), log: say, now: o.now });
+      delivery = new Delivery({ runtime, wallet, host: o.host, box: o.box(row, wallet), log: say, now: o.now, retry: o.retry });
       runtime.outbox = delivery;
     } else {
       say("no messagebox (SKEIN_MESSAGEBOX): nothing will be delivered");

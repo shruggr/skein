@@ -23,16 +23,21 @@
 // Out: an emit (scheduler.ts) is a complete envelope — the program signed it
 // and encrypted its content to the recipient through the instance wallet,
 // inside the step — so once the step is recorded it is handed here and sent to
-// its box as it is: this side makes no wallet call. A send that fails is kept
-// and tried again at the next poll: delivery is this provider's business, and
-// nothing about it goes back into the instance.
+// its box as it is: this side makes no wallet call. What became of it goes
+// back into the instance as one host-signed `outcome` entry (log.ts), the
+// host's word like an arrival: `delivered` once the messagebox took it, or
+// `failed {reason}` for a permanent refusal (a 4xx other than 408/425/429 —
+// e.g. 403 ERR_ACCOUNT_REQUIRED, the recipient has no account). A transient
+// failure (no answer, 5xx, 429) is kept and tried again at the polls after
+// its backoff, up to `retry.attempts` sends in all; then it is `failed` too.
+// Nothing is sent again after a `failed` entry.
 
 import { MessageBoxClient } from "@bsv/message-box-client";
 import type { WalletInterface } from "@bsv/sdk";
 import { brc78Decode, isEnvelope, open, signedPart, verify, type Envelope } from "../envelope.ts";
 import { decode, encode } from "../runtime/cid.ts";
 import type { KeyWallet } from "../runtime/identity.ts";
-import { short } from "../runtime/log.ts";
+import { short, stampMs } from "../runtime/log.ts";
 import type { Runtime, Outbound } from "../runtime/scheduler.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
@@ -72,6 +77,27 @@ export function messageBoxClient(wallet: WalletInterface, host: string, originat
 
 // ---------------------------------------------------------------- the provider
 
+/** How long a transiently failing send is retried: `attempts` sends in all, the n-th retry `backoffMs · 2^(n-1)` (at most `maxBackoffMs`) after the last, checked at each poll. */
+export interface RetryPolicy { attempts: number; backoffMs: number; maxBackoffMs: number }
+
+/** 8 sends over about two minutes (1 s, 2 s, … 32 s, capped at 60 s). */
+export const DEFAULT_RETRY: RetryPolicy = { attempts: 8, backoffMs: 1000, maxBackoffMs: 60_000 };
+
+/**
+ * A send's error: permanent (a refusal that will not change — the
+ * messagebox's HTTP 4xx, other than 408/425/429 — or a request it cannot
+ * carry), else transient. The status comes from the error's `status`, or
+ * from @bsv/message-box-client's message ("Message Box send failed with HTTP
+ * 403 (ERR_ACCOUNT_REQUIRED).").
+ */
+export function sendFailure(e: unknown): { permanent: boolean; reason: string } {
+  const reason = (e as Error)?.message ?? String(e);
+  const status = Number((e as { status?: unknown })?.status ?? /\bHTTP (\d{3})\b/.exec(reason)?.[1]);
+  if (e instanceof TypeError) return { permanent: true, reason };
+  if (Number.isInteger(status) && status >= 400 && status < 500) return { permanent: ![408, 425, 429].includes(status), reason };
+  return { permanent: false, reason };
+}
+
 export interface DeliveryOptions {
   runtime: Runtime;
   /** The instance wallet: decrypts inbound content. Outbound envelopes come sealed. */
@@ -80,8 +106,10 @@ export interface DeliveryOptions {
   host: KeyWallet;
   box: MessageBox;
   log?: (line: string) => void;
-  /** Tests: the clock arrivals are stamped with. Default entry.ts's. */
+  /** Tests: the clock arrivals and outcomes are stamped with, and retries timed by. Default entry.ts's. */
   now?: () => Stamp;
+  /** Transient send failures: default DEFAULT_RETRY. */
+  retry?: Partial<RetryPolicy>;
 }
 
 export type Screened = { ok: true; envelope: Envelope; body: Uint8Array } | { ok: false; reason: string };
@@ -91,12 +119,16 @@ export class Delivery {
   private readonly say: (line: string) => void;
   private timer?: ReturnType<typeof setInterval>;
   private polling?: Promise<unknown>;
-  private unsent: Outbound[] = [];
+  private unsent: Array<{ o: Outbound; attempts: number; next: number; last: string }> = [];
+  private readonly retry: RetryPolicy;
 
   constructor(o: DeliveryOptions) {
     this.o = o;
     this.say = o.log ?? (() => {});
+    this.retry = { ...DEFAULT_RETRY, ...o.retry };
   }
+
+  private now(): Stamp { return (this.o.now ?? clockNow)(); }
 
   /** Poll every `ms` until stop(). */
   start(ms = 1000): void {
@@ -111,14 +143,17 @@ export class Delivery {
   }
 
   /**
-   * Retry what failed to send, then collect every routed box once: admit what
+   * Retry what failed to send and is due, then collect every routed box once: admit what
    * passes, acknowledge everything. Messages from all boxes are admitted in
    * the sender's order (envelope `created`, then the messagebox's arrival
    * time), so an `objects` bundle sent before a `run` over it is admitted
    * first. Returns what was admitted.
    */
   async poll(): Promise<Array<{ box: string; envelope: string; entry: string }>> {
-    for (const o of this.unsent.splice(0)) await this.send(o);
+    const t = stampMs(this.now());
+    const due = this.unsent.filter((u) => u.next <= t);
+    this.unsent = this.unsent.filter((u) => u.next > t);
+    for (const u of due) await this.attempt(u.o, u.attempts, u.last);
     const admitted: Array<{ box: string; envelope: string; entry: string }> = [];
     const all: Array<{ box: string; m: Listed; key: string }> = [];
     for (const box of await this.o.runtime.boxes()) for (const m of await this.o.box.list(box)) all.push({ box, m, key: `${createdOf(m.body)} ${m.created_at ?? ""}` });
@@ -178,7 +213,7 @@ export class Delivery {
     const signed = signedPart(s.envelope);
     const envelope = encode(signed).cid;
     try {
-      const entry = await admitEntry(this.o.runtime, this.o.host, { envelope, box, body: encode(decode(s.body)).cid }, { envelope: signed, body: s.body }, (this.o.now ?? clockNow)());
+      const entry = await admitEntry(this.o.runtime, this.o.host, { envelope, box, body: encode(decode(s.body)).cid }, { envelope: signed, body: s.body }, this.now());
       this.say(`inbox ${box} ${m.messageId}: admitted ${short(envelope)} as ${short(entry)}`);
       return { envelope: envelope.toString(), entry: entry.toString() };
     } catch (e) {
@@ -189,18 +224,46 @@ export class Delivery {
 
   /**
    * The runtime's outbox, once the step is recorded: send the envelope the
-   * program sealed, as it is. A failure is logged and kept for the next poll;
-   * it never reaches the instance.
+   * program sealed, as it is, and admit its outcome — `delivered`, or `failed`
+   * for a permanent refusal; a transient failure is kept for a later poll
+   * (RetryPolicy) and `failed` once the attempts run out.
    */
-  async send(o: Outbound): Promise<void> {
+  send(o: Outbound): Promise<void> {
+    return this.attempt(o, 0, "");
+  }
+
+  /** Waiting for a retry: emits sent, failed transiently, and not yet given up on. */
+  get pending(): number { return this.unsent.length; }
+
+  private async attempt(o: Outbound, before: number, last: string): Promise<void> {
+    const attempts = before + 1;
+    const what = `outbox ${o.box} → ${short(o.to)}: ${short(o.cid)}`;
     try {
       await this.o.box.send({ recipient: o.to, box: o.box, body: o.envelope });
     } catch (e) {
-      this.unsent.push(o);
-      this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)}: ${(e as Error).message} (will retry)`);
+      const f = sendFailure(e);
+      if (f.permanent || attempts >= this.retry.attempts) {
+        const reason = f.permanent ? f.reason : `${f.reason} (gave up after ${attempts} attempts)`;
+        this.say(`${what}: ${reason}: failed`);
+        await this.outcome(o, { status: "failed", reason });
+        return;
+      }
+      const wait = Math.min(this.retry.maxBackoffMs, this.retry.backoffMs * 2 ** (attempts - 1));
+      this.unsent.push({ o, attempts, next: stampMs(this.now()) + wait, last: f.reason });
+      this.say(`${what}: ${f.reason} (attempt ${attempts} of ${this.retry.attempts}; again in ${wait} ms)`);
       return;
     }
-    this.say(`outbox ${o.box} → ${short(o.to)}: ${short(o.cid)} (emit ${short(o.emit)})`);
+    this.say(`${what} (emit ${short(o.emit)})${last ? ` after ${attempts} attempts` : ""}`);
+    await this.outcome(o, { status: "delivered" });
+  }
+
+  /** The host's word on an emit, as a log entry. An outcome the runtime refuses (it has one already) is logged. */
+  private async outcome(o: Outbound, r: { status: "delivered" | "failed"; reason?: string }): Promise<void> {
+    try {
+      await admitEntry(this.o.runtime, this.o.host, { outcome: { emit: o.emit, ...r } }, {}, this.now());
+    } catch (e) {
+      this.say(`outbox ${short(o.cid)}: outcome ${r.status} not admitted: ${(e as Error).message}`);
+    }
   }
 }
 

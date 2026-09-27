@@ -116,11 +116,40 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   provider, which **carries bytes**: it makes no wallet call on the send path.
   (It still uses the instance wallet for its BRC-103/104 messagebox session —
   the instance authenticating its own session — and to decrypt inbound
-  content.) Queueing, retries and delivery errors are the provider's; nothing
-  about delivery comes back as an error. A reply, if any, is just another
-  admitted entry; a thread whose reply never comes sits `waiting` at no cost.
-  (A delivery receipt entry, "sent", signed by the provider, would be optional
-  state the VM may consult; it is not built.)
+  content.) Queueing and retries are the provider's; what became of each emit
+  comes back as one host-signed **outcome** entry (below), never as an error
+  to the step. A reply, if any, is just another admitted entry; a thread
+  whose reply never comes, though its envelope was delivered, sits `waiting`
+  at no cost.
+- **Outcomes** (#10, "delivery closes the loop"). After it sends — or gives
+  up on — an emit, the delivery provider admits an entry like a wake, stamped
+  and signed with the host wallet, naming the emit record:
+
+  ```
+  { kind: "log", prev, n, time, outcome: { emit: <emit cid>, status: "delivered" | "failed", reason? }, sig }
+  ```
+
+  `delivered` means the messagebox took it (nothing about whether anyone will
+  answer); `failed` carries the reason. At most one outcome per emit: the
+  runtime refuses a second ("duplicate-outcome") and an outcome naming a
+  record that is not an emit in its store. The provider reports `failed` at
+  once for a **permanent** refusal — an HTTP 4xx other than 408/425/429 (the
+  local messagebox's `403 ERR_ACCOUNT_REQUIRED`: the recipient has no
+  account), or a request the client cannot make — and retries a
+  **transient** one (no answer, 5xx, 429) at its polls with a doubling
+  backoff, `SKEIN_SEND_ATTEMPTS` sends in all (default 8, over about two
+  minutes: `SKEIN_SEND_BACKOFF_MS` 1000, capped at 60 s), then reports
+  `failed` "… (gave up after n attempts)". Nothing is sent again after a
+  `failed` entry. (The queue is in memory: an emit still queued when the
+  process stops gets no outcome; nothing re-sends it on start.)
+
+  The scheduler: a `delivered` outcome is a record and runs nothing. A
+  `failed` one resumes the thread whose tip emitted that emit and awaits a
+  reply to it, driven by the outcome entry, with `deliveryFailed: {emit,
+  envelope, to, box, reason}` as the step's input in place of a `reply`; if
+  nothing awaits it, it is recorded and nothing runs. So no thread waits on
+  an envelope that will not arrive. Outcomes are entries: replay reads them
+  back like any other.
 - **Wallet**: BRC-100, however wired.
 
 ## Inside the instance
@@ -135,10 +164,11 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   checks the entry's signature, the body against `contentHash`, and that the
   envelope is new, before it appends. Arrival is non-deterministic only until
   admission; the admitted order is the order of record.
-- **Every log entry is signed by the host**, admissions and wakes alike: an
-  entry is the host's statement — "message *n* arrived at *t*", "wake at *t*"
-  — so the provider that delivers it (the delivery for admissions, the tick
-  for wakes; different parties may run them) signs it with the host wallet (`createSignature`, protocol `[2, "skein
+- **Every log entry is signed by the host**, admissions, wakes and outcomes
+  alike: an entry is the host's statement — "message *n* arrived at *t*",
+  "wake at *t*", "emit *e* was delivered (or failed) at *t*" — so the provider
+  that delivers it (the delivery for admissions and outcomes, the tick for
+  wakes; different parties may run them) signs it with the host wallet (`createSignature`, protocol `[2, "skein
   log"]`, key `1`, counterparty `anyone`), not the instance's. The genesis
   records the host's identity (`host`, beside `owner`), and every stamp and
   every kick traces to a signature a third party can check against it. Where
@@ -180,7 +210,8 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   ("Outbound" above), so the id is known and recorded before the step ends.
 - **Nothing is a message that isn't one.** Genesis is starting state. A
   sleeper's wake is a signed, stamped log entry with no message and no
-  sender, one per wake. `hello` and `tick` are gone.
+  sender, one per wake; an outcome is the host's report on an emit, not a
+  message either. `hello` and `tick` are gone.
 
 ## Chat between instances
 
@@ -250,7 +281,14 @@ message {to: "@handle@domain", text}
   nothing runs). A resumed thread that rests on a `message` takes the reply
   as that call's result, kept as `{of: <their chat>, role: "tool", call, to,
   sent: <our chat>, text}`; one that rests on its answer takes it as the next
-  user turn. Replies to `infer` arrive in `completions`, which the genesis
+  user turn.
+- **Undeliverable.** A `failed` outcome for what the loop rests on resumes it
+  (above): a `message` becomes an error result for the model, `{of: <outcome
+  entry>, role: "tool", call, to, error: "could not deliver to @h@d:
+  <reason>"}` — as an unresolvable handle already is — and the loop goes on;
+  its `infer`, an `error` turn answered to the opener as an inference error;
+  its answer to the opener, an `error` turn ("could not deliver the answer:
+  …") and the thread **finishes**, since the reply it awaited cannot come. Replies to `infer` arrive in `completions`, which the genesis
   `collect`s (default `["completions"]`); `chat` is collected because it is
   subscribed.
 - **Two agents alternate on one thread each.** Martha's `message` to Kurt
@@ -266,8 +304,9 @@ message {to: "@handle@domain", text}
   each `message` a reply-await.
 - **Inbound.** The receiving instance routes a new `chat` (no `replyTo`) by
   subscription; to accept agents, not only its owner, its genesis seeds
-  `{box: "chat"}` with no sender (or the owner subscribes it later). A stalled reply is a delivery failure — the
-  thread just waits.
+  `{box: "chat"}` with no sender (or the owner subscribes it later). A chat
+  that cannot be delivered comes back as a `failed` outcome; one that was
+  delivered and never answered leaves the thread waiting.
 
 ## Why the plaintext
 

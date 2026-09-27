@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS handles (
 -- Not derived and not rebuilt: the input log. Each row is one signed
 -- log-entry record (also in blocks); admission order is not recoverable from
 -- the records. (An older file's message-based "log" table is left unread.)
+-- The envelope column is the record the entry is unique by: an admitted envelope, or
+-- an outcome's emit (one outcome per emit). They are different records, so
+-- one column serves both.
 CREATE TABLE IF NOT EXISTS entries (
   n        INTEGER PRIMARY KEY,
   cid      BLOB NOT NULL UNIQUE,
@@ -361,17 +364,24 @@ export function openStore(path: string, o: { readOnly?: boolean } = {}): SqliteS
       async append(entry) {
         return tx(() => {
           if (entry.envelope && q.logOf.get(entry.envelope.bytes)) throw new Rejected("duplicate-envelope", `log: envelope ${fmt(entry.envelope)} is already admitted`);
+          if (entry.outcome && q.logOf.get(entry.outcome.emit.bytes)) throw new Rejected("duplicate-outcome", `log: emit ${fmt(entry.outcome.emit)} already has an outcome`);
           const last = q.logTip.get();
           const tipCid = last ? fromBytes(last.cid as Uint8Array) : undefined;
           checkExtends(entry, tipCid, tipCid ? getBlock<LogEntry>(tipCid) : undefined);
           const cid = put(entry);
-          q.logIns.run(entry.n, cid.bytes, entry.envelope?.bytes ?? null);
+          q.logIns.run(entry.n, cid.bytes, (entry.envelope ?? entry.outcome?.emit)?.bytes ?? null);
           return cid;
         });
       },
       async byEnvelope(envelope) {
         const r = q.logOf.get(envelope.bytes);
-        return r ? fromBytes(r.cid as Uint8Array) : undefined;
+        const cid = r ? fromBytes(r.cid as Uint8Array) : undefined;
+        return cid && getBlock<LogEntry>(cid).envelope ? cid : undefined;
+      },
+      async outcomeOf(emit) {
+        const r = q.logOf.get(emit.bytes);
+        const cid = r ? fromBytes(r.cid as Uint8Array) : undefined;
+        return cid && getBlock<LogEntry>(cid).outcome ? cid : undefined;
       },
       async tip() {
         const last = q.logTip.get();

@@ -14,7 +14,7 @@ import { GIT_RAW, lookup, parseTree, readBlob, readTree } from "../../runtime/tr
 import type { Ref } from "../../runtime/types.ts";
 import { signedPart, verify } from "../../envelope.ts";
 import { escapeHtml, markdownToHtml } from "../../../web/markdown.ts";
-import { ancestry, headMoves, headNames, label, maybe, routeOf, rulesAt, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
+import { ancestry, emitter, headMoves, headNames, kindOf, label, maybe, routeOf, rulesAt, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
 
 const DAG_CBOR = 0x71;
 const esc = (x: unknown) => escapeHtml(String(x));
@@ -41,7 +41,7 @@ th{font-weight:600;font-size:13px;color:var(--mut)}
 table.kv th{width:9em}
 td{overflow-wrap:anywhere}
 .st{display:inline-block;padding:0 7px;border-radius:9px;font-size:12px;border:1px solid currentColor;white-space:nowrap}
-.st.finished{color:var(--ok)}.st.errored,.st.dropped,.st.out-of-context{color:var(--bad)}.st.waiting,.st.new{color:var(--wait)}.st.running{color:var(--acc)}
+.st.finished,.st.delivered{color:var(--ok)}.st.failed,.st.errored,.st.dropped,.st.out-of-context{color:var(--bad)}.st.waiting,.st.new{color:var(--wait)}.st.running{color:var(--acc)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:12px 0}
 .card>.hd{display:flex;justify-content:space-between;gap:8px;font-size:12px;color:var(--mut);flex-wrap:wrap}
 .asked{background:var(--say);border-radius:8px;padding:6px 10px;margin:6px 0;white-space:pre-wrap}
@@ -84,7 +84,15 @@ const threadLink = (w: World, t: Thread) => `${link(w, t.cid)} <span class="mut"
 const entryLink = (w: World, e: CID | undefined) => {
   if (!e) return "";
   const x = w.entries.get(e.toString());
-  return x ? `<a href="/e/${e}" title="${e}">#${x.entry.n}${x.entry.box ? ` ${esc(x.entry.box)}` : x.entry.wake ? " wake" : x.entry.genesis ? " genesis" : ""}</a>` : link(w, e);
+  return x ? `<a href="/e/${e}" title="${e}">#${x.entry.n}${x.entry.box ? ` ${esc(x.entry.box)}` : x.entry.outcome ? ` ${esc(x.entry.outcome.status)}` : x.entry.envelope ? "" : ` ${kindOf(x.entry)}`}</a>` : link(w, e);
+};
+
+/** An emit's outcome, as the delivery provider reported it: delivered, failed (why), or none yet. */
+const outcomeOf = (w: World, emit: CID) => {
+  const x = w.outcomes.get(emit.toString());
+  if (!x) return `<span class="st new">no outcome yet</span>`;
+  const o = x.entry.outcome!;
+  return `${st(o.status)}${o.reason ? ` <span class="bad">${esc(o.reason)}</span>` : ""} ${entryLink(w, x.cid)}`;
 };
 
 /** JSON-shaped HTML with every CID a link and bytes summarised. */
@@ -168,11 +176,11 @@ export function logPage(w: World, before?: number): string {
   const top = before ?? w.log.length;
   const rows = w.log.filter(({ entry }) => entry.n < top).slice(-PAGE).reverse();
   const body = rows.map(({ cid, entry: e }) => {
-    const kind = e.genesis ? "genesis" : e.envelope ? "envelope" : "wake";
+    const kind = e.outcome ? `outcome ${st(e.outcome.status)}` : kindOf(e);
     const env = e.envelope ? w.envelopes.get(e.envelope.toString()) : undefined;
     const threads = (w.touched.get(cid.toString()) ?? []).map((t) => `${link(w, t.thread.cid)} <span class="mut small">${esc(t.thread.program)} ${t.seq ? `step ${t.seq}` : "launched"}</span>`);
     return `<tr><td><a href="/e/${cid}" title="${cid}">#${e.n}</a></td><td class="small">${time(stampMs(e.time))}</td><td>${kind}${e.n >= w.cursor ? ` <span class="st new">pending</span>` : ""}</td>
-<td>${esc(e.box ?? "")}</td><td>${key(w, senderOf(env))}</td><td>${e.envelope ? link(w, e.envelope) : e.genesis ? link(w, e.genesis) : e.wake ? link(w, e.wake) : ""}</td><td>${e.body ? link(w, e.body) : ""}</td><td class="small">${threads.join("<br>")}</td></tr>`;
+<td>${esc(e.box ?? "")}</td><td>${key(w, senderOf(env))}</td><td>${e.envelope ? link(w, e.envelope) : e.genesis ? link(w, e.genesis) : e.wake ? link(w, e.wake) : e.outcome ? link(w, e.outcome.emit) : ""}</td><td>${e.body ? link(w, e.body) : ""}</td><td class="small">${threads.join("<br>")}</td></tr>`;
   }).join("");
   const oldest = rows.at(-1)?.entry.n ?? 0;
   const pager = `<nav class="pager small">${top < w.log.length ? `<a href="/log${top + PAGE >= w.log.length ? "" : `?before=${top + PAGE}`}">← newer</a>` : ""}${oldest > 0 ? `<a href="/log?before=${oldest}">older →</a>` : ""}</nav>`;
@@ -196,6 +204,16 @@ export async function entryPage(w: World, cid: CID): Promise<string> {
   ]));
   if (e.genesis) parts.push(`<h2>genesis</h2>${json(w, await maybe(w.store, e.genesis))}`);
   if (e.wake) parts.push(`<h2>wake</h2><p>the deadline of ${w.byThread.get(e.wake.toString()) ? threadLink(w, w.byThread.get(e.wake.toString())!) : link(w, e.wake)}</p>`);
+  if (e.outcome) {
+    const o = e.outcome;
+    const rec = await maybe<Emit>(w.store, o.emit);
+    const by = emitter(w, o.emit);
+    parts.push(`<h2>outcome</h2>${kv([
+      ["status", `${st(o.status)}${o.reason ? ` <span class="bad">${esc(o.reason)}</span>` : ""}`],
+      ["emit", `${link(w, o.emit, o.emit.toString())}${rec ? ` → <b>${esc(rec.box)}</b> to ${key(w, rec.to)}` : ""}`],
+      ["emitted by", by ? threadLink(w, by) : "—"],
+    ])}<p class="small mut">${o.status === "failed" ? "the host's delivery gave up on it: a thread awaiting a reply to it is resumed with the failure" : "the host's delivery sent it: a record, nothing runs"}</p>`);
+  }
   if (e.envelope) {
     const env = w.envelopes.get(e.envelope.toString());
     const body = await maybe(w.store, e.body);
@@ -216,7 +234,7 @@ export async function entryPage(w: World, cid: CID): Promise<string> {
   }
   const touched = w.touched.get(cid.toString()) ?? [];
   parts.push(`<h2>threads</h2>${touched.length ? `<ul class="plain">${touched.map((t) => `<li>${t.seq ? `stepped (update ${t.seq})` : "launched"} ${threadLink(w, t.thread)}</li>`).join("")}</ul>` : `<p class="mut">none</p>`}`);
-  return layout(`entry #${e.n}`, `<h1>log entry #${e.n} <span class="mut small">${e.genesis ? "genesis" : e.envelope ? "envelope" : "wake"}</span></h1>${parts.join("\n")}`);
+  return layout(`entry #${e.n}`, `<h1>log entry #${e.n} <span class="mut small">${kindOf(e)}</span></h1>${parts.join("\n")}`);
 }
 
 function safe(f: () => boolean): boolean {
@@ -328,6 +346,9 @@ ${r.content ? `<div class="text">${markdownToHtml(text(r.content))}</div>` : ""}
 ${calls.map((tc) => `<div class="small">tool call <code>${esc(tc.function?.name ?? "?")}</code> <span class="mut">${esc(tc.id ?? "")}</span></div><pre>${esc(argsOf(tc.function?.arguments))}</pre>`).join("")}</div>`;
     }
     case "tool": {
+      if (r.exitCode === undefined) { // a message: its answer, or why it could not be sent or delivered
+        return `<div class="turn">${hd("tool", ` · ${esc(r.call ?? "")} · message ${esc(r.to ?? "")}`)}${r.error ? `<pre class="err">${esc(text(r.error))}</pre>` : `<div class="asked">${esc(text(r.text))}</div>`}</div>`;
+      }
       const out = text(r.stdout), err = text(r.stderr);
       return `<div class="turn">${hd("tool", ` · ${esc(r.call ?? "")} · exit ${esc(r.exitCode ?? "?")}`)}${isCID(r.tree) ? `<div class="small mut">tree ${link(w, r.tree)}</div>` : ""}${out ? `<pre>${esc(out)}</pre>` : ""}${err ? `<pre class="err">${esc(err)}</pre>` : ""}${!out && !err ? `<div class="small mut">(no output)</div>` : ""}</div>`;
     }
@@ -354,7 +375,7 @@ async function emitted(w: World, c: CID): Promise<string> {
   const env = e.envelope && typeof e.envelope === "object" ? encode(signedPart(e.envelope as never)).cid : undefined;
   const summary = typeof body?.text === "string" ? `<div class="say">${esc(body.text)}</div>`
     : Array.isArray(body?.messages) ? `<div class="small mut">${esc(String(body.model ?? ""))} · ${body.messages.length} messages${Array.isArray(body.tools) ? ` · ${body.tools.length} tools` : ""}</div>` : "";
-  return `<div class="small">emitted → <b>${esc(e.box)}</b> to ${key(w, e.to)}${r?.handle ? ` <span class="mut">${esc(String(r.handle))}@${esc(String(r.domain ?? ""))}</span>` : ""} · emit ${link(w, c)} · body ${link(w, e.body)}${env ? ` · envelope ${link(w, env)}` : ""}</div>${summary}${details("body", json(w, body), `b-${c}`)}`;
+  return `<div class="small">emitted → <b>${esc(e.box)}</b> to ${key(w, e.to)}${r?.handle ? ` <span class="mut">${esc(String(r.handle))}@${esc(String(r.domain ?? ""))}</span>` : ""} · emit ${link(w, c)} · body ${link(w, e.body)}${env ? ` · envelope ${link(w, env)}` : ""} · ${outcomeOf(w, c)}</div>${summary}${details("body", json(w, body), `b-${c}`)}`;
 }
 
 // Polls the thread's tip; when it moves, re-renders the fragment, keeping open <details> open.
@@ -404,6 +425,7 @@ export async function recordPage(w: World, cid: CID, path = ""): Promise<string>
   if (origin && !origin.equals(cid)) notes.push(`update #${esc(v.seq)} of ${link(w, origin)}`);
   const admitted = await w.store.log.byEnvelope(cid);
   if (admitted) notes.push(`an admitted envelope · ${entryLink(w, admitted)}`);
+  if (v?.kind === "emit") notes.push(`outcome ${outcomeOf(w, cid)}`);
   let chain = "";
   if (origin?.equals(cid)) {
     const ups: CID[] = [];

@@ -30,7 +30,7 @@ export const MODULES = {
   "objects-handler": CID.parse("bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4"),
   "head-handler": CID.parse("bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q"),
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
-  "loop": CID.parse("bafkreifforoghf7swk2k5jibqvorfbqtz7fj3a3ak2lbrdgpm3bhfe3juu"),
+  "loop": CID.parse("bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa"),
 } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
