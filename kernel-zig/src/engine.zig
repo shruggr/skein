@@ -121,6 +121,12 @@ pub const Module = struct {
             };
             const index = list.items.len;
             try list.append(imp);
+            // A module may import one function twice (Go does): one definition serves both.
+            var dup = false;
+            for (list.items[0..index]) |p| if (std.mem.eql(u8, p.module, imp.module) and std.mem.eql(u8, p.name, imp.name)) {
+                dup = true;
+            };
+            if (dup) continue;
             if (c.wasmtime_linker_define_func(linker, imp.module.ptr, imp.module.len, imp.name.ptr, imp.name.len, ft, callback, @ptrFromInt(index + 1), null)) |err| {
                 err_msg.* = errorText(alloc, err);
                 return error.Link;

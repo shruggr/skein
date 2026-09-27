@@ -114,6 +114,16 @@ pub const SqliteStore = struct {
     db: *sql.Db,
     alloc: std.mem.Allocator,
 
+    /// An existing file for reading only (as sqlite.ts with readOnly): no schema, no migration, no journal change.
+    pub fn openReadOnly(alloc: std.mem.Allocator, path: []const u8) !*SqliteStore {
+        const db = try sql.Db.open(alloc, path, true);
+        errdefer db.close();
+        try db.exec("PRAGMA busy_timeout = 5000;");
+        const s = try alloc.create(SqliteStore);
+        s.* = .{ .db = db, .alloc = alloc };
+        return s;
+    }
+
     pub fn open(alloc: std.mem.Allocator, path: []const u8) !*SqliteStore {
         const db = try sql.Db.open(alloc, path, false);
         errdefer db.close();
@@ -169,6 +179,18 @@ pub const SqliteStore = struct {
     pub fn close(s: *SqliteStore) void {
         s.db.close();
         s.alloc.destroy(s);
+    }
+
+    /// Every block of one codec (the replay tool copies modules this way).
+    pub fn blocksOfCodec(s: *SqliteStore, a: std.mem.Allocator, codec: u64) ![][2][]u8 {
+        const st = try s.db.prepare("SELECT cid, bytes FROM blocks ORDER BY cid");
+        var out = std.array_list.Managed([2][]u8).init(a);
+        while (try st.step()) {
+            const c = st.blob(0);
+            if (cidm.codecOf(c) != codec) continue;
+            try out.append(.{ try a.dupe(u8, c), try a.dupe(u8, st.blob(1)) });
+        }
+        return out.items;
     }
 
     pub fn store(s: *SqliteStore) storem.Store {
