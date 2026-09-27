@@ -31,6 +31,8 @@ export const MODULES = {
   "head-handler": CID.parse("bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q"),
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
   "loop": CID.parse("bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa"),
+  // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (wallet-zig/, built by scripts/build-programs.sh).
+  "wallet": CID.parse("bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs
   // beyond brush/coreutils (Modules.extra in shell.ts). find/xargs are two
   // binaries from one build (uutils/findutils); diff and cmp are two names
@@ -106,6 +108,21 @@ export const LOOP = program({
   services: ["infer", "outcomes"],
   description: "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs.",
 });
+
+/**
+ * The wallet's state as records (issue #29, phase 1; docs/WALLET.md): the
+ * `wallet` box's handler, written in Zig (wallet-zig/). Not in a genesis by
+ * default: an instance that wants it subscribes a box to WALLET_CID. Its one
+ * attested call is getPublicKey (BRC-29 payee key); it never signs.
+ */
+export const WALLET = program({
+  name: "wallet",
+  code: { wasm: MODULES.wallet },
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
+  services: ["wallet"],
+  description: "The `wallet` box: wallet state as records. Body {op: checkpoint|headers|internalize|proof|list, …}: validates headers into our chain, internalizes BRC-29 payments from Atomic BEEF (SPV against our headers), records merkle proofs, lists outputs; advances the `wallet` head to the new state record; prints the result record's CID.",
+});
+export const WALLET_CID = encode(WALLET).cid;
 
 /** The programs a genesis names, by name. */
 export const PROGRAMS = { shell: SHELL_PROGRAM, "run-handler": RUN_HANDLER, "objects-handler": OBJECTS_HANDLER, "head-handler": HEAD_HANDLER, "subscribe-handler": SUBSCRIBE_HANDLER, loop: LOOP } as const;
