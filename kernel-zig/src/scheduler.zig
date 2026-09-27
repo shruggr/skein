@@ -187,6 +187,7 @@ pub const Runtime = struct {
         rt.genesis = try logm.genesisOf(rt.life.allocator(), rt.store);
     }
 
+    /// Resume what the last process left mid-flight; the caller then kick()s (consumes the log).
     pub fn start(rt: *Runtime) !void {
         var arena = std.heap.ArenaAllocator.init(rt.gpa);
         defer arena.deinit();
@@ -197,7 +198,6 @@ pub const Runtime = struct {
         rt.say("runtime {s} · log {d} processed{s}", .{ shortStr(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
-        rt.kick();
     }
 
     pub fn stop(rt: *Runtime) void {
@@ -256,10 +256,7 @@ pub const Runtime = struct {
         if (try rt.check(a, entry, env_rec, body)) |r| return r;
         const res = try rt.store.logAppend(a, entry);
         switch (res) {
-            .ok => |c| {
-                rt.kick();
-                return .{ .ok = c };
-            },
+            .ok => |c| return .{ .ok = c }, // the caller kick()s: the entry is processed after the provider hears back
             .rejected => |r| return .{ .rejected = .{ .reason = r.reason, .message = r.message } },
         }
     }

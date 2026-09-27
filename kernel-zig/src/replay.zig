@@ -109,6 +109,7 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
     const rt = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say, .send = Capture.send });
     rt.witness = try scheduler.Witness.from(gpa, src.store());
     try rt.start();
+    rt.kick();
     rt.stop();
 
     const tip = (try dst.store().logTip(a)) orelse "";

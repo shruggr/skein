@@ -62,7 +62,13 @@ for (const source of sources) {
   t0 = Date.now();
   const zg = spawnSync(kernel, ["replay", src, zigDb], { maxBuffer: 1 << 30 });
   const zigMs = Date.now() - t0;
-  const name = basename(source);
+  const name = `${basename(dirname(source))}/${basename(source)}`;
+  if (ts.status !== 0 && zg.status !== 0) {
+    const why = (s: Buffer) => s.toString().split("\n").find((l) => /Error|error:/.test(l))?.trim() ?? "";
+    process.stdout.write(`${name}: both refuse it (ts: ${why(ts.stderr)} · zig: ${why(zg.stderr)})\n`);
+    rmSync(work, { recursive: true, force: true });
+    continue;
+  }
   if (ts.status !== 0 || zg.status !== 0) {
     allSame = false;
     process.stdout.write(`${name}: FAILED to replay (ts exit ${ts.status}, zig exit ${zg.status})\n${ts.stderr}\n${zg.stderr}\n`);
