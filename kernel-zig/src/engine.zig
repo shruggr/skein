@@ -39,7 +39,8 @@ pub const Trap = enum {
 
     /// What V8 says for the same trap (a RuntimeError's message), which the
     /// TypeScript runtime writes as "<argv0>: trapped: <message>".
-    /// Stack overflow is not a RuntimeError under V8 but a RangeError.
+    /// Stack overflow is not a RuntimeError under V8 but a RangeError. Checked
+    /// against Node 26 with hand-built modules (README, "What is not the same").
     pub fn v8Message(t: Trap) []const u8 {
         return switch (t) {
             .unreachable_code => "unreachable",
@@ -48,7 +49,7 @@ pub const Trap = enum {
             .integer_overflow => "divide result unrepresentable",
             .bad_conversion => "float unrepresentable in integer range",
             .table_out_of_bounds => "table index is out of bounds",
-            .indirect_call_null, .bad_signature => "null function or function signature mismatch",
+            .indirect_call_null, .bad_signature => "function signature mismatch", // V8 (Node 26) says this for a null entry too
             .heap_misaligned => "operation does not support unaligned accesses",
             .stack_overflow => "Maximum call stack size exceeded",
             .other => "wasm trap",
@@ -88,6 +89,8 @@ pub const Module = struct {
     m: *c.wasmtime_module_t,
     linker: *c.wasmtime_linker_t,
     imports: []Import,
+    /// The export to run; `_start` unless a test says otherwise.
+    entry: ?[]const u8 = null,
 
     /// Compile. On failure `err_msg` gets the engine's message.
     pub fn compile(eng: *Engine, alloc: std.mem.Allocator, bytes: []const u8, err_msg: *[]const u8) !*Module {
@@ -151,14 +154,17 @@ pub const Module = struct {
         }
         if (trap) |t| return outcomeOf(&session, t);
         var ext: c.wasmtime_extern_t = undefined;
-        if (!c.wasmtime_instance_export_get(ctx, &inst, "_start", 6, &ext) or ext.kind != c.WASMTIME_EXTERN_FUNC) {
+        const entry = if (mod.entry) |e| e else "_start";
+        if (!c.wasmtime_instance_export_get(ctx, &inst, entry.ptr, entry.len, &ext) or ext.kind != c.WASMTIME_EXTERN_FUNC) {
             err_msg.* = "no _start";
             return error.Instantiate;
         }
         if (c.wasmtime_func_call(ctx, &ext.of.func, null, 0, null, 0, &trap)) |err| {
-            defer c.wasmtime_error_delete(err);
-            if (session.aborted) return .aborted;
-            err_msg.* = errorText(alloc, err);
+            if (session.aborted) {
+                c.wasmtime_error_delete(err);
+                return .aborted;
+            }
+            err_msg.* = errorText(alloc, err); // deletes err
             return error.Call;
         }
         if (trap) |t| return outcomeOf(&session, t);

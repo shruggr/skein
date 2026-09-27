@@ -77,7 +77,7 @@ resolver code is `src/host`'s, unchanged.
 
 | check | what | result (2026-09-27) |
 |---|---|---|
-| `zig build test` | dag-cbor encodings and CIDs, canonical re-encoding of non-canonical input, strict decoding, program-record CIDs, "anyone" signatures (log entries, envelopes), JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`) | 9/9 |
+| `zig build test` | dag-cbor encodings and CIDs, canonical re-encoding of non-canonical input, strict decoding, program-record CIDs, "anyone" signatures (log entries, envelopes), JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps through wasmtime reported in V8's words (the words read from Node 26 on the same hand-built modules) | 10/10 |
 | `equiv/shell.ts` | host-go's 64 shell cases through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID | 64/64 identical |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 7 stores the TS runtime writes: run/objects/head/subscribe handlers, the shell (writes, cwd, failures, one and two sleeps with their wakes), the loop with bash and message tools, replies, resolutions, a failed delivery resuming the loop, a refused infer, two agents talking | 7/7 identical; each also reproduces its source store exactly |
 | `equiv/replays.ts` over copies of `~/.skein` | the live `martha` and `kurt` stores, their 6 backups, `~/.skein/runtime.db` and its eras | 10/10 replayable stores identical; the 6 pre-current-format eras are refused by both runtimes |
