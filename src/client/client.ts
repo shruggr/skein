@@ -10,7 +10,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
-import { scan } from "../dev/scan.ts";
+import { scan, type ScanOptions } from "../dev/scan.ts";
 import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
@@ -27,16 +27,33 @@ export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
   return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
 }
 
-/** A directory as git objects held in memory: [root, records]. */
-export async function hashDir(dir: string): Promise<{ root: CID; records: Rec[] }> {
+/** A directory as git objects held in memory: [root, records]. `opts.ignore` as scan's. */
+export async function hashDir(dir: string, opts: ScanOptions = {}): Promise<{ root: CID; records: Rec[] }> {
   const m = new Map<string, Rec>();
   const blocks: TreeBlocks = {
     has: async (cid) => m.has(cid.toString()),
     bytes: async (cid) => { const r = m.get(cid.toString()); if (!r) throw new Error(`missing ${cid}`); return r.bytes; },
     putBlock: async (cid, bytes) => { m.set(cid.toString(), { cid, bytes }); },
   };
-  const root = await scan(blocks, dir);
+  const root = await scan(blocks, dir, opts);
   return { root, records: [...m.values()] };
+}
+
+/**
+ * A directory as the `objects` box takes it: ≤ 1 MiB bundles, blobs before
+ * trees and the root tree last, so a receiver storing in order never holds a
+ * tree whose children have not arrived yet; the last bundle names the root.
+ * `skip` drops records the receiver already has; if it has the root tree it
+ * has everything (trees arrive after their children), and nothing is sent.
+ */
+export async function dirBundles(dir: string, o: ScanOptions & { limit?: number; skip?: (cid: CID) => Promise<boolean> } = {}): Promise<{ root: CID; records: number; bundles: Uint8Array[] }> {
+  const { root, records: all } = await hashDir(dir, o);
+  const rootKey = root.toString();
+  const records: Rec[] = [];
+  if (!(await o.skip?.(root))) for (const r of all) if (r.cid.toString() === rootKey || !(await o.skip?.(r.cid))) records.push(r);
+  const rank = (r: Rec) => (r.cid.toString() === rootKey ? 2 : new TextDecoder().decode(r.bytes.subarray(0, 5)) === "tree " ? 1 : 0);
+  records.sort((a, b) => rank(a) - rank(b));
+  return { root, records: records.length, bundles: [...chunk(records, o.limit, root)] };
 }
 
 export interface Sent { cid: string; box: string; messageId: string; at: string; tree?: string; cmd?: string; text?: string; replyTo?: string }
@@ -74,23 +91,15 @@ export class SkeinClient {
   }
 
   async importDir(dir: string, onBundle?: (i: number, n: number, bytes: number) => void): Promise<{ root: CID; records: number; bundles: Sent[] }> {
-    const { root, records } = await hashDir(dir);
-    // Blobs before trees and the root tree last, so a receiver storing in order
-    // never holds a tree whose children have not arrived yet.
+    const { root, records, bundles } = await dirBundles(dir);
     const rootKey = root.toString();
-    records.sort((a, b) => rank(a) - rank(b));
-    function rank(r: Rec): number {
-      if (r.cid.toString() === rootKey) return 2;
-      return new TextDecoder().decode(r.bytes.subarray(0, 5)) === "tree " ? 1 : 0;
-    }
-    const bundles = [...chunk(records, undefined, root)];
     const sent: Sent[] = [];
     for (const [i, bytes] of bundles.entries()) {
       onBundle?.(i, bundles.length, bytes.length);
       // The bundle is already dag-cbor; send it as the body bytes, not re-wrapped.
       sent.push(await this.sendBytes(BOX.objects, bytes, { tree: rootKey }));
     }
-    return { root, records: records.length, bundles: sent };
+    return { root, records, bundles: sent };
   }
 
   /** Seal already-encoded body bytes to the instance and deliver the envelope into `box`. */
