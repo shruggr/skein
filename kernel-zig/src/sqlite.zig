@@ -97,8 +97,8 @@ pub const Stmt = struct {
                 .null => c.sqlite3_bind_null(st.s, idx),
                 .int => |v| c.sqlite3_bind_int64(st.s, idx, v),
                 .float => |v| c.sqlite3_bind_double(st.s, idx, v),
-                .text => |v| c.sqlite3_bind_text(st.s, idx, v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT),
-                .blob => |v| c.sqlite3_bind_blob(st.s, idx, if (v.len == 0) "" else v.ptr, @intCast(v.len), c.SQLITE_TRANSIENT),
+                .text => |v| c.sqlite3_bind_text(st.s, idx, v.ptr, @intCast(v.len), null),
+                .blob => |v| c.sqlite3_bind_blob(st.s, idx, if (v.len == 0) "" else v.ptr, @intCast(v.len), null),
             };
             if (rc != c.SQLITE_OK) return error.Sqlite;
         }
