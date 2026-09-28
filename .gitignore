@@ -11,3 +11,5 @@ programs/messagebox/zig-out/
 programs/fetch/.zig-cache/
 programs/fetch/zig-out/
 web/kernel/dist/
+programs/overlay/.zig-cache/
+programs/overlay/zig-out/

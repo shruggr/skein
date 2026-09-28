@@ -47,6 +47,7 @@ import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
 import type { MailStore } from "./mail.ts";
 import { VmMail } from "./vmmail.ts";
+import { OverlayRoutes } from "./overlay.ts";
 
 type Named = { handle: string; domain: string };
 
@@ -138,6 +139,8 @@ export class Router {
   readonly o: RouterOptions;
   readonly auth: AuthServer;
   readonly mail: MailStore;
+  /** BRC-22 submit, BRC-24 lookup and the listings, routed to the instances that serve them (#36). */
+  readonly overlay = new OverlayRoutes(this);
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   private queues = new Map<string, Promise<unknown>>();
@@ -163,6 +166,8 @@ export class Router {
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
   private now(): Stamp { return (this.o.now ?? clockNow)(); }
+  /** The router's clock, as entries are stamped (overlay.ts). */
+  nowStamp(): Stamp { return this.now(); }
 
   /** Hydrate every enabled row once (recovery at hydrate time; it reports its sleepers), then let them idle out. */
   async start(): Promise<void> {
@@ -176,6 +181,7 @@ export class Router {
     clearTimeout(this.timer);
     clearInterval(this.idleTimer);
     this.server?.close();
+    this.overlay.close();
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
   }
@@ -578,7 +584,10 @@ export class Router {
       res.setHeader("Access-Control-Allow-Methods", "*");
       res.setHeader("Access-Control-Expose-Headers", "*");
       if (req.method === "OPTIONS") { res.writeHead(200).end(); return; }
-      const path = new URL(req.url ?? "/", "http://router").pathname;
+      const url = new URL(req.url ?? "/", "http://router");
+      const path = url.pathname;
+      // The overlay routes (#36: BRC-22/24 and the listings), unauthenticated as overlay-express is.
+      if (this.overlay.handle(req, res, url)) return;
       if (req.method === "GET") {
         const m = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
         if (m) {
