@@ -51,6 +51,10 @@ fi
 echo "== bootstrap (#4): a system tree from a directory and from a packet, chatted with; a checkpoint restored; replayed"
 "${node[@]}" "$kz/equiv/boot.ts" || status=1
 
+echo "== overlay services (#36): programs/overlay built and tested; submit/lookup through the router with the stock SDK clients; replayed"
+(cd "$kz/../programs/overlay" && mise exec -- zig build && mise exec -- zig build test) || { echo "FAIL programs/overlay build or tests"; status=1; }
+"${node[@]}" "$kz/equiv/overlay.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 

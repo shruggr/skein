@@ -156,8 +156,16 @@ const Server = struct {
             }
         } else if (eq(u8, op, "programs")) {
             // The programs this kernel pins (a genesis's `programs`): their records put, name → CID.
+            // With a list of names, only those (a system tree takes just the shell: no stray records, #36).
             var m = cbor.MapBuilder.init(a);
-            for (programsm.program_names) |name| try m.put(name, cbor.cidv(try s.store.put(a, try programsm.program(a, name))));
+            for (programsm.program_names) |name| {
+                if (v == .array) {
+                    var wanted = false;
+                    for (v.array) |x| wanted = wanted or std.mem.eql(u8, Value.str(x) orelse "", name);
+                    if (!wanted) continue;
+                }
+                try m.put(name, cbor.cidv(try s.store.put(a, try programsm.program(a, name))));
+            }
             s.reply(a, id, m.value(), null, null);
         } else if (eq(u8, op, "head")) {
             // A named head's record, read (the router reads the messagebox's `mailbox` head).
