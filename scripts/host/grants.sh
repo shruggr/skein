@@ -15,9 +15,10 @@ here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 skein="${SKEIN_HOME:-$HOME/.skein}"
 export SKEIN_HOME="$skein"
-router=$("$root/bin/skein-host" identity)   # the BRC-104 identity at the bare URL: the front instance's
-echo "$router" > "$skein/router.identity"
-mapfile -t instances < <("$root/bin/skein-host" list | awk -F'\t' '$2 == "enabled" && $3 != "-" { print $3 }')
+# every enabled instance, agents and mailbox instances alike (#40: list prints handle, kind, state, identity, …)
+mapfile -t instances < <("$root/bin/skein-host" list | awk -F'\t' '$3 == "enabled" && $4 ~ /^0[23]/ { print $4 }')
+# mailbox instances' own front-door keys (#40): SKEIN_MAILBOX_KEYS=hex,hex until skein-host prints them
+IFS=, read -r -a mailboxes <<< "${SKEIN_MAILBOX_KEYS:-}"
 q() { "$@" 2>&1 | grep -e granted -e revoked -e Error || true; }
 
 # Owner (David) wallet, origin skein-client — HOME=~/.skein/owner-home.
@@ -27,9 +28,9 @@ o grant skein-client --protocol "identity key retrieval" --level 1
 o grant skein-client --protocol "skein register" --level 2 --counterparty anyone             # the signed mailbox registration (#40)
 o grant skein-client --protocol "messagebox" --level 1                                       # message-box-client messageId HMAC
 o grant skein-client --protocol "server hmac" --level 2 --counterparty self                  # BRC-104 nonces
-for i in "${instances[@]}"; do
-  o grant skein-client --protocol "auth message signature" --level 2 --counterparty "$i"     # BRC-104 with each instance
-  o grant skein-client --protocol "message encryption" --level 2 --counterparty "$i"         # BRC-78 content to/from each instance
+for i in "${instances[@]}" "${mailboxes[@]}"; do
+  o grant skein-client --protocol "auth message signature" --level 2 --counterparty "$i"     # BRC-104 with each instance / mailbox instance
+  o grant skein-client --protocol "message encryption" --level 2 --counterparty "$i"
 done
 
 # Inference peer wallet, origin skein-infer — HOME=~/.skein/infer-home.
@@ -38,8 +39,8 @@ f grant skein-infer --protocol "identity key retrieval" --level 1
 f grant skein-infer --protocol "server hmac" --level 2 --counterparty self
 f grant skein-infer --protocol "messagebox" --level 1
 f grant skein-infer --protocol "skein register" --level 2 --counterparty anyone
-for i in "${instances[@]}"; do
+for i in "${instances[@]}" "${mailboxes[@]}"; do
   f grant skein-infer --protocol "auth message signature" --level 2 --counterparty "$i"
   f grant skein-infer --protocol "message encryption" --level 2 --counterparty "$i"
 done
-echo "grants: owner and infer toward ${#instances[@]} instance(s) (front ${router:0:8}…)"
+echo "grants: owner and infer toward ${#instances[@]} instance(s)"

@@ -53,3 +53,5 @@ else
 fi
 reg http://127.0.0.1:3323 skein-infer infer
 [ -f "$skein/infer.json" ] || printf '%s\n' '{ "ripper": { "baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm" } }' > "$skein/infer.json"
+# The registrations above may have created mailbox instances: grant toward them too (#40).
+"$here/grants.sh" # again, after registration
