@@ -104,7 +104,12 @@ pub const Clock = struct { timeout: u64, absolute: bool };
 pub const SpawnResult = union(enum) { code: i32, not_found, errno: u16 };
 
 /// What a run provides its processes: the scheduler's clock/random/sleep, the shell's spawn.
-pub const RunState = struct { fatal: ?Fatal = null, parked: bool = false };
+pub const RunState = struct {
+    fatal: ?Fatal = null,
+    parked: bool = false,
+    /// The step's fuel budget, shared by every instance of the run (issue #5); null: unmetered.
+    meter: ?*engine.Meter = null,
+};
 
 pub const Services = struct {
     ctx: *anyopaque,
@@ -128,7 +133,8 @@ pub const Stop = error{
 };
 
 pub const Fatal = struct {
-    kind: enum { plain, diverged, no_witness } = .plain,
+    /// fuel: the step's budget ran out (issue #5), recorded as `fuel exhausted`.
+    kind: enum { plain, diverged, no_witness, fuel } = .plain,
     message: []const u8,
 };
 

@@ -17,6 +17,7 @@ test {
     _ = @import("mst.zig");
     _ = @import("index_test.zig");
     _ = @import("objects.zig");
+    _ = @import("fuel_test.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {
@@ -138,7 +139,7 @@ test "traps come back as V8 names them (modules as in README; messages read from
             fn f(_: *anyopaque, _: usize, _: []const i64, _: []u8) engine.Ret {
                 return .{ .value = 0 };
             }
-        }.f, &em, a);
+        }.f, &em, a, null);
         try std.testing.expect(out == .trapped);
         try std.testing.expectEqualStrings(cs.want, out.trapped.v8Message());
     }

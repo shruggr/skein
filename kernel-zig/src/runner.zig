@@ -9,6 +9,9 @@ const vfsm = @import("vfs.zig");
 const program = @import("program.zig");
 const Store = @import("store.zig").Store;
 
+/// The reason a step that ran out of fuel records (issue #5).
+pub const FUEL_EXHAUSTED = "fuel exhausted";
+
 pub const Compiled = struct {
     mod: *engine.Module,
     shell_bindings: []wasi.Fn,
@@ -72,7 +75,7 @@ pub const Runner = struct {
         p.prog = prog;
         p.bindings = if (prog != null) c.prog_bindings else c.shell_bindings;
         var em: []const u8 = "";
-        const outcome = c.mod.run(&r.eng, p, wasi.Process.call, &em, alloc) catch {
+        const outcome = c.mod.run(&r.eng, p, wasi.Process.call, &em, alloc, svc.state.meter) catch {
             return p.fail(em);
         };
         switch (outcome) {
@@ -84,6 +87,11 @@ pub const Runner = struct {
                 return p.fail("aborted");
             },
             .trapped => |t| {
+                if (t == .out_of_fuel) {
+                    // Not the program's trap: the step ends, whatever instance was running (issue #5).
+                    svc.state.fatal = .{ .kind = .fuel, .message = FUEL_EXHAUSTED };
+                    return error.Fatal;
+                }
                 if (t == .stack_overflow) return p.fail(t.v8Message()); // a RangeError under V8, not a RuntimeError
                 const line = try std.fmt.allocPrint(alloc, "{s}: trapped: {s}\n", .{ args[0], t.v8Message() });
                 wasi.writeTo(stdio[2], line);
