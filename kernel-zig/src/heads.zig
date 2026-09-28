@@ -37,13 +37,9 @@ pub fn headOrigin(a: std.mem.Allocator, name: []const u8) ![]u8 {
     return cbor.cidOfValue(a, try originValue(a, name));
 }
 
-/// The tree a head names now, or null if it never moved.
+/// The tree a head names now, or null if it never moved (the index's `heads` map).
 pub fn headTree(a: std.mem.Allocator, s: Store, name: []const u8) !?[]const u8 {
-    const origin = try headOrigin(a, name);
-    const tip = (try s.chainTip(a, origin)) orelse return null;
-    if (std.mem.eql(u8, tip, origin)) return null;
-    const u = (try s.get(a, tip)) orelse return error.NotFound;
-    return Value.cidOf(u.get("tree"));
+    return s.headTree(a, name);
 }
 
 pub const By = struct { thread: []const u8, input: []const u8, at: i64 };

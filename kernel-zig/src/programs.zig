@@ -17,6 +17,8 @@ pub const modules = [_]Module{
     .{ .name = "head-handler", .cid = "bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q" },
     .{ .name = "subscribe-handler", .cid = "bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e" },
     .{ .name = "loop", .cid = "bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa" },
+    // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
+    .{ .name = "wallet", .cid = "bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },

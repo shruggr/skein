@@ -4,20 +4,50 @@
 // module the source holds), a Runtime with no wallet and the source's
 // witness; prints {lines, sent, state}.
 //
+// A source the Zig kernel wrote (issue #30: blocks and a state record, no
+// tables) is first turned into a store the TS runtime reads: its blocks, its
+// log appended entry by entry (read through `skein-kernel dump`), and the
+// TS index rebuilt from the blocks (sqlite.ts rebuild) for the witness.
+//
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/replay.ts <source.db> <out.db>
 
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { install } from "../../src/dev/cli.ts";
-import { copyLog } from "../../src/runtime/log.ts";
+import { copyLog, type LogEntry } from "../../src/runtime/log.ts";
 import { Runtime, witnessFrom } from "../../src/runtime/scheduler.ts";
 import { openStore } from "../../src/runtime/sqlite.ts";
 
+const here = dirname(fileURLToPath(import.meta.url));
+const kernel = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
 const [source, out] = process.argv.slice(2);
-const src = openStore(source, { readOnly: true });
+
+const raw = new DatabaseSync(source, { readOnly: true });
+const tables = new Set(raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name));
+
+let srcPath = source;
+if (!tables.has("entries") && tables.has("pointers")) {
+  srcPath = join(dirname(out), "ts-view.db");
+  const view = openStore(srcPath);
+  for (const r of raw.prepare("SELECT cid, bytes FROM blocks ORDER BY cid").iterate()) await view.putBlock(CID.decode(r.cid as Uint8Array), r.bytes as Uint8Array);
+  const d = spawnSync(kernel, ["dump", source], { maxBuffer: 1 << 30 });
+  if (d.status !== 0) throw new Error(`skein-kernel dump: ${d.stderr}`);
+  for (const [, c] of JSON.parse(d.stdout.toString()).entries as Array<[number, string]>) {
+    const cid = CID.parse(c);
+    const got = await view.log.append(dagCbor.decode<LogEntry>(await view.bytes(cid)));
+    if (!got.equals(cid)) throw new Error(`log entry ${c} appends as ${got}`);
+  }
+  await view.edges.rebuild();
+  await view.close();
+}
+
+const src = openStore(srcPath, { readOnly: true });
 const fresh = openStore(out);
 await install(fresh);
-const raw = new DatabaseSync(source, { readOnly: true });
 for (const r of raw.prepare("SELECT cid, bytes FROM blocks ORDER BY cid").iterate()) {
   const cid = CID.decode(r.cid as Uint8Array);
   if (cid.code === 0x55) await fresh.putBlock(cid, r.bytes as Uint8Array);
