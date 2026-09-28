@@ -21,6 +21,9 @@ echo "== build and unit tests"
 echo "== shell: host-go's cases"
 "${node[@]}" "$kz/equiv/shell.ts" || status=1
 
+echo "== git in the VM: the verbs, the synthetic object directory (issue #2)"
+"${node[@]}" "$kz/equiv/git.ts" | grep -E "^(ok|FAIL)|failed$|all ok" || status=1 # pipefail: git.ts's status counts
+
 echo "== replay: a generated corpus"
 "${node[@]}" "$kz/equiv/corpus.ts" "$work/gen" > "$work/gen.list"
 mapfile -t gen < "$work/gen.list"

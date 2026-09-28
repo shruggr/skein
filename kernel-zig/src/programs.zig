@@ -29,10 +29,11 @@ pub const modules = [_]Module{
     .{ .name = "tree", .cid = "bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4" },
     .{ .name = "awk", .cid = "bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju" },
     .{ .name = "sed", .cid = "bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy" },
+    .{ .name = "git", .cid = "bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe" },
 };
 
 /// The shell's extra single-purpose tools (programs.ts TOOL_NAMES).
-pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed" };
+pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git" };
 
 pub fn moduleText(name: []const u8) []const u8 {
     for (modules) |m| if (std.mem.eql(u8, m.name, name)) return m.cid;

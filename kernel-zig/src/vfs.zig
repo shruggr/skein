@@ -5,20 +5,30 @@
 const std = @import("std");
 const tree = @import("tree.zig");
 const Store = @import("store.zig").Store;
+const objects = @import("objects.zig");
 
-pub const Kind = enum { dir, file, link, module };
+/// `object`: a loose object in a repository's synthetic object directory
+/// (`.git/objects/xx/yyyy…`, objects.zig) — a gitlink in the tree, a
+/// read-only file of zlib bytes to programs, the git-raw record in the store.
+pub const Kind = enum { dir, file, link, module, object };
 
 pub const Node = struct {
     kind: Kind,
     ino: u64,
     parent: ?*Node = null,
+    /// The entry name under `parent` ("" for the root).
+    name: []const u8 = "",
     cid: ?[]const u8 = null,
     entries: ?*std.StringHashMap(*Node) = null,
     readonly: bool = false,
     exec: bool = false,
-    /// file contents or link target; null until loaded
+    /// file contents or link target; null until loaded. An object's loose
+    /// (zlib) bytes, made on first read.
     data: ?[]u8 = null,
     cap: usize = 0,
+    /// An object written in this run: the git object, kept until commit
+    /// puts it in the store.
+    raw: ?[]u8 = null,
 };
 
 /// wasi errno values used by the filesystem.
@@ -124,18 +134,20 @@ pub const Vfs = struct {
         const obj = try v.getObject(d.cid.?);
         const es = tree.parseTree(v.alloc, obj) catch return v.fatal("not a git tree");
         const m = try v.newMap();
+        const fanout = isFanout(d);
         for (es) |e| {
             const n = try v.newNode(.{
                 .kind = switch (e.mode) {
                     .dir => .dir,
                     .link => .link,
-                    .module => .module,
+                    .module => if (fanout and objects.isLooseName(e.name)) .object else .module,
                     else => .file,
                 },
                 .exec = e.mode == .exec,
                 .cid = e.cid,
                 .ino = v.ino(),
                 .parent = d,
+                .name = e.name,
             });
             try m.put(e.name, n);
         }
@@ -143,9 +155,15 @@ pub const Vfs = struct {
         return m;
     }
 
-    /// A file's data or a link's target.
+    /// A file's data or a link's target; an object's loose bytes.
     pub fn content(v: *Vfs, n: *Node) FsError![]u8 {
         if (n.data) |d| return d;
+        if (n.kind == .object) {
+            const raw = n.raw orelse try v.getObject(n.cid.?);
+            n.data = try objects.deflate(v.alloc, raw);
+            n.cap = n.data.?.len;
+            return n.data.?;
+        }
         if (tree.gitDigest(n.cid.?) == null) return v.fatal("not a git object cid");
         const obj = try v.getObject(n.cid.?);
         const body = tree.objectBody(obj, "blob") orelse return v.fatal("not a git blob");
@@ -158,7 +176,7 @@ pub const Vfs = struct {
         _ = v;
         var x: ?*Node = n;
         while (x) |y| : (x = y.parent) {
-            if (y.kind != .module) y.cid = null;
+            if (y.kind != .module and y.kind != .object) y.cid = null;
         }
     }
 
@@ -272,10 +290,77 @@ pub const Vfs = struct {
     pub fn link(v: *Vfs, dir: *Node, name: []const u8, n: *Node) FsError!void {
         try v.checkName(name);
         if (dir.readonly) return v.fail(E.ROFS);
+        try v.admit(dir, name, n);
         const m = try v.entries(dir);
-        try m.put(try v.alloc.dupe(u8, name), n);
+        const key = try v.alloc.dupe(u8, name);
+        try m.put(key, n);
         n.parent = dir;
+        n.name = key;
         v.dirty(dir);
+    }
+
+    // ------------------------------------------------------------ the synthetic object directory
+
+    /// A directory `xx` directly inside some `.git/objects`.
+    pub fn isFanout(d: *Node) bool {
+        const p = d.parent orelse return false;
+        const g = p.parent orelse return false;
+        return d.kind == .dir and objects.isFanoutName(d.name, p.name, g.name);
+    }
+
+    /// `.git/objects/pack`.
+    pub fn isPackDir(d: *Node) bool {
+        const p = d.parent orelse return false;
+        const g = p.parent orelse return false;
+        return d.kind == .dir and std.mem.eql(u8, d.name, "pack") and std.mem.eql(u8, p.name, "objects") and std.mem.eql(u8, g.name, ".git");
+    }
+
+    /// The sha1 a node linked as `dir/name` must have to be a loose object there.
+    fn looseDigest(dir: *Node, name: []const u8) ?[20]u8 {
+        if (!isFanout(dir) or !objects.isLooseName(name)) return null;
+        return objects.digestOf(dir.name, name);
+    }
+
+    /// Make `n` what it is about to become as `dir/name`: a file linked under
+    /// a loose-object name (git's rename or link of its tmp_obj_ file) becomes
+    /// the object — inflated, hash-checked (EIO if the bytes are not that
+    /// object), kept as a git-raw record; an object linked anywhere else
+    /// becomes a plain file of its loose bytes. An empty file stays a file
+    /// (a create; commit checks it again).
+    pub fn admit(v: *Vfs, dir: *Node, name: []const u8, n: *Node) FsError!void {
+        // No packfiles: a pack would hold every object a second time, as a
+        // blob. Nothing new goes into `.git/objects/pack` (EPERM); git's
+        // repack and gc fail there, loose objects are all it writes.
+        if (isPackDir(dir)) return v.fail(E.PERM);
+        const want = looseDigest(dir, name);
+        switch (n.kind) {
+            .file => {
+                const d = want orelse return;
+                const loose = try v.content(n);
+                if (loose.len == 0) return;
+                const raw = objects.inflate(v.alloc, loose) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return v.fail(E.IO),
+                };
+                var got: [20]u8 = undefined;
+                std.crypto.hash.Sha1.hash(raw, &got, .{});
+                if (!std.mem.eql(u8, &got, &d)) return v.fail(E.IO);
+                n.kind = .object;
+                n.cid = try objects.cidOf(v.alloc, &d);
+                n.raw = raw;
+                n.exec = false; // data stays: the loose bytes as written, a valid stream of this object
+            },
+            .object => {
+                if (want) |d| if (std.mem.eql(u8, &d, tree.gitDigest(n.cid.?).?)) return;
+                const loose = try v.content(n);
+                n.kind = .file;
+                n.data = try v.alloc.dupe(u8, loose);
+                n.cap = loose.len;
+                n.cid = null;
+                n.raw = null;
+            },
+            else => {},
+        }
     }
 
     pub fn unlink(v: *Vfs, dir: *Node, name: []const u8) FsError!void {
@@ -299,12 +384,20 @@ pub const Vfs = struct {
     fn hashDir(v: *Vfs, d: *Node) anyerror![]const u8 {
         if (d.cid) |c| return c;
         var out = std.array_list.Managed(tree.Entry).init(v.alloc);
+        const fanout = isFanout(d);
         var it = d.entries.?.iterator();
         while (it.next()) |kv| {
             const n = kv.value_ptr.*;
+            // A loose object written straight to its name (not through a
+            // rename): an object if its bytes are that object, else a file.
+            if (fanout and n.kind == .file) v.admit(d, kv.key_ptr.*, n) catch |e| switch (e) {
+                error.Errno => {},
+                else => return e,
+            };
             const e: tree.Entry = switch (n.kind) {
                 .dir => .{ .mode = .dir, .name = kv.key_ptr.*, .cid = try v.hashDir(n) },
                 .module => .{ .mode = .module, .name = kv.key_ptr.*, .cid = n.cid.? },
+                .object => .{ .mode = .module, .name = kv.key_ptr.*, .cid = try v.hashObject(n) },
                 .link => .{ .mode = .link, .name = kv.key_ptr.*, .cid = try v.hashLeaf(n) },
                 .file => .{ .mode = if (n.exec) .exec else .file, .name = kv.key_ptr.*, .cid = try v.hashLeaf(n) },
             };
@@ -314,6 +407,15 @@ pub const Vfs = struct {
         try v.put(h.cid, h.object);
         d.cid = h.cid;
         return h.cid;
+    }
+
+    /// An object's CID; one written in this run goes to the store now, once.
+    fn hashObject(v: *Vfs, n: *Node) ![]const u8 {
+        if (n.raw) |raw| {
+            try v.put(n.cid.?, raw);
+            n.raw = null;
+        }
+        return n.cid.?;
     }
 
     fn hashLeaf(v: *Vfs, n: *Node) ![]const u8 {

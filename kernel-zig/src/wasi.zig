@@ -411,7 +411,7 @@ pub const Process = struct {
             },
             .fd_filestat_set_size => blk: {
                 const d = try p.desc(a[0]);
-                if (d.t != .file or !d.write) break :blk E.BADF;
+                if (d.t != .file or !d.write or d.node.?.kind == .object) break :blk E.BADF;
                 _ = try p.vfs.setSize(d.node.?, @intCast(@as(u64, @bitCast(a[1]))));
                 p.vfs.dirty(d.node.?);
                 break :blk 0;
@@ -507,6 +507,7 @@ pub const Process = struct {
             .file => {
                 if (!d.write) return E.BADF;
                 const node = d.node.?;
+                if (node.kind == .object) return E.BADF; // renamed into a loose object while open
                 const len = node.data.?.len;
                 const at = if (d.append) len else d.pos;
                 const next = try p.vfs.setSize(node, @max(len, at + total));
@@ -617,7 +618,7 @@ pub const Process = struct {
         while (it.next()) |kv| {
             const n = kv.value_ptr.*;
             try names.append(.{ .name = kv.key_ptr.*, .ino = n.ino, .ft = switch (n.kind) {
-                .file => FT_FILE,
+                .file, .object => FT_FILE,
                 .link => FT_LINK,
                 else => FT_DIR,
             } });
@@ -699,6 +700,7 @@ pub const Process = struct {
             return 0;
         }
         if ((oflags & O_DIRECTORY) != 0) return E.NOTDIR;
+        if (n.kind == .object and want_write) return E.ACCES; // a loose object is 0444, as git makes it
         _ = try v.content(n);
         if ((oflags & O_TRUNC) != 0 and n.data.?.len > 0) {
             n.data = n.data.?[0..0];
@@ -746,7 +748,7 @@ pub const Process = struct {
         const n = try p.vfs.resolve(try p.dirDesc(fd), path, (flags & 1) != 0);
         switch (n.kind) {
             .dir, .module => try p.writeStat(buf, n.ino, FT_DIR, 0),
-            .file => try p.writeStat(buf, n.ino, FT_FILE, (try p.vfs.content(n)).len),
+            .file, .object => try p.writeStat(buf, n.ino, FT_FILE, (try p.vfs.content(n)).len),
             .link => try p.writeStat(buf, n.ino, FT_LINK, (try p.vfs.content(n)).len),
         }
         return 0;
@@ -803,6 +805,7 @@ pub const Process = struct {
             if (dst != null and dst.?.kind == .dir and (try v.entries(dst.?)).count() > 0) return E.NOTEMPTY;
         } else if (dst != null and dst.?.kind == .dir) return E.ISDIR;
         try v.checkName(b.name);
+        try v.admit(b.dir, b.name, src); // a loose object's bytes are checked before anything moves
         try v.unlink(a.dir, a.name);
         try v.link(b.dir, b.name, src);
         return 0;
@@ -832,7 +835,7 @@ pub const Process = struct {
     fn hardlink(p: *Process, fd: i64, from: []const u8, fd2: i64, to: []const u8) !i64 {
         const v = p.vfs;
         const src = try v.resolve(try p.dirDesc(fd), from, false);
-        if (src.kind != .file) return E.PERM;
+        if (src.kind != .file and src.kind != .object) return E.PERM;
         const par = try v.resolveParent(try p.dirDesc(fd2), to);
         if ((try v.entries(par.dir)).contains(par.name)) return E.EXIST;
         if (par.dir.readonly) return E.ROFS;

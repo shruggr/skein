@@ -47,10 +47,13 @@ export const MODULES = {
   tree: CID.parse("bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4"),
   awk: CID.parse("bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju"),
   sed: CID.parse("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
+  // Real git 2.55.0 for wasm32-wasip1 (issue #2; wasm/README.md "git"): its
+  // .git/objects is the synthetic object directory of the Zig kernel.
+  git: CID.parse("bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe"),
 } as const;
 
 /** The command names of the toolset (issue #13), each mapped to its module in MODULES by the same key. */
-const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed"] as const;
+const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git"] as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
 export const SHELL_PROGRAM = {
