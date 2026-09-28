@@ -15,7 +15,7 @@ import type { WalletInterface } from "@bsv/sdk";
 import { brc78Decode, brc78Encode, ENVELOPE_KEY_ID, ENVELOPE_PROTOCOL, isEnvelope, MESSAGE_ENCRYPTION, signedPart, verify, type Envelope } from "./envelope.ts";
 import { verifyAnyone } from "./runtime/identity.ts";
 import { encode } from "./runtime/cid.ts";
-import type { CID } from "multiformats/cid";
+import { CID } from "multiformats/cid";
 
 export interface CborEnvelope {
   metanetHandles: "1.0";
@@ -108,6 +108,38 @@ export function inspect(env: AnyEnvelope): { form: "json" | "cbor"; sender: stri
   const e = env as Envelope;
   const signed = signedPart(e);
   return { form: "json", sender: e.sender.identityKey, recipient: brc78Decode(Buffer.from(e.content, "base64")).recipient, verified: verify(e), signed, id: encode(signed).cid };
+}
+
+// ---------------------------------------------------------------- session replies (#33)
+
+/**
+ * A reply on a BRC-104 session with the recipient's native messagebox: the
+ * compact §7.3 form, {type: "reply", replyTo, body} — sender, recipient,
+ * host and the envelope signature left out, because the session supplies
+ * them. It travels as BRC-231 bytes (so the signed request carries the body
+ * itself). The first message on a session, and anything for an external box,
+ * is a full envelope.
+ */
+export interface CompactReply { type: "reply"; replyTo: CID; body: Uint8Array }
+
+export function isCompactReply(x: unknown): x is CompactReply {
+  const r = x as CompactReply | null;
+  return !!r && typeof r === "object" && !(r instanceof Uint8Array) && r.type === "reply" && CID.asCID(r.replyTo) !== null && isBytes(r.body);
+}
+
+/**
+ * The record a session reply is kept as — the same entry shape as a full
+ * envelope's ({envelope, box, body}), its envelope record carrying the proof:
+ * the BRC-104 signature over `payload` (the signed request) with the session
+ * nonces; `messageId` is SHA-256 of that payload.
+ */
+export function sessionRecord(r: CompactReply, sender: string, created: string, s: { payload: Uint8Array; signature: Uint8Array; nonce: string; yourNonce: string }) {
+  return {
+    type: "reply" as const, replyTo: r.replyTo, sender: { identityKey: Uint8Array.from(Buffer.from(sender, "hex")) }, created,
+    contentHash: Uint8Array.from(createHash("sha256").update(r.body).digest()),
+    messageId: Uint8Array.from(createHash("sha256").update(s.payload).digest()),
+    session: { payload: s.payload, signature: s.signature, nonce: s.nonce, yourNonce: s.yourNonce },
+  };
 }
 
 /** How a JSON client carries §7.3 bytes in a BRC-33 JSON body: {"dag-cbor": "<base64>"}. */

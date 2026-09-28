@@ -11,8 +11,12 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Peer, SessionManager, Utils, normalizeBRC100ByteFields, type AuthMessage, type Transport, type WalletInterface } from "@bsv/sdk";
 
+/** The BRC-104 general message a request arrived as: its signed payload, the signature and the session nonces. */
+export interface Session { payload: Uint8Array; signature: Uint8Array; nonce: string; yourNonce: string }
+
 export interface AuthedRequest {
   identityKey: string;
+  session: Session;
   method: string;
   path: string;
   query: URLSearchParams;
@@ -150,7 +154,8 @@ export class AuthServer implements Transport {
     }
     let out: AppResponse;
     try {
-      out = await app({ identityKey, method: req.method!, path: url.pathname, query: url.searchParams, headers: req.headers, body: raw });
+      const session: Session = { payload: Uint8Array.from(message.payload!), signature: Uint8Array.from(message.signature!), nonce: message.nonce!, yourNonce: message.yourNonce! };
+      out = await app({ identityKey, session, method: req.method!, path: url.pathname, query: url.searchParams, headers: req.headers, body: raw });
     } catch (e) {
       out = { status: 500, body: { status: "error", code: "ERR_INTERNAL", description: (e as Error).message } };
     }

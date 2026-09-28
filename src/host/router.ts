@@ -31,14 +31,14 @@ import type { CID } from "multiformats/cid";
 import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { isEnvelope, open, type Envelope } from "../envelope.ts";
-import { asEnvelope, inspect, isCborEnvelope, openCbor } from "../envelope-cbor.ts";
+import { asEnvelope, inspect, isCborEnvelope, isCompactReply, openCbor, sessionRecord, type CompactReply } from "../envelope-cbor.ts";
 import { decode, encode } from "../runtime/cid.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Outbound } from "../runtime/scheduler.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { AuthServer, send, type AppResponse, type AuthedRequest } from "./auth.ts";
+import { AuthServer, send, type AppResponse, type AuthedRequest, type Session } from "./auth.ts";
 import { now as clockNow } from "./entry.ts";
 import { admit2, keyBytes, keyHex, writeGenesis } from "./genesis.ts";
 import { hostResolver } from "./host.ts";
@@ -86,6 +86,12 @@ export interface Delivered { status: number; body: Record<string, unknown> }
 const ok = (recipient: string, messageId: string): Delivered => ({ status: 200, body: { status: "success", message: "Your message has been sent to 1 recipient(s).", results: [{ recipient, messageId }] } });
 const err = (status: number, code: string, description: string): Delivered => ({ status, body: { status: "error", code, description } });
 const KEY = /^0[23][0-9a-f]{64}$/;
+
+/** A BRC-231 body that is a compact session reply ({type: "reply", replyTo, body}). */
+function compactOf(body: unknown): CompactReply | undefined {
+  if (!(body instanceof Uint8Array)) return undefined;
+  try { const v = dagCbor.decode(body); return isCompactReply(v) ? v : undefined; } catch { return undefined; }
+}
 
 /** A kept body for a BRC-231 listing: bytes as they came, JSON as its UTF-8 text. */
 const bodyBytes = (b: unknown): Uint8Array => b instanceof Uint8Array ? b : new TextEncoder().encode(typeof b === "string" ? b : JSON.stringify(b));
@@ -290,9 +296,11 @@ export class Router {
    * recipient instance (screened and decrypted through its oracle), or kept
    * in the mailbox of a hosted identity.
    */
-  async deliver(m: { sender: string; recipient: string; box: string; body: unknown; messageId: string }): Promise<Delivered> {
+  async deliver(m: { sender: string; recipient: string; box: string; body: unknown; messageId: string; session?: Session }): Promise<Delivered> {
     const d = this.destination(m.recipient);
     if (!d) return err(403, "ERR_ACCOUNT_REQUIRED", "Recipient has no account on this host");
+    const compact = compactOf(m.body);
+    if (compact) return await this.deliverCompact(m, d, compact);
     if ("mailbox" in d) {
       await this.mail.put(m.recipient, m.box, { messageId: m.messageId, sender: m.sender, body: m.body, createdAt: new Date().toISOString() });
       return ok(m.recipient, m.messageId);
@@ -314,6 +322,47 @@ export class Router {
       } catch (e) {
         if (e instanceof Rejected && e.reason === "duplicate-envelope") return ok(m.recipient, m.messageId);
         throw e;
+      }
+      return ok(m.recipient, m.messageId);
+    });
+  }
+
+  /**
+   * A session reply (docs/MESSAGES.md, "Session replies"): the compact §7.3
+   * form on the sender's BRC-104 session with this host — admitted to the same
+   * entry shape as a full envelope, its record carrying the session's proof
+   * (the signed request, the signature, the nonces). It must travel as BRC-231
+   * bytes (the signed request carries the body) and answer something the
+   * recipient holds; the first message on a session is a full envelope.
+   */
+  private async deliverCompact(m: { sender: string; recipient: string; box: string; body: unknown; messageId: string; session?: Session }, d: { instance: InstanceRow } | { mailbox: string }, c: CompactReply): Promise<Delivered> {
+    const s = m.session;
+    if (!s) return err(400, "ERR_REJECTED", "a compact reply is for a BRC-104 session with the recipient's messagebox; send the full envelope");
+    const raw = m.body as Uint8Array;
+    if (Buffer.from(s.payload).indexOf(Buffer.from(raw)) < 0) return err(400, "ERR_REJECTED", "a compact reply travels as BRC-231 bytes (the signed request must carry it)");
+    try {
+      if (!Buffer.from(encode(decode(c.body)).bytes).equals(Buffer.from(c.body))) return err(400, "ERR_REJECTED", "the body is not canonical dag-cbor");
+    } catch { return err(400, "ERR_REJECTED", "the body is not dag-cbor"); }
+    const created = new Date(stampMs(this.now())).toISOString();
+    const record = sessionRecord(c, m.sender, created, s);
+    if ("mailbox" in d) {
+      // A hosted identity's mail keeps the compact reply with its proof: the record, and the body beside it.
+      await this.mail.put(m.recipient, m.box, { messageId: m.messageId, sender: m.sender, body: dagCbor.encode({ ...record, body: c.body }), createdAt: created });
+      return ok(m.recipient, m.messageId);
+    }
+    const handle = d.instance.handle;
+    return await this.serial(handle, async () => {
+      const l = await this.hydrate(handle);
+      if (!(await l.kernel.store.has(c.replyTo))) return err(400, "ERR_REJECTED", "a compact reply answers a message the recipient sent; this is not one: send the full envelope");
+      const envelope = encode(record).cid;
+      if (await l.kernel.store.log.byEnvelope(envelope)) return ok(m.recipient, m.messageId);
+      try {
+        const entry = await admit2(l.kernel, { envelope, box: m.box, body: encode(decode(c.body)).cid }, { envelope: record, body: c.body }, this.now());
+        this.say(handle, `inbox ${m.box}: admitted session reply ${short(envelope)} as ${short(entry)}`);
+        this.settle(l);
+      } catch (e) {
+        if (e instanceof Rejected && e.reason === "duplicate-envelope") return ok(m.recipient, m.messageId);
+        return err(400, "ERR_REJECTED", (e as Error).message);
       }
       return ok(m.recipient, m.messageId);
     });
@@ -397,7 +446,7 @@ export class Router {
         if (messageId === undefined && m.body instanceof Uint8Array) messageId = createHash("sha256").update(m.body).digest("hex"); // BRC-231 names none
         if (typeof recipient !== "string" || !KEY.test(recipient.trim())) return error(400, "ERR_INVALID_RECIPIENT_KEY", `Invalid recipient key: ${String(recipient)}`);
         if (typeof messageId !== "string" || !messageId.trim()) return error(400, "ERR_MESSAGEID_REQUIRED", "Missing messageId.");
-        const d = await this.deliver({ sender: r.identityKey, recipient: recipient.trim(), box: m.messageBox.trim(), body: m.body, messageId });
+        const d = await this.deliver({ sender: r.identityKey, recipient: recipient.trim(), box: m.messageBox.trim(), body: m.body, messageId, session: r.session });
         return reply(d.status, cbor && d.status === 200 ? { status: "success", messageId } : d.body);
       }
       case "/listMessages": {

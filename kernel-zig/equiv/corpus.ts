@@ -19,6 +19,7 @@ import { AuthFetch, PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { seal, signedPart, type Envelope } from "../../src/envelope.ts";
 import { HostDb } from "../../src/host/instances.ts";
+import { cborBoxClient } from "../../src/host/brc231.ts";
 import { messageBoxClient, type MessageBox } from "../../src/host/messagebox.ts";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
@@ -232,6 +233,14 @@ const made: string[] = [];
   // A second conversation: the inference peer fails.
   h.later(1);
   await h.send(i, "chat", { text: "again?" });
+  await poll();
+  // A session reply (#33): the compact form {type: "reply", replyTo, body} on a BRC-104 session, answering
+  // the loop's "Done." — it resumes that thread like a full envelope would.
+  const chats = await h.box(h.owner).list("chat");
+  const done = chats[1]!;
+  const doneId = encode(signedPart((typeof done.body === "string" ? JSON.parse(done.body) : done.body) as Envelope)).cid;
+  await cborBoxClient(h.owner, `${h.base}/messagebox`).send({ recipient: i, box: "chat", body: dagCbor.encode({ type: "reply", replyTo: doneId, body: dagCbor.encode({ text: "and the rest?" }) }) });
+  await h.settle();
   await poll();
   // A stray reply nobody awaits.
   await h.send(i, "chat", { text: "stray", replyTo: encode(signedPart(chat)).cid });

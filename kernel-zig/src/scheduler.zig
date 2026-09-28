@@ -296,6 +296,8 @@ pub const Runtime = struct {
         if (!std.mem.eql(u8, blk.bytes, bb)) return .{ .invalid = "admit: the body is not canonical dag-cbor" };
         if (!envelope.isSigned(sp) or !envelope.verify(a, sp)) return .{ .invalid = "admit: the envelope's signature does not verify" };
         if (!envelope.hashMatches(sp, bb)) return .{ .invalid = "admit: the body does not match the envelope's contentHash" };
+        // A session reply's authorship is the signed request: it must carry this body.
+        if (envelope.sessionPayload(sp)) |payload| if (std.mem.indexOf(u8, payload, bb) == null) return .{ .invalid = "admit: the session reply's signed payload does not carry its body" };
         const ec = try cbor.cidOfValue(a, sp);
         if (!std.mem.eql(u8, blk.cid, Value.cidOf(entry.get("body")).?) or !std.mem.eql(u8, ec, env_cid)) return .{ .invalid = "admit: the records are not the ones the entry names" };
         if (try rt.store.byEnvelope(a, env_cid) != null) return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "envelope {s} is already admitted", .{fmtCid(a, env_cid)}) } };
@@ -471,7 +473,8 @@ pub const Runtime = struct {
             const env = rt.store.getOpt(a, env_cid);
             const sender = senderOf(a, env);
             const what = try std.fmt.allocPrint(a, "#{d} envelope {s} in {s} from {s}", .{ n, short(a, env_cid), box, if (sender) |x| shortKey(x) else "?" });
-            const rto = rt.replyToOf(a, Value.cidOf(e.get("body")));
+            // A session reply names what it answers in the record; a full envelope, in its body.
+            const rto: ReplyTo = if (env != null and envelope.formOf(env.?) == .session) .{ .cid = Value.cidOf(env.?.get("replyTo")).? } else rt.replyToOf(a, Value.cidOf(e.get("body")));
             switch (rto) {
                 .none => {},
                 .not_cid => {
@@ -1396,7 +1399,7 @@ fn jsTrim(a: std.mem.Allocator, b: []const u8) ![]const u8 {
 /// Why an emitted envelope may not leave (scheduler.ts emitProblem), or null.
 fn emitProblem(a: std.mem.Allocator, e: Value, body: []const u8, identity: []const u8) !?[]const u8 {
     const env = e.get("envelope").?;
-    if (!envelope.isEnvelope(env)) return "the envelope is not a complete BRC-169 envelope";
+    if (!envelope.isEnvelope(env) or envelope.formOf(env) == .session) return "the envelope is not a complete BRC-169 envelope";
     var kb: [33]u8 = undefined;
     const key = envelope.senderKey(&kb, env).?;
     if (!std.mem.eql(u8, key, identity)) return try std.fmt.allocPrint(a, "the envelope's sender is {s}, not this instance", .{Runtime.shortKey(key)});

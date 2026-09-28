@@ -9,8 +9,9 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { isCborEnvelope } from "../envelope-cbor.ts";
 import type { Listed, MessageBox } from "./messagebox.ts";
 
-export function cborBoxClient(wallet: WalletInterface, host: string): MessageBox {
-  const f = new AuthFetch(wallet);
+/** Over `wallet`'s own BRC-104 session, or an existing AuthFetch's (a MessageBoxClient's `authFetch`: the same session). */
+export function cborBoxClient(wallet: WalletInterface | AuthFetch, host: string): MessageBox {
+  const f = wallet instanceof AuthFetch ? wallet : new AuthFetch(wallet);
   const call = async (path: string, body: unknown): Promise<Record<string, unknown>> => {
     const res = await f.fetch(`${host}${path}`, { method: "POST", headers: { "content-type": "application/cbor" }, body: dagCbor.encode(body) });
     const out = dagCbor.decode(new Uint8Array(await res.arrayBuffer())) as Record<string, unknown>;

@@ -128,6 +128,39 @@ test("router: messagebox client → instance → owner's mailbox; list/ack; idle
   assert.equal(Buffer.from((dagCbor.decode((await openCbor(owner, back)).body) as { stdout: Uint8Array }).stdout).toString(), "cbor\n");
   await cb.ack([c1!.messageId]);
   assert.equal((await cb.list("results")).length, 0);
+
+  // Session replies: the standard client sends the full envelope (the first message on its session); the
+  // answer to the agent's reply goes back compact on the same session ({type: "reply", replyTo, body},
+  // BRC-231 bytes). Both land as the same entry shape; list/ack are unaffected.
+  const { sessionRecord } = await import("../envelope-cbor.ts");
+  const { signedPart } = await import("../envelope.ts");
+  const { encode } = await import("../runtime/cid.ts");
+  const first = await seal(owner, { recipient: { identityKey: alpha, handle: "alpha", domain: "localhost" }, body: dagCbor.encode({ cmd: "echo session", tree: root }), created: new Date().toISOString() });
+  await mb2.sendMessage({ recipient: alpha, messageBox: "run", body: first as unknown as Record<string, unknown>, skipEncryption: true }, `${base2}/messagebox`);
+  const [answer] = await until("the agent's reply", async () => { const x = await mb2.listMessagesLite({ messageBox: "results", host: `${base2}/messagebox` }); return x.length ? x : undefined; });
+  const answerEnv = (typeof answer!.body === "string" ? JSON.parse(answer!.body) : answer!.body) as Envelope;
+  const answerId = encode(signedPart(answerEnv)).cid;
+  const same = cborBoxClient(mb2.authFetch, `${base2}/messagebox`); // the standard client's own session
+  const compactBody = dagCbor.encode({ text: "thanks" });
+  await same.send({ recipient: alpha, box: "chat", body: dagCbor.encode({ type: "reply", replyTo: answerId, body: compactBody }) });
+  await again.settled();
+  const k = again.loaded.get("alpha")!.kernel;
+  const tip = await k.store.log.tip();
+  const last = await k.store.get(tip!) as Record<string, unknown>;
+  let prev = await k.store.get(last.prev as never) as Record<string, unknown>;
+  while (!prev.envelope) prev = await k.store.get(prev.prev as never) as Record<string, unknown>; // back past the run's outcome entries
+  assert.deepEqual(Object.keys(last).sort(), Object.keys(prev).sort(), "a session reply is the same entry shape as a full envelope");
+  assert.deepEqual(Object.keys(last).sort(), ["body", "box", "envelope", "kind", "n", "prev", "time"]);
+  const rec = await k.store.get(last.envelope as never) as unknown as ReturnType<typeof sessionRecord>;
+  assert.equal(rec.type, "reply");
+  assert.ok(rec.replyTo.equals(answerId));
+  assert.equal(Buffer.from(rec.sender.identityKey).toString("hex"), ownerId);
+  assert.ok(rec.session.signature.length > 60 && rec.session.nonce && rec.session.yourNonce, "the BRC-104 signature and the nonces are recorded");
+  assert.ok(Buffer.from(rec.session.payload).indexOf(Buffer.from(compactBody)) >= 0, "the signed request carries the body");
+  // A compact message that answers nothing here is refused (the first message on a session is a full envelope).
+  await assert.rejects(same.send({ recipient: alpha, box: "chat", body: dagCbor.encode({ type: "reply", replyTo: encode({ nothing: 1 }).cid, body: compactBody }) }), /ERR_REJECTED/);
+  await mb2.acknowledgeMessage({ messageIds: [answer!.messageId], host: `${base2}/messagebox` });
+  assert.equal((await mb2.listMessagesLite({ messageBox: "results", host: `${base2}/messagebox` })).length, 0);
 });
 
 test("skein-host run: the router with the oracle — a row added by the CLI gets the derived identity; its kernel's genesis is that identity; host page and roster", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
