@@ -1,0 +1,33 @@
+<!doctype html>
+<!-- The browser replay (issue #35, equiv/browser.ts): a corpus store's log replayed by the wasm kernel in a Worker, into IndexedDB. -->
+<meta charset="utf-8">
+<title>skein kernel: replay</title>
+<link rel="icon" href="data:,">
+<script type="module">
+  import { KernelWorker } from "/web/client.js";
+
+  const worker = () => new KernelWorker({ wasm: "/kernel/skein-kernel.wasm", workerUrl: "/web/worker.js", onNotify: (op, v) => { if (op === "panic") console.error(v); } });
+
+  /** Replay the corpus store `name` (source in memory, destination an IndexedDB database); the report, and the database as read back by a fresh worker. */
+  window.replayOne = async (name) => {
+    const kw = worker();
+    await kw.ready;
+    const src = await (await fetch(`/bundle/${name}`)).arrayBuffer();
+    await kw.call("openMemory", 1, src, true);
+    await kw.call("removeIdb", `replay-${name}`);
+    await kw.call("openIdb", 2, `replay-${name}`);
+    const r = await kw.call("replay", 1, 2);
+    await kw.call("closeStore", 2);
+    kw.terminate();
+    // What IndexedDB kept, read back by another worker.
+    const again = worker();
+    await again.ready;
+    const blocks = await again.call("openIdb", 2, `replay-${name}`);
+    const bundle = await again.call("bundle", 2);
+    await again.call("closeStore", 2);
+    again.terminate();
+    await fetch(`/result/${name}`, { method: "POST", body: bundle });
+    return { report: r.report, ms: Math.round(r.ms), stats: r.stats, blocks, isolated: crossOriginIsolated, agent: navigator.userAgent };
+  };
+  window.ready = true;
+</script>

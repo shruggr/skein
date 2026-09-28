@@ -31,6 +31,29 @@ echo "== replay, Zig against Zig: a generated corpus (format 2, written by the Z
 mapfile -t gen < "$work/gen.list"
 "${node[@]}" "$kz/equiv/replays.ts" "${gen[@]}" || status=1
 
+echo "== fuel by instrumentation (issue #35): the corpus replayed with every module counting its own fuel, as under V8"
+for db in "${gen[@]}"; do
+  n="$(basename "$db" .db)"
+  cp "$db" "$work/$n.fi.db"; [ -f "$db-wal" ] && cp "$db-wal" "$work/$n.fi.db-wal"
+  a="$("$kz/zig-out/bin/skein-kernel" replay "$work/$n.fi.db" "$work/$n.fa.db")"
+  b="$(SKEIN_FUEL_MODE=instrument "$kz/zig-out/bin/skein-kernel" replay "$work/$n.fi.db" "$work/$n.fb.db")"
+  if [ "$a" = "$b" ]; then echo "ok   $n: the same report, fuel included"; else echo "FAIL $n: instrumented fuel differs from wasmtime's"; status=1; fi
+done
+
+# The browser build (issue #35): the same corpus replayed by the wasm kernel in
+# headless Chrome (a Worker, IndexedDB) against the native replay. About 10 s
+# a store; SKEIN_EQUIV_BROWSER=0 skips it, and it is skipped (with a note)
+# without Playwright or Chromium.
+if [ "${SKEIN_EQUIV_BROWSER:-1}" = "0" ]; then
+  echo "== browser: skipped (SKEIN_EQUIV_BROWSER=0)"
+elif ! command -v playwright > /dev/null || [ ! -x "${SKEIN_CHROMIUM:-/usr/bin/chromium}" ]; then
+  echo "== browser: skipped (no playwright on PATH or no Chromium at ${SKEIN_CHROMIUM:-/usr/bin/chromium})"
+else
+  echo "== browser (issue #35): the corpus replayed by the wasm kernel in headless Chrome, into IndexedDB"
+  (cd "$kz" && mise exec -- zig build web)
+  "${node[@]}" "$kz/equiv/browser.ts" "${gen[@]}" || status=1
+fi
+
 echo "== a store in an older format (host-signed, before format 2) is refused for running"
 "${node[@]}" "$kz/equiv/old-store.ts" "$work/old.db"
 if echo '[]' | "$kz/zig-out/bin/skein-kernel" shell "$work/old.db" 2> "$work/old.err" > /dev/null; then
