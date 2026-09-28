@@ -28,6 +28,9 @@
 //! body, contentType, session?: {payload, signature, nonce, yourNonce}} and
 //! answers {status, type?, body: bytes, admit?, then?}.
 //!
+//! Its other function, "explore", is a route handler (explore.zig): the
+//! instance's log, threads, heads and records as JSON, behind a read rule.
+//!
 //! Sessions: the head `sessions` names {kind: "sessions", sessions: [{nonce,
 //! session: <cid>}]} (sorted by nonce), each {kind: "session", peer, sessionNonce
 //! (ours), peerNonce, created}. A request's session is looked up by its
@@ -42,6 +45,7 @@ const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
 const brc = @import("brc104");
+const explore = @import("explore.zig");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -63,7 +67,15 @@ fn run(a: Allocator) !void {
     const func = Value.str(in.get("fn")) orelse "";
     const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
     if (eql(u8, func, "http")) return sk.answer(a, try http(a, in, arg));
-    return sk.report("unknown fn (the front door answers \"http\")");
+    if (eql(u8, func, "explore")) {
+        const r = try explore.explore(a, in, arg);
+        var m = cbor.MapBuilder.init(a);
+        try m.put("status", cbor.int(r.status));
+        try m.put("type", cbor.string("application/json"));
+        try m.put("body", .{ .bytes = r.body });
+        return sk.answer(a, m.value());
+    }
+    return sk.report("unknown fn (the front door answers \"http\" and the route handler \"explore\")");
 }
 
 // ---------------------------------------------------------------- responses

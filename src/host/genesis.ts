@@ -62,7 +62,7 @@ export interface Genesis2Config {
   openChat?: boolean;
   /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex) or none, a box, a handler program record. */
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
-  /** The front door's routes and reads for code genesis (#40; default STOCK_ROUTES, none). */
+  /** The front door's routes and reads for code genesis (#40; default STOCK_ROUTES, STOCK_READS). */
   routes?: RouteSpec[];
   reads?: ReadSpec[];
   /** Feeds the router holds for the instance (code genesis; a tree's config names its own). */
@@ -124,12 +124,23 @@ export interface RouteSpec { path?: string; prefix?: string; program: string; fn
 /** A read permission as a system writes it (etc/reads.json): a caller (hex or `$owner`; absent: anyone) may call routes marked `read: op`. */
 export interface ReadSpec { caller?: string; op: string }
 
-/** The stock routes (#40): the BRC-33 messagebox, at the root and under /messagebox (where older clients were pointed). */
-export const STOCK_ROUTES: RouteSpec[] = ["", "/messagebox"].flatMap((p) => [
-  { path: `${p}/sendMessage`, program: "messagebox", fn: "sendMessage" },
-  { path: `${p}/listMessages`, program: "messagebox", fn: "listMessages" },
-  { path: `${p}/acknowledgeMessage`, program: "messagebox", fn: "acknowledgeMessage" },
-]);
+/**
+ * The stock routes (#40): the BRC-33 messagebox, at the root and under
+ * /messagebox (where older clients were pointed); the explorer's read route
+ * (the front door's `explore`: log, threads, heads, records as JSON) behind
+ * the read op `explore`.
+ */
+export const STOCK_ROUTES: RouteSpec[] = [
+  ...["", "/messagebox"].flatMap((p) => [
+    { path: `${p}/sendMessage`, program: "messagebox", fn: "sendMessage" },
+    { path: `${p}/listMessages`, program: "messagebox", fn: "listMessages" },
+    { path: `${p}/acknowledgeMessage`, program: "messagebox", fn: "acknowledgeMessage" },
+  ]),
+  { prefix: "/explore", program: "frontdoor", fn: "explore", read: "explore" },
+];
+
+/** The stock reads (#40): the owner may explore. */
+export const STOCK_READS: ReadSpec[] = [{ caller: "$owner", op: "explore" }];
 
 /** A system's config (etc/config.json): every field optional; keys in hex or `$owner`/`$infer`. */
 export interface ConfigSpec {
@@ -188,7 +199,7 @@ export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer">): Ui
 }
 
 /** Resolve a system's subscriptions, config and programs for one instance (both genesis paths). */
-export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID, routes: RouteSpec[] = STOCK_ROUTES, reads: ReadSpec[] = []): System {
+export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID, routes: RouteSpec[] = STOCK_ROUTES, reads: ReadSpec[] = STOCK_READS): System {
   const handler = (h: string): CID => {
     const p = programs[h];
     if (p) return p;
@@ -243,12 +254,12 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
   if (c.mailbox) {
     // A mailbox instance: the front door and the messagebox, nothing else.
     const mine: Record<string, CID> = { frontdoor: programs.frontdoor!, messagebox: programs.messagebox! };
-    const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined }, mine, MAILBOX_SUBSCRIPTIONS, { peers: {}, names: [] }, undefined, STOCK_ROUTES, []);
+    const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined }, mine, MAILBOX_SUBSCRIPTIONS, { peers: {}, names: [] }, undefined, STOCK_ROUTES, STOCK_READS);
     return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
   }
   const subs = STOCK_SUBSCRIPTIONS.filter((s) => (s.box !== "chat" || s.sender || c.openChat !== false) && programs[s.handler]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
-  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs, {}, undefined, c.routes ?? STOCK_ROUTES, c.reads ?? []), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
+  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs, {}, undefined, c.routes ?? STOCK_ROUTES, c.reads ?? STOCK_READS), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }
 
 /** The genesis record: who the instance is, and its system. */

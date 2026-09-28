@@ -100,7 +100,7 @@ export interface SystemTree {
   modules: Array<{ cid: CID; bytes?: Uint8Array; name: string }>;
   config: ConfigSpec;
   subscriptions: SubscriptionSpec[];
-  /** etc/routes.json (#40), else the stock routes; etc/reads.json, else none. */
+  /** etc/routes.json (#40), else the stock routes; etc/reads.json, else the stock reads. */
   routes?: RouteSpec[];
   reads?: ReadSpec[];
 }
@@ -267,7 +267,9 @@ export async function stockSystemFiles(k: Kernel): Promise<Record<string, string
   const { STOCK_SUBSCRIPTIONS } = await import("./genesis.ts");
   files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"] }, null, 2)}\n`;
   files[SUBSCRIPTIONS] = `${JSON.stringify(STOCK_SUBSCRIPTIONS, null, 2)}\n`;
-  files[ROUTES] = `${JSON.stringify((await import("./genesis.ts")).STOCK_ROUTES, null, 2)}\n`;
+  const { STOCK_ROUTES, STOCK_READS } = await import("./genesis.ts");
+  files[ROUTES] = `${JSON.stringify(STOCK_ROUTES, null, 2)}\n`;
+  files[READS] = `${JSON.stringify(STOCK_READS, null, 2)}\n`;
   return files;
 }
 
