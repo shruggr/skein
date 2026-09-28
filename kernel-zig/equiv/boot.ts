@@ -9,6 +9,9 @@
 // (`add --packet`): the restored store's derived state is the source's, and
 // it goes on answering. Finally the booted stores are replayed Zig against
 // Zig (replays.ts): the replay copies the system tree and reproduces them.
+// With the wallet's component build there (#34, run.sh builds it), the tree
+// also carries it as bin/wallet.wasm — a WASI 0.2 component handler — and
+// each instance answers an owner's `list` through it.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/boot.ts
 
@@ -27,6 +30,13 @@ import { HostDb } from "../../src/host/instances.ts";
 import { messageBoxClient, type MessageBox } from "../../src/host/messagebox.ts";
 import { masterKey, Oracle } from "../../src/host/oracle.ts";
 import { decodePacket } from "../../src/host/packet.ts";
+import { rawCid } from "../../src/host/boot.ts";
+import { decode } from "../../src/runtime/cid.ts";
+import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { WALLET } from "../../src/runtime/programs.ts";
+import { collect } from "../../src/testkit.ts";
+import { CID } from "multiformats/cid";
+import { existsSync } from "node:fs";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -57,6 +67,8 @@ const cli = async (home: string, ...argv: string[]) => {
 
 const home = join(work, "home"), home2 = join(work, "home2");
 const sys = join(work, "system");
+const COMPONENT = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../wallet-zig/zig-out/bin/wallet.component.wasm");
+const withComponent = existsSync(COMPONENT);
 let router: Router | undefined;
 const routerFor = (h: string, db: HostDb) => {
   const oracle = new Oracle(masterKey({}, h));
@@ -101,6 +113,27 @@ async function talk(r: Router, handles: string[]): Promise<void> {
     const [x] = await until(`${h}'s run`, async () => { const y = await inbox("results"); return y.length ? y : undefined; });
     check(text(x!.body.stdout).includes("booted from a system tree") && text(x!.body.stdout).includes("head-handler.cid"), `${h}: a run over main sees the system tree (${JSON.stringify(text(x!.body.stdout)).slice(0, 100)})`);
     await box.ack([x!.id]);
+    if (!withComponent) continue;
+    // The component handler from bin/ (#34): an owner's `list` to its box, answered by the component.
+    const g = await r.loaded.get(h)!.kernel.genesis() as { programs: Record<string, CID> };
+    const prog = g.programs.wallet!;
+    const rec = await r.loaded.get(h)!.kernel.store.get(prog) as { code: { wasm: CID } };
+    check(rec.code.wasm.equals(rawCid(readFileSync(COMPONENT))), `${h}: bin/wallet.wasm (a component) is the wallet program's module`);
+    await send("wallet", { op: "list" });
+    const view = openStoreFile(r.o.db.get(h)!.store, { readOnly: true });
+    try {
+      const out = await until(`${h}'s wallet list`, async () => {
+        for (const t of await collect(view.edges.query({ kind: "thread", program: prog }))) {
+          for (const u of (await collect(view.chains.history(t))).slice(1)) {
+            const up = await view.get(u) as { state: string; result?: { stdout: Uint8Array }; error?: { message: string } };
+            if (up.state === "errored") return { error: up.error?.message };
+            if (up.state === "finished") return { result: decode<{ op: string; outputs: unknown[] }>(await view.bytes(CID.decode(Buffer.from(Buffer.from(up.result!.stdout).toString().trim(), "hex")))) };
+          }
+        }
+        return undefined;
+      });
+      check(out.result?.op === "list" && Array.isArray(out.result.outputs), `${h}: the component handler ran and answered the list (${JSON.stringify(out).slice(0, 120)})`);
+    } finally { view.close(); }
   }
 }
 
@@ -112,6 +145,14 @@ try {
   await fs.writeFile(join(sys, "SOUL.md"), "You were booted from a system tree.\n");
   const config = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8"));
   config.defaults.model = "ripper/booted";
+  if (withComponent) {
+    // A WASI 0.2 component as a handler (#34): its bytes in bin/, its record's metadata beside it, a box for it.
+    copyFileSync(COMPONENT, join(sys, "bin/wallet.wasm"));
+    await fs.writeFile(join(sys, "bin/wallet.json"), JSON.stringify({ inputs: WALLET.inputs, services: WALLET.services, description: WALLET.description }));
+    const subs = JSON.parse(readFileSync(join(sys, "etc/subscriptions.json"), "utf8"));
+    await fs.writeFile(join(sys, "etc/subscriptions.json"), JSON.stringify([...subs, { sender: "$owner", box: "wallet", handler: "wallet" }]));
+    config.defaults.walletNetwork = "regtest";
+  } else process.stdout.write("note: no wallet component build (wallet-zig: zig build component); the component handler case is skipped\n");
   await fs.writeFile(join(sys, "etc/config.json"), JSON.stringify(config));
 
   // Source A: the directory.
@@ -138,7 +179,7 @@ try {
     const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; subscriptions: unknown[] };
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
-    check(Object.keys(g.programs).sort().join() === "head-handler,loop,messagebox,objects-handler,run-handler,shell,subscribe-handler", `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
+    check(Object.keys(g.programs).sort().join() === `head-handler,loop,messagebox,objects-handler,run-handler,shell,subscribe-handler${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
     check(keyHex((await k.genesis() as { owner: Uint8Array }).owner) === ownerId, `${h}: $owner is the host's owner`);
   }
   await talk(router, ["alpha", "beta"]);

@@ -39,8 +39,14 @@ export interface Genesis2Config {
   infer?: string;
   ownerHandle?: Named;
   inferHandle?: Named;
-  /** The host's defaults: over DEFAULTS for code genesis; over the tree's config for a system tree. */
+  /**
+   * The host's defaults. Code genesis: over DEFAULTS, whole. A system tree:
+   * only what the tree's config leaves unset (its behaviour comes from its tree).
+   */
   defaults?: Record<string, string>;
+  /** Explicit host overrides (dev: SKEIN_FUEL_PER_STEP) that win even over a tree's config; `warn` says so when they do. */
+  overrides?: Record<string, string>;
+  warn?(line: string): void;
   /** Anyone may open a `chat` (default true): the seed after the owner's boxes (code genesis only). */
   openChat?: boolean;
   /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex) or none, a box, a handler program record. */
@@ -115,16 +121,24 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     : c.infer ? { infer: keyBytes(c.infer) } : undefined;
   return {
     programs, subscriptions, ...(peers ? { peers } : {}),
-    defaults: { ...DEFAULTS, ...config.defaults, ...c.defaults },
+    defaults: mergeDefaults(c, config.defaults),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
   };
+}
+
+/** DEFAULTS < the host's fill-ins < the tree's config < explicit overrides (warned when they replace a tree value). */
+function mergeDefaults(c: Genesis2Config, tree: Record<string, string> = {}): Record<string, string> {
+  for (const [k, v] of Object.entries(c.overrides ?? {})) {
+    if (tree[k] !== undefined && tree[k] !== v) c.warn?.(`host override: ${k} = ${v} replaces the system tree's ${k} = ${tree[k]}`);
+  }
+  return { ...DEFAULTS, ...c.defaults, ...tree, ...c.overrides };
 }
 
 /** The stock system in code: the kernel's pinned programs (its `programs` frame) and the stock seed. */
 export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): System {
   const subs = STOCK_SUBSCRIPTIONS.filter((s) => (s.box !== "chat" || s.sender || c.openChat !== false) && programs[s.handler]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
-  return { ...resolveSystem({ ...c, defaults: undefined }, programs, subs), defaults: c.defaults ?? DEFAULTS };
+  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs), defaults: c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS };
 }
 
 /** The genesis record: who the instance is, and its system. */

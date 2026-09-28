@@ -273,11 +273,19 @@ export class Router {
   genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, code = true): Genesis2Config {
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const hostDefaults = { ...this.o.genesis?.defaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
+    const warn = (l: string) => this.say(row.handle, l);
+    if (!code) {
+      // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
+      return {
+        identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
+        defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn,
+      };
+    }
     return {
       identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-      // Code genesis takes DEFAULTS under the host's; a system tree's own config sits between (genesis.ts resolveSystem).
-      defaults: Object.keys(hostDefaults).length ? (code ? { ...DEFAULTS, ...hostDefaults } : hostDefaults) : undefined,
-      subscriptions: code ? this.o.genesis?.subscriptions : undefined,
+      // Code genesis takes DEFAULTS under the host's.
+      defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
+      subscriptions: this.o.genesis?.subscriptions,
     };
   }
 

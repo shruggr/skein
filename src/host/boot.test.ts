@@ -47,7 +47,13 @@ test("system tree: bin/ programs (.wasm bytes, .cid, .json), config and subscrip
   const g = genesisRecord(c, resolveSystem(c, programs, s.subscriptions, s.config, root)) as Record<string, any>;
   assert.ok(g.tree.equals(root));
   assert.deepEqual(g.defaults.model, "m");
-  assert.equal(g.defaults.fuelPerStep, "9", "the host's defaults sit over the tree's");
+  assert.equal(g.defaults.fuelPerStep, "5", "the tree's config wins over the host's defaults");
+  const warned: string[] = [];
+  const o = { ...c, overrides: { fuelPerStep: "7" }, warn: (l: string) => warned.push(l) };
+  assert.equal((genesisRecord(o, resolveSystem(o, programs, s.subscriptions, s.config, root)) as Record<string, any>).defaults.fuelPerStep, "7", "an explicit override wins");
+  assert.match(warned[0]!, /replaces the system tree's fuelPerStep = 5/);
+  const fill = { ...c, defaults: { walletNetwork: "test" } };
+  assert.equal((genesisRecord(fill, resolveSystem(fill, programs, s.subscriptions, s.config, root)) as Record<string, any>).defaults.walletNetwork, "test", "the host fills what the tree leaves unset");
   assert.equal(keyHex(g.peers.infer), infer);
   assert.equal(keyHex(g.subscriptions[0].match.sender), c.owner);
   assert.equal(g.subscriptions[1].match.sender, undefined);
@@ -62,6 +68,9 @@ test("system tree: refusals — no subscriptions, a bad .cid, a handler that is 
   await assert.rejects(readSystemTree(bad.objects, bad.root), /not a CID/);
   const notWasm = await tree(t, { "bin/x.wasm": "text", "etc/subscriptions.json": "[]" });
   await assert.rejects(readSystemTree(notWasm.objects, notWasm.root), /not a wasm module/);
+  const component = Uint8Array.from([0, 0x61, 0x73, 0x6d, 0x0d, 0, 1, 0]);
+  const comp = await tree(t, { "bin/c.wasm": component, "etc/subscriptions.json": "[]" });
+  assert.ok((await readSystemTree(comp.objects, comp.root)).modules[0]!.cid.equals(rawCid(component)), "a component in bin/ is a module like any other");
   const c = { identity: key(), owner: key(), handle: "a", domain: "localhost" };
   assert.throws(() => resolveSystem(c, {}, [{ box: "run", handler: "missing" }]), /no such program/);
   assert.throws(() => resolveSystem(c, {}, [], { peers: { infer: "$infer" } }), /no inference peer/);

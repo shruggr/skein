@@ -68,6 +68,14 @@ export function gitBody(object: Uint8Array, type: "blob" | "tree"): Uint8Array |
   return head === `${type} ${object.length - nul - 1}` ? object.subarray(nul + 1) : undefined;
 }
 
+/** A wasm binary's kind by its preamble: a core module, a component (#34), or neither. */
+export function wasmKind(b: Uint8Array): "module" | "component" | undefined {
+  if (b.length < 8 || b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return undefined;
+  if (b[4] === 1 && b[5] === 0 && b[6] === 0 && b[7] === 0) return "module";
+  if (b[4] === 0x0d && b[5] === 0 && b[6] === 1 && b[7] === 0) return "component";
+  return undefined;
+}
+
 // ---------------------------------------------------------------- sources
 
 /** Source A: a directory on disk, hashed into git objects in memory (scan.ts). */
@@ -156,7 +164,9 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
     let module: CID;
     if (wasm) {
       const bytes = gitBody(byCid.get(wasm.cid.toString())!.bytes, "blob")!;
-      if (Buffer.from(bytes.subarray(0, 4)).toString("latin1") !== "\0asm") throw new Error(`bin/${name}.wasm: not a wasm module`);
+      // A preview1 core module (version 1) or a WASI 0.2 component (#34: version 0x0d, layer 1): stored as a raw
+      // block either way; the kernel's runner tells them apart by this preamble when it runs one.
+      if (wasmKind(bytes) === undefined) throw new Error(`bin/${name}.wasm: not a wasm module or component`);
       module = rawCid(bytes);
       modules.push({ cid: module, bytes: new Uint8Array(bytes), name });
     } else {

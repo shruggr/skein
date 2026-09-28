@@ -26,7 +26,7 @@ before. The router's hydration of an empty store calls `boot` with this source.
 ## The system tree
 
 ```
-bin/<name>.wasm          a handler program's module (WASI preview 1), stored as a raw block, or
+bin/<name>.wasm          a handler program: a WASI preview 1 core module or a WASI 0.2 component (#34), stored as a raw block, or
 bin/<name>.cid           the CID (raw, bafkrei…) of a module the source or the kernel holds
 bin/<name>.json          optional: the program record's {inputs, services, description}
                          (default: the handler inputs {envelope, body, box, sender}, no services)
@@ -44,9 +44,16 @@ etc/subscriptions.json   required: [{sender?: key, box, handler}]
   plus the kernel's `shell`. The shell is the VM's own program: its modules
   (brush, coreutils, the tools) stay the kernel's pinned ones. Handler modules
   no longer enter through the pinned table: their CIDs come from the tree.
-- **Defaults** stack in this order, later over earlier: `DEFAULTS`, the tree's
-  `defaults`, then the host's (`SKEIN_FUEL_PER_STEP` and the router's
-  `genesis.defaults`).
+- A `.wasm` is accepted by its preamble: a core module (version 1) or a
+  component (version 0x0d, layer 1). Either is stored as a raw block, and the
+  kernel's runner tells them apart when it runs one (`runner.zig`). Anything
+  else is refused.
+- **Defaults** come from the tree. They stack in this order, later over
+  earlier: `DEFAULTS`, the host's defaults (the router's `genesis.defaults`),
+  which only fill what the tree leaves unset, then the tree's `defaults`. An
+  instance's behaviour comes from its tree. The one exception is an explicit
+  dev override, `SKEIN_FUEL_PER_STEP`: it wins over the tree, and the router
+  logs a warning when it replaces a value the tree set.
 - `peers` and `names`, when the tree omits them, are the host's (as in code
   genesis). `collect` defaults to `["completions"]`.
 - The genesis gains `tree: <root>`. It is a git-raw CID, checked by
@@ -111,6 +118,11 @@ same master key and handle (the router checks the oracle against the genesis).
 
 ### Writing packets
 
+A checkpoint of a stock-system instance is large: about 88 MB in the test.
+The state record reaches the shell's program record, and so its pinned
+modules and python's standard library (`python314.zip`). All of these are in
+the closure.
+
 `skein-host pack <handle|dir|tree-cid> <out>` writes a packet with these options:
 
 - `--form ordfs` (the default) writes trees as ordfs/dir manifests and files as
@@ -154,10 +166,23 @@ processes the genesis at that first start. The owner is `SKEIN_OWNER`.
 - `src/host/packet.test.ts`: both forms, with and without an index; the
   scope-mismatch, hash-mismatch, incomplete, unproven and malformed refusals; a
   patched file resolved through its base, and incomplete without it.
-- `src/host/boot.test.ts`: the tree read and resolved; its refusals.
+- `src/host/boot.test.ts`: the tree read and resolved (including a component
+  in `bin/`, and the order of defaults); its refusals.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
 - `kernel-zig/equiv/boot.ts` (in `run.sh`): two instances, one booted from a
   directory and one from a packet of it (mined, proofs checked). Each is
   chatted with over `main` and runs over it. Then a checkpoint is restored on a
   second host: `dump` is identical and it keeps answering. Finally the booted
-  stores are replayed Zig against Zig.
+  stores are replayed Zig against Zig. When the wallet's component build is
+  there (`run.sh` builds it), the tree also carries it as `bin/wallet.wasm`,
+  and each instance, the restored one included, answers an owner's `list`
+  through that component handler.
+
+## Not done yet
+
+- **Extras.** A checkpoint's records that no link reaches travel as index
+  extras. A follow-up for the kernel is to make them reachable, for example by
+  linking a step's args and an emit's signed part from its update. Then
+  completeness could require them.
+- **Real carriers.** Real inscription (1sat `ord`) and B-protocol carriers are
+  not mapped yet. Only the OP_RETURN `(content-type, payload)` form is read.
