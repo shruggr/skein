@@ -12,7 +12,7 @@ cid() {
     const { rawCid } = await import('./src/runtime/programs.ts');
     console.log(rawCid(readFileSync('wasm/$1.wasm')).toString());"
 }
-for p in run-handler objects-handler head-handler subscribe-handler loop messagebox wallet; do
+for p in run-handler objects-handler head-handler subscribe-handler loop messagebox frontdoor wallet; do
   c=$(cid "$p")
   sed -i -E "s|(\.name = \"$p\", \.cid = \")[a-z0-9]+(\")|\1$c\2|" kernel-zig/src/programs.zig
   echo "$p $c"

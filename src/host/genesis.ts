@@ -58,6 +58,9 @@ export interface Genesis2Config {
   openChat?: boolean;
   /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex) or none, a box, a handler program record. */
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
+  /** The front door's routes and reads for code genesis (#40; default STOCK_ROUTES, none). */
+  routes?: RouteSpec[];
+  reads?: ReadSpec[];
   /** Feeds the router holds for the instance (code genesis; a tree's config names its own). */
   feeds?: FeedSpec[];
 }
@@ -80,7 +83,21 @@ export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { box: "chat", handler: "loop" },
   { box: ":mail", handler: "messagebox" },
   { box: ":auth", handler: "messagebox" },
+  { box: ":sessions", handler: "frontdoor" },
 ];
+
+/**
+ * A front-door route as a system writes it (etc/routes.json, #40): an exact
+ * `path` or a `prefix`, the handler program (a bin/ name or a CID) and its
+ * function; `auth: "none"` for an open route; `read` an op the reads table
+ * must allow the caller.
+ */
+export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string }
+/** A read permission as a system writes it (etc/reads.json): a caller (hex or `$owner`; absent: anyone) may call routes marked `read: op`. */
+export interface ReadSpec { caller?: string; op: string }
+
+/** The stock routes: nothing yet (the messagebox's come with its rewrite). */
+export const STOCK_ROUTES: RouteSpec[] = [];
 
 /** A system's config (etc/config.json): every field optional; keys in hex or `$owner`/`$infer`. */
 export interface ConfigSpec {
@@ -102,6 +119,28 @@ export interface System {
   /** The system tree (a git tree CID): `main` starts there. */
   tree?: CID;
   feeds?: FeedSpec[];
+  /** The front door's routes and reads (#40). */
+  routes: Array<{ path?: string; prefix?: string; program: CID; fn: string; auth?: "none"; read?: string }>;
+  reads: Array<{ caller?: Uint8Array; op: string }>;
+}
+
+/** Routes and reads resolved for one instance: handler names to program CIDs (a route to a program this system lacks is dropped), `$owner` to its key. */
+export function resolveRoutes(c: Pick<Genesis2Config, "owner" | "infer">, programs: Record<string, CID>, routes: RouteSpec[], reads: ReadSpec[] = []): Pick<System, "routes" | "reads"> {
+  const out: System["routes"] = [];
+  for (const r of routes) {
+    if (!r || typeof r.fn !== "string" || typeof r.program !== "string" || (typeof r.path === "string") === (typeof r.prefix === "string")) {
+      throw new Error(`etc/routes.json: bad route ${JSON.stringify(r)} (want {path | prefix, program, fn, auth?, read?})`);
+    }
+    let program = programs[r.program];
+    if (!program) { try { program = parseCid(r.program); } catch { continue; } }
+    out.push({ ...(r.path !== undefined ? { path: r.path } : { prefix: r.prefix! }), program, fn: r.fn, ...(r.auth === "none" ? { auth: "none" as const } : {}), ...(r.read ? { read: r.read } : {}) });
+  }
+  const rs: System["reads"] = [];
+  for (const r of reads) {
+    if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op})`);
+    rs.push({ ...(r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
+  }
+  return { routes: out, reads: rs };
 }
 
 /** A key as a system writes it: hex, or `$owner` / `$infer` (the host's). */
@@ -115,7 +154,7 @@ export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer">): Ui
 }
 
 /** Resolve a system's subscriptions, config and programs for one instance (both genesis paths). */
-export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID): System {
+export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID, routes: RouteSpec[] = STOCK_ROUTES, reads: ReadSpec[] = []): System {
   const handler = (h: string): CID => {
     const p = programs[h];
     if (p) return p;
@@ -136,6 +175,7 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     defaults: mergeDefaults(c, config.defaults),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
+    ...resolveRoutes(c, programs, routes, reads),
   };
 }
 
@@ -163,7 +203,7 @@ function mergeDefaults(c: Genesis2Config, tree: Record<string, string> = {}): Re
 export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): System {
   const subs = STOCK_SUBSCRIPTIONS.filter((s) => (s.box !== "chat" || s.sender || c.openChat !== false) && programs[s.handler]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
-  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs), defaults: { ...SESSION_DEFAULTS, ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
+  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs, {}, undefined, c.routes ?? STOCK_ROUTES, c.reads ?? []), defaults: { ...SESSION_DEFAULTS, ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }
 
 /** The genesis record: who the instance is, and its system. */
@@ -172,6 +212,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, owner: keyBytes(c.owner),
     programs: s.programs, subscriptions: s.subscriptions, ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
+    ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),
   };
 }
 

@@ -155,6 +155,21 @@ pub fn isGenesis(x: ?Value) bool {
         for (c.array) |b| if (b != .string or b.string.len == 0) return false;
     }
     if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
+    // #40: the front door's routes [{path | prefix, program, fn, auth?, read?}] and reads [{caller?, op}].
+    if (g.get("routes")) |rs| {
+        if (rs != .array) return false;
+        for (rs.array) |r| {
+            if (r != .map or Value.cidOf(r.get("program")) == null or Value.str(r.get("fn")) == null) return false;
+            if ((Value.str(r.get("path")) == null) == (Value.str(r.get("prefix")) == null)) return false;
+        }
+    }
+    if (g.get("reads")) |rs| {
+        if (rs != .array) return false;
+        for (rs.array) |r| {
+            if (r != .map or Value.str(r.get("op")) == null) return false;
+            if (r.get("caller")) |c| if (!secp.isKey(Value.bytesOf(c) orelse return false)) return false;
+        }
+    }
     return true;
 }
 

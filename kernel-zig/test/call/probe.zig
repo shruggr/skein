@@ -137,6 +137,17 @@ pub fn main() u8 {
     } else if (std.mem.eql(u8, func, "nest")) {
         const r = result(a, sk.call(arg.ptr, @intCast(arg.len), "echo", 4, "nested", 6, &buf, buf.len), &buf, "call");
         out.writeAll(r) catch {};
+    } else if (std.mem.eql(u8, func, "whoami")) {
+        // A front-door handler (#40): {status: 200, type: "application/octet-stream", body: <the caller's key>}.
+        const caller = field(in, "caller") orelse "";
+        var r = std.array_list.Managed(u8).init(a);
+        r.appendSlice(&.{ 0xa3, 0x64, 'b', 'o', 'd', 'y' }) catch fail("oom");
+        if (caller.len < 24) r.append(0x40 | @as(u8, @intCast(caller.len))) catch fail("oom") else r.appendSlice(&.{ 0x58, @intCast(caller.len) }) catch fail("oom");
+        r.appendSlice(caller) catch fail("oom");
+        r.appendSlice(&.{ 0x64, 't', 'y', 'p', 'e', 0x78, 24 }) catch fail("oom");
+        r.appendSlice("application/octet-stream") catch fail("oom");
+        r.appendSlice(&.{ 0x66, 's', 't', 'a', 't', 'u', 's', 0x18, 200 }) catch fail("oom");
+        out.writeAll(r.items) catch {};
     } else if (std.mem.eql(u8, func, "fail")) {
         std.fs.File.stderr().writeAll("probe: asked to fail\n") catch {};
         return 1;

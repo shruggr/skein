@@ -21,6 +21,8 @@ pub const modules = [_]Module{
     .{ .name = "wallet", .cid = "bafkreihkpdmj2fdp6c7xowww5kyi3noetmentxwsw7zdv6vrvsaf6w2t5q" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreih4oiormhd3vxjoee3xl65jgadyv6lxcgrnisnboa2lkrnckyunbu" },
+    // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
+    .{ .name = "frontdoor", .cid = "bafkreiasbghv2rbnzvy75af32rkqnhrbnidnt7pyi3st3mnjn6kwuumj3a" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -106,6 +108,11 @@ const mail_inputs = [_]cbor.Entry{
     .{ .key = "messageIds", .value = .{ .string = "array?" } },
 };
 
+const call_inputs = [_]cbor.Entry{
+    .{ .key = "event", .value = .{ .string = "cid?" } },
+    .{ .key = "box", .value = .{ .string = "string?" } },
+};
+
 const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
 const handlers = [_]Handler{
@@ -115,10 +122,11 @@ const handlers = [_]Handler{
     .{ .name = "subscribe-handler", .services = &.{}, .description = "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store)." },
     .{ .name = "loop", .services = &.{ "infer", "outcomes" }, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs." },
     .{ .name = "messagebox", .services = &.{}, .inputs = &mail_inputs, .description = "The reserved box `:mail`: the BRC-33 messagebox's records for the identities this instance keeps mail for — {op: put, recipient, box, sender, messageId, body} keeps a message, {op: ack, recipient, messageIds} deletes; state is the head `mailbox`." },
+    .{ .name = "frontdoor", .services = &.{}, .inputs = &call_inputs, .description = "The front door: called with each HTTP request (fn http); runs BRC-103/104 against the session records, routes by the routes table, invokes the handler, signs the answer; stepped on `:sessions` to keep a handshake's session (head `sessions`)." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox" };
+pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox", "frontdoor" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
