@@ -1,22 +1,19 @@
-// `skein-kernel serve`: the runtime process, a drop-in for bin/skein-runtime
-// (src/host/main.ts). Same environment, same stdout lines — among them
-// `skein runtime <identity> (<handle>@<domain>) · pid … · db …`, which the
-// supervisor waits for — same stop on SIGINT/SIGTERM or when the supervisor's
-// IPC channel closes.
+// `skein-kernel serve`: one instance's kernel, driven by the router
+// (src/host/kernel.ts, issue #33) over its stdin/stdout: length-prefixed
+// dag-cbor frames (ipc.zig). The router hydrates an instance by starting this
+// process and stops it by closing stdin (or SIGTERM) once it is idle.
 //
 // The kernel is this process: the store, the log, the scheduler, the
-// programs. The providers stay TypeScript and are peers, as in main.ts: the
-// messagebox delivery and its outcomes, the tick, the host's resolver and the
-// wallets. They run in one child process (peer/peer.ts, started here), which
-// reaches the kernel through the same surface they use on the TS runtime —
-// admit, boxes, sleepersDue/onSleep, idle, the outbox, the store's log — over
-// a pipe of length-prefixed dag-cbor frames (ipc.zig). The kernel calls it for
-// the instance wallet (programs' wallet frames) and handle resolution.
+// programs. Everything outside is the router's: it admits entries (the one
+// call in), answers the kernel's `wallet` and `resolve` requests (the oracle
+// and the resolver), carries its emits (`send`) and keeps its earliest
+// sleeper deadline (`sleepers`) to wake it. Log lines go to stderr.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
 const ipc = @import("ipc.zig");
 const logm = @import("log.zig");
+const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
 const replay = @import("replay.zig");
@@ -33,7 +30,7 @@ fn onSignal(sig: c_int) callconv(.c) void {
 }
 
 fn say(line: []const u8) void {
-    var f = std.fs.File.stdout();
+    var f = std.fs.File.stderr();
     f.writeAll(line) catch {};
     f.writeAll("\n") catch {};
 }
@@ -64,9 +61,7 @@ const Server = struct {
     handle: []const u8,
     domain: []const u8,
     db_path: []const u8,
-    host_db: ?[]const u8,
     running: bool = false,
-    stopping: bool = false,
 
     // ------------------------------------------------------------ frames
 
@@ -142,6 +137,15 @@ const Server = struct {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
                 .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
             }
+        } else if (eq(u8, op, "programs")) {
+            // The programs this kernel pins (a genesis's `programs`): their records put, name → CID.
+            var m = cbor.MapBuilder.init(a);
+            for (programsm.program_names) |name| try m.put(name, cbor.cidv(try s.store.put(a, try programsm.program(a, name))));
+            s.reply(a, id, m.value(), null, null);
+        } else if (eq(u8, op, "head")) {
+            // A named head's record, read (the router reads the messagebox's `mailbox` head).
+            const name = Value.str(v) orelse return error.BadRequest;
+            s.reply(a, id, cbor.optCid(try s.store.headTree(a, name)) orelse .null, null, null);
         } else if (eq(u8, op, "genesis")) {
             s.reply(a, id, logm.genesisOf(a, s.store) catch .null, null, null);
         } else if (eq(u8, op, "boxes")) {
@@ -174,11 +178,7 @@ const Server = struct {
         } else if (eq(u8, op, "running")) {
             s.running = true;
             const ident = Value.str(v) orelse "";
-            if (s.host_db) |h| {
-                sayf("skein runtime {s} ({s}@{s}) · pid {d} · db {s} · rows {s}", .{ ident, s.handle, s.domain, std.c.getpid(), s.db_path, h });
-            } else {
-                sayf("skein runtime {s} ({s}@{s}) · pid {d} · db {s}", .{ ident, s.handle, s.domain, std.c.getpid(), s.db_path });
-            }
+            sayf("skein runtime {s} ({s}@{s}) · pid {d} · db {s}", .{ ident, s.handle, s.domain, std.c.getpid(), s.db_path });
         } else {
             s.reply(a, id, null, "unknown op", null);
         }
@@ -232,7 +232,7 @@ const Server = struct {
         m.put("domain", cbor.string(d)) catch {};
         return ctx(p).request(a, "resolve", m.value()) catch |err| blk: {
             var e = cbor.MapBuilder.init(a);
-            e.put("identityKey", cbor.string("")) catch {};
+            e.put("identityKey", .{ .bytes = "" }) catch {};
             e.put("error", cbor.string(if (err == error.PeerError) last_peer_error else @errorName(err))) catch {};
             break :blk e.value();
         };
@@ -255,12 +255,6 @@ const Server = struct {
     }
 };
 
-fn peerScript(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("SKEIN_KERNEL_PEER")) |p| return p;
-    const exe = try std.fs.selfExeDirPathAlloc(gpa);
-    return std.fs.path.join(gpa, &.{ exe, "..", "..", "peer", "peer.ts" });
-}
-
 pub fn main(gpa: std.mem.Allocator) !void {
     const home = std.posix.getenv("SKEIN_HOME") orelse try std.fmt.allocPrint(gpa, "{s}/.skein", .{std.posix.getenv("HOME") orelse "."});
     const db_path = std.posix.getenv("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
@@ -272,41 +266,19 @@ pub fn main(gpa: std.mem.Allocator) !void {
         const rest = handle_full[i + 1 ..];
         domain = rest[0 .. std.mem.indexOfScalar(u8, rest, '@') orelse rest.len];
     }
-    const host_db_path = std.posix.getenv("SKEIN_HOST_DB") orelse try std.fmt.allocPrint(gpa, "{s}/host.db", .{home});
-    const host_db: ?[]const u8 = if (std.fs.cwd().access(host_db_path, .{})) host_db_path else |_| null;
 
-    // Signals and the supervisor's channel.
+    // Signals.
     sig_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
     const sa = std.posix.Sigaction{ .handler = .{ .handler = onSignal }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
     const ign = std.posix.Sigaction{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(std.posix.SIG.PIPE, &ign, null);
-    var channel: ?std.posix.fd_t = null;
-    if (std.posix.getenv("NODE_CHANNEL_FD")) |s| {
-        if (std.fmt.parseInt(std.posix.fd_t, s, 10)) |fd| {
-            channel = fd;
-            _ = std.posix.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch {};
-        } else |_| {}
-    }
 
-    // The store, with the pinned modules installed (main.ts does this through skein-dev install).
+    // The store, with the pinned modules installed.
     if (std.fs.path.dirname(db_path)) |d| std.fs.cwd().makePath(d) catch {};
     const ss = SqliteStore.open(gpa, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
     replay.install(gpa, ss, say) catch |err| die("{s}@{s}: install: {s}", .{ handle, domain, @errorName(err) });
-    if (std.posix.getenv("SKEIN_MESSAGEBOX") == null) say("SKEIN_MESSAGEBOX unset: no message provider; nothing will be delivered");
-
-    // The peer process.
-    var env = try std.process.getEnvMap(gpa);
-    env.remove("NODE_CHANNEL_FD");
-    env.remove("NODE_CHANNEL_SERIALIZATION_MODE");
-    const script = try peerScript(gpa);
-    var child = std.process.Child.init(&.{ "node", "--experimental-strip-types", "--no-warnings", script }, gpa);
-    child.env_map = &env;
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Inherit;
-    child.spawn() catch |err| die("{s}@{s}: cannot start the peer ({s}): {s}", .{ handle, domain, script, @errorName(err) });
 
     const r = try runner.Runner.init(gpa);
     var server = Server{
@@ -314,13 +286,12 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .ss = ss,
         .store = ss.store(),
         .rt = undefined,
-        .to_peer = child.stdin.?.handle,
-        .from_peer = ipc.Reader.init(gpa, child.stdout.?.handle),
+        .to_peer = std.posix.STDOUT_FILENO,
+        .from_peer = ipc.Reader.init(gpa, std.posix.STDIN_FILENO),
         .idle_waiters = .init(gpa),
         .handle = handle,
         .domain = domain,
         .db_path = db_path,
-        .host_db = host_db,
     };
     server.rt = try scheduler.Runtime.init(gpa, server.store, r, .{
         .ctx = &server,
@@ -332,49 +303,23 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .say = Server.pSay,
     });
 
-    var fds_buf: [3]std.posix.pollfd = undefined;
-    var stop_deadline: ?i64 = null;
+    var fds_buf: [2]std.posix.pollfd = undefined;
     while (true) {
-        var n: usize = 0;
-        fds_buf[n] = .{ .fd = server.from_peer.fd, .events = std.posix.POLL.IN, .revents = 0 };
-        n += 1;
-        fds_buf[n] = .{ .fd = sig_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
-        n += 1;
-        if (channel) |c| {
-            fds_buf[n] = .{ .fd = c, .events = std.posix.POLL.IN, .revents = 0 };
-            n += 1;
-        }
-        const timeout: i32 = if (stop_deadline) |d| @intCast(@max(0, d - std.time.milliTimestamp())) else -1;
-        _ = try std.posix.poll(fds_buf[0..n], timeout);
-        if (stop_deadline) |d| if (std.time.milliTimestamp() >= d) break;
-
-        var reason: ?[]const u8 = null;
+        fds_buf[0] = .{ .fd = server.from_peer.fd, .events = std.posix.POLL.IN, .revents = 0 };
+        fds_buf[1] = .{ .fd = sig_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
+        _ = try std.posix.poll(&fds_buf, -1);
         if (fds_buf[1].revents != 0) {
             var b: [16]u8 = undefined;
             _ = std.posix.read(sig_pipe[0], &b) catch {};
-            reason = sig_name;
-        }
-        if (channel != null and fds_buf[2].revents != 0) {
-            var b: [4096]u8 = undefined;
-            const got = std.posix.read(channel.?, &b) catch 0;
-            if (got == 0 or fds_buf[2].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) {
-                reason = "supervisor gone";
-                channel = null;
-            }
-        }
-        if (reason) |why| if (!server.stopping) {
-            server.stopping = true;
-            sayf("{s}: stopping", .{why});
+            sayf("{s}: stopping", .{sig_name});
             var arena = std.heap.ArenaAllocator.init(gpa);
             defer arena.deinit();
             server.notify(arena.allocator(), "stop", null);
-            stop_deadline = std.time.milliTimestamp() + 10_000;
-        };
+            break;
+        }
         if (fds_buf[0].revents != 0) {
-            if (!try server.from_peer.fill()) {
-                if (!server.stopping) die("{s}@{s}: the peer process exited", .{ handle, domain });
-                break;
-            }
+            // EOF: the router closed the channel (an idle stop, or it is gone).
+            if (!try server.from_peer.fill()) break;
             while (true) {
                 var arena = std.heap.ArenaAllocator.init(gpa);
                 defer arena.deinit();
@@ -386,7 +331,6 @@ pub fn main(gpa: std.mem.Allocator) !void {
         }
     }
     server.rt.stop();
-    _ = child.kill() catch {};
     ss.close();
     std.process.exit(0);
 }

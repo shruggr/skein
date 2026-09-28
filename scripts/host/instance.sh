@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# LEGACY since the router (#33): an instance is `skein-host add <handle>` (its
+# identity derived from the router's master secret; no wallet-api) and
+# scripts/host/grants.sh. Kept for the pre-router layout.
 # One instance for `skein-host run`, idempotent: what up.sh does for the single
 # instance, for <handle>. Its own key and wallet-api (on the next free port from
 # SKEIN_INSTANCE_PORT, default 3401, kept in its directory and reused), its

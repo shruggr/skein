@@ -3,12 +3,14 @@
 // (mst.zig) whose nodes are blocks beside every other record, and one state
 // record naming their roots:
 //
-//   {kind: "skein-state", format: 1, log: <log tip>|null, cursor: <entries processed>,
+//   {kind: "skein-state", format: 2, log: <log tip>|null, cursor: <entries processed>,
 //    heads: <root>|null, index: {<map>: <root>|null, …}}
 //
 // `format` says what the records the maps reach look like: 1 = every step's
-// update carries its `fuel` (issue #5). A state record without it was written
-// before fuel; such a store (with a log) is refused for running (sqlite_store.zig).
+// update carries its `fuel` (issue #5); 2 = log entries are unsigned and
+// identity keys, hashes and signatures are byte strings in every record,
+// envelopes kept in the encoding they were made in (issue #33). A store with
+// a log in an older format is refused for running (sqlite_store.zig).
 //
 // The state record's CID is the instance's one mutable pointer (the backend
 // keeps it under the name "state"); everything else is an immutable block.
@@ -69,8 +71,8 @@ pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleep
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
-/// The store format this kernel writes (see the header): 1 = updates carry fuel (#5).
-pub const FORMAT: i64 = 1;
+/// The store format this kernel writes (see the header): 2 = unsigned entries, keys as bytes (#33).
+pub const FORMAT: i64 = 2;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).

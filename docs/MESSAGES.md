@@ -4,6 +4,108 @@ How messages enter and leave a skein instance, as settled with David on
 2026-09-25/26. This replaces the local-socket transport, the `hello` and
 `tick` messages, and the auth-stage idea of the first runtime build.
 
+## Since the router (issue #33)
+
+This section overrides what follows wherever they differ; the sections below
+describe the envelope, routing and the programs' protocols, which are
+unchanged, and the providers of the TypeScript runtime (frozen), which the
+router replaces.
+
+**The host is a router** (`src/host/router.ts`) and the instance is the
+messagebox host: `sendMessage`, `listMessages` and `acknowledgeMessage` are
+answered by the router under BRC-103/104 mutual auth, with the paths and
+shapes of the TypeScript messagebox (so the stock `@bsv/message-box-client`
+works unchanged), at the same URL (`http://127.0.0.1:8100/messagebox`). There
+is no poller and no delivery provider: a message to an instance is admitted
+when it arrives (screened, decrypted through the instance's oracle, admitted
+in the same request); an instance's emit to an identity on this host is
+delivered in process, and its outcome admitted back (`delivered`, or `failed`
+with the reason: `403 ERR_ACCOUNT_REQUIRED` for a recipient that is neither
+an instance nor a registered mailbox). Nothing waits for a receipt; down
+means down.
+
+**Entries are unsigned** (format 2, #9 revised): `{kind: "log", prev, n,
+time, genesis | envelope+box+body | wake | outcome | mail}`. The sender
+signed the message, `prev` fixes the order, the stamp is the router's clock
+at admission (#10); receipt order = log order = message order. The genesis
+has no `host`. Identity keys, hashes and signatures are byte strings in every
+record (`kernel-zig/src/log.zig`).
+
+### Envelope forms
+
+An envelope is kept **in the encoding it was made in** — a signature is over
+the encoding it was made in (BRC-169 §7.3), and a message's id is the CID of
+its signed part as kept:
+
+| form | on the wire | kept as | signature over | who sends it |
+|---|---|---|---|---|
+| §7.2 JSON | the JSON object (BRC-33 JSON body) | the JSON-shaped record (keys, hash, signature as hex text) | SHA-256 of RFC 8785 of the envelope without `content`, `signature` | JSON clients: the front end, `bin/skein`, `skein-host deploy` |
+| §7.3 dag-cbor | its dag-cbor bytes (BRC-231 body), or `{"dag-cbor": "<base64>"}` in a JSON body | the map, keys/hash/signature as bytes, `content` the BRC-78 bytes (dropped from the kept signed part) | SHA-256 of the dag-cbor of the map without `content`, `signature` | instances, the inference peer, BRC-231 clients |
+
+Both sign under `[2, "metanet handles envelope"]`, key `"1"`, counterparty
+`anyone`. A program answers a party in the form that party wrote to it in (a
+JSON client can read only JSON); everything else it sends is §7.3
+(`programs/envelope`). A request with `Content-Type: application/cbor` is
+answered in dag-cbor (BRC-231: `recipient`/`sender` as 33 bytes, `body` as
+bytes); a JSON listing shows a dag-cbor body as `{"dag-cbor": "<base64>"}`.
+
+### Mail for hosted identities
+
+`POST /account/register {username}` gives the caller a mailbox on this host,
+kept by an instance (`SKEIN_MAILBOX_HOST`, default the first enabled row;
+`skein-host mailboxes`). A message for it is admitted into the keeping
+instance as a `mail` entry, `{op: "put", recipient, box, sender, messageId,
+body, json?}`, which the **messagebox program** (`programs/messagebox`, Zig;
+the genesis routes the reserved box `:mail` to it) keeps under the head
+`mailbox`: `{kind: "mailbox", recipients: [{identity, mail}]}`, each
+recipient's `{kind: "mail", identity, messages: [{messageId, box, sender,
+body, json?, at}]}` in admission order. `listMessages` is a read of that
+record through the kernel (no entry); `acknowledgeMessage` admits `{op:
+"ack", recipient, messageIds}`. The mail is the instance's state: it outlives
+the router. BRC-104 auth stays in the router — one URL and one handshake for
+every instance, so its identity is the router's (a child of the master
+secret), and the program sees the authenticated sender as the entry's
+`sender`.
+
+### Session replies
+
+The interpretation in force (confirmed on #33, 2026-09-28): a **client's**
+reply to an agent, sent on the client's own BRC-104 session with this router,
+may go compact; an agent's messages to a client stay full envelopes for now
+(an instance has no BRC-104 session of its own: the router delivers its emits
+in process).
+
+On a BRC-104 session with the recipient's native messagebox (this router), a
+reply may be the **compact** §7.3 form — `{type: "reply", replyTo, body}`,
+dag-cbor, sent as a BRC-231 body — with `sender`, `recipient`, `host` and the
+envelope signature left out, because the session supplies them. The first
+message on a session, and anything for an external store-and-forward box,
+keeps the full envelope; a compact message must answer something the
+recipient holds (else `400`), and must travel as BRC-231 bytes, so the signed
+request carries the body itself. Its `body` is the plaintext dag-cbor (no
+BRC-78 layer: the session is with the recipient's host), so it is for
+transports that are private themselves (TLS; localhost in dev).
+
+It is a wire encoding, not a second kind of entry: it is admitted to the same
+entry shape, `{envelope, box, body}`. Its envelope record carries the proof
+instead of an envelope signature:
+
+```
+{type: "reply", replyTo, sender: {identityKey: bytes}, created, contentHash: bytes,
+ messageId: bytes,                                   SHA-256 of the signed payload: the message id
+ session: {payload, signature, nonce, yourNonce}}    the BRC-104 general message: the signed request and its signature and nonces
+```
+
+Authorship is the BRC-104 message signature over `payload` with the session
+nonces; the router verifies it at the session, and the record keeps it so the
+proof outlives the session (verifying it again needs the router's key: a
+BRC-104 signature is to its counterparty). The kernel checks the record's
+shape, that `messageId` is the payload's hash, that the payload carries the
+body, and the body against `contentHash`; `replyTo` is read from the record
+(a full envelope's is in its body), and the reply resumes the awaiting thread
+exactly as a full one does. For a kept mailbox, the compact message is kept
+as the dag-cbor of that record with its `body`.
+
 ## Topology
 
 A **skein host** is a BRC-169 ecosystem host: it operates a domain, the
@@ -18,8 +120,8 @@ there; the host hands the message to the instance that owns the handle; the
 instance routes by box; subscriptions take it from there.
 
 BRC-103/104 mutual authentication between clients and the messagebox is
-transport, handled by the host's delivery provider. It is not in the VM and
-not in the log.
+transport, terminated by the router (#33). It is not in the VM; a session
+reply's proof is recorded in the log ("Session replies", above).
 
 ## The envelope
 
@@ -192,7 +294,7 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   envelope and the plaintext body records; it reads the body and launches the
   next thread with arguments pointing at the body or a record derived from it
   — for `run`, the shell over the named tree. No decryption inside, no
-  attested call, no wallet.
+  recorded call, no wallet.
 - **A handler that errors** ends its thread `errored`, and that is all: no
   reply, no bounce. The sender learns nothing, as with any asynchronous
   message.
@@ -233,7 +335,7 @@ message {to: "@handle@domain", text}
 ```
 
 - **Addressing.** The loop resolves the handle to an identity key through the
-  host (`skein.Resolve`, the `resolve` import): an attested call — the host's
+  host (`skein.Resolve`, the `resolve` import): an recorded call — the host's
   `Resolver` answers, the **whole answer** is recorded, replay serves it. A
   handle that does not resolve is recorded as `{identityKey: "", error}` and
   becomes an error result. The emit is sealed to that key with the handle in
@@ -467,7 +569,7 @@ the plaintext, and an inbound message's ciphertext is not part of state;
 nothing depends on it. What the instance sends is different only in that the
 program produced it: its emit record carries the envelope complete,
 ciphertext and all, and the wallet's answers to the sign and encrypt calls
-are recorded like any attested call (the encryption's IV is the wallet's, so
+are recorded like any recorded call (the encryption's IV is the wallet's, so
 two live runs of one input differ there, and nowhere else; replay serves the
 recorded answer). Replay needs the log and nothing else — no keys, no wallet
 on the message path. Sharing state is sharing the log. (An

@@ -42,7 +42,11 @@ export interface World {
 }
 
 export async function load(store: Store): Promise<World> {
-  const genesis = await genesisOf(store).catch(() => undefined);
+  // Format 2 (#33) has no `host`; read the genesis record leniently (display only).
+  const genesis = await genesisOf(store).catch(async () => {
+    for await (const { entry } of store.log.entries()) return entry.genesis ? await store.get<Genesis>(entry.genesis) : undefined;
+    return undefined;
+  });
   const log = await readLog(store);
   const names = new Map<string, string>(Object.entries(genesis?.programs ?? {}).map(([n, c]) => [c.toString(), n]));
   const threads: Thread[] = [];
@@ -125,7 +129,7 @@ export function label(w: World, id: string | undefined): string | undefined {
   if (!g || !id) return undefined;
   if (id === g.owner) return "owner";
   if (id === g.identity) return "instance";
-  if (id === g.host) return "host";
+  if (g.host && id === g.host) return "host";
   return Object.entries(g.peers ?? {}).find(([, v]) => v === id)?.[0];
 }
 

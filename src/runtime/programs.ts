@@ -56,6 +56,15 @@ export const MODULES = {
   python: CID.parse("bafkreid5irpih6ehtwxvg2jf556f4bupz2p54c5n746i5r5spxpta2i42m"),
 } as const;
 
+/**
+ * This TypeScript runtime is frozen (#14) at the log format before #33: its
+ * handler programs are the ones built for it, kept as wasm/v1/<name>.wasm
+ * (the Zig kernel pins the format-2 builds, wasm/<name>.wasm, in
+ * kernel-zig/src/programs.zig). The file a module is read from.
+ */
+export const V1_HANDLERS: ReadonlySet<string> = new Set(["run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop"]);
+export const moduleFile = (name: string): string => V1_HANDLERS.has(name) ? `v1/${name}.wasm` : `${name}.wasm`;
+
 /** Support files the shell's programs read (raw blocks, like the modules), each committed as wasm/<name>. */
 export const FILES = {
   "python314.zip": CID.parse("bafkreigogn32gek27rar2k5pacj2knivlobbjc6tip25qki3hjr3d2v5ce"),

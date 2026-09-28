@@ -1,90 +1,184 @@
-// The process interface: `skein-kernel serve` started as `skein-host run`
-// starts bin/skein-runtime (supervisor.ts: stdio [ignore, pipe, pipe, ipc], the
-// row in the environment), with the real providers (peer/peer.ts) on an
-// in-process messagebox (equiv/serve-peer.ts). Checks the ready line, a run
-// and a chat answered end to end, a sleep woken by the tick, a stop mid-sleep
-// and the restart that finishes it, and a stop when the supervisor's channel
-// closes, and (issue #5) a shell that never ends running out of fuel under a
-// low fuelPerStep. Then the stores the Zig kernel wrote are replayed by the
-// Zig kernel twice over (equiv/replays.ts): identical to each other and to
-// the stores themselves, fuel included.
+// The process interface: `skein-kernel serve` as the router (src/host/router.ts,
+// issue #33) drives it — frames on its stdin/stdout, hydrated on demand,
+// stopped when idle — with the owner and the inference peer as ordinary
+// messagebox clients (@bsv/message-box-client over BRC-104) against the
+// router. Checks a run and a chat answered end to end, a sleep woken by the
+// router's waker, an idle stop mid-sleep and the hydration that finishes it,
+// and (issue #5) a shell that never ends running out of fuel under a low
+// fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
+// python) ending on their own under that limit, the clock being the entry
+// stamp + fuel × 1 ns. Then the stores the Zig kernel wrote are replayed by
+// the Zig kernel twice over (equiv/replays.ts): identical to each other and
+// to the stores themselves, fuel included.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/serve.ts
 
-import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs/promises";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateKey } from "@bsv/sdk";
+import { AuthFetch, PrivateKey } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
+import { open, seal, verify, type Envelope } from "../../src/envelope.ts";
+import { HostDb } from "../../src/host/instances.ts";
+import { messageBoxClient, type MessageBox } from "../../src/host/messagebox.ts";
+import { Router } from "../../src/host/router.ts";
+import { InferPeer } from "../../src/peers/infer.ts";
+import { bundlesOf } from "../../src/testkit.ts";
+import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const kernel = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
+const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-serve-"));
-const KEYS = { instance: "1111", owner: "2222", host: "3333", infer: "4444" };
-const pub = (h: string) => new PrivateKey(h, 16).toPublicKey().toString();
+const key = (h: string) => new PrivateKey(h, 16);
+const KEYS = { owner: "2222", infer: "4444" };
+const LIMIT = "1000000000"; // run-handler's reply step (~6·10^8, sealing in Go) fits; the spinning shell does not
 
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
-
-async function serve(scenario: string, stopBy: "signal" | "channel" = "signal", instance = "zigtest", extra: Record<string, string> = {}): Promise<{ code: number | null; lines: string[]; report: Record<string, unknown> }> {
-  rmSync(join(home, "scenario.json"), { force: true });
-  rmSync(join(home, "scenario.done"), { force: true });
-  const child = spawn(kernel, ["serve"], {
-    env: {
-      ...process.env, SKEIN_HOME: home, SKEIN_DB: join(home, `instances/${instance}/runtime.db`), SKEIN_HANDLE: "zigtest@localhost",
-      SKEIN_OWNER: pub(KEYS.owner), SKEIN_INFER: pub(KEYS.infer), SKEIN_IDENTITY: pub(KEYS.instance), SKEIN_HOST_DB: join(home, "none.db"),
-      SKEIN_KERNEL_PEER: join(here, "serve-peer.ts"), SKEIN_SCENARIO: scenario, SKEIN_SCENARIO_STOP: stopBy, SKEIN_MESSAGEBOX: "", ...extra,
-    },
-    stdio: ["ignore", "pipe", "pipe", "ipc"],
-  });
-  const lines: string[] = [];
-  let partial = "";
-  child.stdout!.on("data", (d: Buffer) => { const s = partial + d.toString(); const ls = s.split("\n"); partial = ls.pop()!; for (const l of ls) { lines.push(l); if (process.env.VERBOSE) process.stdout.write(`  | ${l}\n`); } });
-  child.stderr!.on("data", (d: Buffer) => process.stdout.write(`  ! ${d}`));
-  if (stopBy === "channel") {
-    const t0 = Date.now();
-    while (!existsSync(join(home, "scenario.done")) && Date.now() - t0 < 60_000) await new Promise((r) => setTimeout(r, 100));
-    child.disconnect(); // the supervisor is gone
-  }
-  const code = await new Promise<number | null>((r) => child.once("exit", (c) => r(c)));
-  const report = existsSync(join(home, "scenario.json")) ? JSON.parse(readFileSync(join(home, "scenario.json"), "utf8")) : {};
-  return { code, lines, report };
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_000): Promise<T> {
+  for (const end = Date.now() + ms; Date.now() < end;) { const v = await f(); if (v) return v; await sleep(50); }
+  throw new Error(`timed out waiting for ${what}`);
 }
+const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 
-const a = await serve("run");
-check(a.code === 0, `serve exits 0 on SIGTERM (exit ${a.code})`);
-check(a.lines.some((l) => l.startsWith(`skein runtime ${pub(KEYS.instance)} (zigtest@localhost) · pid `)), "the ready line the supervisor waits for");
-check(a.lines.some((l) => l.startsWith("installed brush ")), "the pinned modules installed into a new store");
-check(a.lines.some((l) => l.startsWith("genesis ")), "a new store gets its genesis from the peer (the host wallet signs it)");
-check(a.report.ok === true, `the scenario ran (${a.report.error ?? ""})`);
-check((a.report.first as { stdout?: string })?.stdout?.startsWith("hello\nREADME\nsrc\n") === true, "a run answered through the messagebox");
-check((a.report.chat as { text?: string })?.text === "It holds README and src.", "a chat answered: loop → infer peer → reply to the owner");
-check((a.report.second as { stdout?: string })?.stdout === "woke\n", "a sleep woken by the tick");
-check(a.lines.includes("SIGTERM: stopping"), "SIGTERM: stopping");
+const db = new HostDb(join(home, "host.db"));
+db.add("zigtest", { store: join(home, "instances/zigtest/runtime.db") });
+const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555") };
+const lines: string[] = [];
+const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
+const inferId = key(KEYS.infer).toPublicKey().toString();
+const make = (fuel?: string) => new Router({
+  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), authWallet: ephemeralWallet(),
+  owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
+});
+let router = make();
+let base = "";
+const listen = async (r: Router) => { const s = await r.listen(0); base = `http://127.0.0.1:${(s.address() as { port: number }).port}`; };
+await listen(router);
+await router.start();
+const zig = db.get("zigtest")!.identity!;
 
-const b = await serve("sleep");
-check(b.code === 0 && b.report.sleeping === true, "stopped mid-sleep");
-const c = await serve("resume");
-check(c.report.ok === true && (c.report.resumed as { stdout?: string })?.stdout?.startsWith("woke\n") === true, `the restart re-executes the sleeper, the tick wakes it, the reply comes (${c.report.error ?? ""})`);
-check(c.lines.some((l) => l.includes("re-executing from its origin")), "the sleeper re-executed from its origin on start");
+const register = async (w: ReturnType<typeof ephemeralWallet>, name: string) => (await new AuthFetch(w).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: name }) })).status;
+check(await register(owner, "david") === 200, "the owner registers a mailbox (kept by the instance)");
+check(await register(ephemeralWallet(key(KEYS.infer)), "infer") === 200, "the inference peer registers a mailbox");
+let box: MessageBox = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
+const sendTo = async (to: string, handle: string, b: string, body: unknown) => {
+  const env = await seal(owner, { recipient: { identityKey: to, handle, domain: "localhost" }, body: body instanceof Uint8Array ? body : dagCbor.encode(body), created: new Date().toISOString() });
+  await box.send({ recipient: to, box: b, body: env });
+};
+const inbox = async (b: string) => {
+  const out: Array<{ id: string; body: Record<string, unknown> }> = [];
+  for (const m of await box.list(b)) {
+    const e = (typeof m.body === "string" ? JSON.parse(m.body) : m.body) as Envelope;
+    if (!verify(e)) throw new Error("reply does not verify");
+    out.push({ id: m.messageId, body: dagCbor.decode((await open(owner, e)).body) as Record<string, unknown> });
+  }
+  return out;
+};
+let waited: { exitCode?: number; stdout?: string } | undefined;
+const results = (n: number, b = "results", ms = 30_000) => until(`${n} in ${b}`, async () => { const x = await inbox(b); return x.length >= n ? x : undefined; }, ms);
 
-const d = await serve("run", "channel");
-check(d.code === 0 && d.lines.includes("supervisor gone: stopping"), `stops when the supervisor's channel closes (exit ${d.code})`);
+try {
+  const dir = await fs.mkdtemp(join(tmpdir(), "skein-kz-serve-"));
+  await fs.mkdir(join(dir, "src"));
+  await fs.writeFile(join(dir, "src/a.txt"), "alpha\n");
+  await fs.writeFile(join(dir, "README"), "hello\n");
+  const { root, bundles } = await bundlesOf(dir);
+  for (const b of bundles) await sendTo(zig, "zigtest", "objects", b);
+  await sendTo(zig, "zigtest", "run", { cmd: "cat README; ls; echo $RANDOM", tree: root });
+  const [r1] = await results(1);
+  check(text(r1!.body.stdout).startsWith("hello\nREADME\nsrc\n"), "a run answered through the router");
+  await box.ack([r1!.id]);
 
-// Fuel (issue #5): a shell that never ends, under a low fuelPerStep, runs out; the step is recorded.
-const LIMIT = "1000000000"; // run-handler's reply step (~6·10^8, sealing in Go) fits; the spinning shell does not
-const f = await serve("fuel", "signal", "fueltest", { SKEIN_FUEL_PER_STEP: LIMIT });
-const spun = f.report.spun as { exitCode?: number; stdout?: string; stderr?: string; error?: string } | undefined;
-check(f.report.ok === true, `the fuel scenario ran (${f.report.error ?? ""})`);
-check(JSON.stringify(spun ?? {}).includes("fuel exhausted"), `a spinning shell runs out of fuel and run-handler says so (${JSON.stringify(spun ?? null).slice(0, 200)})`);
+  const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: ephemeralWallet(key(KEYS.infer)), box: messageBoxClient(ephemeralWallet(key(KEYS.infer)), `${base}/messagebox`, "skein-infer"), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
+    fetch: (async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "It holds README and src." } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
+    now: () => Date.now() });
+  await sendTo(zig, "zigtest", "chat", { text: "What is here?", tree: root });
+  const [a] = await until("the chat answer", async () => { await peer.poll(); const x = await inbox("chat"); return x.length ? x : undefined; });
+  check(a!.body.text === "It holds README and src.", "a chat answered: loop → infer peer (a messagebox client) → reply to the owner");
+  await box.ack([a!.id]);
+
+  // A sleep longer than the idle timeout: stopped mid-sleep, hydrated by the waker, re-executed, woken.
+  await sendTo(zig, "zigtest", "run", { cmd: "sleep 3; echo woke", tree: root });
+  await until("stopped mid-sleep", async () => !router.loaded.has("zigtest") && router.deadlines.has("zigtest") ? true : undefined, 15_000);
+  check(true, "the kernel is stopped while its thread sleeps; the router keeps the deadline");
+  const [r2] = await results(1);
+  check(text(r2!.body.stdout) === "woke\n", "the waker hydrates it at the deadline and the wake finishes the run");
+  check(lines.some((l) => l.includes("re-executing from its origin")), "the sleeper re-executed from its origin at hydration");
+  await box.ack([r2!.id]);
+
+  // The router itself restarts mid-sleep: the next router hydrates at start and learns the deadline.
+  await sendTo(zig, "zigtest", "run", { cmd: "sleep 2; echo again", tree: root });
+  await sleep(500);
+  await router.stop();
+  router = make();
+  await listen(router);
+  box = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
+  await router.start();
+  // The owner's mail is the instance's records (the messagebox program): kept across the restart.
+  const [r3] = await results(1, "results", 20_000);
+  check(text(r3!.body.stdout) === "again\n", "a router restart mid-sleep: hydrated at start, the wake still fires");
+  await box.ack([r3!.id]);
+  await router.stop();
+
+  // Fuel (issue #5): a shell that never ends, under a low fuelPerStep, runs out; the step is recorded.
+  db.add("fueltest", { store: join(home, "instances/fueltest/runtime.db") });
+  router = make(LIMIT);
+  await listen(router);
+  box = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
+  await router.start();
+  const ft = db.get("fueltest")!.identity!;
+  for (const b of bundles) await sendTo(ft, "fueltest", "objects", b);
+  await sendTo(ft, "fueltest", "run", { cmd: "echo start; while :; do :; done", tree: root });
+  const [s] = await results(1, "results", 60_000);
+  check(JSON.stringify(s!.body).includes("fuel exhausted"), `a spinning shell runs out of fuel and run-handler says so (${JSON.stringify(s!.body).slice(0, 160)})`);
+  await box.ack([s!.id]);
+
+  // The in-step clock (issue #38): entry stamp + fuel × 1 ns. A 50 ms busy-wait on the clock
+  // (qjs Date.now, python time.monotonic) ends on its own, under the same fuel limit.
+  db.add("clocktest", { store: join(home, "instances/clocktest/runtime.db") });
+  await router.hydrate("clocktest");
+  const ct = db.get("clocktest")!.identity!;
+  for (const b of bundles) await sendTo(ct, "clocktest", "objects", b);
+  const clockCmd = [
+    "qjs -e 'const t0 = Date.now(); let n = 0; while (Date.now() - t0 < 50) n++; console.log(\"qjs\", Date.now() - t0, n > 100)'",
+    "python3 -c 'import time\nt0 = time.monotonic()\nwhile time.monotonic() - t0 < 0.05: pass\nprint(\"python\", round((time.monotonic() - t0) * 1000))'",
+  ].join("; ");
+  await sendTo(ct, "clocktest", "run", { cmd: clockCmd, tree: root });
+  const [w] = await results(1, "results", 60_000);
+  waited = { exitCode: w!.body.exitCode as number, stdout: w!.body.stdout ? text(w!.body.stdout) : undefined };
+  await box.ack([w!.id]);
+  await router.stop();
+  await fs.rm(dir, { recursive: true, force: true });
+} catch (e) {
+  check(false, `the scenario ran: ${(e as Error).message}\n${lines.slice(-30).join("\n")}`);
+  await router.stop();
+}
+db.close();
+
 const fuelDb = join(home, "instances/fueltest/runtime.db");
 const fr = spawnSync(kernel, ["fuel", fuelDb], { encoding: "utf8" });
 check(fr.status === 0 && fr.stdout.split("\n").some((l) => l.startsWith(`${LIMIT}\t1\t`) && l.endsWith("\tshell")), "skein-kernel fuel: the shell's one step burnt exactly the limit");
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb], { encoding: "utf8" });
+// The in-step clock (issue #38), checked: the busy-waits ended 50 ms of fuel later.
+const CLOCK_LIMIT = Number(LIMIT);
+const [qjsLine, pyLine] = (waited?.stdout ?? "").trim().split("\n").map((l) => l.split(" "));
+const ms = (x?: string) => Number(x);
+check(waited?.exitCode === 0 && qjsLine?.[0] === "qjs" && ms(qjsLine[1]) >= 50 && ms(qjsLine[1]) < 60 && qjsLine[2] === "true", `a qjs busy-wait on Date.now for 50 ms ends, 50 ms of fuel later (${JSON.stringify(waited ?? null).slice(0, 200)})`);
+check(pyLine?.[0] === "python" && ms(pyLine[1]) >= 50 && ms(pyLine[1]) < 60, `a python busy-wait on time.monotonic for 50 ms ends (${waited?.stdout?.trim()})`);
+const clockDb = join(home, "instances/clocktest/runtime.db");
+const kr = spawnSync(kernel, ["fuel", clockDb], { encoding: "utf8" });
+const shellFuel = kr.stdout.split("\n").filter((l) => l.endsWith("\tshell")).map((l) => Number(l.split("\t")[0]));
+check(kr.status === 0 && shellFuel.length === 1 && shellFuel[0] >= 100_000_000 && shellFuel[0] < CLOCK_LIMIT, `the shell's step burnt at least the 2 × 50 ms it waited, under the limit (${shellFuel})`);
+
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb, clockDb], { encoding: "utf8" });
 process.stdout.write(r.stdout);
-check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 2, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
+check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 3, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `serve: ${failures} FAILED\n` : "serve: all ok\n");

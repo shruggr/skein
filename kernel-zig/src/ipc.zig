@@ -1,4 +1,4 @@
-// Frames between the kernel and its peer process (serve.zig, peer/peer.ts):
+// Frames between the kernel and the router (serve.zig, src/host/kernel.ts):
 // a 4-byte big-endian length, then one dag-cbor map. Blocking IO on file
 // descriptors; the reader buffers partial frames.
 const std = @import("std");

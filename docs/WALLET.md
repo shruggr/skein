@@ -185,7 +185,7 @@ handler: WALLET}`). What arrives is validated inside: headers by work and
 links, proofs against our headers; a status is provisional until its proof.
 
 **`http`** — one-shot calls are made from the VM and answered by the host,
-recorded as attested calls (request + response), so replay never touches
+recorded calls (request + response), so replay never touches
 the network. The kernel import is `http(request) → response`, dag-cbor
 `{method, url, headers?, body?}` → `{status, headers, body}`. This is the
 **pre-#15 shape**: #15 replaces the import with standard `wasi:http`,

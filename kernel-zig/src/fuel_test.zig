@@ -182,3 +182,119 @@ test "fuel: a segment starts a new step's count with a full budget" {
     try std.testing.expect((try m.run(&t.eng, &dummy, noop, &em, t.a, &meter)) == .returned);
     try std.testing.expectEqual(need, meter.used());
 }
+
+// ------------------------------------------------ the in-step clock on fuel (issue #38)
+
+const ThreadClock = @import("syscalls.zig").ThreadClock;
+
+/// f: call h.f; count to n; call h.f — two clock reads around the work.
+fn aroundWork(a: std.mem.Allocator, n: u16) ![]u8 {
+    std.debug.assert(n >= 64 and n < 8192);
+    const body = [_]u8{
+        0x03, 0x40, 0x20, 0, 0x41, 1, 0x6a, 0x22, 0, // loop; local.tee 0 (local.get 0 + 1)
+        0x41, @as(u8, @intCast(n & 0x7f)) | 0x80, @intCast(n >> 7), 0x48, 0x0d, 0, 0x0b, // i32.const n; lt_s; br_if 0; end
+        0x10, 0, // call h.f
+    };
+    return module(a, true, &.{ 1, 1, 0x7f }, &body);
+}
+
+/// Every import call reads the clock; with a child set, the first call from
+/// the top-level instance runs it (same meter, same clock) and reads again after.
+const Reader = struct {
+    t: *T,
+    clock: *ThreadClock,
+    meter: *engine.Meter,
+    child: ?*engine.Module = null,
+    reads: std.array_list.Managed(i128),
+    depth: u32 = 0,
+
+    fn call(ctx: *anyopaque, _: usize, _: []const i64, _: []u8) engine.Ret {
+        const r: *Reader = @ptrCast(@alignCast(ctx));
+        r.reads.append(r.clock.read()) catch return .abort;
+        if (r.child) |c| if (r.depth == 0 and r.reads.items.len == 1) {
+            r.depth += 1;
+            defer r.depth -= 1;
+            var em: []const u8 = "";
+            const out = c.run(&r.t.eng, r, call, &em, r.t.a, r.meter) catch return .abort;
+            if (out != .returned) return .abort;
+            r.reads.append(r.clock.read()) catch return .abort;
+        };
+        return .{ .value = 0 };
+    }
+};
+
+fn near(d: i128, want: u64) bool {
+    return d >= @as(i128, want) - 16 and d <= @as(i128, want) + 16;
+}
+
+test "clock: stamp + fuel × 1 ns; reads around work differ by the fuel it burnt; ties +1 ns" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = T{ .eng = try engine.Engine.init(), .a = arena.allocator() };
+    defer t.eng.deinit();
+    const loop = (try burn(&t, try t.compile(try counter(t.a, false, 4000)), 1 << 40)).used;
+    const m = try t.compile(try aroundWork(t.a, 4000));
+    const base: i128 = 1_790_000_000_000_000_000;
+
+    var meter = engine.Meter.init(1 << 40);
+    var clock = ThreadClock{ .meter = &meter };
+    clock.drive(base);
+    try std.testing.expectEqual(base, clock.read()); // nothing burnt yet: the stamp
+    try std.testing.expectEqual(base + 1, clock.read()); // no work between: the tie-break
+    var r = Reader{ .t = &t, .clock = &clock, .meter = &meter, .reads = .init(t.a) };
+    var em: []const u8 = "";
+    try std.testing.expect((try m.run(&t.eng, &r, Reader.call, &em, t.a, &meter)) == .returned);
+    const x = r.reads.items;
+    try std.testing.expectEqual(@as(usize, 2), x.len);
+    try std.testing.expect(x[0] > base + 1 and x[0] < base + 16); // the call's own few units
+    // Around the loop: its fuel, give or take the few instructions around it.
+    try std.testing.expect(x[1] - x[0] > 4000);
+    try std.testing.expect(near(x[1] - x[0], loop));
+    // Every read is the stamp plus the fuel used so far (or the tie-break).
+    try std.testing.expect(x[1] <= base + meter.used());
+
+    // The same run again reads the same times: deterministic.
+    var meter2 = engine.Meter.init(1 << 40);
+    var clock2 = ThreadClock{ .meter = &meter2 };
+    clock2.drive(base);
+    _ = clock2.read();
+    _ = clock2.read();
+    var r2 = Reader{ .t = &t, .clock = &clock2, .meter = &meter2, .reads = .init(t.a) };
+    try std.testing.expect((try m.run(&t.eng, &r2, Reader.call, &em, t.a, &meter2)) == .returned);
+    try std.testing.expectEqualSlices(i128, x, r2.reads.items);
+
+    // A new segment (a shell woken by a later entry): the new stamp, fuel counted afresh.
+    meter.segment();
+    clock.drive(base + 5_000_000_000);
+    try std.testing.expectEqual(base + 5_000_000_000, clock.read());
+    // A stamp behind the clock (the wall clock stepped back): never repeats, never goes back.
+    const before = clock.read();
+    clock.drive(base - 1_000_000);
+    try std.testing.expectEqual(before + 1, clock.read());
+}
+
+test "clock: nested instances share one clock, driven by the fuel of both" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var t = T{ .eng = try engine.Engine.init(), .a = arena.allocator() };
+    defer t.eng.deinit();
+    const parent = try t.compile(try aroundWork(t.a, 1000));
+    const child = try t.compile(try aroundWork(t.a, 3000));
+    const p_loop = (try burn(&t, try t.compile(try counter(t.a, false, 1000)), 1 << 40)).used;
+    const c_loop = (try burn(&t, try t.compile(try counter(t.a, false, 3000)), 1 << 40)).used;
+    const base: i128 = 1_000_000_000;
+
+    var meter = engine.Meter.init(1 << 40);
+    var clock = ThreadClock{ .meter = &meter };
+    clock.drive(base);
+    var r = Reader{ .t = &t, .clock = &clock, .meter = &meter, .child = child, .reads = .init(t.a) };
+    var em: []const u8 = "";
+    try std.testing.expect((try parent.run(&t.eng, &r, Reader.call, &em, t.a, &meter)) == .returned);
+    // The parent's first call, the child's two, the parent's read after the child, the parent's last.
+    const x = r.reads.items;
+    try std.testing.expectEqual(@as(usize, 5), x.len);
+    for (1..x.len) |i| try std.testing.expect(x[i] > x[i - 1]);
+    try std.testing.expect(near(x[2] - x[1], c_loop)); // the child's work moves the parent's clock
+    try std.testing.expect(near(x[4] - x[3], p_loop));
+    try std.testing.expect(near(x[4] - base, meter.used()));
+}

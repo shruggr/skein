@@ -2,7 +2,8 @@
 # The Zig kernel's checks: unit tests, the shell cases against the TS shell
 # (stdout/stderr/exit/tree carry no fuel), git in the VM, and replay
 # exactness Zig against Zig (issue #5: from fuel on the Zig kernel is its own
-# reference) over a generated corpus and over the stores `serve` writes.
+# reference) over a generated corpus (format 2, issue #33: written by the Zig
+# kernel as the router drives it) and over the stores `serve` writes.
 # Run from anywhere; needs node (26) and the repo's node_modules; for the
 # component cases (issue #34) wasm-tools and the preview1 adapter (README,
 # "Components"), else those are skipped with a note. Never
@@ -25,16 +26,16 @@ echo "== shell: host-go's cases"
 echo "== git in the VM: the verbs, the synthetic object directory (issue #2)"
 "${node[@]}" "$kz/equiv/git.ts" | grep -E "^(ok|FAIL)|failed$|all ok" || status=1 # pipefail: git.ts's status counts
 
-echo "== replay, Zig against Zig: a generated corpus (logs written by the TS runtime)"
+echo "== replay, Zig against Zig: a generated corpus (format 2, written by the Zig kernel through the router)"
 "${node[@]}" "$kz/equiv/corpus.ts" "$work/gen" > "$work/gen.list"
 mapfile -t gen < "$work/gen.list"
 "${node[@]}" "$kz/equiv/replays.ts" "${gen[@]}" || status=1
 
-echo "== a store written before fuel is refused for running"
-cp "${gen[0]}" "$work/old.db"
+echo "== a store in an older format (host-signed, before format 2) is refused for running"
+"${node[@]}" "$kz/equiv/old-store.ts" "$work/old.db"
 if echo '[]' | "$kz/zig-out/bin/skein-kernel" shell "$work/old.db" 2> "$work/old.err" > /dev/null; then
-  echo "FAIL a pre-fuel store with a log was opened"; status=1
-elif grep -q "before fuel metering" "$work/old.err"; then
+  echo "FAIL an older store with a log was opened"; status=1
+elif grep -q -e "before format 2" -e "before fuel metering" "$work/old.err"; then
   echo "ok   refused: $(head -1 "$work/old.err")"
 else
   echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1

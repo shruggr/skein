@@ -17,7 +17,6 @@ mkdir -p "$home"
 [ -z "${SKEIN_OWNER:-}" ] && [ -f "$home/owner.identity" ] && export SKEIN_OWNER="$(cat "$home/owner.identity")"
 [ -z "${SKEIN_INFER:-}" ] && [ -f "$home/infer.identity" ] && export SKEIN_INFER="$(cat "$home/infer.identity")"
 [ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"
-# SKEIN_KERNEL=zig: the Zig kernel (kernel-zig/, issue #32) in place of src/runtime, with the
-# same providers as peers; `SKEIN_KERNEL=zig skein-host run` runs every instance on it.
-if [ "${SKEIN_KERNEL:-}" = zig ]; then exec "$root/kernel-zig/zig-out/bin/skein-kernel" serve "$@"; fi
+# Legacy: the frozen TypeScript runtime as a standalone process. Instances run on the Zig
+# kernel, which `skein-host run` (the router, issue #33) starts on demand.
 exec node --experimental-strip-types --no-warnings "$root/src/host/main.ts" "$@"

@@ -6,6 +6,7 @@
 //
 //   probe fs        the filesystem, stdio, args, env, clock and random
 //   probe spin N    N iterations of arithmetic (fuel)
+//   probe clock N   the clock's advance over N iterations (on fuel, #38)
 //   probe forever   never ends (out of fuel)
 //   probe exit N    exit status N
 #include <dirent.h>
@@ -109,6 +110,18 @@ int main(int argc, char **argv) {
     volatile unsigned long s = 0;
     for (long i = 0; i < n; i++) s = s * 31 + (unsigned long)i;
     printf("spin %ld: %lu\n", n, s);
+    return 0;
+  }
+  if (argc > 2 && !strcmp(argv[1], "clock")) {
+    // Two clock reads around N iterations: on a clock that runs on fuel (#38) they differ by the loop's fuel.
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    long n = atol(argv[2]);
+    volatile unsigned long s = 0;
+    for (long i = 0; i < n; i++) s = s * 31 + (unsigned long)i;
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    long long d = (long long)(b.tv_sec - a.tv_sec) * 1000000000LL + (b.tv_nsec - a.tv_nsec);
+    printf("%lld\n", d);
     return 0;
   }
   if (argc > 1 && !strcmp(argv[1], "forever")) {

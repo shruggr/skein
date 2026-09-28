@@ -118,7 +118,7 @@ type args struct {
 	Envelope skein.CID `cbor:"envelope"`
 	Body     skein.CID `cbor:"body"`
 	Box      string    `cbor:"box"`
-	Sender   string    `cbor:"sender"`
+	Sender   skein.Key `cbor:"sender"`
 }
 
 // chatBody is every `chat`, both directions: a new conversation (no replyTo)
@@ -515,7 +515,7 @@ func (l *loop) stream(r record) error {
 	if err != nil {
 		return err
 	}
-	_, err = envelope.Send(l.a.Sender, n.Handle, n.Domain, "turn", r)
+	_, err = envelope.Send(l.a.Sender.Hex(), n.Handle, n.Domain, "turn", r)
 	return err
 }
 
@@ -750,7 +750,7 @@ func (l *loop) latestFrom(key string) (skein.CID, error) {
 		if err := skein.Decode(raw, &env); err != nil {
 			return nil, fmt.Errorf("envelope record: %w", err)
 		}
-		if env.Sender.IdentityKey == key {
+		if env.Sender.IdentityKey.Hex() == key {
 			latest = r.Of
 		}
 	}
@@ -835,7 +835,7 @@ func (l *loop) launch(cmd string) error {
 // answered — or, the first time and when `all`, the whole conversation.
 // `model` and `thinking`: the latest user turn's, else the genesis defaults.
 func (l *loop) infer(all bool) error {
-	peer := l.step.Peers["infer"]
+	peer := l.step.Peers["infer"].Hex()
 	if peer == "" {
 		return l.answer("no inference peer is configured (genesis peers.infer)")
 	}
@@ -888,7 +888,7 @@ func (l *loop) infer(all bool) error {
 // envelope in this thread (the chat that opened the turn, or their reply to a
 // message) — then rest on their reply, which continues the conversation.
 func (l *loop) answer(text string) error {
-	replyTo, err := l.latestFrom(l.a.Sender)
+	replyTo, err := l.latestFrom(l.a.Sender.Hex())
 	if err != nil {
 		return err
 	}
@@ -899,7 +899,7 @@ func (l *loop) answer(text string) error {
 	if err != nil {
 		return err
 	}
-	c, err := envelope.Send(l.a.Sender, n.Handle, n.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
+	c, err := envelope.Send(l.a.Sender.Hex(), n.Handle, n.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
 	if err != nil {
 		return err
 	}

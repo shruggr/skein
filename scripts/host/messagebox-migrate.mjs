@@ -1,3 +1,4 @@
+// LEGACY since the router (#33): only for the `1sat serve` messagebox (messagebox.sh).
 // `1sat serve` (0.0.121) mounts @bopen-io/messagebox-server's routes but never
 // runs its knex migrations, so the first sendMessage fails with SQLITE_ERROR
 // (no `messages` table). Apply them to the host's messagebox sqlite file using

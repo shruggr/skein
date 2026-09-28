@@ -128,3 +128,48 @@ test "components: fuel is metered per store, the same every run, and runs out at
         try std.testing.expectEqual(f1.fuel, f2.fuel);
     }
 }
+
+/// A run whose clock is the step's (issue #38): the entry's stamp plus the step's fuel, 1 ns each.
+const OnFuel = struct {
+    clock: syscalls.ThreadClock,
+    mix: syscalls.SplitMix = .{ .s = 7 },
+    fn read(ctx: *anyopaque, _: u32) u64 {
+        const f: *OnFuel = @ptrCast(@alignCast(ctx));
+        return @intCast(f.clock.read());
+    }
+    fn random(ctx: *anyopaque, out: []u8) void {
+        const f: *OnFuel = @ptrCast(@alignCast(ctx));
+        f.mix.fill(out);
+    }
+};
+
+fn clockRun(a: std.mem.Allocator, r: *runner.Runner, c: *runner.Compiled, n: []const u8) !i64 {
+    const empty = (try tree.hashTree(a, &.{})).cid;
+    const v = try vfsm.Vfs.init(a, null, empty);
+    const stdout = try wasi.Pipe.init(a, 1 << 20, "");
+    const stdio = [3]*wasi.Desc{ try wasi.nullDesc(a, v), try wasi.pipeDesc(a, v, stdout, true), try wasi.nullDesc(a, v) };
+    var meter = engine.Meter.init(1 << 40);
+    var on = OnFuel{ .clock = .{ .base = 1_700_000_000_000_000_000, .meter = &meter } };
+    var st = wasi.RunState{ .meter = &meter };
+    var svc = wasi.Services{ .ctx = &on, .state = &st, .clock = OnFuel.read, .random = OnFuel.random };
+    _ = try r.runModule(a, c, v, &.{ "probe", "clock", n }, &.{}, stdio, &svc, null);
+    return std.fmt.parseInt(i64, std.mem.trim(u8, try stdout.drain(a), "\n"), 10);
+}
+
+test "components: the in-step clock runs on the component's fuel as on a module's (issue #38)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try runner.Runner.init(std.heap.page_allocator);
+    var growth: [builds.len]i64 = undefined;
+    for (builds, 0..) |b, i| {
+        const c = try load(a, r, b);
+        const d1 = try clockRun(a, r, c, "10000");
+        const d2 = try clockRun(a, r, c, "20000");
+        try std.testing.expect(d1 > 10000); // the loop's fuel, in ns
+        try std.testing.expectEqual(d1, try clockRun(a, r, c, "10000")); // deterministic
+        growth[i] = d2 - d1;
+    }
+    // The extra 10000 iterations advance the clock by the same fuel on every ABI.
+    for (growth[1..]) |g| try std.testing.expectEqual(growth[0], g);
+}

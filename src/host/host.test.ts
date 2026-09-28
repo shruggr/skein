@@ -3,6 +3,7 @@
 // the open `chat` subscription); two instances started from two rows, sharing
 // a messagebox hub and the host wallet and nothing else.
 
+import { Oracle } from "./oracle.ts";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -76,14 +77,25 @@ test("host.db: `knows` — a list of handles, [\"*\"] for everyone, null for nob
 test("skein-host: add / list / disable / enable / remove through the CLI, store defaulting under $SKEIN_HOME", async (t) => {
   const home = await tmp(t);
   const out: string[] = [], err: string[] = [];
-  const cli = (...argv: string[]) => main(argv, { vars: { SKEIN_HOME: home }, out: (l) => out.push(l), err: (l) => err.push(l) });
+  const master = "11".repeat(32);
+  const cli = (...argv: string[]) => main(argv, { vars: { SKEIN_HOME: home, SKEIN_MASTER_KEY: master }, out: (l) => out.push(l), err: (l) => err.push(l) });
   assert.equal(await cli("add", "martha", "--wallet-url", "http://127.0.0.1:3401"), 0);
+  const derived = new Oracle(PrivateKey.fromHex(master)).identity("martha");
   assert.equal(await cli("add", "martha", "--tree", "bafytree"), 0, "again: an update");
   assert.equal(await cli("disable", "martha"), 0);
   out.length = 0;
   assert.equal(await cli("list"), 0);
-  assert.deepEqual(out, [["martha@localhost", "disabled", "-", "http://127.0.0.1:3401", join(home, "instances/martha/runtime.db"), "bafytree"].join("\t")]);
+  assert.deepEqual(out, [["martha@localhost", "disabled", derived, "http://127.0.0.1:3401", join(home, "instances/martha/runtime.db"), "bafytree"].join("\t")]);
   assert.equal(await cli("enable", "martha"), 0);
+  assert.equal(await cli("add", "martha", "--identity", `02${"a".repeat(64)}`), 0);
+  assert.equal(await cli("add", "martha", "--tree", "bafy2"), 0);
+  out.length = 0;
+  await cli("list");
+  assert.equal(out[0]!.split("\t")[2], `02${"a".repeat(64)}`, "a recorded identity is kept");
+  assert.equal(await cli("add", "martha", "--derive"), 0);
+  out.length = 0;
+  await cli("list");
+  assert.equal(out[0]!.split("\t")[2], derived, "--derive: the oracle's again");
   assert.equal(await cli("remove", "martha"), 0);
   assert.equal(await cli("remove", "martha"), 1);
   assert.equal(await cli("add"), 2);

@@ -19,7 +19,7 @@ import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
 import { copyLog, readLog } from "../runtime/log.ts";
 import { memoryStore } from "../runtime/memory.ts";
-import { FILES, MODULES, rawCid } from "../runtime/programs.ts";
+import { FILES, MODULES, moduleFile, rawCid } from "../runtime/programs.ts";
 import { Runtime, witnessFrom } from "../runtime/scheduler.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
@@ -78,9 +78,9 @@ function jsonify(v: unknown): unknown {
 /** Put the shell's wasm modules into the store under their pinned CIDs. */
 export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Promise<string[]> {
   const out: string[] = [];
-  const all = [...Object.entries(MODULES).map(([n, c]) => [`${n}.wasm`, c] as const), ...Object.entries(FILES)];
+  const all = [...Object.entries(MODULES).map(([n, c]) => [moduleFile(n), c] as const), ...Object.entries(FILES)];
   for (const [file, cid] of all) {
-    const name = file.replace(/\.wasm$/, "");
+    const name = file.replace(/^v1\//, "").replace(/\.wasm$/, "");
     if (await store.has(cid)) continue;
     const bytes = await readFile(join(WASM_DIR, file));
     if (!rawCid(bytes).equals(cid)) throw new Error(`wasm/${file} does not match the pinned ${fmt(cid)} (rebuilt? update src/runtime/programs.ts)`);
