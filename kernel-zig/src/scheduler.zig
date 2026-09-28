@@ -831,6 +831,7 @@ pub const Runtime = struct {
             .children = .init(a),
         };
         st.clock.drive(time.ns());
+        st.clock.meter = meter; // the in-step clock runs on the step's fuel (issue #38)
 
         var msg: []const u8 = "";
         const mod = rt.runner.load(rt.store, a, programs.wasmOf(prog) orelse return rt.failf(a, "not a wasm program", .{}), &msg) catch |err| switch (err) {
@@ -1196,6 +1197,7 @@ pub const Runtime = struct {
         const launch = try rt.getOrNotFound(a, ic);
         if (!logm.isLogEntry(launch)) return rt.failf(a, "thread {s}: input is not a log entry", .{short(a, origin)});
         var t = ShellRun{ .rt = rt, .a = a, .origin = origin, .o = o, .history = history, .wake = wake, .meter = engine.Meter.init(fuelPerStep(rt.genesis)) };
+        t.clock.meter = &t.meter; // one clock for the shell and its children, on their fuel (issue #38)
         t.drive(.{ .cid = ic, .e = launch });
         if (!rt.live.contains(origin)) try rt.live.put(try rt.gpa.dupe(u8, origin), {});
         try rt.shellBody(&t);
