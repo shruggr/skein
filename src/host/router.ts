@@ -40,7 +40,8 @@ import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { AuthServer, send, type AppResponse, type AuthedRequest, type Session } from "./auth.ts";
 import { now as clockNow } from "./entry.ts";
-import { admit2, keyBytes, keyHex, writeGenesis } from "./genesis.ts";
+import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
+import { admit2, keyBytes, keyHex, type Genesis2Config } from "./genesis.ts";
 import { hostResolver } from "./host.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
@@ -232,13 +233,9 @@ export class Router {
     kernel.outbox = { send: (out: Outbound) => this.route(handle, identity, out) };
     try {
       if (!(await kernel.store.log.tip())) {
-        if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-        const e = await writeGenesis(kernel, {
-          identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-          defaults: this.o.fuelPerStep || this.o.genesis?.defaults ? { ...DEFAULTS, ...this.o.genesis?.defaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) } : undefined,
-          subscriptions: this.o.genesis?.subscriptions,
-        }, this.now());
-        this.say(handle, `genesis ${e}`);
+        // No tree was loaded into this store (`skein-host add --boot/--packet` does that): the stock system, through the same loader.
+        const b = await boot(kernel, { kind: "code" }, this.genesisConfig(row, identity), this.now());
+        this.say(handle, `genesis ${b.entry}`);
       }
       const g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a format-2 genesis (issue #33): start a new store (re-genesis)");
@@ -255,6 +252,33 @@ export class Router {
     this.loaded.set(handle, l);
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
+  }
+
+  /**
+   * Boot a row's empty store from a system tree or a checkpoint (issue #4,
+   * boot.ts) before its first hydration; the row's identity is its oracle's.
+   */
+  async bootRow(handle: string, src: BootSource): Promise<Booted> {
+    const row = this.o.db.get(handle);
+    if (!row) throw new Error(`no instance ${handle}`);
+    if (this.loaded.has(handle)) throw new Error(`${handle} is loaded: boot only an empty store`);
+    const identity = await rootIdentity(await this.o.walletFor(row));
+    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : this.genesisConfig(row, identity, src.kind === "code");
+    const b = await bootStore({ db: row.store, handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
+    this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
+    return b;
+  }
+
+  /** What this host brings to a new instance's genesis (boot.ts): the owner, the inference peer, their names, the host's defaults. */
+  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, code = true): Genesis2Config {
+    if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
+    const hostDefaults = { ...this.o.genesis?.defaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
+    return {
+      identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
+      // Code genesis takes DEFAULTS under the host's; a system tree's own config sits between (genesis.ts resolveSystem).
+      defaults: Object.keys(hostDefaults).length ? (code ? { ...DEFAULTS, ...hostDefaults } : hostDefaults) : undefined,
+      subscriptions: code ? this.o.genesis?.subscriptions : undefined,
+    };
   }
 
   /** The kernel counts as busy until it has processed what was just admitted (its `idle` answers after the drain). */

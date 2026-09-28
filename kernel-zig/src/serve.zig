@@ -132,6 +132,10 @@ const Server = struct {
             s.reply(a, id, (try s.store.get(a, c)) orelse .null, null, null);
         } else if (eq(u8, op, "put")) {
             s.reply(a, id, cbor.cidv(try s.store.put(a, v)), null, null);
+        } else if (eq(u8, op, "has")) {
+            // Any block, whatever its codec (`get` decodes dag-cbor).
+            const c = Value.cidOf(v) orelse return error.BadRequest;
+            s.reply(a, id, .{ .bool = try s.store.has(c) }, null, null);
         } else if (eq(u8, op, "putblock")) {
             // The loader's pre-fill (issue #4): a block minted elsewhere (git-raw, raw,
             // dag-cbor, bitcoin-tx/-block), hash-checked against its CID before it is kept.

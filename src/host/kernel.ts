@@ -2,7 +2,7 @@
 // process spoken to over its stdin/stdout — length-prefixed dag-cbor frames
 // (kernel-zig/src/ipc.zig). This is the kernel's whole surface:
 //
-//   the router asks      tip · get · put · append · genesis · boxes · byEnvelope ·
+//   the router asks      tip · get · put · has · putblock · restore · append · genesis · boxes · byEnvelope ·
 //                        admit (the one call in) · idle · start · running
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle) ·
 //                        resolve (handle, domain → a Resolution)
@@ -202,6 +202,12 @@ export class Kernel {
     },
   } as unknown as Store;
 
+  /** Any block, whatever its codec. */
+  async hasBlock(cid: CID): Promise<boolean> { return await this.call("has", cid) === true; }
+  /** A block minted elsewhere (git-raw, raw, dag-cbor, bitcoin-*), hash-checked by the kernel (#4: the loader's pre-fill). */
+  async putBlock(cid: CID, bytes: Uint8Array): Promise<void> { await this.call("putblock", { cid, bytes }); }
+  /** Adopt a checkpoint's state record (its blocks put first) as this empty store's state (#4). */
+  async restore(state: CID): Promise<void> { await this.call("restore", state); }
   sleepersDue(): Sleeper[] { return this.sleepers; }
   async boxes(): Promise<string[]> { return await this.call("boxes") as string[]; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
