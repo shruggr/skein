@@ -135,7 +135,7 @@ fetch, clone, run-on-machine) — are one message out and one signed message
 back, recorded and replayed. Time and random are pure: they derive from the
 stamp the runtime wrote on the current log entry.
 Request/response *is* attestation; peers all look the same from inside. A
-program waiting on an attested call is an ordinary thread at rest: the
+program waiting on an recorded call is an ordinary thread at rest: the
 suspended instance is its transient handle, the scheduler wakes it when the
 reply arrives, and a restart re-executes it from the log. Pipeline stages are
 threads too; their records are recomputable cache. Which syscall is bound to

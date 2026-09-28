@@ -20,7 +20,7 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 
 ```
 src/runtime/     the machine — no disk, network, clock, randomness, messagebox or private key
-  scheduler.ts     the log consumer: admit, route by subscription, step programs and the shell, attested calls, replay
+  scheduler.ts     the log consumer: admit, route by subscription, step programs and the shell, recorded calls, replay
   log.ts           the input log: host-signed entries (genesis | envelope | wake | outcome), verified at admission
   program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
   programs.ts      the program records (shell, run-handler, objects-handler, head-handler, subscribe-handler, loop) and pinned module CIDs

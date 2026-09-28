@@ -89,7 +89,7 @@ is recorded and replayed like any other field.
   (wasmtime's out-of-fuel trap, in whichever instance) the step ends
   `errored` with `error: {kind: "cant-do", message: "fuel exhausted"}` and
   `fuel` = the limit — stable, never retried. An errored step's update
-  lists the attested calls it made before failing, so a replay has their
+  lists the recorded calls it made before failing, so a replay has their
   answers. (wasmtime checks fuel at function entries and loop headers; a run
   may overshoot its budget by the few instructions after its last check,
   in which case its `fuel` is the limit without a trap.)
