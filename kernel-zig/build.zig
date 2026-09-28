@@ -64,6 +64,8 @@ fn webKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .target = target,
         .optimize = optimize,
         .single_threaded = true,
+        // No DWARF in what the page downloads (4.2 → 2.7 MB); panics still report their message.
+        .strip = true,
     });
     const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod });
     exe.entry = .disabled;

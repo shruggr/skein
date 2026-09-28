@@ -52,6 +52,8 @@ else
   echo "== browser (issue #35): the corpus replayed by the wasm kernel in headless Chrome, into IndexedDB"
   (cd "$kz" && mise exec -- zig build web)
   "${node[@]}" "$kz/equiv/browser.ts" "${gen[@]}" || status=1
+  echo "== browser live (issue #35): an instance in Chrome chats an agent on a scratch router; the reply admitted; its store replayed natively"
+  "${node[@]}" "$kz/equiv/browser-live.ts" || status=1
 fi
 
 echo "== a store in an older format (host-signed, before format 2) is refused for running"

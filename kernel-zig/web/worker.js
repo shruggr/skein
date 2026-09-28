@@ -11,7 +11,7 @@
 // Messages out: {notify: op, v} (send, sleepers, onSleep, say, panic) and
 // {request: op, v} (answered through the shared buffer).
 
-import { Kernel, MemoryStore, readBundle, replayInto, writeBundle } from "./kernel.js";
+import { codecOf, Kernel, MemoryStore, readBundle, replayInto, writeBundle } from "./kernel.js";
 import { IdbStore } from "./store.js";
 
 const dec = new TextDecoder();
@@ -44,8 +44,15 @@ const methods = {
   openMemory(id, bundle, readOnly = false) { stores[id] = new MemoryStore({ readOnly }); if (bundle) readBundle(new Uint8Array(bundle), stores[id]); return stores[id].blocks.size; },
   async removeIdb(name) { await IdbStore.remove(name); return true; },
   closeStore(id) { stores[id]?.close?.(); delete stores[id]; return true; },
-  /** The store as a bundle (to write it out: equiv). */
-  async bundle(id) { await stores[id].flushed?.(); return writeBundle(stores[id]); },
+  /** The store as a bundle (to write it out: equiv); `records` leaves out the raw blocks (the modules, which a replay installs). */
+  async bundle(id, records = false) {
+    await stores[id].flushed?.();
+    if (!records) return writeBundle(stores[id]);
+    const s = new MemoryStore();
+    for (const [cid, bytes] of stores[id].entries()) if (codecOf(cid) !== 0x55) s.blocks.set(String.fromCharCode(...cid), bytes);
+    for (const [n, c] of stores[id].pointers) s.pointers.set(n, c);
+    return writeBundle(s);
+  },
   open(id) { kernel.open(id); return true; },
   modules() { return kernel.modulesList(); },
   hasBlock(id, cid) { return stores[id].hasBlock(cid); },
