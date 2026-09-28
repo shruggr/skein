@@ -9,7 +9,8 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
@@ -22,7 +23,10 @@ import { openStore } from "../../src/runtime/sqlite.ts";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.argv[2] ?? join(here, "../zig-out/bin/skein-kernel");
 
-interface Case { cmd: string; tree: string; cwd?: string; env?: Array<[string, string]>; stdin?: string; time?: number; seed?: number }
+// statusAbove1: the case prints a tool's exit status above 1 — which the
+// preview1 adapter cannot carry (wasi:cli/exit takes ok/err: 0 or 1), so as
+// components those digits may differ and nothing else may (issue #34).
+interface Case { cmd: string; tree: string; cwd?: string; env?: Array<[string, string]>; stdin?: string; time?: number; seed?: number; statusAbove1?: boolean }
 interface Out { exitCode?: number; stdout?: string; stderr?: string; tree?: string; error?: string }
 
 const dir = await fs.mkdtemp(join(tmpdir(), "skein-kz-shell-"));
@@ -43,6 +47,7 @@ await fs.writeFile(join(tree, "big.bin"), big);
 const bigTree = (await scan(store, tree)).toString();
 
 const c = (cmd: string): Case => ({ cmd, tree: tr });
+const hi = (k: Case): Case => ({ ...k, statusAbove1: true });
 const b64 = (s: string) => Buffer.from(s).toString("base64");
 const det = "date; echo $RANDOM $RANDOM; ls -la; head -c 16 /dev/stdin | od -c; sleep 1; date +%s > t; mktemp -u XXXXXX";
 const cases: Case[] = [
@@ -62,7 +67,7 @@ const cases: Case[] = [
   { cmd: "date -u +%FT%T", tree: tr, time: Date.UTC(2026, 8, 25, 12, 0, 0) },
   { cmd: "echo $RANDOM", tree: tr, seed: 7 }, c("echo $RANDOM"),
   c("cat /etc/passwd"), c("cd /; cd ..; cd ..; ls"), c("ls ../../.."),
-  c("echo gone > /dev/null; ls /dev 2>&1; echo $?"),
+  hi(c("echo gone > /dev/null; ls /dev 2>&1; echo $?")),
   { cmd: "pwd; ls; cat ../a.txt | head -1; /bin/true 2>/dev/null; echo $FOO", tree: tr, cwd: "/sub", env: [["FOO", "bar"]] },
   { cmd: "ls", tree: tr, cwd: "/nope" },
   c("printf '#!/bin/sh\\necho script $1\\n' > s.sh && bash s.sh one && ./s.sh two && sh -c 'echo nested'"),
@@ -132,11 +137,11 @@ function scriptCases(): Case[] {
   const js1 = put("t.js", js), py1 = put("t.py", py), e1 = put("e.py", ent);
   return [
     { cmd: `${js1} && ./t.js a b <<< piped; echo "exit=$?"; node t.js c; echo "exit=$?"; cat out/js.txt`, tree: tr },
-    { cmd: `${py1} && echo in | ./t.py a b; echo "exit=$?"; python t.py c < /dev/null; echo "exit=$?"; cat out/py.json`, tree: tr },
-    { cmd: `qjs -e 'import("qjs:std").then((std) => { console.log(scriptArgs, std.getenv("HOME")); std.exit(4) })'; echo "exit=$?"; qjs -e 'throw new Error("boom")'; echo "exit=$?"`, tree: tr },
+    hi({ cmd: `${py1} && echo in | ./t.py a b; echo "exit=$?"; python t.py c < /dev/null; echo "exit=$?"; cat out/py.json`, tree: tr }),
+    hi({ cmd: `qjs -e 'import("qjs:std").then((std) => { console.log(scriptArgs, std.getenv("HOME")); std.exit(4) })'; echo "exit=$?"; qjs -e 'throw new Error("boom")'; echo "exit=$?"`, tree: tr }),
     { cmd: `${e1} && python3 e.py; node -e 'console.log(Date.now(), new Date().toISOString(), Math.random())'`, tree: tr, time: Date.UTC(2023, 10, 14, 22, 13, 20), seed: 7 },
     { cmd: `node -e 'setTimeout((x) => console.log("later", x, Date.now()), 1500, 1); console.log("now", Date.now())'; python3 -c 'import time; time.sleep(2); print(time.time())'`, tree: tr },
-    c(`python3 -c 'import sys; print(sys.prefix, sys.path[1:3])'; python3 -c 'open("/opt/skein/python/lib/python314.zip", "ab")'; echo "exit=$?"; ls /opt; echo "exit=$?"`),
+    hi(c(`python3 -c 'import sys; print(sys.prefix, sys.path[1:3])'; python3 -c 'open("/opt/skein/python/lib/python314.zip", "ab")'; echo "exit=$?"; ls /opt; echo "exit=$?"`)),
     c(`node -e 'require("child_process")'; echo "exit=$?"; python3 -c 'import subprocess; subprocess.run(["ls"])' 2>&1 | tail -1`),
   ];
 }
@@ -168,6 +173,45 @@ const zigMs = Date.now() - t0;
 if (z.status !== 0) { process.stderr.write(z.stderr); throw new Error(`skein-kernel shell exited ${z.status}`); }
 const zig = JSON.parse(z.stdout.toString()) as Out[];
 
+// Issue #34: the same cases with every tool that is a plain preview1 program
+// (coreutils and the extras; not brush, which imports skein's spawn) turned
+// into a WASI 0.2 component through the preview1 adapter and run as one by the
+// kernel: both ABIs must give identical results. Needs wasm-tools and the
+// adapter (kernel-zig/README.md, "Components"); skipped with a note if absent.
+const adapter = process.env.SKEIN_WASI_ADAPTER ?? join(homedir(), ".local/wasi-adapter-v49.0.1/wasi_snapshot_preview1.command.wasm");
+const wasmTools = process.env.WASM_TOOLS ?? "wasm-tools";
+let compOk = true;
+const haveTools = !process.env.SKEIN_EQUIV_NO_COMPONENTS && spawnSync(wasmTools, ["--version"]).status === 0 && existsSync(adapter);
+if (haveTools) {
+  const cdir = join(dir, "components");
+  await fs.mkdir(cdir);
+  const made: string[] = [];
+  for (const t of ["coreutils", "find", "xargs", "diff", "jq", "which", "grep", "tree", "awk", "sed", "git", "qjs", "python"]) {
+    const src = join(here, "../../wasm", `${t}.wasm`);
+    const r = spawnSync(wasmTools, ["component", "new", src, "--adapt", `wasi_snapshot_preview1=${adapter}`, "-o", join(cdir, `${t}.wasm`)]);
+    if (r.status === 0) made.push(t);
+  }
+  if (made.includes("diff")) await fs.copyFile(join(cdir, "diff.wasm"), join(cdir, "cmp.wasm")); // one module, two names
+  t0 = Date.now();
+  const zc = spawnSync(kernel, ["shell", db], { input: JSON.stringify(cases), maxBuffer: 1 << 30, env: { ...process.env, SKEIN_SHELL_COMPONENTS: cdir } });
+  const compMs = Date.now() - t0;
+  if (zc.status !== 0) { process.stderr.write(zc.stderr); throw new Error(`skein-kernel shell (components) exited ${zc.status}`); }
+  const comp = JSON.parse(zc.stdout.toString()) as Out[];
+  let csame = 0, cstatus = 0;
+  const digits = (o: Out) => JSON.stringify({ ...o, stdout: Buffer.from(o.stdout ?? "", "base64").toString().replace(/\d+/g, "N") });
+  const showc = (s?: string) => JSON.stringify(Buffer.from(s ?? "", "base64").toString("utf8"));
+  cases.forEach((k, i) => {
+    const a = zig[i], b = comp[i];
+    if (JSON.stringify(a) === JSON.stringify(b)) { csame++; return; }
+    if (k.statusAbove1 && digits(a) === digits(b)) { cstatus++; return; }
+    process.stdout.write(`DIFF (component) ${JSON.stringify(k.cmd)}\n module: ${a.error ?? `exit ${a.exitCode} tree ${a.tree}\n  stdout ${showc(a.stdout)}\n  stderr ${showc(a.stderr)}`}\n  component: ${b.error ?? `exit ${b.exitCode} tree ${b.tree}\n  stdout ${showc(b.stdout)}\n  stderr ${showc(b.stderr)}`}\n`);
+  });
+  compOk = csame + cstatus === cases.length;
+  process.stdout.write(`shell, tools as components (${made.join(" ")}): ${csame}/${cases.length} identical to the modules, ${cstatus} differing only in an exit status above 1 (the adapter's 0/1) (${compMs} ms including compile)\n`);
+} else {
+  process.stdout.write("shell, tools as components: skipped (no wasm-tools or preview1 adapter)\n");
+}
+
 let same = 0;
 const show = (s?: string) => JSON.stringify(Buffer.from(s ?? "", "base64").toString("utf8"));
 cases.forEach((k, i) => {
@@ -179,5 +223,5 @@ cases.forEach((k, i) => {
 });
 if (process.env.SKEIN_EQUIV_SHOW) cases.forEach((k, i) => { if (i >= cases.length - 7) process.stdout.write(`${k.cmd.slice(0, 60)}\n  exit ${node[i].exitCode} ${show(node[i].stdout)} ${show(node[i].stderr)}\n`); });
 process.stdout.write(`shell: ${same}/${cases.length} identical (node ${nodeMs} ms, zig ${zigMs} ms including compile)\n`);
-await fs.rm(dir, { recursive: true, force: true });
-process.exit(same === cases.length ? 0 : 1);
+if (process.env.SKEIN_EQUIV_KEEP) { await fs.writeFile(join(dir, "cases.json"), JSON.stringify(cases)); process.stdout.write(`kept ${dir}\n`); } else await fs.rm(dir, { recursive: true, force: true });
+process.exit(same === cases.length && compOk ? 0 : 1);

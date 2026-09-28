@@ -159,6 +159,13 @@ pub const Imports = struct {
     }
 };
 
+/// A CID argument as the preview1 imports check it (component.zig: the same
+/// check and message for the WIT interface).
+pub fn checkCid(imp: *Imports, b: []const u8) Err![]const u8 {
+    _ = cidm.parts(b) catch return imp.failWith(cidDecodeMessage(b));
+    return b;
+}
+
 /// multiformats' CID.decode messages, for the cases a program can reach.
 fn cidDecodeMessage(b: []const u8) []const u8 {
     if (b.len == 0) return "Unexpected end of data";

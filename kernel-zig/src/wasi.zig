@@ -339,7 +339,7 @@ pub const Process = struct {
 
     // -------------------------------------------------- dispatch
 
-    const FsE = error{ Errno, Fatal, Park, OutOfMemory };
+    pub const FsE = error{ Errno, Fatal, Park, OutOfMemory };
 
     fn errno(p: *Process, e: u16) FsE {
         p.vfs.errno = e;
@@ -371,7 +371,8 @@ pub const Process = struct {
         return .{ .value = r };
     }
 
-    fn dispatch(p: *Process, f: Fn, a: []const i64) !i64 {
+    /// One preview1 call against `p.mem` (the engine callback, or component.zig over a scratch memory).
+    pub fn dispatch(p: *Process, f: Fn, a: []const i64) !i64 {
         return switch (f) {
             .unknown => E.NOSYS,
             .args_sizes_get => p.sizes(p.args, a[0], a[1]),
