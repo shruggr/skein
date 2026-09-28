@@ -20,18 +20,18 @@ export const until = async <T>(what: string, f: () => Promise<T | undefined> | T
 };
 
 /** A host with agents and mailbox instances, each instance's key its own (the oracle's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
   const keys = new Map<string, PrivateKey>();
   const keyOf = (h: string) => { let k = keys.get(h); if (!k) { k = PrivateKey.fromRandom(); keys.set(h, k); } return k; };
-  const ownerKey = PrivateKey.fromRandom();
+  const ownerKey = o.ownerKey ?? PrivateKey.fromRandom();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
   const router = new Router({
     db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), owner: ownerId, infer: o.infer, home,
-    idleMs: o.idleMs ?? 0, http: o.http, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
+    idleMs: o.idleMs ?? 0, http: o.http, ownerMessagebox: o.ownerMessagebox, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
   t.after(async () => { await router.stop(); db.close(); });
