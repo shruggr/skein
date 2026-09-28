@@ -46,10 +46,11 @@ import { short } from "../runtime/log.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
-import { remoteWallet, type WalletInterface } from "../wallet.ts";
+import { ephemeralWallet, remoteWallet, type WalletInterface } from "../wallet.ts";
 import { subscribeBody } from "../client/client.ts";
 import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
-import { Supervisor, type Backoff, type Supervised } from "./supervisor.ts";
+import { Supervisor, type Supervised } from "./supervisor.ts";
+import { Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { messageBoxClient, type MessageBox } from "./messagebox.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
@@ -69,7 +70,7 @@ const USAGE = `usage:
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
   skein-host list
   skein-host enable|disable|remove <handle>
-  skein-host run [--only a,b]                             every enabled row (or those), one process each; host page and roster on :4600
+  skein-host run                                          the router: the messagebox on :8100, a kernel per instance on demand; host page and roster on :4600
   skein-host deploy <handle> <dir> [--only glob,glob]     default --only ${DEFAULT_ONLY.join(",")}
   skein-host deploy --all [--only glob,glob]              every enabled row, from its last deployed directory
   skein-host roster                                       the front end's roster JSON
@@ -306,97 +307,103 @@ async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 
 export interface RunOptions {
-  /** The handles to run (`--only`); default every enabled row. */
-  only?: string[];
-  /** The child commands: default bin/skein-runtime and bin/skein-explore. Tests pass stubs. */
-  runtime?: { command: string; args?: string[] };
+  /** The explorer command: default bin/skein-explore. Tests pass stubs. */
   explore?: { command: string; args?: string[] };
-  backoff?: Partial<Backoff>;
   killAfterMs?: number;
+  /** The router's options beyond what the environment gives (tests). */
+  router?: Partial<RouterOptions>;
 }
 
 export interface Host {
+  router: Router;
   supervisor: Supervisor;
-  /** handle → its runtime process. */
-  instances: Map<string, Supervised>;
-  /** handle → its explorer process, once started. */
+  /** handle → its explorer process. */
   explorers: Map<string, { port: number; s: Supervised }>;
+  /** The messagebox (router) port and the host page's. */
+  messagebox?: number;
   server?: Server;
   port?: number;
   stop(): Promise<void>;
 }
 
+/** The instances' wallets and the entry key, from the environment (SKEIN_WALLET, row.wallet_url, SKEIN_HOST_WALLET_URL). */
+function wallets(v: Env["vars"]): Pick<RouterOptions, "walletFor" | "host" | "authWallet"> {
+  const ephemeral = v.SKEIN_WALLET === "ephemeral";
+  const eph = new Map<string, WalletInterface>();
+  return {
+    walletFor: (row) => {
+      if (ephemeral) { let w = eph.get(row.handle); if (!w) eph.set(row.handle, (w = ephemeralWallet())); return w; }
+      if (!row.wallet_url) throw new Error("no wallet_url (skein-host add --wallet-url)");
+      return remoteWallet(row.wallet_url, row.wallet_originator);
+    },
+    host: ephemeral ? ephemeralWallet() : remoteWallet(v.SKEIN_HOST_WALLET_URL || "http://127.0.0.1:3324", "skein-host"),
+    authWallet: ephemeralWallet(),
+  };
+}
+
 /**
- * The supervisor (supervisor.ts): one runtime process per enabled row (or
- * `only` those), each with its row in its environment; each row's explorer
- * once its runtime is ready; the host page and roster. Nothing of any
- * instance runs in this process.
+ * `skein-host run`: the router (router.ts) on SKEIN_ROUTER_PORT (default
+ * 8100, the messagebox URL clients already use), every enabled row hydrated
+ * once at start (then stopped when idle), one read-only `skein-explore` per
+ * enabled row, and the host page and roster on SKEIN_HOST_PORT.
  */
 export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise<Host> {
   const v = env.vars;
   const home = homeOf(v);
-  const ephemeral = v.SKEIN_WALLET === "ephemeral";
-  const enabled = db.list("enabled");
-  const rows = o.only ? enabled.filter((r) => o.only!.includes(r.handle)) : enabled;
-  for (const h of o.only ?? []) if (!rows.some((r) => r.handle === h)) env.err(`skein-host run: ${db.get(h) ? `${h} is disabled` : `no instance ${h}`}; skipped`);
-  const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);
-  const supervisor = new Supervisor({ out: env.out, err: env.err, backoff: o.backoff, killAfterMs: o.killAfterMs });
-  const instances = new Map<string, Supervised>();
+  const named = (s: string | undefined, d: string) => { const [handle, domain = "localhost"] = (s || d).split("@"); return { handle: handle!, domain }; };
+  const router = new Router({
+    db, ...wallets(v),
+    owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
+    fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, mailboxHost: v.SKEIN_MAILBOX_HOST,
+    kernel: { env: { SKEIN_HOME: home } },
+    log: (source, line) => env.out(`[${source}] ${line}`),
+    ...o.router,
+  });
+  const supervisor = new Supervisor({ out: env.out, err: env.err, killAfterMs: o.killAfterMs });
   const explorers = new Map<string, { port: number; s: Supervised }>();
-  const runtime = o.runtime ?? { command: join(ROOT, "bin/skein-runtime") };
+  const enabled = db.list("enabled");
+  const mport = Number(v.SKEIN_ROUTER_PORT ?? 8100);
+  const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: messagebox: ${e.message}`); return undefined; });
+  const messagebox = mserver ? (mserver.address() as { port: number }).port : undefined;
+  if (messagebox !== undefined) env.out(`skein-host: messagebox at http://127.0.0.1:${messagebox}/messagebox`);
+  await router.start();
+  env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
+  const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);
   const explore = o.explore ?? { command: join(ROOT, "bin/skein-explore") };
-  for (const row of rows) {
-    if (!row.wallet_url && !ephemeral) { env.err(`[${row.handle}] not started: no wallet_url (skein-host add --wallet-url)`); continue; }
-    const s = supervisor.add({
-      name: row.handle, command: runtime.command, args: runtime.args,
-      env: {
-        ...v, SKEIN_HOME: home, SKEIN_DB: row.store, SKEIN_HANDLE: `${row.handle}@${row.domain}`,
-        SKEIN_WALLET_URL: row.wallet_url ?? undefined, SKEIN_WALLET_ORIGINATOR: row.wallet_originator,
-        SKEIN_IDENTITY: row.identity ?? "", SKEIN_HOST_DB: join(home, "host.db"),
-      },
-    }, (line, child) => {
-      if (!child.ready || !child.identity) return;
-      if (!ephemeral && !db.get(row.handle)?.identity) db.add(row.handle, { identity: child.identity });
-      if (base === undefined || explorers.has(row.handle)) return;
-      const port = base + enabled.findIndex((r) => r.handle === row.handle);
-      explorers.set(row.handle, { port, s: supervisor.add({ name: `${row.handle} explore`, command: explore.command, args: [...(explore.args ?? []), String(port)], env: { ...v, SKEIN_DB: row.store } }) });
-    });
-    instances.set(row.handle, s);
-  }
-  env.out(`skein-host: supervising ${instances.size} of ${enabled.length} enabled instances (${[...instances.keys()].join(", ") || "none"})`);
-  const live = (row: InstanceRow) => !!instances.get(row.handle)?.ready;
+  if (base !== undefined) enabled.forEach((row, i) => {
+    const port = base + i;
+    explorers.set(row.handle, { port, s: supervisor.add({ name: `${row.handle} explore`, command: explore.command, args: [...(explore.args ?? []), String(port)], env: { ...v, SKEIN_DB: row.store } }) });
+  });
+  const live = (row: InstanceRow) => router.loaded.has(row.handle);
   const port = Number(v.SKEIN_HOST_PORT || 4600);
-  const page = async () => hostPage(enabled.map((row): HostRow => {
-    const s = instances.get(row.handle), x = explorers.get(row.handle);
-    const r = db.get(row.handle) ?? row;
+  const page = async () => hostPage(db.list("enabled").map((r): HostRow => {
+    const l = router.loaded.get(r.handle), x = explorers.get(r.handle);
     return {
-      handle: r.handle, domain: r.domain, identity: r.identity ?? s?.identity ?? "", status: s ? (s.ready ? "live" : "idle") : "not run",
-      store: r.store, tree: r.tree ?? "", pid: s?.pid, restarts: s?.restarts ?? 0, explorer: x ? `http://127.0.0.1:${x.port}/` : undefined,
+      handle: r.handle, domain: r.domain, identity: r.identity ?? "", status: l ? "live" : "idle",
+      store: r.store, tree: r.tree ?? "", pid: l?.kernel.proc.pid, restarts: 0, explorer: x ? `http://127.0.0.1:${x.port}/` : undefined,
     };
   }));
-  const rosterRows = () => db.list("enabled").map((r) => ({ ...r, identity: r.identity ?? instances.get(r.handle)?.identity ?? null }));
-  const server = await serveRoster(port, () => roster(rosterRows(), async (row) => openRow(row, env), live), "127.0.0.1", page)
+  const server = await serveRoster(port, () => roster(db.list("enabled"), async (row) => openRow(row, env), live), "127.0.0.1", page)
     .then((s) => { env.out(`skein-host: host page at http://127.0.0.1:${(s.address() as { port: number }).port}/ · roster at /roster.json`); return s; }, (e: Error) => { env.err(`skein-host: host server: ${e.message}`); return undefined; });
   return {
-    supervisor, instances, explorers, server, port: server ? (server.address() as { port: number }).port : undefined,
+    router, supervisor, explorers, messagebox, server, port: server ? (server.address() as { port: number }).port : undefined,
     async stop() {
       server?.close();
-      await supervisor.stop();
+      await Promise.all([router.stop(), supervisor.stop()]);
     },
   };
 }
 
-/** `skein-host run`: runHost until SIGINT/SIGTERM, then stop every child and exit. */
+/** `skein-host run`: runHost until SIGINT/SIGTERM, then stop every kernel and explorer and exit. */
 async function run(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { only: { type: "string" } } });
+  const { positionals } = parseArgs({ args: rest, allowPositionals: true, options: {} });
   if (positionals.length) { env.err(USAGE); db.close(); return 2; }
-  const host = await runHost(db, env, { only: v.only !== undefined ? handles(v.only) : undefined });
-  if (!host.instances.size) { await host.stop(); db.close(); return 1; }
+  const host = await runHost(db, env);
   let stopping = false;
   const stop = async (sig: string) => {
     if (stopping) return;
     stopping = true;
-    env.out(`${sig}: stopping ${host.supervisor.children.length} processes`);
+    env.out(`${sig}: stopping`);
     await host.stop();
     db.close();
     process.exit(0);
