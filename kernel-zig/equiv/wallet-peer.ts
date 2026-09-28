@@ -14,7 +14,7 @@
 // merkle path) proves it; a rejected broadcast gives the inputs back; a
 // draft (signAndProcess: false) is signed by signAction.
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { KeyDeriver, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
@@ -23,13 +23,23 @@ import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { seal } from "../../src/envelope.ts";
 import { DEFAULTS } from "../../src/runtime/log.ts";
-import { WALLET, WALLET_CID } from "../../src/runtime/programs.ts";
+import { rawCid, WALLET as WALLET_P1 } from "../../src/runtime/programs.ts";
+import { encode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { decode } from "../../src/runtime/cid.ts";
 import { collect, messageBoxHub } from "../../src/testkit.ts";
 import type { ThreadUpdate } from "../../src/runtime/types.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { admitEvent, remote, runPeer, say, type HttpRequest, type HttpResponse } from "../peer/peer.ts";
+
+// SKEIN_WALLET_COMPONENT=<file>: the wallet's component build (issue #34;
+// `zig build component` in wallet-zig) in place of the pinned preview1 module:
+// the same program record but for `code.wasm` (the kernel installs the file
+// through SKEIN_EXTRA_MODULES). Everything the scenario checks must come out
+// the same on both ABIs.
+const componentPath = process.env.SKEIN_WALLET_COMPONENT;
+const WALLET = componentPath ? { ...WALLET_P1, code: { wasm: rawCid(readFileSync(componentPath)) } } : WALLET_P1;
+const WALLET_CID = encode(WALLET).cid;
 
 const KEYS = { instance: "1111", owner: "2222", host: "3333" };
 const key = (h: string) => new PrivateKey(h, 16);

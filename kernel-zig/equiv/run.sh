@@ -3,7 +3,9 @@
 # (stdout/stderr/exit/tree carry no fuel), git in the VM, and replay
 # exactness Zig against Zig (issue #5: from fuel on the Zig kernel is its own
 # reference) over a generated corpus and over the stores `serve` writes.
-# Run from anywhere; needs node (26) and the repo's node_modules. Never
+# Run from anywhere; needs node (26) and the repo's node_modules; for the
+# component cases (issue #34) wasm-tools and the preview1 adapter (README,
+# "Components"), else those are skipped with a note. Never
 # touches the stores under $SKEIN_HOME: they predate fuel.
 #
 #   kernel-zig/equiv/run.sh
@@ -39,6 +41,10 @@ else
 fi
 
 echo "== the wallet in the VM (#29): oracle signing, plain entries, http to a fake ARC, deadline wakes; replayed"
+# Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
+if command -v wasm-tools > /dev/null; then
+  (cd "$kz/../wallet-zig" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
+fi
 "${node[@]}" "$kz/equiv/wallet.ts" || status=1
 
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
