@@ -3,10 +3,12 @@
 // (the TS runtime's replay path: copyLog + Runtime + witnessFrom). The fresh
 // store first gets the pinned modules (skein-dev install, from $SKEIN_WASM_DIR
 // or the repo's wasm/) and every module (raw block) the source holds, so an
-// old log runs the handlers it ran. Prints {lines, sent, state} as JSON: the
-// runtime's log lines, the emits handed to the outbox, the state hash.
-// equiv/replay.ts does the same with the TypeScript runtime; equiv/run.sh
-// compares the two stores table by table.
+// old log runs the handlers it ran. Prints {lines, sent, state, index} as
+// JSON: the runtime's log lines, the emits handed to the outbox, the log tip,
+// and the index's costs and final state record (#30). The source may be in
+// either store format (sqlite_store.zig imports the old one in memory).
+// equiv/replay.ts does the same with the TypeScript runtime; equiv/replays.ts
+// compares the two runs and what they derived.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");

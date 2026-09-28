@@ -281,6 +281,39 @@ trees and command output are recomputable and may be kept as cache or
 dropped; nothing depends on them. Pruning is a capacity decision, never a
 correctness one.
 
+## The index: maps in the store and one state record
+
+(Issue #30; built in the Zig kernel, `kernel-zig/src/index.zig`, `mst.zig`.)
+The questions the scheduler asks — which entry is number n, which entry
+admitted this envelope, where is this chain's tip, which threads are not
+finished, which sleep until when, which await a reply to this envelope, what
+points at this record, what tree does this head name — are answered by
+**persistent maps kept as records in the store**, not by database tables.
+Each query shape is its own map, keyed so that the question is a lookup, a
+range or a prefix: `log` (n → entry), `unique` (envelope or emit → entry),
+`chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
+and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
+(envelope ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
+(name → tree).
+
+A map is a **Merkle search tree** of dag-cbor nodes (fan-out ~32; a key's
+level is the leading zero 5-bit groups of its sha2-256). It is canonical —
+the same pairs give the same root CID in whatever order they arrived — and
+updated copy-on-write like a git tree: a change writes new nodes along one
+path and shares every other node with the previous version, which stays
+readable.
+
+One **state record** names it all:
+`{kind: "skein-state", log: <log tip>, cursor, heads: <root>, index: {<map>: <root>…}}`.
+Its CID is the instance's single mutable pointer; the store is otherwise a
+pure key→bytes map of immutable records (SQLite today; IndexedDB in a
+browser, RocksDB on a server, a chain for checkpoints). The maps are a
+function of the log and the trees are canonical, so the state record is a
+function of the log: two machines that consumed the same log have the same
+state CID, and a bootstrap packet can ship the index for a reader to verify
+rather than rebuild. Old spine nodes and old state records are prunable like
+intermediate trees; the log and what live chains reach are not.
+
 ## Checkpoints
 
 A checkpoint is a commit of the log and the records it reaches, pushed as a
