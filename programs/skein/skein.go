@@ -39,14 +39,8 @@ func _keep(cid unsafe.Pointer, cidLen uint32) int32
 //go:wasmimport skein launch
 func _launch(prog unsafe.Pointer, progLen uint32, args unsafe.Pointer, argsLen uint32, out unsafe.Pointer, cap uint32) int32
 
-//go:wasmimport skein emit
-func _emit(cid unsafe.Pointer, cidLen uint32, out unsafe.Pointer, cap uint32) int32
-
 //go:wasmimport skein await
 func _await(cid unsafe.Pointer, cidLen uint32) int32
-
-//go:wasmimport skein resolve
-func _resolve(name unsafe.Pointer, nameLen uint32, out unsafe.Pointer, cap uint32) int32
 
 //go:wasmimport skein head
 func _head(name unsafe.Pointer, nameLen uint32, out unsafe.Pointer, cap uint32) int32
@@ -152,31 +146,20 @@ type Resolved struct {
 	Error  cbor.RawMessage `cbor:"error,omitempty"`
 }
 
-// Answer is an admitted envelope delivered to the thread that awaited the
-// envelope its body's replyTo names (see Await). Same fields as a handler's
-// args, so Read(r.Envelope, r.Body) reads it.
+// Answer is an admitted message delivered to the thread that awaited the
+// message its body's replyTo names (see Await). Same fields as a handler's
+// args, so Read(r.Message, r.Body) reads it.
 type Answer struct {
-	Envelope CID    `cbor:"envelope"`
-	Body     CID    `cbor:"body"`
-	Box      string `cbor:"box"`
-	Sender   Key    `cbor:"sender"`
-	ReplyTo  CID    `cbor:"replyTo"`
-}
-
-// DeliveryFailed is an awaited envelope the host's delivery provider could not
-// deliver (a `failed` outcome entry): the emit, its envelope's id, to whom, in
-// which box, and why. The reply it awaited will not come.
-type DeliveryFailed struct {
-	Emit     CID    `cbor:"emit"`
-	Envelope CID    `cbor:"envelope"`
-	To       Key    `cbor:"to"`
-	Box      string `cbor:"box"`
-	Reason   string `cbor:"reason"`
+	Message CID    `cbor:"message"`
+	Body    CID    `cbor:"body"`
+	Box     string `cbor:"box"`
+	Sender  Key    `cbor:"sender"`
+	ReplyTo CID    `cbor:"replyTo"`
 }
 
 // Step is what input() returns: which thread, which step, and why it runs now
 // (the first step; Resolved: launched threads at rest; Reply: an awaited reply;
-// DeliveryFailed: an awaited envelope that could not be delivered).
+// Woke: the deadline it rested on came).
 type Step struct {
 	Thread   CID               `cbor:"thread"`
 	N        int               `cbor:"step"`
@@ -186,12 +169,20 @@ type Step struct {
 	Resolved []Resolved        `cbor:"resolved,omitempty"`
 	Tip      CID               `cbor:"tip,omitzero"` // the thread's latest update before this step; absent on step 1
 	Reply    *Answer           `cbor:"reply,omitempty"`
-	Failed   *DeliveryFailed   `cbor:"deliveryFailed,omitempty"`
+	Woke     bool              `cbor:"woke,omitempty"`
 	At       int64             `cbor:"at"`              // the entry's stamp, ms since the epoch: an envelope's `created`
-	Self     Name              `cbor:"self"`            // the instance's handle and domain (the genesis's)
+	Self     Self              `cbor:"self"`            // the instance's handle, domain and identity (the genesis's)
+	Owner    Key               `cbor:"owner"`           // the genesis's owner
 	Peers    map[string]Key    `cbor:"peers,omitempty"`    // genesis peers by role (e.g. "infer")
 	Defaults map[string]string `cbor:"defaults,omitempty"` // genesis defaults (e.g. "model")
 	Names    []KeyName         `cbor:"names,omitempty"`    // genesis names: handles for identities (the owner, peers)
+}
+
+// Self is the instance: its handle, domain and identity key.
+type Self struct {
+	Handle   string `cbor:"handle"`
+	Domain   string `cbor:"domain"`
+	Identity Key    `cbor:"identity"`
 }
 
 // KeyName is a genesis `names` entry: the handle an identity goes by.
@@ -344,67 +335,16 @@ func Launch(program, args CID) (CID, error) {
 	return CID(b), err
 }
 
-// Emit an outbound message: an emit record (already Put, see EmitRecord)
-// carrying the complete envelope, signed and encrypted through the wallet
-// (package envelope does both). The runtime checks it — signed by this
-// instance, content from it to `to`, contentHash the body's — and returns the
-// CID of its signed part (the message's id: what a reply's replyTo names). It
-// is handed to the delivery provider, as it is, when the step ends.
-func Emit(c CID) (CID, error) {
-	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _emit(ptr(c), uint32(len(c)), out, cap) })
-	return CID(b), err
-}
-
-// Await rests the thread on a reply to an envelope this step emitted: the step
-// ends waiting, and the admitted envelope whose body's replyTo is env (from the
-// identity it was sealed to) is the next step's Reply. A step awaits replies or
-// launches threads, not both.
+// Await rests the thread on a record in the store: a message this step sent
+// (the id Send returned) — the step ends waiting, and the admitted message
+// whose body's replyTo names it, from the identity it was sent to, is the next
+// step's Reply — or the subject of a plain entry to come. A step awaits
+// replies or launches threads, not both.
 func Await(env CID) error {
 	if _await(ptr(env), uint32(len(env))) < 0 {
 		return lastError()
 	}
 	return nil
-}
-
-// Resolution is the host's answer to a resolve, as recorded: the resolution
-// endpoint's whole response (BRC-169 §5.2: identityKey, certificate,
-// messagebox, ttl, …) plus how the host got it and what it checked.
-type Resolution struct {
-	IdentityKey Key             `cbor:"identityKey"`
-	Via         string          `cbor:"via,omitempty"`
-	Messagebox  string          `cbor:"messagebox,omitempty"`
-	TTL         int64           `cbor:"ttl,omitempty"`
-	Certificate cbor.RawMessage `cbor:"certificate,omitempty"`
-	Checked     []string        `cbor:"checked,omitempty"`
-	Unchecked   []string        `cbor:"unchecked,omitempty"`
-	Error       string          `cbor:"error,omitempty"`
-}
-
-// Resolve a BRC-169 handle ("handle@domain") to the identity key it names,
-// through the host's resolver. Attested: the whole answer is recorded, and
-// served from the record on replay. An envelope to a handle is sealed to this
-// key (envelope.Send's `to`), and a reply is taken only from it. A handle
-// that does not resolve is an error.
-func Resolve(handle, domain string) (string, error) {
-	r, err := ResolveAll(handle, domain)
-	if err != nil {
-		return "", err
-	}
-	return r.IdentityKey.Hex(), nil
-}
-
-// ResolveAll is Resolve with the whole recorded answer.
-func ResolveAll(handle, domain string) (*Resolution, error) {
-	n := []byte(handle + "@" + domain)
-	b, err := result(func(out unsafe.Pointer, cap uint32) int32 { return _resolve(ptr(n), uint32(len(n)), out, cap) })
-	if err != nil {
-		return nil, err
-	}
-	var r Resolution
-	if err := Decode(b, &r); err != nil {
-		return nil, fmt.Errorf("resolve: %w", err)
-	}
-	return &r, nil
 }
 
 // Head is the tree a named head points at now, or nil if it has none.

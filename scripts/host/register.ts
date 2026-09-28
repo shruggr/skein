@@ -1,9 +1,11 @@
-// Register an identity as an account on the skein host. `1sat serve` only
-// stores messages for recipients holding an account (ERR_ACCOUNT_REQUIRED), so
-// both the instance and the owner must register once. BRC-104 (AuthFetch)
-// through the identity's own wallet-api; idempotent (409 = already registered).
+// A mailbox instance for an identity outside the host (#40): the signed
+// registration the router takes at POST /account/register {username,
+// identityKey, signature} — signature by the identity's own wallet-api over
+// "register <username>" (protocol [2, "skein register"], keyID the username,
+// counterparty anyone). Prints the mailbox's URL; idempotent (409 = the name
+// is taken, by this key or another).
 //   node scripts/host/register.ts <wallet-url> <originator> <username> [host-url]
-import { AuthFetch, HTTPWalletJSON } from "@bsv/sdk";
+import { HTTPWalletJSON, Utils } from "@bsv/sdk";
 
 const [walletUrl, originator, username, host = "http://127.0.0.1:8100"] = process.argv.slice(2);
 if (!walletUrl || !originator || !username) {
@@ -15,12 +17,16 @@ const wallet = new HTTPWalletJSON(originator, walletUrl, async (input, init) => 
   if (!res.ok) { const t = await res.clone().text(); if (t.includes("permission denied")) throw new Error(t); }
   return res;
 });
-const res = await new AuthFetch(wallet).fetch(`${host}/account/register`, {
+const { publicKey: identityKey } = await wallet.getPublicKey({ identityKey: true });
+const { signature } = await wallet.createSignature({
+  protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}`, "utf8"),
+});
+const res = await fetch(`${host}/account/register`, {
   method: "POST",
   headers: { "content-type": "application/json" },
-  body: JSON.stringify({ username }),
+  body: JSON.stringify({ username, identityKey, signature: Utils.toHex(signature) }),
 });
 const text = await res.text();
-if (res.status === 200) console.log(`registered ${username} on ${host}`);
-else if (res.status === 409) console.log(`${username}: ${JSON.parse(text).error}`);
+if (res.status === 200) console.log(JSON.parse(text).messagebox);
+else if (res.status === 409) { console.error(`${username}: ${JSON.parse(text).error}`); process.exit(3); }
 else { console.error(`register ${username}: HTTP ${res.status} ${text}`); process.exit(1); }

@@ -24,6 +24,16 @@
 // passed through as it is.)
 //
 // Providers come from ~/.skein/infer.json: {"ripper": {"baseUrl": "http://…/v1", "apiKey": "…"}}.
+//
+// Two transports. Since #40 (`raw`): its mailbox is a mailbox instance at its
+// own origin, and it speaks raw BRC-33 on BRC-104 sessions — it lists its
+// `infer` box there (a request's id is its messageId: the record the instance
+// keeps; the sender is the session's identity), and answers in the sender's
+// `completions` at the sender's own messagebox. Where that is it learns from
+// the sender's claim (`register` box: {handle, domain}, sent when the
+// sender's messagebox opens a session with it), checked by a BRC-169 resolve:
+// the claim is recorded only if the handle resolves to the sender. The
+// envelope transport (`box`) is the one the frozen TypeScript runtime speaks.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,6 +44,17 @@ import { isoTime, open, seal, type Envelope } from "../envelope.ts";
 import { asEnvelope, inspect, isCborEnvelope, openCbor, sealCbor, wrapCbor, type AnyEnvelope } from "../envelope-cbor.ts";
 import { encode } from "../runtime/cid.ts";
 import type { Listed, MessageBox } from "../host/messagebox.ts";
+import type { Listed as RawListed } from "../client/raw.ts";
+
+/** The raw transport (#40): its own mailbox, a session per peer messagebox, BRC-169 lookups. */
+export interface RawTransport {
+  /** Its mailbox instance (a RawBox). */
+  inbox: { list(box: string): Promise<RawListed[]>; ack(ids: string[]): Promise<void> };
+  /** A session with the messagebox at `url` (a RawBox). */
+  outbox(url: string): { send(recipient: string, box: string, body: unknown): Promise<unknown> };
+  /** BRC-169: handle@domain → its identity key and messagebox URL. */
+  resolve(handle: string, domain: string): Promise<{ identityKey: string; messagebox: string }>;
+}
 
 export interface Provider { baseUrl: string; apiKey?: string }
 
@@ -138,7 +159,10 @@ export class NodeGraph {
 
 export interface InferOptions {
   wallet: WalletInterface;
-  box: MessageBox;
+  /** The envelope transport (the frozen TypeScript runtime's). */
+  box?: MessageBox;
+  /** The raw transport (#40). */
+  raw?: RawTransport;
   providers: Record<string, Provider>;
   /** The conversation graph. Default: in memory only. */
   graph?: NodeGraph;
@@ -179,17 +203,61 @@ export class InferPeer {
     await this.polling;
   }
 
+  /** Who has claimed which messagebox (#40: a claim checked by a resolve), by identity key. */
+  readonly peers = new Map<string, string>();
+
   /** Collect the `infer` box once: answer each request, acknowledge it. Returns how many were answered. */
   async poll(): Promise<number> {
+    if (this.o.raw) return this.pollRaw(this.o.raw);
     let n = 0;
-    for (const m of await this.o.box.list("infer")) {
+    for (const m of await this.o.box!.list("infer")) {
       try {
         if (await this.handle(m)) n++;
       } catch (e) {
         this.say(`infer ${m.messageId}: ${(e as Error).message} (left unacknowledged)`);
         continue;
       }
-      await this.o.box.ack([m.messageId]);
+      await this.o.box!.ack([m.messageId]);
+    }
+    return n;
+  }
+
+  /** The raw transport (#40): claims first (who is where), then requests. */
+  private async pollRaw(raw: RawTransport): Promise<number> {
+    for (const m of await raw.inbox.list("register")) {
+      try {
+        const v = m.value as { handle?: unknown; domain?: unknown; sender?: { handle?: unknown; domain?: unknown } };
+        const c = v.sender && typeof v.sender === "object" ? v.sender : v;
+        if (typeof c.handle !== "string" || typeof c.domain !== "string") throw new Error("a claim is {handle, domain}");
+        const r = await raw.resolve(c.handle, c.domain);
+        if (r.identityKey !== m.sender) throw new Error(`@${c.handle}@${c.domain} resolves to ${short(r.identityKey)}, not the sender`);
+        this.peers.set(m.sender, r.messagebox);
+        this.say(`claim: ${short(m.sender)} is @${c.handle}@${c.domain} at ${r.messagebox}`);
+      } catch (e) {
+        this.say(`claim ${m.messageId}: ${(e as Error).message}`);
+      }
+      await raw.inbox.ack([m.messageId]);
+    }
+    let n = 0;
+    for (const m of await raw.inbox.list("infer")) {
+      const url = this.peers.get(m.sender);
+      if (!url) {
+        this.say(`infer ${short(m.messageId)} from ${short(m.sender)}: no claim from the sender, nowhere to answer; dropped`);
+        await raw.inbox.ack([m.messageId]);
+        continue;
+      }
+      const replyTo = CID.parse(m.messageId);
+      let result: Completion;
+      try { result = await this.answer(m.sender, m.value as InferRequest); } catch (e) { result = { error: (e as Error).message }; }
+      try {
+        await raw.outbox(url).send(m.sender, "completions", clean({ replyTo, ...result }));
+        n++;
+      } catch (e) {
+        this.say(`infer ${short(m.messageId)}: answer to ${url}: ${(e as Error).message} (left unacknowledged)`);
+        continue;
+      }
+      this.say(`infer ${short(m.messageId)} from ${short(m.sender)}: ${"error" in result ? `error: ${result.error}` : "missing" in result ? `missing ${result.missing.map((c) => short(c.toString())).join(", ")}` : `${result.model} ${result.ms} ms`}`);
+      await raw.inbox.ack([m.messageId]);
     }
     return n;
   }
@@ -299,7 +367,7 @@ export class InferPeer {
       created: isoTime((this.o.now ?? Date.now)()),
     };
     const out = isCborEnvelope(to) ? wrapCbor(await sealCbor(this.o.wallet, args)) : await seal(this.o.wallet, args);
-    await this.o.box.send({ recipient: sender, box: "completions", body: out });
+    await this.o.box!.send({ recipient: sender, box: "completions", body: out });
   }
 }
 

@@ -1,9 +1,10 @@
 // The scheduler: the log consumer (src/runtime/scheduler.ts, ported line by
 // line; the comments there are the design record). Entries come in finished
 // and signed through `admit`; the runtime checks them and consumes them in
-// order: genesis → the seed subscriptions; envelope → a reply to the thread
-// awaiting it, else route by subscription and launch the handler; wake → a
-// sleeping shell thread; outcome `failed` → the thread awaiting that emit.
+// order: genesis → the seed subscriptions; a message (`mail`, #40) → a reply
+// to the thread awaiting the message it answers, else route by subscription
+// and launch the handler; wake → a sleeping thread; event → the thread
+// awaiting its subject, else a sender-less subscription on its box.
 //
 // One difference of mechanism, none of result: a shell thread that sleeps is
 // not parked mid-instance (there is no JSPI here). The run is abandoned at the
@@ -21,7 +22,6 @@ const logm = @import("log.zig");
 const heads = @import("heads.zig");
 const subs = @import("subscriptions.zig");
 const programs = @import("programs.zig");
-const envelope = @import("envelope.zig");
 const syscalls = @import("syscalls.zig");
 const shell = @import("shell.zig");
 const program = @import("program.zig");
@@ -31,8 +31,6 @@ const engine = @import("engine.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
 const Value = cbor.Value;
-
-pub const OUTCOMES = "outcomes";
 
 /// Fuel per step when the genesis's `defaults` do not set `fuelPerStep` (issue #5):
 /// 10^12 wasm instructions, generous until something hits it.
@@ -46,6 +44,23 @@ pub fn fuelPerStep(g: ?Value) u64 {
     const n = std.fmt.parseInt(u64, v, 10) catch return FUEL_PER_STEP;
     return if (n == 0 or n > engine.UNMETERED) FUEL_PER_STEP else n;
 }
+
+/// Fuel for a kernel `call` (#40) when the genesis's `defaults` do not set
+/// `callFuelLimit`: 10^10 wasm instructions (a front door answers in far less).
+pub const CALL_FUEL: u64 = 10_000_000_000;
+
+/// The one limit on a call's fuel: the genesis's `defaults.callFuelLimit`, else CALL_FUEL.
+pub fn callFuelLimit(g: ?Value) u64 {
+    const d = (g orelse return CALL_FUEL).get("defaults") orelse return CALL_FUEL;
+    const v = Value.str(d.get("callFuelLimit")) orelse return CALL_FUEL;
+    const n = std.fmt.parseInt(u64, v, 10) catch return CALL_FUEL;
+    return if (n == 0 or n > engine.UNMETERED) CALL_FUEL else n;
+}
+
+/// How deep in-VM calls may nest (a front door calling a handler calling another).
+const MAX_CALL_DEPTH = 8;
+/// A call's result (its stdout) may be this big: a listing, a page of the log.
+const CALL_OUTPUT_LIMIT = 64 << 20;
 
 /// BRC-100 wire call codes a program may make: key derivation and crypto only.
 const wallet_calls = [_]u8{ 8, 11, 12, 13, 14, 15, 16 };
@@ -91,10 +106,6 @@ pub const Peers = struct {
     ctx: *anyopaque,
     /// A BRC-100 wire frame to the instance wallet → its result frame.
     wallet: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]u8 = null,
-    /// handle, domain → the Resolution (a map with identityKey, "" when unknown). Never fails: errors are answers.
-    resolve: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, handle: []const u8, domain: []const u8) Value = null,
-    /// An emitted message for the delivery provider: the emit record plus {emit, thread, cid}.
-    send: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, outbound: Value) anyerror!void = null,
     /// One HTTP request (dag-cbor {method, url, headers?, body?}) → the response
     /// (dag-cbor {status, headers, body}): a program's `http` import (#29, pre-#15).
     http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8) anyerror![]u8 = null,
@@ -274,46 +285,36 @@ pub const Runtime = struct {
         invalid: []const u8, // a TypeError / Error: the provider's bug
     };
 
-    /// Admit a finished, host-signed entry with the records it names (Runtime.admit).
-    pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, env_rec: ?Value, body: ?[]const u8) !AdmitResult {
-        if (try rt.check(a, entry, env_rec, body)) |r| return r;
+    /// Admit a finished entry (Runtime.admit). A message entry names its
+    /// record, which the host put first; `body` is the message body's bytes.
+    pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !AdmitResult {
+        if (try rt.check(a, entry, body)) |r| return r;
         const res = try rt.store.logAppend(a, entry);
         switch (res) {
-            .ok => |c| return .{ .ok = c }, // the caller kick()s: the entry is processed after the provider hears back
+            .ok => |c| return .{ .ok = c }, // the caller kick()s: the entry is processed after the host hears back
             .rejected => |r| return .{ .rejected = .{ .reason = r.reason, .message = r.message } },
         }
     }
 
-    fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, signed: ?Value, body: ?[]const u8) !?AdmitResult {
-        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want an envelope, wake, outcome, mail or event entry (format 2: unsigned)" };
+    fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !?AdmitResult {
+        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a mail, wake or event entry (format 3, #40)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
         if (Value.cidOf(entry.get("event"))) |ev| {
             if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first)" };
             return null;
         }
-        if (entry.get("outcome")) |o| {
-            const emit = Value.cidOf(o.get("emit")).?;
-            if (!logm.isEmit(rt.store.getOpt(a, emit))) return .{ .invalid = try std.fmt.allocPrint(a, "admit: outcome for {s}, which is not an emit in this store", .{fmtCid(a, emit)}) };
-            if (try rt.store.outcomeOf(a, emit) != null) return .{ .rejected = .{ .reason = .duplicate_outcome, .message = try std.fmt.allocPrint(a, "emit {s} already has an outcome", .{fmtCid(a, emit)}) } };
-            return null;
-        }
-        const env_cid = Value.cidOf(entry.get("envelope")) orelse return null;
-        const sp = signed orelse return .{ .invalid = "admit: an envelope entry needs its envelope and body records" };
-        const bb = body orelse return .{ .invalid = "admit: an envelope entry needs its envelope and body records" };
-        if (sp.get("content") != null) return .{ .invalid = "admit: keep the signed part only, not the wire `content`" };
-        const bv = cbor.decode(a, bb) catch return .{ .invalid = "CBOR decode error" };
-        const blk = try cbor.block(a, bv);
-        if (!std.mem.eql(u8, blk.bytes, bb)) return .{ .invalid = "admit: the body is not canonical dag-cbor" };
-        if (!envelope.isSigned(sp) or !envelope.verify(a, sp)) return .{ .invalid = "admit: the envelope's signature does not verify" };
-        if (!envelope.hashMatches(sp, bb)) return .{ .invalid = "admit: the body does not match the envelope's contentHash" };
-        // A session reply's authorship is the signed request: it must carry this body.
-        if (envelope.sessionPayload(sp)) |payload| if (std.mem.indexOf(u8, payload, bb) == null) return .{ .invalid = "admit: the session reply's signed payload does not carry its body" };
-        const ec = try cbor.cidOfValue(a, sp);
-        if (!std.mem.eql(u8, blk.cid, Value.cidOf(entry.get("body")).?) or !std.mem.eql(u8, ec, env_cid)) return .{ .invalid = "admit: the records are not the ones the entry names" };
-        if (try rt.store.byEnvelope(a, env_cid) != null) return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "envelope {s} is already admitted", .{fmtCid(a, env_cid)}) } };
-        _ = try rt.store.put(a, sp);
-        try rt.store.putBlock(blk.cid, bb);
+        const mc = Value.cidOf(entry.get("mail")) orelse return null;
+        const rec = rt.store.getOpt(a, mc);
+        if (!logm.isMail(rec)) return .{ .invalid = "admit: a message entry names its mail record, put first: {kind: \"mail\", op: \"put\", sender, recipient, box, body, json?, session?}" };
+        const bc = Value.cidOf(rec.?.get("body")).?;
+        if (body) |bb| {
+            const bv = cbor.decode(a, bb) catch return .{ .invalid = "admit: the body is not dag-cbor" };
+            const blk = try cbor.block(a, bv);
+            if (!std.mem.eql(u8, blk.bytes, bb)) return .{ .invalid = "admit: the body is not canonical dag-cbor" };
+            if (!std.mem.eql(u8, blk.cid, bc)) return .{ .invalid = "admit: the body is not the one the message names" };
+            try rt.store.putBlock(blk.cid, bb);
+        } else if (!(try rt.store.has(bc))) return .{ .invalid = "admit: a message entry needs its body" };
         return null;
     }
 
@@ -391,7 +392,7 @@ pub const Runtime = struct {
             const ss = g.get("subscriptions").?.array;
             for (ss) |s| {
                 const m = s.get("match").?;
-                _ = try subs.subscribe(a, rt.store, .{ .op = "add", .sender = Value.bytesOf(m.get("sender")), .box = Value.str(m.get("box")) orelse "", .handler = Value.cidOf(s.get("handler")).? }, .{ .thread = null, .input = entry, .at = at });
+                _ = try subs.subscribe(a, rt.store, .{ .op = "add", .sender = Value.bytesOf(m.get("sender")), .box = Value.str(m.get("box")), .handler = Value.cidOf(s.get("handler")).? }, .{ .thread = null, .input = entry, .at = at });
             }
             // A system tree (issue #4): the loader pre-filled its objects; `main` starts there.
             if (Value.cidOf(g.get("tree"))) |tree| {
@@ -422,136 +423,72 @@ pub const Runtime = struct {
             return;
         }
 
-        if (e.get("outcome")) |o| {
-            const emit = Value.cidOf(o.get("emit")).?;
-            const status = Value.str(o.get("status")).?;
-            const reason = Value.str(o.get("reason"));
-            const what = try std.fmt.allocPrint(a, "#{d} outcome {s} for emit {s}{s}{s}", .{ n, status, short(a, emit), if (reason != null and reason.?.len > 0) ": " else "", if (reason != null and reason.?.len > 0) reason.? else "" });
-            if (!std.mem.eql(u8, status, "failed")) {
-                rt.say("{s}", .{what});
-                return;
-            }
-            const rec = rt.store.getOpt(a, emit);
-            if (!logm.isEmit(rec)) {
-                rt.say("{s}: not an emit; recorded, nothing runs", .{what});
-                return;
-            }
-            const env_cid = try cbor.cidOfValue(a, try envelope.signedPart(a, rec.?.get("envelope").?));
-            const t = try rt.awaiter(a, env_cid, .{ .emit = emit });
-            if (t == null) {
-                rt.say("{s}: no thread awaits it; recorded, nothing runs", .{what});
-                return;
-            }
-            const p: ?Value = rt.programOf(a, try rt.getOrNotFound(a, t.?)) catch null;
-            if (p == null or !programs.hasService(p.?, OUTCOMES)) {
-                rt.say("{s}: {s} {s} does not take delivery failures (services: no \"{s}\"); recorded, it keeps waiting", .{ what, short(a, t.?), if (p) |x| Value.str(x.get("name")).? else "?", OUTCOMES });
-                return;
-            }
-            rt.say("{s} → {s}", .{ what, short(a, t.?) });
-            var f = cbor.MapBuilder.init(a);
-            try f.put("emit", cbor.cidv(emit));
-            try f.put("envelope", cbor.cidv(env_cid));
-            try f.put("to", rec.?.get("to"));
-            try f.put("box", rec.?.get("box"));
-            try f.put("reason", cbor.string(reason orelse ""));
-            try rt.step(a, t.?, .{ .cid = entry, .e = e }, null, null, f.value());
-            return;
-        }
-
-        if (e.get("mail")) |mail| {
-            // The messagebox's state change for a hosted identity (#33): routed by
-            // subscription on the reserved box, from the mail's sender (the
-            // recipient, for an acknowledgement); the args are the mail itself.
-            const op = Value.str(mail.get("op")).?;
-            const who = Value.bytesOf(mail.get("sender")) orelse Value.bytesOf(mail.get("recipient")).?;
-            const what = try std.fmt.allocPrint(a, "#{d} mail {s} for {s}", .{ n, op, shortKey(Value.bytesOf(mail.get("recipient")).?) });
-            var sub: ?subs.Sub = null;
-            const rules = (try subs.current(a, rt.store)) orelse &.{};
-            for (rules) |s| if (subs.matches(s, who, logm.MAIL_BOX)) {
-                sub = s;
-                break;
-            };
-            if (sub == null) {
-                rt.say("{s}: no subscription for {s}; recorded, nothing runs", .{ what, logm.MAIL_BOX });
-                return;
-            }
-            var origin = cbor.MapBuilder.init(a);
-            try origin.put("kind", cbor.string("thread"));
-            try origin.put("program", cbor.cidv(sub.?.handler));
-            try origin.put("args", mail);
-            try origin.put("launchedBy", cbor.cidv(entry));
-            try origin.put("input", cbor.cidv(entry));
-            try origin.put("at", cbor.int(at));
-            const t = try rt.store.chainOpen(a, origin.value());
-            rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
-            try rt.run(a, t);
-            return;
-        }
-
         if (Value.cidOf(e.get("event"))) |ev| return rt.processEvent(a, n, .{ .cid = entry, .e = e }, ev, at);
 
-        if (Value.cidOf(e.get("envelope"))) |env_cid| {
-            const box = Value.str(e.get("box")) orelse "";
-            const env = rt.store.getOpt(a, env_cid);
-            const sender = senderOf(a, env);
-            const what = try std.fmt.allocPrint(a, "#{d} envelope {s} in {s} from {s}", .{ n, short(a, env_cid), box, if (sender) |x| shortKey(x) else "?" });
-            // A session reply names what it answers in the record; a full envelope, in its body.
-            const rto: ReplyTo = if (env != null and envelope.formOf(env.?) == .session) .{ .cid = Value.cidOf(env.?.get("replyTo")).? } else rt.replyToOf(a, Value.cidOf(e.get("body")));
-            switch (rto) {
+        if (Value.cidOf(e.get("mail"))) |mc| return rt.processMail(a, n, .{ .cid = entry, .e = e }, mc, at);
+    }
+
+    /// A message (#40): a reply to a message this instance sent — the thread
+    /// awaiting that record steps with it; else routed by subscription on
+    /// (sender, box), and the handler launched with {message, body, box,
+    /// sender}. A message for an identity this instance keeps mail for (its
+    /// owner, in a mailbox instance) is never a reply here: it is routed.
+    fn processMail(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, mc: []const u8, at: i64) !void {
+        const m = rt.store.getOpt(a, mc) orelse return error.NotFound;
+        const sender = Value.bytesOf(m.get("sender")).?;
+        const recipient = Value.bytesOf(m.get("recipient")).?;
+        const box = Value.str(m.get("box")).?;
+        const body = Value.cidOf(m.get("body")).?;
+        const what = try std.fmt.allocPrint(a, "#{d} message {s} in {s} from {s}", .{ n, short(a, mc), box, shortKey(sender) });
+        if (std.mem.eql(u8, recipient, rt.identity())) {
+            switch (rt.replyToOf(a, body)) {
                 .none => {},
                 .not_cid => {
                     rt.say("{s}: replyTo is not a CID; recorded, nothing runs", .{what});
                     return;
                 },
                 .cid => |reply_to| {
-                    if (sender == null) {
-                        rt.say("{s}: replyTo is not a CID; recorded, nothing runs", .{what});
-                        return;
-                    }
-                    const t = try rt.awaiter(a, reply_to, .{ .to = sender.? });
+                    const t = try rt.awaiter(a, reply_to, sender);
                     if (t == null) {
                         rt.say("{s}: reply to {s}, which no thread awaits from this sender; recorded, nothing runs", .{ what, short(a, reply_to) });
                         return;
                     }
                     rt.say("{s}: reply to {s} → {s}", .{ what, short(a, reply_to), short(a, t.?) });
                     var r = cbor.MapBuilder.init(a);
-                    try r.put("envelope", cbor.cidv(env_cid));
-                    try r.put("body", cbor.cidv(Value.cidOf(e.get("body")).?));
+                    try r.put("message", cbor.cidv(mc));
+                    try r.put("body", cbor.cidv(body));
                     try r.put("box", cbor.string(box));
-                    try r.put("sender", .{ .bytes = sender.? });
+                    try r.put("sender", .{ .bytes = sender });
                     try r.put("replyTo", cbor.cidv(reply_to));
-                    try rt.step(a, t.?, .{ .cid = entry, .e = e }, null, r.value(), null);
+                    try rt.step(a, t.?, ctx, null, r.value());
                     return;
                 },
             }
-            var sub: ?subs.Sub = null;
-            if (sender) |sd| {
-                const rules = (try subs.current(a, rt.store)) orelse &.{};
-                for (rules) |s| if (subs.matches(s, sd, box)) {
-                    sub = s;
-                    break;
-                };
-            }
-            if (sub == null or sender == null) {
-                rt.say("{s}: no subscription; recorded, nothing runs", .{what});
-                return;
-            }
-            var args = cbor.MapBuilder.init(a);
-            try args.put("envelope", cbor.cidv(env_cid));
-            try args.put("body", cbor.optCid(Value.cidOf(e.get("body"))));
-            try args.put("box", cbor.string(box));
-            try args.put("sender", .{ .bytes = sender.? });
-            var origin = cbor.MapBuilder.init(a);
-            try origin.put("kind", cbor.string("thread"));
-            try origin.put("program", cbor.cidv(sub.?.handler));
-            try origin.put("args", args.value());
-            try origin.put("launchedBy", cbor.cidv(env_cid));
-            try origin.put("input", cbor.cidv(entry));
-            try origin.put("at", cbor.int(at));
-            const t = try rt.store.chainOpen(a, origin.value());
-            rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
-            try rt.run(a, t);
         }
+        var sub: ?subs.Sub = null;
+        for ((try subs.current(a, rt.store)) orelse &.{}) |s| if (subs.matches(s, sender, box)) {
+            sub = s;
+            break;
+        };
+        if (sub == null) {
+            rt.say("{s}: no subscription; recorded, nothing runs", .{what});
+            return;
+        }
+        var args = cbor.MapBuilder.init(a);
+        try args.put("message", cbor.cidv(mc));
+        try args.put("body", cbor.cidv(body));
+        try args.put("box", cbor.string(box));
+        try args.put("sender", .{ .bytes = sender });
+        var origin = cbor.MapBuilder.init(a);
+        try origin.put("kind", cbor.string("thread"));
+        try origin.put("program", cbor.cidv(sub.?.handler));
+        try origin.put("args", args.value());
+        try origin.put("launchedBy", cbor.cidv(mc));
+        try origin.put("input", cbor.cidv(ctx.cid));
+        try origin.put("at", cbor.int(at));
+        const t = try rt.store.chainOpen(a, origin.value());
+        rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
+        try rt.run(a, t);
     }
 
     /// A plain entry (#29: a header, a proof, a transaction status the host
@@ -573,7 +510,7 @@ pub const Runtime = struct {
                 if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), subj)) continue;
                 rt.say("{s} → {s} (awaits {s})", .{ what, short(a, t), short(a, subj) });
                 rt.step_extra = .{ .key = "event", .value = info.value() };
-                try rt.step(a, t, ctx, null, null, null);
+                try rt.step(a, t, ctx, null, null);
                 return;
             }
         };
@@ -596,14 +533,6 @@ pub const Runtime = struct {
         const t = try rt.store.chainOpen(a, origin.value());
         rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
         try rt.run(a, t);
-    }
-
-    /// The envelope's sender as 33 bytes, whichever encoding it is kept in.
-    fn senderOf(a: std.mem.Allocator, env: ?Value) ?[]const u8 {
-        const e = env orelse return null;
-        var kb: [33]u8 = undefined;
-        const k = envelope.senderKey(&kb, e) orelse return null;
-        return a.dupe(u8, k) catch null;
     }
 
     /// The last 8 hex digits of a key's bytes, for log lines.
@@ -631,27 +560,14 @@ pub const Runtime = struct {
         return if (r == .cid) .{ .cid = r.cid } else .not_cid;
     }
 
-    const Which = union(enum) { to: []const u8, emit: []const u8 };
-
-    /// The thread whose tip awaits `env` and emitted it (to that sender, or that emit).
-    fn awaiter(rt: *Runtime, a: std.mem.Allocator, env: []const u8, which: Which) !?[]const u8 {
-        for (try rt.store.awaiting(a, env)) |t| {
+    /// The thread whose tip awaits the message `sent` (a record this instance
+    /// holds: what it sent `from`) — the reply is `from` the one it was sent to.
+    fn awaiter(rt: *Runtime, a: std.mem.Allocator, sent: []const u8, from: []const u8) !?[]const u8 {
+        const rec = rt.store.getOpt(a, sent) orelse return null;
+        if (!logm.isMail(rec) or !std.mem.eql(u8, Value.bytesOf(rec.get("recipient")).?, from)) return null;
+        for (try rt.store.awaiting(a, sent)) |t| {
             const tip = rt.tipOf(a, t) catch null orelse continue;
-            if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), env)) continue;
-            const emits = tip.get("emits") orelse continue;
-            if (emits != .array) continue;
-            for (emits.array) |c| {
-                if (c != .cid) continue;
-                const e = rt.store.getOpt(a, c.cid);
-                if (!logm.isEmit(e)) continue;
-                const ok = switch (which) {
-                    .to => |to| std.mem.eql(u8, Value.bytesOf(e.?.get("to")).?, to),
-                    .emit => |em| std.mem.eql(u8, c.cid, em),
-                };
-                if (!ok) continue;
-                const sc = try cbor.cidOfValue(a, try envelope.signedPart(a, e.?.get("envelope").?));
-                if (std.mem.eql(u8, sc, env)) return t;
-            }
+            if (stateIs(tip, "waiting") and cidIn(tip.get("awaits"), sent)) return t;
         }
         return null;
     }
@@ -687,7 +603,7 @@ pub const Runtime = struct {
         const p: ?Value = rt.programOf(a, o) catch null;
         if (p != null and hasWasm(p.?)) {
             const input = Value.cidOf(o.get("input")).?;
-            try rt.step(a, origin, .{ .cid = input, .e = try rt.getOrNotFound(a, input) }, null, null, null);
+            try rt.step(a, origin, .{ .cid = input, .e = try rt.getOrNotFound(a, input) }, null, null);
         } else try rt.runShellThread(a, origin, null);
     }
 
@@ -737,7 +653,7 @@ pub const Runtime = struct {
                 driver_n = en;
             }
         }
-        try rt.step(a, origin, driver.?, resolved.items, null, null);
+        try rt.step(a, origin, driver.?, resolved.items, null);
     }
 
     /// A thread came to rest for good: step the program that launched it, if it now can.
@@ -766,21 +682,23 @@ pub const Runtime = struct {
         calls: *std.array_list.Managed([]const u8),
         launched: std.array_list.Managed([]const u8),
         kept: std.array_list.Managed([]const u8),
-        emits: std.array_list.Managed([]const u8),
-        sealed: std.array_list.Managed([]const u8),
         awaits: std.array_list.Managed([]const u8),
         moves: std.array_list.Managed([2][]const u8),
         rules: std.array_list.Managed(subs.Rule),
         children: std.array_list.Managed(Value),
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most.
         until: ?i64 = null,
+        /// For in-VM calls (#40): the step's host and services, and how deep the calls nest.
+        host: ?*const program.Host = null,
+        svc: ?*wasi.Services = null,
+        depth: u8 = 0,
     };
 
     fn stepOf(imp: *program.Imports) *StepState {
         return @ptrCast(@alignCast(imp.host.ctx));
     }
 
-    fn step(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, failed: ?Value) anyerror!void {
+    fn step(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value) anyerror!void {
         if (rt.stepping.contains(origin) or rt.stopped) {
             rt.step_extra = null;
             return;
@@ -788,7 +706,6 @@ pub const Runtime = struct {
         rt.dropSleeper(origin); // a step supersedes the deadline it rested on
         const key = try rt.gpa.dupe(u8, origin);
         try rt.stepping.put(key, {});
-        var after_emits: []const [2][]const u8 = &.{};
         var after_launched: []const []const u8 = &.{};
         var after_rested = false;
         // The step's fuel: one budget for the whole step, read from the genesis at its start.
@@ -801,7 +718,7 @@ pub const Runtime = struct {
                 _ = rt.stepping.remove(key);
                 rt.gpa.free(key);
             }
-            const r = rt.stepBody(a, origin, ctx, resolved, reply, failed, &meter, &calls) catch |err| {
+            const r = rt.stepBody(a, origin, ctx, resolved, reply, &meter, &calls) catch |err| {
                 const exhausted = err == error.FuelExhausted;
                 const msg = if (exhausted) runner.FUEL_EXHAUSTED else if (err == error.Failed or err == error.Fatal) last_error else @errorName(err);
                 const label = if (err == error.Diverged) "DIVERGED" else if (err == error.NoWitness) "cannot run" else "failed";
@@ -822,18 +739,16 @@ pub const Runtime = struct {
                 after_rested = true;
                 break :blk;
             };
-            after_emits = r.emits;
             after_launched = r.launched;
             after_rested = r.rested;
         }
-        for (after_emits) |x| rt.send(a, origin, x[0], x[1]);
         for (after_launched) |c| try rt.run(a, c);
         if (after_rested) try rt.rested(a, origin);
     }
 
-    const After = struct { emits: []const [2][]const u8, launched: []const []const u8, rested: bool };
+    const After = struct { launched: []const []const u8, rested: bool };
 
-    fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, failed: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
+    fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
         const o = try rt.getOrNotFound(a, origin);
         const prog = try rt.programOf(a, o);
         if (!hasWasm(prog)) return rt.failf(a, "not a wasm program", .{});
@@ -852,13 +767,14 @@ pub const Runtime = struct {
         var self = cbor.MapBuilder.init(a);
         try self.put("handle", g.get("handle"));
         try self.put("domain", g.get("domain"));
+        try self.put("identity", g.get("identity"));
         try input.put("self", self.value());
+        try input.put("owner", g.get("owner"));
         try input.put("args", o.get("args"));
         try input.put("programs", g.get("programs"));
         if (resolved) |rs| try input.put("resolved", .{ .array = rs });
         if (!std.mem.eql(u8, tip_cid, origin)) try input.put("tip", cbor.cidv(tip_cid));
         try input.put("reply", reply);
-        try input.put("deliveryFailed", failed);
         try input.put("peers", g.get("peers"));
         try input.put("defaults", g.get("defaults"));
         try input.put("names", g.get("names"));
@@ -877,8 +793,6 @@ pub const Runtime = struct {
             .calls = calls,
             .launched = .init(a),
             .kept = .init(a),
-            .emits = .init(a),
-            .sealed = .init(a),
             .awaits = .init(a),
             .moves = .init(a),
             .rules = .init(a),
@@ -903,18 +817,19 @@ pub const Runtime = struct {
             .putBlock = hPutBlock,
             .keep = hKeep,
             .launch = hLaunch,
-            .emit = hEmit,
             .awaitReply = hAwait,
-            .resolve = hResolve,
             .head = hHead,
             .advance = hAdvance,
             .subscribe = hSubscribe,
             .wallet = hWallet,
             .http = hHttp,
             .deadline = hDeadline,
+            .call = hCall,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
+        st.host = &host;
+        st.svc = &svc;
         const name = Value.str(prog.get("name")).?;
         const out = program.runProgram(a, rt.runner, mod, name, &host, &svc) catch |err| switch (err) {
             error.Fatal => {
@@ -930,7 +845,7 @@ pub const Runtime = struct {
             else => return err,
         };
 
-        if (rt.stopped) return .{ .emits = &.{}, .launched = &.{}, .rested = false };
+        if (rt.stopped) return .{ .launched = &.{}, .rested = false };
         const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or st.until != null) "waiting" else "finished";
         const errored = std.mem.eql(u8, state, "errored");
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
@@ -952,7 +867,6 @@ pub const Runtime = struct {
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
         try u.put("launched", try cbor.cidArray(a, st.launched.items));
         try u.put("kept", try cbor.cidArray(a, st.kept.items));
-        try u.put("emits", try cbor.cidArray(a, st.emits.items));
         try u.put("heads", try cbor.cidArray(a, head_updates.items));
         try u.put("subscriptions", try cbor.cidArray(a, sub_updates.items));
         var res = cbor.MapBuilder.init(a);
@@ -982,7 +896,6 @@ pub const Runtime = struct {
             try w.writeAll(" · launched ");
             for (st.launched.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
         }
-        if (st.emits.items.len > 0) try w.print(" · {d} emitted", .{st.emits.items.len});
         if (head_updates.items.len > 0) {
             try w.writeAll(" · moved ");
             for (st.moves.items, 0..) |m, i| try w.print("{s}{s}→{s}", .{ if (i > 0) "," else "", m[0], short(a, m[1]) });
@@ -995,20 +908,7 @@ pub const Runtime = struct {
         if (errored) try w.print(" · {s}", .{stderr_text});
         rt.say("{s}", .{line.items});
 
-        const emits = try a.alloc([2][]const u8, st.emits.items.len);
-        for (st.emits.items, 0..) |e, i| emits[i] = .{ e, st.sealed.items[i] };
-        return .{ .emits = emits, .launched = st.launched.items, .rested = !waiting };
-    }
-
-    fn send(rt: *Runtime, a: std.mem.Allocator, thread: []const u8, emit: []const u8, env: []const u8) void {
-        const f = rt.peers.send orelse return;
-        const rec = rt.store.getOpt(a, emit) orelse return;
-        var m = cbor.MapBuilder.init(a);
-        for (rec.map) |e| m.put(e.key, e.value) catch return;
-        m.put("emit", cbor.cidv(emit)) catch return;
-        m.put("thread", cbor.cidv(thread)) catch return;
-        m.put("cid", cbor.cidv(env)) catch return;
-        f(rt.peers.ctx, a, m.value()) catch |err| rt.say("{s} emit {s}: {s}", .{ short(a, thread), short(a, emit), @errorName(err) });
+        return .{ .launched = st.launched.items, .rested = !waiting };
     }
 
     // -------------------------------------------------- the program host (skein imports)
@@ -1067,47 +967,19 @@ pub const Runtime = struct {
         try st.launched.append(c);
         return c;
     }
-    fn hEmit(imp: *program.Imports, c: []const u8) program.Err![]const u8 {
-        const st = stepOf(imp);
-        const a = st.a;
-        const rec = (st.rt.store.get(a, c) catch return imp.failWith("CBOR decode error")) orelse return notFound(imp, c);
-        if (!logm.isEmit(rec)) return imp.failWith("emit: want {kind: \"emit\", to, box, body, envelope}");
-        const bc = Value.cidOf(rec.get("body")).?;
-        const body = (st.rt.store.bytes(a, bc) catch return imp.failWith("store error")) orelse return notFound(imp, bc);
-        if (try emitProblem(a, rec, body, st.rt.identity())) |bad| return imp.failFmt("emit: {s}", .{bad});
-        const cid = st.rt.store.put(a, try envelope.signedPart(a, rec.get("envelope").?)) catch return imp.failWith("store error");
-        try st.emits.append(c);
-        try st.sealed.append(cid);
-        return cid;
-    }
     fn hAwait(imp: *program.Imports, c: []const u8) program.Err!void {
         const st = stepOf(imp);
-        var ok = false;
-        for (st.sealed.items) |s| if (std.mem.eql(u8, s, c)) {
-            ok = true;
-        };
-        if (!ok and !(st.rt.store.has(c) catch false)) return imp.failWith("await: not an envelope this step emitted, nor a record in the store");
+        if (!(st.rt.store.has(c) catch false)) return imp.failWith("await: not a record in the store (a message this step sent, or an event's subject)");
         if (st.launched.items.len > 0) return imp.failWith("await: this step launched threads; a step waits on threads or on replies, not both");
         for (st.awaits.items) |x| if (std.mem.eql(u8, x, c)) return;
         try st.awaits.append(c);
     }
-    fn hResolve(imp: *program.Imports, name: []const u8) program.Err![]const u8 {
-        const st = stepOf(imp);
-        const a = st.a;
-        const at = std.mem.indexOfScalar(u8, name, '@');
-        var ok = at != null and at.? > 0 and at.? + 1 < name.len and std.mem.indexOfScalarPos(u8, name, at.? + 1, '@') == null;
-        if (ok and heads.hasSpaceOrNul(name) and hasJsSpace(name)) ok = false;
-        if (!ok) return imp.failFmt("resolve: want handle@domain, not {s}", .{try json.quoted(a, name)});
-        const handle = name[0..at.?];
-        const domain = name[at.? + 1 ..];
-        const answer = try attest(st, imp, "resolve", .{ .bytes = name }, .{ .resolve = .{ handle, domain } });
-        const r = cbor.decode(a, answer) catch return imp.failFmt("resolve: {s} did not resolve to an identity key", .{name});
-        if (r != .map or !secp.isKey(Value.bytesOf(r.get("identityKey")) orelse "")) return imp.failFmt("resolve: {s} did not resolve to an identity key", .{name});
-        return answer;
-    }
     fn hHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
         const st = stepOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("head: bad name {s}", .{try json.quoted(st.a, name)});
+        // A step sees its own moves (#40: an in-VM call may advance a head its caller then reads).
+        var i = st.moves.items.len;
+        while (i > 0) : (i -= 1) if (std.mem.eql(u8, st.moves.items[i - 1][0], name)) return st.moves.items[i - 1][1];
         return heads.headTree(st.a, st.rt.store, name) catch imp.failWith("store error");
     }
     fn hAdvance(imp: *program.Imports, name: []const u8, t: []const u8) program.Err!void {
@@ -1161,7 +1033,7 @@ pub const Runtime = struct {
         };
     }
 
-    const Perform = union(enum) { wallet: []const u8, resolve: [2][]const u8, http: []const u8 };
+    const Perform = union(enum) { wallet: []const u8, http: []const u8 };
 
     /// An attested call's answer, recorded: the witness's (replay), else the peer's.
     fn attest(st: *StepState, imp: *program.Imports, op: []const u8, request: Value, perform: Perform) program.Err![]const u8 {
@@ -1186,16 +1058,6 @@ pub const Runtime = struct {
                     imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (wallet): the router is gone", .{ short(a, st.origin), st.n, i }))
                 else
                     imp.failFmt("{s}", .{@errorName(err)}),
-                .resolve => |hd| {
-                    const res: Value = if (rt.peers.resolve) |rf| rf(rt.peers.ctx, a, hd[0], hd[1]) else blk: {
-                        var m = cbor.MapBuilder.init(a);
-                        try m.put("identityKey", .{ .bytes = "" });
-                        try m.put("error", cbor.string("no resolver"));
-                        break :blk m.value();
-                    };
-                    if (Value.str(res.get("error"))) |e| if (e.len > 0) rt.say("{s} resolve {s}@{s}: {s}", .{ short(a, st.origin), hd[0], hd[1], e });
-                    result = cbor.encode(a, res) catch return imp.failWith("resolve: the answer is not IPLD");
-                },
                 .http => |q| {
                     const f = rt.peers.http orelse return imp.failWith("http: this host answers no http");
                     result = f(rt.peers.ctx, a, q) catch |err| return imp.failFmt("http: {s}", .{@errorName(err)});
@@ -1214,6 +1076,275 @@ pub const Runtime = struct {
         try rec.put("result", .{ .bytes = result });
         try st.calls.append(rt.store.put(a, rec.value()) catch return imp.failWith("store error"));
         return result;
+    }
+
+    // ------------------------------------------------------------ calls (#40)
+
+    /// An in-VM call from a step: the callee runs as part of the step — its
+    /// recorded calls, kept records, launches and head moves are the step's,
+    /// on the step's fuel and clock — with its own input.
+    fn hCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        const a = st.a;
+        if (st.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
+        const loaded = try loadCallee(st.rt, imp, a, prog);
+        var ctx = st.rt.callContext(a, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
+        var extra = cbor.MapBuilder.init(a);
+        try extra.put("thread", cbor.cidv(st.origin));
+        try extra.put("step", cbor.int(st.n));
+        try extra.put("entry", cbor.cidv(st.entry));
+        try extra.put("at", cbor.int(st.at));
+        try ctx.put("step", extra.value());
+        const saved = st.input;
+        st.input = cbor.encode(a, ctx.value()) catch return error.OutOfMemory;
+        st.depth += 1;
+        defer {
+            st.input = saved;
+            st.depth -= 1;
+        }
+        return runCallee(imp, a, st.rt, loaded, func, st.host.?, st.svc.?);
+    }
+
+    const Callee = struct { mod: *runner.Compiled, name: []const u8 };
+
+    fn loadCallee(rt: *Runtime, imp: *program.Imports, a: std.mem.Allocator, prog: []const u8) program.Err!Callee {
+        const p = rt.store.getOpt(a, prog);
+        if (!programs.isProgram(p) or !hasWasm(p.?)) return imp.failFmt("call: {s} is not a wasm program record in the store", .{fmtCid(a, prog)});
+        var msg: []const u8 = "";
+        const mod = rt.runner.load(rt.store, a, programs.wasmOf(p.?).?, &msg) catch |err| return switch (err) {
+            error.NotInStore, error.BadHash, error.Compile => imp.failFmt("call: {s}", .{msg}),
+            error.OutOfMemory => error.OutOfMemory,
+            else => imp.failFmt("call: {s}", .{@errorName(err)}),
+        };
+        return .{ .mod = mod, .name = Value.str(p.?.get("name")).? };
+    }
+
+    fn runCallee(imp: *program.Imports, a: std.mem.Allocator, rt: *Runtime, c: Callee, func: []const u8, host: *const program.Host, svc: *wasi.Services) program.Err![]const u8 {
+        const out = program.runProgramLimit(a, rt.runner, c.mod, c.name, host, svc, CALL_OUTPUT_LIMIT) catch |err| switch (err) {
+            // Diverged, no witness, out of fuel: the callee's fatal is its caller's.
+            error.Fatal => {
+                imp.fatal = svc.state.fatal;
+                return error.Fatal;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (out.exit_code != 0) return imp.failFmt("call {s}.{s}: {s}", .{ c.name, func, lastLine(a, out.stderr, out.exit_code) });
+        return out.stdout;
+    }
+
+    /// The input a called program reads (`kind: "call"`): what it is asked,
+    /// by whom, and the instance it runs in — the genesis's facts and the
+    /// subscriptions as they stand.
+    fn callContext(rt: *Runtime, a: std.mem.Allocator, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !cbor.MapBuilder {
+        const g = rt.genesis orelse return error.NoGenesis;
+        var m = cbor.MapBuilder.init(a);
+        try m.put("kind", cbor.string("call"));
+        try m.put("fn", cbor.string(func));
+        try m.put("arg", .{ .bytes = arg });
+        if (caller) |c| try m.put("caller", .{ .bytes = c });
+        try m.put("now", cbor.int(now));
+        var self = cbor.MapBuilder.init(a);
+        try self.put("handle", g.get("handle"));
+        try self.put("domain", g.get("domain"));
+        try self.put("identity", g.get("identity"));
+        try m.put("self", self.value());
+        try m.put("owner", g.get("owner"));
+        try m.put("programs", g.get("programs"));
+        try m.put("peers", g.get("peers"));
+        try m.put("defaults", g.get("defaults"));
+        try m.put("names", g.get("names"));
+        try m.put("routes", g.get("routes"));
+        try m.put("reads", g.get("reads"));
+        var rules = std.array_list.Managed(Value).init(a);
+        for ((try subs.current(a, rt.store)) orelse &.{}) |r| {
+            var x = cbor.MapBuilder.init(a);
+            if (r.sender) |sd| try x.put("sender", .{ .bytes = sd });
+            if (r.box) |b| try x.put("box", cbor.string(b));
+            try x.put("handler", cbor.cidv(r.handler));
+            try rules.append(x.value());
+        }
+        try m.put("subscriptions", .{ .array = rules.items });
+        return m;
+    }
+
+    pub const CallResult = struct { ok: bool, result: []const u8 = "", err: []const u8 = "", fuel: u64 };
+
+    /// The kernel's `call` (#40): run `prog`'s entry as a function over the
+    /// current state and return what it wrote to stdout. No entry, no writes:
+    /// `put` keeps records in memory for the call only; heads, the store and
+    /// the log are read as they stand (plus the entries admitted and not yet
+    /// processed, `pending`, and the committed state record, `state`). The
+    /// oracle (`wallet`) and `http` are answered by the host and not recorded,
+    /// so a call is not deterministic and nothing replays it. Fuel is limited
+    /// by `callFuelLimit` and reported.
+    pub fn call(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !CallResult {
+        try rt.loadGenesis();
+        if (rt.genesis == null) return .{ .ok = false, .err = "call: no genesis", .fuel = 0 };
+        var meter = engine.Meter.init(callFuelLimit(rt.genesis));
+        var cs = CallState{ .rt = rt, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = &meter, .random = undefined };
+        var seed: [32]u8 = undefined;
+        realRandom(&seed, now);
+        cs.random = syscalls.Entropy.init(&seed, prog);
+        cs.clock.drive(@as(i128, now) * 1_000_000);
+        cs.clock.meter = &meter;
+        var ctx = try rt.callContext(a, func, arg, caller, now);
+        var pend = std.array_list.Managed(Value).init(a);
+        for (try rt.store.logFrom(a, rt.cursor)) |c| try pend.append(cbor.cidv(c));
+        try ctx.put("pending", .{ .array = pend.items });
+        try ctx.put("state", cbor.optCid(try rt.store.state(a)));
+        cs.input = try cbor.encode(a, ctx.value());
+        var host = callHost;
+        host.ctx = &cs;
+        var rs = wasi.RunState{ .meter = &meter };
+        var svc = wasi.Services{ .ctx = &cs, .state = &rs, .clock = csClock, .random = csRandom };
+        cs.svc = &svc;
+        cs.host = &host;
+        var imp = program.Imports{ .host = &host, .alloc = a };
+        const loaded = loadCallee(rt, &imp, a, prog) catch |err| switch (err) {
+            error.Failed => return .{ .ok = false, .err = imp.last_error, .fuel = 0 },
+            else => return err,
+        };
+        const out = program.runProgramLimit(a, rt.runner, loaded.mod, loaded.name, &host, &svc, CALL_OUTPUT_LIMIT) catch |err| switch (err) {
+            error.Fatal => {
+                const f = rs.fatal orelse wasi.Fatal{ .message = "fatal" };
+                return .{ .ok = false, .err = if (f.kind == .fuel) runner.FUEL_EXHAUSTED else f.message, .fuel = meter.used() };
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (out.exit_code != 0) return .{ .ok = false, .err = lastLine(a, out.stderr, out.exit_code), .fuel = meter.used() };
+        return .{ .ok = true, .result = out.stdout, .fuel = meter.used() };
+    }
+
+    /// A call's world: the records it put (in memory only), its clock, its random, its fuel.
+    const CallState = struct {
+        rt: *Runtime,
+        a: std.mem.Allocator,
+        overlay: std.StringHashMap([]const u8),
+        meter: *engine.Meter,
+        clock: syscalls.ThreadClock = .{},
+        random: syscalls.Entropy,
+        input: []const u8 = "",
+        svc: ?*wasi.Services = null,
+        host: ?*const program.Host = null,
+        depth: u8 = 0,
+    };
+
+    const callHost = program.Host{
+        .ctx = undefined,
+        .input = cInput,
+        .get = cGet,
+        .put = cPut,
+        .putBlock = cPutBlock,
+        .keep = cKeep,
+        .launch = cLaunch,
+        .awaitReply = cAwait,
+        .head = cHead,
+        .advance = cAdvance,
+        .subscribe = cSubscribe,
+        .wallet = cWallet,
+        .http = cHttp,
+        .deadline = cDeadline,
+        .call = cCall,
+    };
+
+    fn callOf(imp: *program.Imports) *CallState {
+        return @ptrCast(@alignCast(imp.host.ctx));
+    }
+    fn csClock(ctx: *anyopaque, _: u32) u64 {
+        const cs: *CallState = @ptrCast(@alignCast(ctx));
+        return @intCast(cs.clock.read());
+    }
+    fn csRandom(ctx: *anyopaque, out: []u8) void {
+        const cs: *CallState = @ptrCast(@alignCast(ctx));
+        cs.random.fill(out);
+    }
+    fn readOnly(imp: *program.Imports, what: []const u8) program.Err {
+        return imp.failFmt("{s}: a call reads only (no entry, no writes)", .{what});
+    }
+    fn cInput(imp: *program.Imports) []const u8 {
+        return callOf(imp).input;
+    }
+    fn cGet(imp: *program.Imports, c: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        if (cs.overlay.get(c)) |b| return b;
+        return (cs.rt.store.bytes(cs.a, c) catch return imp.failWith("store error")) orelse notFound(imp, c);
+    }
+    fn cPut(imp: *program.Imports, bytes: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        const v = cbor.decode(cs.a, bytes) catch return imp.failWith("CBOR decode error");
+        const blk = cbor.block(cs.a, v) catch return imp.failWith("the value is not IPLD");
+        try cs.overlay.put(blk.cid, blk.bytes);
+        return blk.cid;
+    }
+    fn cPutBlock(imp: *program.Imports, c: []const u8, bytes: []const u8) program.Err!void {
+        const cs = callOf(imp);
+        if (!cidm.hashMatches(c, bytes)) return imp.failFmt("putblock: bytes do not hash to {s}", .{fmtCid(cs.a, c)});
+        try cs.overlay.put(try cs.a.dupe(u8, c), try cs.a.dupe(u8, bytes));
+    }
+    fn cKeep(imp: *program.Imports, _: []const u8) program.Err!void {
+        return readOnly(imp, "keep");
+    }
+    fn cLaunch(imp: *program.Imports, _: []const u8, _: []const u8) program.Err![]const u8 {
+        return readOnly(imp, "launch");
+    }
+    fn cAwait(imp: *program.Imports, _: []const u8) program.Err!void {
+        return readOnly(imp, "await");
+    }
+    fn cAdvance(imp: *program.Imports, _: []const u8, _: []const u8) program.Err!void {
+        return readOnly(imp, "advance");
+    }
+    fn cSubscribe(imp: *program.Imports, _: []const u8, _: ?[]const u8, _: []const u8, _: []const u8) program.Err!void {
+        return readOnly(imp, "subscribe");
+    }
+    fn cDeadline(imp: *program.Imports, _: i64) program.Err!void {
+        return readOnly(imp, "deadline");
+    }
+    fn cHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
+        const cs = callOf(imp);
+        if (!heads.isHeadName(name)) return imp.failFmt("head: bad name {s}", .{try json.quoted(cs.a, name)});
+        return heads.headTree(cs.a, cs.rt.store, name) catch imp.failWith("store error");
+    }
+    /// The oracle, answered by the host and not recorded (a call is never replayed).
+    fn cWallet(imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        var allowed = false;
+        if (frame.len > 0) for (wallet_calls) |w| if (w == frame[0]) {
+            allowed = true;
+        };
+        if (!allowed) return imp.failFmt("wallet: call {s} is not allowed to programs", .{if (frame.len > 0) try std.fmt.allocPrint(cs.a, "{d}", .{frame[0]}) else "undefined"});
+        const f = cs.rt.peers.wallet orelse return imp.failWith("wallet: this host has no oracle");
+        return f(cs.rt.peers.ctx, cs.a, frame) catch |err| imp.failFmt("wallet: {s}", .{@errorName(err)});
+    }
+    /// HTTP, answered by the host and not recorded.
+    fn cHttp(imp: *program.Imports, request: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        const r = cbor.decode(cs.a, request) catch return imp.failWith("http: the request is not dag-cbor");
+        if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
+        const f = cs.rt.peers.http orelse return imp.failWith("http: this host answers no http");
+        return f(cs.rt.peers.ctx, cs.a, request) catch |err| imp.failFmt("http: {s}", .{@errorName(err)});
+    }
+    /// A call within a call: the same world (records put, fuel, clock), its own fn and arg.
+    fn cCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        const a = cs.a;
+        if (cs.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
+        const loaded = try loadCallee(cs.rt, imp, a, prog);
+        const outer = cbor.decode(a, cs.input) catch return imp.failWith("call: bad input");
+        var m = cbor.MapBuilder.init(a);
+        for (outer.map) |e| {
+            if (std.mem.eql(u8, e.key, "fn") or std.mem.eql(u8, e.key, "arg")) continue;
+            try m.put(e.key, e.value);
+        }
+        try m.put("fn", cbor.string(func));
+        try m.put("arg", .{ .bytes = arg });
+        const saved = cs.input;
+        cs.input = cbor.encode(a, m.value()) catch return error.OutOfMemory;
+        cs.depth += 1;
+        defer {
+            cs.input = saved;
+            cs.depth -= 1;
+        }
+        return runCallee(imp, a, cs.rt, loaded, func, cs.host.?, cs.svc.?);
     }
 
     // ------------------------------------------------------------ the shell
@@ -1266,7 +1397,7 @@ pub const Runtime = struct {
         const p: ?Value = rt.programOf(a, try rt.getOrNotFound(a, origin)) catch null;
         if (p != null and hasWasm(p.?)) {
             rt.step_extra = .{ .key = "woke", .value = .{ .bool = true } };
-            return rt.step(a, origin, c, null, null, null);
+            return rt.step(a, origin, c, null, null);
         }
         try rt.runShellThread(a, origin, c);
     }
@@ -1514,19 +1645,23 @@ fn jsTrim(a: std.mem.Allocator, b: []const u8) ![]const u8 {
     return s[start..end];
 }
 
-/// Why an emitted envelope may not leave (scheduler.ts emitProblem), or null.
-fn emitProblem(a: std.mem.Allocator, e: Value, body: []const u8, identity: []const u8) !?[]const u8 {
-    const env = e.get("envelope").?;
-    if (!envelope.isEnvelope(env) or envelope.formOf(env) == .session) return "the envelope is not a complete BRC-169 envelope";
-    var kb: [33]u8 = undefined;
-    const key = envelope.senderKey(&kb, env).?;
-    if (!std.mem.eql(u8, key, identity)) return try std.fmt.allocPrint(a, "the envelope's sender is {s}, not this instance", .{Runtime.shortKey(key)});
-    if (!envelope.verify(a, env)) return "the envelope's signature does not verify";
-    const raw = envelope.contentBytes(a, env) catch return "the envelope has no content";
-    const m = envelope.brc78Decode(raw) catch |err| return try envelope.brc78Message(a, raw, err);
-    const to = Value.bytesOf(e.get("to")).?;
-    const to_hex = std.fmt.bytesToHex(to[0..33].*, .lower);
-    if (!std.mem.eql(u8, &m.recipient, &to_hex)) return try std.fmt.allocPrint(a, "the content is encrypted to {s}, not {s}", .{ m.recipient[58..], to_hex[58..] });
-    if (!envelope.hashMatches(env, body)) return "contentHash is not the body's";
-    return null;
+/// The last line of a program's stderr, or "exit N": what a failed call reports.
+fn lastLine(a: std.mem.Allocator, stderr: []const u8, code: i32) []const u8 {
+    var t = jsTrim(a, stderr) catch "";
+    if (std.mem.lastIndexOfScalar(u8, t, '\n')) |i| t = t[i + 1 ..];
+    return if (t.len > 0) t else std.fmt.allocPrint(a, "exit {d}", .{code}) catch "failed";
+}
+
+/// Real randomness for a call's stream: a call needs no determinism, and a
+/// nonce it makes (a front door's session nonce) must not be guessable.
+fn realRandom(out: []u8, now: i64) void {
+    if (engine.web) {
+        // The browser build runs no front door; the call's time and a counter will do there.
+        const S = struct {
+            var n: u32 = 0;
+        };
+        S.n +%= 1;
+        var sm = syscalls.SplitMix{ .s = @as(u32, @truncate(@as(u64, @bitCast(now)))) ^ (S.n *% 0x9e3779b9) };
+        sm.fill(out);
+    } else std.crypto.random.bytes(out);
 }

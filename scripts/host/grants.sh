@@ -24,7 +24,7 @@ q() { "$@" 2>&1 | grep -e granted -e revoked -e Error || true; }
 o() { HOME="$skein/owner-home" q 1sat permissions "$@"; }
 o revoke skein-client --all
 o grant skein-client --protocol "identity key retrieval" --level 1
-o grant skein-client --protocol "metanet handles envelope" --level 2 --counterparty anyone   # envelope signature
+o grant skein-client --protocol "skein register" --level 2 --counterparty anyone             # the signed mailbox registration (#40)
 o grant skein-client --protocol "messagebox" --level 1                                       # message-box-client messageId HMAC
 o grant skein-client --protocol "server hmac" --level 2 --counterparty self                  # BRC-104 nonces
 for i in "${instances[@]}"; do
@@ -37,7 +37,7 @@ f() { HOME="$skein/infer-home" q 1sat permissions "$@"; }
 f grant skein-infer --protocol "identity key retrieval" --level 1
 f grant skein-infer --protocol "server hmac" --level 2 --counterparty self
 f grant skein-infer --protocol "messagebox" --level 1
-f grant skein-infer --protocol "metanet handles envelope" --level 2 --counterparty anyone
+f grant skein-infer --protocol "skein register" --level 2 --counterparty anyone
 for i in "${instances[@]}"; do
   f grant skein-infer --protocol "auth message signature" --level 2 --counterparty "$i"
   f grant skein-infer --protocol "message encryption" --level 2 --counterparty "$i"

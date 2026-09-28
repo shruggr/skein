@@ -113,11 +113,11 @@ export interface HostRow {
   wake?: number;
 }
 
-/** The router's side of the page (#33): where the messagebox is, and the mailboxes it keeps for other identities. */
+/** The router's side of the page (#40): where it is, each instance's origin, the mailbox instances. */
 export interface HostInfo {
-  messagebox?: string;
   router?: string;
-  mailboxes?: Array<{ handle: string; domain: string; identity: string; instance: string }>;
+  originOf?(handle: string): string;
+  mailboxes?: Array<{ handle: string; domain: string; owner?: string | null }>;
 }
 
 const esc = (x: unknown) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -134,11 +134,11 @@ body{margin:0 auto;max-width:1100px;padding:14px 16px;background:var(--bg);color
 a{color:var(--acc)}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 th{font-size:13px;color:var(--mut);font-weight:600}.k{font-family:ui-monospace,monospace;font-size:13px}.mut{color:var(--mut)}.ok{color:var(--ok)}</style></head>
 <body><h1 style="font-size:19px">skein host <span class="mut" style="font-size:13px">${rows.length} instance${rows.length === 1 ? "" : "s"} · <a href="/roster.json">roster.json</a></span></h1>
-${info.messagebox ? `<p class="mut">messagebox <code>${esc(info.messagebox)}</code>${info.router ? ` · session identity (front instance) <code title="${esc(info.router)}">${esc(info.router.slice(0, 16))}…</code>` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
+${info.router ? `<p class="mut">router <code>${esc(info.router)}</code>${info.originOf ? ` · an instance at <code>${esc(info.originOf("<handle>"))}</code> (its front door)` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
 <table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>explorer</th></tr>
 ${body}</table>
-${info.mailboxes ? `<h2 style="font-size:16px">mailboxes kept here</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>identity</th><th>kept by</th></tr>
-${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.identity)}">${esc(m.identity.slice(0, 16))}…</td><td>${esc(m.instance)}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (POST /account/register)</p>`}` : ""}</body></html>`;
+${info.mailboxes ? `<h2 style="font-size:16px">mailbox instances</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>whose</th><th>origin</th></tr>
+${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.owner ?? "")}">${esc((m.owner ?? "").slice(0, 16))}…</td><td class="k">${esc(info.originOf?.(m.handle) ?? "")}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (skein-host add --mailbox, or POST /account/register)</p>`}` : ""}</body></html>`;
 }
 
 /**

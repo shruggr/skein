@@ -1,167 +1,445 @@
-//! messagebox: the BRC-33 messagebox's records inside the instance (issue #33),
-//! a wasm32-wasi command stepped with the `skein` imports. The router
-//! terminates transport and BRC-104 auth and admits each state change as a
-//! `mail` log entry; the genesis subscribes this program to the reserved box
-//! `:mail`, so each such entry is one step here:
+//! messagebox (#40): the BRC-33 messagebox inside the instance, to the
+//! persistence rules — messages are state, nothing else is.
 //!
-//!   {op: "put", recipient: bytes(33), box, sender: bytes(33), messageId, body: bytes, json?: true}
-//!       a message for a hosted identity (the body as submitted: dag-cbor bytes,
-//!       or a JSON body's UTF-8 text with `json`)
-//!   {op: "ack", recipient: bytes(33), messageIds: [text]}
-//!       the recipient acknowledged these: they are deleted
+//! Called by the front door (its routes; a handler gets {caller, body,
+//! contentType, session, …} and answers {status, type, body, admit?}):
+//!   sendMessage          a message for this instance or for the identity it
+//!                        keeps a mailbox for → one entry to admit: the `mail`
+//!                        record {kind: "mail", op: "put", sender (the
+//!                        session's identity), recipient, box, body: <cid>,
+//!                        json?, session: {payload, signature, nonce,
+//!                        yourNonce}} and its body. Nothing is written if it is
+//!                        refused. Accepted when a subscription takes it —
+//!                        (sender, box) for this instance's own boxes, or a
+//!                        reply to a message this instance sent that sender;
+//!                        a subscription to this program for its owner's (a
+//!                        mailbox exists only where one is subscribed)
+//!   listMessages         a read of the caller's mailbox: nothing is written
+//!   acknowledgeMessage   one entry moving the reader's pointer (an `ack`
+//!                        event in `:ack`); the records stay in the log
+//! Called from a step (the loop's, an in-VM call):
+//!   send                 deliver a message over http: deliver.zig
+//! Stepped:
+//!   a `mail` message routed here by a subscription → kept in the mailbox
+//!   an `ack` event (box `:ack`) → the reader's pointer moves
 //!
-//! State is the head `mailbox`, naming
-//!   {kind: "mailbox", recipients: [{identity: bytes(33), mail: <cid>}]}   (sorted by identity)
-//! and each recipient's
-//!   {kind: "mail", identity: bytes(33), messages: [{messageId, box, sender, body, json?, at}]}
-//! in admission order: listMessages for a hosted identity is a read of its
-//! record, in log order (the router reads it through the kernel). A message id
-//! already kept for that recipient is not kept twice. Each step moves the head.
-//!
-//! The same program keeps the instance's BRC-103/104 sessions (auth.zig): a
-//! plain `event` entry in the reserved box `:auth` (a sender-less
-//! subscription) is an authentication message the router forwarded.
+//! State: the head `mailbox` names {kind: "mailbox", lists: [{recipient, box,
+//! list: <cid>}]} (sorted), each {kind: "mail-list", recipient, box, acked:
+//! <count>, messages: [{id: <mail cid>, at}]} — the messages not yet
+//! acknowledged, in arrival order. The message records themselves are the
+//! log's and stay there. An instance's own subscribed boxes keep no list:
+//! admission is the acknowledgement, the log is the queue.
 const std = @import("std");
 const cbor = @import("cbor");
+const cid = cbor.cidm;
+const sk = @import("sk");
+const dagjson = @import("dagjson");
+const deliver = @import("deliver.zig");
 
 const Value = cbor.Value;
+const Allocator = std.mem.Allocator;
+const eql = std.mem.eql;
 
-pub const sk = struct {
-    pub extern "skein" fn input(out: [*]u8, cap: u32) i32;
-    pub extern "skein" fn get(cid: [*]const u8, cid_len: u32, out: [*]u8, cap: u32) i32;
-    pub extern "skein" fn put(data: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
-    pub extern "skein" fn head(name: [*]const u8, name_len: u32, out: [*]u8, cap: u32) i32;
-    pub extern "skein" fn advance(name: [*]const u8, name_len: u32, tree: [*]const u8, tree_len: u32) i32;
-    pub extern "skein" fn take(out: [*]u8, cap: u32) i32;
-    pub extern "skein" fn @"error"(out: [*]u8, cap: u32) i32;
-    pub extern "skein" fn wallet(frame: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
-};
-
-const auth = @import("auth.zig");
-
-var last_error: [1024]u8 = undefined;
-var last_error_len: usize = 0;
-
-pub fn failed() error{ImportFailed} {
-    const n = sk.@"error"(&last_error, last_error.len);
-    last_error_len = if (n < 0) 0 else @min(@as(usize, @intCast(n)), last_error.len);
-    return error.ImportFailed;
-}
-
-/// Run an import that writes (out, cap), taking the held result when it did not fit.
-pub fn result(a: std.mem.Allocator, call: anytype, args: anytype) ![]u8 {
-    var buf = try a.alloc(u8, 4096);
-    const n = @call(.auto, call, args ++ .{ buf.ptr, @as(u32, @intCast(buf.len)) });
-    if (n < 0) return failed();
-    const len: usize = @intCast(n);
-    if (len <= buf.len) return buf[0..len];
-    buf = try a.alloc(u8, len);
-    if (sk.take(buf.ptr, @intCast(len)) != n) return failed();
-    return buf;
-}
-
-pub fn getValue(a: std.mem.Allocator, c: []const u8) !Value {
-    return cbor.decode(a, try result(a, sk.get, .{ c.ptr, @as(u32, @intCast(c.len)) }));
-}
-
-pub fn putValue(a: std.mem.Allocator, v: Value) ![]u8 {
-    const bytes = try cbor.encode(a, v);
-    return result(a, sk.put, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) });
-}
-
-const head_name = "mailbox";
+pub const ACK_BOX = ":ack";
+const MAILBOX = "mailbox";
 
 pub fn main() u8 {
-    var arena = std.heap.ArenaAllocator.init(std.heap.wasm_allocator);
-    defer arena.deinit();
-    run(arena.allocator()) catch |e| {
-        var buf: [1400]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "messagebox: {s}{s}{s}\n", .{ @errorName(e), if (last_error_len > 0) ": " else "", last_error[0..last_error_len] }) catch "messagebox: error\n";
-        std.fs.File.stderr().writeAll(msg) catch {};
-        return 1;
+    return sk.main("messagebox", run);
+}
+
+fn run(a: Allocator) !void {
+    const in = try sk.input(a);
+    const kind = Value.str(in.get("kind")) orelse "";
+    if (eql(u8, kind, "step")) return step(a, in);
+    if (!eql(u8, kind, "call")) return sk.report("the messagebox is called or stepped");
+    const func = Value.str(in.get("fn")) orelse "";
+    const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
+    if (eql(u8, func, "send")) return sk.answer(a, try deliver.send(a, in, arg));
+    const r: Resp = if (eql(u8, func, "sendMessage"))
+        try sendMessage(a, in, arg)
+    else if (eql(u8, func, "listMessages"))
+        try listMessages(a, in, arg)
+    else if (eql(u8, func, "acknowledgeMessage"))
+        try acknowledgeMessage(a, in, arg)
+    else
+        return sk.report("unknown fn");
+    try sk.answer(a, try r.value(a));
+}
+
+// ---------------------------------------------------------------- answers (JSON or BRC-231 dag-cbor, as asked)
+
+const Resp = struct {
+    status: u64,
+    cbor: bool,
+    body: Value,
+    admit: ?Value = null,
+
+    fn value(r: Resp, a: Allocator) !Value {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("status", cbor.int(r.status));
+        try m.put("type", cbor.string(if (r.cbor) "application/cbor" else "application/json"));
+        try m.put("body", .{ .bytes = if (r.cbor) try cbor.encode(a, r.body) else try dagjson.encode(a, r.body) });
+        try m.put("admit", r.admit);
+        return m.value();
+    }
+};
+
+fn failure(a: Allocator, is_cbor: bool, status: u64, code: []const u8, description: []const u8) !Resp {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("status", cbor.string("error"));
+    try m.put("code", cbor.string(code));
+    try m.put("description", cbor.string(description));
+    return .{ .status = status, .cbor = is_cbor, .body = m.value() };
+}
+
+/// The request body: dag-cbor for application/cbor (BRC-231), else JSON (kept as JSON values: strings stay strings).
+fn requestBody(a: Allocator, arg: Value) !struct { cbor: bool, v: ?Value } {
+    const ct = Value.str(arg.get("contentType")) orelse "";
+    const raw = Value.bytesOf(arg.get("body")) orelse "";
+    if (std.ascii.eqlIgnoreCase(ct, "application/cbor")) return .{ .cbor = true, .v = cbor.decode(a, raw) catch null };
+    if (raw.len == 0) return .{ .cbor = false, .v = .{ .map = &.{} } };
+    const j = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch return .{ .cbor = false, .v = null };
+    return .{ .cbor = false, .v = try plainJson(a, j) };
+}
+
+/// JSON as values, no DAG-JSON reading (a request's own fields).
+fn plainJson(a: Allocator, j: std.json.Value) !Value {
+    return switch (j) {
+        .null => .null,
+        .bool => |b| .{ .bool = b },
+        .integer => |i| .{ .int = i },
+        .float => |f| .{ .float = f },
+        .number_string => |s| .{ .string = s },
+        .string => |s| .{ .string = s },
+        .array => |arr| blk: {
+            const out = try a.alloc(Value, arr.items.len);
+            for (arr.items, 0..) |x, i| out[i] = try plainJson(a, x);
+            break :blk .{ .array = out };
+        },
+        .object => |o| blk: {
+            var list: std.ArrayList(cbor.Entry) = .empty;
+            var it = o.iterator();
+            while (it.next()) |e| try list.append(a, .{ .key = e.key_ptr.*, .value = try plainJson(a, e.value_ptr.*) });
+            break :blk .{ .map = list.items };
+        },
     };
-    return 0;
 }
 
-fn isKey(b: ?[]const u8) bool {
-    const k = b orelse return false;
-    return k.len == 33 and (k[0] == 2 or k[0] == 3);
+fn keyOf(a: Allocator, v: ?Value) ?[]const u8 {
+    const x = v orelse return null;
+    if (Value.bytesOf(x)) |b| return if (sk.isKey(b)) b else null;
+    if (Value.str(x)) |s| {
+        const b = sk.unhex(a, std.mem.trim(u8, s, " ")) orelse return null;
+        return if (sk.isKey(b)) b else null;
+    }
+    if (x == .array and x.array.len == 1) return keyOf(a, x.array[0]);
+    return null;
 }
 
-fn run(a: std.mem.Allocator) !void {
-    const step = try cbor.decode(a, try result(a, sk.input, .{}));
-    const args = step.get("args") orelse return error.BadInput;
-    if (args.get("event") != null) return auth.run(a, step, args);
-    const op = Value.str(args.get("op")) orelse return error.BadOp;
-    const recipient = Value.bytesOf(args.get("recipient")) orelse return error.BadRecipient;
-    if (!isKey(recipient)) return error.BadRecipient;
-    const at = Value.intOf(step.get("at")) orelse 0;
+fn selfKey(in: Value) []const u8 {
+    const s = in.get("self") orelse return "";
+    return Value.bytesOf(s.get("identity")) orelse "";
+}
 
-    // The state: the root record and this recipient's list.
-    const root_cid = try result(a, sk.head, .{ head_name.ptr, @as(u32, head_name.len) });
-    var recipients = std.ArrayList(Value).empty;
-    var mine: ?Value = null;
-    if (root_cid.len > 0) {
-        const root = try getValue(a, root_cid);
-        if (root.get("recipients")) |rs| if (rs == .array) for (rs.array) |r| {
-            if (std.mem.eql(u8, Value.bytesOf(r.get("identity")) orelse "", recipient)) {
-                mine = try getValue(a, Value.cidOf(r.get("mail")) orelse return error.BadState);
-            } else try recipients.append(a, r);
+fn ownerKey(in: Value) []const u8 {
+    return Value.bytesOf(in.get("owner")) orelse "";
+}
+
+/// The first subscription (sender, box) matches, as the kernel routes (subscriptions.zig matches).
+fn route(in: Value, sender: []const u8, box: []const u8) ?[]const u8 {
+    const rs = in.get("subscriptions") orelse return null;
+    if (rs != .array) return null;
+    for (rs.array) |r| {
+        if (Value.bytesOf(r.get("sender"))) |s| if (!eql(u8, s, sender)) continue;
+        if (Value.str(r.get("box"))) |b| if (!eql(u8, b, box)) continue;
+        return Value.cidOf(r.get("handler"));
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------- sendMessage
+
+fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
+    const rb = try requestBody(a, arg);
+    const body = rb.v orelse return failure(a, rb.cbor, 400, "ERR_BAD_BODY", "The body is not dag-cbor or JSON.");
+    const m = body.get("message") orelse return failure(a, rb.cbor, 400, "ERR_MESSAGE_REQUIRED", "Please provide a valid message to send!");
+    const box_raw = Value.str(m.get("messageBox")) orelse "";
+    const box = std.mem.trim(u8, box_raw, " ");
+    if (box.len == 0 or box[0] == ':') return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGEBOX", "Invalid message box.");
+    const recipient = keyOf(a, m.get("recipient")) orelse return failure(a, rb.cbor, 400, "ERR_INVALID_RECIPIENT_KEY", "Invalid recipient key.");
+    const sender = Value.bytesOf(arg.get("caller")) orelse return failure(a, rb.cbor, 401, "ERR_AUTH_REQUIRED", "sendMessage needs an authenticated sender");
+
+    // The body as dag-cbor: the bytes of a BRC-231 request (canonical), or a JSON body read as DAG-JSON.
+    const mb = m.get("body") orelse return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.");
+    var json = false;
+    const value: Value = if (rb.cbor) blk: {
+        const b = Value.bytesOf(mb) orelse return failure(a, true, 400, "ERR_INVALID_MESSAGE_BODY", "A BRC-231 body is dag-cbor bytes.");
+        const v = cbor.decode(a, b) catch return failure(a, true, 400, "ERR_INVALID_MESSAGE_BODY", "The body is not dag-cbor.");
+        const blk2 = try cbor.block(a, v);
+        if (!eql(u8, blk2.bytes, b)) return failure(a, true, 400, "ERR_INVALID_MESSAGE_BODY", "The body is not canonical dag-cbor.");
+        break :blk v;
+    } else blk: {
+        json = true;
+        if (Value.str(mb)) |text| {
+            if (text.len == 0) return failure(a, false, 400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.");
+            break :blk dagjson.decode(a, text) catch Value{ .string = text };
+        }
+        // A JSON value sent as it is: read as DAG-JSON through its text.
+        break :blk dagjson.decode(a, try dagjson.encode(a, mb)) catch mb;
+    };
+    const blk = try cbor.block(a, value);
+
+    // Acceptance: a mailbox exists only where a subscription takes the message.
+    const me = selfKey(in);
+    const mine = eql(u8, recipient, me);
+    if (mine) {
+        const reply = isReplyTo(a, value, sender) catch false;
+        if (route(in, sender, box) == null and !reply) return failure(a, rb.cbor, 403, "ERR_NOT_SUBSCRIBED", "This instance takes no messages from you in that box.");
+    } else {
+        const keeper = sk.program(in, "messagebox") orelse "";
+        const h = route(in, sender, box) orelse "";
+        if (!eql(u8, recipient, ownerKey(in)) or !eql(u8, h, keeper)) return failure(a, rb.cbor, 403, "ERR_ACCOUNT_REQUIRED", "No mailbox for that recipient here.");
+    }
+
+    var rec = cbor.MapBuilder.init(a);
+    try rec.put("kind", cbor.string("mail"));
+    try rec.put("op", cbor.string("put"));
+    try rec.put("sender", .{ .bytes = sender });
+    try rec.put("recipient", .{ .bytes = recipient });
+    try rec.put("box", cbor.string(box));
+    try rec.put("body", cbor.cidv(blk.cid));
+    if (json) try rec.put("json", .{ .bool = true });
+    try rec.put("session", arg.get("session"));
+    const id = try cbor.cidOfValue(a, rec.value());
+    const id_text = try cid.format(a, id);
+
+    var ok = cbor.MapBuilder.init(a);
+    try ok.put("status", cbor.string("success"));
+    if (rb.cbor) {
+        try ok.put("messageId", cbor.string(id_text));
+    } else {
+        try ok.put("message", cbor.string("Your message has been sent to 1 recipient(s)."));
+        // The stock client checks its own messageId comes back; `id` is the message's id here.
+        var one = cbor.MapBuilder.init(a);
+        try one.put("recipient", cbor.string(try sk.hex(a, recipient)));
+        try one.put("messageId", m.get("messageId") orelse cbor.string(id_text));
+        const results = try a.alloc(Value, 1);
+        results[0] = one.value();
+        try ok.put("results", .{ .array = results });
+    }
+    try ok.put("id", cbor.string(id_text));
+    // A replayed request is the same record: nothing to admit again.
+    if (try sk.getOpt(a, id) != null) return .{ .status = 200, .cbor = rb.cbor, .body = ok.value() };
+    var e = cbor.MapBuilder.init(a);
+    try e.put("mail", rec.value());
+    try e.put("body", .{ .bytes = blk.bytes });
+    const admit = try a.alloc(Value, 1);
+    admit[0] = e.value();
+    return .{ .status = 200, .cbor = rb.cbor, .body = ok.value(), .admit = .{ .array = admit } };
+}
+
+/// Whether a body is a reply to a message this instance sent `sender` (its `replyTo` names our record of it).
+fn isReplyTo(a: Allocator, body: Value, sender: []const u8) !bool {
+    const r = Value.cidOf(body.get("replyTo")) orelse return false;
+    const rec = (try sk.getOpt(a, r)) orelse return false;
+    if (!eql(u8, Value.str(rec.get("kind")) orelse "", "mail")) return false;
+    return eql(u8, Value.bytesOf(rec.get("recipient")) orelse "", sender);
+}
+
+// ---------------------------------------------------------------- the mailbox
+
+const List = struct { recipient: []const u8, box: []const u8, cid: []const u8 };
+
+fn lists(a: Allocator) ![]List {
+    const root = (try sk.head(a, MAILBOX)) orelse return &.{};
+    const r = try sk.get(a, root);
+    var out: std.ArrayList(List) = .empty;
+    if (r.get("lists")) |ls| if (ls == .array) for (ls.array) |x| try out.append(a, .{
+        .recipient = Value.bytesOf(x.get("recipient")) orelse continue,
+        .box = Value.str(x.get("box")) orelse continue,
+        .cid = Value.cidOf(x.get("list")) orelse continue,
+    });
+    return out.items;
+}
+
+fn listMessages(a: Allocator, _: Value, arg: Value) !Resp {
+    const rb = try requestBody(a, arg);
+    const body = rb.v orelse return failure(a, rb.cbor, 400, "ERR_BAD_BODY", "The body is not dag-cbor or JSON.");
+    const box = Value.str(body.get("messageBox")) orelse return failure(a, rb.cbor, 400, "ERR_MESSAGEBOX_REQUIRED", "Please provide the name of a valid MessageBox!");
+    // A caller lists only what is addressed to its own key.
+    const caller = Value.bytesOf(arg.get("caller")) orelse return failure(a, rb.cbor, 401, "ERR_AUTH_REQUIRED", "listMessages needs an authenticated caller");
+    var out: std.ArrayList(Value) = .empty;
+    for (try lists(a)) |l| {
+        if (!eql(u8, l.recipient, caller) or !eql(u8, l.box, box)) continue;
+        const list = try sk.get(a, l.cid);
+        const ms = list.get("messages") orelse continue;
+        if (ms != .array) continue;
+        for (ms.array) |x| {
+            const id = Value.cidOf(x.get("id")) orelse continue;
+            const rec = try sk.get(a, id);
+            const bc = Value.cidOf(rec.get("body")) orelse continue;
+            const bytes = try sk.getBytes(a, bc);
+            const sender = Value.bytesOf(rec.get("sender")) orelse continue;
+            var m = cbor.MapBuilder.init(a);
+            try m.put("messageId", cbor.string(try cid.format(a, id)));
+            if (rb.cbor) {
+                try m.put("body", .{ .bytes = bytes });
+                try m.put("sender", .{ .bytes = sender });
+            } else {
+                // {message: <the body as DAG-JSON>}, as text: the stock client unwraps `message`.
+                var w = cbor.MapBuilder.init(a);
+                try w.put("message", try cbor.decode(a, bytes));
+                try m.put("body", cbor.string(try dagjson.encode(a, w.value())));
+                try m.put("sender", cbor.string(try sk.hex(a, sender)));
+                const at = try isoTime(a, Value.intOf(x.get("at")) orelse 0);
+                try m.put("createdAt", cbor.string(at));
+                try m.put("updatedAt", cbor.string(at));
+            }
+            try out.append(a, m.value());
+        }
+    }
+    var r = cbor.MapBuilder.init(a);
+    try r.put("status", cbor.string("success"));
+    try r.put("messages", .{ .array = out.items });
+    return .{ .status = 200, .cbor = rb.cbor, .body = r.value() };
+}
+
+fn acknowledgeMessage(a: Allocator, _: Value, arg: Value) !Resp {
+    const rb = try requestBody(a, arg);
+    const body = rb.v orelse return failure(a, rb.cbor, 400, "ERR_BAD_BODY", "The body is not dag-cbor or JSON.");
+    const caller = Value.bytesOf(arg.get("caller")) orelse return failure(a, rb.cbor, 401, "ERR_AUTH_REQUIRED", "acknowledgeMessage needs an authenticated caller");
+    const ids = body.get("messageIds") orelse return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGE_ID", "Message IDs must be formatted as an array of strings!");
+    if (ids != .array or ids.array.len == 0) return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGE_ID", "Message IDs must be formatted as an array of strings!");
+    // Only ids in the caller's own lists, not yet acknowledged.
+    var mine: std.ArrayList([]const u8) = .empty;
+    for (try lists(a)) |l| {
+        if (!eql(u8, l.recipient, caller)) continue;
+        const list = try sk.get(a, l.cid);
+        if (list.get("messages")) |ms| if (ms == .array) for (ms.array) |x| if (Value.cidOf(x.get("id"))) |c| try mine.append(a, c);
+    }
+    var found: std.ArrayList(Value) = .empty;
+    for (ids.array) |x| {
+        const s = Value.str(x) orelse return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGE_ID", "Message IDs must be formatted as an array of strings!");
+        const c = cid.parse(a, s) catch continue;
+        for (mine.items) |m| if (eql(u8, m, c)) {
+            try found.append(a, cbor.cidv(c));
+            break;
         };
     }
-    var messages = std.ArrayList(Value).empty;
-    if (mine) |m| if (m.get("messages")) |ms| if (ms == .array) try messages.appendSlice(a, ms.array);
+    if (found.items.len == 0) return failure(a, rb.cbor, 400, "ERR_INVALID_ACKNOWLEDGMENT", "Message not found!");
+    var ev = cbor.MapBuilder.init(a);
+    try ev.put("kind", cbor.string("ack"));
+    try ev.put("reader", .{ .bytes = caller });
+    try ev.put("ids", .{ .array = found.items });
+    try ev.put("session", arg.get("session"));
+    var e = cbor.MapBuilder.init(a);
+    try e.put("event", ev.value());
+    try e.put("box", cbor.string(ACK_BOX));
+    const admit = try a.alloc(Value, 1);
+    admit[0] = e.value();
+    var ok = cbor.MapBuilder.init(a);
+    try ok.put("status", cbor.string("success"));
+    return .{ .status = 200, .cbor = rb.cbor, .body = ok.value(), .admit = .{ .array = admit } };
+}
 
-    if (std.mem.eql(u8, op, "put")) {
-        const box = Value.str(args.get("box")) orelse return error.BadBox;
-        const sender = Value.bytesOf(args.get("sender")) orelse return error.BadSender;
-        if (!isKey(sender)) return error.BadSender;
-        const id = Value.str(args.get("messageId")) orelse return error.BadMessageId;
-        const body = Value.bytesOf(args.get("body")) orelse return error.BadBody;
-        for (messages.items) |x| if (std.mem.eql(u8, Value.str(x.get("messageId")) orelse "", id)) return; // already kept
+fn isoTime(a: Allocator, ms: i128) ![]const u8 {
+    const secs: u64 = @intCast(@max(0, @divFloor(ms, 1000)));
+    const es = std.time.epoch.EpochSeconds{ .secs = secs };
+    const day = es.getEpochDay().calculateYearDay();
+    const md = day.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ day.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(), @as(u64, @intCast(@mod(ms, 1000))) });
+}
+
+// ---------------------------------------------------------------- the writes (a step)
+
+fn step(a: Allocator, in: Value) !void {
+    const args = in.get("args") orelse return sk.report("no args");
+    const at = Value.intOf(in.get("at")) orelse 0;
+    var ls = std.ArrayList(List).fromOwnedSlice(try a.dupe(List, try lists(a)));
+    if (Value.cidOf(args.get("message"))) |id| {
+        // A message routed here: kept for its recipient, in its box.
+        const rec = try sk.get(a, id);
+        const recipient = Value.bytesOf(rec.get("recipient")) orelse return sk.report("not a message record");
+        const box = Value.str(rec.get("box")) orelse return sk.report("not a message record");
+        var idx: ?usize = null;
+        for (ls.items, 0..) |l, i| if (eql(u8, l.recipient, recipient) and eql(u8, l.box, box)) {
+            idx = i;
+        };
+        var messages: std.ArrayList(Value) = .empty;
+        var acked: i128 = 0;
+        if (idx) |i| {
+            const list = try sk.get(a, ls.items[i].cid);
+            acked = Value.intOf(list.get("acked")) orelse 0;
+            if (list.get("messages")) |ms| if (ms == .array) for (ms.array) |x| {
+                if (eql(u8, Value.cidOf(x.get("id")) orelse "", id)) return; // already kept
+                try messages.append(a, x);
+            };
+        }
         var m = cbor.MapBuilder.init(a);
-        try m.put("messageId", cbor.string(id));
-        try m.put("box", cbor.string(box));
-        try m.put("sender", .{ .bytes = sender });
-        try m.put("body", .{ .bytes = body });
-        if (args.get("json")) |j| if (j == .bool and j.bool) try m.put("json", .{ .bool = true });
+        try m.put("id", cbor.cidv(id));
         try m.put("at", cbor.int(at));
         try messages.append(a, m.value());
-    } else if (std.mem.eql(u8, op, "ack")) {
-        const ids = args.get("messageIds") orelse return error.BadMessageIds;
-        if (ids != .array) return error.BadMessageIds;
-        var kept = std.ArrayList(Value).empty;
-        for (messages.items) |x| {
-            const id = Value.str(x.get("messageId")) orelse "";
+        const c = try saveList(a, recipient, box, acked, messages.items);
+        if (idx) |i| ls.items[i].cid = c else try ls.append(a, .{ .recipient = recipient, .box = box, .cid = c });
+        return saveRoot(a, ls.items);
+    }
+    const ev = Value.cidOf(args.get("event")) orelse return sk.report("the messagebox is stepped on a message or an `:ack` event");
+    const rec = try sk.get(a, ev);
+    if (!eql(u8, Value.str(rec.get("kind")) orelse "", "ack")) return sk.report("not an ack record");
+    const reader = Value.bytesOf(rec.get("reader")) orelse return sk.report("not an ack record");
+    const ids = rec.get("ids") orelse return sk.report("not an ack record");
+    var changed = false;
+    for (ls.items) |*l| {
+        if (!eql(u8, l.recipient, reader)) continue;
+        const list = try sk.get(a, l.cid);
+        var acked = Value.intOf(list.get("acked")) orelse 0;
+        var kept: std.ArrayList(Value) = .empty;
+        if (list.get("messages")) |ms| if (ms == .array) for (ms.array) |x| {
+            const id = Value.cidOf(x.get("id")) orelse "";
             var gone = false;
-            for (ids.array) |i| if (i == .string and std.mem.eql(u8, i.string, id)) {
+            for (ids.array) |i| if (i == .cid and eql(u8, i.cid, id)) {
                 gone = true;
             };
-            if (!gone) try kept.append(a, x);
-        }
-        messages = kept;
-    } else return error.BadOp;
-
-    // Save: this recipient's list (none when empty), then the root, sorted by identity; move the head.
-    if (messages.items.len > 0) {
-        var l = cbor.MapBuilder.init(a);
-        try l.put("kind", cbor.string("mail"));
-        try l.put("identity", .{ .bytes = recipient });
-        try l.put("messages", .{ .array = messages.items });
-        const lc = try putValue(a, l.value());
-        var r = cbor.MapBuilder.init(a);
-        try r.put("identity", .{ .bytes = recipient });
-        try r.put("mail", cbor.cidv(lc));
-        try recipients.append(a, r.value());
+            if (gone) acked += 1 else try kept.append(a, x);
+        };
+        if (kept.items.len == (if (list.get("messages")) |ms| ms.array.len else 0)) continue;
+        l.cid = try saveList(a, l.recipient, l.box, acked, kept.items);
+        changed = true;
     }
-    std.mem.sort(Value, recipients.items, {}, struct {
-        fn lt(_: void, x: Value, y: Value) bool {
-            return std.mem.order(u8, Value.bytesOf(x.get("identity")) orelse "", Value.bytesOf(y.get("identity")) orelse "") == .lt;
+    if (changed) try saveRoot(a, ls.items);
+}
+
+fn saveList(a: Allocator, recipient: []const u8, box: []const u8, acked: i128, messages: []const Value) ![]const u8 {
+    var l = cbor.MapBuilder.init(a);
+    try l.put("kind", cbor.string("mail-list"));
+    try l.put("recipient", .{ .bytes = recipient });
+    try l.put("box", cbor.string(box));
+    try l.put("acked", cbor.int(acked));
+    try l.put("messages", .{ .array = messages });
+    return sk.put(a, l.value());
+}
+
+fn saveRoot(a: Allocator, ls: []List) !void {
+    std.mem.sort(List, ls, {}, struct {
+        fn lt(_: void, x: List, y: List) bool {
+            return switch (std.mem.order(u8, x.recipient, y.recipient)) {
+                .lt => true,
+                .gt => false,
+                .eq => std.mem.order(u8, x.box, y.box) == .lt,
+            };
         }
     }.lt);
-    var root = cbor.MapBuilder.init(a);
-    try root.put("kind", cbor.string("mailbox"));
-    try root.put("recipients", .{ .array = recipients.items });
-    const rc = try putValue(a, root.value());
-    if (sk.advance(head_name.ptr, head_name.len, rc.ptr, @intCast(rc.len)) < 0) return failed();
+    const arr = try a.alloc(Value, ls.len);
+    for (ls, 0..) |l, i| {
+        var e = cbor.MapBuilder.init(a);
+        try e.put("recipient", .{ .bytes = l.recipient });
+        try e.put("box", cbor.string(l.box));
+        try e.put("list", cbor.cidv(l.cid));
+        arr[i] = e.value();
+    }
+    var r = cbor.MapBuilder.init(a);
+    try r.put("kind", cbor.string("mailbox"));
+    try r.put("lists", .{ .array = arr });
+    try sk.advance(MAILBOX, try sk.put(a, r.value()));
 }

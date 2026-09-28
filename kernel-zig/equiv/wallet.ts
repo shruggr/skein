@@ -39,14 +39,13 @@ import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, KeyDeriver, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
+import { KeyDeriver, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
-import { seal } from "../../src/envelope.ts";
+import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import type { HttpRequest, HttpResponse } from "../../src/host/kernel.ts";
-import { messageBoxClient } from "../../src/host/messagebox.ts";
 import { Router } from "../../src/host/router.ts";
 import { decode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
@@ -138,7 +137,8 @@ const ARC_TOKEN = "arc-callback-token";
 const hostDb = new HostDb(join(home, "host.db"));
 hostDb.add("wallettest", { store: db });
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(key(KEYS.instance)), authWallet: ephemeralWallet(), // the signing oracle: a ProtoWallet
+  // The signing oracle: a ProtoWallet (the owner's mailbox instance has a key of its own).
+  db: hostDb, walletFor: (row) => ephemeralWallet(key(row.handle === "wallettest" ? KEYS.instance : "9999")), home,
   owner: ownerId, idleMs: 0, http: fakeArc, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   genesis: {
     subscriptions: [{ box: "wallet", sender: ownerId, handler: WALLET_CID }, { box: "chain", handler: WALLET_CID }],
@@ -147,12 +147,14 @@ const router = new Router({
   },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
-const server = await router.listen(0);
-const box = messageBoxClient(owner, `http://127.0.0.1:${(server.address() as { port: number }).port}/messagebox`, "skein-client");
+await router.listen(0);
+// The owner's mailbox instance (#40), before the instance's genesis names it: where settlement messages go.
+router.addMailbox("david", ownerId);
+const toWallet = new RawBox(owner, `http://127.0.0.1:${router.port}/@wallettest`);
+const ownersBox = new RawBox(owner, `http://127.0.0.1:${router.port}/@david`);
 
 async function sendTo(identity: string, b: string, body: unknown): Promise<void> {
-  const e = await seal(owner, { recipient: { identityKey: identity, handle: "wallettest", domain: "localhost" }, body: dagCbor.encode(body), created: new Date().toISOString() });
-  await box.send({ recipient: identity, box: b, body: e });
+  await toWallet.send(identity, b, body);
 }
 
 async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_000): Promise<T> {
@@ -234,7 +236,6 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
     await sendTo(identity, "wallet", body);
     return resultWhere(String(body.op), (r) => r.op === body.op);
   };
-  await new AuthFetch(owner).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "owner" }) });
   out.watch = (await ownedWhere({ op: "watch" })).result.settlement;
   const total0 = (await ownedWhere({ op: "list" })).result.total;
 
@@ -256,13 +257,10 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
   out.inputsFreed = list.result.total === total0;
   out.noOutputsOfAB = !(list.result.outputs as Array<Record<string, unknown>>).some((o) => o.txid === txA || o.txid === txB);
 
-  // The owner's settlement box: sealed §7.3 envelopes from the instance, one per transaction.
-  const { cborBoxClient } = await import("../../src/host/brc231.ts");
-  const { openCbor, asEnvelope } = await import("../../src/envelope-cbor.ts");
-  const cb = cborBoxClient(owner, `${base}/messagebox`);
-  const msgs = await until("two settlement messages", async () => { const x = await cb.list("settlement"); return x.length >= 2 ? x : undefined; });
-  const bodies = [];
-  for (const m of msgs) bodies.push(dagCbor.decode((await openCbor(owner, asEnvelope(m.body as Uint8Array)!)).body) as Record<string, unknown>);
+  // The owner's settlement box (its mailbox instance): the instance delivered them over http, one per transaction.
+  void base;
+  const msgs = await until("two settlement messages", async () => { const x = await ownersBox.list("settlement"); return x.length >= 2 ? x : undefined; });
+  const bodies = msgs.map((m) => m.value as Record<string, unknown>);
   out.messages = bodies.map((m) => [m.kind, m.txid === txA ? "A" : m.txid === txB ? "B" : "?", m.status, m.reason]).sort();
   out.messageSender = msgs.every((m) => m.sender === identity);
 
@@ -283,9 +281,8 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
     reposted: arc.posts.length === posts + 1 && Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]).id("hex") === reorg.spend,
     state: h.state, awaited: (h.result.awaited as string[] | undefined)?.includes(reorg.spend),
   };
-  const m3 = await until("the reorg's settlement message", async () => { const x = await cb.list("settlement"); return x.length >= 3 ? x : undefined; });
-  const last = [];
-  for (const m of m3) last.push(dagCbor.decode((await openCbor(owner, asEnvelope(m.body as Uint8Array)!)).body) as Record<string, unknown>);
+  const m3 = await until("the reorg's settlement message", async () => { const x = await ownersBox.list("settlement"); return x.length >= 3 ? x : undefined; });
+  const last = m3.map((m) => m.value as Record<string, unknown>);
   out.reorgMessage = last.some((m) => m.txid === reorg.spend && m.status === "unproven" && m.reason === "reorg");
   return out;
 }
@@ -355,7 +352,7 @@ try {
   r = await nextResult("header 103");
   const path = new MerklePath(103, [[{ offset: 0, hash: spendTxid, txid: true }]]);
   // ARC's callback to the router's webhook: a status entry for the transaction's CID.
-  const cb = (auth: string) => fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/callback/wallettest`, {
+  const cb = (auth: string) => fetch(`http://127.0.0.1:${router.port}/callback/wallettest`, {
     method: "POST", headers: { "content-type": "application/json", authorization: auth },
     body: JSON.stringify({ timestamp: new Date().toISOString(), txid: spendTxid, txStatus: "MINED", blockHeight: 103, blockHash: "00".repeat(32), merklePath: path.toHex(), extraInfo: "" }),
   });
@@ -383,7 +380,7 @@ try {
   const signed = Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]);
   report.draft = { hasReference: CID.asCID(draft.reference) !== null, notPostedAsDraft: draft.posts === arc.posts.length - 1, awaiting: r.result.awaiting, scriptsVerify: await signed.verify("scripts only"), txid: r.result.txid === signed.id("hex") };
 
-  report.settlement = await settlementScenario(identity, new Uint8Array(someone), `http://127.0.0.1:${(server.address() as { port: number }).port}`, { h102: prev, spend: spendTxid });
+  report.settlement = await settlementScenario(identity, new Uint8Array(someone), `http://127.0.0.1:${router.port}`, { h102: prev, spend: spendTxid });
 
   report.ok = true;
 } catch (e) {
@@ -416,7 +413,7 @@ const st = (report.settlement ?? {}) as Record<string, unknown>;
 check(st.watch === true && eq(st.awaiting, ["waiting", "waiting"]) && st.bSpendsA === true, `settlement (#37): the owner watches; A, then B spending A's change, both broadcast and awaited (${JSON.stringify([st.watch, st.awaiting, st.bSpendsA])})`);
 check(eq(st.rejected, { sameThread: true, outcome: "rejected", state: "finished", settlement: [["A", "rejected", "DOUBLE_SPEND_ATTEMPTED", null], ["B", "rejected", "input-rejected", "A"]], sent: 2 }), `a DOUBLE_SPEND status entry for A reaches A's thread: A rejected, bubbled to B (spends) (${JSON.stringify(st.rejected)})`);
 check(st.inputsFreed === true && st.noOutputsOfAB === true, `the rejected outputs vanish; the input A consumed is spendable again (${JSON.stringify([st.inputsFreed, st.noOutputsOfAB])})`);
-check(eq(st.messages, [["settlement", "A", "rejected", "DOUBLE_SPEND_ATTEMPTED"], ["settlement", "B", "rejected", "input-rejected"]]) && st.messageSender === true, `the owner's settlement box: one sealed message per rejected transaction, from the instance (${JSON.stringify(st.messages)})`);
+check(eq(st.messages, [["settlement", "A", "rejected", "DOUBLE_SPEND_ATTEMPTED"], ["settlement", "B", "rejected", "input-rejected"]]) && st.messageSender === true, `the owner's settlement box: one message per rejected transaction, delivered by the instance (${JSON.stringify(st.messages)})`);
 check(eq(st.bThread, { outcome: "rejected", state: "finished" }), `B's thread is not replayed: at its deadline it finds B rejected and finishes (${JSON.stringify(st.bThread)})`);
 check(st.mentions === true, "the results name the transactions as `mentions` edges (which never propagate)");
 check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }) && st.reorgMessage === true, `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited; the owner is told (${JSON.stringify([st.reorg, st.reorgMessage])})`);

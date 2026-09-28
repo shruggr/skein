@@ -15,8 +15,13 @@ cp wallet-zig/zig-out/bin/wallet.wasm wasm/wallet.wasm
 # The messagebox's records in the VM (issue #33): Zig, over the kernel's dag-cbor.
 (cd programs/messagebox && zig build)
 cp programs/messagebox/zig-out/bin/messagebox.wasm wasm/messagebox.wasm
+# The front door (#40): Zig, over the kernel's dag-cbor and programs/lib.
+(cd programs/frontdoor && zig build)
+cp programs/frontdoor/zig-out/bin/frontdoor.wasm wasm/frontdoor.wasm
+(cd programs/resolve && zig build)
+cp programs/resolve/zig-out/bin/resolve.wasm wasm/resolve.wasm
 node --experimental-strip-types --no-warnings -e '
   const { readFileSync } = await import("node:fs");
   const { rawCid } = await import("./src/runtime/programs.ts");
-  for (const p of ["run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "wire-probe", "wallet", "messagebox"]) console.log(p, rawCid(readFileSync(`wasm/${p}.wasm`)).toString());
+  for (const p of ["run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "wire-probe", "wallet", "messagebox", "frontdoor", "resolve"]) console.log(p, rawCid(readFileSync(`wasm/${p}.wasm`)).toString());
 '

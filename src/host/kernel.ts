@@ -3,16 +3,14 @@
 // (kernel-zig/src/ipc.zig). This is the kernel's whole surface:
 //
 //   the router asks      tip · get · put · has · putblock · restore · append · genesis · boxes · byEnvelope ·
-//                        admit (the one call in) · idle · start · running
+//                        admit (the one call in that writes) · call (#40: a program's function over the
+//                        state, no entry, no writes: the front door's) · idle · start · running
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle) ·
-//                        resolve (handle, domain → a Resolution)
-//   the kernel tells     send (an emit, once its step is recorded) · sleepers (its
-//                        sleeping threads and their deadlines) · onSleep · stop
+//                        http (a program's request: the messagebox's delivery, a resolve, a wallet's ARC)
+//   the kernel tells     sleepers (its sleeping threads and their deadlines) · onSleep · stop
 //
-// `Kernel` offers the part of the TS Runtime the host's providers use
-// (entry.ts, tick.ts, messagebox.ts): `store` (get/put/log), `admit`,
-// `boxes`, `sleepersDue`/`onSleep`, `idle`, `outbox`. Log lines (stderr)
-// go to `log`.
+// `Kernel` offers `store` (get/put/log), `admit`, `invoke` (the call),
+// `boxes`, `sleepersDue`/`onSleep`, `idle`. Log lines (stderr) go to `log`.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -21,7 +19,6 @@ import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
 import type { LogEntry } from "../runtime/log.ts";
-import type { Outbound } from "../runtime/scheduler.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
 
@@ -37,6 +34,8 @@ type Frame = Record<string, unknown>;
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; options?: { connectTimeout?: number; firstByteTimeout?: number; betweenBytesTimeout?: number } };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 export interface Sleeper { thread: CID; until: Ms }
+/** A kernel call's answer (#40): the program's stdout, or its error; the fuel it used either way. */
+export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
 export interface KernelOptions {
   /** The store file. */
@@ -45,12 +44,8 @@ export interface KernelOptions {
   domain: string;
   /** Answers the kernel's `wallet` frames: the instance's oracle. Absent: every wallet call fails. */
   wallet?: WalletInterface;
-  /** Answers `resolve`: the whole Resolution, `identityKey: ""` (plus `error`) when unknown. */
-  resolve?(handle: string, domain: string): Promise<Record<string, unknown>>;
   /** Answers programs' HTTP (the preview1 `http` import, #29, and wasi:http, #15 — one shape): a request {method, url, headers?, body?, options?} → {status, headers, body}. Absent: refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
-  /** An emit to carry (after its step is recorded). */
-  send?(o: Outbound): void | Promise<void>;
   /** The kernel's sleepers changed (earliest first). */
   sleepers?(s: Sleeper[]): void;
   /** Log lines (the kernel's stderr and this side's notes). */
@@ -76,7 +71,6 @@ export class Kernel {
   gone = false;
   sleepers: Sleeper[] = [];
   onSleep?: (thread: CID, until: Ms) => void;
-  outbox?: { send(o: Outbound): void | Promise<void> };
 
   constructor(o: KernelOptions) {
     this.o = o;
@@ -154,28 +148,11 @@ export class Kernel {
         case "wallet":
           if (!this.wire) throw new Error("no wallet");
           return answer(Uint8Array.from(await this.wire.transmitToWallet([...(f.v as Uint8Array)])));
-        case "resolve": {
-          const { handle, domain } = f.v as { handle: string; domain: string };
-          let r: Record<string, unknown>;
-          try {
-            r = this.o.resolve ? await this.o.resolve(handle, domain) : { identityKey: "", error: "no resolver" };
-          } catch (e) { r = { identityKey: "", error: (e as Error).message }; }
-          // Format 2 (#33): the identity key as its 33 bytes (empty when unknown); the rest as answered.
-          const k = r.identityKey;
-          r = { ...r, identityKey: typeof k === "string" && /^0[23][0-9a-f]{64}$/.test(k) ? Uint8Array.from(Buffer.from(k, "hex")) : k instanceof Uint8Array ? k : new Uint8Array() };
-          return answer(decode(encode(r).bytes)); // dag-cbor as recorded (undefined dropped)
-        }
         case "http": {
           // A program's http request (#29, pre-#15), recorded by the kernel with its answer.
           if (!this.o.http) throw new Error("this host answers no http");
           const res = await this.o.http(decode<HttpRequest>(f.v as Uint8Array));
           return answer(encode(res).bytes);
-        }
-        case "send": {
-          const o = f.v as Outbound;
-          if (this.outbox) await this.outbox.send(o);
-          else await this.o.send?.(o);
-          return;
         }
         case "sleepers":
           this.sleepers = f.v as Sleeper[];
@@ -215,8 +192,19 @@ export class Kernel {
   sleepersDue(): Sleeper[] { return this.sleepers; }
   async boxes(): Promise<string[]> { return await this.call("boxes") as string[]; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
-  async admit(entry: LogEntry | Record<string, unknown>, records: { envelope?: object; body?: Uint8Array } = {}): Promise<CID> {
-    return await this.call("admit", { entry, envelope: records.envelope, body: records.body }) as CID;
+  /** Admit an entry (a message's record put first; its body's bytes beside it). */
+  async admit(entry: LogEntry | Record<string, unknown>, records: { body?: Uint8Array } = {}): Promise<CID> {
+    return await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}) }) as CID;
+  }
+  /**
+   * The kernel's `call` (#40): a program's function (by CID, or a genesis
+   * program's name) over the current state — no entry, no writes, the oracle
+   * and http answered but not recorded; fuel-limited (`callFuelLimit`). The
+   * result is what the program wrote to stdout; `fuel` is reported either way
+   * (the router's ledger).
+   */
+  async invoke(program: CID | string, fn: string, arg: Uint8Array, o: { caller?: Uint8Array; now?: number } = {}): Promise<CallAnswer> {
+    return await this.call("call", { program, fn, arg, ...(o.caller ? { caller: o.caller } : {}), now: o.now ?? Date.now() }) as CallAnswer;
   }
   async idle(): Promise<void> { await this.call("idle"); }
   async start(): Promise<void> { await this.call("start"); }

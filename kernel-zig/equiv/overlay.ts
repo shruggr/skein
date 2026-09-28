@@ -1,8 +1,11 @@
 // Overlay services in the VM (issue #36) end to end on the Zig kernel,
-// driven through the router (src/host/overlay.ts) by the stock @bsv/sdk
-// overlay clients: an instance booted from a system tree (#4) whose bin/
-// holds the overlay engine, the tm_demo topic and the ls_demo lookup
-// (programs/overlay), its config naming them. Headers are fed as plain
+// served by the instance's own front door (#40: etc/routes.json names the
+// overlay engine's route handlers; the router only proxies to the instance's
+// origin) to the stock @bsv/sdk overlay clients: an instance booted from a
+// system tree (#4) whose bin/ holds the front door, the overlay engine, the
+// tm_demo topic and the ls_demo lookup (programs/overlay), its config naming
+// them. A submit is the one write (an entry admitted, then its STEAK read
+// back); a lookup, a dupe and a refused BEEF write nothing. Headers are fed as plain
 // `header` entries (a regtest chain from its genesis, the funding mined at
 // height 1); a token transaction is broadcast with TopicBroadcaster (POST
 // /submit, SHIP's wire form) and found with LookupResolver (POST /lookup,
@@ -45,12 +48,21 @@ const sys = join(home, "system");
 mkdirSync(join(sys, "bin"), { recursive: true });
 mkdirSync(join(sys, "etc"), { recursive: true });
 for (const p of ["overlay", "topic-demo", "lookup-demo"]) copyFileSync(join(overlayBin, `${p}.wasm`), join(sys, `bin/${p}.wasm`));
+copyFileSync(join(here, "../../wasm/frontdoor.wasm"), join(sys, "bin/frontdoor.wasm"));
+writeFileSync(join(sys, "bin/frontdoor.json"), JSON.stringify({ inputs: { event: "cid?", box: "string?" }, description: "The front door." }));
 const handler = { event: "cid", box: "string" };
 writeFileSync(join(sys, "bin/overlay.json"), JSON.stringify({ inputs: handler, description: "The overlay engine: BRC-22 submit, BRC-24 lookup, the chain feed." }));
 writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, description: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP.\n\nEvery such output is admitted; the tokens a transaction spends are retained when it admits one." }));
 writeFileSync(join(sys, "bin/lookup-demo.json"), JSON.stringify({ inputs: {}, description: "Demo token lookup: {topic}, {scriptHash, topic?}, {txid, outputIndex, topic}." }));
 writeFileSync(join(sys, "etc/config.json"), JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: "lookup-demo" }) } }));
-writeFileSync(join(sys, "etc/subscriptions.json"), JSON.stringify([{ box: "submit", handler: "overlay" }, { box: "lookup", handler: "overlay" }, { box: "chain", handler: "overlay" }]));
+writeFileSync(join(sys, "etc/subscriptions.json"), JSON.stringify([{ box: "submit", handler: "overlay" }, { box: "chain", handler: "overlay" }]));
+// The overlay-express wire contract as front-door routes: open, as overlay-express is.
+const route = (path: string, fn: string) => ({ path, program: "overlay", fn, auth: "none" });
+writeFileSync(join(sys, "etc/routes.json"), JSON.stringify([
+  route("/submit", "submit"), route("/lookup", "lookup"),
+  route("/listTopicManagers", "listTopicManagers"), route("/listLookupServiceProviders", "listLookupServiceProviders"),
+  route("/getDocumentationForTopicManager", "topicDocumentation"), route("/getDocumentationForLookupServiceProvider", "lookupDocumentation"),
+]));
 writeFileSync(join(sys, "README.md"), "An overlay node: tm_demo and ls_demo.\n");
 
 // ---------------------------------------------------------------- regtest
@@ -79,7 +91,7 @@ const hostDb = new HostDb(join(home, "host.db"));
 hostDb.add("overlay", { store: db });
 const owner = key("2222").toPublicKey().toString();
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), authWallet: ephemeralWallet(), owner, idleMs: 0,
+  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0,
   kernel: { command: kernel, env: { SKEIN_HOME: home } },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
@@ -87,8 +99,9 @@ const router = new Router({
 try {
   const src = await dirSource(sys);
   await router.bootRow("overlay", { kind: "tree", root: src.root, objects: src.objects });
-  const server = await router.listen(0);
-  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  await router.listen(0);
+  // The overlay's own origin (the SDK clients take an origin, no path): http://overlay.localhost:<port>.
+  const base = router.originOf("overlay");
 
   // The chain: the funding transaction mined alone at 1, then 2 and 3, as plain header entries.
   const alice = key("3333");
@@ -159,6 +172,9 @@ try {
   // A resubmission is a dupe: nothing new.
   const dupe = await new HTTPSOverlayBroadcastFacilitator(fetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo", "tm_other"] });
   report.dupe = dupe;
+  // Reads write nothing: the lookups above, the dupe; so do the refusals below.
+  const logLen = async () => { const k = (await router.hydrate("overlay")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
+  const before = await logLen();
 
   // T2 spends the token into a new one (X-Topics as a JSON array, Atomic BEEF): the old one is retained.
   const r2 = await fetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": JSON.stringify(["tm_demo"]) }, body: new Uint8Array(t2.toAtomicBEEF()) });
@@ -182,6 +198,9 @@ try {
   report.lookups = await (await fetch(`${base}/listLookupServiceProviders`)).json();
   const doc = await fetch(`${base}/getDocumentationForTopicManager?manager=tm_demo`);
   report.doc = [doc.headers.get("content-type"), (await doc.text()).split("\n")[0]];
+  await look({ topic: "tm_demo" });
+  await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
+  report.readsWrite = [before, await logLen()];
   report.ok = true;
 } catch (e) {
   report.error = (e as Error).stack ?? String(e);
@@ -203,6 +222,11 @@ check(Array.isArray(report.resubmitRejected) && report.resubmitRejected[0] === 4
 check(Array.isArray(report.badBeef) && report.badBeef[0] === 400 && report.unknownService === 400, `refusals: a bad BEEF, an unknown service (${JSON.stringify([report.badBeef, report.unknownService])})`);
 check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the program records (${JSON.stringify([report.topics, report.lookups])})`);
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
+{
+  const [b, a] = (report.readsWrite ?? []) as number[];
+  // Between the two counts: T2's submit (one entry), the status entry (one); the rest — lookups, a dupe, refusals, listings — none.
+  check(a === b! + 2, `only the writes write: 2 entries over one submit and one status entry, none for the lookups, dupes, refusals, listings (${b} → ${a})`);
+}
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
 process.stdout.write(r.stdout);

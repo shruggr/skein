@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { envelopeCid } from "../client/client.ts";
+import { envelopeCid } from "../envelope.ts";
 import { encryptContent, seal, signedPart } from "../envelope.ts";
 import { bundlesOf, collect, installWasm, instance, iso, results, send, T0, type Instance } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";

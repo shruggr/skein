@@ -15,7 +15,7 @@ import { MessageBoxClient } from "@bsv/message-box-client";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { open, seal, verify, type Envelope } from "../src/envelope.ts";
-import { envelopeCid as nodeEnvelopeCid } from "../src/client/client.ts";
+import { envelopeCid as nodeEnvelopeCid } from "../src/envelope.ts";
 import { decodeBundle } from "../src/client/bundle.ts";
 import { blobCid } from "../src/runtime/tree.ts";
 import { browserOptions, WEB } from "./build.ts";

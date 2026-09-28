@@ -21,13 +21,13 @@
 // uvarint-length-prefixed):
 //
 //   log       n                          → entry CID           (log.ts entries by n)
-//   unique    envelope|emit CID          → entry CID           (an envelope's entry, an emit's outcome)
+//   unique    message CID                → entry CID           (a message's entry: admitted once, #40)
 //   chains    origin                     → {tip, seq, kind?}   (every chain's tip)
 //   updates   origin ‖ seq               → update CID          (a chain's history)
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
 //   resting   at ‖ origin                → null                (threads not finished: what start resumes)
 //   sleepers  until ‖ origin             → null                (threads waiting with a deadline)
-//   awaits    envelope ‖ at ‖ origin     → null                (threads awaiting a reply to an envelope)
+//   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
 //                                                              an update's own, then its kept records' `refs`)
 //   heads     name                       → tree CID            (named heads)
@@ -72,8 +72,9 @@ pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleep
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
-/// The store format this kernel writes (see the header): 2 = unsigned entries, keys as bytes (#33).
-pub const FORMAT: i64 = 2;
+/// The store format this kernel writes (see the header): 2 = unsigned entries, keys as bytes (#33);
+/// 3 = messages as `mail` records, no envelopes, emits or outcomes (#40).
+pub const FORMAT: i64 = 3;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).
@@ -568,7 +569,13 @@ pub const Index = struct {
         .cursorGet = cursorGetFn,
         .cursorSet = cursorSetFn,
         .commit = commitFn,
+        .state = stateFn,
     };
+
+    fn stateFn(ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8 {
+        const ix = self(ctx);
+        return ix.backend.vt.pointer(ix.backend.ctx, a, POINTER);
+    }
 
     fn self(ctx: *anyopaque) *Index {
         return @ptrCast(@alignCast(ctx));
@@ -635,13 +642,10 @@ pub const Index = struct {
 
     fn logAppendFn(ctx: *anyopaque, a: std.mem.Allocator, entry: Value) anyerror!storem.AppendResult {
         const ix = self(ctx);
-        const env = Value.cidOf(entry.get("envelope"));
-        const emit: ?[]const u8 = if (entry.get("outcome")) |o| Value.cidOf(o.get("emit")) else null;
-        if (env) |e| if (try logByUniqueFn(ctx, a, e) != null) {
-            return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "log: envelope {s} is already admitted", .{try cidm.format(a, e)}) } };
-        };
-        if (emit) |e| if (try logByUniqueFn(ctx, a, e) != null) {
-            return .{ .rejected = .{ .reason = .duplicate_outcome, .message = try std.fmt.allocPrint(a, "log: emit {s} already has an outcome", .{try cidm.format(a, e)}) } };
+        // A message is admitted once (#40: its record's CID is its id; a replayed request is the same record).
+        const mail = Value.cidOf(entry.get("mail"));
+        if (mail) |e| if (try logByUniqueFn(ctx, a, e) != null) {
+            return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "log: message {s} is already admitted", .{try cidm.format(a, e)}) } };
         };
         const n = Value.intOf(entry.get("n")) orelse -1;
         var ok_prev: bool = undefined;
@@ -661,7 +665,7 @@ pub const Index = struct {
             return .{ .rejected = .{ .reason = .out_of_order, .message = try std.fmt.allocPrint(a, "log: entry #{d} does not extend the tip{s}", .{ n, if (ok_time) "" else " (stamped before it)" }) } };
         }
         const cid = try ix.putValue(a, entry);
-        try ix.importEntry(@intCast(n), cid, env orelse emit);
+        try ix.importEntry(@intCast(n), cid, mail);
         try ix.commitLog();
         return .{ .ok = cid };
     }

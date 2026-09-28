@@ -4,41 +4,19 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuthFetch, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
-import { MessageBoxClient } from "@bsv/message-box-client";
+import { existsSync } from "node:fs";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { blobCid, gitSha } from "../runtime/tree.ts";
 import { chunk, decodeBundle, BUNDLE_LIMIT, type Rec } from "./bundle.ts";
-import { SkeinClient, hashDir, envelopeCid, handlerCid, subscribeBody } from "./client.ts";
+import { SkeinClient, hashDir, handlerCid, subscribeBody } from "./client.ts";
 import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import { parseCli } from "./cli.ts";
-import { open, seal, verify, type Envelope } from "./envelope.ts";
 import type { ClientConfig } from "./config.ts";
+import { KERNEL_BIN } from "../host/kernel.ts";
+import { testHost, until } from "../host/testhost.ts";
 
-const wallet = (): WalletInterface => new ProtoWallet(PrivateKey.fromRandom()) as unknown as WalletInterface;
-const idk = async (w: WalletInterface) => (await w.getPublicKey({ identityKey: true })).publicKey;
 const tmp = () => mkdtempSync(join(tmpdir(), "skein-client-"));
-
-// ---------------------------------------------------------------- envelopes
-
-test("envelope: seal, verify, open between two wallets", async () => {
-  const david = wallet(), inst = wallet();
-  const body = dagCbor.encode({ cmd: "ls", tree: blobCid(new Uint8Array()) });
-  const env = await seal(david, { recipient: { identityKey: await idk(inst), handle: "skein", domain: "localhost" }, body });
-  assert.equal(env.sender.identityKey, await idk(david));
-  assert.ok(verify(env));
-  const opened = await open(inst, env);
-  assert.deepEqual(opened.body, body);
-  assert.equal(opened.senderIdentityKey, await idk(david));
-  await assert.rejects(open(david, env), /addressed to/);
-  assert.ok(!verify({ ...env, created: "2000-01-01T00:00:00.000Z" }), "metadata is signed");
-  assert.ok(!verify({ ...env, sender: { identityKey: await idk(inst) } }), "sender is bound");
-  // The envelope survives the messagebox's JSON round trip.
-  const back = JSON.parse(JSON.stringify(env)) as Envelope;
-  assert.ok(verify(back));
-  assert.equal((await envelopeCid(back)).toString(), (await envelopeCid(env)).toString());
-});
 
 // ---------------------------------------------------------------- chunker
 
@@ -118,61 +96,30 @@ test("parseCli", () => {
 
 // ---------------------------------------------------------------- live messagebox
 
-const HOST = process.env.SKEIN_TEST_MESSAGEBOX_HOST ?? "http://127.0.0.1:8100";
-
-async function hostUp(): Promise<boolean> {
-  try { await fetch(`${HOST}/exchange-rate`, { signal: AbortSignal.timeout(1000) }); return true; } catch { return false; }
-}
-
-async function register(w: WalletInterface): Promise<void> {
-  const res = await new AuthFetch(w).fetch(`${HOST}/account/register`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username: `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` }),
-  });
-  assert.equal(res.status, 200, await res.text());
-}
-
-test("messagebox round trip: run out, result back (real local server)", async (t) => {
-  if (!(await hostUp())) { t.skip(`no messagebox at ${HOST} (scripts/host/messagebox.sh --bg)`); return; }
-  const david = wallet(), inst = wallet();
-  await register(david); await register(inst); // the host only stores for account holders
+test("bin/skein on a host (#40): run to the instance's front door, the result read from David's mailbox instance, acknowledged", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const h = await testHost(t);
+  h.mailbox("david", h.ownerId);
+  const alpha = h.agent("alpha");
+  await h.router.start();
   const cfg: ClientConfig = {
     home: tmp(), walletUrl: "unused", originator: "skein-client-test",
-    messageboxUrl: `${HOST}/messagebox`,
-    instance: { identityKey: await idk(inst), handle: "skein", domain: "localhost" },
+    instanceUrl: `${h.base}/@alpha`, mailboxUrl: h.origin("david"),
+    instance: { identityKey: alpha, handle: "alpha", domain: "localhost" },
     stateDir: join(tmp(), "client"),
   };
-  const client = new SkeinClient(cfg, david);
-  const tree = blobCid(new TextEncoder().encode("not really a tree")).toString();
-  const sent = await client.run({ tree, cmd: "ls | head -3", cwd: "src" });
+  const client = new SkeinClient(cfg, h.owner);
+  const sent = await client.run({ cmd: "echo a; echo b" });
   assert.equal(client.lastSent("run")?.cid, sent.cid);
+  assert.equal(sent.messageId, sent.cid, "a message's id is its record's CID");
 
-  // The instance's side, by hand: collect the run box, open, answer into david's results box.
-  const mb = new MessageBoxClient({ host: cfg.messageboxUrl, walletClient: inst });
-  const got = await mb.listMessagesLite({ messageBox: "run", host: cfg.messageboxUrl });
-  assert.equal(got.length, 1);
-  const env = got[0]!.body as unknown as Envelope;
-  assert.ok(verify(env));
-  assert.equal((await envelopeCid(env)).toString(), sent.cid);
-  const req = dagCbor.decode((await open(inst, env)).body) as { cmd: string; tree: CID; cwd: string };
-  assert.equal(req.cmd, "ls | head -3");
-  assert.equal(req.tree.toString(), tree);
-  assert.equal(req.cwd, "src");
-  await mb.acknowledgeMessage({ messageIds: [got[0]!.messageId], host: cfg.messageboxUrl });
-
-  const reply = await seal(inst, {
-    recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" },
-    body: dagCbor.encode({ replyTo: CID.parse(sent.cid), exitCode: 0, stdout: new TextEncoder().encode("a\nb\nc\n"), stderr: new Uint8Array(), tree: CID.parse(tree) }),
-  });
-  await mb.sendMessage({ recipient: await idk(david), messageBox: "results", body: reply as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
-
-  const results = await client.inbox();
+  const results = await until("the result", async () => { const r = await client.inbox(); return r.length ? r : undefined; });
   assert.equal(results.length, 1);
   const r = results[0]!;
-  assert.ok(r.verified, r.error ?? "unverified");
+  assert.ok(r.verified && !r.error, r.error ?? "");
+  assert.equal(r.sender, alpha);
   assert.equal(String(r.body!.replyTo), sent.cid);
   assert.equal(r.body!.exitCode, 0);
-  assert.equal(new TextDecoder().decode(r.body!.stdout as Uint8Array), "a\nb\nc\n");
+  assert.equal(new TextDecoder().decode(r.body!.stdout as Uint8Array), "a\nb\n");
   assert.deepEqual(await client.inbox(), [], "acknowledged");
 });
 

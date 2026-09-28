@@ -1,8 +1,8 @@
 // The process interface: `skein-kernel serve` as the router (src/host/router.ts,
 // issue #33) drives it — frames on its stdin/stdout, hydrated on demand,
-// stopped when idle — with the owner and the inference peer as ordinary
-// messagebox clients (@bsv/message-box-client over BRC-104) against the
-// router. Checks a run and a chat answered end to end, a sleep woken by the
+// stopped when idle — each instance an HTTP server (its front door, #40),
+// the owner and the inference peer speaking raw BRC-33 on BRC-104 sessions,
+// each with its mailbox instance on the same router. Checks a run and a chat answered end to end, a sleep woken by the
 // router's waker, an idle stop mid-sleep and the hydration that finishes it,
 // and (issue #5) a shell that never ends running out of fuel under a low
 // fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
@@ -19,11 +19,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, PrivateKey } from "@bsv/sdk";
-import * as dagCbor from "@ipld/dag-cbor";
-import { open, seal, verify, type Envelope } from "../../src/envelope.ts";
+import { PrivateKey } from "@bsv/sdk";
+import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { messageBoxClient, type MessageBox } from "../../src/host/messagebox.ts";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { bundlesOf } from "../../src/testkit.ts";
@@ -34,7 +32,7 @@ const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-
 const home = mkdtempSync(join(tmpdir(), "skein-kz-serve-"));
 const key = (h: string) => new PrivateKey(h, 16);
 const KEYS = { owner: "2222", infer: "4444" };
-const LIMIT = "1000000000"; // run-handler's reply step (~6·10^8, sealing in Go) fits; the spinning shell does not
+const LIMIT = "1000000000"; // run-handler's reply step (delivering over http) fits; the spinning shell does not
 
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -47,39 +45,36 @@ const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 
 const db = new HostDb(join(home, "host.db"));
 db.add("zigtest", { store: join(home, "instances/zigtest/runtime.db") });
-const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555") };
+const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555"), clocktest: key("6666"), david: key("7777"), infer: key("8888") };
 const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
 const inferId = key(KEYS.infer).toPublicKey().toString();
 const make = (fuel?: string) => new Router({
-  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), authWallet: ephemeralWallet(),
+  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home,
   owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 let router = make();
 let base = "";
-const listen = async (r: Router) => { const s = await r.listen(0); base = `http://127.0.0.1:${(s.address() as { port: number }).port}`; };
+let port = 0;
+// The router comes back on the same port: an agent's genesis names its owner's mailbox by URL.
+const listen = async (r: Router) => { await r.listen(port); port = r.port; base = `http://127.0.0.1:${port}`; };
 await listen(router);
+// The owner's and the inference peer's mailboxes: mailbox instances (registering is creating one).
+const reg = async (w: ReturnType<typeof ephemeralWallet>, id: string, name: string) => {
+  const sig = await w.createSignature({ protocolID: [2, "skein register"], keyID: name, counterparty: "anyone", data: [...Buffer.from(`register ${name}`)] });
+  return (await fetch(`${base}/account/register`, { method: "POST", body: JSON.stringify({ username: name, identityKey: id, signature: Buffer.from(sig.signature).toString("hex") }) })).status;
+};
+check(await reg(owner, ownerId, "david") === 200, "the owner registers: a mailbox instance of its own (a signed claim to its key)");
+check(await reg(ephemeralWallet(key(KEYS.infer)), inferId, "infer") === 200, "the inference peer registers its mailbox instance");
 await router.start();
 const zig = db.get("zigtest")!.identity!;
 
-const register = async (w: ReturnType<typeof ephemeralWallet>, name: string) => (await new AuthFetch(w).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: name }) })).status;
-check(await register(owner, "david") === 200, "the owner registers a mailbox (kept by the instance)");
-check(await register(ephemeralWallet(key(KEYS.infer)), "infer") === 200, "the inference peer registers a mailbox");
-let box: MessageBox = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
-const sendTo = async (to: string, handle: string, b: string, body: unknown) => {
-  const env = await seal(owner, { recipient: { identityKey: to, handle, domain: "localhost" }, body: body instanceof Uint8Array ? body : dagCbor.encode(body), created: new Date().toISOString() });
-  await box.send({ recipient: to, box: b, body: env });
-};
-const inbox = async (b: string) => {
-  const out: Array<{ id: string; body: Record<string, unknown> }> = [];
-  for (const m of await box.list(b)) {
-    const e = (typeof m.body === "string" ? JSON.parse(m.body) : m.body) as Envelope;
-    if (!verify(e)) throw new Error("reply does not verify");
-    out.push({ id: m.messageId, body: dagCbor.decode((await open(owner, e)).body) as Record<string, unknown> });
-  }
-  return out;
-};
+const boxes = new Map<string, RawBox>();
+const boxFor = (handle: string) => { const k = `${base}/${handle}`; let b = boxes.get(k); if (!b) { b = new RawBox(owner, `${base}/@${handle}`); boxes.set(k, b); } return b; };
+const sendTo = async (to: string, handle: string, b: string, body: unknown) => { await boxFor(handle).send(to, b, body); };
+const box = { ack: (ids: string[]) => boxFor("david").ack(ids) };
+const inbox = async (b: string) => (await boxFor("david").list(b)).map((m) => ({ id: m.messageId, body: m.value as Record<string, unknown> }));
 let waited: { exitCode?: number; stdout?: string } | undefined;
 const results = (n: number, b = "results", ms = 30_000) => until(`${n} in ${b}`, async () => { const x = await inbox(b); return x.length >= n ? x : undefined; }, ms);
 
@@ -95,12 +90,17 @@ try {
   check(text(r1!.body.stdout).startsWith("hello\nREADME\nsrc\n"), "a run answered through the router");
   await box.ack([r1!.id]);
 
-  const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: ephemeralWallet(key(KEYS.infer)), box: messageBoxClient(ephemeralWallet(key(KEYS.infer)), `${base}/messagebox`, "skein-infer"), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
+  const iw = ephemeralWallet(key(KEYS.infer));
+  const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
     fetch: (async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "It holds README and src." } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
-    now: () => Date.now() });
+    raw: {
+      inbox: new RawBox(iw, `${base}/@infer`),
+      outbox: (url) => new RawBox(iw, url),
+      resolve: async (h, d) => await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=${h}@${d}`)).json() as { identityKey: string; messagebox: string },
+    } });
   await sendTo(zig, "zigtest", "chat", { text: "What is here?", tree: root });
   const [a] = await until("the chat answer", async () => { await peer.poll(); const x = await inbox("chat"); return x.length ? x : undefined; });
-  check(a!.body.text === "It holds README and src.", "a chat answered: loop → infer peer (a messagebox client) → reply to the owner");
+  check(a!.body.text === "It holds README and src.", "a chat answered: loop → the infer peer's mailbox over http → its answer → reply into the owner's mailbox");
   await box.ack([a!.id]);
 
   // A sleep longer than the idle timeout: stopped mid-sleep, hydrated by the waker, re-executed, woken.
@@ -118,9 +118,8 @@ try {
   await router.stop();
   router = make();
   await listen(router);
-  box = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
   await router.start();
-  // The owner's mail is the instance's records (the messagebox program): kept across the restart.
+  // The owner's mail is its mailbox instance's records (the messagebox program): kept across the restart.
   const [r3] = await results(1, "results", 20_000);
   check(text(r3!.body.stdout) === "again\n", "a router restart mid-sleep: hydrated at start, the wake still fires");
   await box.ack([r3!.id]);
@@ -130,7 +129,6 @@ try {
   db.add("fueltest", { store: join(home, "instances/fueltest/runtime.db") });
   router = make(LIMIT);
   await listen(router);
-  box = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
   await router.start();
   const ft = db.get("fueltest")!.identity!;
   for (const b of bundles) await sendTo(ft, "fueltest", "objects", b);

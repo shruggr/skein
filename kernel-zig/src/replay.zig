@@ -3,7 +3,7 @@
 // (the TS runtime's replay path: copyLog + Runtime + witnessFrom). The fresh
 // store first gets the pinned modules (skein-dev install, from $SKEIN_WASM_DIR
 // or the repo's wasm/) and every module (raw block) the source holds, so an
-// old log runs the handlers it ran. Prints {lines, sent, state, index} as
+// old log runs the handlers it ran. Prints {lines, state, index} as
 // JSON: the runtime's log lines, the emits handed to the outbox, the log tip,
 // and the index's costs and final state record (#30). The source may be in
 // either store format (sqlite_store.zig imports the old one in memory).
@@ -23,17 +23,12 @@ const Value = cbor.Value;
 const Capture = struct {
     gpa: std.mem.Allocator,
     lines: std.array_list.Managed([]u8),
-    sent: std.array_list.Managed([]u8),
     echo: bool,
 
     fn say(ctx: *anyopaque, line: []const u8) void {
         const c: *Capture = @ptrCast(@alignCast(ctx));
         c.lines.append(c.gpa.dupe(u8, line) catch return) catch return;
         if (c.echo) std.debug.print("{s}\n", .{line});
-    }
-    fn send(ctx: *anyopaque, a: std.mem.Allocator, o: Value) anyerror!void {
-        const c: *Capture = @ptrCast(@alignCast(ctx));
-        try c.sent.append(try c.gpa.dupe(u8, try cidm.format(a, Value.cidOf(o.get("emit")).?)));
     }
 };
 
@@ -99,12 +94,16 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) {
-            std.debug.print("log: entry #{d} is not a format-2 entry (issue #33: unsigned, keys as bytes)\n", .{Value.intOf(e.get("n")) orelse -1});
+            std.debug.print("log: entry #{d} is not a format-3 entry (issue #40: messages as mail records)\n", .{Value.intOf(e.get("n")) orelse -1});
             return error.BadSignature;
         }
-        for ([_][]const u8{ "genesis", "envelope", "body", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
+        for ([_][]const u8{ "genesis", "mail", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
             try dst.putBlock(x, b);
+        };
+        // A message's body (#40), beside its record.
+        if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
+            if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
         };
         switch (try dst.logAppend(a, e)) {
             .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,
@@ -148,8 +147,8 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
         const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return error.BadReplayModule;
         r.subst = .{ .cid = try cidm.parse(a, spec[0..eq]), .bytes = try std.fs.cwd().readFileAlloc(a, spec[eq + 1 ..], 1 << 30) };
     }
-    var cap = Capture{ .gpa = gpa, .lines = .init(gpa), .sent = .init(gpa), .echo = std.posix.getenv("SKEIN_REPLAY_ECHO") != null };
-    const rt = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say, .send = Capture.send });
+    var cap = Capture{ .gpa = gpa, .lines = .init(gpa), .echo = std.posix.getenv("SKEIN_REPLAY_ECHO") != null };
+    const rt = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say });
     rt.witness = try scheduler.Witness.from(gpa, src.store());
     try rt.start();
     rt.kick();
@@ -160,8 +159,6 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
     const w = o.writer();
     try w.writeAll("{\"lines\":[");
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
-    try w.writeAll("],\"sent\":[");
-    for (cap.sent.items, 0..) |l, i| try w.print("{s}\"{s}\"", .{ if (i > 0) "," else "", l });
     try dst.store().commit();
     const st = dst.ix.stats();
     try w.print("],\"state\":\"{s}\",\"index\":{{\"states\":{d},\"commits\":{d},\"nodes\":{d},\"bytes\":{d},\"record\":\"{s}\"}}}}\n", .{

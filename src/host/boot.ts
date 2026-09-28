@@ -33,7 +33,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./entry.ts";
-import { codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type Genesis2Config, type SubscriptionSpec, type System } from "./genesis.ts";
+import { codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const RAW = 0x55;
@@ -43,6 +43,8 @@ const SHA2_256 = 0x12;
 export const BIN = "bin";
 export const CONFIG = "etc/config.json";
 export const SUBSCRIPTIONS = "etc/subscriptions.json";
+export const ROUTES = "etc/routes.json";
+export const READS = "etc/reads.json";
 
 /** Blocks by CID, from wherever a source keeps them. */
 export interface Objects {
@@ -98,10 +100,13 @@ export interface SystemTree {
   modules: Array<{ cid: CID; bytes?: Uint8Array; name: string }>;
   config: ConfigSpec;
   subscriptions: SubscriptionSpec[];
+  /** etc/routes.json (#40), else the stock routes; etc/reads.json, else the stock reads. */
+  routes?: RouteSpec[];
+  reads?: ReadSpec[];
 }
 
 /** A handler program's record inputs when bin/<name>.json gives none (the kernel's handler inputs). */
-const HANDLER_INPUTS = { envelope: "cid", body: "cid", box: "string", sender: "identity" };
+const HANDLER_INPUTS = { message: "cid", body: "cid", box: "string", sender: "identity" };
 
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {
   const b = await objects.get(cid);
@@ -193,7 +198,11 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
   }
   const config = json<ConfigSpec>(CONFIG) ?? {};
   if (config.defaults && Object.values(config.defaults).some((v) => typeof v !== "string")) throw new Error(`${CONFIG}: every default is a string`);
-  return { root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, subscriptions };
+  const routes = json<RouteSpec[]>(ROUTES);
+  if (routes !== undefined && !Array.isArray(routes)) throw new Error(`${ROUTES}: not a list`);
+  const reads = json<ReadSpec[]>(READS);
+  if (reads !== undefined && !Array.isArray(reads)) throw new Error(`${READS}: not a list`);
+  return { root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, subscriptions, ...(routes ? { routes } : {}), ...(reads ? { reads } : {}) };
 }
 
 // ---------------------------------------------------------------- the loader
@@ -221,7 +230,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
   // A tree takes only the shell from the kernel: the other pinned records would sit in the store unreferenced (a replay would not reproduce them).
-  const kernelPrograms = await k.call("programs", src.kind === "code" ? undefined : ["shell"]) as Record<string, CID>;
+  const kernelPrograms = await k.call("programs", src.kind === "code" ? (c.mailbox ? ["frontdoor", "messagebox"] : undefined) : ["shell"]) as Record<string, CID>;
   if (src.kind === "code") {
     const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
     return { entry, objects: 0, programs: Object.keys(kernelPrograms) };
@@ -236,7 +245,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   // The shell is the VM's own program (its modules are the kernel's); every handler comes from bin/.
   const programs: Record<string, CID> = { ...(kernelPrograms.shell ? { shell: kernelPrograms.shell } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
-  const s: System = resolveSystem(c, programs, t.subscriptions, t.config, t.root);
+  const s: System = resolveSystem(c, programs, t.subscriptions, t.config, t.root, t.routes, t.reads);
   const entry = await writeSystemGenesis(k, c, s, time);
   return { entry, tree: t.root, objects: n, programs: Object.keys(programs) };
 }
@@ -258,6 +267,9 @@ export async function stockSystemFiles(k: Kernel): Promise<Record<string, string
   const { STOCK_SUBSCRIPTIONS } = await import("./genesis.ts");
   files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"] }, null, 2)}\n`;
   files[SUBSCRIPTIONS] = `${JSON.stringify(STOCK_SUBSCRIPTIONS, null, 2)}\n`;
+  const { STOCK_ROUTES, STOCK_READS } = await import("./genesis.ts");
+  files[ROUTES] = `${JSON.stringify(STOCK_ROUTES, null, 2)}\n`;
+  files[READS] = `${JSON.stringify(STOCK_READS, null, 2)}\n`;
   return files;
 }
 

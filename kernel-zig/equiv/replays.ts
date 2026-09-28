@@ -5,8 +5,8 @@
 // a fresh store z1, then replay z1's log into z2, and require the two to be
 // exactly the same:
 //
-//   - the replay reports: the runtime's log lines, the emits handed to the
-//     outbox, the log tip, the final state record;
+//   - the replay reports: the runtime's log lines, the log tip, the final
+//     state record;
 //   - everything `skein-kernel dump` derives: the log entries, chains and
 //     tips, every update (with its fuel), threads, resting threads in resume
 //     order, sleepers, awaits, edges, heads, the cursor, fuel per thread and
@@ -136,7 +136,7 @@ for (const source of sources) {
   const j1 = JSON.parse(r1.stdout), j2 = JSON.parse(r2.stdout);
   const d1 = dump(z1), d2 = dump(z2);
   const diffs: string[] = [];
-  for (const k of ["lines", "sent", "state"] as const) if (JSON.stringify(j1[k]) !== JSON.stringify(j2[k])) diffs.push(`replay ${k} differ: ${JSON.stringify(j1[k]).slice(0, 300)} vs ${JSON.stringify(j2[k]).slice(0, 300)}`);
+  for (const k of ["lines", "state"] as const) if (JSON.stringify(j1[k]) !== JSON.stringify(j2[k])) diffs.push(`replay ${k} differ: ${JSON.stringify(j1[k]).slice(0, 300)} vs ${JSON.stringify(j2[k]).slice(0, 300)}`);
   if (j1.index.record !== j2.index.record) diffs.push(`state record: ${j1.index.record} vs ${j2.index.record}`);
   if (j1.index.record !== d1.state) diffs.push(`state record: the replay ended at ${j1.index.record}, the store holds ${d1.state}`);
   for (const l of [...j1.lines, ...j2.lines] as string[]) if (/DIVERGED|cannot run/.test(l)) { diffs.push(`replay: ${l}`); break; }
@@ -170,7 +170,7 @@ for (const source of sources) {
       exhausted++;
       if (r.state !== "errored" || r.error.kind !== "cant-do" || r.fuel !== limit) diffs.push(`update ${u[2]}: fuel exhausted but ${r.state}/${r.error.kind}, fuel ${r.fuel} (limit ${limit})`);
     }
-    if (/fuel/.test(basename(source)) && exhausted === 0) diffs.push(`no step ran out of fuel (limit ${limit})`);
+    if (/fuel\.db$/.test(basename(source)) && exhausted === 0) diffs.push(`no step ran out of fuel (limit ${limit})`);
     d.close();
   }
   const pageDiff = await explorerDiff(z1, z2);
@@ -183,7 +183,7 @@ for (const source of sources) {
     fromSource = sd.length ? "" : " · the source store reproduced exactly";
   }
   const n = d1.entries.length;
-  const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines, ${j1.sent.length} sent; fuel ${d1.fuel.total}`;
+  const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines; fuel ${d1.fuel.total}`;
   if (ending === 0) diffs.push("no update records fuel");
   if (diffs.length) {
     allSame = false;

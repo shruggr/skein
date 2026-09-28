@@ -35,7 +35,7 @@ async function tmp(t: { after(fn: () => Promise<void>): void }): Promise<string>
 test("host.db: add (defaults, then an update of given fields), get, list by status, enable/disable, remove", async (t) => {
   const db = new HostDb(join(await tmp(t), "host.db"));
   const a = db.add("martha", { store: "/s/martha.db", wallet_url: "http://127.0.0.1:3401" }, new Date(0));
-  assert.deepEqual(a, { handle: "martha", domain: "localhost", identity: null, wallet_url: "http://127.0.0.1:3401", wallet_originator: "skein", store: "/s/martha.db", tree: null, source: null, knows: null, status: "enabled", created_at: "1970-01-01T00:00:00.000Z" });
+  assert.deepEqual(a, { handle: "martha", domain: "localhost", identity: null, wallet_url: "http://127.0.0.1:3401", wallet_originator: "skein", store: "/s/martha.db", tree: null, source: null, knows: null, status: "enabled", created_at: "1970-01-01T00:00:00.000Z", kind: "agent", owner: null });
   db.add("kurt", { store: "/s/kurt.db", domain: "example.com" }, new Date(1));
   const updated = db.add("martha", { identity: "02" + "a".repeat(64), tree: "bafy" });
   assert.equal(updated.identity, "02" + "a".repeat(64));
@@ -85,17 +85,17 @@ test("skein-host: add / list / disable / enable / remove through the CLI, store 
   assert.equal(await cli("disable", "martha"), 0);
   out.length = 0;
   assert.equal(await cli("list"), 0);
-  assert.deepEqual(out, [["martha@localhost", "disabled", derived, "http://127.0.0.1:3401", join(home, "instances/martha/runtime.db"), "bafytree"].join("\t")]);
+  assert.deepEqual(out, [["martha@localhost", "agent", "disabled", derived, "http://127.0.0.1:3401", join(home, "instances/martha/runtime.db"), "bafytree"].join("\t")]);
   assert.equal(await cli("enable", "martha"), 0);
   assert.equal(await cli("add", "martha", "--identity", `02${"a".repeat(64)}`), 0);
   assert.equal(await cli("add", "martha", "--tree", "bafy2"), 0);
   out.length = 0;
   await cli("list");
-  assert.equal(out[0]!.split("\t")[2], `02${"a".repeat(64)}`, "a recorded identity is kept");
+  assert.equal(out[0]!.split("\t")[3], `02${"a".repeat(64)}`, "a recorded identity is kept");
   assert.equal(await cli("add", "martha", "--derive"), 0);
   out.length = 0;
   await cli("list");
-  assert.equal(out[0]!.split("\t")[2], derived, "--derive: the oracle's again");
+  assert.equal(out[0]!.split("\t")[3], derived, "--derive: the oracle's again");
   assert.equal(await cli("remove", "martha"), 0);
   assert.equal(await cli("remove", "martha"), 1);
   assert.equal(await cli("add"), 2);

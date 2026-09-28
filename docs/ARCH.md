@@ -1,28 +1,33 @@
 # Architecture
 
-The one-page picture, as settled with David on 2026-09-25. Where `VM.md`
-talks about a "host" with services beside the runtime, this note supersedes
-it: there is no such layer.
+The one-page picture, as settled with David on 2026-09-25 and revised by
+issue #40: **the instance is an HTTP server; BRC-169 is discovery;
+BRC-103/104 is the network; messages are state.** Where `VM.md` talks about a
+"host" with services beside the runtime, this note supersedes it: there is no
+such layer.
 
 ## The runtime is the whole system
 
 The skein runtime is the only thing that communicates into or out of an
 instance. Its edges are:
 
-1. **Messages** — signed records, in and out. This is the only channel.
-2. **The wallet** — the connected BRC-100 wallet, for signing, verifying,
+1. **Messages** — in through the instance's front door (BRC-33 on a
+   BRC-103/104 session: the session proves the sender), out through its own
+   messagebox program as an HTTP client. This is the only channel for another
+   party's word.
+2. **The wallet** — the instance's oracle, for signing, verifying,
    encrypting, decrypting and deriving. Keys never enter the runtime.
+3. **HTTP** — the `http` import: a recorded call (request and response on the
+   step's update), how delivery and discovery reach the network.
 
 Everything else that looks like an input — a model completion, a tree of
-files, a person's line — is a message from another identity, signed by it.
+files, a person's line — is a message from another identity, proven by its
+session.
 
-Each edge is an interface, satisfied by a **provider** outside `src/runtime`
-(`MESSAGES.md`, "Providers"): message delivery (`src/host/messagebox.ts`),
-ticks (`src/host/tick.ts`), the wallet. Which provider serves which interface
-is kernel configuration (`src/host/main.ts`), so a test wires mocks and one
-host can serve all of them or different parties each. The runtime only
-`admit`s the finished, host-signed entries they deliver and hands its emits
-to the delivery provider.
+The host's side of these edges is small: it admits the entries a front door
+returns, feeds (headers, proofs, statuses), and wakes; it answers `wallet` and
+`http`; it calls the front door with each HTTP request. `MESSAGES.md` has the
+message path end to end.
 
 Time and randomness are different: they are not another party's statement
 inside a message. When the host admits an input it reads its clock and writes
@@ -50,36 +55,51 @@ Inside the runtime:
 - the **scheduler**: consumes the message log in order, routes by
   subscription (the subscriptions chain), steps programs;
 - **programs**: WASI modules stepped by the scheduler, with imports only for
-  the virtual filesystem, the store by CID, the wallet, and message
-  emission;
+  the virtual filesystem, the store by CID, heads, the wallet, `http`, and
+  `call` (another program's function, in the VM); nothing emits: a program
+  that sends a message calls the messagebox program, which delivers over
+  `http`;
+- **calls**: a program's function run over the current state with no entry
+  and no writes — how the host asks the instance anything (the front door is
+  one: `docs/VM.md`, "Calls");
 - the **virtual filesystem**: trees from the store, seen through WASI; the
   wasm shell and its tools run over it. It is the only filesystem the runtime
   has.
 
 The runtime has no access to a disk, a network, a clock or a process table.
-Nothing in its code imports `node:fs`, `node:child_process` or `fetch`. The
+Nothing in its code imports `node:fs`, `node:child_process` or `fetch`
+(`http` is answered by the host, recorded, replayed). The
 "WASI host" — the code that satisfies a module's imports — is *inside* the
 runtime; it is not a host in any other sense.
 
 ## Everything outside is a peer
 
 Anything that acts on the world is a **peer**: an identity that exchanges
-signed messages with the runtime. The runtime cannot tell, and does not care,
+messages with the runtime, proven by its BRC-104 session. The runtime cannot tell, and does not care,
 whether a peer is a process on the same machine or a service across the
 network. Peers include:
 
 - **David's client** — runs as David on his desktop. It scans a directory
-  into tree objects and *sends* the tree; sends his prompts; receives pages
-  and spoken lines; signs with his wallet. It is a peer, not part of skein.
+  into tree objects and *sends* the tree to the instance's front door; sends
+  his prompts; reads pages and spoken lines from his mailbox instance; signs
+  with his wallet. It is a peer, not part of skein.
 - **inference** — a peer that turns a prompt message into a completion
   message (ripper's vLLM behind it).
 - **a machine** — a peer that receives "run this on the host" and answers
   with the signed result. This is the sysadmin path and the toolchain path
   (`go build`, `npm test`): the command runs outside, the result is a
   recorded input.
-- **messagebox** — the host's BRC-33/BRC-169 messagebox; every message in
-  or out passes through it as a BRC-169 envelope (see `MESSAGES.md`).
-- **other instances** — peers like any other.
+- **mailbox instances** — an identity outside the host (David's wallet, the
+  inference peer, a browser tab) has its mail kept by an instance of its own
+  with only the front door and the messagebox (`MESSAGES.md`, "Mailbox
+  instances").
+- **other instances** — peers like any other, on this host or another.
+
+Who an instance can reach is its **peer table** (head `peers`), written only
+by its own programs: a BRC-169 resolve (the resolve program), the owner as
+admin (box `peers`), a claim a peer sent (box `register`), checked by a
+resolve. The host never seeds it; the one peer a genesis names is the owner
+(`etc/config.json` `owner.messagebox`).
 
 A peer may be a thin proxy that receives messages and runs things on a real
 host; what makes that acceptable is that its result is signed by the peer's
@@ -89,7 +109,7 @@ is exactly the set of messages peers sent it.
 ## How a file gets in and out
 
 In: a peer (the client) hashes a directory into git blob and tree objects,
-sends them, and sends a message naming the root CID. The runtime stores the
+sends them (box `objects`), and sends a message naming the root CID. The runtime stores the
 objects and the message; a thread's working tree is that CID. A message that
 names no tree starts from the instance's `main` head, which only an explicit
 act moves (`VM.md`, "Heads").
@@ -98,33 +118,41 @@ Out: a thread's result names a tree CID. A peer that wants bytes on a disk
 fetches the objects and materializes them, or pushes them as a git commit
 through gib. The runtime never writes to a disk.
 
-## The router (issue #33)
+## The router (issues #33, #40)
 
-The host is a **router**, and the instance is the messagebox host. The kernel's
-surface is its table: three things leave the VM — `wallet` (the signing
-oracle), `emit` (these bytes to that identity), `resolve` (handle → identity
-key) — and one call comes in: **admit an entry and run the step**. A
-`sendMessage` from the web, a wake, an outcome, a mailbox change and a deploy
-are all that one call.
+The host is a **router**: a reverse proxy in front of instances that are HTTP
+servers. The kernel's surface is small: out go `wallet` (the signing oracle)
+and `http`; in come **admit an entry and run the step**, and **call a
+function** (no entry, no writes).
 
-- **Transport** ends at the router (`src/host/router.ts`): the BRC-33 API of
-  the TypeScript messagebox (`/sendMessage`, `/listMessages`,
-  `/acknowledgeMessage` under BRC-103/104 mutual auth, plus
-  `/account/register` and the paymail PKI), JSON or BRC-231 dag-cbor, so the
-  stock `@bsv/message-box-client` works against it unchanged.
-- **Sessions belong to the instances** (#33, decided 2026-09-29): the router
-  is a forwarder with no auth state (`auth.ts`). It picks the instance an
-  HTTP request is for (`Router.front`: a `/@<handle>` path prefix, a
-  `<handle>.` host name — the stock AuthFetch keeps one session per origin —
-  else the front instance, the mailbox host), puts each authentication
-  message (the handshake, each signed request, each response to sign) into
-  that instance as a plain `event` entry in the reserved box `:auth`, awaits
-  the step and returns its answer as the HTTP reply. The messagebox program
-  (`programs/messagebox/auth.zig`) verifies and signs through the
-  instance's oracle and keeps the sessions as records (head `sessions`,
-  expiring by `defaults.sessionTtlMs` over entry stamps), so every session
-  signature in the log verifies with the instance's key alone.
-  docs/MESSAGES.md, "Sessions".
+- **Transport** ends at the instance: each has an origin of its own,
+  `http://<handle>.localhost:<port>` (or `/@<handle>` on the router's own
+  origin, for our clients). The router picks the instance by the URL — routing
+  comes before authentication, because a handshake does not name its
+  recipient — and forwards the request as one kernel `call` of the instance's
+  **front door** (`programs/frontdoor`), which runs BRC-103/104 against the
+  session records in the instance's state, routes by its routes table
+  (`etc/routes.json`), checks its reads table (`etc/reads.json`), calls the
+  handler and signs the answer. The router has no auth state and keeps no
+  mail. The stock AuthFetch (one session per origin, handshake at
+  `<origin>/.well-known/auth`) is served by the host-name form.
+- **Writes and reads.** A handler that writes returns entries for the router
+  to admit (a message, an acknowledgement, a session); a read returns an
+  answer and nothing else — ten thousand polls write no entry and no byte.
+  `MESSAGES.md`, "The persistence rule".
+- **Mailbox instances**: an identity outside the host gets an instance of its
+  own for its mail (`skein-host add <h> --mailbox --owner <key>`, or a signed
+  `POST /account/register {username, identityKey, signature}`).
+- **Delivery** is the instance's: its messagebox program sends over the
+  kernel's `http`, on its own BRC-104 session with the recipient's front door.
+  The router answers a URL of its own in process (no socket) and sends any
+  other out.
+- **Discovery.** The router publishes BRC-169 for its instances
+  (`/manifest.json`, `/.well-known/metanet-handles/resolve`: `{identityKey,
+  messagebox}`) and the paymail PKI; an instance looks others up with its
+  resolve program. BRC-169 is discovery only.
+- **The fuel ledger**: every front-door call's fuel is charged to (instance,
+  caller, op) in host.db (`fuel_ledger`; `skein-host ledger`).
 - **Feeds** (`src/host/feeds.ts`): the router holds long-lived subscriptions
   an instance declares in its config (`etc/config.json` `feeds`, carried by
   the genesis) — an SSE header stream (`{kind: "headers", url}`) and ARC's
@@ -133,23 +161,13 @@ are all that one call.
   entry (`Router.admitEvent`) through a bounded per-instance queue; SSE
   reconnects with backoff. It judges nothing: the instance's chain tracker
   validates.
-- **Routing**: host.db maps an identity to the instance that serves it — its
-  own identity, or a mailbox it keeps for another identity (the owner's
-  wallet, the inference peer, a roster). A message to an instance is screened
-  (signed by the authenticated sender, addressed to it, new), decrypted
-  through its oracle and admitted as an envelope entry; mail for a hosted
-  identity is admitted into the keeping instance as a `mail` entry, and the
-  **messagebox program** (`programs/messagebox`, Zig, run by the `:mail`
-  subscription) keeps it under the head `mailbox`, in log order;
-  `listMessages` is a read of those records, `acknowledgeMessage` an `ack`
-  entry. Down means down; nothing waits for a receipt.
 - **Hydration**: an instance is a kernel the router can load
   (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
   length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
   demand and stops it when it has been idle `SKEIN_IDLE_MS`; recovery after an
   environment failure happens at hydrate time from the log (a thread whose
-  step was cut off — the router gone mid-call — runs again; a deterministic
-  error is recorded and never retried).
+  step was cut off runs again; a deterministic error is recorded and never
+  retried).
 - **The waker** is the router's timer: the kernel reports its sleepers; the
   router keeps each instance's earliest deadline, and when it comes it
   hydrates the instance and admits the wake.
@@ -158,14 +176,13 @@ are all that one call.
   instance"]`, key ID = the handle, self), a ProtoWallet each
   (`src/host/oracle.ts`) answering the kernel's `wallet` import in process.
   Provisioning an instance is picking a handle (`skein-host add`).
-- **No host key** (#9): entries are unsigned — the sender signed the message,
-  `prev` fixes its place, the stamp is the environment's word. Time (#10): the
-  router stamps each entry at admission; the sequence is the order.
-- **Format 2** (#21): identity keys, hashes and signatures are byte strings in
-  every record; envelopes are kept in the encoding they were made in — §7.2
-  JSON from JSON clients (the front end), §7.3 dag-cbor from instances and
-  BRC-231 clients — and an instance answers a party in the form it wrote in.
-  `kernel-zig/src/log.zig` has the shapes.
+- **No host key** (#9): entries are unsigned — the sender signed its request
+  (kept in the mail record), `prev` fixes its place, the stamp is the
+  environment's word. Time (#10): the router stamps each entry at admission;
+  the sequence is the order.
+- **Format 3** (#40): `{kind: "log", prev, n, time, genesis | mail | wake |
+  event+box}`; a message is its mail record, and the record's CID is the
+  message's id. `kernel-zig/src/log.zig` has the shapes.
 
 ## Bootstrap (issue #4)
 
@@ -173,12 +190,14 @@ An instance boots from a **system tree**: `bin/*.wasm` handlers (or their
 CIDs), `etc/config.json` and `etc/subscriptions.json`, and its own files. The
 loader (`src/host/boot.ts`) pre-fills the store with the tree's objects and
 writes the genesis from it. The genesis names the tree, and processing it sets
-`main` there. There is one loader and it takes two sources: a directory
+`main` there. The front door's routes and reads come from `etc/routes.json`
+and `etc/reads.json` (else the stock ones). There is one loader and it takes two sources: a directory
 (`skein-host add <h> --boot <dir>`) or a chain packet, which is a BEEF bag plus
 a scope, verified offline (`--packet`, `src/host/packet.ts`). A packet whose
 scope is a state record is a checkpoint: it is restored, and its index is not
 rebuilt. Rows without a tree get the stock system in code, through the same
 writer. See `docs/BOOTSTRAP.md`.
+
 ## The browser as a host (issue #35)
 
 The same Zig kernel compiled to wasm (`kernel-zig`, `zig build web`) runs in a
@@ -189,47 +208,45 @@ one instance whose identity is the connected wallet's (Yours) — user, instance
 and host are the same identity on three separate interfaces
 (`web/kernel/host.ts`):
 
-- **out**: `wallet` → the page's BRC-100 wallet; `resolve` → fetch of a
-  messagebox host's paymail PKI; `http` → fetch; an emit → BRC-231
-  `sendMessage` to the messagebox host (the router on :8100 speaks the standard
-  API), its outcome admitted back; an emit to the instance's own identity is
-  the page's to show.
-- **in**, the same one call: the page's chat (sealed by the wallet and admitted
-  directly, keeping the envelope shape), a poll of the instance identity's
-  mailbox on the messagebox host (`listMessages`, screened as the router
-  screens, acknowledged once durable), and a timer for wakes.
+- **out**: `wallet` → the page's BRC-100 wallet; `http` → fetch: the
+  instance's messagebox program delivers its messages itself (a BRC-104
+  client) and its resolve program looks handles up.
+- **in**, the same one call: the page's chat (a message from the user,
+  admitted directly), a poll of the page identity's mailbox instance on the
+  host (registered by the page, `listMessages` on a BRC-104 session, each
+  message admitted, acknowledged once durable), and a timer for wakes.
 - **intermittent**: nothing runs while the tab is closed; inbound waits in the
-  messagebox and wakes fire late, when the page is next open.
+  mailbox instance and wakes fire late, when the page is next open.
 
 The proof page is `web/kernel/` (no framework; `node web/kernel/serve.ts`,
 cross-origin isolated). Easel (#16) builds on this.
 
 ## Overlay services (issue #36)
 
-An instance can be a BRC-22/24 overlay node: the router answers `POST
-/submit`, `POST /lookup` and overlay-express's listing routes for the
-instances whose config serves the topics and services named. Each request is
-a plain entry into the instance; the `overlay` program (`programs/overlay`)
-verifies the BEEF against the held headers and launches the topic managers
-and lookup services, which are programs too. What topics admit is kept as
-index maps in the same state record as the wallet's (wallet-zig
+An instance can be a BRC-22/24 overlay node, served by its own front door:
+its `etc/routes.json` names the overlay engine's route handlers (`POST
+/submit`, `POST /lookup`, overlay-express's listing and documentation
+routes, all open). A submit is the one write: the handler checks the BEEF
+against the held headers as a read and returns the `submit` entry to admit
+(the `overlay` program, stepped, launches the topic managers and records their
+judgements); the answer is a `then` call reading the STEAK back. A lookup is
+a read: an in-VM call of the lookup service's program. What topics admit is
+kept as index maps in the same state record as the wallet's (wallet-zig
 `overlay.zig`), so a transaction's settlement (#37) is one thing for both: a
 rejection makes its admittances vanish. See `docs/OVERLAY.md`.
 
 ## Processes on David's machines, today
 
-- `skein-host run` — the router: the messagebox on `127.0.0.1:8100`
-  (`/messagebox`), a `skein-kernel serve` child per instance while it has
-  work, the host page and roster on `:4600`, one read-only `skein-explore` per
-  instance on `:4610+`. Log in `~/.skein/logs/host.log` when `up.sh` starts it.
-- `1sat serve wallet-api` — the clients' wallets only: the dev owner (3322)
+- `skein-host run` — the router on `127.0.0.1:8100` (each instance at
+  `http://<handle>.localhost:8100`), a- `1sat serve wallet-api` — the clients' wallets only: the dev owner (3322)
   and the inference peer (3323). No wallet per instance, no host wallet, no
   `1sat serve` messagebox (their scripts are kept, marked legacy).
-- a **client** — David's terminal (`bin/skein`) or the bopen-skein front end
-  (Yours wallet): scans, prompts, renders, signs as David, over the standard
-  messagebox client.
+- a **client** — David's terminal (`bin/skein`, raw BRC-33 on a BRC-104
+  session) or the bopen-skein front end (Yours wallet): scans, prompts,
+  renders, signs as David; sends to the instance's front door and reads his
+  mailbox instance.
 - **peers** — inference (`bin/skein-infer`, ripper behind it), each with its
-  own identity and a mailbox kept here.
+  own identity and a mailbox instance here.
 
 The v1 daemon glued a runtime and a local client into one process and let
 the "skein" CLI read the disk. That is the thing this note corrects.
@@ -241,9 +258,10 @@ userland is anything compiled to plain WASI (Rust `wasm32-wasip1`, wasi-sdk
 C/C++, Go `wasip1`, interpreters as modules). Programs target WASI, never
 skein. Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
 — are answered inside, deterministically, and never recorded. **Attested**
-ones — anything that leaves the runtime: a message to a peer (inference,
-fetch, clone, run-on-machine) — are one message out and one signed message
-back, recorded and replayed. Time and random are pure: they derive from the
+ones — anything that leaves the runtime: the wallet, `http` (a message
+delivered to a peer, a fetch, a resolve) — are recorded and replayed. A
+message to a peer (inference, run-on-machine) goes out as an `http` call and
+its answer comes back as a message. Time and random are pure: they derive from the
 stamp the runtime wrote on the current log entry.
 Request/response *is* attestation; peers all look the same from inside. A
 program waiting on an recorded call is an ordinary thread at rest: the

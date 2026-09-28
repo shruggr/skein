@@ -7,44 +7,44 @@
 //   the imports out   wallet  → the page's BRC-100 wallet (Yours through
 //                               @1sat/connect; a ProtoWallet in tests), over the
 //                               BRC-100 wire (WalletWireProcessor)
-//                     resolve → fetch: the router's paymail PKI (/bsvalias/id/…)
-//                     http    → fetch
-//                     emit    → the kernel's `send`: a message to another
-//                               identity goes to the messagebox host (BRC-231
-//                               over BRC-104, as the instance), its outcome
-//                               admitted back; one addressed to this identity
-//                               is the page's (shown, not sent)
-//   the call in       admit + drain, from: the page (a chat: an envelope from
-//                     the user sealed and admitted directly, keeping the
-//                     envelope shape), a poll of the external messagebox
-//                     (listMessages as this identity, screened as the router
-//                     screens, acknowledged once durable), a timer for wakes.
+//                     http    → fetch: the instance's own programs deliver its
+//                               messages (#40: the messagebox program, a BRC-104
+//                               client) and resolve handles (the resolve program,
+//                               BRC-169) — there is no emit and no resolve
+//   the call in       admit + drain, from: the page (a chat: a message from the
+//                     user admitted directly), a poll of this identity's
+//                     mailbox instance on the host (listMessages on a BRC-104
+//                     session; each message admitted, acknowledged once
+//                     durable), a timer for wakes.
 //
-// An intermittent host (#16): nothing runs while the tab is closed; inbound
-// waits in the messagebox and wakes fire late, at the next open.
+// The mailbox: registering this identity on the host creates its mailbox
+// instance (#40); the genesis names it as the owner's messagebox, so what the
+// instance sends its owner (this identity) lands there too — the page shows
+// those (sender = this identity) and admits the rest. An intermittent host
+// (#16): nothing runs while the tab is closed; inbound waits in the mailbox
+// instance and wakes fire late, at the next open.
 
-import { AuthFetch, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
+import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 // @ts-expect-error: plain JS module (kernel-zig/web/client.js)
 import { KernelWorker } from "../../kernel-zig/web/client.js";
-import { asEnvelope, inspect, isCborEnvelope, openCbor, sealCbor, type AnyEnvelope, type CborEnvelope } from "../../src/envelope-cbor.ts";
-import { open, type Envelope } from "../../src/envelope.ts";
-import { cborBoxClient } from "../../src/host/brc231.ts";
-import { admit2, keyBytes, keyHex, writeGenesis } from "../../src/host/genesis.ts";
+import { RawBox } from "../../src/client/raw.ts";
+import { admit2, keyBytes, writeGenesis } from "../../src/host/genesis.ts";
 import type { Kernel } from "../../src/host/kernel.ts";
-import type { MessageBox } from "../../src/host/messagebox.ts";
 import { DEFAULTS, stampMs } from "../../src/runtime/log.ts";
 import { NotFound, Rejected } from "../../src/runtime/store.ts";
 import { msStamp, type Stamp } from "../../src/runtime/syscalls.ts";
 
 type Reply = { ok?: unknown; error?: string | null; rejected?: string | null };
-type Outbound = { to: Uint8Array; box: string; envelope: unknown; emit: CID; thread: CID; cid: CID };
+
+/** The boxes the page collects from its mailbox besides the ones the subscriptions route. */
+const COLLECT = ["chat", "turn", "results", "completions", "register"];
 
 export interface HostOptions {
   wallet: WalletInterface;
-  /** The messagebox host, e.g. http://127.0.0.1:8100/messagebox; its origin also resolves handles (/bsvalias/id). */
-  messagebox: string;
+  /** The skein host (the router), e.g. http://127.0.0.1:8100: where this identity registers its mailbox instance and handles resolve. */
+  host: string;
   handle: string;
   domain?: string;
   /** The inference peer's identity (hex) and name, for the genesis. */
@@ -60,11 +60,10 @@ export interface HostOptions {
   pollMs?: number;
   log?(line: string): void;
   /** A message the instance sent to this identity: the page shows it. */
-  onMessage?(m: { from: string; box: string; body: unknown; envelope: CID }): void;
+  onMessage?(m: { from: string; box: string; body: unknown; id: string }): void;
 }
 
 const now = (): Stamp => msStamp(Date.now());
-const isHex = (s: unknown): s is string => typeof s === "string" && /^0[23][0-9a-f]{64}$/.test(s);
 
 /** The kernel in the worker, with the surface src/host's helpers use (writeGenesis, admit2: Kernel in kernel.ts). */
 export class WebKernel {
@@ -90,9 +89,8 @@ export class WebKernel {
     },
   };
   /** The one call in: admitted and durable when this resolves (processing is drain's). */
-  async admit(entry: unknown, records: { envelope?: object; body?: Uint8Array } = {}): Promise<CID> {
+  async admit(entry: unknown, records: { body?: Uint8Array } = {}): Promise<CID> {
     const frame: Record<string, unknown> = { entry };
-    if (records.envelope) frame.envelope = records.envelope;
     if (records.body) frame.body = records.body;
     return WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply) as CID;
   }
@@ -109,7 +107,9 @@ export class BrowserHost {
   readonly o: HostOptions;
   kernel!: WebKernel;
   identity = "";
-  private box!: MessageBox;
+  private box!: RawBox;
+  /** This identity's mailbox instance on the host. */
+  mailbox = "";
   private queue: Promise<unknown> = Promise.resolve();
   private pollTimer?: ReturnType<typeof setTimeout>;
   private wakeTimer?: ReturnType<typeof setTimeout>;
@@ -124,7 +124,7 @@ export class BrowserHost {
   }
 
   private log(line: string): void { this.o.log?.(line); }
-  get origin(): string { return new URL(this.o.messagebox).origin; }
+  get origin(): string { return new URL(this.o.host).origin; }
   get domain(): string { return this.o.domain ?? "localhost"; }
 
   /** Admissions and drains one at a time, in order (the router's serial()). */
@@ -148,13 +148,14 @@ export class BrowserHost {
     this.log(`store: IndexedDB ${this.o.db ?? `skein-${this.o.handle}`} (${blocks} blocks)`);
     await kw.call("open", 1);
     await this.install();
-    this.box = cborBoxClient(this.o.wallet, this.o.messagebox);
+    this.mailbox = await this.register();
+    this.box = new RawBox(this.o.wallet, this.mailbox);
     if (!(await this.kernel.store.log.tip())) {
-      await this.register();
       const e = await writeGenesis(this.kernel as unknown as Kernel, {
         identity: this.identity, owner: this.identity, handle: this.o.handle, domain: this.domain,
         infer: this.o.infer, inferHandle: this.o.inferHandle, ownerHandle: { handle: this.o.handle, domain: this.domain },
         defaults: this.o.defaults ? { ...DEFAULTS, ...this.o.defaults } : undefined,
+        ownerMessagebox: this.mailbox, resolveOrigin: this.origin,
       }, now());
       this.log(`genesis ${e}`);
     }
@@ -184,10 +185,14 @@ export class BrowserHost {
     if (n) this.log(`installed ${n} modules`);
   }
 
-  /** A mailbox for this identity on the messagebox host (replies to it wait there while the tab is closed). */
-  private async register(): Promise<void> {
-    const r = await new AuthFetch(this.o.wallet).fetch(`${this.origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: this.o.handle }) });
-    this.log(`register ${this.o.handle}: HTTP ${r.status}`);
+  /** This identity's mailbox instance on the host (messages to it wait there while the tab is closed): its URL. */
+  private async register(): Promise<string> {
+    const sig = await this.o.wallet.createSignature({ protocolID: [2, "skein register"], keyID: this.o.handle, counterparty: "anyone", data: [...new TextEncoder().encode(`register ${this.o.handle}`)] });
+    const r = await fetch(`${this.origin}/account/register`, { method: "POST", body: JSON.stringify({ username: this.o.handle, identityKey: this.identity, signature: [...sig.signature].map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    const j = await r.json() as { messagebox?: string; error?: string };
+    this.log(`register ${this.o.handle}: HTTP ${r.status}${j.messagebox ? ` · ${j.messagebox}` : ` ${j.error ?? ""}`}`);
+    if (!j.messagebox) throw new Error(`register ${this.o.handle}: ${j.error ?? r.status}`);
+    return j.messagebox;
   }
 
   // ---------------------------------------------------------------- the kernel's requests (it waits on them)
@@ -197,22 +202,10 @@ export class BrowserHost {
     switch (op) {
       case "wallet":
         return dagCbor.encode(Uint8Array.from(await this.wire.transmitToWallet([...(arg as Uint8Array)])));
-      case "resolve": {
-        const { handle, domain } = arg as { handle: string; domain: string };
-        let res: Record<string, unknown>;
-        try {
-          const r = await fetch(`${this.origin}/bsvalias/id/${encodeURIComponent(`${handle}@${domain}`)}`);
-          const j = await r.json() as { pubkey?: string; error?: string };
-          res = isHex(j.pubkey) ? { identityKey: keyBytes(j.pubkey), via: "host" } : { identityKey: new Uint8Array(), error: j.error ?? `${handle}@${domain}: unknown` };
-        } catch (e) {
-          res = { identityKey: new Uint8Array(), error: (e as Error).message };
-        }
-        this.events.push({ kind: "resolve", handle, domain, identityKey: keyHex(res.identityKey) });
-        return dagCbor.encode(res);
-      }
       case "http": {
         const req = dagCbor.decode(arg as Uint8Array) as { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array };
         const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined });
+        this.events.push({ kind: "http", method: req.method, url: req.url, status: r.status });
         return dagCbor.encode(dagCbor.encode({ status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) }));
       }
     }
@@ -223,34 +216,7 @@ export class BrowserHost {
 
   private notified(op: string, v: Uint8Array | string): void {
     if (op === "say" || op === "panic") { this.log(String(v)); return; }
-    if (op === "send") { const o = dagCbor.decode(v as Uint8Array) as Outbound; void this.route(o); return; }
     if (op === "sleepers") { void this.scheduleWake(dagCbor.decode(v as Uint8Array) as Array<{ thread: CID; until: number }>); return; }
-  }
-
-  /** An emit: to another identity through the messagebox host, or to this one (the page); the outcome goes back in. */
-  private async route(o: Outbound): Promise<void> {
-    const to = keyHex(o.to);
-    let status: "delivered" | "failed" = "delivered";
-    let reason: string | undefined;
-    if (to === this.identity) {
-      try {
-        const env = o.envelope as AnyEnvelope;
-        const body = dagCbor.decode((isCborEnvelope(env) ? await openCbor(this.o.wallet, env) : await open(this.o.wallet, env as Envelope)).body);
-        this.events.push({ kind: "message", box: o.box, body, envelope: o.cid.toString() });
-        this.o.onMessage?.({ from: this.identity, box: o.box, body, envelope: o.cid });
-      } catch (e) { status = "failed"; reason = (e as Error).message; }
-    } else {
-      try {
-        const body = isCborEnvelope(o.envelope) ? dagCbor.encode(o.envelope) : o.envelope as object;
-        await this.box.send({ recipient: to, box: o.box, body });
-        this.events.push({ kind: "sent", to, box: o.box, envelope: o.cid.toString() });
-      } catch (e) { status = "failed"; reason = (e as Error).message; }
-    }
-    this.log(`outbox ${o.box} → ${to.slice(-8)}: ${status}${reason ? ` (${reason})` : ""}`);
-    await this.serial(async () => {
-      await admit2(this.kernel as unknown as Kernel, { outcome: { emit: o.emit, status, ...(reason ? { reason } : {}) } } as never, {}, now());
-      await this.kernel.drain();
-    });
   }
 
   private async scheduleWake(s: Array<{ thread: CID; until: number }>): Promise<void> {
@@ -279,13 +245,24 @@ export class BrowserHost {
     this.pollTimer = setTimeout(() => void this.pollLoop(), this.o.pollMs ?? 1000);
   }
 
-  /** listMessages for every box the subscriptions route; each message screened, admitted (durable), processed, acknowledged. */
+  /**
+   * listMessages in every box the subscriptions route (and COLLECT) on this
+   * identity's mailbox instance: what the instance sent its owner (this
+   * identity) is shown; the rest admitted as messages (durable), processed,
+   * acknowledged.
+   */
   async poll(): Promise<number> {
     let n = 0;
-    for (const box of await this.kernel.boxes()) {
+    const boxes = [...new Set([...(await this.kernel.boxes()), ...COLLECT])];
+    for (const box of boxes) {
       for (const m of await this.box.list(box)) {
-        const r = await this.admitMessage(m.sender ?? "", box, m.body);
-        this.log(`inbox ${box} from ${(m.sender ?? "?").slice(-8)}: ${r}`);
+        if (m.sender === this.identity) {
+          this.events.push({ kind: "message", box, body: m.value, id: m.messageId });
+          this.o.onMessage?.({ from: m.sender, box, body: m.value, id: m.messageId });
+        } else {
+          const r = await this.admitMessage(m.sender, box, m.body);
+          this.log(`inbox ${box} from ${m.sender.slice(-8)}: ${r}`);
+        }
         await this.box.ack([m.messageId]);
         n++;
       }
@@ -293,27 +270,16 @@ export class BrowserHost {
     return n;
   }
 
-  /** router.ts screen + deliver: a BRC-169 envelope in either form, signed by `sender`, to this identity, new, decrypting to canonical dag-cbor. */
-  private async admitMessage(sender: string, box: string, raw: unknown): Promise<string> {
-    // A BRC-231 listing gives every body as bytes: a §7.3 envelope's dag-cbor, or a JSON sender's §7.2 envelope as its UTF-8 text.
-    let env = asEnvelope(raw);
-    if (!env && raw instanceof Uint8Array) try { env = asEnvelope(JSON.parse(new TextDecoder().decode(raw))); } catch { /* neither */ }
-    if (!env) return "rejected: not a BRC-169 envelope";
-    let x: ReturnType<typeof inspect>;
-    try { x = inspect(env); } catch (e) { return `rejected: ${(e as Error).message}`; }
-    if (!x.verified) return "rejected: the signature does not verify";
-    if (sender && sender !== x.sender) return "rejected: the authenticated sender is not the envelope's";
-    if (x.recipient !== this.identity) return "rejected: not addressed to this instance";
-    let body: Uint8Array;
-    try { body = (isCborEnvelope(env) ? await openCbor(this.o.wallet, env) : await open(this.o.wallet, env as Envelope)).body; } catch (e) { return `rejected: ${(e as Error).message}`; }
+  /** A message from `sender` to this identity, admitted as the host's word (the mailbox verified its session). Its id. */
+  private async admitMessage(sender: string, box: string, body: Uint8Array): Promise<string> {
     const bodyCid = await this.kernel.store.put(dagCbor.decode(body));
+    const mail = await this.kernel.store.put({ kind: "mail", op: "put", sender: keyBytes(sender), recipient: keyBytes(this.identity), box, body: bodyCid });
     return await this.serial(async () => {
-      if (await this.kernel.store.log.byEnvelope(x.id)) return "a duplicate";
       try {
-        const e = await admit2(this.kernel as unknown as Kernel, { envelope: x.id, box, body: bodyCid }, { envelope: x.signed, body }, now());
-        this.events.push({ kind: "admitted", box, sender: x.sender, envelope: x.id.toString(), entry: e.toString() });
+        const e = await admit2(this.kernel as unknown as Kernel, { mail } as never, { body }, now());
+        this.events.push({ kind: "admitted", box, sender, message: mail.toString(), entry: e.toString() });
         await this.kernel.drain();
-        return `admitted ${x.id.toString().slice(-8)} as ${e.toString().slice(-8)}`;
+        return `admitted ${mail.toString().slice(-8)} as ${e.toString().slice(-8)}`;
       } catch (e) {
         if (e instanceof Rejected && e.reason === "duplicate-envelope") return "a duplicate";
         return `rejected: ${(e as Error).message}`;
@@ -323,16 +289,13 @@ export class BrowserHost {
 
   // ---------------------------------------------------------------- the call in: the page
 
-  /** The user's chat to the instance: sealed by the wallet as an envelope from this identity and admitted directly (#16). */
-  async chat(text: string, replyTo?: CID): Promise<CID> {
-    const env: CborEnvelope = await sealCbor(this.o.wallet, {
-      recipient: { identityKey: this.identity, handle: this.o.handle, domain: this.domain },
-      body: dagCbor.encode(replyTo ? { text, replyTo } : { text }),
-      created: new Date(stampMs(now())).toISOString(),
-    });
-    const r = await this.admitMessage(this.identity, "chat", env);
+  /** The user's chat to the instance: a message from this identity, admitted directly (#16). Its id (what a reply names). */
+  async chat(text: string, replyTo?: CID): Promise<string> {
+    const body = dagCbor.encode(replyTo ? { text, replyTo } : { text });
+    void stampMs;
+    const r = await this.admitMessage(this.identity, "chat", body);
     this.log(`chat: ${r}`);
     if (!r.startsWith("admitted")) throw new Error(r);
-    return inspect(env).id;
+    return r.split(" ")[1]!;
   }
 }

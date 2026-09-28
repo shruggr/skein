@@ -1,25 +1,24 @@
 // run-handler: the handler program for the `run` box (docs/MESSAGES.md).
 //
-// Step 1 (input: the admitted envelope and its plaintext body record): decode
+// Step 1 (input: the admitted message and its body record): decode
 // the body {cmd, tree?, cwd?, env?} (no tree: the `main` head's, else the empty
 // tree), put the shell's arguments {cmd, tree, cwd?, env?} as a record and
 // launch the shell with it. The step ends; the thread waits on the shell.
 //
-// Step 2 (input: the shell at rest): emit a result envelope to the sender in
-// box `results`: {exitCode, stdout, stderr, tree, replyTo: <envelope>} (or
-// {error, replyTo} if the shell errored).
+// Step 2 (input: the shell at rest): send the result to the sender in box
+// `results` (the messagebox's delivery, #40): {exitCode, stdout, stderr, tree,
+// replyTo: <message>} (or {error, replyTo} if the shell errored).
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/shruggr/skein/programs/envelope"
 	"github.com/shruggr/skein/programs/skein"
 )
 
 type args struct {
-	Envelope skein.CID `cbor:"envelope"`
+	Message  skein.CID `cbor:"message"`
 	Body     skein.CID `cbor:"body"`
 	Box      string    `cbor:"box"`
 	Sender   skein.Key `cbor:"sender"`
@@ -82,7 +81,7 @@ func run() error {
 }
 
 func first(step *skein.Step, a args) error {
-	_, plain, err := skein.Read(a.Envelope, a.Body)
+	_, plain, err := skein.Read(a.Message, a.Body)
 	if err != nil {
 		return err
 	}
@@ -113,10 +112,6 @@ func first(step *skein.Step, a args) error {
 }
 
 func second(step *skein.Step, a args) error {
-	env, err := envelopeOf(a.Envelope)
-	if err != nil {
-		return err
-	}
 	r := step.Resolved[0]
 	if r.State != "finished" || len(r.Result) == 0 {
 		msg := r.State
@@ -126,11 +121,13 @@ func second(step *skein.Step, a args) error {
 		if len(r.Error) > 0 && skein.Decode(r.Error, &e) == nil && e.Message != "" {
 			msg = e.Message
 		}
-		return envelope.Reply(env, "results", errorBody{Error: msg, ReplyTo: a.Envelope})
+		_, err := skein.Send(step, a.Sender, "results", errorBody{Error: msg, ReplyTo: a.Message}, "", "")
+		return err
 	}
 	var res shellResult
 	if err := skein.Decode(r.Result, &res); err != nil {
 		return fmt.Errorf("shell result: %w", err)
 	}
-	return envelope.Reply(env, "results", resultBody{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, Tree: res.Tree, ReplyTo: a.Envelope})
+	_, err := skein.Send(step, a.Sender, "results", resultBody{ExitCode: res.ExitCode, Stdout: res.Stdout, Stderr: res.Stderr, Tree: res.Tree, ReplyTo: a.Message}, "", "")
+	return err
 }

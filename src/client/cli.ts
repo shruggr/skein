@@ -1,5 +1,8 @@
-// skein — David's client. Signs as David through his wallet-api, talks only to
-// the messagebox. See scripts/host/README.md for the processes it expects.
+// skein — David's client. Signs as David through his wallet-api; raw BRC-33 on
+// a BRC-104 session (#40): sends to the instance's front door
+// (SKEIN_INSTANCE_URL, default $SKEIN_HOST_URL/@<handle>), reads David's
+// mailbox instance (SKEIN_MAILBOX_URL, ~/.skein/mailbox.url, default
+// $SKEIN_HOST_URL/@david). See scripts/host/README.md for the processes it expects.
 //
 //   skein whoami
 //   skein import <dir>
@@ -171,12 +174,13 @@ export async function main(argv: string[]): Promise<number> {
     case "whoami": {
       console.log(`owner (you):  ${await client.identityKey()}  via ${cfg.walletUrl} as ${cfg.originator}`);
       console.log(`instance:     ${cfg.instance.identityKey}  ${cfg.instance.handle}@${cfg.instance.domain}`);
-      console.log(`messagebox:   ${cfg.messageboxUrl}`);
+      console.log(`instance url: ${cfg.instanceUrl}`);
+      console.log(`mailbox:      ${cfg.mailboxUrl}`);
       return 0;
     }
     case "import": {
       const r = await client.importDir(c.dir, (i, n, bytes) => process.stderr.write(`bundle ${i + 1}/${n} (${bytes} bytes)\n`));
-      process.stderr.write(`${r.records} objects in ${r.bundles.length} envelope(s) to box objects\n`);
+      process.stderr.write(`${r.records} objects in ${r.bundles.length} message(s) to box objects\n`);
       console.log(r.root.toString());
       return 0;
     }

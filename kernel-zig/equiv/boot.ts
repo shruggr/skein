@@ -21,13 +21,12 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, PrivateKey } from "@bsv/sdk";
-import * as dagCbor from "@ipld/dag-cbor";
-import { open, seal, verify, type Envelope } from "../../src/envelope.ts";
+import { createServer } from "node:net";
+import { PrivateKey } from "@bsv/sdk";
+import { RawBox } from "../../src/client/raw.ts";
 import { main } from "../../src/host/cli.ts";
 import { keyHex } from "../../src/host/genesis.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { messageBoxClient, type MessageBox } from "../../src/host/messagebox.ts";
 import { masterKey, Oracle } from "../../src/host/oracle.ts";
 import { decodePacket } from "../../src/host/packet.ts";
 import { rawCid } from "../../src/host/boot.ts";
@@ -57,9 +56,11 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_0
 }
 const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 const lines: string[] = [];
+// The port the routers serve on: an agent's genesis names its owner's mailbox by URL (#40), so it is fixed before the boots.
+const port = await new Promise<number>((res) => { const srv = createServer(); srv.listen(0, "127.0.0.1", () => { const p = (srv.address() as { port: number }).port; srv.close(() => res(p)); }); });
 const cli = async (home: string, ...argv: string[]) => {
   const out: string[] = [];
-  const code = await main(argv, { vars: { ...process.env, SKEIN_HOME: home, SKEIN_OWNER: ownerId, SKEIN_INFER: inferId, SKEIN_KERNEL_BIN: kernel }, out: (l) => out.push(l), err: (l) => out.push(`ERR ${l}`) });
+  const code = await main(argv, { vars: { ...process.env, SKEIN_HOME: home, SKEIN_OWNER: ownerId, SKEIN_INFER: inferId, SKEIN_KERNEL_BIN: kernel, SKEIN_ROUTER_PORT: String(port) }, out: (l) => out.push(l), err: (l) => out.push(`ERR ${l}`) });
   lines.push(`$ skein-host ${argv.join(" ")}`, ...out);
   if (process.env.VERBOSE) process.stdout.write(`  | $ skein-host ${argv.join(" ")}\n${out.map((l) => `  | ${l}\n`).join("")}`);
   return { code, out };
@@ -73,38 +74,34 @@ let router: Router | undefined;
 const routerFor = (h: string, db: HostDb) => {
   const oracle = new Oracle(masterKey({}, h));
   return new Router({
-    db, walletFor: (row) => oracle.wallet(row.handle), authWallet: oracle.routerWallet(),
+    db, walletFor: (row) => oracle.wallet(row.handle), home: h, port,
     owner: ownerId, infer: inferId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: h } },
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
   });
 };
 
 async function talk(r: Router, handles: string[]): Promise<void> {
-  const base = `http://127.0.0.1:${((await r.listen(0)).address() as { port: number }).port}`;
-  for (const [w, name] of [[owner, "david"], [ephemeralWallet(inferKey), "infer"]] as const) {
-    const res = await new AuthFetch(w).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: name }) });
-    if (res.status !== 200 && res.status !== 409) throw new Error(`register ${name}: ${res.status}`);
-  }
-  const box: MessageBox = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
-  const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: ephemeralWallet(inferKey), box: messageBoxClient(ephemeralWallet(inferKey), `${base}/messagebox`, "skein-infer"), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
+  await r.listen(port);
+  const base = `http://127.0.0.1:${port}`;
+  const iw = ephemeralWallet(inferKey);
+  const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
     fetch: (async (_u: string, init: { body: string }) => {
       // The prompt the loop sent: its system message is SOUL.md from the tree it runs over (main).
       const soul = String((JSON.parse(init.body) as { messages: Array<{ role: string; content: string }> }).messages.find((m) => m.role === "system")?.content ?? "");
       return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: soul.includes("booted from a system tree") ? "I was booted from a system tree." : `no soul: ${soul.slice(0, 80)}` } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch,
-    now: () => Date.now() });
-  const inbox = async (b: string) => {
-    const out: Array<{ id: string; body: Record<string, unknown> }> = [];
-    for (const m of await box.list(b)) {
-      const e = (typeof m.body === "string" ? JSON.parse(m.body) : m.body) as Envelope;
-      if (!verify(e)) throw new Error("reply does not verify");
-      out.push({ id: m.messageId, body: dagCbor.decode((await open(owner, e)).body) as Record<string, unknown> });
-    }
-    return out;
-  };
+    raw: {
+      inbox: new RawBox(iw, `${base}/@infer`),
+      outbox: (url) => new RawBox(iw, url),
+      resolve: async (h, d) => await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=${h}@${d}`)).json() as { identityKey: string; messagebox: string },
+    } });
+  const mine = new RawBox(owner, `${base}/@david`);
+  const box = { ack: (ids: string[]) => mine.ack(ids) };
+  const inbox = async (b: string) => (await mine.list(b)).map((m) => ({ id: m.messageId, body: m.value as Record<string, unknown> }));
   for (const h of handles) {
     const id = r.o.db.get(h)!.identity!;
-    const send = async (b: string, body: unknown) => box.send({ recipient: id, box: b, body: await seal(owner, { recipient: { identityKey: id, handle: h, domain: "localhost" }, body: dagCbor.encode(body), created: new Date().toISOString() }) });
+    const to = new RawBox(owner, `${base}/@${h}`);
+    const send = async (b: string, body: unknown) => { await to.send(id, b, body); };
     await send("chat", { text: "Who are you?" });
     const [a] = await until(`${h}'s chat answer`, async () => { await peer.poll(); const x = await inbox("chat"); return x.length ? x : undefined; });
     check(a!.body.text === "I was booted from a system tree.", `${h}: a chat answered, the loop reading SOUL.md from main (the system tree) (${String(a!.body.text).slice(0, 80)})`);
@@ -155,6 +152,8 @@ try {
   } else process.stdout.write("note: no wallet component build (wallet-zig: zig build component); the component handler case is skipped\n");
   await fs.writeFile(join(sys, "etc/config.json"), JSON.stringify(config));
 
+  // The owner's and the inference peer's mailbox instances, before the agents (whose geneses name the owner's).
+  check((await cli(home, "add", "david", "--mailbox", "--owner", ownerId)).code === 0 && (await cli(home, "add", "infer", "--mailbox", "--owner", inferId)).code === 0, "mailbox instances for the owner and the inference peer");
   // Source A: the directory.
   const a = await cli(home, "add", "alpha", "--boot", sys);
   check(a.code === 0 && a.out.some((l) => l.startsWith("alpha: booted from ")), `add --boot <dir> (${a.out.join(" | ").slice(0, 200)})`);
@@ -179,7 +178,7 @@ try {
     const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; subscriptions: unknown[] };
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
-    check(Object.keys(g.programs).sort().join() === `head-handler,loop,messagebox,objects-handler,run-handler,shell,subscribe-handler${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
+    check(Object.keys(g.programs).sort().join() === `frontdoor,head-handler,loop,messagebox,objects-handler,resolve,run-handler,shell,subscribe-handler${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
     check(keyHex((await k.genesis() as { owner: Uint8Array }).owner) === ownerId, `${h}: $owner is the host's owner`);
   }
   await talk(router, ["alpha", "beta"]);
@@ -192,6 +191,8 @@ try {
   check(c.code === 0, `pack <handle> --checkpoint (${c.out.join(" | ")})`);
   await fs.mkdir(home2, { recursive: true });
   copyFileSync(join(home, "master.key"), join(home2, "master.key"));
+  await cli(home2, "add", "david", "--mailbox", "--owner", ownerId);
+  await cli(home2, "add", "infer", "--mailbox", "--owner", inferId);
   const rc = await cli(home2, "add", "alpha", "--packet", ck);
   check(rc.code === 0 && rc.out.some((l) => l.startsWith("alpha: restored checkpoint")), `add --packet <checkpoint> (${rc.out.join(" | ").slice(0, 200)})`);
   const db2 = new HostDb(join(home2, "host.db"));

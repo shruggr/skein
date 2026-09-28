@@ -1,13 +1,17 @@
-// Format 2 (issue #33) on the router's side: the genesis a new instance's log
-// starts with, and unsigned entries.
+// Format 3 (issue #40; format 2, #33: unsigned entries, keys as bytes) on the
+// router's side: the genesis a new instance's log starts with, and entries.
 //
-//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome}   — no `sig`: no host key
+//   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box}   — no `sig`: no host key
 //   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs,
-//             subscriptions: [{match: {sender?: bytes(33), box}, handler}], peers?: {role: bytes(33)},   (last: `:mail` → messagebox)
+//             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
-//             feeds?: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}]}
-//            (`feeds`: what the router holds for the instance, feeds.ts; `:auth` → the
-//            messagebox program keeps its BRC-103/104 sessions, auth.ts)
+//             feeds?: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}],
+//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}]}
+//            (`feeds`: what the router holds for the instance, feeds.ts; `routes`/`reads`: the
+//            front door's, #40; `:sessions` → the front door keeps its sessions; `:ack` → the
+//            messagebox moves a reader's pointer; `defaults.ownerMessagebox`: the owner's
+//            messagebox URL — the one peer a genesis names; `defaults.resolveOrigin`: where
+//            the instance's own domain is looked up (a dev host))
 //
 // The stamp is the router's clock at admission (#10): the sequence is the
 // order. A genesis is written from a **system** (issue #4, docs/BOOTSTRAP.md):
@@ -58,8 +62,17 @@ export interface Genesis2Config {
   openChat?: boolean;
   /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex) or none, a box, a handler program record. */
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
+  /** The front door's routes and reads for code genesis (#40; default STOCK_ROUTES, STOCK_READS). */
+  routes?: RouteSpec[];
+  reads?: ReadSpec[];
   /** Feeds the router holds for the instance (code genesis; a tree's config names its own). */
   feeds?: FeedSpec[];
+  /** A mailbox instance (#40): only the front door and the messagebox, keeping mail for `owner` from anyone. */
+  mailbox?: boolean;
+  /** The owner's messagebox URL (#40): the one peer a genesis names (`defaults.ownerMessagebox`). */
+  ownerMessagebox?: string;
+  /** Where the instance's own domain resolves (`defaults.resolveOrigin`): the host's origin in dev. */
+  resolveOrigin?: string;
 }
 
 /**
@@ -68,19 +81,66 @@ export interface Genesis2Config {
  * absent (anyone); the handler a program name (bin/<name>, or `shell`) or a
  * program record's CID.
  */
-export interface SubscriptionSpec { sender?: string; box: string; handler: string }
+export interface SubscriptionSpec { sender?: string; box?: string; handler: string }
 
-/** The stock seed (what code genesis has always written): the owner's boxes, chat from anyone, the messagebox. */
+/**
+ * The stock seed: the owner's boxes, chat from anyone, the peer table's
+ * boxes (the admin's `peers`, anyone's `register` claim: resolve), and the
+ * reserved boxes the host admits into — `:sessions` (the front door keeps a
+ * handshake's session) and `:ack` (the messagebox moves a reader's pointer).
+ */
 export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { sender: "$owner", box: "run", handler: "run-handler" },
   { sender: "$owner", box: "objects", handler: "objects-handler" },
   { sender: "$owner", box: "head", handler: "head-handler" },
   { sender: "$owner", box: "chat", handler: "loop" },
   { sender: "$owner", box: "subscribe", handler: "subscribe-handler" },
+  { sender: "$owner", box: "peers", handler: "resolve" },
   { box: "chat", handler: "loop" },
-  { box: ":mail", handler: "messagebox" },
-  { box: ":auth", handler: "messagebox" },
+  { box: "register", handler: "resolve" },
+  { box: ":sessions", handler: "frontdoor" },
+  { box: ":ack", handler: "messagebox" },
 ];
+
+/**
+ * A mailbox instance's seed (#40): the front door's sessions, the
+ * messagebox's acknowledgements, and every message from anyone in any box to
+ * the messagebox (kept for the owner; a mailbox exists only where such a
+ * subscription does).
+ */
+export const MAILBOX_SUBSCRIPTIONS: SubscriptionSpec[] = [
+  { box: ":sessions", handler: "frontdoor" },
+  { box: ":ack", handler: "messagebox" },
+  { handler: "messagebox" },
+];
+
+/**
+ * A front-door route as a system writes it (etc/routes.json, #40): an exact
+ * `path` or a `prefix`, the handler program (a bin/ name or a CID) and its
+ * function; `auth: "none"` for an open route; `read` an op the reads table
+ * must allow the caller.
+ */
+export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string }
+/** A read permission as a system writes it (etc/reads.json): a caller (hex or `$owner`; absent: anyone) may call routes marked `read: op`. */
+export interface ReadSpec { caller?: string; op: string }
+
+/**
+ * The stock routes (#40): the BRC-33 messagebox, at the root and under
+ * /messagebox (where older clients were pointed); the explorer's read route
+ * (the front door's `explore`: log, threads, heads, records as JSON) behind
+ * the read op `explore`.
+ */
+export const STOCK_ROUTES: RouteSpec[] = [
+  ...["", "/messagebox"].flatMap((p) => [
+    { path: `${p}/sendMessage`, program: "messagebox", fn: "sendMessage" },
+    { path: `${p}/listMessages`, program: "messagebox", fn: "listMessages" },
+    { path: `${p}/acknowledgeMessage`, program: "messagebox", fn: "acknowledgeMessage" },
+  ]),
+  { prefix: "/explore", program: "frontdoor", fn: "explore", read: "explore" },
+];
+
+/** The stock reads (#40): the owner may explore. */
+export const STOCK_READS: ReadSpec[] = [{ caller: "$owner", op: "explore" }];
 
 /** A system's config (etc/config.json): every field optional; keys in hex or `$owner`/`$infer`. */
 export interface ConfigSpec {
@@ -89,12 +149,14 @@ export interface ConfigSpec {
   names?: Array<{ identityKey: string; handle: string; domain: string }>;
   collect?: string[];
   feeds?: FeedSpec[];
+  /** The owner as a peer (#40): its messagebox URL — the one peer a genesis names. */
+  owner?: { messagebox?: string };
 }
 
 /** A system resolved for one instance: what its genesis says besides who it is. */
 export interface System {
   programs: Record<string, CID>;
-  subscriptions: Array<{ match: { sender?: Uint8Array; box: string }; handler: CID }>;
+  subscriptions: Array<{ match: { sender?: Uint8Array; box?: string }; handler: CID }>;
   peers?: Record<string, Uint8Array>;
   defaults: Record<string, string>;
   names: Array<{ identityKey: Uint8Array; handle: string; domain: string }>;
@@ -102,6 +164,28 @@ export interface System {
   /** The system tree (a git tree CID): `main` starts there. */
   tree?: CID;
   feeds?: FeedSpec[];
+  /** The front door's routes and reads (#40). */
+  routes: Array<{ path?: string; prefix?: string; program: CID; fn: string; auth?: "none"; read?: string }>;
+  reads: Array<{ caller?: Uint8Array; op: string }>;
+}
+
+/** Routes and reads resolved for one instance: handler names to program CIDs (a route to a program this system lacks is dropped), `$owner` to its key. */
+export function resolveRoutes(c: Pick<Genesis2Config, "owner" | "infer">, programs: Record<string, CID>, routes: RouteSpec[], reads: ReadSpec[] = []): Pick<System, "routes" | "reads"> {
+  const out: System["routes"] = [];
+  for (const r of routes) {
+    if (!r || typeof r.fn !== "string" || typeof r.program !== "string" || (typeof r.path === "string") === (typeof r.prefix === "string")) {
+      throw new Error(`etc/routes.json: bad route ${JSON.stringify(r)} (want {path | prefix, program, fn, auth?, read?})`);
+    }
+    let program = programs[r.program];
+    if (!program) { try { program = parseCid(r.program); } catch { continue; } }
+    out.push({ ...(r.path !== undefined ? { path: r.path } : { prefix: r.prefix! }), program, fn: r.fn, ...(r.auth === "none" ? { auth: "none" as const } : {}), ...(r.read ? { read: r.read } : {}) });
+  }
+  const rs: System["reads"] = [];
+  for (const r of reads) {
+    if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op})`);
+    rs.push({ ...(r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
+  }
+  return { routes: out, reads: rs };
 }
 
 /** A key as a system writes it: hex, or `$owner` / `$infer` (the host's). */
@@ -115,14 +199,14 @@ export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer">): Ui
 }
 
 /** Resolve a system's subscriptions, config and programs for one instance (both genesis paths). */
-export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID): System {
+export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID, routes: RouteSpec[] = STOCK_ROUTES, reads: ReadSpec[] = STOCK_READS): System {
   const handler = (h: string): CID => {
     const p = programs[h];
     if (p) return p;
     try { return parseCid(h); } catch { throw new Error(`subscription handler ${JSON.stringify(h)}: no such program (bin/${h}.wasm or bin/${h}.cid) and not a CID`); }
   };
   const subscriptions = [
-    ...subs.map((s) => ({ match: { ...(s.sender ? { sender: keyOf(s.sender, c) } : {}), box: s.box }, handler: handler(s.handler) })),
+    ...subs.map((s) => ({ match: { ...(s.sender ? { sender: keyOf(s.sender, c) } : {}), ...(s.box !== undefined ? { box: s.box } : {}) }, handler: handler(s.handler) })),
     ...(c.subscriptions ?? []).map((x) => ({ match: { ...(x.sender ? { sender: keyBytes(x.sender) } : {}), box: x.box }, handler: x.handler })),
   ];
   let names = [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }];
@@ -133,9 +217,10 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     : c.infer ? { infer: keyBytes(c.infer) } : undefined;
   return {
     programs, subscriptions, ...(peers ? { peers } : {}),
-    defaults: mergeDefaults(c, config.defaults),
+    defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
+    ...resolveRoutes(c, programs, routes, reads),
   };
 }
 
@@ -156,14 +241,25 @@ function mergeDefaults(c: Genesis2Config, tree: Record<string, string> = {}): Re
   for (const [k, v] of Object.entries(c.overrides ?? {})) {
     if (tree[k] !== undefined && tree[k] !== v) c.warn?.(`host override: ${k} = ${v} replaces the system tree's ${k} = ${tree[k]}`);
   }
-  return { ...DEFAULTS, ...SESSION_DEFAULTS, ...c.defaults, ...tree, ...c.overrides };
+  return { ...DEFAULTS, ...SESSION_DEFAULTS, ...hostFacts(c), ...c.defaults, ...tree, ...c.overrides };
+}
+
+/** What the host knows at genesis (#40): the owner's messagebox, where its own domain resolves. */
+function hostFacts(c: Pick<Genesis2Config, "ownerMessagebox" | "resolveOrigin">): Record<string, string> {
+  return { ...(c.ownerMessagebox ? { ownerMessagebox: c.ownerMessagebox } : {}), ...(c.resolveOrigin ? { resolveOrigin: c.resolveOrigin } : {}) };
 }
 
 /** The stock system in code: the kernel's pinned programs (its `programs` frame) and the stock seed. */
 export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): System {
+  if (c.mailbox) {
+    // A mailbox instance: the front door and the messagebox, nothing else.
+    const mine: Record<string, CID> = { frontdoor: programs.frontdoor!, messagebox: programs.messagebox! };
+    const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined }, mine, MAILBOX_SUBSCRIPTIONS, { peers: {}, names: [] }, undefined, STOCK_ROUTES, STOCK_READS);
+    return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
+  }
   const subs = STOCK_SUBSCRIPTIONS.filter((s) => (s.box !== "chat" || s.sender || c.openChat !== false) && programs[s.handler]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
-  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs), defaults: { ...SESSION_DEFAULTS, ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
+  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs, {}, undefined, c.routes ?? STOCK_ROUTES, c.reads ?? STOCK_READS), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }
 
 /** The genesis record: who the instance is, and its system. */
@@ -172,6 +268,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, owner: keyBytes(c.owner),
     programs: s.programs, subscriptions: s.subscriptions, ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
+    ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),
   };
 }
 
@@ -193,10 +290,10 @@ export async function writeGenesis(k: Kernel, c: Genesis2Config, time: Stamp = c
 }
 
 /** Admit the next entry over `body` (unsigned), retrying if the tip moved under it. */
-export async function admit2(k: Kernel, body: EntryBody, records: { envelope?: object; body?: Uint8Array } = {}, time: Stamp = clockNow()): Promise<CID> {
+export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array } = {}, time: Stamp = clockNow()): Promise<CID> {
   for (let tries = 0; ; tries++) {
     try {
-      return await k.admit(await nextEntry(k.store, body, time) as never, records);
+      return await k.admit(await nextEntry(k.store, body as EntryBody, time) as never, records);
     } catch (e) {
       if (!(e instanceof Rejected && e.reason === "out-of-order") || tries >= 10) throw e;
     }

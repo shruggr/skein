@@ -1,62 +1,50 @@
-// The host as a router (#33): a light web server in front of the instances.
+// The host as a reverse proxy (#40): each instance is an HTTP server — its
+// front door (programs/frontdoor) — at an origin of its own, and the router
+// only picks the instance a request is for and forwards it. Routing comes
+// before authentication, because a BRC-104 handshake does not name its
+// recipient: the URL is the recipient. The router holds no auth state and no
+// mailbox: it keeps the hostname → instance map (host.db), the kernels it has
+// hydrated, the waker, the feeds, the fuel ledger.
 //
-// It takes a BRC-33 request — `/sendMessage`, `/listMessages`,
-// `/acknowledgeMessage`, under BRC-103/104 mutual auth, the paths
-// and shapes the TypeScript messagebox (`1sat serve`) exposes, so the stock
-// @bsv/message-box-client works against it unchanged — looks up which
-// instance serves the recipient (host.db: an instance's own identity, or a
-// mailbox it keeps for another identity), hydrates that instance if it is not
-// loaded (starts its kernel over its store: kernel.ts), makes the one call in
-// (admit an entry) and returns the response. Nothing runs between requests: a
-// kernel with nothing to do is stopped after `idleMs`.
+//   http://<handle>.localhost:<port>/…   an instance's origin (the Host header). The stock AuthFetch keeps one
+//                                         session per origin, and shakes hands at <origin>/.well-known/auth: this
+//                                         is the form it is served by. (SKEIN_INSTANCE_ORIGIN: another template.)
+//   http://<host>:<port>/@<handle>/…      the same instance for our own clients (a dev form): the router strips
+//                                         the prefix for the routes; the client signs the path it sent, and its
+//                                         handshake goes under the prefix (src/client/raw.ts).
+//   GET  /manifest.json                   BRC-169: metanet.handles.resolve
+//   GET  /.well-known/metanet-handles/resolve?handle=h   {handle, domain, identityKey, messagebox}: an agent's own
+//                                         identity; for a mailbox instance, its owner's — and the instance's origin
+//   GET  /bsvalias/id/<handle>@<domain>   paymail PKI (identity keys by handle)
+//   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
+//                                         signature: [2, "skein register"], key ID the username, counterparty
+//                                         anyone, over "register <username>")
+//   POST /callback/<handle>               ARC's status callback (an arc-callback feed), no auth
 //
-// BRC-103/104 sessions belong to the instances (auth.ts): the router forwards
-// each authentication message to the instance the request is for (`front`: a
-// `/@<handle>` path prefix, a `<handle>.` host name, else the front instance —
-// the mailbox host) and awaits its answer; it keeps nothing but the identity →
-// instance map. It also holds the instances' feeds (feeds.ts): SSE header
-// streams and ARC callbacks, admitted as plain entries.
-//
-//   POST /.well-known/auth                      the BRC-104 handshake (answered by the instance)
-//   POST /callback/<handle>                     ARC's status callback (an arc-callback feed), no auth
-//   POST [/messagebox]/sendMessage              deliver: admit into the recipient instance, or keep it in a mailbox
-//   POST [/messagebox]/listMessages             the caller's mailbox, in arrival order
-//   POST [/messagebox]/acknowledgeMessage       delete from the caller's mailbox
-//   POST /account/register {username}           a mailbox for the caller (kept by the mailbox host instance)
-//   GET  /bsvalias/id/<handle>@<domain>         paymail PKI for rows and mailboxes (the resolvers' fallback)
-//
-// The waker is the router's timer: it keeps the earliest sleeper deadline per
-// instance (the kernel reports its sleepers) and, when it comes, hydrates the
-// instance and admits the wake. An instance's emits come back here too
-// (`send`): to another instance or a kept mailbox they are delivered in
-// process; the result goes back into the emitter as an `outcome` entry. The
-// router is also the instances' oracle (oracle.ts): it answers each kernel's
-// `wallet` import from that instance's derived key.
+// A request for an instance is one kernel `call` of its front door (the raw
+// request in; the answer, signed on the session, out): hydrate on demand,
+// `admit` the entries the front door returns, and charge the call's fuel to
+// the ledger (caller, op). A read — a poll — writes nothing: no entry, no
+// byte. The instances' outbound http (the messagebox's delivery, a resolve)
+// comes back here through the kernels' `http`: a URL of this host's own is
+// answered in process (the same path, no socket), any other goes out.
 
-import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { CID } from "multiformats/cid";
-import type { WalletInterface } from "@bsv/sdk";
+import { join } from "node:path";
+import { ProtoWallet, Utils, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { isEnvelope, open, type Envelope } from "../envelope.ts";
-import { asEnvelope, inspect, isCborEnvelope, isCompactReply, openCbor, sessionRecord, type CompactReply } from "../envelope-cbor.ts";
-import { decode, encode } from "../runtime/cid.ts";
+import type { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
-import type { Outbound } from "../runtime/scheduler.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { askIn, InstanceSessions, send, type AppResponse, type AuthedRequest, type Session } from "./auth.ts";
 import { Feeds, feedsOf, type FeedSpec } from "./feeds.ts";
 import { now as clockNow } from "./entry.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
-import { admit2, keyBytes, keyHex, type Genesis2Config } from "./genesis.ts";
-import { hostResolver } from "./host.ts";
+import { admitAll, callFrontDoor, headerMap, type FrontAnswer } from "./frontdoor.ts";
+import { admit2, keyHex, type Genesis2Config } from "./genesis.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
-import type { MailStore } from "./mail.ts";
-import { VmMail } from "./vmmail.ts";
-import { OverlayRoutes } from "./overlay.ts";
 
 type Named = { handle: string; domain: string };
 
@@ -64,9 +52,7 @@ export interface RouterOptions {
   db: HostDb;
   /** Each row's oracle: the wallet its kernel's `wallet` import is answered from. */
   walletFor(row: InstanceRow): Promise<WalletInterface> | WalletInterface;
-  /** Unused since sessions belong to the instances (#33 part 2); kept so older callers still type-check. */
-  authWallet?: WalletInterface;
-  /** A new instance's genesis: the owner (required to write one), the inference peer, their names. */
+  /** A new agent's genesis: its owner (required to write one), the inference peer, their names. */
   owner?: string;
   infer?: string;
   ownerHandle?: Named;
@@ -76,33 +62,39 @@ export interface RouterOptions {
   genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[] };
   /** The router-held feeds' limits (feeds.ts). */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
-  /** Answers programs' HTTP — the preview1 `http` import (#29) and wasi:http (#15), one request shape; default: SKEIN_HTTP=fetch performs them (fetchHttp), else none is answered. */
+  /** Answers programs' HTTP to URLs that are not this host's (#15, #40); default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never. Default 5 minutes. */
   idleMs?: number;
-  /** The instance (handle) that keeps mailboxes registered here; default the first enabled row. */
-  mailboxHost?: string;
-  /** Where hosted identities' mail is kept; default the keeping instance's messagebox program (vmmail.ts). */
-  mail?: MailStore;
+  /** Where a new mailbox instance's store goes: <home>/instances/<handle>/runtime.db. */
+  home?: string;
+  /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
+  instanceOrigin?: string;
+  /** This host's own origin (the manifest, a genesis's resolveOrigin); default http://127.0.0.1:{port}. */
+  origin?: string;
+  /** The port it serves on, for origins named before it listens (a boot, `skein-host add`); listening sets it. */
+  port?: number;
+  /** The owner's messagebox URL for a new agent's genesis; default the owner's mailbox instance here, if there is one. */
+  ownerMessagebox?: string;
+  /** How often the fuel ledger is written (ms); default 5000. */
+  ledgerMs?: number;
   /** Tests: the clock entries are stamped with. */
   now?: () => Stamp;
   /** Lines, by source: an instance's handle, or "router". */
   log?(source: string, line: string): void;
   /** Kernel process settings. */
   kernel?: { command?: string; env?: Record<string, string | undefined> };
-  /** The resolver's origin for BRC-169/paymail beyond the rows (default: none; rows and mailboxes only). */
-  resolveOrigin?: string;
-  /** Tests: answer every kernel's `resolve` instead of the rows. */
-  resolve?(handle: string, domain: string): Promise<Record<string, unknown>>;
 }
 
 interface Loaded { row: InstanceRow; kernel: Kernel; identity: string; wallet: WalletInterface }
 
-export interface Delivered { status: number; body: Record<string, unknown> }
+/** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
+export interface RouterRequest { method: string; url: string; headers: Record<string, string>; body: Uint8Array }
+export interface RouterResponse { status: number; headers: Record<string, string>; body: Uint8Array }
 
-const ok = (recipient: string, messageId: string): Delivered => ({ status: 200, body: { status: "success", message: "Your message has been sent to 1 recipient(s).", results: [{ recipient, messageId }] } });
-const err = (status: number, code: string, description: string): Delivered => ({ status, body: { status: "error", code, description } });
+const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
+export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
 
 /**
  * SKEIN_HTTP=fetch: programs' http requests performed for real. A wasi:http
@@ -135,24 +127,9 @@ export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
   }
 }
 
-/** A BRC-231 body that is a compact session reply ({type: "reply", replyTo, body}). */
-function compactOf(body: unknown): CompactReply | undefined {
-  if (!(body instanceof Uint8Array)) return undefined;
-  try { const v = dagCbor.decode(body); return isCompactReply(v) ? v : undefined; } catch { return undefined; }
-}
-
-/** A kept body for a BRC-231 listing: bytes as they came, JSON as its UTF-8 text. */
-const bodyBytes = (b: unknown): Uint8Array => b instanceof Uint8Array ? b : new TextEncoder().encode(typeof b === "string" ? b : JSON.stringify(b));
-/** A kept body for a JSON listing: bytes wrapped as {"dag-cbor": base64}, JSON as it came. */
-const bodyJson = (b: unknown): unknown => b instanceof Uint8Array ? { "dag-cbor": Buffer.from(b).toString("base64") } : b;
-
 export class Router {
   readonly o: RouterOptions;
-  readonly sessions: InstanceSessions;
   readonly feeds: Feeds;
-  readonly mail: MailStore;
-  /** BRC-22 submit, BRC-24 lookup and the listings, routed to the instances that serve them (#36). */
-  readonly overlay = new OverlayRoutes(this);
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   private queues = new Map<string, Promise<unknown>>();
@@ -160,30 +137,35 @@ export class Router {
   readonly deadlines = new Map<string, number>();
   private timer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setInterval>;
+  private ledgerTimer?: ReturnType<typeof setInterval>;
+  /** The fuel of calls not yet written to the ledger: instance\0caller\0op → {calls, fuel}. */
+  private owed = new Map<string, { calls: number; fuel: number }>();
   private stopped = false;
-  server?: Server;
+  servers: Server[] = [];
+  port = 0;
 
   constructor(o: RouterOptions) {
     this.o = o;
-    this.sessions = new InstanceSessions({ withKernel: (h, f) => this.serial(h, async () => f((await this.hydrate(h)).kernel)), now: () => this.now() });
     this.feeds = new Feeds({
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
     });
-    // Mail for hosted identities lives in the keeping instance's log (the messagebox program), unless a test gives a store.
-    this.mail = o.mail ?? new VmMail({
-      keeper: (r) => this.o.db.mailbox(r)?.instance,
-      withKernel: (h, f) => this.serial(h, async () => f((await this.hydrate(h)).kernel)),
-      now: () => this.now(),
-    });
     const idle = o.idleMs ?? 300_000;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
+    this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
   }
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
   private now(): Stamp { return (this.o.now ?? clockNow)(); }
-  /** The router's clock, as entries are stamped (overlay.ts). */
+  /** The router's clock, as entries are stamped. */
   nowStamp(): Stamp { return this.now(); }
+
+  /** This host's own origin. */
+  origin(): string { return (this.o.origin ?? "http://127.0.0.1:{port}").replace("{port}", String(this.port || this.o.port || 0)); }
+  /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
+  originOf(handle: string): string {
+    return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
+  }
 
   /** Hydrate every enabled row once (recovery at hydrate time; it reports its sleepers), then let them idle out. */
   async start(): Promise<void> {
@@ -196,8 +178,9 @@ export class Router {
     this.stopped = true;
     clearTimeout(this.timer);
     clearInterval(this.idleTimer);
-    this.server?.close();
-    this.overlay.close();
+    clearInterval(this.ledgerTimer);
+    this.flushLedger();
+    for (const s of this.servers) s.close();
     this.feeds.stop();
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
@@ -205,10 +188,9 @@ export class Router {
 
   /**
    * A plain entry (#29): an event from a feed the router holds (a header, a
-   * proof, a transaction status; later SSE/webhooks, #29's revision), put as
-   * a record and admitted into the instance in `box`. The kernel routes it by
-   * its `subject` to the thread awaiting that record, else to a sender-less
-   * subscription on `box`.
+   * proof, a transaction status), put as a record and admitted into the
+   * instance in `box`. The kernel routes it by its `subject` to the thread
+   * awaiting that record, else to a sender-less subscription on `box`.
    */
   async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
@@ -230,7 +212,7 @@ export class Router {
     }
   }
 
-  /** Run `f` after everything else queued for this instance (admissions are serial per instance). */
+  /** Run `f` after everything else queued for this instance (the waker's and the feeds' admissions are serial per instance). */
   serial<T>(handle: string, f: () => Promise<T>): Promise<T> {
     const prev = this.queues.get(handle) ?? Promise.resolve();
     const next = prev.catch(() => {}).then(f);
@@ -261,24 +243,16 @@ export class Router {
     const wallet = await this.o.walletFor(row);
     const identity = await rootIdentity(wallet);
     if (row.identity && row.identity !== identity) throw new Error(`its oracle is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
-    const rows = (h: string, d: string) => this.o.db.identityOf(h, d);
-    const resolve = hostResolver(rows, this.o.resolveOrigin);
     const kernel = new Kernel({
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
-      resolve: async (h, d) => {
-        if (this.o.resolve) return await this.o.resolve(h, d);
-        if (!this.o.resolveOrigin) { const k = rows(h, d); return k ? { identityKey: k, via: "host" } : { identityKey: "", error: `${h}@${d}: not an instance or mailbox on this host` }; }
-        return await resolve(h, d);
-      },
       log: (line) => this.say(handle, line),
-      http: this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined),
+      http: (req) => this.http(req),
       sleepers: (s) => this.sleepersOf(handle, s),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);
       },
     });
-    kernel.outbox = { send: (out: Outbound) => this.route(handle, identity, out) };
     try {
       if (!(await kernel.store.log.tip())) {
         // No tree was loaded into this store (`skein-host add --boot/--packet` does that): the stock system, through the same loader.
@@ -286,7 +260,7 @@ export class Router {
         this.say(handle, `genesis ${b.entry}`);
       }
       const g = await kernel.genesis() as { identity?: unknown } | null;
-      if (!g) throw new Error("the store's log does not start with a format-2 genesis (issue #33): start a new store (re-genesis)");
+      if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the oracle (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
       await kernel.running(identity);
@@ -318,16 +292,28 @@ export class Router {
     return b;
   }
 
-  /** What this host brings to a new instance's genesis (boot.ts): the owner, the inference peer, their names, the host's defaults. */
-  genesisConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, code = true): Genesis2Config {
+  /** The owner's messagebox: configured, else its mailbox instance here. */
+  ownerMessagebox(): string | undefined {
+    if (this.o.ownerMessagebox) return this.o.ownerMessagebox;
+    const mb = this.o.owner ? this.o.db.mailboxOf(this.o.owner) : undefined;
+    return mb ? this.originOf(mb.handle) : undefined;
+  }
+
+  /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */
+  genesisConfig(row: Pick<InstanceRow, "handle" | "domain"> & Partial<Pick<InstanceRow, "kind" | "owner">>, identity: string, code = true): Genesis2Config {
+    if (row.kind === "mailbox") {
+      if (!row.owner) throw new Error(`${row.handle}: a mailbox instance names its owner`);
+      return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true };
+    }
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const hostDefaults = { ...this.o.genesis?.defaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
     const warn = (l: string) => this.say(row.handle, l);
+    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin() };
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
         identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn,
+        feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
       };
     }
     return {
@@ -336,7 +322,29 @@ export class Router {
       defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
       subscriptions: this.o.genesis?.subscriptions,
       feeds: this.o.genesis?.feeds,
+      ...facts,
     };
+  }
+
+  /**
+   * A mailbox instance for identity `owner` (#40): registering an outside
+   * identity is creating its mailbox instance — the front door and the
+   * messagebox, keeping mail for it from anyone. Its genesis is written at the
+   * first hydration. 409 if the handle is taken by someone else.
+   */
+  addMailbox(handle: string, owner: string, domain = "localhost"): InstanceRow {
+    const name = handle.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw Object.assign(new Error("invalid username"), { status: 400 });
+    if (!KEY.test(owner)) throw Object.assign(new Error("invalid identity key"), { status: 400 });
+    const had = this.o.db.get(name);
+    if (had && !(had.kind === "mailbox" && had.owner === owner)) throw Object.assign(new Error(`username ${name} is taken`), { status: 409 });
+    const mine = this.o.db.mailboxOf(owner);
+    if (mine && mine.handle !== name) throw Object.assign(new Error(`already registered as ${mine.handle}`), { status: 409 });
+    if (had) return had;
+    const home = this.o.home ?? ".";
+    const row = this.o.db.add(name, { domain, kind: "mailbox", owner, store: join(home, "instances", name, "runtime.db") });
+    this.say("router", `mailbox instance ${name}@${domain} for ${short(owner)} at ${this.originOf(name)}`);
+    return row;
   }
 
   /** The kernel counts as busy until it has processed what was just admitted (its `idle` answers after the drain). */
@@ -391,321 +399,184 @@ export class Router {
     this.schedule();
   }
 
-  // ---------------------------------------------------------------- delivery
+  // ---------------------------------------------------------------- the fuel ledger
 
-  /** Who keeps mail for `identity`: its own instance, or the instance keeping its mailbox. */
-  private destination(identity: string): { instance: InstanceRow } | { mailbox: string } | undefined {
-    const row = this.o.db.byIdentity(identity);
-    if (row) return { instance: row };
-    const mb = this.o.db.mailbox(identity);
-    if (mb) return { mailbox: mb.instance };
-    return undefined;
+  private charge(instance: string, caller: string, op: string, fuel: number): void {
+    const k = `${instance}\0${caller}\0${op}`;
+    const x = this.owed.get(k) ?? { calls: 0, fuel: 0 };
+    x.calls += 1;
+    x.fuel += fuel;
+    this.owed.set(k, x);
   }
 
-  /**
-   * One BRC-33 message from an authenticated `sender`: admitted into the
-   * recipient instance (screened and decrypted through its oracle), or kept
-   * in the mailbox of a hosted identity.
-   */
-  async deliver(m: { sender: string; recipient: string; box: string; body: unknown; messageId: string; session?: Session }): Promise<Delivered> {
-    const d = this.destination(m.recipient);
-    if (!d) return err(403, "ERR_ACCOUNT_REQUIRED", "Recipient has no account on this host");
-    const compact = compactOf(m.body);
-    if (compact) return await this.deliverCompact(m, d, compact);
-    if ("mailbox" in d) {
-      await this.mail.put(m.recipient, m.box, { messageId: m.messageId, sender: m.sender, body: m.body, createdAt: new Date().toISOString() });
-      return ok(m.recipient, m.messageId);
-    }
-    const handle = d.instance.handle;
-    return await this.serial(handle, async () => {
-      const l = await this.hydrate(handle);
-      const s = await this.screen(l, m.sender, m.body);
-      if (!s.ok) {
-        if (s.duplicate) return ok(m.recipient, m.messageId);
-        this.say(handle, `inbox ${m.box} ${m.messageId.slice(0, 12)}: rejected: ${s.reason}`);
-        return err(400, "ERR_REJECTED", s.reason);
-      }
-      const envelope = s.id;
-      try {
-        const entry = await admit2(l.kernel, { envelope, box: m.box, body: encode(decode(s.body)).cid }, { envelope: s.signed, body: s.body }, this.now());
-        this.say(handle, `inbox ${m.box}: admitted ${short(envelope)} as ${short(entry)}`);
-        this.settle(l);
-      } catch (e) {
-        if (e instanceof Rejected && e.reason === "duplicate-envelope") return ok(m.recipient, m.messageId);
-        throw e;
-      }
-      return ok(m.recipient, m.messageId);
-    });
-  }
-
-  /**
-   * A session reply (docs/MESSAGES.md, "Session replies"): the compact §7.3
-   * form on the sender's BRC-104 session with this host — admitted to the same
-   * entry shape as a full envelope, its record carrying the session's proof
-   * (the signed request, the signature, the nonces). It must travel as BRC-231
-   * bytes (the signed request carries the body) and answer something the
-   * recipient holds; the first message on a session is a full envelope.
-   */
-  private async deliverCompact(m: { sender: string; recipient: string; box: string; body: unknown; messageId: string; session?: Session }, d: { instance: InstanceRow } | { mailbox: string }, c: CompactReply): Promise<Delivered> {
-    const s = m.session;
-    if (!s) return err(400, "ERR_REJECTED", "a compact reply is for a BRC-104 session with the recipient's messagebox; send the full envelope");
-    const keeper = "mailbox" in d ? d.mailbox : d.instance.handle;
-    if (s.instance !== keeper) return err(400, "ERR_REJECTED", "a compact reply is for a BRC-104 session with the recipient's instance (this session is with another): send the full envelope");
-    const raw = m.body as Uint8Array;
-    if (Buffer.from(s.payload).indexOf(Buffer.from(raw)) < 0) return err(400, "ERR_REJECTED", "a compact reply travels as BRC-231 bytes (the signed request must carry it)");
-    try {
-      if (!Buffer.from(encode(decode(c.body)).bytes).equals(Buffer.from(c.body))) return err(400, "ERR_REJECTED", "the body is not canonical dag-cbor");
-    } catch { return err(400, "ERR_REJECTED", "the body is not dag-cbor"); }
-    const created = new Date(stampMs(this.now())).toISOString();
-    const record = sessionRecord(c, m.sender, created, s);
-    if ("mailbox" in d) {
-      // A hosted identity's mail keeps the compact reply with its proof: the record, and the body beside it.
-      await this.mail.put(m.recipient, m.box, { messageId: m.messageId, sender: m.sender, body: dagCbor.encode({ ...record, body: c.body }), createdAt: created });
-      return ok(m.recipient, m.messageId);
-    }
-    const handle = d.instance.handle;
-    return await this.serial(handle, async () => {
-      const l = await this.hydrate(handle);
-      if (!(await l.kernel.store.has(c.replyTo))) return err(400, "ERR_REJECTED", "a compact reply answers a message the recipient sent; this is not one: send the full envelope");
-      const envelope = encode(record).cid;
-      if (await l.kernel.store.log.byEnvelope(envelope)) return ok(m.recipient, m.messageId);
-      try {
-        const entry = await admit2(l.kernel, { envelope, box: m.box, body: encode(decode(c.body)).cid }, { envelope: record, body: c.body }, this.now());
-        this.say(handle, `inbox ${m.box}: admitted session reply ${short(envelope)} as ${short(entry)}`);
-        this.settle(l);
-      } catch (e) {
-        if (e instanceof Rejected && e.reason === "duplicate-envelope") return ok(m.recipient, m.messageId);
-        return err(400, "ERR_REJECTED", (e as Error).message);
-      }
-      return ok(m.recipient, m.messageId);
-    });
-  }
-
-  /**
-   * docs/MESSAGES.md "Replay protection": a BRC-169 envelope in either form
-   * (§7.2 JSON from JSON clients, §7.3 dag-cbor from BRC-231 clients and
-   * instances), signed by the authenticated sender, to this instance, new,
-   * decrypting (through the oracle) to canonical dag-cbor matching
-   * contentHash. Kept in the form it was made in.
-   */
-  private async screen(l: Loaded, sender: string, raw: unknown): Promise<{ ok: true; signed: object; id: CID; body: Uint8Array } | { ok: false; reason: string; duplicate?: boolean }> {
-    const env = asEnvelope(raw);
-    if (!env) return { ok: false, reason: "body is not a BRC-169 envelope (§7.2 JSON or §7.3 dag-cbor)" };
-    let x: ReturnType<typeof inspect>;
-    try { x = inspect(env); } catch (e) { return { ok: false, reason: (e as Error).message }; }
-    if (!x.verified) return { ok: false, reason: "envelope signature does not verify" };
-    if (sender !== x.sender) return { ok: false, reason: `authenticated sender ${short(sender)} is not envelope.sender ${short(x.sender)}` };
-    if (x.recipient !== l.identity) return { ok: false, reason: "not addressed to this instance" };
-    if (await l.kernel.store.log.byEnvelope(x.id)) return { ok: false, reason: `envelope ${short(x.id)} was already admitted`, duplicate: true };
-    let body: Uint8Array;
-    try {
-      body = (isCborEnvelope(env) ? await openCbor(l.wallet, env) : await open(l.wallet, env as Envelope)).body;
-    } catch (e) {
-      return { ok: false, reason: (e as Error).message };
-    }
-    try {
-      if (!Buffer.from(encode(decode(body)).bytes).equals(body)) return { ok: false, reason: "the body is not canonical dag-cbor" };
-    } catch {
-      return { ok: false, reason: "the body is not dag-cbor" };
-    }
-    return { ok: true, signed: x.signed, id: x.id, body };
-  }
-
-  /** An instance's emit: delivered here or refused; its outcome goes back into the emitter. */
-  private async route(handle: string, identity: string, o: Outbound): Promise<void> {
-    const to = keyHex(o.to);
-    const what = `outbox ${o.box} → ${short(to)}: ${short(o.cid)}`;
-    let r: Delivered;
-    try {
-      // An envelope in the §7.3 form travels as its dag-cbor bytes (BRC-231), the §7.2 form as the JSON object.
-      const compact = await this.compactFor(handle, to, o).catch((e: Error) => { this.say(handle, `${what}: compact: ${e.message}`); return undefined; });
-      if (compact) {
-        r = await this.deliverSealed(identity, to, o.box, compact);
-      } else {
-        const body = isCborEnvelope(o.envelope) ? dagCbor.encode(o.envelope) : o.envelope;
-        r = await this.deliver({ sender: identity, recipient: to, box: o.box, body, messageId: o.cid.toString() });
-      }
-    } catch (e) {
-      r = err(500, "ERR_INTERNAL", (e as Error).message);
-    }
-    const failed = r.status !== 200;
-    const reason = failed ? `Message Box send failed with HTTP ${r.status} (${String(r.body.code)}): ${String(r.body.description)}` : undefined;
-    this.say(handle, `${what}${failed ? `: ${reason}: failed` : ""}`);
-    void this.serial(handle, async () => {
-      const l = await this.hydrate(handle);
-      await admit2(l.kernel, { outcome: { emit: o.emit as CID, status: failed ? "failed" : "delivered", ...(reason ? { reason } : {}) } }, {}, this.now());
-      this.settle(l);
-    }).catch((e: Error) => this.say(handle, `${what}: outcome not admitted: ${e.message}`));
-  }
-
-  /**
-   * Compact both ways (docs/MESSAGES.md, "Sessions"): an emit to a client that
-   * holds a session with the emitting instance and negotiated compact
-   * messages on it (`x-bsv-skein-compact` on a signed request) goes as the
-   * compact form, signed by the instance on that session. Only toward kept
-   * mailboxes (clients); instances get full envelopes. The session check is
-   * a read of the instance's `sessions` head; the instance signs (or
-   * declines: expired) in a `seal` step.
-   */
-  private async compactFor(handle: string, to: string, o: Outbound): Promise<Record<string, unknown> | undefined> {
-    const d = this.destination(to);
-    if (!d || !("mailbox" in d) || !o.emit) return undefined;
-    return await this.serial(handle, async () => {
-      const k = (await this.hydrate(handle)).kernel;
-      const root = await k.call("head", "sessions") as CID | null;
-      if (!root) return undefined;
-      const r = await k.store.get(root) as { sessions?: Array<{ session: CID }> };
-      const me = Buffer.from(to, "hex");
-      let any = false;
-      for (const x of r.sessions ?? []) {
-        const s = await k.store.get(x.session) as { peer?: Uint8Array; compact?: boolean; authenticated?: boolean };
-        if (s.compact && s.authenticated && s.peer && Buffer.from(s.peer).equals(me)) { any = true; break; }
-      }
-      if (!any) return undefined;
-      const a = await askIn(k, { op: "seal", emit: o.emit as CID, id: o.cid }, this.now());
-      return a.ok ? a.compact as Record<string, unknown> : undefined;
-    });
-  }
-
-  /** A compact message from an instance into a client's kept mailbox: kept as its dag-cbor; its id the hash of the signed payload. */
-  private async deliverSealed(sender: string, to: string, box: string, c: Record<string, unknown>): Promise<Delivered> {
-    const payload = (c.session as { payload: Uint8Array }).payload;
-    const messageId = createHash("sha256").update(payload).digest("hex");
-    await this.mail.put(to, box, { messageId, sender, body: dagCbor.encode(c), createdAt: new Date(stampMs(this.now())).toISOString() });
-    return ok(to, messageId);
+  /** Write what calls cost since the last flush (host.db, never the log). */
+  flushLedger(): void {
+    if (!this.owed.size) return;
+    const rows = [...this.owed].map(([k, v]) => { const [instance, caller, op] = k.split("\0") as [string, string, string]; return { instance, caller, op, ...v }; });
+    this.owed.clear();
+    try { this.o.db.charge(rows); } catch (e) { this.say("router", `ledger: ${(e as Error).message}`); }
   }
 
   // ---------------------------------------------------------------- HTTP
 
-  /**
-   * Which instance an HTTP request is for: `/@<handle>/…` (a transport whose
-   * base URL names the instance; the rest of the path is what it signs), a
-   * host name `<handle>.…` (a per-instance origin: the stock AuthFetch keeps
-   * one session per origin), else the front instance — the mailbox host
-   * (SKEIN_MAILBOX_HOST, default the first enabled row).
-   */
-  front(url: string, host?: string): { handle: string; path: string } | undefined {
-    const path = new URL(url, "http://router").pathname;
+  /** Whether a URL is this host's own (answered in process: no DNS, no socket). */
+  isLocal(url: string): boolean {
+    let u: URL;
+    try { u = new URL(url); } catch { return false; }
+    if (!this.port) return false;
+    const mine = (o: string) => { try { return new URL(o).host === u.host; } catch { return false; } };
+    if (mine(this.origin())) return true;
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    if (port !== String(this.port)) return false;
+    const h = u.hostname.toLowerCase();
+    return h === "127.0.0.1" || h === "localhost" || h === "[::1]" || h === "::1" || h.endsWith(".localhost");
+  }
+
+  /** Which instance a URL is for: `/@<handle>` (stripped for the routes), or a `<handle>.` host name. */
+  target(url: URL): { handle: string; route: string } | undefined {
     const enabled = (h: string) => this.o.db.get(h)?.status === "enabled";
-    const m = /^\/@([^/]+)(\/.*)?$/.exec(path);
-    if (m) return enabled(decodeURIComponent(m[1]!)) ? { handle: decodeURIComponent(m[1]!), path: m[2] ?? "/" } : undefined;
-    const name = (host ?? "").split(":")[0]!.toLowerCase();
+    const m = /^\/@([^/]+)(\/.*)?$/.exec(url.pathname);
+    if (m) { const h = decodeURIComponent(m[1]!); return enabled(h) ? { handle: h, route: m[2] ?? "/" } : undefined; }
+    const name = url.hostname.toLowerCase();
     const label = name.includes(".") ? name.split(".")[0]! : "";
-    if (label && enabled(label)) return { handle: label, path };
-    const f = this.o.mailboxHost ?? this.o.db.list("enabled")[0]?.handle;
-    return f ? { handle: f, path } : undefined;
+    if (label && enabled(label)) return { handle: label, route: url.pathname };
+    return undefined;
   }
 
-  /** The BRC-33 routes (JSON, or BRC-231 dag-cbor), the registration and the paymail PKI, after auth. */
-  private async app(r: AuthedRequest): Promise<AppResponse> {
-    const path = r.path.replace(/^\/messagebox(?=\/)/, "");
-    // BRC-231: a request in dag-cbor is answered in dag-cbor (keys and bodies as bytes); JSON in JSON.
-    const cbor = String(r.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() === "application/cbor";
-    const reply = (status: number, b: Record<string, unknown>): AppResponse => cbor ? { status, type: "application/cbor", body: dagCbor.encode(b) } : { status, body: b };
-    const error = (status: number, code: string, description: string) => reply(status, { status: "error", code, description });
-    let body: Record<string, unknown> = {};
-    try {
-      if (r.body.length) body = (cbor ? dagCbor.decode(r.body) : JSON.parse(new TextDecoder().decode(r.body))) as Record<string, unknown>;
-    } catch { return error(400, "ERR_BAD_BODY", `The body is not ${cbor ? "dag-cbor" : "JSON"}.`); }
-    if (r.method !== "POST") return error(404, "ERR_NOT_FOUND", "not found");
-    switch (path) {
-      case "/sendMessage": {
-        const m = body.message as Record<string, unknown> | undefined;
-        if (!m) return error(400, "ERR_MESSAGE_REQUIRED", "Please provide a valid message to send!");
-        if (typeof m.messageBox !== "string" || !m.messageBox.trim() || m.messageBox.trim().startsWith(":")) return error(400, "ERR_INVALID_MESSAGEBOX", "Invalid message box.");
-        if (m.body === undefined || m.body === null || m.body === "") return error(400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.");
-        let recipient = Array.isArray(m.recipient) ? m.recipient[0] : m.recipient;
-        if (recipient instanceof Uint8Array) recipient = keyHex(recipient);
-        let messageId = Array.isArray(m.messageId) ? m.messageId[0] : m.messageId;
-        if (messageId === undefined && m.body instanceof Uint8Array) messageId = createHash("sha256").update(m.body).digest("hex"); // BRC-231 names none
-        if (typeof recipient !== "string" || !KEY.test(recipient.trim())) return error(400, "ERR_INVALID_RECIPIENT_KEY", `Invalid recipient key: ${String(recipient)}`);
-        if (typeof messageId !== "string" || !messageId.trim()) return error(400, "ERR_MESSAGEID_REQUIRED", "Missing messageId.");
-        const d = await this.deliver({ sender: r.identityKey, recipient: recipient.trim(), box: m.messageBox.trim(), body: m.body, messageId, session: r.session });
-        return reply(d.status, cbor && d.status === 200 ? { status: "success", messageId } : d.body);
-      }
-      case "/listMessages": {
-        const box = body.messageBox;
-        if (typeof box !== "string" || !box) return error(400, "ERR_MESSAGEBOX_REQUIRED", "Please provide the name of a valid MessageBox!");
-        const ms = await this.mail.list(r.identityKey, box);
-        if (cbor) return reply(200, { status: "success", messages: ms.map((m) => ({ messageId: m.messageId, body: bodyBytes(m.body), sender: keyBytes(m.sender) })) });
-        return reply(200, { status: "success", messages: ms.map((m) => ({ messageId: m.messageId, body: JSON.stringify({ message: bodyJson(m.body) }), sender: m.sender, createdAt: m.createdAt, updatedAt: m.createdAt })) });
-      }
-      case "/acknowledgeMessage": {
-        const ids = body.messageIds;
-        if (!Array.isArray(ids) || !ids.length || ids.some((x) => typeof x !== "string")) return error(400, "ERR_INVALID_MESSAGE_ID", "Message IDs must be formatted as an array of strings!");
-        const n = await this.mail.ack(r.identityKey, ids as string[]);
-        if (!n) return error(400, "ERR_INVALID_ACKNOWLEDGMENT", "Message not found!");
-        return reply(200, { status: "success" });
-      }
-      case "/account/register": return this.register(r.identityKey, body.username);
+  /** A program's HTTP request (the kernel's `http`): this host's own URLs in process, the rest as configured. */
+  async http(req: HttpRequest): Promise<HttpResponse> {
+    if (this.isLocal(req.url)) {
+      const r = await this.dispatch({ method: req.method, url: req.url, headers: headerMap(req.headers ?? {}), body: req.body ?? new Uint8Array() });
+      return { status: r.status, headers: r.headers, body: r.body };
     }
-    return error(404, "ERR_NOT_FOUND", "not found");
+    const f = this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined);
+    if (!f) throw new Error(`this host answers no http beyond its own (${req.url})`);
+    return await f(req);
   }
 
-  /** A mailbox for `identity` under `username` (kept by the mailbox host instance). 409 if the name is another's. */
-  register(identity: string, username: unknown, domain = "localhost"): AppResponse {
-    const name = typeof username === "string" ? username.trim().toLowerCase() : "";
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) return { status: 400, body: { error: "invalid username" } };
-    if (this.o.db.byIdentity(identity)) return { status: 409, body: { error: "this identity is an instance on this host" } };
-    const taken = this.o.db.get(name) ?? this.o.db.mailboxByHandle(name, domain);
-    if (taken && ("instance" in taken ? taken.identity !== identity : true)) return { status: 409, body: { error: `username ${name} is taken` } };
-    const mine = this.o.db.mailbox(identity);
-    if (mine && mine.handle === name) return { status: 409, body: { error: `already registered as ${name}` } };
-    const keeper = this.o.mailboxHost ?? this.o.db.list("enabled")[0]?.handle;
-    if (!keeper) return { status: 503, body: { error: "no instance to keep the mailbox" } };
-    const mb = this.o.db.addMailbox(identity, name, domain, mine?.instance ?? keeper);
-    this.say("router", `registered ${name}@${domain} (${short(identity)}), kept by ${mb.instance}`);
-    return { status: 200, body: { identityKey: identity, username: name, handle: `${name}@${domain}` } };
+  /** One request, whoever made it: a socket's, or an instance's own http. */
+  async dispatch(req: RouterRequest): Promise<RouterResponse> {
+    const url = new URL(req.url);
+    const t = this.target(url);
+    if (t) return await this.forward(t.handle, t.route, url, req);
+    const path = url.pathname;
+    if (req.method === "GET" && path === "/manifest.json") {
+      return json(200, { metanet: { handles: { resolve: `${this.origin()}/.well-known/metanet-handles/resolve` } } });
+    }
+    if (req.method === "GET" && path === "/.well-known/metanet-handles/resolve") {
+      const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
+      const [h0, d] = q.includes("@") ? q.split("@") : [q, "localhost"];
+      const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? "localhost").toLowerCase();
+      const row = this.o.db.get(handle);
+      const key = this.o.db.identityOf(handle, domain);
+      if (!row || row.status !== "enabled" || !key) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no handle ${handle}@${domain} here` });
+      return json(200, { handle, domain, identityKey: key, messagebox: this.originOf(handle) });
+    }
+    const pki = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
+    if (req.method === "GET" && pki) {
+      const [handle, domain = "localhost"] = decodeURIComponent(pki[1]!).split("@");
+      const key = this.o.db.identityOf(handle!, domain);
+      return key ? json(200, { bsvalias: "1.0", handle: `${handle}@${domain}`, pubkey: key }) : json(404, { error: "not found" });
+    }
+    const callback = /^\/callback\/([^/]+)$/.exec(path);
+    if (req.method === "POST" && callback) {
+      const r = this.feeds.callback(decodeURIComponent(callback[1]!), req.headers, req.body);
+      return json(r.status, r.body);
+    }
+    if (req.method === "POST" && path === "/account/register") return await this.register(req.body);
+    return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
-  /** The HTTP handler: CORS, paymail, and everything else behind auth. */
+  /** POST /account/register {username, identityKey, signature}: a mailbox instance for a key its holder signed for. */
+  private async register(raw: Uint8Array): Promise<RouterResponse> {
+    let b: { username?: unknown; identityKey?: unknown; signature?: unknown };
+    try { b = JSON.parse(new TextDecoder().decode(raw)); } catch { return json(400, { error: "the body is not JSON" }); }
+    const username = typeof b.username === "string" ? b.username.trim().toLowerCase() : "";
+    const key = typeof b.identityKey === "string" ? b.identityKey : "";
+    const sig = typeof b.signature === "string" ? b.signature : "";
+    if (!KEY.test(key) || !/^[0-9a-f]+$/i.test(sig)) return json(400, { error: "want {username, identityKey, signature (hex)}" });
+    try {
+      const v = await new ProtoWallet("anyone").verifySignature({ protocolID: REGISTER_PROTOCOL, keyID: username, counterparty: key, data: Utils.toArray(`register ${username}`, "utf8"), signature: Utils.toArray(sig, "hex") });
+      if (!v.valid) throw new Error("invalid");
+    } catch { return json(401, { error: "the signature does not verify for that identity" }); }
+    try {
+      const row = this.addMailbox(username, key);
+      return json(200, { identityKey: key, username: row.handle, handle: `${row.handle}@${row.domain}`, messagebox: this.originOf(row.handle) });
+    } catch (e) {
+      return json((e as { status?: number }).status ?? 500, { error: (e as Error).message });
+    }
+  }
+
+  /** A request for an instance: one kernel call of its front door; what it returns admitted; its fuel charged. */
+  private async forward(handle: string, route: string, url: URL, req: RouterRequest): Promise<RouterResponse> {
+    let l: Loaded;
+    try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
+    const caller = req.headers["x-bsv-auth-identity-key"] ?? "";
+    const a: FrontAnswer = await callFrontDoor(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: stampMs(this.now()) });
+    this.charge(handle, caller, route, a.fuel);
+    if (a.admit?.length) {
+      try {
+        await admitAll(l.kernel, a.admit, () => this.now());
+      } catch (e) {
+        // A replayed message is already in: the answer stands. Anything else is the host's failure.
+        if (!(e instanceof Rejected && e.reason === "duplicate-envelope")) {
+          this.say(handle, `admit: ${(e as Error).message}`);
+          return json(500, { status: "error", code: "ERR_ADMIT", description: (e as Error).message });
+        }
+      }
+      this.settle(l);
+    }
+    if (a.then) {
+      // An answer a step computes (an overlay's submit): once what was admitted is processed.
+      await l.kernel.idle();
+      const t = await l.kernel.invoke(a.then.program, a.then.fn, a.then.arg, { now: stampMs(this.now()) });
+      this.charge(handle, caller, `${route} (then)`, t.fuel);
+      if (!t.ok) return json(500, { status: "error", code: "ERR_INTERNAL", description: t.error });
+      const r = dagCbor.decode(t.result) as { status?: number; type?: string; body?: Uint8Array };
+      return { status: r.status ?? 200, headers: { "content-type": r.type ?? "application/json" }, body: r.body ?? new Uint8Array() };
+    }
+    return { status: a.status, headers: a.headers, body: a.body };
+  }
+
+  /** The HTTP handler: CORS, then dispatch. */
   handler(): (req: IncomingMessage, res: ServerResponse) => void {
     return (req, res) => {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader("Access-Control-Allow-Headers", "*");
-      res.setHeader("Access-Control-Allow-Methods", "*");
-      res.setHeader("Access-Control-Expose-Headers", "*");
-      if (req.method === "OPTIONS") { res.writeHead(200).end(); return; }
-      const url = new URL(req.url ?? "/", "http://router");
-      const path = url.pathname;
-      // The overlay routes (#36: BRC-22/24 and the listings), unauthenticated as overlay-express is.
-      if (this.overlay.handle(req, res, url)) return;
-      const callback = /^\/callback\/([^/]+)$/.exec(path);
-      if (callback && req.method === "POST") {
-        const chunks: Buffer[] = [];
-        req.on("data", (c: Buffer) => chunks.push(c));
-        req.on("end", () => send(res, this.feeds.callback(decodeURIComponent(callback[1]!), req.headers, new Uint8Array(Buffer.concat(chunks)))));
-        return;
-      }
-      if (req.method === "GET") {
-        const m = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
-        if (m) {
-          const [handle, domain = "localhost"] = decodeURIComponent(m[1]!).split("@");
-          const key = this.o.db.identityOf(handle!, domain);
-          send(res, key ? { status: 200, body: { bsvalias: "1.0", handle: `${handle}@${domain}`, pubkey: key } } : { status: 404, body: { error: "not found" } });
-          return;
-        }
-        send(res, { status: 404, body: { status: "error", code: "ERR_NOT_FOUND" } });
-        return;
-      }
+      const cors: Record<string, string> = {
+        "access-control-allow-origin": "*", "access-control-allow-headers": "*", "access-control-allow-methods": "*", "access-control-expose-headers": "*",
+      };
+      if (req.method === "OPTIONS") { res.writeHead(200, cors).end(); return; }
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
-        const to = this.front(req.url ?? "/", req.headers.host);
-        if (!to) { send(res, { status: 404, body: { status: "error", code: "ERR_NOT_FOUND", description: "no instance here" } }); return; }
-        this.sessions.handle(req, res, new Uint8Array(Buffer.concat(chunks)), to.handle, to.path, (r) => this.app(r))
-          .catch((e: Error) => { if (!res.headersSent) send(res, { status: 500, body: { status: "error", code: "ERR_INTERNAL", description: e.message } }); });
+        const url = `http://${req.headers.host ?? `127.0.0.1:${this.port}`}${req.url ?? "/"}`;
+        this.dispatch({ method: req.method ?? "GET", url, headers: headerMap(req.headers), body: new Uint8Array(Buffer.concat(chunks)) })
+          .then((r) => { res.writeHead(r.status, { ...cors, ...r.headers, "content-length": String(r.body.length) }); res.end(r.body); })
+          .catch((e: Error) => { if (!res.headersSent) { res.writeHead(500, { ...cors, "content-type": "application/json" }); res.end(JSON.stringify({ status: "error", code: "ERR_INTERNAL", description: e.message })); } });
       });
     };
   }
 
-  /** Listen on host:port (0: any). */
-  listen(port: number, host = "127.0.0.1"): Promise<Server> {
-    const server = createServer(this.handler());
-    this.server = server;
-    return new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(port, host, () => { server.off("error", reject); resolve(server); });
-    });
+  /**
+   * Listen on `port` (0: any) at each of `hosts` (default the IPv4 and IPv6
+   * loopbacks: `<handle>.localhost` resolves to either).
+   */
+  async listen(port: number, hosts: string | string[] = ["127.0.0.1", "::1"]): Promise<Server> {
+    const list = Array.isArray(hosts) ? hosts : [hosts];
+    for (const [i, host] of list.entries()) {
+      const server = createServer(this.handler());
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(i === 0 ? port : this.port, host, () => { server.off("error", reject); resolve(); });
+        });
+      } catch (e) {
+        if (i === 0) throw e;
+        this.say("router", `not listening on ${host}: ${(e as Error).message}`);
+        continue;
+      }
+      if (i === 0) this.port = (server.address() as { port: number }).port;
+      this.servers.push(server);
+    }
+    return this.servers[0]!;
   }
 }

@@ -22,10 +22,9 @@ import { fileURLToPath } from "node:url";
 import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { seal } from "../../src/envelope.ts";
+import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import type { HttpRequest, HttpResponse } from "../../src/host/kernel.ts";
-import { messageBoxClient } from "../../src/host/messagebox.ts";
 import { Router } from "../../src/host/router.ts";
 import { encode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
@@ -68,13 +67,13 @@ async function network(r: HttpRequest): Promise<HttpResponse> {
 const hostDb = new HostDb(join(home, "host.db"));
 hostDb.add("fetchtest", { store: db });
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(new PrivateKey("1111", 16)), authWallet: ephemeralWallet(),
+  db: hostDb, walletFor: () => ephemeralWallet(new PrivateKey("1111", 16)), home,
   owner: ownerId, idleMs: 0, http: network, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   genesis: { subscriptions: [{ box: "fetch", sender: ownerId, handler: FETCH_CID }] },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
-const server = await router.listen(0);
-const box = messageBoxClient(owner, `http://127.0.0.1:${(server.address() as { port: number }).port}/messagebox`, "skein-client");
+await router.listen(0);
+const box = new RawBox(owner, `http://127.0.0.1:${router.port}/@fetchtest`);
 
 type Update = { state: string; step: number; calls?: CID[]; result?: { stdout: Uint8Array; stderr: Uint8Array }; error?: { message: string } };
 let view!: ReturnType<typeof openStoreFile>;
@@ -98,8 +97,7 @@ async function nextStep(what: string, ms = 30_000): Promise<Update> {
 }
 
 async function fetchVia(identity: string, url: string): Promise<Update> {
-  const e = await seal(owner, { recipient: { identityKey: identity, handle: "fetchtest", domain: "localhost" }, body: dagCbor.encode({ url }), created: new Date().toISOString() });
-  await box.send({ recipient: identity, box: "fetch", body: e });
+  await box.send(identity, "fetch", { url });
   return nextStep(url);
 }
 

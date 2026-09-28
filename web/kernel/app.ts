@@ -3,7 +3,7 @@
 // is the connected wallet's, and a chat box that talks to it. Configured by
 // the query string:
 //
-//   messagebox   the messagebox host (default http://127.0.0.1:8100/messagebox)
+//   host         the skein host, the router (default http://127.0.0.1:8100): this identity's mailbox instance is registered there
 //   handle       this instance's name there (default "me")
 //   infer        the inference peer's identity (hex), inferHandle its handle@domain
 //   key          tests only: a private key (hex) for a ProtoWallet instead of Yours
@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   const [ih, id] = (q.get("inferHandle") ?? "infer@localhost").split("@");
   const host = new BrowserHost({
     wallet: await wallet(),
-    messagebox: q.get("messagebox") ?? "http://127.0.0.1:8100/messagebox",
+    host: q.get("host") ?? "http://127.0.0.1:8100",
     handle: q.get("handle") ?? "me",
     infer: q.get("infer") ?? undefined,
     inferHandle: { handle: ih!, domain: id ?? "localhost" },

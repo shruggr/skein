@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # The dev stack on David's machine, in the router layout (#33), idempotent:
 #
-#   router    skein-host run  (background)    127.0.0.1:8100  the BRC-33 messagebox (BRC-104 auth), the instances'
-#                                                              oracle and kernels (started on demand), the waker;
+#   router    skein-host run  (background)    127.0.0.1:8100  the reverse proxy to every instance's front door
+#                                                              (http://<handle>.localhost:8100 or /@<handle>, #40), the
+#                                                              instances' oracle and kernels (started on demand), the waker;
 #                                              127.0.0.1:4600  host page and /roster.json; 4610+ one explorer per instance
 #   owner     1sat serve wallet-api            127.0.0.1:3322  the dev owner's wallet (a client)
 #   infer     1sat serve wallet-api            127.0.0.1:3323  the inference peer's wallet (a client)
 #
-# No `1sat serve` messagebox, no wallet-api per instance, no host wallet: the
-# router is the messagebox at the same URL (http://127.0.0.1:8100/messagebox),
-# instances sign through the router's oracle (master secret ~/.skein/master.key),
-# entries are unsigned. It starts the client wallets, writes the grants for
-# them (router identity, every instance), starts the router if nothing listens
-# on :8100, and registers the owner (david) and the inference peer (infer):
-# their mailboxes are kept by an instance (SKEIN_MAILBOX_HOST, default the
-# first enabled row). The inference peer itself is bin/skein-infer, run as
-# before. Instances are rows: `skein-host add <handle>` (identity derived),
+# No `1sat serve` messagebox, no wallet-api per instance, no host wallet: each
+# instance is an HTTP server (its front door); instances sign through the
+# router's oracle (master secret ~/.skein/master.key). It starts the client
+# wallets, writes the grants for them, starts the router if nothing listens on
+# :8100, and registers the owner (david) and the inference peer (infer) —
+# each a mailbox instance of its own, by a signed registration
+# (register.ts). The owner's mailbox URL goes to ~/.skein/mailbox.url (the
+# client's). The inference peer itself is bin/skein-infer
+# (SKEIN_MAILBOX_URL=http://127.0.0.1:8100/@infer). Instances are rows: `skein-host add <handle>` (identity derived),
 # then `skein-host deploy <handle> <dir>`. See README.md.
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -26,7 +27,7 @@ port="${SKEIN_ROUTER_PORT:-8100}"
 mkdir -p "$skein/logs"
 "$here/wallets.sh" owner infer
 "$here/grants.sh"
-echo "http://127.0.0.1:$port/messagebox" > "$skein/messagebox.url"
+echo "http://127.0.0.1:$port/@david" > "$skein/mailbox.url"
 
 listening() { ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN; }
 if listening "$port"; then
@@ -36,10 +37,11 @@ else
   nohup "$root/bin/skein-host" run >> "$skein/logs/host.log" 2>&1 &
   for _ in $(seq 60); do listening "$port" && break; sleep 0.5; done
   listening "$port" || { echo "the router did not start; see $skein/logs/host.log" >&2; exit 1; }
-  echo "router: http://127.0.0.1:$port/messagebox (log $skein/logs/host.log)"
+  echo "router: http://127.0.0.1:$port (log $skein/logs/host.log)"
 fi
 
-reg() { node --experimental-strip-types --no-warnings "$here/register.ts" "$@" "http://127.0.0.1:$port"; }
+# A name already registered (exit 3) is fine: the mailbox instance is there.
+reg() { node --experimental-strip-types --no-warnings "$here/register.ts" "$@" "http://127.0.0.1:$port" || [ $? = 3 ]; }
 # `owner.identity` may name a key up.sh does not hold (e.g. the Yours wallet):
 # it can register only the dev owner wallet (3322); the front end registers
 # the other one itself (Register).

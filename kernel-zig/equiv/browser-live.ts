@@ -2,11 +2,14 @@
 // the wasm kernel in a Worker over IndexedDB, the page as its host
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
 // with an agent on the native kernel and a scripted inference peer. The page
-// identity (a ProtoWallet here; Yours in use) chats its instance; the
-// instance's loop asks the inference peer, resolves the agent, seals and
-// emits a chat to it over the messagebox; the agent's loop answers; the
-// reply waits in the page identity's mailbox, is polled, screened, admitted
-// into the browser instance and resumes the thread, which answers the page.
+// identity (a ProtoWallet here; Yours in use) registers its mailbox
+// instance on the router and chats its instance; the instance's loop asks the
+// inference peer (its messagebox program delivers over http — fetch from the
+// page — on a BRC-104 session), resolves the agent (its resolve program, a
+// BRC-169 lookup), delivers a chat to it; the agent's loop answers into the
+// page identity's mailbox instance, which the page polls and admits into the
+// browser instance; the thread resumes and answers the page (into the same
+// mailbox, shown).
 // Then the store the browser wrote (its records, read back from IndexedDB) is
 // replayed by the native kernel and must reach the same state.
 //
@@ -17,11 +20,11 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, PrivateKey } from "@bsv/sdk";
+import { PrivateKey } from "@bsv/sdk";
+import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
-import { messageBoxClient } from "../../src/host/messagebox.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { buildPage, servePage } from "../../web/kernel/serve.ts";
 import { chromium, playwright, writeStore } from "./browser.ts";
@@ -52,22 +55,30 @@ const keys = new Map<string, PrivateKey>();
 const ownerKey = key(), inferKey = key(), pageKey = key();
 const inferId = inferKey.toPublicKey().toString(), pageId = pageKey.toPublicKey().toString();
 const router = new Router({
-  db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), authWallet: ephemeralWallet(key()),
+  db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home,
   owner: ownerKey.toPublicKey().toString(), infer: inferId, idleMs: 0, kernel: { command: kernelBin, env: { SKEIN_HOME: home } },
   log: (s, l) => { if (verbose) console.log(`  | [${s}] ${l}`); },
 });
-const server = await router.listen(0);
-const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+await router.listen(0);
+const base = `http://127.0.0.1:${router.port}`;
+// The inference peer's mailbox instance; the owner's (the agent answers the page, its opener, by its claim).
+keys.set("infer", key());
+router.addMailbox("infer", inferId);
+db.add("infer", { identity: keys.get("infer")!.toPublicKey().toString() });
+keys.set("page", key()); // the page identity's mailbox instance, registered by the page itself
 keys.set("agent", key());
 db.add("agent", { store: join(home, "agent.db"), identity: keys.get("agent")!.toPublicKey().toString() });
 await router.hydrate("agent");
 const agentId = keys.get("agent")!.toPublicKey().toString();
 const iw = ephemeralWallet(inferKey);
-const reg = await new AuthFetch(iw).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "infer" }) });
-if (reg.status !== 200) throw new Error(`register infer: ${reg.status}`);
 // The conversation, in the order the requests reach the peer: the page's instance, the agent, the page's instance.
 const peer = new InferPeer({
-  log: () => {}, wallet: iw, box: messageBoxClient(iw, `${base}/messagebox`, "skein-infer"), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
+  log: () => {}, wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
+  raw: {
+    inbox: new RawBox(iw, `${base}/@infer`),
+    outbox: (url) => new RawBox(iw, url),
+    resolve: async (h, d) => await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=${h}@${d}`)).json() as { identityKey: string; messagebox: string },
+  },
   fetch: scripted([
     answer({ content: "", tool_calls: [messageCall("m1", "@agent@localhost", "What does the blue one cost?")] }),
     answer({ content: "The blue one is 5." }),
@@ -77,7 +88,7 @@ const peer = new InferPeer({
 
 await buildPage();
 const web = await servePage(0);
-const pageUrl = `http://127.0.0.1:${(web.address() as { port: number }).port}/?messagebox=${encodeURIComponent(`${base}/messagebox`)}&handle=page&infer=${inferId}&key=${pageKey.toHex()}&pollMs=200`;
+const pageUrl = `http://127.0.0.1:${(web.address() as { port: number }).port}/?host=${encodeURIComponent(base)}&handle=page&infer=${inferId}&key=${pageKey.toHex()}&pollMs=200`;
 console.log(`router ${base} (agent ${agentId.slice(-8)}, infer ${inferId.slice(-8)}); page identity ${pageId.slice(-8)}`);
 const pw = await playwright();
 const browser = await pw.chromium.launch({ executablePath: chromium(), headless: true });
@@ -104,9 +115,10 @@ try {
   }
   const kinds = evs.map((e) => `${e.kind}${e.box ? `:${String(e.box)}` : ""}`).join(" ");
   if (verbose) console.log(`  events: ${kinds}`);
-  check(evs.some((e) => e.kind === "sent" && e.to === inferId), "the browser instance's loop emitted its inference request (emit → messagebox, sealed by the page wallet through the wallet import)");
-  check(evs.some((e) => e.kind === "resolve" && e.identityKey === agentId), "resolve → fetch: @agent@localhost resolved to the agent's identity");
-  check(evs.some((e) => e.kind === "sent" && e.to === agentId && e.box === "chat"), "the browser instance sent the chat to the agent (on the router)");
+  const http = (f: (u: string, m: string, s: number) => boolean) => evs.some((e) => e.kind === "http" && f(String(e.url), String(e.method), Number(e.status)));
+  check(http((u, m, st) => u.startsWith(router.originOf("infer")) && u.endsWith("/sendMessage") && m === "POST" && st === 200), "the browser instance's loop delivered its inference request itself: its messagebox program over http (fetch), on a BRC-104 session signed through the page wallet");
+  check(http((u, m, st) => u.includes("/.well-known/metanet-handles/resolve?handle=agent") && m === "GET" && st === 200), "its resolve program looked the agent up (BRC-169, over http)");
+  check(http((u, m, st) => u.startsWith(router.originOf("agent")) && u.endsWith("/sendMessage") && m === "POST" && st === 200), "the browser instance delivered the chat to the agent's front door (on the router)");
   check(evs.some((e) => e.kind === "admitted" && e.sender === agentId && e.box === "chat"), "the agent's reply was polled from the page identity's mailbox and admitted into the browser instance");
   const msg = evs.find((e) => e.kind === "message") as { body?: { text?: string } } | undefined;
   check(msg?.body?.text === "The agent says: the blue one is 5.", `the instance answered the page: ${JSON.stringify(msg?.body?.text)} (${Date.now() - t0} ms)`);

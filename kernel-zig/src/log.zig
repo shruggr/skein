@@ -1,22 +1,29 @@
-// The input log and the record shapes the scheduler checks, in format 2
-// (issue #33): entries are unsigned — `prev` fixes the order, messages are
-// signed by their senders, the router's stamp is the environment's word — and
-// identity keys are 33-byte byte strings in every record (no hex).
+// The input log and the record shapes the scheduler checks, in format 3
+// (issue #40; format 2, #33: entries unsigned, identity keys as 33-byte byte
+// strings in every record). Messages are state: an entry is a message that
+// arrived, a wake, or an event the host holds a feed for (or a front door's
+// own write, such as a session). Nothing a front door merely reads or
+// verifies is an entry.
 //
-//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome | mail | event+box}
-//   event    a record from a feed (#29: a header, a proof, a status), routed by its `subject` or by box
-//   mail     {op: "put", recipient: bytes, box, sender: bytes, messageId, body: bytes, json?}
-//          | {op: "ack", recipient: bytes, messageIds: [text]}
-//            the messagebox's state changes for a hosted identity (issue #33), routed
-//            by subscription on the reserved box `:mail` (sender: the mail's sender,
-//            or the recipient acknowledging)
+//   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box}
+//   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, json?: true,
+//             session?: {payload: bytes, signature: bytes, nonce, yourNonce}}
+//            a BRC-33 message that arrived (#40): the sender is the BRC-104 session's
+//            identity, `session` the signed request and its nonces (so the log
+//            verifies with the instance's key alone); its CID is the message's
+//            id — what a reply's `replyTo` names. Routed to the thread awaiting
+//            the message its body's `replyTo` names, else by subscription on
+//            (sender, box).
+//   event    a record from a feed (#29: a header, a proof, a status) or a front
+//            door's write (`:sessions`, a mailbox acknowledgement), routed by
+//            its `subject` or by box
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
-//             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?}
+//             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
+//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes, op}]}
 //            `tree` (issue #4): the system tree the instance booted from (a git
 //            tree, its objects pre-filled by the loader); processing the genesis
-//            sets the head `main` to it
-//   emit     {kind: "emit", to: bytes, box, body, envelope}   (the envelope in either encoding, envelope.zig)
+//            sets the head `main` to it. `routes`/`reads`: the front door's (#40).
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -33,16 +40,6 @@ pub fn stampOf(v: ?Value) ?syscalls.Stamp {
     return .{ .sec = @intCast(s), .nsec = @intCast(n) };
 }
 
-pub fn isOutcome(x: ?Value) bool {
-    const o = x orelse return false;
-    if (o != .map) return false;
-    if (Value.cidOf(o.get("emit")) == null) return false;
-    const st = Value.str(o.get("status")) orelse return false;
-    if (!std.mem.eql(u8, st, "delivered") and !std.mem.eql(u8, st, "failed")) return false;
-    if (o.get("reason")) |r| if (r != .string) return false;
-    return true;
-}
-
 /// A plain entry (#29): an event the host admits from a feed it holds (a
 /// header, a proof, a transaction status), the record `event` names, routed
 /// by `box` (or its `subject`). No envelope: it self-validates inside the
@@ -51,9 +48,8 @@ pub fn isEventEntry(e: Value) bool {
     return isLogEntry(e) and e.get("event") != null;
 }
 
-/// The one entry encoding (format 2, #33): {kind: "log", prev, n, time} and
-/// exactly one of genesis | envelope (+box, body) | wake | outcome | mail |
-/// event (+box). No signature on any of them.
+/// The one entry encoding (format 3, #40): {kind: "log", prev, n, time} and
+/// exactly one of genesis | mail | wake | event (+box). No signature on any of them.
 pub fn isLogEntry(e: Value) bool {
     if (e != .map) return false;
     const kind = Value.str(e.get("kind")) orelse return false;
@@ -61,47 +57,41 @@ pub fn isLogEntry(e: Value) bool {
     if (!Value.isNumber(e.get("n"))) return false;
     if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
-    for ([_][]const u8{ "genesis", "envelope", "wake", "outcome", "mail", "event" }) |k| {
+    for ([_][]const u8{ "genesis", "mail", "wake", "event" }) |k| {
         if (e.get(k) != null) count += 1;
     }
     if (count != 1) return false;
-    if ((e.get("envelope") == null) != (e.get("body") == null)) return false;
-    // A box goes with an envelope or an event, and only with them.
-    const boxed = e.get("envelope") != null or e.get("event") != null;
-    if (boxed) {
+    for ([_][]const u8{ "envelope", "body", "outcome" }) |k| if (e.get(k) != null) return false; // format 2
+    // A box goes with an event, and only with it.
+    if (e.get("event") != null) {
+        if (e.get("event").? != .cid) return false;
         const box = Value.str(e.get("box")) orelse return false;
         if (box.len == 0) return false;
     } else if (e.get("box") != null) return false;
-    if (e.get("event")) |v| if (v != .cid) return false;
-    if (e.get("outcome")) |o| if (!isOutcome(o)) return false;
-    if (e.get("mail")) |m| if (!isMail(m)) return false;
+    if (e.get("mail")) |m| if (m != .cid) return false;
     return true;
 }
 
-/// The box a `mail` entry is routed in (subscriptions.zig): reserved, never a BRC-33 box a client names.
-pub const MAIL_BOX = ":mail";
-
+/// A message record (#40): a BRC-33 message that arrived, its sender the
+/// authenticated one. A box a client names never starts with ':' (reserved
+/// for the host's own boxes).
 pub fn isMail(x: ?Value) bool {
     const m = x orelse return false;
     if (m != .map) return false;
+    if (!std.mem.eql(u8, Value.str(m.get("kind")) orelse return false, "mail")) return false;
+    if (!std.mem.eql(u8, Value.str(m.get("op")) orelse return false, "put")) return false;
+    if (!secp.isKey(Value.bytesOf(m.get("sender")) orelse return false)) return false;
     if (!secp.isKey(Value.bytesOf(m.get("recipient")) orelse return false)) return false;
-    const op = Value.str(m.get("op")) orelse return false;
-    if (std.mem.eql(u8, op, "put")) {
-        if (!secp.isKey(Value.bytesOf(m.get("sender")) orelse return false)) return false;
-        const box = Value.str(m.get("box")) orelse return false;
-        if (box.len == 0) return false;
-        if ((Value.str(m.get("messageId")) orelse return false).len == 0) return false;
-        if (Value.bytesOf(m.get("body")) == null) return false;
-        if (m.get("json")) |j| if (j != .bool) return false;
-        return true;
+    const box = Value.str(m.get("box")) orelse return false;
+    if (box.len == 0 or box[0] == ':') return false;
+    if (Value.cidOf(m.get("body")) == null) return false;
+    if (m.get("json")) |j| if (j != .bool) return false;
+    if (m.get("session")) |s| {
+        if (s != .map) return false;
+        if (Value.bytesOf(s.get("payload")) == null or Value.bytesOf(s.get("signature")) == null) return false;
+        if (Value.str(s.get("nonce")) == null or Value.str(s.get("yourNonce")) == null) return false;
     }
-    if (std.mem.eql(u8, op, "ack")) {
-        const ids = m.get("messageIds") orelse return false;
-        if (ids != .array or ids.array.len == 0) return false;
-        for (ids.array) |i| if (i != .string) return false;
-        return true;
-    }
-    return false;
+    return true;
 }
 
 fn isCidMap(v: ?Value) bool {
@@ -155,20 +145,22 @@ pub fn isGenesis(x: ?Value) bool {
         for (c.array) |b| if (b != .string or b.string.len == 0) return false;
     }
     if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
+    // #40: the front door's routes [{path | prefix, program, fn, auth?, read?}] and reads [{caller?, op}].
+    if (g.get("routes")) |rs| {
+        if (rs != .array) return false;
+        for (rs.array) |r| {
+            if (r != .map or Value.cidOf(r.get("program")) == null or Value.str(r.get("fn")) == null) return false;
+            if ((Value.str(r.get("path")) == null) == (Value.str(r.get("prefix")) == null)) return false;
+        }
+    }
+    if (g.get("reads")) |rs| {
+        if (rs != .array) return false;
+        for (rs.array) |r| {
+            if (r != .map or Value.str(r.get("op")) == null) return false;
+            if (r.get("caller")) |c| if (!secp.isKey(Value.bytesOf(c) orelse return false)) return false;
+        }
+    }
     return true;
-}
-
-/// records.ts isEmit.
-pub fn isEmit(x: ?Value) bool {
-    const e = x orelse return false;
-    if (e != .map) return false;
-    if (!std.mem.eql(u8, Value.str(e.get("kind")) orelse return false, "emit")) return false;
-    if (!secp.isKey(Value.bytesOf(e.get("to")) orelse return false)) return false;
-    const box = Value.str(e.get("box")) orelse return false;
-    if (box.len == 0) return false;
-    if (Value.cidOf(e.get("body")) == null) return false;
-    const env = e.get("envelope") orelse return false;
-    return env == .map and env.get("content") != null;
 }
 
 /// records.ts isAttested.
@@ -179,7 +171,7 @@ pub fn isAttested(x: ?Value) bool {
     if (Value.cidOf(a.get("thread")) == null) return false;
     if (!Value.isNumber(a.get("step")) or !Value.isNumber(a.get("i"))) return false;
     const op = Value.str(a.get("op")) orelse return false;
-    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "resolve") and !std.mem.eql(u8, op, "http")) return false;
+    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "http")) return false;
     return Value.bytesOf(a.get("result")) != null;
 }
 

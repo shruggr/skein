@@ -262,7 +262,10 @@ export class Kernel {
     const c = this.push(cid);
     try { const n = this.x.skein_get_block(c[0], c[1]); return n === -1 ? undefined : this.result(this.check(n)); } finally { this.release(c); }
   }
-  /** A serve op as a frame {op, v} (dag-cbor) → the reply frame (dag-cbor {ok} | {error, rejected}). */
+  /**
+   * A serve op as a frame {op, v} (dag-cbor) → the reply frame (dag-cbor {ok} | {error, rejected}).
+   * Among them the kernel's `call` (#40): {op: "call", v: {program, fn, arg, caller?, now?}} → ok {ok, result | error, fuel}.
+   */
   call(frame) { const f = this.push(frame); try { return this.result(this.x.skein_call(f[0], f[1])); } finally { this.release(f); } }
   /** serve's admit ({entry, envelope?, body?}, dag-cbor) → the reply frame; not processed until drain. */
   admit(frame) { const f = this.push(frame); try { return this.result(this.x.skein_admit(f[0], f[1])); } finally { this.release(f); } }

@@ -185,15 +185,14 @@ const F = enum(u32) {
     sk_putblock,
     sk_keep,
     sk_launch,
-    sk_emit,
     sk_await,
-    sk_resolve,
     sk_head,
     sk_advance,
     sk_subscribe,
     sk_wallet,
     sk_http,
     sk_deadline,
+    sk_call,
 };
 
 const Def = struct { name: []const u8, f: F };
@@ -370,15 +369,14 @@ const interfaces = [_]Iface{
         .{ .name = "putblock", .f = .sk_putblock },
         .{ .name = "keep", .f = .sk_keep },
         .{ .name = "launch", .f = .sk_launch },
-        .{ .name = "emit", .f = .sk_emit },
         .{ .name = "await", .f = .sk_await },
-        .{ .name = "resolve", .f = .sk_resolve },
         .{ .name = "head", .f = .sk_head },
         .{ .name = "advance", .f = .sk_advance },
         .{ .name = "subscribe", .f = .sk_subscribe },
         .{ .name = "wallet", .f = .sk_wallet },
         .{ .name = "http", .f = .sk_http },
         .{ .name = "deadline", .f = .sk_deadline },
+        .{ .name = "call", .f = .sk_call },
     } },
 };
 
@@ -1063,7 +1061,7 @@ const Session = struct {
             },
 
             // ---- skein:kernel/skein: program.Host, as the preview1 imports call it
-            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_emit, .sk_await, .sk_resolve, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_http, .sk_deadline => return s.skein(f, a),
+            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_http, .sk_deadline, .sk_call => return s.skein(f, a),
 
             // ---- wasi:http (#15): the recorded-call path of skein.http
             else => return s.httpCall(f, a),
@@ -1540,12 +1538,10 @@ const Session = struct {
                 const args = try program.checkCid(imp, try listBytes(A, &a[1]));
                 return vOk(vBytes(try h.launch(imp, prog, args)));
             },
-            .sk_emit => return vOk(vBytes(try h.emit(imp, try program.checkCid(imp, try listBytes(A, &a[0]))))),
             .sk_await => {
                 try h.awaitReply(imp, try program.checkCid(imp, try listBytes(A, &a[0])));
                 return vOk(null);
             },
-            .sk_resolve => return vOk(vBytes(try h.resolve(imp, try A.dupe(u8, str(&a[0]))))),
             .sk_head => {
                 const t = try h.head(imp, try A.dupe(u8, str(&a[0])));
                 return vOk(if (t) |x| vSome(vBytes(x)) else vNone());
@@ -1567,6 +1563,11 @@ const Session = struct {
             .sk_deadline => {
                 try h.deadline(imp, a[0].of.s64);
                 return vOk(null);
+            },
+            .sk_call => {
+                const prog = try program.checkCid(imp, try listBytes(A, &a[0]));
+                const func = try A.dupe(u8, str(&a[1]));
+                return vOk(vBytes(try h.call(imp, prog, func, try listBytes(A, &a[2]))));
             },
             else => unreachable,
         }

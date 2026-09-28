@@ -14,7 +14,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { seal } from "../envelope.ts";
 import { InferPeer } from "../peers/infer.ts";
-import { collect, installWasm, iso, messageBoxHub, scriptClock, T0 } from "../testkit.ts";
+import { collect, envelopeOutbox, installWasm, iso, messageBoxHub, scriptClock, T0 } from "../testkit.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { readLog, stampMs } from "../runtime/log.ts";
 import { memoryStore } from "../runtime/memory.ts";
@@ -89,7 +89,9 @@ async function setup() {
   }) as unknown as typeof fetch;
   const inferId = inferKey.toPublicKey().toString();
   const peer = new InferPeer({ wallet: ephemeralWallet(inferKey), box: hub.as(inferId), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: f, now: () => stampMs(clock.now()) });
-  const owner = { wallet: ephemeralWallet(ownerKey), box: hub.as(ownerKey.toPublicKey().toString()), identity: ownerKey.toPublicKey().toString() };
+  const hubbed = hub.as(ownerKey.toPublicKey().toString());
+  const box = envelopeOutbox(ephemeralWallet(ownerKey), hubbed, () => stampMs(clock.now()));
+  const owner = { wallet: ephemeralWallet(ownerKey), box, hub: hubbed, identity: ownerKey.toPublicKey().toString() };
   return { hub, clock, o, owner, peer, requests, answers, lines, stores };
 }
 
@@ -154,7 +156,7 @@ test("deploy: the filtered tree through `objects` as the owner sets main; the sa
 
   // A new conversation (no tree: main's) gets the new prompt.
   const env = await seal(h.owner.wallet, { recipient: { identityKey: r.identity, handle: "martha", domain: "localhost" }, body: dagCbor.encode({ text: "who are you?" }), created: iso(h.clock.now()) });
-  await h.owner.box.send({ recipient: r.identity, box: "chat", body: env });
+  await h.owner.hub.send({ recipient: r.identity, box: "chat", body: env });
   await settle(r);
   assert.equal(await h.peer.poll(), 1, h.lines.join("\n"));
   assert.equal((h.requests[0].messages as Json[])[0].content, `You are Martha, now at the back office.\n\n${IDENTITY}`);
@@ -194,7 +196,7 @@ test("skein-host deploy: records the root and source in the row; again: unchange
   const home = await tmp(t);
   const dir = await agentDir(t);
   const out: string[] = [], err: string[] = [];
-  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: h.owner, store: () => r.store };
+  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: { wallet: h.owner.wallet, box: () => h.owner.box }, store: () => r.store };
   const cli = (...argv: string[]) => main(argv, env);
   assert.equal(await cli("add", "martha", "--identity", r.identity, "--store", "mem:martha"), 0);
   assert.equal(await cli("add", "kurt", "--store", "mem:kurt"), 0);
@@ -202,7 +204,7 @@ test("skein-host deploy: records the root and source in the row; again: unchange
   const db = new HostDb(join(home, "host.db"));
   const tree = db.get("martha")!.tree!;
   assert.equal(db.get("martha")!.source, dir);
-  assert.match(out.at(-1)!, new RegExp(`^martha: deployed ${tree} · 5 objects in 1 envelope\\(s\\) to objects$`));
+  assert.match(out.at(-1)!, new RegExp(`^martha: deployed ${tree} · 5 objects in 1 message\\(s\\) to objects$`));
   await settle(r);
   assert.equal(await cli("deploy", "martha", dir), 0);
   assert.equal(out.at(-1), `martha: unchanged ${tree}`);
@@ -220,7 +222,7 @@ test("skein-host subscribe: a `subscribe` message as the owner changes a running
   const r = await startInstance(rowOf("martha"), h.o);
   const home = await tmp(t);
   const out: string[] = [], err: string[] = [];
-  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: h.owner, store: () => r.store };
+  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: { wallet: h.owner.wallet, box: () => h.owner.box }, store: () => r.store };
   const cli = (...argv: string[]) => main(argv, env);
   assert.equal(await cli("add", "martha", "--identity", r.identity, "--store", "mem:martha"), 0);
   const genesis = (await readLog(r.store))[0].cid;
@@ -368,7 +370,7 @@ test("skein-host knows / roster --for / deploy / roster --deploy: each agent's R
   await fs.writeFile(join(kdir, "IDENTITY.md"), KURT);
   const stores: Record<string, Store> = { martha: m.store, kurt: k.store };
   const out: string[] = [], err: string[] = [];
-  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: h.owner, store: (row: InstanceRow) => stores[row.handle] };
+  const env = { vars: { SKEIN_HOME: home, SKEIN_OWNER: h.owner.identity }, out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner: { wallet: h.owner.wallet, box: () => h.owner.box }, store: (row: InstanceRow) => stores[row.handle] };
   const cli = (...argv: string[]) => main(argv, env);
   const rosterOf = async (r: Running) => new TextDecoder().decode(await readFile(r.store, (await headTree(r.store, MAIN))!, "ROSTER.md"));
   assert.equal(await cli("add", "martha", "--identity", m.identity, "--store", "mem:martha"), 0);
@@ -396,7 +398,7 @@ test("skein-host knows / roster --for / deploy / roster --deploy: each agent's R
   assert.equal(await cli("roster", "--deploy"), 0, err.join("\n"));
   const [kl, ml] = out.slice(-2).sort(); // rows in created_at order: the same ms here
   assert.equal(kl, `kurt: unchanged ${kurtTree}`);
-  assert.match(ml!, /^martha: deployed \S+ · 2 objects in 1 envelope\(s\) to objects · head main$/);
+  assert.match(ml!, /^martha: deployed \S+ · 2 objects in 1 message\(s\) to objects · head main$/);
   await settle(m);
   assert.equal(await rosterOf(m), "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager for\n");
   assert.equal((await headTree(m.store, MAIN))!.toString(), db.get("martha")!.tree);
@@ -417,7 +419,7 @@ test("skein-host knows / roster --for / deploy / roster --deploy: each agent's R
   assert.equal(err.at(-1), "kurt knows nobody: no ROSTER.md");
   assert.equal(await cli("roster", "--deploy"), 0);
   assert.equal(out.slice(-2).sort()[1], `martha: unchanged ${before[0]}`);
-  assert.match(out.slice(-2).sort()[0]!, /^kurt: deployed \S+ · 1 objects in 1 envelope\(s\) to objects · head main$/);
+  assert.match(out.slice(-2).sort()[0]!, /^kurt: deployed \S+ · 1 objects in 1 message\(s\) to objects · head main$/);
   await settle(k);
   assert.deepEqual(await paths(k.store, (await headTree(k.store, MAIN))!), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
 
