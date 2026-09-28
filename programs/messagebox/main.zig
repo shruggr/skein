@@ -17,32 +17,39 @@
 //! in admission order: listMessages for a hosted identity is a read of its
 //! record, in log order (the router reads it through the kernel). A message id
 //! already kept for that recipient is not kept twice. Each step moves the head.
+//!
+//! The same program keeps the instance's BRC-103/104 sessions (auth.zig): a
+//! plain `event` entry in the reserved box `:auth` (a sender-less
+//! subscription) is an authentication message the router forwarded.
 const std = @import("std");
 const cbor = @import("cbor");
 
 const Value = cbor.Value;
 
-const sk = struct {
-    extern "skein" fn input(out: [*]u8, cap: u32) i32;
-    extern "skein" fn get(cid: [*]const u8, cid_len: u32, out: [*]u8, cap: u32) i32;
-    extern "skein" fn put(data: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
-    extern "skein" fn head(name: [*]const u8, name_len: u32, out: [*]u8, cap: u32) i32;
-    extern "skein" fn advance(name: [*]const u8, name_len: u32, tree: [*]const u8, tree_len: u32) i32;
-    extern "skein" fn take(out: [*]u8, cap: u32) i32;
-    extern "skein" fn @"error"(out: [*]u8, cap: u32) i32;
+pub const sk = struct {
+    pub extern "skein" fn input(out: [*]u8, cap: u32) i32;
+    pub extern "skein" fn get(cid: [*]const u8, cid_len: u32, out: [*]u8, cap: u32) i32;
+    pub extern "skein" fn put(data: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
+    pub extern "skein" fn head(name: [*]const u8, name_len: u32, out: [*]u8, cap: u32) i32;
+    pub extern "skein" fn advance(name: [*]const u8, name_len: u32, tree: [*]const u8, tree_len: u32) i32;
+    pub extern "skein" fn take(out: [*]u8, cap: u32) i32;
+    pub extern "skein" fn @"error"(out: [*]u8, cap: u32) i32;
+    pub extern "skein" fn wallet(frame: [*]const u8, len: u32, out: [*]u8, cap: u32) i32;
 };
+
+const auth = @import("auth.zig");
 
 var last_error: [1024]u8 = undefined;
 var last_error_len: usize = 0;
 
-fn failed() error{ImportFailed} {
+pub fn failed() error{ImportFailed} {
     const n = sk.@"error"(&last_error, last_error.len);
     last_error_len = if (n < 0) 0 else @min(@as(usize, @intCast(n)), last_error.len);
     return error.ImportFailed;
 }
 
 /// Run an import that writes (out, cap), taking the held result when it did not fit.
-fn result(a: std.mem.Allocator, call: anytype, args: anytype) ![]u8 {
+pub fn result(a: std.mem.Allocator, call: anytype, args: anytype) ![]u8 {
     var buf = try a.alloc(u8, 4096);
     const n = @call(.auto, call, args ++ .{ buf.ptr, @as(u32, @intCast(buf.len)) });
     if (n < 0) return failed();
@@ -53,11 +60,11 @@ fn result(a: std.mem.Allocator, call: anytype, args: anytype) ![]u8 {
     return buf;
 }
 
-fn getValue(a: std.mem.Allocator, c: []const u8) !Value {
+pub fn getValue(a: std.mem.Allocator, c: []const u8) !Value {
     return cbor.decode(a, try result(a, sk.get, .{ c.ptr, @as(u32, @intCast(c.len)) }));
 }
 
-fn putValue(a: std.mem.Allocator, v: Value) ![]u8 {
+pub fn putValue(a: std.mem.Allocator, v: Value) ![]u8 {
     const bytes = try cbor.encode(a, v);
     return result(a, sk.put, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) });
 }
@@ -84,6 +91,7 @@ fn isKey(b: ?[]const u8) bool {
 fn run(a: std.mem.Allocator) !void {
     const step = try cbor.decode(a, try result(a, sk.input, .{}));
     const args = step.get("args") orelse return error.BadInput;
+    if (args.get("event") != null) return auth.run(a, step, args);
     const op = Value.str(args.get("op")) orelse return error.BadOp;
     const recipient = Value.bytesOf(args.get("recipient")) orelse return error.BadRecipient;
     if (!isKey(recipient)) return error.BadRecipient;

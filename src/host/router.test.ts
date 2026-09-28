@@ -146,7 +146,9 @@ test("router: messagebox client → instance → owner's mailbox; list/ack; idle
   await again.settled();
   const k = again.loaded.get("alpha")!.kernel;
   const tip = await k.store.log.tip();
-  const last = await k.store.get(tip!) as Record<string, unknown>;
+  let last = await k.store.get(tip!) as Record<string, unknown>;
+  // Back past the session's own entries (#33 part 2: the response's signature is an `:auth` entry after the message).
+  while (last.box === ":auth") last = await k.store.get(last.prev as never) as Record<string, unknown>;
   let prev = await k.store.get(last.prev as never) as Record<string, unknown>;
   while (!prev.envelope) prev = await k.store.get(prev.prev as never) as Record<string, unknown>; // back past the run's outcome entries
   assert.deepEqual(Object.keys(last).sort(), Object.keys(prev).sort(), "a session reply is the same entry shape as a full envelope");
