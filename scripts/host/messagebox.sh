@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# LEGACY since the router (#33): `skein-host run` serves the messagebox on :8100
+# itself (src/host/router.ts). Kept for the pre-router layout; up.sh no longer runs it.
 # The skein host's messagebox: `1sat serve` (unified host: storage + accounts +
 # paymail + messagebox) under its own HOME and its own dev key. Messagebox at
 # http://127.0.0.1:8100/messagebox, BRC-103/104 auth (AuthFetch). See README.md.

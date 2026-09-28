@@ -4,6 +4,8 @@
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host knows <handle> [a,b | --all | --none]
 //   skein-host list
+//   skein-host identity [handle]      the router's BRC-104 identity key, or an instance's (both from the master secret)
+//   skein-host mailboxes              the mailboxes kept here for other identities, and which instance keeps each
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
@@ -76,6 +78,8 @@ const USAGE = `usage:
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
   skein-host list
+  skein-host identity [handle]                            the router's identity key (BRC-104), or an instance's
+  skein-host mailboxes                                    mailboxes kept for other identities (registered), and their keepers
   skein-host enable|disable|remove <handle>
   skein-host run                                          the router: the messagebox on :8100, a kernel per instance on demand; host page and roster on :4600
   skein-host deploy <handle> <dir> [--only glob,glob]     default --only ${DEFAULT_ONLY.join(",")}
@@ -110,6 +114,16 @@ export async function main(argv: string[], env: Env): Promise<number> {
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
         return 0;
       }
+      case "identity": {
+        // The oracle's keys (oracle.ts): the router's BRC-104 identity, or an instance's.
+        const [handle] = rest;
+        const oracle = new Oracle(masterKey(env.vars, home));
+        env.out(handle ? oracle.identity(handle) : (await oracle.routerWallet().getPublicKey({ identityKey: true })).publicKey);
+        return 0;
+      }
+      case "mailboxes":
+        for (const m of db.mailboxes()) env.out([`${m.handle}@${m.domain}`, m.identity, m.instance].join("\t"));
+        return 0;
       case "list":
         for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.status, r.identity ?? "-", r.wallet_url ?? "-", r.store, r.tree ?? "-"].join("\t"));
         return 0;
@@ -380,13 +394,15 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   });
   const live = (row: InstanceRow) => router.loaded.has(row.handle);
   const port = Number(v.SKEIN_HOST_PORT || 4600);
+  const routerId = await router.o.authWallet.getPublicKey({ identityKey: true }).then((r) => r.publicKey, () => undefined);
   const page = async () => hostPage(db.list("enabled").map((r): HostRow => {
     const l = router.loaded.get(r.handle), x = explorers.get(r.handle);
     return {
       handle: r.handle, domain: r.domain, identity: r.identity ?? "", status: l ? "live" : "idle",
       store: r.store, tree: r.tree ?? "", pid: l?.kernel.proc.pid, restarts: 0, explorer: x ? `http://127.0.0.1:${x.port}/` : undefined,
+      wake: router.deadlines.get(r.handle),
     };
-  }));
+  }), { messagebox: messagebox !== undefined ? `http://127.0.0.1:${messagebox}/messagebox` : undefined, router: routerId, mailboxes: db.mailboxes() });
   const server = await serveRoster(port, () => roster(db.list("enabled"), async (row) => openRow(row, env), live), "127.0.0.1", page)
     .then((s) => { env.out(`skein-host: host page at http://127.0.0.1:${(s.address() as { port: number }).port}/ · roster at /roster.json`); return s; }, (e: Error) => { env.err(`skein-host: host server: ${e.message}`); return undefined; });
   return {

@@ -149,6 +149,8 @@ test("skein-host run: the router with the oracle — a row added by the CLI gets
   await until("the ready line", () => out.some((l) => l.startsWith(`[solo] skein runtime ${id} (solo@example.test)`)), 5000);
   const roster = await (await fetch(`http://127.0.0.1:${host.port}/roster.json`)).json() as Array<{ handle: string; status: string }>;
   assert.deepEqual(roster.map((r) => [r.handle, r.status]), [["solo", "live"]]);
-  assert.match(await (await fetch(`http://127.0.0.1:${host.port}/`)).text(), /<b>solo<\/b>@example\.test/);
+  const page = await (await fetch(`http://127.0.0.1:${host.port}/`)).text();
+  assert.match(page, /<b>solo<\/b>@example\.test/);
+  assert.ok(page.includes(`messagebox <code>http://127.0.0.1:${host.messagebox}/messagebox</code>`) && page.includes("mailboxes kept here"), page);
   assert.equal((await (await fetch(`http://127.0.0.1:${host.messagebox}/bsvalias/id/solo@example.test`)).json() as { pubkey: string }).pubkey, id);
 });
