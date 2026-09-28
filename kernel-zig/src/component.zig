@@ -23,6 +23,7 @@ const engine = @import("engine.zig");
 const wasi = @import("wasi.zig");
 const program = @import("program.zig");
 const vfsm = @import("vfs.zig");
+const http = @import("http.zig");
 const c = engine.c;
 const E = vfsm.E;
 
@@ -36,7 +37,28 @@ pub fn isComponent(bytes: []const u8) bool {
 
 // ---------------------------------------------------------------- the import table
 
-const Rt = enum(u32) { descriptor = 1, dir_stream, input_stream, output_stream, pollable, io_error, terminal_input, terminal_output };
+const Rt = enum(u32) {
+    descriptor = 1,
+    dir_stream,
+    input_stream,
+    output_stream,
+    pollable,
+    io_error,
+    terminal_input,
+    terminal_output,
+    // wasi:http/types (#15)
+    fields,
+    incoming_request,
+    outgoing_request,
+    request_options,
+    response_outparam,
+    incoming_response,
+    incoming_body,
+    future_trailers,
+    outgoing_response,
+    outgoing_body,
+    future_response,
+};
 
 const F = enum(u32) {
     // wasi:cli
@@ -115,6 +137,47 @@ const F = enum(u32) {
     d_metadata_hash,
     d_metadata_hash_at,
     dirs_read,
+    // wasi:http (#15)
+    h_fields_new,
+    h_fields_from_list,
+    h_fields_get,
+    h_fields_has,
+    h_fields_set,
+    h_fields_delete,
+    h_fields_append,
+    h_fields_entries,
+    h_fields_clone,
+    h_req_new,
+    h_req_body,
+    h_req_method,
+    h_req_set_method,
+    h_req_path,
+    h_req_set_path,
+    h_req_scheme,
+    h_req_set_scheme,
+    h_req_authority,
+    h_req_set_authority,
+    h_req_headers,
+    h_opts_new,
+    h_opts_connect,
+    h_opts_set_connect,
+    h_opts_first_byte,
+    h_opts_set_first_byte,
+    h_opts_between,
+    h_opts_set_between,
+    h_resp_status,
+    h_resp_headers,
+    h_resp_consume,
+    h_ibody_stream,
+    h_ibody_finish,
+    h_trailers_subscribe,
+    h_trailers_get,
+    h_obody_write,
+    h_obody_finish,
+    h_future_subscribe,
+    h_future_get,
+    h_error_code,
+    h_handle,
     // skein:kernel/skein
     sk_input,
     sk_get,
@@ -235,6 +298,71 @@ const interfaces = [_]Iface{
         .{ .name = "get-insecure-random-u64", .f = .insecure_u64 },
     } },
     .{ .name = "wasi:random/insecure-seed" ++ V, .funcs = &.{.{ .name = "insecure-seed", .f = .insecure_seed }} },
+    .{ .name = "wasi:http/types" ++ V, .resources = &.{
+        .{ .name = "fields", .ty = .fields },
+        // `type headers = fields`, `type trailers = fields`: the same host type under the alias names
+        .{ .name = "headers", .ty = .fields },
+        .{ .name = "trailers", .ty = .fields },
+        .{ .name = "incoming-request", .ty = .incoming_request },
+        .{ .name = "outgoing-request", .ty = .outgoing_request },
+        .{ .name = "request-options", .ty = .request_options },
+        .{ .name = "response-outparam", .ty = .response_outparam },
+        .{ .name = "incoming-response", .ty = .incoming_response },
+        .{ .name = "incoming-body", .ty = .incoming_body },
+        .{ .name = "future-trailers", .ty = .future_trailers },
+        .{ .name = "outgoing-response", .ty = .outgoing_response },
+        .{ .name = "outgoing-body", .ty = .outgoing_body },
+        .{ .name = "future-incoming-response", .ty = .future_response },
+        .{ .name = "input-stream", .ty = .input_stream },
+        .{ .name = "output-stream", .ty = .output_stream },
+        .{ .name = "io-error", .ty = .io_error },
+        .{ .name = "pollable", .ty = .pollable },
+    }, .funcs = &.{
+        .{ .name = "[constructor]fields", .f = .h_fields_new },
+        .{ .name = "[static]fields.from-list", .f = .h_fields_from_list },
+        .{ .name = "[method]fields.get", .f = .h_fields_get },
+        .{ .name = "[method]fields.has", .f = .h_fields_has },
+        .{ .name = "[method]fields.set", .f = .h_fields_set },
+        .{ .name = "[method]fields.delete", .f = .h_fields_delete },
+        .{ .name = "[method]fields.append", .f = .h_fields_append },
+        .{ .name = "[method]fields.entries", .f = .h_fields_entries },
+        .{ .name = "[method]fields.clone", .f = .h_fields_clone },
+        .{ .name = "[constructor]outgoing-request", .f = .h_req_new },
+        .{ .name = "[method]outgoing-request.body", .f = .h_req_body },
+        .{ .name = "[method]outgoing-request.method", .f = .h_req_method },
+        .{ .name = "[method]outgoing-request.set-method", .f = .h_req_set_method },
+        .{ .name = "[method]outgoing-request.path-with-query", .f = .h_req_path },
+        .{ .name = "[method]outgoing-request.set-path-with-query", .f = .h_req_set_path },
+        .{ .name = "[method]outgoing-request.scheme", .f = .h_req_scheme },
+        .{ .name = "[method]outgoing-request.set-scheme", .f = .h_req_set_scheme },
+        .{ .name = "[method]outgoing-request.authority", .f = .h_req_authority },
+        .{ .name = "[method]outgoing-request.set-authority", .f = .h_req_set_authority },
+        .{ .name = "[method]outgoing-request.headers", .f = .h_req_headers },
+        .{ .name = "[constructor]request-options", .f = .h_opts_new },
+        .{ .name = "[method]request-options.connect-timeout", .f = .h_opts_connect },
+        .{ .name = "[method]request-options.set-connect-timeout", .f = .h_opts_set_connect },
+        .{ .name = "[method]request-options.first-byte-timeout", .f = .h_opts_first_byte },
+        .{ .name = "[method]request-options.set-first-byte-timeout", .f = .h_opts_set_first_byte },
+        .{ .name = "[method]request-options.between-bytes-timeout", .f = .h_opts_between },
+        .{ .name = "[method]request-options.set-between-bytes-timeout", .f = .h_opts_set_between },
+        .{ .name = "[method]incoming-response.status", .f = .h_resp_status },
+        .{ .name = "[method]incoming-response.headers", .f = .h_resp_headers },
+        .{ .name = "[method]incoming-response.consume", .f = .h_resp_consume },
+        .{ .name = "[method]incoming-body.stream", .f = .h_ibody_stream },
+        .{ .name = "[static]incoming-body.finish", .f = .h_ibody_finish },
+        .{ .name = "[method]future-trailers.subscribe", .f = .h_trailers_subscribe },
+        .{ .name = "[method]future-trailers.get", .f = .h_trailers_get },
+        .{ .name = "[method]outgoing-body.write", .f = .h_obody_write },
+        .{ .name = "[static]outgoing-body.finish", .f = .h_obody_finish },
+        .{ .name = "[method]future-incoming-response.subscribe", .f = .h_future_subscribe },
+        .{ .name = "[method]future-incoming-response.get", .f = .h_future_get },
+        .{ .name = "http-error-code", .f = .h_error_code },
+    } },
+    .{ .name = "wasi:http/outgoing-handler" ++ V, .resources = &.{
+        .{ .name = "outgoing-request", .ty = .outgoing_request },
+        .{ .name = "request-options", .ty = .request_options },
+        .{ .name = "future-incoming-response", .ty = .future_response },
+    }, .funcs = &.{.{ .name = "handle", .f = .h_handle }} },
     .{ .name = SKEIN_INTERFACE, .funcs = &.{
         .{ .name = "input", .f = .sk_input },
         .{ .name = "get", .f = .sk_get },
@@ -395,7 +523,48 @@ const Res = union(enum) {
     /// null: always ready (a stream's); a clock: a sleep.
     poll: ?wasi.Clock,
     err: u16,
+    // wasi:http (#15)
+    /// A fields resource; `ro`: a request's or response's headers (immutable).
+    fields: struct { f: *http.Fields, ro: bool },
+    oreq: *OutReq,
+    opts: *http.Options,
+    obody: struct { req: *OutReq, written: bool = false },
+    future: *Future,
+    iresp: *InResp,
+    ibody: struct { resp: *InResp, streamed: bool = false },
+    trailers: struct { taken: bool = false },
 };
+
+/// An outgoing-request: built by the program, performed at the first
+/// future-incoming-response.get (the body, buffered, is final then).
+const OutReq = struct {
+    method: []const u8 = "GET",
+    scheme: ?[]const u8 = null,
+    authority: ?[]const u8 = null,
+    path: ?[]const u8 = null,
+    headers: *http.Fields,
+    body: ?*wasi.Pipe = null,
+    body_taken: bool = false,
+    finished: bool = false,
+};
+
+const HttpErr = struct { code: []const u8, msg: ?[]const u8 = null };
+
+const Future = struct {
+    req: *OutReq,
+    opts: http.Options,
+    taken: bool = false,
+};
+
+const InResp = struct {
+    status: u16,
+    headers: *http.Fields,
+    body: []const u8,
+    consumed: bool = false,
+};
+
+/// The largest request body the kernel buffers.
+const MAX_BODY: usize = 64 << 20;
 
 const Abort = error{ Abort, OutOfMemory };
 
@@ -656,7 +825,11 @@ const Session = struct {
                     .errno => |e| vErr(variant("last-operation-failed", try s.newRes(.io_error, .{ .err = e }))),
                 };
             },
-            .in_subscribe, .out_subscribe => return try s.newRes(.pollable, .{ .poll = null }),
+            .in_subscribe, .out_subscribe => {
+                // every resource argument is taken (a borrow left untaken outlives the call)
+                _ = try s.repOf(&a[0]);
+                return try s.newRes(.pollable, .{ .poll = null });
+            },
             .out_check_write => {
                 _ = try s.streamOf(&a[0]);
                 return vOk(u64v(WRITE_BUDGET));
@@ -890,7 +1063,10 @@ const Session = struct {
             },
 
             // ---- skein:kernel/skein: program.Host, as the preview1 imports call it
-            else => return s.skein(f, a),
+            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_emit, .sk_await, .sk_resolve, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_http, .sk_deadline => return s.skein(f, a),
+
+            // ---- wasi:http (#15): the recorded-call path of skein.http
+            else => return s.httpCall(f, a),
         }
     }
 
@@ -1015,6 +1191,321 @@ const Session = struct {
             }
             return out.toOwnedSlice();
         }
+    }
+
+    // -------------------------------------------------- wasi:http (#15)
+
+    fn fieldsOf(s: *Session, v: *const Val) Abort!*@FieldType(Res, "fields") {
+        const r = try s.get(try s.repOf(v));
+        if (r.* != .fields) return s.fatal("component: not a fields");
+        return &r.fields;
+    }
+
+    fn oreqOf(s: *Session, v: *const Val) Abort!*OutReq {
+        return switch ((try s.get(try s.repOf(v))).*) {
+            .oreq => |q| q,
+            else => s.fatal("component: not an outgoing-request"),
+        };
+    }
+
+    fn optsOf(s: *Session, v: *const Val) Abort!*http.Options {
+        return switch ((try s.get(try s.repOf(v))).*) {
+            .opts => |o| o,
+            else => s.fatal("component: not a request-options"),
+        };
+    }
+
+    fn irespOf(s: *Session, v: *const Val) Abort!*InResp {
+        return switch ((try s.get(try s.repOf(v))).*) {
+            .iresp => |r| r,
+            else => s.fatal("component: not an incoming-response"),
+        };
+    }
+
+    fn newFields(s: *Session, f: *http.Fields, ro: bool) Abort!Val {
+        return s.newRes(.fields, .{ .fields = .{ .f = f, .ro = ro } });
+    }
+
+    /// A hidden fd over a pipe: a body's stream, read and written by the stream calls as any fd.
+    fn pipeFd(s: *Session, pipe: *wasi.Pipe, write_end: bool) Abort!Stream {
+        const d = try s.alloc.create(wasi.Desc);
+        // ino 0: an inode number from the vfs would shift the numbers the program sees later.
+        d.* = .{ .t = .pipe, .pipe = pipe, .wend = write_end, .ino = 0 };
+        const h = s.next_hidden;
+        s.next_hidden += 1;
+        try s.p.fds.put(h, d);
+        return .{ .fd = h, .owned = true };
+    }
+
+    fn httpCall(s: *Session, f: F, a: []Val) Abort!?Val {
+        const A = s.alloc;
+        switch (f) {
+            // ---- fields
+            .h_fields_new => {
+                const fl = try A.create(http.Fields);
+                fl.* = http.Fields.init(A);
+                return try s.newFields(fl, false);
+            },
+            .h_fields_from_list => {
+                const fl = try A.create(http.Fields);
+                fl.* = http.Fields.init(A);
+                const l = a[0].of.list;
+                for (0..l.size) |i| {
+                    const td: [*]Val = @ptrCast(l.data[i].of.tuple.data);
+                    const name = str(&td[0]);
+                    const value = try listBytes(A, &td[1]);
+                    if (!http.validName(name) or !http.validValue(value)) return vErr(variant("invalid-syntax", null));
+                    try fl.append(name, value);
+                }
+                return vOk(try s.newFields(fl, false));
+            },
+            .h_fields_get => {
+                const fl = (try s.fieldsOf(&a[0])).f;
+                const name = str(&a[1]);
+                var n: usize = 0;
+                for (fl.list.items) |e| {
+                    if (std.ascii.eqlIgnoreCase(e.name, name)) n += 1;
+                }
+                var l = listUninit(n);
+                var i: usize = 0;
+                for (fl.list.items) |e| if (std.ascii.eqlIgnoreCase(e.name, name)) {
+                    l.data[i] = vBytes(e.value);
+                    i += 1;
+                };
+                return .{ .kind = c.WASMTIME_COMPONENT_LIST, .of = .{ .list = l } };
+            },
+            .h_fields_has => return boolean((try s.fieldsOf(&a[0])).f.has(str(&a[1]))),
+            .h_fields_set => {
+                const fr = try s.fieldsOf(&a[0]);
+                if (fr.ro) return vErr(variant("immutable", null));
+                const name = str(&a[1]);
+                if (!http.validName(name)) return vErr(variant("invalid-syntax", null));
+                const l = a[2].of.list;
+                var vals = try A.alloc([]const u8, l.size);
+                for (0..l.size) |i| {
+                    vals[i] = try listBytes(A, item(l, i));
+                    if (!http.validValue(vals[i])) return vErr(variant("invalid-syntax", null));
+                }
+                fr.f.delete(name);
+                for (vals) |v| try fr.f.append(name, v);
+                return vOk(null);
+            },
+            .h_fields_delete => {
+                const fr = try s.fieldsOf(&a[0]);
+                if (fr.ro) return vErr(variant("immutable", null));
+                const name = str(&a[1]);
+                if (!http.validName(name)) return vErr(variant("invalid-syntax", null));
+                fr.f.delete(name);
+                return vOk(null);
+            },
+            .h_fields_append => {
+                const fr = try s.fieldsOf(&a[0]);
+                if (fr.ro) return vErr(variant("immutable", null));
+                const name = str(&a[1]);
+                const value = try listBytes(A, &a[2]);
+                if (!http.validName(name) or !http.validValue(value)) return vErr(variant("invalid-syntax", null));
+                try fr.f.append(name, value);
+                return vOk(null);
+            },
+            .h_fields_entries => {
+                const fl = (try s.fieldsOf(&a[0])).f;
+                var l = listUninit(fl.list.items.len);
+                for (fl.list.items, 0..) |e, i| l.data[i] = tuple(&.{ vStr(e.name), vBytes(e.value) });
+                return .{ .kind = c.WASMTIME_COMPONENT_LIST, .of = .{ .list = l } };
+            },
+            .h_fields_clone => return try s.newFields(try (try s.fieldsOf(&a[0])).f.clone(A), false),
+
+            // ---- outgoing-request
+            .h_req_new => {
+                const fr = try s.fieldsOf(&a[0]);
+                const q = try A.create(OutReq);
+                q.* = .{ .headers = fr.f };
+                return try s.newRes(.outgoing_request, .{ .oreq = q });
+            },
+            .h_req_body => {
+                const q = try s.oreqOf(&a[0]);
+                if (q.body_taken) return vErr(null);
+                q.body_taken = true;
+                q.body = try wasi.Pipe.init(A, MAX_BODY, "");
+                return vOk(try s.newRes(.outgoing_body, .{ .obody = .{ .req = q } }));
+            },
+            .h_req_method => return methodValue((try s.oreqOf(&a[0])).method),
+            .h_req_set_method => {
+                const q = try s.oreqOf(&a[0]);
+                const v = a[1].of.variant;
+                const case = v.discriminant.data[0..v.discriminant.size];
+                if (std.mem.eql(u8, case, "other")) {
+                    const m = str(v.val);
+                    if (!http.validName(m)) return vErr(null);
+                    q.method = try A.dupe(u8, m);
+                } else q.method = try std.ascii.allocUpperString(A, case);
+                return vOk(null);
+            },
+            .h_req_path => return optStr((try s.oreqOf(&a[0])).path),
+            .h_req_set_path => {
+                const q = try s.oreqOf(&a[0]);
+                q.path = if (a[1].of.option) |o| try A.dupe(u8, str(o)) else null;
+                return vOk(null);
+            },
+            .h_req_scheme => {
+                const q = try s.oreqOf(&a[0]);
+                const sc = q.scheme orelse return vNone();
+                if (std.mem.eql(u8, sc, "http")) return vSome(variant("HTTP", null));
+                if (std.mem.eql(u8, sc, "https")) return vSome(variant("HTTPS", null));
+                return vSome(variant("other", vStr(sc)));
+            },
+            .h_req_set_scheme => {
+                const q = try s.oreqOf(&a[0]);
+                if (a[1].of.option) |o| {
+                    const v = o.*.of.variant;
+                    const case = v.discriminant.data[0..v.discriminant.size];
+                    q.scheme = if (std.mem.eql(u8, case, "HTTP")) "http" else if (std.mem.eql(u8, case, "HTTPS")) "https" else try A.dupe(u8, str(v.val));
+                } else q.scheme = null;
+                return vOk(null);
+            },
+            .h_req_authority => return optStr((try s.oreqOf(&a[0])).authority),
+            .h_req_set_authority => {
+                const q = try s.oreqOf(&a[0]);
+                q.authority = if (a[1].of.option) |o| try A.dupe(u8, str(o)) else null;
+                return vOk(null);
+            },
+            .h_req_headers => return try s.newFields((try s.oreqOf(&a[0])).headers, true),
+
+            // ---- request-options (nanoseconds)
+            .h_opts_new => {
+                const o = try A.create(http.Options);
+                o.* = .{};
+                return try s.newRes(.request_options, .{ .opts = o });
+            },
+            .h_opts_connect => return optU64((try s.optsOf(&a[0])).connect),
+            .h_opts_first_byte => return optU64((try s.optsOf(&a[0])).first_byte),
+            .h_opts_between => return optU64((try s.optsOf(&a[0])).between_bytes),
+            .h_opts_set_connect => {
+                (try s.optsOf(&a[0])).connect = if (a[1].of.option) |o| o.*.of.u64 else null;
+                return vOk(null);
+            },
+            .h_opts_set_first_byte => {
+                (try s.optsOf(&a[0])).first_byte = if (a[1].of.option) |o| o.*.of.u64 else null;
+                return vOk(null);
+            },
+            .h_opts_set_between => {
+                (try s.optsOf(&a[0])).between_bytes = if (a[1].of.option) |o| o.*.of.u64 else null;
+                return vOk(null);
+            },
+
+            // ---- outgoing-body: buffered whole
+            .h_obody_write => {
+                const r = try s.get(try s.repOf(&a[0]));
+                if (r.* != .obody) return s.fatal("component: not an outgoing-body");
+                if (r.obody.written) return vErr(null);
+                r.obody.written = true;
+                return vOk(try s.newRes(.output_stream, .{ .out = try s.pipeFd(r.obody.req.body.?, true) }));
+            },
+            .h_obody_finish => {
+                const r = try s.get(try s.repOf(&a[0]));
+                if (r.* != .obody) return s.fatal("component: not an outgoing-body");
+                r.obody.req.finished = true;
+                if (a[1].of.option != null) return vErr(internalError("skein: request trailers are not supported"));
+                return vOk(null);
+            },
+
+            // ---- the call
+            .h_handle => {
+                const q = try s.oreqOf(&a[0]);
+                var opts: http.Options = .{};
+                if (a[1].of.option) |o| opts = (try s.optsOf(o)).*;
+                if (s.p.prog == null) return vErr(variant("HTTP-request-denied", null));
+                if (q.authority == null or q.authority.?.len == 0) return vErr(variant("HTTP-request-URI-invalid", null));
+                const fu = try A.create(Future);
+                fu.* = .{ .req = q, .opts = opts };
+                return vOk(try s.newRes(.future_response, .{ .future = fu }));
+            },
+            .h_future_subscribe, .h_trailers_subscribe => {
+                _ = try s.repOf(&a[0]); // taken: an untaken borrow outlives the call
+                return try s.newRes(.pollable, .{ .poll = null });
+            },
+            .h_future_get => {
+                const fu = switch ((try s.get(try s.repOf(&a[0]))).*) {
+                    .future => |x| x,
+                    else => return s.fatal("component: not a future-incoming-response"),
+                };
+                if (fu.taken) return vSome(vErr(null));
+                fu.taken = true;
+                return switch (try s.perform(fu)) {
+                    .resp => |r| vSome(vOk(vOk(try s.newRes(.incoming_response, .{ .iresp = r })))),
+                    .err => |e| vSome(vOk(vErr(if (e.msg) |m| internalError(m) else variant(e.code, null)))),
+                };
+            },
+            .h_error_code => {
+                _ = try s.repOf(&a[0]);
+                return vNone();
+            },
+
+            // ---- incoming-response / body
+            .h_resp_status => return .{ .kind = c.WASMTIME_COMPONENT_U16, .of = .{ .u16 = (try s.irespOf(&a[0])).status } },
+            .h_resp_headers => return try s.newFields((try s.irespOf(&a[0])).headers, true),
+            .h_resp_consume => {
+                const r = try s.irespOf(&a[0]);
+                if (r.consumed) return vErr(null);
+                r.consumed = true;
+                return vOk(try s.newRes(.incoming_body, .{ .ibody = .{ .resp = r } }));
+            },
+            .h_ibody_stream => {
+                const r = try s.get(try s.repOf(&a[0]));
+                if (r.* != .ibody) return s.fatal("component: not an incoming-body");
+                if (r.ibody.streamed) return vErr(null);
+                r.ibody.streamed = true;
+                const body = r.ibody.resp.body;
+                const pipe = try wasi.Pipe.init(A, @max(body.len, 1), body);
+                return vOk(try s.newRes(.input_stream, .{ .in = try s.pipeFd(pipe, false) }));
+            },
+            .h_ibody_finish => {
+                _ = try s.repOf(&a[0]);
+                return try s.newRes(.future_trailers, .{ .trailers = .{} });
+            },
+            .h_trailers_get => {
+                const r = try s.get(try s.repOf(&a[0]));
+                if (r.* != .trailers) return s.fatal("component: not a future-trailers");
+                if (r.trailers.taken) return vSome(vErr(null));
+                r.trailers.taken = true;
+                return vSome(vOk(vOk(vNone()))); // no trailers: the recorded response has none
+            },
+            else => unreachable,
+        }
+    }
+
+    const Performed = union(enum) { resp: *InResp, err: HttpErr };
+
+    /// The request as the recorded call `http` (http.zig), answered through
+    /// program.Host.http: the host's answer, recorded; on replay the record's.
+    fn perform(s: *Session, fu: *Future) Abort!Performed {
+        const A = s.alloc;
+        const imp = s.p.prog orelse return .{ .err = .{ .code = "HTTP-request-denied" } };
+        const q = fu.req;
+        const bytes = http.encodeRequest(A, .{
+            .method = q.method,
+            .scheme = q.scheme orelse "https",
+            .authority = q.authority.?,
+            .path = q.path orelse "/",
+            .headers = q.headers.list.items,
+            .body = if (q.body) |b| b.buf.items[b.head..] else null,
+            .options = fu.opts,
+        }) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else Performed{ .err = .{ .code = "internal-error", .msg = "skein: the request cannot be encoded" } };
+        const answer = imp.host.http(imp, bytes) catch |e| switch (e) {
+            error.Failed => return .{ .err = .{ .code = "internal-error", .msg = imp.last_error } },
+            error.Fatal => {
+                s.p.svc.state.fatal = imp.fatal;
+                return error.Abort;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        const r = (try http.decodeResponse(A, answer)) orelse return .{ .err = .{ .code = "internal-error", .msg = "skein: the host's http answer is not {status, headers, body}" } };
+        const hs = try A.create(http.Fields);
+        hs.* = http.Fields.init(A);
+        try hs.list.appendSlice(r.headers);
+        const out = try A.create(InResp);
+        out.* = .{ .status = r.status, .headers = hs, .body = r.body };
+        return .{ .resp = out };
     }
 
     fn skein(s: *Session, f: F, a: []Val) Abort!?Val {
@@ -1211,6 +1702,34 @@ fn flags(names: []const []const u8) Val {
 
 fn datetime(ns: u64) Val {
     return record(&.{ .{ "seconds", u64v(ns / 1_000_000_000) }, .{ "nanoseconds", .{ .kind = c.WASMTIME_COMPONENT_U32, .of = .{ .u32 = @intCast(ns % 1_000_000_000) } } } });
+}
+
+fn item(l: c.wasmtime_component_vallist_t, i: usize) *const Val {
+    const d: [*]Val = @ptrCast(l.data);
+    return &d[i];
+}
+
+fn optStr(x: ?[]const u8) Val {
+    return if (x) |v| vSome(vStr(v)) else vNone();
+}
+
+fn optU64(x: ?u64) Val {
+    return if (x) |v| vSome(u64v(v)) else vNone();
+}
+
+/// wasi:http's error-code internal-error(some(msg)).
+fn internalError(msg: []const u8) Val {
+    return variant("internal-error", vSome(vStr(msg)));
+}
+
+/// A method as wasi:http's variant (the standard ones by name, else other).
+fn methodValue(m: []const u8) Val {
+    const std_methods = [_][]const u8{ "get", "head", "post", "put", "delete", "connect", "options", "trace", "patch" };
+    for (std_methods) |x| {
+        var up: [8]u8 = undefined;
+        if (std.mem.eql(u8, std.ascii.upperString(up[0..x.len], x), m)) return variant(x, null);
+    }
+    return variant("other", vStr(m));
 }
 
 fn str(v: *const Val) []const u8 {
