@@ -415,6 +415,46 @@ state CID, and a bootstrap packet can ship the index for a reader to verify
 rather than rebuild. Old spine nodes and old state records are prunable like
 intermediate trees; the log and what live chains reach are not.
 
+### Edges and their relation kinds
+
+The `edges` map is who points at what: target ‖ from ‖ seq ‖ ord →
+`[rel, locator?]`, from a chain (a thread or node) at an update. The kernel
+derives them (index.zig, as sqlite.ts did) from:
+
+| source | rel |
+|---|---|
+| an origin's `refs: [{to, rel, locator?}]` | the ref's own |
+| an origin's `launchedBy` | `launched-by` |
+| an update's `waitingOn` | `depends-on` |
+| an update's `resolution` | `resolves` |
+| an update's `emit` of type `launched` | `launched` |
+| each record the step **kept** (`keep`) with `refs: [{to, rel, locator?}]` (#37) | the ref's own |
+
+The last is how a program says what a record it keeps stands on, with the
+**relation kind** that decides whether a transaction's rejection (#37,
+docs/WALLET.md "Settlement") matters to it:
+
+| rel | meaning | propagates a rejection |
+|---|---|---|
+| `spends` | consumes an output of the target transaction | yes |
+| `admits` | an overlay admitted an output of it (#36; reserved) | yes |
+| `derives-from` | built on it (an action, a draft, a record computed from it) | yes |
+| `mentions` | merely names it (a message, a turn, a wallet result) | no |
+
+Propagation happens in **derived state**, never in threads: the wallet
+recomputes its maps from the records that remain (its own `dependents`
+map carries the same kinds), and an overlay's admitted outputs will be
+recomputed the same way (#36). A **thread** whose history took the
+transaction as input is never replayed — the log never un-happens anything.
+The rejection reaches it as a new input: a `status` entry for the
+transaction's CID goes to the thread awaiting that subject, which continues
+from where it stands (the fork-and-continue of #12, naming a different
+parent); what it believed before stays as its history. For a thread that
+only `mentions` the transaction nothing happens automatically; a program
+that wants to know subscribes: the wallet's `watch` op opts an identity in
+to `{kind: "settlement", txid, status, reason}` messages in its `settlement`
+box, which a subscription on that box routes to the program.
+
 ## Checkpoints
 
 A checkpoint is a commit of the log and the records it reaches, pushed as a
