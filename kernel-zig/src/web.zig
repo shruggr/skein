@@ -16,7 +16,7 @@
 //   skein_modules() → n                             dag-cbor [{name, cid}]: the pinned modules and files to install
 //   skein_put_block(cid, n, bytes, n) → 0 | < 0     a block, checked against its CID (install, import)
 //   skein_get_block(cid, n) → n | -1                a block's bytes
-//   skein_admit(frame, n) → n                       serve's `admit` ({entry, envelope?, body?}): the one call in; not yet processed
+//   skein_admit(frame, n) → n                       serve's `admit` ({entry, body?}): the one call in that writes; not yet processed
 //   skein_start() → n                               resume what the last run left (serve's `start`)
 //   skein_drain() → n                               process everything admitted (the step loop)
 //   skein_next_deadline() → ms | -1                 the earliest sleeper's deadline (the waker)
@@ -139,16 +139,14 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 2, issue #33): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 3, issue #40): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));
     rt = scheduler.Runtime.init(gpa, s.store(), r, .{
         .ctx = @ptrCast(s),
         .wallet = pWallet,
-        .resolve = pResolve,
         .http = pHttp,
-        .send = pSend,
         .on_sleep = pOnSleep,
         .say = pSay,
     }) catch |err| return fail(@errorName(err));
@@ -177,22 +175,6 @@ fn pWallet(_: *anyopaque, a: std.mem.Allocator, fr: []const u8) anyerror![]u8 {
 fn pHttp(_: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror![]u8 {
     const r = try request(a, "http", .{ .bytes = req });
     return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
-}
-
-fn pResolve(_: *anyopaque, a: std.mem.Allocator, h: []const u8, d: []const u8) Value {
-    var m = cbor.MapBuilder.init(a);
-    m.put("handle", cbor.string(h)) catch {};
-    m.put("domain", cbor.string(d)) catch {};
-    return request(a, "resolve", m.value()) catch |err| blk: {
-        var e = cbor.MapBuilder.init(a);
-        e.put("identityKey", .{ .bytes = "" }) catch {};
-        e.put("error", cbor.string(if (err == error.PeerError) last_peer_error else @errorName(err))) catch {};
-        break :blk e.value();
-    };
-}
-
-fn pSend(_: *anyopaque, _: std.mem.Allocator, o: Value) anyerror!void {
-    notifyValue("send", o);
 }
 
 fn pOnSleep(_: *anyopaque, _: []const u8, _: i64) void {
@@ -357,7 +339,7 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     }
     if (eq(u8, op, "admit")) {
         const entry = v.get("entry") orelse return error.BadRequest;
-        const res = try r.admit(a, entry, v.get("envelope"), Value.bytesOf(v.get("body")));
+        const res = try r.admit(a, entry, Value.bytesOf(v.get("body")));
         // Not processed here: skein_drain runs the step loop (the shim acknowledges first, once it is durable).
         return switch (res) {
             .ok => |c| reply(a, cbor.cidv(c), null, null),
@@ -408,15 +390,10 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
 
 const Capture = struct {
     lines: std.array_list.Managed([]u8),
-    sent: std.array_list.Managed([]u8),
 
     fn say(ctx: *anyopaque, line: []const u8) void {
         const c: *Capture = @ptrCast(@alignCast(ctx));
         c.lines.append(gpa.dupe(u8, line) catch return) catch return;
-    }
-    fn send(ctx: *anyopaque, a: std.mem.Allocator, o: Value) anyerror!void {
-        const c: *Capture = @ptrCast(@alignCast(ctx));
-        try c.sent.append(try gpa.dupe(u8, try cidm.format(a, Value.cidOf(o.get("emit")).?)));
     }
 };
 
@@ -436,9 +413,13 @@ fn copyLog(a: std.mem.Allocator, src: storem.Store, dst: storem.Store) !void {
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) return error.BadSignature;
-        for ([_][]const u8{ "genesis", "envelope", "body", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
+        for ([_][]const u8{ "genesis", "mail", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
             try dst.putBlock(x, b);
+        };
+        // A message's body (#40), beside its record.
+        if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
+            if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
         };
         switch (try dst.logAppend(a, e)) {
             .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,
@@ -467,8 +448,8 @@ fn replayInto(src_id: u32, dst_id: u32) !i32 {
     try copyLog(a, src.store(), dst.store());
 
     const r = try getRunner();
-    var cap = Capture{ .lines = .init(gpa), .sent = .init(gpa) };
-    const run = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say, .send = Capture.send });
+    var cap = Capture{ .lines = .init(gpa) };
+    const run = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say });
     run.witness = try scheduler.Witness.from(gpa, src.store());
     try run.start();
     run.kick();
@@ -479,8 +460,6 @@ fn replayInto(src_id: u32, dst_id: u32) !i32 {
     const w = o.writer();
     try w.writeAll("{\"lines\":[");
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
-    try w.writeAll("],\"sent\":[");
-    for (cap.sent.items, 0..) |l, i| try w.print("{s}\"{s}\"", .{ if (i > 0) "," else "", l });
     try dst.store().commit();
     const st = dst.ix.stats();
     try w.print("],\"state\":\"{s}\",\"index\":{{\"states\":{d},\"commits\":{d},\"nodes\":{d},\"bytes\":{d},\"record\":\"{s}\"}}}}\n", .{

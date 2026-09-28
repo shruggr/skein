@@ -1,5 +1,5 @@
 // loop: the turn loop (README.md, "Records"; docs/MESSAGES.md), launched by a
-// subscription (…, chat) → loop with the opening `chat` envelope as its input:
+// subscription (…, chat) → loop with the opening `chat` message as its input:
 // David's, or another agent's (the `message` tool of another instance). Its
 // sender is the thread's opener.
 //
@@ -11,17 +11,17 @@
 // by CID, which is what the inference peer holds (below):
 //
 //	system     {of: <tree>, role: "system", content}   (first, once: the conversation's prompt)
-//	user       {of: <chat envelope>, role: "user", text, tree?, model?, thinking?, annotations?}   (the opener's)
-//	assistant  {of: <completions envelope>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
+//	user       {of: <chat message>, role: "user", text, tree?, model?, thinking?, annotations?}   (the opener's)
+//	assistant  {of: <completions message>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
 //	tool       {of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}   (bash; outputs capped at 16 KiB)
-//	tool       {of: <their chat reply>, role: "tool", call, to, sent: <our chat envelope>, text}   (message)
+//	tool       {of: <their chat reply>, role: "tool", call, to, sent: <our chat message>, text}   (message)
 //	tool       {of: <entry>, role: "tool", call, to?, error}   (a message that could not be sent, or delivered)
 //	tool       {of: <say|present|annotation record>, role: "tool", call, text}   (the record's CID, as JSON)
 //	tool       {of: <entry>, role: "tool", call, error}   (a say/present/annotate call with bad arguments)
-//	error      {of: <completions envelope | outcome entry>, role: "error", error}
+//	error      {of: <completions message | entry>, role: "error", error}
 //
 // Kept beside the turns, not one of them: {kind: "missing", of: <completions
-// envelope>, missing: [<node>]} — the peer did not hold a node we named; and
+// message>, missing: [<node>]} — the peer did not hold a node we named; and
 // the conversation's artefacts (issue #19; docs/MESSAGES.md, "The turn
 // stream"):
 //
@@ -45,18 +45,20 @@
 // knows, with their addresses), after it if there are. It is kept as the system turn, so the
 // conversation keeps it however the tree moves on.
 //
-// Everything the loop sends a party is a `chat` — the same envelope in both
+// Everything the loop sends a party is a `chat` — the same body in both
 // directions — and it rests on the reply. A chat to a party this thread
 // already has a conversation with (it opened the thread, or replied to one of
-// our messages) is a reply to that party's latest envelope here (latestFrom),
+// our messages) is a reply to that party's latest message here (latestFrom),
 // so their waiting thread resumes with it; a chat to anyone else starts a new
 // conversation (no replyTo). A conversation is pairwise; two agents talking
 // alternate on one thread each.
 //
 // Tools: `bash` (a command in the shell over the working tree) and `message`
-// ({to: "@handle@domain", text}: a `chat` to another party, sealed to the
-// identity the handle resolves to through the host — skein.Resolve, attested
-// — then rest on the reply as on an `infer`; their reply is the tool result).
+// ({to: "@handle@domain", text}: a `chat` to another party — the identity the
+// handle resolves to, from the peer table, or on first contact through the
+// resolve program (an in-VM call; its BRC-169 lookup is recorded) — delivered
+// by the messagebox program over http (#40), then rest on the reply as on an
+// `infer`; their reply is the tool result).
 // Calls run one at a time, in order. With `defaults.tools` in the genesis
 // naming them (a comma-separated list; default none), three more: `say`
 // ({text}), `present` ({page, blocks?}) and `annotate` ({present, block?,
@@ -75,7 +77,7 @@
 // kept. These are sent, not kept: the turns hold the same facts.
 //
 // The answer: a turn ends with a `chat` to the opener, {text, tree, thread,
-// replyTo: <their latest envelope>}, and rests on their reply; that reply is
+// replyTo: <their latest message>}, and rests on their reply; that reply is
 // the next user turn.
 //
 // Per step, by why it runs:
@@ -87,11 +89,10 @@
 //	a reply to our `message`                   keep it as the tool result; run the next call
 //	the shell at rest                          keep the tool result; run the next call, or
 //	                                           emit `infer` again when none is left
-//	an awaited envelope was not delivered      (the host's `failed` outcome) a `message` →
-//	                                           an error tool result, run the next call; the
-//	                                           `infer` → an error, answered as an inference
-//	                                           error; the answer → an error turn, and the
-//	                                           thread ends (no reply can come)
+//	a send fails (the messagebox's error:      a `message` → an error tool result, run the
+//	  delivery is inside the step, #40)        next call; the `infer` → an error, answered as
+//	                                           an inference error; the answer → an error turn,
+//	                                           and the thread ends (no reply can come)
 package main
 
 import (
@@ -104,7 +105,6 @@ import (
 	"strings"
 
 	"github.com/fxamacker/cbor/v2"
-	"github.com/shruggr/skein/programs/envelope"
 	"github.com/shruggr/skein/programs/skein"
 )
 
@@ -115,7 +115,7 @@ const defaultModel = "ripper/qwen38"
 const outputCap = 16 << 10
 
 type args struct {
-	Envelope skein.CID `cbor:"envelope"`
+	Message  skein.CID `cbor:"message"`
 	Body     skein.CID `cbor:"body"`
 	Box      string    `cbor:"box"`
 	Sender   skein.Key `cbor:"sender"`
@@ -345,8 +345,6 @@ type loop struct {
 	last string
 	// the pages presented in this thread: their CIDs and block ids
 	presents []presented
-	// the opener's handle and domain, read once (for the turn stream and the answer)
-	openerName *skein.Name
 }
 
 type presented struct {
@@ -411,18 +409,16 @@ func run() error {
 		}
 	}
 	switch {
-	case step.Failed != nil:
-		return l.undelivered(step.Failed)
 	case step.Reply != nil && step.Reply.Box == "completions":
 		return l.completion(step.Reply)
 	case step.Reply != nil && l.messaging() != nil:
 		return l.messageDone(step.Reply)
 	case step.Reply != nil:
-		return l.chat(step.Reply.Envelope, step.Reply.Body)
+		return l.chat(step.Reply.Message, step.Reply.Body)
 	case len(step.Resolved) > 0:
 		return l.toolDone(step.Resolved[0])
 	default:
-		return l.chat(l.a.Envelope, l.a.Body)
+		return l.chat(l.a.Message, l.a.Body)
 	}
 }
 
@@ -493,35 +489,18 @@ func (l *loop) started(call toolCall) error {
 	return l.stream(record{Kind: "log", Of: l.lastAssistantCID(), Call: call.ID, Name: call.Function.Name, Event: "started"})
 }
 
-// opener: the handle and domain the opening chat's sender gave.
-func (l *loop) opener() (skein.Name, error) {
-	if l.openerName == nil {
-		opening, err := skein.Get(l.a.Envelope)
-		if err != nil {
-			return skein.Name{}, err
-		}
-		var env skein.Envelope
-		if err := skein.Decode(opening, &env); err != nil {
-			return skein.Name{}, err
-		}
-		l.openerName = &skein.Name{Handle: env.Sender.Handle, Domain: env.Sender.Domain}
-	}
-	return *l.openerName, nil
-}
-
 // stream sends a record to the opener in their `turn` box: a message, not awaited.
+// A record that cannot be delivered is noted on stderr and the turn goes on.
 func (l *loop) stream(r record) error {
-	n, err := l.opener()
-	if err != nil {
-		return err
+	if _, err := skein.Send(l.step, l.a.Sender, "turn", r, "", ""); err != nil {
+		fmt.Fprintln(os.Stderr, "loop: turn stream:", err)
 	}
-	_, err = envelope.Send(l.a.Sender.Hex(), n.Handle, n.Domain, "turn", r)
-	return err
+	return nil
 }
 
 // chat: the opener's line (the opening one, or their reply to our answer).
-func (l *loop) chat(envelope, body skein.CID) error {
-	_, plain, err := skein.Read(envelope, body)
+func (l *loop) chat(message, body skein.CID) error {
+	_, plain, err := skein.Read(message, body)
 	if err != nil {
 		return err
 	}
@@ -548,7 +527,7 @@ func (l *loop) chat(envelope, body skein.CID) error {
 			return err
 		}
 	}
-	user, err := l.keepTurn(turn{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model, Thinking: b.Thinking, Annotations: b.Annotations})
+	user, err := l.keepTurn(turn{Of: message, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model, Thinking: b.Thinking, Annotations: b.Annotations})
 	if err != nil {
 		return err
 	}
@@ -570,7 +549,7 @@ func (l *loop) chat(envelope, body skein.CID) error {
 
 // completion: the inference peer's answer to our `infer`.
 func (l *loop) completion(r *skein.Answer) error {
-	_, plain, err := skein.Read(r.Envelope, r.Body)
+	_, plain, err := skein.Read(r.Message, r.Body)
 	if err != nil {
 		return err
 	}
@@ -584,7 +563,7 @@ func (l *loop) completion(r *skein.Answer) error {
 		// the first of the conversation (no assistant turn yet), or the
 		// resend itself — is an error.
 		if l.last != "missing" && l.lastAssistant() != nil {
-			if _, err := l.put("missing", turn{Kind: "missing", Of: r.Envelope, Missing: b.Missing}); err != nil {
+			if _, err := l.put("missing", turn{Kind: "missing", Of: r.Message, Missing: b.Missing}); err != nil {
 				return err
 			}
 			return l.infer(true)
@@ -596,13 +575,13 @@ func (l *loop) completion(r *skein.Answer) error {
 		if msg == "" {
 			msg = "completion has no message"
 		}
-		if err := l.fail(r.Envelope, msg); err != nil {
+		if err := l.fail(r.Message, msg); err != nil {
 			return err
 		}
 		return l.answer("inference failed: " + msg)
 	}
 	m := b.Message
-	c, err := l.keepTurn(turn{Of: r.Envelope, Role: "assistant", Content: m.Content, Reasoning: m.Reasoning, ToolCalls: m.ToolCalls, Model: b.Model, Ms: b.Ms, Usage: b.Usage})
+	c, err := l.keepTurn(turn{Of: r.Message, Role: "assistant", Content: m.Content, Reasoning: m.Reasoning, ToolCalls: m.ToolCalls, Model: b.Model, Ms: b.Ms, Usage: b.Usage})
 	if err != nil {
 		return err
 	}
@@ -655,11 +634,14 @@ func (l *loop) next() error {
 		if call.Function.Name == "message" {
 			to, h, d, text, msg := messageArgs(call)
 			if msg == "" {
-				key, err := skein.Resolve(h, d)
+				key, err := skein.Resolve(l.step, h, d)
 				if err == nil {
-					return l.message(key, to, h, d, text)
+					sent, err := l.message(key, h, d, text)
+					if err == nil {
+						return skein.Await(sent)
+					}
 				}
-				msg = err.Error()
+				msg = "could not deliver to " + to + ": " + err.Error()
 			}
 			if err := l.result(call, turn{Of: l.step.Entry, To: to, Error: msg}); err != nil {
 				return err
@@ -716,24 +698,21 @@ func messageArgs(call toolCall) (to, handle, domain, text, problem string) {
 	return "@" + parts[0] + "@" + parts[1], parts[0], parts[1], a.Text, ""
 }
 
-// message: a `chat` to another agent (sealed to the identity its handle
-// resolved to); rest on their reply, as on an `infer`. If this thread already
-// has a conversation with that identity — it opened the thread, or answered
-// one of our messages — the chat is a reply to their latest envelope here, so
-// their waiting thread resumes with it; else it starts a new conversation.
-func (l *loop) message(key, to, handle, domain, text string) error {
-	replyTo, err := l.latestFrom(key)
+// message: a `chat` to another party (the identity its handle resolved to),
+// delivered over http by the messagebox (#40); the caller rests on the reply,
+// as on an `infer`. If this thread already has a conversation with that
+// identity — it opened the thread, or answered one of our messages — the chat
+// is a reply to their latest message here, so their waiting thread resumes
+// with it; else it starts a new conversation.
+func (l *loop) message(key skein.Key, handle, domain, text string) (skein.CID, error) {
+	replyTo, err := l.latestFrom(key.Hex())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	env, err := envelope.Send(key, handle, domain, "chat", chatBody{Text: text, ReplyTo: replyTo})
-	if err != nil {
-		return err
-	}
-	return skein.Await(env)
+	return skein.Send(l.step, key, "chat", chatBody{Text: text, ReplyTo: replyTo}, handle, domain)
 }
 
-// latestFrom: the latest envelope this thread received from identity `key` —
+// latestFrom: the latest message this thread received from identity `key` —
 // the opener's chats (user turns) and the answers to our messages (tool turns
 // with `sent`) — or nil if it has none.
 func (l *loop) latestFrom(key string) (skein.CID, error) {
@@ -742,15 +721,11 @@ func (l *loop) latestFrom(key string) (skein.CID, error) {
 		if r.Role != "user" && !(r.Role == "tool" && len(r.Sent) > 0) {
 			continue
 		}
-		raw, err := skein.Get(r.Of)
+		m, err := skein.ReadMessage(r.Of)
 		if err != nil {
-			return nil, fmt.Errorf("get envelope: %w", err)
+			return nil, err
 		}
-		var env skein.Envelope
-		if err := skein.Decode(raw, &env); err != nil {
-			return nil, fmt.Errorf("envelope record: %w", err)
-		}
-		if env.Sender.IdentityKey.Hex() == key {
+		if m.Sender.Hex() == key {
 			latest = r.Of
 		}
 	}
@@ -767,34 +742,11 @@ func (l *loop) messaging() *toolCall {
 	return &p[0]
 }
 
-// undelivered: the host could not deliver what this thread rests on. A
-// `message` becomes an error result for the model ("could not deliver to
-// @h@d: reason"), as an unresolvable handle is; the `infer`, an inference
-// error answered to the opener; the answer itself is noted and the turn ends:
-// the thread finishes, since the reply it awaited cannot come.
-func (l *loop) undelivered(f *skein.DeliveryFailed) error {
-	if call := l.messaging(); call != nil && f.Box == "chat" {
-		to, _, _, _, _ := messageArgs(*call)
-		if err := l.result(*call, turn{Of: l.step.Entry, To: to, Error: "could not deliver to " + to + ": " + f.Reason}); err != nil {
-			return err
-		}
-		return l.next()
-	}
-	if f.Box == "infer" {
-		msg := "could not deliver to the inference peer: " + f.Reason
-		if err := l.fail(l.step.Entry, msg); err != nil {
-			return err
-		}
-		return l.answer("inference failed: " + msg)
-	}
-	return l.fail(l.step.Entry, "could not deliver the answer: "+f.Reason)
-}
-
 // messageDone: the other party's reply to our message: kept as its tool result.
 func (l *loop) messageDone(r *skein.Answer) error {
 	call := l.messaging()
 	to, _, _, _, _ := messageArgs(*call)
-	_, plain, err := skein.Read(r.Envelope, r.Body)
+	_, plain, err := skein.Read(r.Message, r.Body)
 	if err != nil {
 		return err
 	}
@@ -804,7 +756,7 @@ func (l *loop) messageDone(r *skein.Answer) error {
 	if err := skein.Decode(plain, &b); err != nil {
 		return fmt.Errorf("message answer: %w", err)
 	}
-	if err := l.result(*call, turn{Of: r.Envelope, To: to, Sent: r.ReplyTo, Text: b.Text}); err != nil {
+	if err := l.result(*call, turn{Of: r.Message, To: to, Sent: r.ReplyTo, Text: b.Text}); err != nil {
 		return err
 	}
 	return l.next()
@@ -835,8 +787,8 @@ func (l *loop) launch(cmd string) error {
 // answered — or, the first time and when `all`, the whole conversation.
 // `model` and `thinking`: the latest user turn's, else the genesis defaults.
 func (l *loop) infer(all bool) error {
-	peer := l.step.Peers["infer"].Hex()
-	if peer == "" {
+	peer := l.step.Peers["infer"]
+	if len(peer) == 0 {
 		return l.answer("no inference peer is configured (genesis peers.infer)")
 	}
 	model, thinking := l.step.Defaults["model"], l.step.Defaults["thinking"]
@@ -877,15 +829,20 @@ func (l *loop) infer(all bool) error {
 		}
 		body.Nodes = append(body.Nodes, b)
 	}
-	env, err := envelope.Send(peer, "", "", "infer", body)
+	n, _ := l.step.NameOf(peer.Hex())
+	sent, err := skein.Send(l.step, peer, "infer", body, n.Handle, n.Domain)
 	if err != nil {
-		return err
+		msg := "could not deliver to the inference peer: " + err.Error()
+		if err := l.fail(l.step.Entry, msg); err != nil {
+			return err
+		}
+		return l.answer("inference failed: " + msg)
 	}
-	return skein.Await(env)
+	return skein.Await(sent)
 }
 
 // answer: the turn's answer to the opener — a `chat` replying to their latest
-// envelope in this thread (the chat that opened the turn, or their reply to a
+// message in this thread (the chat that opened the turn, or their reply to a
 // message) — then rest on their reply, which continues the conversation.
 func (l *loop) answer(text string) error {
 	replyTo, err := l.latestFrom(l.a.Sender.Hex())
@@ -893,17 +850,14 @@ func (l *loop) answer(text string) error {
 		return err
 	}
 	if len(replyTo) == 0 {
-		replyTo = l.a.Envelope
+		replyTo = l.a.Message
 	}
-	n, err := l.opener()
+	sent, err := skein.Send(l.step, l.a.Sender, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo}, "", "")
 	if err != nil {
-		return err
+		// The reply this turn would rest on cannot come: note it, and the thread ends.
+		return l.fail(l.step.Entry, "could not deliver the answer: "+err.Error())
 	}
-	c, err := envelope.Send(l.a.Sender.Hex(), n.Handle, n.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
-	if err != nil {
-		return err
-	}
-	return skein.Await(c)
+	return skein.Await(sent)
 }
 
 // lastAssistantCID: the latest assistant turn's CID (what a tool call is of).

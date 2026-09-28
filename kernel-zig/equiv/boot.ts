@@ -179,7 +179,7 @@ try {
     const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; subscriptions: unknown[] };
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
-    check(Object.keys(g.programs).sort().join() === `head-handler,loop,messagebox,objects-handler,run-handler,shell,subscribe-handler${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
+    check(Object.keys(g.programs).sort().join() === `frontdoor,head-handler,loop,messagebox,objects-handler,run-handler,shell,subscribe-handler${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
     check(keyHex((await k.genesis() as { owner: Uint8Array }).owner) === ownerId, `${h}: $owner is the host's owner`);
   }
   await talk(router, ["alpha", "beta"]);

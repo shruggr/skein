@@ -13,3 +13,5 @@ programs/fetch/zig-out/
 web/kernel/dist/
 programs/overlay/.zig-cache/
 programs/overlay/zig-out/
+programs/*/.zig-cache/
+programs/*/zig-out/

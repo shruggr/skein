@@ -1,7 +1,7 @@
-// The messagebox program (#40): Zig 0.15.2, wasm32-wasi, over the kernel's own
+// The resolve program (#40): Zig 0.15.2, wasm32-wasi, over the kernel's own
 // dag-cbor and CIDs (kernel-zig/src) and the programs' shared lib (programs/lib).
 //
-//   zig build        → zig-out/bin/messagebox.wasm (scripts/build-programs.sh copies it to wasm/)
+//   zig build        → zig-out/bin/resolve.wasm (scripts/build-programs.sh copies it to wasm/)
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     const brc = b.createModule(.{ .root_source_file = b.path("../lib/brc104.zig"), .target = t, .optimize = o, .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "sk.zig", .module = sk } } });
     const dagjson = b.createModule(.{ .root_source_file = b.path("../lib/dagjson.zig"), .target = t, .optimize = o, .imports = &.{ .{ .name = "cbor", .module = cbor } } });
     const exe = b.addExecutable(.{
-        .name = "messagebox",
+        .name = "resolve",
         .root_module = b.createModule(.{
             .root_source_file = b.path("main.zig"),
             .target = t,

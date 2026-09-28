@@ -5,9 +5,10 @@
 //
 // The kernel is this process: the store, the log, the scheduler, the
 // programs. Everything outside is the router's: it admits entries (the one
-// call in), answers the kernel's `wallet` and `resolve` requests (the oracle
-// and the resolver), carries its emits (`send`) and keeps its earliest
-// sleeper deadline (`sleepers`) to wake it. Log lines go to stderr.
+// call in that writes), makes `call`s (#40: a program's function over the
+// state, the front door's), answers the kernel's `wallet` and `http`
+// requests (the oracle and the network) and keeps its earliest sleeper
+// deadline (`sleepers`) to wake it. Log lines go to stderr.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -194,7 +195,7 @@ const Server = struct {
             s.reply(a, id, cbor.optCid(try s.store.byEnvelope(a, c)) orelse .null, null, null);
         } else if (eq(u8, op, "admit")) {
             const entry = v.get("entry") orelse return error.BadRequest;
-            const res = try s.rt.admit(a, entry, v.get("envelope"), Value.bytesOf(v.get("body")));
+            const res = try s.rt.admit(a, entry, Value.bytesOf(v.get("body")));
             switch (res) {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
                 .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
@@ -283,22 +284,6 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
-    fn pResolve(p: *anyopaque, a: std.mem.Allocator, h: []const u8, d: []const u8) Value {
-        var m = cbor.MapBuilder.init(a);
-        m.put("handle", cbor.string(h)) catch {};
-        m.put("domain", cbor.string(d)) catch {};
-        return ctx(p).request(a, "resolve", m.value()) catch |err| blk: {
-            var e = cbor.MapBuilder.init(a);
-            e.put("identityKey", .{ .bytes = "" }) catch {};
-            e.put("error", cbor.string(if (err == error.PeerError) last_peer_error else @errorName(err))) catch {};
-            break :blk e.value();
-        };
-    }
-
-    fn pSend(p: *anyopaque, a: std.mem.Allocator, o: Value) anyerror!void {
-        ctx(p).notify(a, "send", o);
-    }
-
     fn pOnSleep(p: *anyopaque, _: []const u8, _: i64) void {
         const s = ctx(p);
         var arena = std.heap.ArenaAllocator.init(s.gpa);
@@ -354,9 +339,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
     server.rt = try scheduler.Runtime.init(gpa, server.store, r, .{
         .ctx = &server,
         .wallet = Server.pWallet,
-        .resolve = Server.pResolve,
         .http = Server.pHttp,
-        .send = Server.pSend,
         .on_sleep = Server.pOnSleep,
         .say = Server.pSay,
     });

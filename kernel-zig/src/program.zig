@@ -37,9 +37,7 @@ pub const Host = struct {
     putBlock: *const fn (imp: *Imports, c: []const u8, bytes: []const u8) Err!void,
     keep: *const fn (imp: *Imports, c: []const u8) Err!void,
     launch: *const fn (imp: *Imports, prog: []const u8, args: []const u8) Err![]const u8,
-    emit: *const fn (imp: *Imports, c: []const u8) Err![]const u8,
     awaitReply: *const fn (imp: *Imports, c: []const u8) Err!void,
-    resolve: *const fn (imp: *Imports, name: []const u8) Err![]const u8,
     head: *const fn (imp: *Imports, name: []const u8) Err!?[]const u8,
     advance: *const fn (imp: *Imports, name: []const u8, tree: []const u8) Err!void,
     subscribe: *const fn (imp: *Imports, op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8) Err!void,
@@ -128,12 +126,10 @@ pub const Imports = struct {
                 return 0;
             },
             .launch => return imp.out(p, try h.launch(imp, try imp.cidAt(p, a[0], a[1]), try imp.cidAt(p, a[2], a[3])), a[4], a[5]),
-            .emit => return imp.out(p, try h.emit(imp, try imp.cidAt(p, a[0], a[1])), a[2], a[3]),
             .@"await" => {
                 try h.awaitReply(imp, try imp.cidAt(p, a[0], a[1]));
                 return 0;
             },
-            .resolve => return imp.out(p, try h.resolve(imp, try imp.strAt(p, a[0], a[1])), a[2], a[3]),
             .head => return imp.out(p, (try h.head(imp, try imp.strAt(p, a[0], a[1]))) orelse "", a[2], a[3]),
             .advance => {
                 const name = try imp.strAt(p, a[0], a[1]);

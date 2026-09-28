@@ -12,17 +12,19 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
-    .{ .name = "run-handler", .cid = "bafkreif57vlek2v7lbfa5y43txx7svtlseanithrjxjldqveknwvt3vfwm" },
-    .{ .name = "objects-handler", .cid = "bafkreiauysb5a3aj7ucs3eqeq27qgu5xo6vcw2olx5lhbbr54xy5qalgm4" },
-    .{ .name = "head-handler", .cid = "bafkreiftxmnqsysrb4cfz5me7suztijkx5deovtaquohi2kzledivjq2ua" },
-    .{ .name = "subscribe-handler", .cid = "bafkreibz2k42tzmitpxy5xqzakko6xuxigcp3x6gcg4dt64mqpztnnazia" },
-    .{ .name = "loop", .cid = "bafkreiabv7a5lwimtdlt3bj4ac7il27xdurdil2lgbngavvotpfb3m3doq" },
+    .{ .name = "run-handler", .cid = "bafkreidt7tsn5l3xg2jyt72cmtd23ggopfsol4gdbdiu7kb3b2jmxrm2i4" },
+    .{ .name = "objects-handler", .cid = "bafkreiht7bb4iry6hg6tcr4j73rtunxuxh3kgjizsdqpvjrfvaxx2idtyy" },
+    .{ .name = "head-handler", .cid = "bafkreibc5a5u375bxqpq6oo6r3tzfv23qku3jnjtejwh6dxgk2kwljs32m" },
+    .{ .name = "subscribe-handler", .cid = "bafkreiaotl4zkhkuxe2yykptlkhc23imyawimbt5vhuxqxjamov5k2e7di" },
+    .{ .name = "loop", .cid = "bafkreihza6cihz3rdmxl77rrqck37x65aq2aszxopofeprqapa2cebkuti" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreihkpdmj2fdp6c7xowww5kyi3noetmentxwsw7zdv6vrvsaf6w2t5q" },
+    .{ .name = "wallet", .cid = "bafkreid2kaqltmak2eayvteju5gopb7z5eww2mk5ciiysfbgvp6ptum3aa" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreih4oiormhd3vxjoee3xl65jgadyv6lxcgrnisnboa2lkrnckyunbu" },
+    .{ .name = "messagebox", .cid = "bafkreieqrn4illeokbe5f6amrcom6vq2nnowk6cpmyzedond4ienizacgu" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreiasbghv2rbnzvy75af32rkqnhrbnidnt7pyi3st3mnjn6kwuumj3a" },
+    // The peer table's writer (#40): BRC-169 resolve, the admin's `peers`, `register` claims (programs/resolve).
+    .{ .name = "resolve", .cid = "bafkreicxsp4aoppj6xvfmdgh5lh7g4dxmajv7zepyykaovrrixujvnv63y" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -92,21 +94,12 @@ pub fn moduleCid(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
 }
 
 const handler_inputs = [_]cbor.Entry{
-    .{ .key = "envelope", .value = .{ .string = "cid" } },
+    .{ .key = "message", .value = .{ .string = "cid" } },
     .{ .key = "body", .value = .{ .string = "cid" } },
     .{ .key = "box", .value = .{ .string = "string" } },
     .{ .key = "sender", .value = .{ .string = "identity" } },
 };
 
-const mail_inputs = [_]cbor.Entry{
-    .{ .key = "op", .value = .{ .string = "string" } },
-    .{ .key = "recipient", .value = .{ .string = "identity" } },
-    .{ .key = "box", .value = .{ .string = "string?" } },
-    .{ .key = "sender", .value = .{ .string = "identity?" } },
-    .{ .key = "messageId", .value = .{ .string = "string?" } },
-    .{ .key = "body", .value = .{ .string = "bytes?" } },
-    .{ .key = "messageIds", .value = .{ .string = "array?" } },
-};
 
 const call_inputs = [_]cbor.Entry{
     .{ .key = "event", .value = .{ .string = "cid?" } },
@@ -120,13 +113,14 @@ const handlers = [_]Handler{
     .{ .name = "objects-handler", .services = &.{}, .description = "The `objects` box: read the bundle {records: [{cid, bytes}], root?}, store each record; a root becomes `main` if there is none." },
     .{ .name = "head-handler", .services = &.{}, .description = "The `head` box: read the body {name, tree}, advance the named head to the tree." },
     .{ .name = "subscribe-handler", .services = &.{}, .description = "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store)." },
-    .{ .name = "loop", .services = &.{ "infer", "outcomes" }, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs." },
-    .{ .name = "messagebox", .services = &.{}, .inputs = &mail_inputs, .description = "The reserved box `:mail`: the BRC-33 messagebox's records for the identities this instance keeps mail for — {op: put, recipient, box, sender, messageId, body} keeps a message, {op: ack, recipient, messageIds} deletes; state is the head `mailbox`." },
+    .{ .name = "loop", .services = &.{"infer"}, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs. Everything it sends goes through the messagebox's `send` (#40)." },
+    .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
+    .{ .name = "resolve", .services = &.{}, .description = "The peer table (#40, head `peers`): `resolve` {handle, domain} looks a BRC-169 handle up (recorded http) and writes its record; the `peers` box (the admin) adds or removes one; the `register` box takes a claim {handle, domain} and records it if it resolves to the sender." },
     .{ .name = "frontdoor", .services = &.{}, .inputs = &call_inputs, .description = "The front door: called with each HTTP request (fn http); runs BRC-103/104 against the session records, routes by the routes table, invokes the handler, signs the answer; stepped on `:sessions` to keep a handshake's session (head `sessions`)." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox", "frontdoor" };
+pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox", "frontdoor", "resolve" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {

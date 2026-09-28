@@ -11,7 +11,8 @@ const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
 pub const Sub = struct { sender: ?[]const u8, box: ?[]const u8, handler: []const u8 };
-pub const Rule = struct { op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8 };
+/// A rule's box: absent (null) is any box — only a genesis writes such a rule (#40: a mailbox instance's catch-all).
+pub const Rule = struct { op: []const u8, sender: ?[]const u8, box: ?[]const u8, handler: []const u8 };
 
 fn originValue(a: std.mem.Allocator) !Value {
     var m = cbor.MapBuilder.init(a);
@@ -55,7 +56,7 @@ pub fn fold(a: std.mem.Allocator, updates: []const Value) ![]Sub {
         const r = Rule{
             .op = Value.str(u.get("op")) orelse "",
             .sender = Value.bytesOf(u.get("sender")),
-            .box = Value.str(u.get("box")) orelse "",
+            .box = Value.str(u.get("box")),
             .handler = Value.cidOf(u.get("handler")) orelse "",
         };
         var idx: ?usize = null;
@@ -97,7 +98,7 @@ pub fn subscribe(a: std.mem.Allocator, s: Store, r: Rule, by: By) !?[]u8 {
     var m = cbor.MapBuilder.init(a);
     try m.put("op", cbor.string(r.op));
     try m.put("sender", if (r.sender) |x| Value{ .bytes = x } else null);
-    try m.put("box", cbor.string(r.box));
+    try m.put("box", cbor.optStr(r.box));
     try m.put("handler", cbor.cidv(r.handler));
     try m.put("thread", cbor.optCid(by.thread));
     try m.put("input", cbor.cidv(by.input));

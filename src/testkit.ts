@@ -238,3 +238,21 @@ export async function brc169Host(o: { certifier?: string; handles?: boolean; ans
   const { port } = server.address() as { port: number };
   return { origin: `http://127.0.0.1:${port}`, asked, close: () => new Promise((r) => server.close(() => r())) };
 }
+
+/**
+ * An Outbox (deploy.ts) for the frozen TypeScript runtime (#40: deploy speaks
+ * raw BRC-33 to a front door; the frozen runtime still takes BRC-169
+ * envelopes): each body sealed as the owner and sent on the hub, `created`
+ * strictly increasing on `clock`.
+ */
+export function envelopeOutbox(wallet: import("./wallet.ts").WalletInterface, box: { send(m: { recipient: string; box: string; body: object }): Promise<void> }, clock: () => number = Date.now) {
+  let last = 0;
+  return {
+    async send(recipient: string, b: string, body: Uint8Array): Promise<void> {
+      const { seal } = await import("./envelope.ts");
+      last = Math.max(clock(), last + 1);
+      const env = await seal(wallet, { recipient: { identityKey: recipient, handle: "skein", domain: "localhost" }, body, created: new Date(last).toISOString() });
+      await box.send({ recipient, box: b, body: env });
+    },
+  };
+}

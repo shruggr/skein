@@ -1,13 +1,12 @@
 // Deployment via `objects` (#23): the host sends an agent's directory into its
 // instance exactly as `bin/skein import` does — git objects in ≤ 1 MiB bundles
-// to the instance's `objects` box, the root tree on the last one — signed by
-// the owner, the identity the genesis subscribes to `objects` (and `head`). So
-// the personality arrives as a signed message, admitted as a host-signed log
-// entry. The first root sets `main` (objects-handler does that when there is
-// none); a redeploy of a changed directory then moves `main` through the
-// `head` box, so a new conversation starts from the new tree. The messagebox
-// queues all of it until the instance's delivery collects it: running or not
-// does not matter here.
+// to the instance's `objects` box, the root tree on the last one — sent as
+// the owner, the identity the genesis subscribes to `objects` (and `head`), as
+// raw BRC-33 on the owner's BRC-104 session with the instance's front door
+// (#40: src/client/raw.ts). So the personality arrives as a message, admitted
+// as a log entry. The first root sets `main` (objects-handler does that when
+// there is none); a redeploy of a changed directory then moves `main` through
+// the `head` box, so a new conversation starts from the new tree.
 //
 // The host adds files of its own at the tree's root (`files`): ROSTER.md
 // (#27), generated from host.db, never written into the directory. They are
@@ -22,7 +21,6 @@ import { CID } from "multiformats/cid";
 import type { Rec } from "../client/bundle.ts";
 import { hashDir, recordBundles } from "../client/client.ts";
 import { defaultIgnore } from "../dev/scan.ts";
-import { isoTime, seal } from "../envelope.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import { genesisOf, short } from "../runtime/log.ts";
@@ -30,7 +28,9 @@ import type { Store } from "../runtime/store.ts";
 import { hashBlob, hashTree, readTree, type TreeBlocks } from "../runtime/tree.ts";
 import type { WalletInterface } from "../wallet.ts";
 import type { InstanceRow } from "./instances.ts";
-import type { MessageBox } from "./messagebox.ts";
+
+/** Where the owner's messages to the row's instance go: its front door (RawBox), or a test's stand-in. */
+export interface Outbox { send(recipient: string, box: string, body: Uint8Array): Promise<unknown> }
 
 /** What goes in by default: the personality and its file-only skills (#24), not the code around them. */
 export const DEFAULT_ONLY = ["SOUL.md", "IDENTITY.md", "skills"];
@@ -63,18 +63,16 @@ export interface DeployOptions {
   dir: string;
   /** Patterns (onlyIgnore); default DEFAULT_ONLY. */
   only?: string[];
-  /** The owner's wallet: signs and encrypts every envelope. */
+  /** The owner's wallet: its identity is checked against the genesis. */
   owner: WalletInterface;
-  /** A messagebox session as the owner. */
-  box: MessageBox;
+  /** The owner's session with the row's instance. */
+  box: Outbox;
   /**
    * The instance's store, read only, if it exists: its genesis must name this
    * owner and the row's identity; records it already has are not sent; its
    * `main` says whether a `head` move is needed.
    */
   store?: Store;
-  /** The clock for envelope `created` (ms). */
-  now?: () => number;
   /**
    * Files the host sets at the tree's root, over what the directory has:
    * contents, or null for none (removed if the directory has one).
@@ -128,11 +126,9 @@ export async function deployFiles(o: DeployFilesOptions): Promise<Deployed> {
  * a changed rule sends, instead of a new genesis. Queued in the messagebox
  * like a deploy; the store, if given, is checked as for one.
  */
-export async function subscribeRow(o: { row: InstanceRow; owner: WalletInterface; box: MessageBox; store?: Store; now?: () => number }, body: Record<string, unknown>): Promise<void> {
+export async function subscribeRow(o: { row: InstanceRow; owner: WalletInterface; box: Outbox; store?: Store }, body: Record<string, unknown>): Promise<void> {
   await checked(o);
-  const { row } = o;
-  const env = await seal(o.owner, { recipient: { identityKey: row.identity!, handle: row.handle, domain: row.domain }, body: dagCbor.encode(body), created: isoTime((o.now ?? Date.now)()) });
-  await o.box.send({ recipient: row.identity!, box: "subscribe", body: env });
+  await o.box.send(o.row.identity!, "subscribe", dagCbor.encode(body));
 }
 
 /** The genesis checks; the store if it has a log. */
@@ -179,7 +175,7 @@ async function setFiles(blocks: TreeBlocks, root: CID, files: DeployOptions["fil
 }
 
 /** Send the tree `root` (its objects: `m`, less what the store has) unless it is the row's tree already; `head` if main must move. */
-async function ship(o: { row: InstanceRow; owner: WalletInterface; box: MessageBox; now?: () => number }, store: Store | undefined, root: CID, m: Map<string, Rec>): Promise<Deployed> {
+async function ship(o: { row: InstanceRow; owner: WalletInterface; box: Outbox }, store: Store | undefined, root: CID, m: Map<string, Rec>): Promise<Deployed> {
   const { row } = o;
   const done: Deployed = { root: root.toString(), unchanged: true, records: 0, bundles: 0, head: false };
   // Unchanged: the row's tree, and the store (if there is one) has it — a store
@@ -200,14 +196,7 @@ async function ship(o: { row: InstanceRow; owner: WalletInterface; box: MessageB
   // objects-handler sets main only when there is none: once one exists (or an
   // earlier deploy is on its way to setting it), moving it is `head`'s job.
   const head = !main?.equals(root) && (main !== undefined || row.tree !== null);
-  const recipient = { identityKey: row.identity!, handle: row.handle, domain: row.domain };
-  const clock = o.now ?? Date.now;
-  let last = 0;
-  const send = async (box: string, body: Uint8Array) => {
-    last = Math.max(clock(), last + 1); // strictly increasing: delivery admits in `created` order
-    const env = await seal(o.owner, { recipient, body, created: isoTime(last) });
-    await o.box.send({ recipient: row.identity!, box, body: env });
-  };
+  const send = (box: string, body: Uint8Array) => o.box.send(row.identity!, box, body);
   for (const b of bundles) await send("objects", b);
   if (head) await send("head", dagCbor.encode({ name: MAIN, tree: root as CID }));
   return { ...done, unchanged: false, records, bundles: bundles.length, head };

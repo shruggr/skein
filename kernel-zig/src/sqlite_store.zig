@@ -62,6 +62,8 @@ pub const SqliteStore = struct {
                 if (probe.predatesFuel()) {
                     if (probe.ix.loaded_format < 1) {
                         std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    } else if (probe.ix.loaded_format == 2) {
+                        std.log.err("{s}: a store written before format 3 (issue #40: messages as mail records, no envelopes or emits): refused (start a new store: re-genesis)", .{path});
                     } else {
                         std.log.err("{s}: a store written before format 2 (issue #33: unsigned entries, keys as bytes): refused (start a new store: re-genesis)", .{path});
                     }

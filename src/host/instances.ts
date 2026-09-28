@@ -2,7 +2,15 @@
 // row each, in $SKEIN_HOME/host.db. Host-side state, outside every instance's
 // graph: nothing in src/runtime reads it. Rows get here by hand (`skein-host
 // add`), by script (scripts/host/instance.sh) or later by an API; `skein-host
-// run` supervises one runtime process per enabled row (supervisor.ts).
+// run` (the router, router.ts) serves every enabled row.
+//
+// #40: a row is an agent (its own identity) or a **mailbox instance** — an
+// instance whose system is only the front door and the messagebox, keeping
+// mail for an identity outside the host (`owner`: a user's wallet, the
+// inference peer). There is no messagebox host: every identity's mailbox is
+// an instance at its own origin. Beside the rows, the **fuel ledger**: what
+// each caller's calls (#40: the front door's reads, which the log never sees)
+// cost, per instance and op.
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -18,22 +26,27 @@ CREATE TABLE IF NOT EXISTS instances (
   source            TEXT,                             -- that directory, for skein-host deploy --all
   knows             TEXT,                             -- JSON array of the handles this agent knows (its ROSTER.md); ["*"]: everyone; NULL: nobody
   status            TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
-  created_at        TEXT NOT NULL
+  created_at        TEXT NOT NULL,
+  kind              TEXT NOT NULL DEFAULT 'agent' CHECK (kind IN ('agent', 'mailbox')),
+  owner             TEXT                               -- a mailbox instance's: the identity (hex) whose mailbox it is
 );
--- Mailboxes this host keeps for identities that are not instances (#33): the
--- owner's wallet, the inference peer, … Each is kept by one instance (its
--- messagebox records live in that instance's store).
-CREATE TABLE IF NOT EXISTS mailboxes (
-  identity          TEXT PRIMARY KEY,                 -- hex identity key
-  handle            TEXT NOT NULL,                    -- its handle here (POST /account/register {username})
-  domain            TEXT NOT NULL DEFAULT 'localhost',
-  instance          TEXT NOT NULL,                    -- the instance (handle) that keeps its mail
-  created_at        TEXT NOT NULL
-);`;
+-- The fuel of calls (#40): per instance, caller (hex, or '' for none) and op (the route).
+CREATE TABLE IF NOT EXISTS fuel_ledger (
+  instance          TEXT NOT NULL,
+  caller            TEXT NOT NULL,
+  op                TEXT NOT NULL,
+  calls             INTEGER NOT NULL DEFAULT 0,
+  fuel              INTEGER NOT NULL DEFAULT 0,
+  updated_at        TEXT NOT NULL,
+  PRIMARY KEY (instance, caller, op)
+) WITHOUT ROWID;`;
 
 export type Status = "enabled" | "disabled";
 
-export interface Mailbox { identity: string; handle: string; domain: string; instance: string; created_at: string }
+export type Kind = "agent" | "mailbox";
+
+/** One row of the fuel ledger. */
+export interface Ledger { instance: string; caller: string; op: string; calls: number; fuel: number; updated_at: string }
 
 export interface InstanceRow {
   handle: string;
@@ -48,12 +61,15 @@ export interface InstanceRow {
   knows: string | null;
   status: Status;
   created_at: string;
+  kind?: Kind;
+  /** A mailbox instance's: whose mailbox it is (hex). */
+  owner?: string | null;
 }
 
 /** The fields `add` sets; absent ones keep their value (or the column's default on insert). */
 export type RowFields = Partial<Omit<InstanceRow, "handle" | "created_at">>;
 
-const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "source", "knows", "status"] as const;
+const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "source", "knows", "status", "kind", "owner"] as const;
 
 /** The handles a row knows: a list, or "all" (every other enabled row). */
 export function knowsOf(row: Pick<InstanceRow, "knows">): string[] | "all" {
@@ -81,6 +97,8 @@ export class HostDb {
     const cols = new Set(this.db.prepare("PRAGMA table_info(instances)").all().map((c) => c.name));
     if (!cols.has("source")) this.db.exec("ALTER TABLE instances ADD COLUMN source TEXT");
     if (!cols.has("knows")) this.db.exec("ALTER TABLE instances ADD COLUMN knows TEXT");
+    if (!cols.has("kind")) this.db.exec("ALTER TABLE instances ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'");
+    if (!cols.has("owner")) this.db.exec("ALTER TABLE instances ADD COLUMN owner TEXT");
   }
 
   /**
@@ -105,11 +123,14 @@ export class HostDb {
     return r ? { ...r } as unknown as InstanceRow : undefined; // node:sqlite rows have a null prototype
   }
 
-  /** The recorded identity for handle@domain (the resolver's first answer), if any. */
+  /**
+   * The identity handle@domain names (BRC-169's answer): an agent's own, or
+   * the owner of a mailbox instance (whose mailbox the instance is).
+   */
   identityOf(handle: string, domain: string): string | undefined {
-    const r = this.db.prepare("SELECT identity FROM instances WHERE handle = ? AND domain = ?").get(handle, domain) as { identity: string | null } | undefined;
-    if (r?.identity) return r.identity;
-    try { return this.mailboxByHandle(handle, domain)?.identity; } catch { return undefined; } // a read-only file from before mailboxes
+    const r = this.db.prepare("SELECT identity, kind, owner FROM instances WHERE handle = ? AND domain = ?").get(handle, domain) as { identity: string | null; kind?: string; owner?: string | null } | undefined;
+    if (!r) return undefined;
+    return (r.kind === "mailbox" ? r.owner : r.identity) ?? undefined;
   }
 
   list(status?: Status): InstanceRow[] {
@@ -132,25 +153,21 @@ export class HostDb {
     return Number(this.db.prepare("DELETE FROM instances WHERE handle = ?").run(handle).changes) > 0;
   }
 
-  /** A mailbox for a non-instance identity, kept by `instance`; replaces the handle of an existing one. */
-  addMailbox(identity: string, handle: string, domain: string, instance: string, now = new Date()): Mailbox {
-    this.db.prepare("INSERT INTO mailboxes (identity, handle, domain, instance, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(identity) DO UPDATE SET handle = excluded.handle, domain = excluded.domain")
-      .run(identity, handle, domain, instance, now.toISOString());
-    return this.mailbox(identity)!;
+  /** The enabled mailbox instance for identity `owner` (hex). */
+  mailboxOf(owner: string): InstanceRow | undefined {
+    const r = this.db.prepare("SELECT * FROM instances WHERE kind = 'mailbox' AND owner = ? AND status = 'enabled'").get(owner);
+    return r ? { ...r } as unknown as InstanceRow : undefined;
   }
 
-  mailbox(identity: string): Mailbox | undefined {
-    const r = this.db.prepare("SELECT * FROM mailboxes WHERE identity = ?").get(identity);
-    return r ? { ...r } as unknown as Mailbox : undefined;
+  /** Add calls and fuel to the ledger (#40): `rows` aggregated by (instance, caller, op). */
+  charge(rows: Array<{ instance: string; caller: string; op: string; calls: number; fuel: number }>, now = new Date()): void {
+    const st = this.db.prepare("INSERT INTO fuel_ledger (instance, caller, op, calls, fuel, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (instance, caller, op) DO UPDATE SET calls = calls + excluded.calls, fuel = fuel + excluded.fuel, updated_at = excluded.updated_at");
+    for (const r of rows) st.run(r.instance, r.caller, r.op, r.calls, r.fuel, now.toISOString());
   }
 
-  mailboxByHandle(handle: string, domain: string): Mailbox | undefined {
-    const r = this.db.prepare("SELECT * FROM mailboxes WHERE handle = ? AND domain = ?").get(handle, domain);
-    return r ? { ...r } as unknown as Mailbox : undefined;
-  }
-
-  mailboxes(): Mailbox[] {
-    return this.db.prepare("SELECT * FROM mailboxes ORDER BY created_at").all().map((r) => ({ ...r }) as unknown as Mailbox);
+  ledger(instance?: string): Ledger[] {
+    const q = instance ? this.db.prepare("SELECT * FROM fuel_ledger WHERE instance = ? ORDER BY fuel DESC").all(instance) : this.db.prepare("SELECT * FROM fuel_ledger ORDER BY instance, fuel DESC").all();
+    return q.map((r) => ({ ...r }) as unknown as Ledger);
   }
 
   /** The enabled row whose identity is `identity`. */

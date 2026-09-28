@@ -14,7 +14,7 @@ import (
 )
 
 type args struct {
-	Envelope skein.CID `cbor:"envelope"`
+	Message  skein.CID `cbor:"message"`
 	Body     skein.CID `cbor:"body"`
 }
 
@@ -39,7 +39,7 @@ func run() error {
 	if err := skein.Decode(step.Args, &a); err != nil {
 		return fmt.Errorf("args: %w", err)
 	}
-	_, plain, err := skein.Read(a.Envelope, a.Body)
+	_, plain, err := skein.Read(a.Message, a.Body)
 	if err != nil {
 		return err
 	}

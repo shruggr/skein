@@ -37,7 +37,7 @@ test("front door: handshake = one session record; signed requests verify both wa
   await k.start();
   await k.idle();
 
-  const entries = async () => (await k.store.get((await k.store.log.tip())!) as { n: number }).n;
+  const entries = async () => (await k.store.get((await k.store.log.tip())!) as unknown as { n: number }).n;
   const size = () => statSync(db).size + (existsSync(`${db}-wal`) ? statSync(`${db}-wal`).size : 0);
   const n0 = await entries();
   const af = new AuthFetch(ephemeralWallet(clientKey), undefined, undefined, undefined, {}, frontDoorFetch(k));
@@ -47,7 +47,7 @@ test("front door: handshake = one session record; signed requests verify both wa
   assert.equal(Buffer.from(await first.arrayBuffer()).toString("hex"), client, "the handler sees the authenticated caller; the client verified the signed answer");
   assert.equal(await entries(), n0 + 1, "the handshake is one entry");
   await k.idle();
-  const sessions = await k.store.get(await k.call("head", "sessions") as CID) as { sessions: Array<{ session: CID }> };
+  const sessions = await k.store.get(await k.call("head", "sessions") as CID) as unknown as { sessions: Array<{ session: CID }> };
   assert.equal(sessions.sessions.length, 1);
   const s = await k.store.get(sessions.sessions[0]!.session) as { kind: string; peer: Uint8Array };
   assert.equal(s.kind, "session");
