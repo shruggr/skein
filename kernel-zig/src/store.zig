@@ -1,9 +1,9 @@
 // The store interface the kernel sees (src/runtime/store.ts): blocks, chains,
-// the input log, the live worklist. One implementation today, SQLite
-// (sqlite_store.zig, the same file format as src/runtime/sqlite.ts, so the
-// explorer reads it unchanged); a browser build would bring its own behind
-// the same table of functions. Everything returned is allocated from the
-// caller's allocator.
+// the input log, the live worklist. One implementation (index.zig): the index
+// as IPLD maps in the store and one state record (issue #30), over any
+// key→bytes backend with one named pointer — SQLite today
+// (sqlite_store.zig); a browser build brings its own backend. Everything
+// returned is allocated from the caller's allocator.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const Value = cbor.Value;
@@ -45,8 +45,13 @@ pub const VTable = struct {
     resting: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror![][]u8,
     awaiting: *const fn (ctx: *anyopaque, a: std.mem.Allocator, envelope: []const u8) anyerror![][]u8,
     threads: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror![][]u8,
+    /// The tree a named head names, or null if it never moved.
+    headTree: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror!?[]u8,
     cursorGet: *const fn (ctx: *anyopaque) anyerror!i64,
+    /// Sets the cursor and commits (an entry is processed).
     cursorSet: *const fn (ctx: *anyopaque, n: i64) anyerror!void,
+    /// Make what was derived since the last commit durable (index.zig).
+    commit: *const fn (ctx: *anyopaque) anyerror!void,
 };
 
 pub const Store = struct {
@@ -116,10 +121,16 @@ pub const Store = struct {
     pub fn threads(s: Store, a: std.mem.Allocator) ![][]u8 {
         return s.vt.threads(s.ctx, a);
     }
+    pub fn headTree(s: Store, a: std.mem.Allocator, name: []const u8) !?[]u8 {
+        return s.vt.headTree(s.ctx, a, name);
+    }
     pub fn cursorGet(s: Store) !i64 {
         return s.vt.cursorGet(s.ctx);
     }
     pub fn cursorSet(s: Store, n: i64) !void {
         return s.vt.cursorSet(s.ctx, n);
+    }
+    pub fn commit(s: Store) !void {
+        return s.vt.commit(s.ctx);
     }
 };

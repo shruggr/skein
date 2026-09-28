@@ -119,7 +119,11 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
     try w.writeAll("],\"sent\":[");
     for (cap.sent.items, 0..) |l, i| try w.print("{s}\"{s}\"", .{ if (i > 0) "," else "", l });
-    try w.print("],\"state\":\"{s}\"}}\n", .{if (tip.len > 0) try cidm.format(a, tip) else ""});
+    try dst.store().commit();
+    const st = dst.ix.stats();
+    try w.print("],\"state\":\"{s}\",\"index\":{{\"states\":{d},\"commits\":{d},\"nodes\":{d},\"bytes\":{d},\"record\":\"{s}\"}}}}\n", .{
+        if (tip.len > 0) try cidm.format(a, tip) else "", st.states, st.commits, st.nodes, st.node_bytes, try cidm.format(a, try dst.ix.stateCid(a)),
+    });
     try std.fs.File.stdout().writeAll(o.items);
     return 0;
 }

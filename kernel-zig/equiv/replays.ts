@@ -1,9 +1,23 @@
 // Replay equivalence: for each instance store, replay its log with no wallet
 // on the TypeScript runtime (equiv/replay.ts) and on the Zig kernel
-// (`skein-kernel replay`), each into a fresh store, and compare: every row of
-// every table (blocks, chains, updates, edges, entries, meta), the runtime's
-// log lines, the emits handed to the outbox, the state hash. Also reports how
-// each replay compares with the source store itself (thread and head tips).
+// (`skein-kernel replay`), each into a fresh store, and compare what the two
+// runtimes did and derived — not how they store it (issue #30: the Zig store
+// is blocks and a state record; the TS store keeps SQLite tables):
+//
+//   - the log entries (n, CID, the envelope/emit each is unique by) and the
+//     records: every block the TS store holds, and nothing else but index
+//     nodes and state records in the Zig store;
+//   - the runtime's log lines, the emits handed to the outbox, the log tip;
+//   - the derived state, asked of the TS tables in SQL and of the Zig index
+//     through `skein-kernel dump`: chains and their tips, every update's
+//     position, threads, resting threads (in resume order), sleepers (by
+//     deadline), awaits, edges, heads, the cursor;
+//   - the state record: the TS store's tables imported into the index
+//     (`skein-kernel dump ts.db`) give the same state CID as the Zig replay's
+//     own — the index is a function of the log.
+//
+// Also reports how each replay compares with the source store itself (thread
+// and head tips), and the index's cost per log entry.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/replays.ts [--keep] <store.db>…
 //
@@ -15,6 +29,8 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import * as dagCbor from "@ipld/dag-cbor";
+import { CID } from "multiformats/cid";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
@@ -22,29 +38,69 @@ const args = process.argv.slice(2);
 const keep = args.includes("--keep");
 const sources = args.filter((a) => a !== "--keep");
 
-const TABLES: Array<[string, string]> = [
-  ["blocks", "SELECT hex(cid), hex(bytes) FROM blocks ORDER BY cid"],
-  ["chains", "SELECT hex(origin), hex(tip), seq, kind, hex(thread), hex(launched_by), at, state, until, waiting_on, tip_at, hex(program), waiting_from, awaits FROM chains ORDER BY origin"],
-  ["updates", "SELECT hex(cid), hex(origin), seq FROM updates ORDER BY cid"],
-  ["edges", "SELECT hex(\"from\"), seq, ord, \"to\", rel, locator FROM edges ORDER BY \"from\", seq, ord"],
-  ["entries", "SELECT n, hex(cid), hex(envelope) FROM entries ORDER BY n"],
-  ["meta", "SELECT key, value FROM meta ORDER BY key"],
-];
+type Derived = {
+  entries: unknown[]; chains: unknown[]; updates: unknown[]; threads: unknown[]; resting: unknown[];
+  sleepers: unknown[]; awaits: unknown[]; edges: unknown[]; heads: unknown[]; cursor: number; blocks: string[];
+};
+/** Compared in order (the order is part of the answer); the rest as sets. */
+const ORDERED = new Set(["entries", "threads", "resting", "sleepers"]);
+const KEYS = ["entries", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads", "cursor", "blocks"] as const;
 
-function dump(db: string): Record<string, string[]> {
+const fmt = (b: unknown) => (b == null ? null : CID.decode(b as Uint8Array).toString());
+
+/** The same questions, asked of the TypeScript runtime's tables. */
+function derivedTs(db: string): Derived {
   const d = new DatabaseSync(db, { readOnly: true });
-  const out: Record<string, string[]> = {};
-  for (const [t, q] of TABLES) out[t] = d.prepare(q).all().map((r) => JSON.stringify(Object.values(r)));
+  const all = (q: string) => d.prepare(q).all();
+  const block = (c: Uint8Array) => dagCbor.decode<Record<string, unknown>>(d.prepare("SELECT bytes FROM blocks WHERE cid = ?").get(c)!.bytes as Uint8Array);
+  const heads: unknown[] = [];
+  for (const r of all("SELECT origin, tip FROM chains WHERE kind = 'head' AND tip <> origin")) {
+    const name = block(r.origin as Uint8Array).name;
+    const tree = CID.asCID(block(r.tip as Uint8Array).tree);
+    if (typeof name === "string" && tree) heads.push([name, tree.toString()]);
+  }
+  const out: Derived = {
+    entries: all("SELECT n, cid, envelope FROM entries ORDER BY n").map((r) => [r.n, fmt(r.cid), fmt(r.envelope)]),
+    chains: all("SELECT origin, tip, seq, kind FROM chains").map((r) => [fmt(r.origin), fmt(r.tip), r.seq, r.kind]),
+    updates: all("SELECT origin, seq, cid FROM updates").map((r) => [fmt(r.origin), r.seq, fmt(r.cid)]),
+    threads: all("SELECT origin FROM chains WHERE kind = 'thread' ORDER BY at, origin").map((r) => fmt(r.origin)),
+    resting: all("SELECT origin FROM chains WHERE kind = 'thread' AND (state IS NULL OR state <> 'finished') ORDER BY at, origin").map((r) => fmt(r.origin)),
+    sleepers: all("SELECT until, origin FROM chains WHERE kind = 'thread' AND state = 'waiting' AND until IS NOT NULL ORDER BY until, origin").map((r) => [r.until, fmt(r.origin)]),
+    awaits: all("SELECT j.value AS env, c.origin FROM chains c, json_each(c.awaits) j WHERE c.kind = 'thread' AND c.awaits IS NOT NULL").map((r) => [r.env, fmt(r.origin)]),
+    edges: all("SELECT \"from\" AS f, seq, ord, \"to\" AS t, rel, locator FROM edges").map((r) => [fmt(r.f), r.seq, r.ord, r.t, r.rel, r.locator]),
+    heads,
+    cursor: (all("SELECT value FROM meta WHERE key = 'cursor'")[0]?.value as number | undefined) ?? 0,
+    blocks: all("SELECT cid FROM blocks ORDER BY cid").map((r) => fmt(r.cid)!),
+  };
   d.close();
   return out;
 }
 
-function tips(db: string): Map<string, string> {
-  const d = new DatabaseSync(db, { readOnly: true });
+type Dump = Derived & { state: string; log: string | null; roots: Record<string, string | null>; indexBlocks: number };
+function dump(db: string): Dump {
+  const r = spawnSync(kernel, ["dump", db], { maxBuffer: 1 << 30 });
+  if (r.status !== 0) throw new Error(`skein-kernel dump ${db}: ${r.stderr}`);
+  return JSON.parse(r.stdout.toString());
+}
+
+function tips(d: Dump): Map<string, string> {
   const m = new Map<string, string>();
-  for (const r of d.prepare("SELECT hex(origin) o, hex(tip) t, kind FROM chains WHERE kind IN ('thread', 'head')").all()) m.set(`${r.kind} ${r.o}`, r.t as string);
-  d.close();
+  for (const [o, t, , kind] of d.chains as Array<[string, string, number, string | null]>) if (kind === "thread" || kind === "head") m.set(`${kind} ${o}`, t);
   return m;
+}
+
+function compare(what: string, x: unknown[], y: unknown[], ordered: boolean): string | undefined {
+  const xs = x.map((r) => JSON.stringify(r)), ys = y.map((r) => JSON.stringify(r));
+  if (ordered) {
+    const i = xs.findIndex((r, k) => r !== ys[k]);
+    if (i < 0 && xs.length === ys.length) return undefined;
+    const k = i >= 0 ? i : Math.min(xs.length, ys.length);
+    return `${what}: ${xs.length} vs ${ys.length}, first difference at ${k}\n    ts:  ${xs[k]}\n    zig: ${ys[k]}`;
+  }
+  const sx = new Set(xs), sy = new Set(ys);
+  const onlyTs = xs.filter((r) => !sy.has(r)), onlyZig = ys.filter((r) => !sx.has(r));
+  if (!onlyTs.length && !onlyZig.length && xs.length === ys.length) return undefined;
+  return `${what}: ${xs.length} vs ${ys.length}, ${onlyTs.length} only in ts, ${onlyZig.length} only in zig${onlyTs.length ? `\n    ts:  ${onlyTs.slice(0, 3).join("\n         ")}` : ""}${onlyZig.length ? `\n    zig: ${onlyZig.slice(0, 3).join("\n         ")}` : ""}`;
 }
 
 let allSame = true;
@@ -75,13 +131,11 @@ for (const source of sources) {
     continue;
   }
   const tj = JSON.parse(ts.stdout.toString()), zj = JSON.parse(zg.stdout.toString());
-  const a = dump(tsDb), b = dump(zigDb);
+  const a = derivedTs(tsDb), b = dump(zigDb);
   const diffs: string[] = [];
-  for (const [t] of TABLES) {
-    const x = a[t], y = b[t];
-    const sx = new Set(x), sy = new Set(y);
-    const onlyTs = x.filter((r) => !sy.has(r)), onlyZig = y.filter((r) => !sx.has(r));
-    if (onlyTs.length || onlyZig.length || x.length !== y.length) diffs.push(`${t}: ${x.length} vs ${y.length} rows, ${onlyTs.length} only in ts, ${onlyZig.length} only in zig${onlyTs.length ? `\n    ts:  ${onlyTs.slice(0, 3).join("\n         ")}` : ""}${onlyZig.length ? `\n    zig: ${onlyZig.slice(0, 3).join("\n         ")}` : ""}`);
+  for (const k of KEYS) {
+    const d = k === "cursor" ? (a.cursor === b.cursor ? undefined : `cursor: ${a.cursor} vs ${b.cursor}`) : compare(k, a[k] as unknown[], b[k] as unknown[], ORDERED.has(k));
+    if (d) diffs.push(d);
   }
   const lineDiff = tj.lines.findIndex((l: string, i: number) => l !== zj.lines[i]);
   if (lineDiff >= 0 || tj.lines.length !== zj.lines.length) {
@@ -89,18 +143,23 @@ for (const source of sources) {
     diffs.push(`log lines differ at ${i} (${tj.lines.length} vs ${zj.lines.length}):\n    ts:  ${tj.lines[i]}\n    zig: ${zj.lines[i]}`);
   }
   if (JSON.stringify(tj.sent) !== JSON.stringify(zj.sent)) diffs.push(`sent: ${JSON.stringify(tj.sent)} vs ${JSON.stringify(zj.sent)}`);
-  if (tj.state !== zj.state) diffs.push(`state: ${tj.state} vs ${zj.state}`);
+  if (tj.state !== zj.state || (b.log ?? "") !== zj.state) diffs.push(`log tip: ts ${tj.state} vs zig ${zj.state} (index: ${b.log})`);
+  const imported = dump(tsDb);
+  if (imported.state !== b.state) diffs.push(`state record: the TS tables imported give ${imported.state}, the Zig replay has ${b.state}`);
+  if (zj.index.record !== b.state) diffs.push(`state record: the replay ended at ${zj.index.record}, the store holds ${b.state}`);
 
-  const want = tips(src), got = tips(zigDb);
+  const want = tips(dump(src)), got = tips(b);
   let match = 0;
   for (const [k, v] of want) if (got.get(k) === v) match++;
 
-  const counts = `${a.entries.length} entries, ${a.chains.length} chains, ${a.updates.length} updates, ${a.blocks.length} blocks, ${tj.lines.length} lines, ${tj.sent.length} sent`;
+  const n = a.entries.length;
+  const cost = `index ${(zj.index.nodes / Math.max(n, 1)).toFixed(1)} nodes/entry (${(zj.index.bytes / Math.max(n, 1) / 1024).toFixed(1)} KiB) + ${(zj.index.states / Math.max(n, 1)).toFixed(1)} states/entry`;
+  const counts = `${n} entries, ${a.chains.length} chains, ${a.updates.length} updates, ${a.blocks.length} blocks + ${b.indexBlocks} index, ${tj.lines.length} lines, ${tj.sent.length} sent`;
   if (diffs.length) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts}; ts ${tsMs} ms, zig ${zigMs} ms)\n  ${diffs.join("\n  ")}\n`);
   } else {
-    process.stdout.write(`${name}: identical (${counts}; ts ${tsMs} ms, zig ${zigMs} ms) · vs the source: ${match}/${want.size} thread/head tips\n`);
+    process.stdout.write(`${name}: identical (${counts}; ${cost}; ts ${tsMs} ms, zig ${zigMs} ms) · vs the source: ${match}/${want.size} thread/head tips\n`);
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }
