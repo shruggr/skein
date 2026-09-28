@@ -14,6 +14,9 @@
 // waker wakes it and it re-asks ARC — until a `status` entry (MINED, with the
 // merkle path) routed by its subject proves it; a rejected broadcast gives
 // the inputs back; a draft (signAndProcess: false) is signed by signAction.
+// Then settlement (#37, settlementScenario): a rejection bubbling from A to
+// the B that spends it, settlement messages to the owner's `settlement` box,
+// B's thread learning it as a new input, and a reorg re-broadcasting.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/wallet.ts
 
@@ -23,7 +26,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { KeyDeriver, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
+import { AuthFetch, KeyDeriver, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
@@ -162,6 +165,96 @@ async function owned(identity: string, body: Record<string, unknown>) {
   return nextResult(String(body.op));
 }
 
+// ---------------------------------------------------------------- settlement (#37)
+
+/** The next unseen ended wallet step whose result satisfies `pred` (others stay unseen: deadline wakes interleave). */
+async function resultWhere(what: string, pred: (r: Result, state: string, thread: CID) => boolean, ms = 30_000) {
+  return until(what, async () => {
+    for (const { thread, update } of await updates()) {
+      const k = `${thread}/${update.step}`;
+      if (seen.has(k) || update.state === "running" || update.state === "errored") continue;
+      const stdout = Buffer.from(update.result?.stdout ?? []).toString().trim();
+      const result = decode<Result>(await view.bytes(CID.decode(Buffer.from(stdout, "hex"))));
+      if (!pred(result, update.state, thread)) continue;
+      seen.add(k);
+      return { result, state: update.state, thread };
+    }
+    return undefined;
+  }, ms);
+}
+
+/**
+ * A rejection after a dependent spend: A pays someone from our change, B
+ * spends A's change, then ARC's status for A says DOUBLE_SPEND_ATTEMPTED (a
+ * plain entry routed by its subject to A's awaiting thread). A and B are
+ * rejected (the bubbling: B spends A), their outputs vanish, the input A
+ * consumed is spendable again, and the owner — who opted in with `watch` —
+ * gets one settlement message per transaction in its `settlement` box. B's
+ * own thread is not replayed: at its deadline it finds B rejected, a new
+ * input, and finishes. The results name the transactions as `mentions`.
+ */
+async function settlementScenario(identity: string, someone: Uint8Array, base: string, reorg: { h102: Uint8Array; spend: string }): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  const ownedWhere = async (body: Record<string, unknown>) => {
+    await sendTo(identity, "wallet", body);
+    return resultWhere(String(body.op), (r) => r.op === body.op);
+  };
+  await new AuthFetch(owner).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "owner" }) });
+  out.watch = (await ownedWhere({ op: "watch" })).result.settlement;
+  const total0 = (await ownedWhere({ op: "list" })).result.total;
+
+  const a = await ownedWhere({ op: "createAction", description: "A", outputs: [{ lockingScript: someone, satoshis: 1_000 }] });
+  const b = await ownedWhere({ op: "createAction", description: "B", outputs: [{ lockingScript: someone, satoshis: 500 }] });
+  const txA = a.result.txid as string, txB = b.result.txid as string;
+  const bTx = Transaction.fromAtomicBEEF([...(b.result.tx as Uint8Array)]);
+  out.bSpendsA = bTx.inputs.some((i) => (i.sourceTXID ?? i.sourceTransaction?.id("hex")) === txA);
+  out.awaiting = [a.state, b.state];
+
+  await router.admitEvent("wallettest", "chain", { kind: "status", subject: txCid(txA), txid: txA, txStatus: "DOUBLE_SPEND_ATTEMPTED" });
+  const r = await resultWhere("A's status entry", (res) => res.op === "callback" && res.txid === txA && res.event === "status");
+  out.rejected = {
+    sameThread: r.thread.equals(a.thread), outcome: r.result.outcome, state: r.state,
+    settlement: (r.result.settlement as Array<Record<string, unknown>>)?.map((c) => [c.txid === txA ? "A" : c.txid === txB ? "B" : "?", c.status, c.reason, c.cause === undefined ? null : c.cause === txA ? "A" : "?"]),
+    sent: r.result.sent,
+  };
+  const list = await ownedWhere({ op: "list", includeSpent: true });
+  out.inputsFreed = list.result.total === total0;
+  out.noOutputsOfAB = !(list.result.outputs as Array<Record<string, unknown>>).some((o) => o.txid === txA || o.txid === txB);
+
+  // The owner's settlement box: sealed §7.3 envelopes from the instance, one per transaction.
+  const { cborBoxClient } = await import("../../src/host/brc231.ts");
+  const { openCbor, asEnvelope } = await import("../../src/envelope-cbor.ts");
+  const cb = cborBoxClient(owner, `${base}/messagebox`);
+  const msgs = await until("two settlement messages", async () => { const x = await cb.list("settlement"); return x.length >= 2 ? x : undefined; });
+  const bodies = [];
+  for (const m of msgs) bodies.push(dagCbor.decode((await openCbor(owner, asEnvelope(m.body as Uint8Array)!)).body) as Record<string, unknown>);
+  out.messages = bodies.map((m) => [m.kind, m.txid === txA ? "A" : m.txid === txB ? "B" : "?", m.status, m.reason]).sort();
+  out.messageSender = msgs.every((m) => m.sender === identity);
+
+  // B's thread was not replayed: its deadline wakes it, it finds B rejected, and finishes.
+  const bw = await resultWhere("B's deadline", (res, _s, t) => t.equals(b.thread) && res.op === "callback", 15_000);
+  out.bThread = { outcome: bw.result.outcome, state: bw.state };
+  // The results mention the transactions (kernel edges with rel `mentions`).
+  out.mentions = (await view.edges.refsTo(txCid(txA))).some((x) => x.rel === "mentions");
+
+  // A reorg: a heavier branch from 102 drops block 103, where our first spend was proven. It is
+  // unproven again, broadcast again like a fresh one, awaited; the owner is told.
+  const posts = arc.posts.length;
+  const alt103 = mine(reorg.h102, sha256d(Buffer.from("alt 103")), 1_790_000_000 + 103 * 600 + 1);
+  const alt104 = mine(sha256d(alt103), sha256d(Buffer.from("alt 104")), 1_790_000_000 + 104 * 600);
+  const h = await ownedWhere({ op: "headers", headers: [alt103, alt104] });
+  out.reorg = {
+    replaced: h.result.replaced, reverted: (h.result.reverted as string[] | undefined)?.map((t) => t === reorg.spend ? "spend" : "?"),
+    reposted: arc.posts.length === posts + 1 && Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]).id("hex") === reorg.spend,
+    state: h.state, awaited: (h.result.awaited as string[] | undefined)?.includes(reorg.spend),
+  };
+  const m3 = await until("the reorg's settlement message", async () => { const x = await cb.list("settlement"); return x.length >= 3 ? x : undefined; });
+  const last = [];
+  for (const m of m3) last.push(dagCbor.decode((await openCbor(owner, asEnvelope(m.body as Uint8Array)!)).body) as Record<string, unknown>);
+  out.reorgMessage = last.some((m) => m.txid === reorg.spend && m.status === "unproven" && m.reason === "reorg");
+  return out;
+}
+
 // ---------------------------------------------------------------- the scenario
 
 try {
@@ -249,6 +342,8 @@ try {
   const signed = Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]);
   report.draft = { hasReference: CID.asCID(draft.reference) !== null, notPostedAsDraft: draft.posts === arc.posts.length - 1, awaiting: r.result.awaiting, scriptsVerify: await signed.verify("scripts only"), txid: r.result.txid === signed.id("hex") };
 
+  report.settlement = await settlementScenario(identity, new Uint8Array(someone), `http://127.0.0.1:${(server.address() as { port: number }).port}`, { h102: prev, spend: spendTxid });
+
   report.ok = true;
 } catch (e) {
   report.error = (e as Error).stack ?? String(e);
@@ -271,6 +366,15 @@ check(Array.isArray(report.list) && (report.list as unknown[][]).some((o) => o[0
 check(eq(report.rejected, { outcome: "rejected", state: "finished", awaiting: false }) && report.afterReject === report.total, `a rejected broadcast drops the action: the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
 const d = (report.draft ?? {}) as Record<string, unknown>;
 check(d.hasReference === true && d.notPostedAsDraft === true && d.awaiting === true && d.scriptsVerify === true && d.txid === true, `a draft (signAndProcess: false), then signAction: signed, broadcast, awaiting (${JSON.stringify(d)})`);
+
+const st = (report.settlement ?? {}) as Record<string, unknown>;
+check(st.watch === true && eq(st.awaiting, ["waiting", "waiting"]) && st.bSpendsA === true, `settlement (#37): the owner watches; A, then B spending A's change, both broadcast and awaited (${JSON.stringify([st.watch, st.awaiting, st.bSpendsA])})`);
+check(eq(st.rejected, { sameThread: true, outcome: "rejected", state: "finished", settlement: [["A", "rejected", "DOUBLE_SPEND_ATTEMPTED", null], ["B", "rejected", "input-rejected", "A"]], sent: 2 }), `a DOUBLE_SPEND status entry for A reaches A's thread: A rejected, bubbled to B (spends) (${JSON.stringify(st.rejected)})`);
+check(st.inputsFreed === true && st.noOutputsOfAB === true, `the rejected outputs vanish; the input A consumed is spendable again (${JSON.stringify([st.inputsFreed, st.noOutputsOfAB])})`);
+check(eq(st.messages, [["settlement", "A", "rejected", "DOUBLE_SPEND_ATTEMPTED"], ["settlement", "B", "rejected", "input-rejected"]]) && st.messageSender === true, `the owner's settlement box: one sealed message per rejected transaction, from the instance (${JSON.stringify(st.messages)})`);
+check(eq(st.bThread, { outcome: "rejected", state: "finished" }), `B's thread is not replayed: at its deadline it finds B rejected and finishes (${JSON.stringify(st.bThread)})`);
+check(st.mentions === true, "the results name the transactions as `mentions` edges (which never propagate)");
+check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }) && st.reorgMessage === true, `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited; the owner is told (${JSON.stringify([st.reorg, st.reorgMessage])})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
 process.stdout.write(r.stdout);
