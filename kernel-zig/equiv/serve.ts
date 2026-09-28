@@ -5,7 +5,9 @@
 // and a chat answered end to end, a sleep woken by the tick, a stop mid-sleep
 // and the restart that finishes it, and a stop when the supervisor's channel
 // closes, and (issue #5) a shell that never ends running out of fuel under a
-// low fuelPerStep. Then the stores the Zig kernel wrote are replayed by the
+// low fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock
+// (qjs, python) ending on their own under that limit, the clock being the
+// entry stamp + fuel × 1 ns. Then the stores the Zig kernel wrote are replayed by the
 // Zig kernel twice over (equiv/replays.ts): identical to each other and to
 // the stores themselves, fuel included.
 //
@@ -82,9 +84,24 @@ const fuelDb = join(home, "instances/fueltest/runtime.db");
 const fr = spawnSync(kernel, ["fuel", fuelDb], { encoding: "utf8" });
 check(fr.status === 0 && fr.stdout.split("\n").some((l) => l.startsWith(`${LIMIT}\t1\t`) && l.endsWith("\tshell")), "skein-kernel fuel: the shell's one step burnt exactly the limit");
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb], { encoding: "utf8" });
+// The in-step clock (issue #38): entry stamp + fuel × 1 ns. A 50 ms busy-wait on the
+// clock (qjs Date.now, python time.monotonic) ends on its own, under the fuel limit.
+const CLOCK_LIMIT = 1_000_000_000; // the same limit the spinning shell above runs out of
+const k = await serve("clock", "signal", "clocktest", { SKEIN_FUEL_PER_STEP: String(CLOCK_LIMIT) });
+const waited = k.report.waited as { exitCode?: number; stdout?: string; stderr?: string } | undefined;
+check(k.report.ok === true, `the clock scenario ran (${k.report.error ?? ""})`);
+const [qjsLine, pyLine] = (waited?.stdout ?? "").trim().split("\n").map((l) => l.split(" "));
+const ms = (x?: string) => Number(x);
+check(waited?.exitCode === 0 && qjsLine?.[0] === "qjs" && ms(qjsLine[1]) >= 50 && ms(qjsLine[1]) < 60 && qjsLine[2] === "true", `a qjs busy-wait on Date.now for 50 ms ends, 50 ms of fuel later (${JSON.stringify(waited ?? null).slice(0, 200)})`);
+check(pyLine?.[0] === "python" && ms(pyLine[1]) >= 50 && ms(pyLine[1]) < 60, `a python busy-wait on time.monotonic for 50 ms ends (${waited?.stdout?.trim()})`);
+const clockDb = join(home, "instances/clocktest/runtime.db");
+const kr = spawnSync(kernel, ["fuel", clockDb], { encoding: "utf8" });
+const shellFuel = kr.stdout.split("\n").filter((l) => l.endsWith("\tshell")).map((l) => Number(l.split("\t")[0]));
+check(kr.status === 0 && shellFuel.length === 1 && shellFuel[0] >= 100_000_000 && shellFuel[0] < CLOCK_LIMIT, `the shell's step burnt at least the 2 × 50 ms it waited, under the limit (${shellFuel})`);
+
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb, clockDb], { encoding: "utf8" });
 process.stdout.write(r.stdout);
-check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 2, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
+check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 3, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `serve: ${failures} FAILED\n` : "serve: all ok\n");

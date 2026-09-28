@@ -103,6 +103,20 @@ await runPeer({
         const [r] = await until("the spinning shell's result", async () => { const x = await inbox("results"); return x.length ? x : undefined; }, 60_000);
         report.spun = { ...r.body, stdout: r.body.stdout ? text(r.body.stdout) : undefined, stderr: r.body.stderr ? text(r.body.stderr) : undefined };
         await fs.rm(dir, { recursive: true, force: true });
+      } else if (scenario === "clock") {
+        // The in-step clock runs on fuel (issue #38): busy-waits on the clock end on their own.
+        const dir = await fs.mkdtemp(join(tmpdir(), "skein-kz-serve-"));
+        await fs.writeFile(join(dir, "README"), "hello\n");
+        const { root, bundles } = await bundlesOf(dir);
+        for (const b of bundles) await sendTo(identity, "objects", b);
+        const cmd = [
+          "qjs -e 'const t0 = Date.now(); let n = 0; while (Date.now() - t0 < 50) n++; console.log(\"qjs\", Date.now() - t0, n > 100)'",
+          "python3 -c 'import time\nt0 = time.monotonic()\nwhile time.monotonic() - t0 < 0.05: pass\nprint(\"python\", round((time.monotonic() - t0) * 1000))'",
+        ].join("; ");
+        await sendTo(identity, "run", { cmd, tree: root });
+        const [r] = await until("the busy-waits' result", async () => { const x = await inbox("results"); return x.length ? x : undefined; }, 60_000);
+        report.waited = { ...r.body, stdout: r.body.stdout ? text(r.body.stdout) : undefined, stderr: r.body.stderr ? text(r.body.stderr) : undefined };
+        await fs.rm(dir, { recursive: true, force: true });
       } else if (scenario === "resume") {
         // After a restart mid-sleep: the shell re-executes, parks again, the tick wakes it, the reply comes.
         const rs = await until("the resumed sleeper's result", async () => { const x = await inbox("results"); return x.length ? x : undefined; }, 20_000);
