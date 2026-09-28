@@ -375,6 +375,23 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
         syncSleepers();
         return reply(a, .null, null, null);
     }
+    if (eq(u8, op, "call")) {
+        // The kernel's `call` (#40), as serve's: {program: cid | name, fn, arg, caller?, now?} → {ok, result | error, fuel}.
+        try r.loadGenesis();
+        const g = r.genesis orelse return reply(a, null, "call: no genesis", null);
+        const prog: []const u8 = Value.cidOf(v.get("program")) orelse blk: {
+            const name = Value.str(v.get("program")) orelse return error.BadRequest;
+            const progs: Value = g.get("programs") orelse .null;
+            break :blk Value.cidOf(if (progs == .map) progs.get(name) else null) orelse return reply(a, null, "call: no such program in the genesis", null);
+        };
+        const now = Value.intOf(v.get("now")) orelse return reply(a, null, "call: the browser build wants `now` (ms)", null);
+        const res = try r.call(a, prog, Value.str(v.get("fn")) orelse return error.BadRequest, Value.bytesOf(v.get("arg")) orelse "", Value.bytesOf(v.get("caller")), @intCast(now));
+        var m = cbor.MapBuilder.init(a);
+        try m.put("ok", .{ .bool = res.ok });
+        if (res.ok) try m.put("result", .{ .bytes = res.result }) else try m.put("error", cbor.string(res.err));
+        try m.put("fuel", cbor.int(res.fuel));
+        return reply(a, m.value(), null, null);
+    }
     if (eq(u8, op, "idle")) return reply(a, .null, null, null); // nothing runs between calls
     if (eq(u8, op, "sleepers")) return reply(a, try sleepersValue(a, r), null, null);
     if (eq(u8, op, "state")) {

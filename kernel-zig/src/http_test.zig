@@ -61,6 +61,9 @@ const Fake = struct {
     fn deadline(imp: *program.Imports, _: i64) program.Err!void {
         return refuse(imp);
     }
+    fn call(imp: *program.Imports, _: []const u8, _: []const u8, _: []const u8) program.Err![]const u8 {
+        return refuse(imp);
+    }
     const host = program.Host{
         .ctx = undefined,
         .input = input,
@@ -78,6 +81,7 @@ const Fake = struct {
         .wallet = get,
         .http = http,
         .deadline = deadline,
+        .call = call,
     };
 };
 

@@ -52,6 +52,8 @@ pub const VTable = struct {
     cursorSet: *const fn (ctx: *anyopaque, n: i64) anyerror!void,
     /// Make what was derived since the last commit durable (index.zig).
     commit: *const fn (ctx: *anyopaque) anyerror!void,
+    /// The committed state record's CID (index.zig), or null before the first commit (#40: a call reads through it).
+    state: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
 };
 
 pub const Store = struct {
@@ -129,6 +131,9 @@ pub const Store = struct {
     }
     pub fn cursorSet(s: Store, n: i64) !void {
         return s.vt.cursorSet(s.ctx, n);
+    }
+    pub fn state(s: Store, a: std.mem.Allocator) !?[]u8 {
+        return s.vt.state(s.ctx, a);
     }
     pub fn commit(s: Store) !void {
         return s.vt.commit(s.ctx);

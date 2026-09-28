@@ -37,6 +37,8 @@ type Frame = Record<string, unknown>;
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; options?: { connectTimeout?: number; firstByteTimeout?: number; betweenBytesTimeout?: number } };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 export interface Sleeper { thread: CID; until: Ms }
+/** A kernel call's answer (#40): the program's stdout, or its error; the fuel it used either way. */
+export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
 export interface KernelOptions {
   /** The store file. */
@@ -217,6 +219,16 @@ export class Kernel {
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   async admit(entry: LogEntry | Record<string, unknown>, records: { envelope?: object; body?: Uint8Array } = {}): Promise<CID> {
     return await this.call("admit", { entry, envelope: records.envelope, body: records.body }) as CID;
+  }
+  /**
+   * The kernel's `call` (#40): a program's function (by CID, or a genesis
+   * program's name) over the current state — no entry, no writes, the oracle
+   * and http answered but not recorded; fuel-limited (`callFuelLimit`). The
+   * result is what the program wrote to stdout; `fuel` is reported either way
+   * (the router's ledger).
+   */
+  async invoke(program: CID | string, fn: string, arg: Uint8Array, o: { caller?: Uint8Array; now?: number } = {}): Promise<CallAnswer> {
+    return await this.call("call", { program, fn, arg, ...(o.caller ? { caller: o.caller } : {}), now: o.now ?? Date.now() }) as CallAnswer;
   }
   async idle(): Promise<void> { await this.call("idle"); }
   async start(): Promise<void> { await this.call("start"); }

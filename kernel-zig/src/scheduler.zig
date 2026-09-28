@@ -47,6 +47,23 @@ pub fn fuelPerStep(g: ?Value) u64 {
     return if (n == 0 or n > engine.UNMETERED) FUEL_PER_STEP else n;
 }
 
+/// Fuel for a kernel `call` (#40) when the genesis's `defaults` do not set
+/// `callFuelLimit`: 10^10 wasm instructions (a front door answers in far less).
+pub const CALL_FUEL: u64 = 10_000_000_000;
+
+/// The one limit on a call's fuel: the genesis's `defaults.callFuelLimit`, else CALL_FUEL.
+pub fn callFuelLimit(g: ?Value) u64 {
+    const d = (g orelse return CALL_FUEL).get("defaults") orelse return CALL_FUEL;
+    const v = Value.str(d.get("callFuelLimit")) orelse return CALL_FUEL;
+    const n = std.fmt.parseInt(u64, v, 10) catch return CALL_FUEL;
+    return if (n == 0 or n > engine.UNMETERED) CALL_FUEL else n;
+}
+
+/// How deep in-VM calls may nest (a front door calling a handler calling another).
+const MAX_CALL_DEPTH = 8;
+/// A call's result (its stdout) may be this big: a listing, a page of the log.
+const CALL_OUTPUT_LIMIT = 64 << 20;
+
 /// BRC-100 wire call codes a program may make: key derivation and crypto only.
 const wallet_calls = [_]u8{ 8, 11, 12, 13, 14, 15, 16 };
 
@@ -774,6 +791,10 @@ pub const Runtime = struct {
         children: std.array_list.Managed(Value),
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most.
         until: ?i64 = null,
+        /// For in-VM calls (#40): the step's host and services, and how deep the calls nest.
+        host: ?*const program.Host = null,
+        svc: ?*wasi.Services = null,
+        depth: u8 = 0,
     };
 
     fn stepOf(imp: *program.Imports) *StepState {
@@ -912,9 +933,12 @@ pub const Runtime = struct {
             .wallet = hWallet,
             .http = hHttp,
             .deadline = hDeadline,
+            .call = hCall,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
+        st.host = &host;
+        st.svc = &svc;
         const name = Value.str(prog.get("name")).?;
         const out = program.runProgram(a, rt.runner, mod, name, &host, &svc) catch |err| switch (err) {
             error.Fatal => {
@@ -1108,6 +1132,9 @@ pub const Runtime = struct {
     fn hHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
         const st = stepOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("head: bad name {s}", .{try json.quoted(st.a, name)});
+        // A step sees its own moves (#40: an in-VM call may advance a head its caller then reads).
+        var i = st.moves.items.len;
+        while (i > 0) : (i -= 1) if (std.mem.eql(u8, st.moves.items[i - 1][0], name)) return st.moves.items[i - 1][1];
         return heads.headTree(st.a, st.rt.store, name) catch imp.failWith("store error");
     }
     fn hAdvance(imp: *program.Imports, name: []const u8, t: []const u8) program.Err!void {
@@ -1214,6 +1241,283 @@ pub const Runtime = struct {
         try rec.put("result", .{ .bytes = result });
         try st.calls.append(rt.store.put(a, rec.value()) catch return imp.failWith("store error"));
         return result;
+    }
+
+    // ------------------------------------------------------------ calls (#40)
+
+    /// An in-VM call from a step: the callee runs as part of the step — its
+    /// recorded calls, kept records, launches and head moves are the step's,
+    /// on the step's fuel and clock — with its own input.
+    fn hCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        const a = st.a;
+        if (st.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
+        const loaded = try loadCallee(st.rt, imp, a, prog);
+        var ctx = st.rt.callContext(a, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
+        var extra = cbor.MapBuilder.init(a);
+        try extra.put("thread", cbor.cidv(st.origin));
+        try extra.put("step", cbor.int(st.n));
+        try extra.put("entry", cbor.cidv(st.entry));
+        try extra.put("at", cbor.int(st.at));
+        try ctx.put("step", extra.value());
+        const saved = st.input;
+        st.input = cbor.encode(a, ctx.value()) catch return error.OutOfMemory;
+        st.depth += 1;
+        defer {
+            st.input = saved;
+            st.depth -= 1;
+        }
+        return runCallee(imp, a, st.rt, loaded, func, st.host.?, st.svc.?);
+    }
+
+    const Callee = struct { mod: *runner.Compiled, name: []const u8 };
+
+    fn loadCallee(rt: *Runtime, imp: *program.Imports, a: std.mem.Allocator, prog: []const u8) program.Err!Callee {
+        const p = rt.store.getOpt(a, prog);
+        if (!programs.isProgram(p) or !hasWasm(p.?)) return imp.failFmt("call: {s} is not a wasm program record in the store", .{fmtCid(a, prog)});
+        var msg: []const u8 = "";
+        const mod = rt.runner.load(rt.store, a, programs.wasmOf(p.?).?, &msg) catch |err| return switch (err) {
+            error.NotInStore, error.BadHash, error.Compile => imp.failFmt("call: {s}", .{msg}),
+            error.OutOfMemory => error.OutOfMemory,
+            else => imp.failFmt("call: {s}", .{@errorName(err)}),
+        };
+        return .{ .mod = mod, .name = Value.str(p.?.get("name")).? };
+    }
+
+    fn runCallee(imp: *program.Imports, a: std.mem.Allocator, rt: *Runtime, c: Callee, func: []const u8, host: *const program.Host, svc: *wasi.Services) program.Err![]const u8 {
+        const out = program.runProgramLimit(a, rt.runner, c.mod, c.name, host, svc, CALL_OUTPUT_LIMIT) catch |err| switch (err) {
+            // Diverged, no witness, out of fuel: the callee's fatal is its caller's.
+            error.Fatal => {
+                imp.fatal = svc.state.fatal;
+                return error.Fatal;
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (out.exit_code != 0) return imp.failFmt("call {s}.{s}: {s}", .{ c.name, func, lastLine(a, out.stderr, out.exit_code) });
+        return out.stdout;
+    }
+
+    /// The input a called program reads (`kind: "call"`): what it is asked,
+    /// by whom, and the instance it runs in — the genesis's facts and the
+    /// subscriptions as they stand.
+    fn callContext(rt: *Runtime, a: std.mem.Allocator, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !cbor.MapBuilder {
+        const g = rt.genesis orelse return error.NoGenesis;
+        var m = cbor.MapBuilder.init(a);
+        try m.put("kind", cbor.string("call"));
+        try m.put("fn", cbor.string(func));
+        try m.put("arg", .{ .bytes = arg });
+        if (caller) |c| try m.put("caller", .{ .bytes = c });
+        try m.put("now", cbor.int(now));
+        var self = cbor.MapBuilder.init(a);
+        try self.put("handle", g.get("handle"));
+        try self.put("domain", g.get("domain"));
+        try self.put("identity", g.get("identity"));
+        try m.put("self", self.value());
+        try m.put("owner", g.get("owner"));
+        try m.put("programs", g.get("programs"));
+        try m.put("peers", g.get("peers"));
+        try m.put("defaults", g.get("defaults"));
+        try m.put("names", g.get("names"));
+        try m.put("routes", g.get("routes"));
+        try m.put("reads", g.get("reads"));
+        var rules = std.array_list.Managed(Value).init(a);
+        for ((try subs.current(a, rt.store)) orelse &.{}) |r| {
+            var x = cbor.MapBuilder.init(a);
+            if (r.sender) |sd| try x.put("sender", .{ .bytes = sd });
+            if (r.box) |b| try x.put("box", cbor.string(b));
+            try x.put("handler", cbor.cidv(r.handler));
+            try rules.append(x.value());
+        }
+        try m.put("subscriptions", .{ .array = rules.items });
+        return m;
+    }
+
+    pub const CallResult = struct { ok: bool, result: []const u8 = "", err: []const u8 = "", fuel: u64 };
+
+    /// The kernel's `call` (#40): run `prog`'s entry as a function over the
+    /// current state and return what it wrote to stdout. No entry, no writes:
+    /// `put` keeps records in memory for the call only; heads, the store and
+    /// the log are read as they stand (plus the entries admitted and not yet
+    /// processed, `pending`, and the committed state record, `state`). The
+    /// oracle (`wallet`) and `http` are answered by the host and not recorded,
+    /// so a call is not deterministic and nothing replays it. Fuel is limited
+    /// by `callFuelLimit` and reported.
+    pub fn call(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !CallResult {
+        try rt.loadGenesis();
+        if (rt.genesis == null) return .{ .ok = false, .err = "call: no genesis", .fuel = 0 };
+        var meter = engine.Meter.init(callFuelLimit(rt.genesis));
+        var cs = CallState{ .rt = rt, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = &meter, .random = undefined };
+        var seed: [32]u8 = undefined;
+        realRandom(&seed, now);
+        cs.random = syscalls.Entropy.init(&seed, prog);
+        cs.clock.drive(@as(i128, now) * 1_000_000);
+        cs.clock.meter = &meter;
+        var ctx = try rt.callContext(a, func, arg, caller, now);
+        var pend = std.array_list.Managed(Value).init(a);
+        for (try rt.store.logFrom(a, rt.cursor)) |c| try pend.append(cbor.cidv(c));
+        try ctx.put("pending", .{ .array = pend.items });
+        try ctx.put("state", cbor.optCid(try rt.store.state(a)));
+        cs.input = try cbor.encode(a, ctx.value());
+        var host = callHost;
+        host.ctx = &cs;
+        var rs = wasi.RunState{ .meter = &meter };
+        var svc = wasi.Services{ .ctx = &cs, .state = &rs, .clock = csClock, .random = csRandom };
+        cs.svc = &svc;
+        cs.host = &host;
+        var imp = program.Imports{ .host = &host, .alloc = a };
+        const loaded = loadCallee(rt, &imp, a, prog) catch |err| switch (err) {
+            error.Failed => return .{ .ok = false, .err = imp.last_error, .fuel = 0 },
+            else => return err,
+        };
+        const out = program.runProgramLimit(a, rt.runner, loaded.mod, loaded.name, &host, &svc, CALL_OUTPUT_LIMIT) catch |err| switch (err) {
+            error.Fatal => {
+                const f = rs.fatal orelse wasi.Fatal{ .message = "fatal" };
+                return .{ .ok = false, .err = if (f.kind == .fuel) runner.FUEL_EXHAUSTED else f.message, .fuel = meter.used() };
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        if (out.exit_code != 0) return .{ .ok = false, .err = lastLine(a, out.stderr, out.exit_code), .fuel = meter.used() };
+        return .{ .ok = true, .result = out.stdout, .fuel = meter.used() };
+    }
+
+    /// A call's world: the records it put (in memory only), its clock, its random, its fuel.
+    const CallState = struct {
+        rt: *Runtime,
+        a: std.mem.Allocator,
+        overlay: std.StringHashMap([]const u8),
+        meter: *engine.Meter,
+        clock: syscalls.ThreadClock = .{},
+        random: syscalls.Entropy,
+        input: []const u8 = "",
+        svc: ?*wasi.Services = null,
+        host: ?*const program.Host = null,
+        depth: u8 = 0,
+    };
+
+    const callHost = program.Host{
+        .ctx = undefined,
+        .input = cInput,
+        .get = cGet,
+        .put = cPut,
+        .putBlock = cPutBlock,
+        .keep = cKeep,
+        .launch = cLaunch,
+        .emit = cEmit,
+        .awaitReply = cAwait,
+        .resolve = cResolve,
+        .head = cHead,
+        .advance = cAdvance,
+        .subscribe = cSubscribe,
+        .wallet = cWallet,
+        .http = cHttp,
+        .deadline = cDeadline,
+        .call = cCall,
+    };
+
+    fn callOf(imp: *program.Imports) *CallState {
+        return @ptrCast(@alignCast(imp.host.ctx));
+    }
+    fn csClock(ctx: *anyopaque, _: u32) u64 {
+        const cs: *CallState = @ptrCast(@alignCast(ctx));
+        return @intCast(cs.clock.read());
+    }
+    fn csRandom(ctx: *anyopaque, out: []u8) void {
+        const cs: *CallState = @ptrCast(@alignCast(ctx));
+        cs.random.fill(out);
+    }
+    fn readOnly(imp: *program.Imports, what: []const u8) program.Err {
+        return imp.failFmt("{s}: a call reads only (no entry, no writes)", .{what});
+    }
+    fn cInput(imp: *program.Imports) []const u8 {
+        return callOf(imp).input;
+    }
+    fn cGet(imp: *program.Imports, c: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        if (cs.overlay.get(c)) |b| return b;
+        return (cs.rt.store.bytes(cs.a, c) catch return imp.failWith("store error")) orelse notFound(imp, c);
+    }
+    fn cPut(imp: *program.Imports, bytes: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        const v = cbor.decode(cs.a, bytes) catch return imp.failWith("CBOR decode error");
+        const blk = cbor.block(cs.a, v) catch return imp.failWith("the value is not IPLD");
+        try cs.overlay.put(blk.cid, blk.bytes);
+        return blk.cid;
+    }
+    fn cPutBlock(imp: *program.Imports, c: []const u8, bytes: []const u8) program.Err!void {
+        const cs = callOf(imp);
+        if (!cidm.hashMatches(c, bytes)) return imp.failFmt("putblock: bytes do not hash to {s}", .{fmtCid(cs.a, c)});
+        try cs.overlay.put(try cs.a.dupe(u8, c), try cs.a.dupe(u8, bytes));
+    }
+    fn cKeep(imp: *program.Imports, _: []const u8) program.Err!void {
+        return readOnly(imp, "keep");
+    }
+    fn cLaunch(imp: *program.Imports, _: []const u8, _: []const u8) program.Err![]const u8 {
+        return readOnly(imp, "launch");
+    }
+    fn cEmit(imp: *program.Imports, _: []const u8) program.Err![]const u8 {
+        return readOnly(imp, "emit");
+    }
+    fn cAwait(imp: *program.Imports, _: []const u8) program.Err!void {
+        return readOnly(imp, "await");
+    }
+    fn cResolve(imp: *program.Imports, _: []const u8) program.Err![]const u8 {
+        return readOnly(imp, "resolve");
+    }
+    fn cAdvance(imp: *program.Imports, _: []const u8, _: []const u8) program.Err!void {
+        return readOnly(imp, "advance");
+    }
+    fn cSubscribe(imp: *program.Imports, _: []const u8, _: ?[]const u8, _: []const u8, _: []const u8) program.Err!void {
+        return readOnly(imp, "subscribe");
+    }
+    fn cDeadline(imp: *program.Imports, _: i64) program.Err!void {
+        return readOnly(imp, "deadline");
+    }
+    fn cHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
+        const cs = callOf(imp);
+        if (!heads.isHeadName(name)) return imp.failFmt("head: bad name {s}", .{try json.quoted(cs.a, name)});
+        return heads.headTree(cs.a, cs.rt.store, name) catch imp.failWith("store error");
+    }
+    /// The oracle, answered by the host and not recorded (a call is never replayed).
+    fn cWallet(imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        var allowed = false;
+        if (frame.len > 0) for (wallet_calls) |w| if (w == frame[0]) {
+            allowed = true;
+        };
+        if (!allowed) return imp.failFmt("wallet: call {s} is not allowed to programs", .{if (frame.len > 0) try std.fmt.allocPrint(cs.a, "{d}", .{frame[0]}) else "undefined"});
+        const f = cs.rt.peers.wallet orelse return imp.failWith("wallet: this host has no oracle");
+        return f(cs.rt.peers.ctx, cs.a, frame) catch |err| imp.failFmt("wallet: {s}", .{@errorName(err)});
+    }
+    /// HTTP, answered by the host and not recorded.
+    fn cHttp(imp: *program.Imports, request: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        const r = cbor.decode(cs.a, request) catch return imp.failWith("http: the request is not dag-cbor");
+        if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
+        const f = cs.rt.peers.http orelse return imp.failWith("http: this host answers no http");
+        return f(cs.rt.peers.ctx, cs.a, request) catch |err| imp.failFmt("http: {s}", .{@errorName(err)});
+    }
+    /// A call within a call: the same world (records put, fuel, clock), its own fn and arg.
+    fn cCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        const a = cs.a;
+        if (cs.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
+        const loaded = try loadCallee(cs.rt, imp, a, prog);
+        const outer = cbor.decode(a, cs.input) catch return imp.failWith("call: bad input");
+        var m = cbor.MapBuilder.init(a);
+        for (outer.map) |e| {
+            if (std.mem.eql(u8, e.key, "fn") or std.mem.eql(u8, e.key, "arg")) continue;
+            try m.put(e.key, e.value);
+        }
+        try m.put("fn", cbor.string(func));
+        try m.put("arg", .{ .bytes = arg });
+        const saved = cs.input;
+        cs.input = cbor.encode(a, m.value()) catch return error.OutOfMemory;
+        cs.depth += 1;
+        defer {
+            cs.input = saved;
+            cs.depth -= 1;
+        }
+        return runCallee(imp, a, cs.rt, loaded, func, cs.host.?, cs.svc.?);
     }
 
     // ------------------------------------------------------------ the shell
@@ -1529,4 +1833,25 @@ fn emitProblem(a: std.mem.Allocator, e: Value, body: []const u8, identity: []con
     if (!std.mem.eql(u8, &m.recipient, &to_hex)) return try std.fmt.allocPrint(a, "the content is encrypted to {s}, not {s}", .{ m.recipient[58..], to_hex[58..] });
     if (!envelope.hashMatches(env, body)) return "contentHash is not the body's";
     return null;
+}
+
+/// The last line of a program's stderr, or "exit N": what a failed call reports.
+fn lastLine(a: std.mem.Allocator, stderr: []const u8, code: i32) []const u8 {
+    var t = jsTrim(a, stderr) catch "";
+    if (std.mem.lastIndexOfScalar(u8, t, '\n')) |i| t = t[i + 1 ..];
+    return if (t.len > 0) t else std.fmt.allocPrint(a, "exit {d}", .{code}) catch "failed";
+}
+
+/// Real randomness for a call's stream: a call needs no determinism, and a
+/// nonce it makes (a front door's session nonce) must not be guessable.
+fn realRandom(out: []u8, now: i64) void {
+    if (engine.web) {
+        // The browser build runs no front door; the call's time and a counter will do there.
+        const S = struct {
+            var n: u32 = 0;
+        };
+        S.n +%= 1;
+        var sm = syscalls.SplitMix{ .s = @as(u32, @truncate(@as(u64, @bitCast(now)))) ^ (S.n *% 0x9e3779b9) };
+        sm.fill(out);
+    } else std.crypto.random.bytes(out);
 }

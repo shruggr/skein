@@ -13,6 +13,8 @@
 //                                  preview1 programs — a component's standard
 //                                  wasi:http becomes this same request (http.zig)
 //   deadline(until_ms) → 0         a step that ends waiting rests until then at most
+//   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
+//                                  (input kind "call"), its stdout the result
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
@@ -49,6 +51,12 @@ pub const Host = struct {
     http: *const fn (imp: *Imports, request: []const u8) Err![]const u8,
     /// If this step ends waiting, rest no later than `until` (ms): a wake entry then steps it.
     deadline: *const fn (imp: *Imports, until: i64) Err!void,
+    /// An in-VM call (#40): run `prog` (a program record) as a function — its
+    /// entry with `input()` = {kind: "call", fn, arg, …} — and return what it
+    /// wrote to stdout. From a step it is part of the step (its recorded calls,
+    /// head moves and records are the step's); from a kernel `call` it reads
+    /// only (no entry, no writes, nothing recorded).
+    call: *const fn (imp: *Imports, prog: []const u8, func: []const u8, arg: []const u8) Err![]const u8,
 };
 
 pub const Imports = struct {
@@ -146,6 +154,12 @@ pub const Imports = struct {
                 try h.deadline(imp, a[0]);
                 return 0;
             },
+            .call => {
+                const prog = try imp.alloc.dupe(u8, try imp.cidAt(p, a[0], a[1]));
+                const func = try imp.strAt(p, a[2], a[3]);
+                const arg = try imp.alloc.dupe(u8, p.slice(a[4], a[5]) catch return error.OutOfMemory);
+                return imp.out(p, try h.call(imp, prog, func, arg), a[6], a[7]);
+            },
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
                 p.set(a[0], imp.held) catch return imp.failWith("offset is out of bounds");
@@ -182,7 +196,11 @@ pub const RunError = error{ Fatal, OutOfMemory };
 /// One step: a plain WASI command with the skein imports, over an empty tree,
 /// stdin null, stdout/stderr captured (1 MiB each), the thread's clock and random.
 pub fn runProgram(alloc: std.mem.Allocator, r: *runner.Runner, mod: *runner.Compiled, name: []const u8, host: *const Host, svc: *wasi.Services) RunError!StepOutput {
-    const limit = 1 << 20;
+    return runProgramLimit(alloc, r, mod, name, host, svc, 1 << 20);
+}
+
+/// runProgram with stdout/stderr captured up to `limit` bytes each (an in-VM call's result is its stdout, #40).
+pub fn runProgramLimit(alloc: std.mem.Allocator, r: *runner.Runner, mod: *runner.Compiled, name: []const u8, host: *const Host, svc: *wasi.Services, limit: usize) RunError!StepOutput {
     const empty = (tree.hashTree(alloc, &.{}) catch return error.OutOfMemory).cid;
     const v = vfsm.Vfs.init(alloc, null, empty) catch return error.OutOfMemory;
     const stdout = try wasi.Pipe.init(alloc, limit, "");

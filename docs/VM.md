@@ -287,6 +287,44 @@ with a message). A preview1 program behaves the same on both engines — the
 same imports answered by the same kernel code, the same fuel — so a log
 written in the browser replays natively and the other way round.
 
+### Calls: reading the state without an entry (#40)
+
+Beside the one call in that writes — **admit** an entry, and the steps it
+drives — the kernel has a second call in, **`call`**: run a program as a
+function over the current state and return a value. It writes nothing.
+
+- **The ABI** is the program's ordinary entry (`_start`, or `wasi:cli/run`
+  for a component), so it is the same for preview1 modules and components.
+  `input()` returns `{kind: "call", fn, arg: bytes, caller?, now, self:
+  {handle, domain, identity}, owner, programs, peers, defaults, names, routes,
+  reads, subscriptions: [{sender?, box?, handler}], pending: [entry CIDs
+  admitted and not yet processed], state: <the committed state record>}`;
+  the program dispatches on `fn` and writes its result to stdout. A non-zero
+  exit is the error, with the last line of stderr as its message. The
+  serve frame is `{op: "call", v: {program: <CID or a genesis program's
+  name>, fn, arg, caller?, now?}}` → `{ok, result | error, fuel}`; the
+  browser build takes the same frame through `skein_call`.
+- **No entry, no writes.** `get`, `head` and the store read as they stand;
+  `put` and `putblock` keep their records in memory for the call only (so a
+  program can build a record and read it back, or return it for the host to
+  admit), and `keep`, `launch`, `await`, `advance`, `subscribe` and
+  `deadline` are refused. The oracle (`wallet`) and `http` are answered by
+  the host and **not recorded**.
+- **No determinism.** Nothing replays a call, so it needs none: its clock is
+  the host's `now` (plus fuel, as in a step), its random is real entropy
+  (a session nonce made there must not be guessable), and the host's answers
+  are whatever they are at the time.
+- **Fuel** is limited by `callFuelLimit` in the genesis's `defaults`
+  (default 10^10) and reported with every answer, success or not, for the
+  host's ledger; it is never in the log.
+- **In-VM calls.** A program calls another with the `call` import
+  (`call(program, fn, arg) → bytes`, preview1 and WIT alike). From a kernel
+  `call` the callee reads only, in the same world (the records put, the
+  fuel). From a **step** the callee is part of the step: its recorded calls,
+  kept records, launches and head moves are the step's, on the step's fuel,
+  and replay re-runs it with the step. A step sees its own head moves: a
+  head a callee advanced reads back as moved in the rest of the step.
+
 ### Fuel: every step is metered
 
 (Issue #5; built in the Zig kernel, `kernel-zig/src/engine.zig`, README

@@ -62,6 +62,8 @@ const Server = struct {
     domain: []const u8,
     db_path: []const u8,
     running: bool = false,
+    /// Answers the peer sent to an outer request while an inner one waited (encoded frames).
+    answers: std.AutoHashMap(i64, []u8),
 
     // ------------------------------------------------------------ frames
 
@@ -86,6 +88,9 @@ const Server = struct {
     }
 
     /// A request to the peer; serves the peer's own requests while it waits.
+    /// Requests nest (a `call` served while a step waits on the peer makes
+    /// its own), and the peer answers in any order: an answer to another
+    /// request is kept for it.
     fn request(s: *Server, a: std.mem.Allocator, op: []const u8, payload: Value) !Value {
         const id = s.next_id;
         s.next_id += 1;
@@ -95,9 +100,15 @@ const Server = struct {
         try m.put("v", payload);
         try ipc.write(s.to_peer, a, m.value());
         while (true) {
-            const f = (try s.from_peer.read(a)) orelse return error.PeerGone;
+            const f = if (s.answers.fetchRemove(id)) |kv| blk: {
+                defer s.gpa.free(kv.value);
+                break :blk try cbor.decode(a, try a.dupe(u8, kv.value));
+            } else (try s.from_peer.read(a)) orelse return error.PeerGone;
             if (Value.intOf(f.get("re"))) |re| {
-                if (re != id) continue;
+                if (re != id) {
+                    try s.answers.put(@intCast(re), try s.gpa.dupe(u8, try cbor.encode(a, f)));
+                    continue;
+                }
                 if (Value.str(f.get("error"))) |e| {
                     last_peer_error = try a.dupe(u8, e);
                     return error.PeerError;
@@ -192,6 +203,27 @@ const Server = struct {
             // Now process it (mid-step, a drain is running: it loops again when the step is done).
             if (res == .ok) s.rt.kick();
             s.afterDrain(a);
+        } else if (eq(u8, op, "call")) {
+            // The other call in (#40): a program's function over the current state; no entry, no writes.
+            // {program: cid | a genesis program's name, fn, arg: bytes, caller?: bytes, now?: ms}
+            //   → {ok: true, result: bytes, fuel} | {ok: false, error, fuel}
+            try s.rt.loadGenesis();
+            const g = s.rt.genesis orelse return s.reply(a, id, null, "call: no genesis", null);
+            const prog: []const u8 = Value.cidOf(v.get("program")) orelse blk: {
+                const name = Value.str(v.get("program")) orelse return error.BadRequest;
+                const progs: Value = g.get("programs") orelse .null;
+                break :blk Value.cidOf(if (progs == .map) progs.get(name) else null) orelse
+                    return s.reply(a, id, null, try std.fmt.allocPrint(a, "call: no program {s} in the genesis", .{name}), null);
+            };
+            const func = Value.str(v.get("fn")) orelse return error.BadRequest;
+            const arg = Value.bytesOf(v.get("arg")) orelse "";
+            const now = Value.intOf(v.get("now")) orelse std.time.milliTimestamp();
+            const r = try s.rt.call(a, prog, func, arg, Value.bytesOf(v.get("caller")), @intCast(now));
+            var m = cbor.MapBuilder.init(a);
+            try m.put("ok", .{ .bool = r.ok });
+            if (r.ok) try m.put("result", .{ .bytes = r.result }) else try m.put("error", cbor.string(r.err));
+            try m.put("fuel", cbor.int(r.fuel));
+            s.reply(a, id, m.value(), null, null);
         } else if (eq(u8, op, "idle")) {
             try s.idle_waiters.append(id);
             s.afterDrain(a);
@@ -314,6 +346,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .to_peer = std.posix.STDOUT_FILENO,
         .from_peer = ipc.Reader.init(gpa, std.posix.STDIN_FILENO),
         .idle_waiters = .init(gpa),
+        .answers = .init(gpa),
         .handle = handle,
         .domain = domain,
         .db_path = db_path,

@@ -568,7 +568,13 @@ pub const Index = struct {
         .cursorGet = cursorGetFn,
         .cursorSet = cursorSetFn,
         .commit = commitFn,
+        .state = stateFn,
     };
+
+    fn stateFn(ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8 {
+        const ix = self(ctx);
+        return ix.backend.vt.pointer(ix.backend.ctx, a, POINTER);
+    }
 
     fn self(ctx: *anyopaque) *Index {
         return @ptrCast(@alignCast(ctx));

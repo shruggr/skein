@@ -216,6 +216,7 @@ pub const Fn = enum {
     wallet,
     http,
     deadline,
+    call,
     take,
     @"error",
 };
