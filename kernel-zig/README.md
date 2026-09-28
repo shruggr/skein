@@ -113,6 +113,36 @@ is recorded and replayed like any other field.
   (a module's own max), per-tree depth and step counts (countable from the
   chain; enforced from config later).
 
+## For the wallet (issue #29)
+
+What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md);
+the TS runtime has none of it.
+
+- **Bitcoin codecs** (`cid.zig`): `putblock` accepts `bitcoin-tx` (0xb1) and
+  `bitcoin-block` (0xb0, 80 bytes) with `dbl-sha2-256` (0x56), hash-checked,
+  so a transaction's CID is its txid and a header's its block hash (the
+  digest in internal byte order); `get` returns the bytes as stored.
+- **Plain entries** (`log.zig`, `scheduler.zig` `processEvent`):
+  `{kind: "log", n, prev, time, box, event}` — no envelope, no signature. The
+  host admits one per event from a feed it holds (SSE/webhook: a header, a
+  proof, a transaction status), with the record `event` names already put.
+  Processing: the thread whose tip awaits the record's `subject` (a CID; a
+  transaction's is its txid) steps with `input.event = {event, box,
+  subject}`; else a subscription with no sender on the entry's box launches
+  its handler with `args = {event, box}`.
+- **`await` on a record**: besides an envelope the step emitted, a step may
+  await any record in the store — the subject of a plain entry to come.
+- **`deadline(until_ms)`**: a step that ends waiting rests until then at
+  most: the update carries `until`, the thread is a sleeper for the tick
+  (re-registered on start), and the wake entry steps it with `input.woke`.
+- **`http(req, len, out, cap)`**: a dag-cbor request `{method, url,
+  headers?, body?}` → response `{status, headers, body}`, answered by the host
+  (`serve`: the peer's `http` frame; `peer.ts` answers with a test's handler,
+  or with `fetch` when `SKEIN_HTTP=fetch`, else refuses) and attested like
+  `wallet`/`resolve` (op `http`): replay reads the answer from the record and
+  never touches the network. This is the pre-#15 shape: #15 replaces the
+  import with standard `wasi:http`, answered and recorded the same way.
+
 ## The index (issue #30)
 
 The store is a key→bytes map: SQLite's `blocks` table and a `pointers` table
@@ -179,8 +209,8 @@ used by the explorer and `skein-dev` (`rebuild` is refused on such a store:
 the kernel keeps its index); and `buildIndex`, the same maps built
 canonically in TypeScript — equiv checks it reaches the kernel's state CID,
 and that every explorer page renders the same over the TS and the Zig
-replays' files. **Not yet:** the wallet's flat
-index (`wallet-zig`, #29) moves onto `mst.zig` in #29 phase 2; pruning old
+replays' files. The wallet (`wallet-zig`, #29) builds `mst.zig` as a module
+of its own for its index maps (inside the VM). **Not yet:** pruning old
 spine nodes and state records; a cache bound (decoded nodes are dropped at
 every commit).
 
@@ -216,6 +246,7 @@ meter, so its update records (and CIDs) are no longer the Zig kernel's.
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 8 logs the TS runtime writes (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, two agents, and `gen-fuel`: `fuelPerStep` 10^8, where run-handler's reply step runs out after its wallet call), each replayed by the Zig kernel into z1, and z1's log replayed into z2 | 8/8 identical |
 | pre-fuel refusal | a TS-written store with a log opened for running (`skein-kernel shell`) | refused, with the message |
+| `equiv/wallet.ts` | `serve` with `equiv/wallet-peer.ts`: a ProtoWallet oracle, a fake ARC on the `http` import, the wallet program (#29) subscribed to an owner's box and a sender-less `chain` box — headers from regtest's genesis (an owner's message, then plain `header` entries), a BRC-29 payment internalized, a spend signed through the oracle and broadcast (the posted BEEF's scripts verify under @bsv/sdk), the thread's deadline woken by the tick and ARC re-asked, a plain `status` entry (MINED + path) for the transaction's CID proving it, a rejected broadcast dropping its action, a draft signed by `signAction`; then the store replayed Zig against Zig | all ok; the store reproduced exactly |
 | `equiv/serve.ts` | `serve` spawned as the supervisor spawns `bin/skein-runtime`, with the real providers on an in-process messagebox: genesis, a run, a chat through the inference peer, a sleep woken by the tick, SIGTERM mid-sleep and the restart that finishes it, stop on channel close; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
 A replay comparison (`equiv/replays.ts`) requires z1 and z2 to be the

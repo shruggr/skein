@@ -9,5 +9,6 @@ for p in run-handler objects-handler head-handler subscribe-handler loop wallet;
     const { rawCid } = await import('./src/runtime/programs.ts');
     console.log(rawCid(readFileSync('wasm/$p.wasm')).toString());")
   sed -i -E "s|(\"$p\": CID.parse\(\")[a-z0-9]+(\"\))|\1$cid\2|" src/runtime/programs.ts
+  sed -i -E "s|(\.name = \"$p\", \.cid = \")[a-z0-9]+(\")|\1$cid\2|" kernel-zig/src/programs.zig
   echo "$p $cid"
 done

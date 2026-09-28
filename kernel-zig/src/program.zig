@@ -5,6 +5,15 @@
 // is f(…, out, cap) → n: n >= 0 is the full length, written only if n <= cap;
 // the result is held for take(out, cap). n < 0 is an error; error(out, cap)
 // returns its message.
+//
+// Here only (not in the TS runtime), for the wallet (#29):
+//   http(req, len, out, cap) → n   a dag-cbor request {method, url, headers?, body?}
+//                                  → the response {status, headers, body}, answered
+//                                  by the host and attested (op "http"); the
+//                                  pre-#15 shape, replaced by standard wasi:http
+//   deadline(until_ms) → 0         a step that ends waiting rests until then at most
+// putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
+// await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
