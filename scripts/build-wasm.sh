@@ -99,6 +99,34 @@ cp wasm/tools/which/target/wasm32-wasip1/release/which.wasm wasm/which.wasm
 (cd wasm/tools/grep && cargo build --release --target wasm32-wasip1)
 cp wasm/tools/grep/target/wasm32-wasip1/release/grep.wasm wasm/grep.wasm
 
+# git (issue #2): real git in C, for wasm32-wasip1 with wasi-sdk's clang, from
+# the release tarballs (checked by sha256), + patches/git.patch and the WASI
+# compat layer in wasm/git/ (config.mak, wasi-compat.h, compat.c, include/).
+# Built fresh each time in .build/git-$GIT_VERSION so nothing stale leaks in.
+GIT_VERSION=2.55.0
+GIT_SHA256=457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357
+ZLIB_VERSION=1.3.2
+ZLIB_SHA256=bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16
+tarball() { # url file sha256
+  if [ ! -f "$2" ] || ! echo "$3  $2" | sha256sum -c --quiet - 2>/dev/null; then curl -sL -o "$2" "$1"; fi
+  echo "$3  $2" | sha256sum -c --quiet -
+}
+tarball "https://www.kernel.org/pub/software/scm/git/git-$GIT_VERSION.tar.xz" .build/git-$GIT_VERSION.tar.xz "$GIT_SHA256"
+tarball "https://github.com/madler/zlib/releases/download/v$ZLIB_VERSION/zlib-$ZLIB_VERSION.tar.gz" .build/zlib-$ZLIB_VERSION.tar.gz "$ZLIB_SHA256"
+WASI_CC="$WASI_SDK_PATH/bin/clang --target=wasm32-wasip1 --sysroot=$WASI_SDK_PATH/share/wasi-sysroot"
+rm -rf .build/zlib-$ZLIB_VERSION .build/zlib-wasi .build/git-$GIT_VERSION
+tar -C .build -xzf .build/zlib-$ZLIB_VERSION.tar.gz
+(cd .build/zlib-$ZLIB_VERSION && CC="$WASI_CC" AR="$WASI_SDK_PATH/bin/llvm-ar" RANLIB="$WASI_SDK_PATH/bin/llvm-ranlib" CFLAGS=-O2 \
+  ./configure --static --prefix="$ROOT/.build/zlib-wasi" >/dev/null && make -j"$(nproc)" libz.a >/dev/null && make install >/dev/null)
+tar -C .build -xJf .build/git-$GIT_VERSION.tar.xz
+(cd .build/git-$GIT_VERSION && patch -s -p1 < "$ROOT/wasm/patches/git.patch" && cp "$ROOT/wasm/git/config.mak" config.mak)
+$WASI_CC -O2 -D_WASI_EMULATED_SIGNAL -I"$ROOT/wasm/git/include" -c wasm/git/compat.c -o .build/git-$GIT_VERSION/skein-compat.o
+# uname_*: no host platform's section of config.mak.uname applies.
+make -C .build/git-$GIT_VERSION -j"$(nproc)" uname_S=WASI uname_M=wasm32 uname_O=WASI uname_R=1 uname_V=1 \
+  SKEIN_WASI_SDK="$WASI_SDK_PATH" SKEIN_ZLIB="$ROOT/.build/zlib-wasi" SKEIN_COMPAT="$ROOT/wasm/git" \
+  SKEIN_COMPAT_OBJ="$ROOT/.build/git-$GIT_VERSION/skein-compat.o" git >/dev/null
+cp .build/git-$GIT_VERSION/git wasm/git.wasm
+
 # --- script runtimes (issue #25): JavaScript and Python ---
 
 # qjs: QuickJS-ng with wasi-sdk (C), + patches/quickjs.patch, which compiles

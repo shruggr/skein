@@ -198,6 +198,7 @@ pub const Runtime = struct {
         rt.say("runtime {s} · log {d} processed{s}", .{ shortStr(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
+        try rt.store.commit();
     }
 
     pub fn stop(rt: *Runtime) void {
@@ -307,6 +308,8 @@ pub const Runtime = struct {
             if (!rt.again) break;
             rt.again = false;
         }
+        // What a resumed or woken thread derived outside an entry's processing.
+        rt.store.commit() catch |err| rt.say("runtime: commit: {s}", .{@errorName(err)});
     }
 
     var last_error: []const u8 = "";

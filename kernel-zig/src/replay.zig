@@ -3,10 +3,12 @@
 // (the TS runtime's replay path: copyLog + Runtime + witnessFrom). The fresh
 // store first gets the pinned modules (skein-dev install, from $SKEIN_WASM_DIR
 // or the repo's wasm/) and every module (raw block) the source holds, so an
-// old log runs the handlers it ran. Prints {lines, sent, state} as JSON: the
-// runtime's log lines, the emits handed to the outbox, the state hash.
-// equiv/replay.ts does the same with the TypeScript runtime; equiv/run.sh
-// compares the two stores table by table.
+// old log runs the handlers it ran. Prints {lines, sent, state, index} as
+// JSON: the runtime's log lines, the emits handed to the outbox, the log tip,
+// and the index's costs and final state record (#30). The source may be in
+// either store format (sqlite_store.zig imports the old one in memory).
+// equiv/replay.ts does the same with the TypeScript runtime; equiv/replays.ts
+// compares the two runs and what they derived.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -119,7 +121,11 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
     try w.writeAll("],\"sent\":[");
     for (cap.sent.items, 0..) |l, i| try w.print("{s}\"{s}\"", .{ if (i > 0) "," else "", l });
-    try w.print("],\"state\":\"{s}\"}}\n", .{if (tip.len > 0) try cidm.format(a, tip) else ""});
+    try dst.store().commit();
+    const st = dst.ix.stats();
+    try w.print("],\"state\":\"{s}\",\"index\":{{\"states\":{d},\"commits\":{d},\"nodes\":{d},\"bytes\":{d},\"record\":\"{s}\"}}}}\n", .{
+        if (tip.len > 0) try cidm.format(a, tip) else "", st.states, st.commits, st.nodes, st.node_bytes, try cidm.format(a, try dst.ix.stateCid(a)),
+    });
     try std.fs.File.stdout().writeAll(o.items);
     return 0;
 }

@@ -16,7 +16,9 @@ pub const modules = [_]Module{
     .{ .name = "objects-handler", .cid = "bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4" },
     .{ .name = "head-handler", .cid = "bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q" },
     .{ .name = "subscribe-handler", .cid = "bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e" },
-    .{ .name = "loop", .cid = "bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa" },
+    .{ .name = "loop", .cid = "bafkreibucy775ondafg447omm5735b6o3ggeas7ggrrqjfpiwtajs4fiuu" },
+    // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
+    .{ .name = "wallet", .cid = "bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -27,10 +29,11 @@ pub const modules = [_]Module{
     .{ .name = "tree", .cid = "bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4" },
     .{ .name = "awk", .cid = "bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju" },
     .{ .name = "sed", .cid = "bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy" },
+    .{ .name = "git", .cid = "bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe" },
 };
 
 /// The shell's extra single-purpose tools (programs.ts TOOL_NAMES).
-pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed" };
+pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git" };
 
 pub fn moduleText(name: []const u8) []const u8 {
     for (modules) |m| if (std.mem.eql(u8, m.name, name)) return m.cid;

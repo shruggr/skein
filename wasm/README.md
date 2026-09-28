@@ -2,11 +2,11 @@
 
 The programs the wasm shell (`src/runtime/shell.ts`) runs: brush + uutils
 coreutils, the toolset of issue #13 (search/edit/structured-data
-commands beyond coreutils, registered in `Modules.extra`), and the script
-runtimes of issue #25 (`qjs`/`node`, `python`/`python3`; see "Script
-runtimes" below — those are C, built with wasi-sdk, or a pinned upstream
-build, not Rust). All WASI preview1
-modules (`wasm32-wasip1`), built with Rust 1.98.1 and stripped of symbols.
+commands beyond coreutils, registered in `Modules.extra`), git (issue
+#2, also in `Modules.extra`), and the script runtimes of issue #25
+(`qjs`/`node`, `python`/`python3`; see "Script runtimes" below). All WASI
+preview1 modules (`wasm32-wasip1`), built with Rust 1.98.1 (git and qjs: C,
+wasi-sdk 34; python: a pinned upstream build) and stripped of symbols.
 `scripts/build-wasm.sh` rebuilds all of them from the pinned sources plus
 `patches/`, byte-identically on the same machine in the same checkout
 layout (paths of the build machine and even line numbers within a patched
@@ -29,6 +29,7 @@ other bytes — verified the hard way while pinning `sed.wasm`, see the
 | `tree.wasm`      | 0.69 MB | peteretelej/tree (crate `rust_tree`) `v1.3.0` (`dfed2820`), unpatched |
 | `which.wasm`     | 0.07 MB | first-party, `wasm/tools/which` — no Rust `which` CLI exists (library only) |
 | `grep.wasm`      | 1.57 MB | first-party, `wasm/tools/grep` on grep-matcher/grep-regex/grep-searcher (ripgrep's own libraries) — no GNU-grep-compatible CLI exists in Rust |
+| `git.wasm`       | 3.78 MB | git `2.55.0` (C, kernel.org release tarball) + zlib `1.3.2`, wasi-sdk 34, + `patches/git.patch` and `git/` (see "git" below) |
 | `qjs.wasm`       | 1.20 MB | quickjs-ng/quickjs `v0.17.0` (`6d46d07d`), wasi-sdk 34.0, + `patches/quickjs.patch` + `tools/qjs/`; registered as `qjs` and `node` (issue #25) |
 | `python.wasm`    | 7.63 MB | CPython 3.14.7 WASI build, brettcannon/cpython-wasi-build `v3.14.7` (`python-3.14.7-wasi_sdk-24.zip`, sha256 `2e064d3f…584b`), `llvm-strip`ped (30.5 MB with DWARF); registered as `python` and `python3` (issue #25) |
 | `python314.zip`  | 10.31 MB | not a module: that release's `lib/python3.14`, every `.py` (529 files), packed stored by `tools/python/zip-stdlib.mjs` |
@@ -54,6 +55,7 @@ fad7b15e0c4eb00f8ca22e8325d8f8fc57d8b45265d29e97ed4b7145250cddf1  jq.wasm
 140e2277a4e5d37ceb0e1cbcc6465cb4f0425ccb6314a5249eed73ab2b7bf83f  tree.wasm
 43612217922c4a6ddbebcf4b9503d8360c9a22c0c3b7b797689a37a6c67368c1  which.wasm
 e167efd302749254f77dd7b28fcdae6fafdd205b8902100e78f95fe80f7075c1  grep.wasm
+0ada3f26b9fab9d1842c9689c4cea4c34bcb6a655d0593038f47017339dad1b9  git.wasm
 dc5db82250ebec2b98f36a24c09024ea25cd061bc49ea2f4aefef0ea0adbd9b1  qjs.wasm
 7d445e83f8879daf536925ef7c5e068fce9fde0badff3c8ec7b27ddf30691cd3  python.wasm
 ce3377a3115afc411d2baf0093a535155b82148bd343f5d8291b3a63b1eabd11  python314.zip
@@ -240,6 +242,115 @@ script; the Rust `wasm32-wasip1` target's bundled wasi-libc is not a C
   command is registered (registering one under a different argv0 without
   it defaulting to YAML would be a false advertisement of `yq`'s actual
   ergonomics).
+
+## git (issue #2)
+
+Real git — the C source of release 2.55.0, not a reimplementation — built
+for `wasm32-wasip1` with wasi-sdk 34's clang: one binary with every builtin
+(no dashed commands, no scripts). gitoxide was not needed. Its
+`.git/objects` is the Zig kernel's synthetic object directory (docs/VM.md,
+"The synthetic object directory"): loose objects are the store's git-raw
+records, nothing is stored twice. `scripts/build-wasm.sh` fetches the git
+and zlib release tarballs (checked by sha256), applies `patches/git.patch`,
+copies `git/config.mak` in and builds. The result is byte-identical to the
+committed file, also from a differently-named build directory
+(`-ffile-prefix-map`, `-g0` and `--strip-all` leave no build path in it).
+
+Verified in the VM (`kernel-zig/equiv/git.ts`, on the Zig kernel): `init
+add rm mv status diff commit log show branch checkout reset restore merge`
+(a true merge with a merge commit, and a conflict with markers and
+`--abort`) and `tag` (lightweight and annotated), plus `describe`,
+`cat-file`, `ls-files`, `ls-tree`, `fsck` and `count-objects`. Author and
+committer come from `$HOME/.gitconfig` (`HOME=/` in the shell), the repo's
+config or `GIT_AUTHOR_*`/`GIT_COMMITTER_*`, the same way git reads them
+anywhere. Dates come from `clock_time_get`, which the kernel answers with
+the run's attested time. So a commit depends only on its inputs, and a
+replay gives the same id.
+
+### What is built out (config.mak)
+
+`NO_RUST` (2.55's optional Rust parts), `NO_OPENSSL` (git's own SHA-1DC
+and SHA-256), `NO_CURL`, `NO_EXPAT`, `NO_PERL`, `NO_PYTHON`, `NO_TCLTK`,
+`NO_GETTEXT`, `NO_ICONV`, `NO_PTHREADS`, `NO_MMAP` (objects are read into
+memory), `NO_UNIX_SOCKETS`, `NO_IPV6`, `NO_REGEX` (git's bundled regex),
+`NO_TRUSTABLE_FILEMODE` (`core.filemode=false`: the tree keeps only the
+executable bit, and WASI cannot set it), `NO_SYMLINK_HEAD`, `NO_NSEC`,
+`NO_SETITIMER` (no progress timer), `NO_FSMONITOR`,
+`SKIP_DASHED_BUILT_INS`; `CSPRNG_METHOD=getentropy`; `prefix=/usr` (so
+`/etc/gitconfig` is read from the tree if present); `template_dir` empty.
+
+### The compat layer (`git/`)
+
+wasi-libc leaves the process, user, signal, terminal and socket calls
+undeclared. `git/wasi-compat.h` (force-included) declares them and
+`git/compat.c` defines them. `git/include/` has the headers wasi-libc
+lacks (`pwd.h`, `grp.h`, `netdb.h`, `syslog.h`, `termios.h`, `sys/wait.h`).
+
+- **Child processes** go through the host, the same way brush and xargs
+  run theirs: `pipe()` is `skein.pipe`, and `start_command` (patched, below)
+  hands the request to `skein.spawn`, which runs the program to completion
+  with its stdio bound to this process's fds; `waitpid()` reports the exit
+  status. `git` spawning `git` works (merge's `stash create`, gc's
+  `pack-refs`), and so do `sh` commands (`/bin/sh` maps to the shell's
+  `sh`). When git feeds a child through a pipe, the child runs when git
+  waits for it, after git has written and closed its end. A child that git
+  feeds and reads at the same time needs two processes at once (e.g.
+  repack's `pack-objects`), so it fails with ENOSYS. `fork()`/`exec*()`
+  themselves fail with ENOSYS, and so does `start_async` (fork under
+  `NO_PTHREADS`); none of the verbs above use it.
+- **Working directory**: wasi-libc starts in `/`; a constructor calls
+  `chdir($PWD)`, as coreutils and brush are patched to.
+- **Users**: uid/gid 0, which is what wasi-libc's `stat` reports for every
+  file, so `safe.directory` ownership checks pass. `getpw*`/`getgr*` find
+  nothing, so the identity must come from config or the environment
+  (otherwise git's own "please tell me who you are" error).
+- **chmod/fchmod** succeed and change nothing (wasi-libc's fail with ENOSYS,
+  which git treats as fatal when it rewrites config); `umask` is 022.
+- **Signals**: masks and `sigaction` are no-ops over wasi-libc's emulated
+  `signal()`; `kill` fails (ESRCH), `alarm` does nothing.
+- **Temporary files**: `mkstemp`/`mkdtemp` (missing from wasi-libc) name
+  files from `getentropy()`, which under skein is the run's deterministic
+  random stream (`random_get`), so temporary names replay too. They never
+  persist.
+- **Terminals, network**: `isatty` is false in the shell, so no pager
+  starts and `merge` opens no editor. `getpass`/`tcgetattr` fail. Every
+  socket and resolver call fails; remotes (`push`/`pull`/`fetch`/`clone`)
+  are out of scope.
+
+### git.patch
+
+- `run-command.c`: under `__wasi__`, `start_command` spawns through
+  `skein_spawn` (shaped like the Windows branch: stdio fds,
+  `prepare_git_cmd`/`prepare_shell_cmd`, then the pid).
+  `run_auto_maintenance` does nothing under `__wasi__`: no automatic
+  `gc`/`repack`/`maintenance` after commit or merge, so git never decides
+  to pack.
+- `read-cache.c`: under `__wasi__` every index entry counts as racy, so it
+  is compared by content. The tree records no times: every file and the
+  index stat as the epoch, and inode numbers follow load order. So stat
+  data cannot tell an edit that keeps the size from no edit (`git commit
+  -a` missed such edits). The cost is re-hashing tracked files on each
+  command, which is fine at agent-repo sizes.
+- `setup.c`: an empty `template_dir` means no templates, with no "templates
+  not found" warning on every `init`. No hooks are installed, so none run.
+
+### Not supported
+
+- **Packs.** Loose objects only. The kernel refuses new files in
+  `.git/objects/pack` (EPERM), so `git gc` and `git repack` fail there
+  ("Unable to create temporary file … Operation not permitted") and write
+  nothing; `count-objects` reports `packs: 0`. A pack would hold every
+  object a second time, as a blob.
+- **The editor**: `commit`/`tag -a` without `-m`/`-F` try to start `vi`,
+  which does not exist. (`GIT_EDITOR` naming a shell script in the tree
+  should work; untested.) **Pager**: never started (no tty).
+- `rebase`, `cherry-pick`, `revert`, `am` and `stash` as a verb were not
+  tested (merge does exercise `stash create`).
+- Under the TypeScript runtime (frozen), git runs too, because it is in
+  the shell program's module list and both runtimes must agree on that
+  list. There is no synthetic object directory there, though: a loose
+  object is an ordinary file, i.e. a zlib blob of the object, stored a
+  second time.
 
 ## Script runtimes (issue #25)
 

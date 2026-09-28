@@ -30,7 +30,7 @@ export const MODULES = {
   "objects-handler": CID.parse("bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4"),
   "head-handler": CID.parse("bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q"),
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
-  "loop": CID.parse("bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa"),
+  "loop": CID.parse("bafkreibucy775ondafg447omm5735b6o3ggeas7ggrrqjfpiwtajs4fiuu"),
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (wallet-zig/, built by scripts/build-programs.sh).
   "wallet": CID.parse("bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs
@@ -47,6 +47,9 @@ export const MODULES = {
   tree: CID.parse("bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4"),
   awk: CID.parse("bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju"),
   sed: CID.parse("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
+  // Real git 2.55.0 for wasm32-wasip1 (issue #2; wasm/README.md "git"): its
+  // .git/objects is the synthetic object directory of the Zig kernel.
+  git: CID.parse("bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe"),
   // Script runtimes (issue #25): QuickJS-ng (also run as `node`, a small
   // shim) and CPython on WASI (also `python3`); its stdlib is FILES below.
   qjs: CID.parse("bafkreig4lw4ceuhl5qvzr43ketajajhkexgqmg6et2rpjlx66dvavw6zwe"),
@@ -59,7 +62,7 @@ export const FILES = {
 } as const;
 
 /** The command names of the toolset (issue #13), each mapped to its module in MODULES by the same key. */
-const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "qjs", "python"] as const;
+const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git", "qjs", "python"] as const;
 /** More command names for a module already in TOOL_NAMES (issue #25): `node` is qjs with its node shim (it checks argv[0]). */
 const TOOL_ALIASES = { node: "qjs", python3: "python" } as const;
 /**
