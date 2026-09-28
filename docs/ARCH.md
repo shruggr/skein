@@ -148,6 +148,19 @@ are all that one call.
   BRC-231 clients — and an instance answers a party in the form it wrote in.
   `kernel-zig/src/log.zig` has the shapes.
 
+## Bootstrap (issue #4)
+
+An instance boots from a **system tree**: `bin/*.wasm` handlers (or their
+CIDs), `etc/config.json` and `etc/subscriptions.json`, and its own files. The
+loader (`src/host/boot.ts`) pre-fills the store with the tree's objects and
+writes the genesis from it. The genesis names the tree, and processing it sets
+`main` there. There is one loader and it takes two sources: a directory
+(`skein-host add <h> --boot <dir>`) or a chain packet, which is a BEEF bag plus
+a scope, verified offline (`--packet`, `src/host/packet.ts`). A packet whose
+scope is a state record is a checkpoint: it is restored, and its index is not
+rebuilt. Rows without a tree get the stock system in code, through the same
+writer. See `docs/BOOTSTRAP.md`.
+
 ## Processes on David's machines, today
 
 - `skein-host run` — the router: the messagebox on `127.0.0.1:8100`
