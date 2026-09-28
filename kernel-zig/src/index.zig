@@ -28,7 +28,8 @@
 //   resting   at ‖ origin                → null                (threads not finished: what start resumes)
 //   sleepers  until ‖ origin             → null                (threads waiting with a deadline)
 //   awaits    envelope ‖ at ‖ origin     → null                (threads awaiting a reply to an envelope)
-//   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target)
+//   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
+//                                                              an update's own, then its kept records' `refs`)
 //   heads     name                       → tree CID            (named heads)
 //
 // Every map is a function of the chains and the log (the derivation is
@@ -369,6 +370,33 @@ pub const Index = struct {
         return out.items;
     }
 
+    /// The update's edges, then those its kept records declare: a kept record
+    /// with `refs: [{to, rel, locator?}]` (the shape an origin's refs have)
+    /// gives an edge from the thread at this seq with the record's own `rel`
+    /// — how a program says what a record it keeps stands on (#37: `spends`,
+    /// `admits`, `derives-from` propagate a rejection; `mentions` does not).
+    /// A kept block that is not a dag-cbor map (a transaction, a tree) has none.
+    fn updateEdgesWithKept(ix: *Index, a: std.mem.Allocator, u: Value) ![]EdgeRow {
+        var out = std.array_list.Managed(EdgeRow).init(a);
+        try out.appendSlice(try updateEdges(a, u));
+        const kept = u.get("kept") orelse return out.items;
+        if (kept != .array) return out.items;
+        for (kept.array) |k| {
+            const c = Value.cidOf(k) orelse continue;
+            const bytes = (try ix.backend.vt.get(ix.backend.ctx, a, c)) orelse continue;
+            const r = cbor.decode(a, bytes) catch continue;
+            if (r != .map) continue;
+            const refs = r.get("refs") orelse continue;
+            if (refs != .array) continue;
+            for (refs.array) |x| {
+                if (x != .map) continue;
+                const rel = Value.str(x.get("rel")) orelse continue;
+                try edge(a, &out, x.get("to"), rel, x.get("locator"));
+            }
+        }
+        return out.items;
+    }
+
     fn writeEdges(ix: *Index, a: std.mem.Allocator, from: []const u8, seq: i64, edges: []const EdgeRow) !void {
         for (edges, 0..) |e, i| {
             var k = std.array_list.Managed(u8).init(a);
@@ -475,7 +503,7 @@ pub const Index = struct {
     /// One update of a chain, recorded (not yet the tip).
     fn recordUpdate(ix: *Index, a: std.mem.Allocator, origin: []const u8, seq: i64, cid: []const u8, u: Value) !void {
         try ix.mapPut(.updates, try cat(a, .{ origin, seq }), .{ .cid = cid });
-        try ix.writeEdges(a, origin, seq, try updateEdges(a, u));
+        try ix.writeEdges(a, origin, seq, try ix.updateEdgesWithKept(a, u));
     }
 
     /// move(): the chain's tip is now `tip` (at `seq`); the maps that follow tips follow.

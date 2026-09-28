@@ -140,3 +140,69 @@ test "index: maps follow chains; commits write new nodes only; import = incremen
     try std.testing.expectEqualSlices(u8, want, try ix3.stateCid(a));
     try std.testing.expectEqual(@as(usize, 2), (try ix3.store().resting(a)).len);
 }
+
+test "index: a kept record's refs are edges with the record's own rel (#37)" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = Mem.init(gpa);
+    defer mem.deinit();
+    const ix = try index.Index.init(gpa, mem.backend(), false);
+    defer ix.deinit();
+    const s = ix.store();
+
+    const t = try s.chainOpen(a, try thread(a, 10, "k"));
+    const tx = try cbor.cidOfValue(a, cbor.string("a transaction"));
+    const base = try cbor.cidOfValue(a, cbor.string("a record it was built on"));
+    // A kept record that mentions tx and derives from `base`, and a kept block that is not a map.
+    var ref1 = cbor.MapBuilder.init(a);
+    try ref1.put("to", cbor.cidv(tx));
+    try ref1.put("rel", cbor.string("mentions"));
+    var ref2 = cbor.MapBuilder.init(a);
+    try ref2.put("to", cbor.cidv(base));
+    try ref2.put("rel", cbor.string("derives-from"));
+    try ref2.put("locator", cbor.string("#0"));
+    var rec = cbor.MapBuilder.init(a);
+    try rec.put("kind", cbor.string("wallet-result"));
+    try rec.put("refs", .{ .array = try a.dupe(Value, &.{ ref1.value(), ref2.value() }) });
+    const kept = try cbor.block(a, rec.value());
+    try Mem.put(&mem, kept.cid, kept.bytes);
+    const plain = try cbor.block(a, cbor.string("no refs here"));
+    try Mem.put(&mem, plain.cid, plain.bytes);
+    var u = cbor.MapBuilder.init(a);
+    try u.put("state", cbor.string("finished"));
+    try u.put("at", cbor.int(11));
+    try u.put("kept", try cbor.cidArray(a, &.{ plain.cid, kept.cid }));
+    _ = try s.chainAppend(a, t, u.value());
+
+    // edges: to ‖ from ‖ seq ‖ ord → [rel, locator]; `to` is the target's CID string.
+    const edges = try ix.all(a, .edges);
+    try std.testing.expectEqual(@as(usize, 2), edges.len);
+    const tx_s = try cidm.format(a, tx);
+    var seen: usize = 0;
+    for (edges) |kv| {
+        const v = kv.value.array;
+        if (std.mem.indexOf(u8, kv.key, tx_s) != null) {
+            try std.testing.expectEqualStrings("mentions", Value.str(v[0]).?);
+            try std.testing.expect(v[1] == .null);
+        } else {
+            try std.testing.expectEqualStrings("derives-from", Value.str(v[0]).?);
+            try std.testing.expectEqualStrings("#0", Value.str(v[1]).?);
+        }
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+
+    // The rebuild path derives the same edges: the same state record.
+    const want = try ix.stateCid(a);
+    var mem2 = Mem.init(gpa);
+    defer mem2.deinit();
+    var it = mem.blocks.iterator();
+    while (it.next()) |e| try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
+    const ix2 = try index.Index.init(gpa, mem2.backend(), false);
+    defer ix2.deinit();
+    const ups = (try s.chainUpdates(a, t)).?;
+    try ix2.importChain(t, ups, (try s.chainTip(a, t)).?, @intCast(ups.len));
+    try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
+}
