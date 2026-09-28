@@ -32,7 +32,7 @@ export const MODULES = {
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
   "loop": CID.parse("bafkreihi2lx7lj54qaw4lopithify5x5gm7tcdomfig3bjijoqzj5sj2ty"),
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (wallet-zig/, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24"),
+  "wallet": CID.parse("bafkreidmvqntqpjg2755dp5bcp5lyxzhq6yitakseobllznmobdgi5h5jy"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs
   // beyond brush/coreutils (Modules.extra in shell.ts). find/xargs are two
   // binaries from one build (uutils/findutils); diff and cmp are two names
@@ -137,17 +137,20 @@ export const LOOP = program({
 });
 
 /**
- * The wallet's state as records (issue #29, phase 1; docs/WALLET.md): the
- * `wallet` box's handler, written in Zig (wallet-zig/). Not in a genesis by
- * default: an instance that wants it subscribes a box to WALLET_CID. Its one
- * attested call is getPublicKey (BRC-29 payee key); it never signs.
+ * The wallet's state as records (issue #29; docs/WALLET.md): the `wallet`
+ * box's handler, written in Zig (wallet-zig/). Not in a genesis by default:
+ * an instance that wants it subscribes a box to WALLET_CID (an owner's box,
+ * and a sender-less box for plain header/proof/status entries). It runs on
+ * the Zig kernel only: its transactions and headers are bitcoin-tx /
+ * bitcoin-block blocks, which this (frozen) TS kernel's putblock refuses,
+ * and it uses the kernel's `http` and `deadline` imports.
  */
 export const WALLET = program({
   name: "wallet",
   code: { wasm: MODULES.wallet },
-  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity" },
-  services: ["wallet"],
-  description: "The `wallet` box: wallet state as records. Body {op: checkpoint|headers|internalize|proof|list, …}: validates headers into our chain, internalizes BRC-29 payments from Atomic BEEF (SPV against our headers), records merkle proofs, lists outputs; advances the `wallet` head to the new state record; prints the result record's CID.",
+  inputs: { envelope: "cid", body: "cid", box: "string", sender: "identity", event: "cid" },
+  services: ["wallet", "http"],
+  description: "The `wallet` box: wallet state as records. Body {op: headers|internalize|proof|createAction|signAction|list, …}, or a plain header/proof/status entry: validates headers into our chain from the network's genesis, internalizes BRC-29 payments from Atomic BEEF (SPV against our headers), builds and signs spends through the oracle, broadcasts to ARC over http and awaits the status, records merkle proofs, lists outputs; advances the `wallet` head to the new state record; prints the result record's CID.",
 });
 export const WALLET_CID = encode(WALLET).cid;
 

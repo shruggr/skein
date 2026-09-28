@@ -14,7 +14,8 @@ import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../../src/runtime/cid.ts";
 import { rootIdentity } from "../../src/runtime/identity.ts";
-import { DEFAULTS, short, type LogEntry } from "../../src/runtime/log.ts";
+import { DEFAULTS, nextEntry, short, type InstanceConfig, type LogEntry } from "../../src/runtime/log.ts";
+import { msStamp } from "../../src/runtime/syscalls.ts";
 import type { Genesis } from "../../src/runtime/records.ts";
 import type { Outbound, Runtime } from "../../src/runtime/scheduler.ts";
 import { NotFound, Rejected, type Store } from "../../src/runtime/store.ts";
@@ -82,6 +83,7 @@ async function onFrame(f: Frame): Promise<void> {
         try { r = await resolve(handle, domain); } catch (e) { r = { identityKey: "", error: (e as Error).message }; }
         return answer(decode(encode(r).bytes)); // dag-cbor as the TS runtime records it (undefined dropped)
       }
+      case "http": return answer(await http(f.v as Uint8Array));
       case "send": await runtime.outbox?.send(f.v as Outbound); return;
       case "sleepers": runtime.sleepers = f.v as Array<{ thread: CID; until: Ms }>; return;
       case "onSleep": runtime.onSleep?.(undefined as never, 0); return;
@@ -119,6 +121,45 @@ const runtime = {
   async tip() { return this.store.log.tip(); },
 };
 
+// ---------------------------------------------------------------- http (#29, pre-#15)
+
+/** A program's request {method, url, headers?, body?} → {status, headers, body}, all dag-cbor. */
+export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array };
+export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
+let httpHandler: ((r: HttpRequest) => Promise<HttpResponse>) | undefined;
+
+/**
+ * The `http` import's answer. A test sets PeerOptions.http; SKEIN_HTTP=fetch
+ * performs real requests; otherwise the host answers none. #15 replaces this
+ * with standard wasi:http answered the same way.
+ */
+async function http(bytes: Uint8Array): Promise<Uint8Array> {
+  const req = decode<HttpRequest>(bytes);
+  let res: HttpResponse;
+  if (httpHandler) res = await httpHandler(req);
+  else if (process.env.SKEIN_HTTP === "fetch") {
+    const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body });
+    res = { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
+  } else throw new Error("this host answers no http (SKEIN_HTTP)");
+  return encode(res).bytes;
+}
+
+/**
+ * A plain entry (#29): an event from a feed the host holds (a header, a proof,
+ * a transaction status), put as a record and admitted unsigned in `box`.
+ */
+export async function admitEvent(box: string, event: Record<string, unknown>): Promise<CID> {
+  const cid = await store.put(event);
+  for (let tries = 0; ; tries++) {
+    const entry = await nextEntry(store, { box, event: cid } as never, msStamp(Date.now()));
+    try {
+      return await runtime.admit(entry as never);
+    } catch (e) {
+      if (!(e instanceof Rejected && e.reason === "out-of-order") || tries >= 10) throw e;
+    }
+  }
+}
+
 // ---------------------------------------------------------------- main.ts, as a peer
 
 const env = process.env;
@@ -149,6 +190,10 @@ export interface PeerOptions {
   wallet?: WalletInterface;
   box?: (wallet: WalletInterface) => MessageBox;
   pollMs?: number;
+  /** The genesis config for a new store, adjusted (extra subscriptions, defaults). */
+  config?: (c: InstanceConfig) => InstanceConfig;
+  /** Answers programs' `http` requests (#29). */
+  http?: (r: HttpRequest) => Promise<HttpResponse>;
   /** Called once the kernel is running, with the instance's identity. */
   running?: (identity: string) => void | Promise<void>;
   stopped?: () => void;
@@ -157,6 +202,7 @@ export interface PeerOptions {
 /** main.ts's startInstance, with the kernel behind RemoteRuntime. */
 export async function runPeer(o: PeerOptions = {}): Promise<void> {
  onStop = o.stopped;
+ httpHandler = o.http;
  try {
   const host = o.host ?? (ephemeral ? ephemeralWallet() : await connectWallet({ kind: "remote", url: env.SKEIN_HOST_WALLET_URL || "http://127.0.0.1:3324", originator: "skein-host" }));
   const wallet: WalletInterface = o.wallet ?? (ephemeral ? ephemeralWallet() : await connectWallet({ kind: "remote", url: env.SKEIN_WALLET_URL || "http://127.0.0.1:3321", originator }));
@@ -172,7 +218,7 @@ export async function runPeer(o: PeerOptions = {}): Promise<void> {
     });
     // The one limit on a step's fuel (issue #5), for a new genesis only; default DEFAULTS.fuelPerStep.
     if (env.SKEIN_FUEL_PER_STEP) config.defaults = { ...DEFAULTS, fuelPerStep: env.SKEIN_FUEL_PER_STEP };
-    const g = await ensureGenesis(store, wallet, host, config);
+    const g = await ensureGenesis(store, wallet, host, o.config ? o.config(config) : config);
     say(`genesis ${g.entry}`);
   }
   const g = await call("genesis") as Genesis;

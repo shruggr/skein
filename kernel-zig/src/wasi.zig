@@ -214,6 +214,8 @@ pub const Fn = enum {
     advance,
     subscribe,
     wallet,
+    http,
+    deadline,
     take,
     @"error",
 };

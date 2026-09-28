@@ -220,6 +220,12 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
+    /// A program's http request (#29, pre-#15): the peer performs it (or refuses).
+    fn pHttp(p: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror![]u8 {
+        const r = try ctx(p).request(a, "http", .{ .bytes = req });
+        return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+    }
+
     fn pResolve(p: *anyopaque, a: std.mem.Allocator, h: []const u8, d: []const u8) Value {
         var m = cbor.MapBuilder.init(a);
         m.put("handle", cbor.string(h)) catch {};
@@ -320,6 +326,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .ctx = &server,
         .wallet = Server.pWallet,
         .resolve = Server.pResolve,
+        .http = Server.pHttp,
         .send = Server.pSend,
         .on_sleep = Server.pOnSleep,
         .say = Server.pSay,

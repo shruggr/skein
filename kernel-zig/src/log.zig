@@ -27,8 +27,26 @@ pub fn isOutcome(x: ?Value) bool {
     return true;
 }
 
-/// log.ts isLogEntry.
+/// A plain entry (#29): {kind: "log", n, prev, time, box, event} — an event
+/// the host admits from a feed it holds (a header, a proof, a transaction
+/// status), the record `event` names, routed by `box`. No envelope, no
+/// signature: it self-validates inside the program that takes it (#9
+/// revised: entries are unsigned; the envelope/wake/outcome kinds keep their
+/// signatures until #33 reshapes them).
+pub fn isEventEntry(e: Value) bool {
+    if (e != .map) return false;
+    if (!std.mem.eql(u8, Value.str(e.get("kind")) orelse return false, "log")) return false;
+    if (!Value.isNumber(e.get("n")) or e.get("sig") != null) return false;
+    if (Value.cidOf(e.get("event")) == null) return false;
+    const box = Value.str(e.get("box")) orelse return false;
+    if (box.len == 0) return false;
+    for ([_][]const u8{ "genesis", "envelope", "wake", "outcome", "body" }) |k| if (e.get(k) != null) return false;
+    return true;
+}
+
+/// log.ts isLogEntry, and the plain (event) entries.
 pub fn isLogEntry(e: Value) bool {
+    if (isEventEntry(e)) return true;
     if (e != .map) return false;
     const kind = Value.str(e.get("kind")) orelse return false;
     if (!std.mem.eql(u8, kind, "log")) return false;
@@ -49,7 +67,9 @@ pub fn entryBytes(a: std.mem.Allocator, e: Value) ![]u8 {
     return cbor.encode(a, try cbor.without(a, e, "sig"));
 }
 
+/// The host's signature on an entry; a plain (event) entry has none to check.
 pub fn verifyEntry(a: std.mem.Allocator, e: Value, host: []const u8) bool {
+    if (isEventEntry(e)) return true;
     const sig = Value.bytesOf(e.get("sig")) orelse return false;
     const bytes = entryBytes(a, e) catch return false;
     return secp.verifyAnyone(host, 2, "skein log", "1", bytes, sig);
@@ -128,7 +148,7 @@ pub fn isAttested(x: ?Value) bool {
     if (Value.cidOf(a.get("thread")) == null) return false;
     if (!Value.isNumber(a.get("step")) or !Value.isNumber(a.get("i"))) return false;
     const op = Value.str(a.get("op")) orelse return false;
-    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "resolve")) return false;
+    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "resolve") and !std.mem.eql(u8, op, "http")) return false;
     return Value.bytesOf(a.get("result")) != null;
 }
 
