@@ -462,6 +462,129 @@ by the reserved box `:mail`. A store written in an older format is refused
 for running; the handler programs the frozen TypeScript runtime runs are its
 own builds, `wasm/v1/`.
 
+## The browser build (issue #35)
+
+The same kernel compiled to `wasm32-freestanding`, with its engine and its
+store behind a small JS shim. Nothing else changes: log, scheduler, index/MST,
+cbor/cid, vfs, syscalls, wasi and the programs compile as they are.
+
+```
+cd kernel-zig && mise exec -- zig build web      # → zig-out/web/skein-kernel.wasm (2.4 MB, stripped)
+mise exec -- zig build -Dtarget=wasm32-freestanding   # the same (any wasm target builds only the web kernel)
+node --experimental-strip-types web/kernel/serve.ts   # the proof page on :4401 (builds web/kernel/dist)
+```
+
+**The two seams.** `engine.zig` is now the interface; it picks
+`engine_wasmtime.zig` natively and `engine_v8.zig` when the kernel is itself
+wasm. `store.zig`'s key→bytes backend is `sqlite_store.zig` natively and
+`web_store.zig` in the browser. `component_web.zig` stands in for the
+component host: the browser runs **preview1 modules only** for now (a
+component is refused at compile with a clear message). Two lines outside the
+backends: `wasi.zig`'s memory accessors call `engine.touch` (a no-op
+natively), and `runner.zig` picks the component backend by target.
+
+**The shim** (`kernel-zig/web/`, dependency-free ES modules):
+
+| file | what |
+|---|---|
+| `kernel.js` | the kernel's imports and exports as a class: `skein_engine` (V8 as the engine), `skein_store` (stores by id: `MemoryStore`), `skein_peer` (the host) |
+| `store.js` | `IdbStore`: IndexedDB (`blocks`: CID → bytes, `pointers`: name → CID), loaded whole at open (the kernel reads synchronously), each committed batch written behind in its own readwrite transaction (IndexedDB runs them in order, so what is durable is a prefix of what was committed); `flushed()` before an admission is acknowledged |
+| `worker.js` | the kernel in a module Worker: programs are compiled and run synchronously, and the kernel's requests (wallet, resolve, http) block on a SharedArrayBuffer (`Atomics.wait`) while the page answers — so the page must be cross-origin isolated (COOP/COEP) |
+| `client.js` | the page's side: calls as promises, notifications, requests answered into the shared buffer |
+
+**The ABI** (`src/web.zig`). Results are left in a result buffer
+(`skein_result()`), the call returning its length; a failure returns
+−(length + 1) with its message there. Values are dag-cbor.
+
+| export | what (serve's op) |
+|---|---|
+| `skein_alloc(n)`, `skein_free(p, n)`, `skein_result()`, `skein_args()` | buffers; `skein_args` is 16 × i64 for a host call's arguments and result |
+| `skein_open(store)` | open the shim's store `store` and a runtime over it (an older-format store is refused) |
+| `skein_modules()` | `[{name, file, cid}]`: the pinned modules and files to install |
+| `skein_put_block(cid, bytes)`, `skein_get_block(cid)` | a block, checked against its CID on put |
+| `skein_admit({entry, envelope?, body?})` | `admit`: the one call in; admitted, not yet processed |
+| `skein_start()`, `skein_drain()` | `start`; the step loop over everything admitted (`kick`) |
+| `skein_state()` | `{state, log, cursor}` |
+| `skein_next_deadline()` | the earliest sleeper's deadline (ms) or −1: the waker |
+| `skein_call({op, v})` | the other serve ops: `tip get put append programs head genesis boxes byEnvelope sleepers` |
+| `skein_replay(src, dst)` | `skein-kernel replay` between two shim stores, the same JSON report |
+| `skein_host_call(instance, index, nargs, memlen)` | a program's import (the shim's import functions call it) |
+
+Imports: `skein_engine` (`compile`, `instantiate`, `run`, `release`,
+`fuel_get`/`fuel_set`, `mem_read`/`mem_write`, `error_len`/`error_take`),
+`skein_store` (`get`/`take`, `has`, `put`, `begin`/`commit`/`rollback`,
+`pointer_get`/`pointer_set`), `skein_peer` (`request(op, v)` → the answer,
+blocking, for `wallet`, `resolve`, `http`; `notify(op, v)` for `send`,
+`sleepers`, `onSleep`, `say`, `panic`; `take`).
+
+**Programs on V8.** The kernel hands the shim a program's bytes; the shim
+compiles and instantiates them with an import object whose every function
+writes its arguments into `skein_args` and calls `skein_host_call` — the same
+host callback, by import index, as wasmtime's. An abort (exit, a park, a fatal
+host error) is a JS exception thrown through the program's frames; a trap
+comes back by V8's message (the `Trap` table). A sleeping shell re-executes on
+wake, as natively: same records. The program's memory is not the kernel's:
+during a host call the callback's `mem` is a mirror in the kernel's memory,
+whose 4 KiB pages are fetched on first touch and written back when the call
+returns (nothing else runs in the program meanwhile, and nested instances each
+have their own mirror).
+
+**Fuel by instrumentation** (`src/wasm_fuel.zig`). V8 has no fuel, so the
+kernel rewrites each module before handing it over to count its own fuel in
+an exported i64 global, exactly as wasmtime v49's `consume_fuel` counts it
+(read from `crates/cranelift/src/func_environ.rs` and wasmtime-environ's
+`tunables.rs`): 1 per operator except `nop drop block loop unreachable return
+else end`; 1 per function entry; the bulk operators 1 per unit
+(memory.copy/fill/init per byte, memory.grow per page, table.* per element),
+charged on success, or up front for a small constant count (≤ 128); costs
+buffered and added to a local at loop/if/br/br_if/br_table/end/else and the
+calls, returns and traps; the local saved to the global before every call,
+return, unreachable and at the exit, reloaded after calls; checked (≥ 0 → out
+of fuel) at function entries, loop headers and after a bulk operator with a
+runtime or large count. A start function runs through a wrapper that costs
+what wasmtime's start trampoline costs (2). The kernel's `Meter` then works
+over that counter exactly as over wasmtime's fuel, so `fuel`, the in-step
+clock (#38) and exhaustion are the same numbers. **Identical to wasmtime** on
+everything checked: `wasm_fuel_test.zig` runs a probe module both ways under
+wasmtime (the fuel read at every host call, at the end, and the exhaustion
+point for every limit), `SKEIN_FUEL_MODE=instrument` runs the native kernel
+with instrumented modules (the 9 corpus stores replay to identical reports),
+and the corpus replays identically in Chrome. Not modelled, and absent from
+every pinned program: a statically out-of-bounds load/store (wasmtime makes
+what follows unreachable), and a bulk count that is a constant carried in a
+local across a control-flow merge (wasmtime may see a constant there; the
+total on success is the same, only a failed small grow or the exhaustion
+point could differ). Exceptions, GC, typed function references and memory64
+are refused.
+
+**The host in the browser** (`web/kernel/host.ts`, #16): one instance whose
+identity is the connected wallet's; the page is its router. `wallet` → the
+page's BRC-100 wallet over the wire (Yours via @1sat/connect; a ProtoWallet in
+tests); `resolve` → fetch of the router's paymail PKI; `http` → fetch; an emit
+→ BRC-231 `sendMessage` to the messagebox host as the instance (one to its own
+identity is shown on the page), its outcome admitted back. The call in: the
+page's chat (an envelope sealed by the wallet, screened as the router screens,
+admitted directly — the envelope shape kept), a poll of `listMessages` as the
+instance (acknowledged once durable), and a timer for wakes. An intermittent
+host: nothing runs while the tab is closed; inbound waits in the messagebox,
+wakes fire late at the next open.
+
+**Proof** (`equiv/run.sh`; `SKEIN_EQUIV_BROWSER=0` skips the Chrome parts):
+`equiv/browser.ts` replays every corpus store in headless Chrome (Playwright,
+`/usr/bin/chromium`) into IndexedDB, reads it back in a fresh worker and
+compares the report and `skein-kernel dump` of what IndexedDB kept with the
+native replay — 9/9 identical (entries, updates with fuel, state CID; about
+1–7 s a store in the worker). `equiv/browser-live.ts` runs the page against a
+router on a scratch port with an agent on the native kernel and a scripted
+inference peer: the page's instance asks inference, resolves `@agent@localhost`,
+chats the agent, the reply is polled from the page identity's mailbox and
+admitted, and the thread answers the page; the store the browser wrote then
+replays natively to the same state with no DIVERGED.
+
+**Not yet:** components in the browser (the shim would need jco-style glue);
+the JSPI path (not needed: re-execution on wake); a store too big to hold in
+memory (IdbStore loads everything).
+
 ## Equivalence
 
 Since #5 the Zig kernel is its own reference: the TS runtime does not
@@ -479,6 +602,10 @@ meter, so its update records (and CIDs) are no longer the Zig kernel's.
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains, lines and emits; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly |
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains, lines and emits; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly. Since #15 the component broadcasts and re-asks ARC over `wasi:http`, so this also shows the two ABIs make byte-identical recorded HTTP calls |
 | `equiv/fetch.ts` (#15) | the `fetch` component (wasi:http) as a box's handler through the router, the router's http handler standing in for the network; then `replays.ts` with no host | the body on stdout; the host asked once per step in the recorded-call shape; the update records request and response; a 404 comes back to the program; the store replays exactly with no host to ask |
+| `wasm_fuel_test.zig` (#35) | fuel by instrumentation against wasmtime's on a probe module (bulk operators, grows that fail, branches to the function's label, call_indirect, a trap, a start function): the same reading at every host call and at the end, and the same exhaustion for every limit; every pinned program instruments to a valid module | ok |
+| instrumented fuel (#35) | the corpus replayed natively with `SKEIN_FUEL_MODE=instrument` (every module metered by its own counter) | 9/9 identical reports |
+| `equiv/browser.ts` (#35) | the corpus replayed by the wasm kernel in headless Chrome into IndexedDB, read back, against the native replay: report and dump | 9/9 identical |
+| `equiv/browser-live.ts` (#35) | an instance in Chrome chats an agent on a scratch router; the reply admitted; its store replayed natively | all ok |
 | older-format refusal | a TS-written store (host-signed entries, no fuel) opened for running (`skein-kernel shell`) | refused, with the message |
 | `equiv/serve.ts` | `serve` as the router drives it, the owner and the inference peer as standard messagebox clients over BRC-104: genesis, a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a router restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
@@ -514,7 +641,8 @@ predate fuel; the live instances re-genesis when they move to this build).
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
 | `log.zig`, `heads.zig`, `subscriptions.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, `subscriptions.ts`, `programs.ts`, `syscalls.ts` |
-| `engine.zig` | wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |
+| `engine.zig`, `engine_wasmtime.zig` | the engine interface; wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |
+| `engine_v8.zig`, `web_store.zig`, `component_web.zig`, `web.zig`, `wasm_fuel.zig`, `web/` | the browser build (#35): V8 through the shim, the shim's stores, preview1 only, the exported ABI, fuel by instrumentation, the JS shim |
 | `wasi.zig`, `vfs.zig`, `tree.zig` | `wasi/host.ts`, `wasi/vfs.ts`, `tree.ts` |
 | `objects.zig` | none: the synthetic `.git/objects` (issue #2, docs/VM.md), loose-object framing over git-raw records |
 | `runner.zig`, `shell.zig`, `program.zig` | module cache and `runModule`; `shell.ts`; `program.ts` + `wasi/skein-imports.ts` |

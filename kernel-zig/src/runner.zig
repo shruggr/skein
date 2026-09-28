@@ -6,7 +6,8 @@
 // and runs either, with the same process (tree, stdio, clock, random, skein).
 const std = @import("std");
 const engine = @import("engine.zig");
-const component = @import("component.zig");
+// Components run on wasmtime's component API; the browser build runs preview1 modules only (issue #35).
+const component = if (engine.web) @import("component_web.zig") else @import("component.zig");
 const wasi = @import("wasi.zig");
 const cidm = @import("cid.zig");
 const vfsm = @import("vfs.zig");

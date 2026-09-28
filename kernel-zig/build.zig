@@ -6,11 +6,24 @@
 // ~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api. The static
 // libwasmtime.a is linked, so the binary needs nothing of it at run time.
 // SQLite: the system libsqlite3 (JSON1 is built in since 3.38).
+//
+// The browser build (issue #35): `zig build web`, or any wasm target
+// (`zig build -Dtarget=wasm32-freestanding`) → zig-out/web/skein-kernel.wasm,
+// the same kernel with the engine and the store behind the JS shim
+// (src/web.zig; kernel-zig/web/). Needs neither wasmtime nor SQLite.
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSafe });
+
+    const web_target = if (target.result.cpu.arch.isWasm()) target else b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const web = webKernel(b, web_target, optimize);
+    b.step("web", "the browser build: zig-out/web/skein-kernel.wasm").dependOn(&web.step);
+    if (target.result.cpu.arch.isWasm()) {
+        b.getInstallStep().dependOn(&web.step);
+        return;
+    }
 
     const home = std.process.getEnvVarOwned(b.allocator, "HOME") catch "/root";
     const default_wt = b.fmt("{s}/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api", .{home});
@@ -43,6 +56,23 @@ pub fn build(b: *std.Build) void {
     const trun = b.addRunArtifact(tests);
     trun.setCwd(b.path("."));
     b.step("test", "run the unit tests").dependOn(&trun.step);
+}
+
+fn webKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.InstallArtifact {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("src/web.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = true,
+        // No DWARF in what the page downloads (4.2 → 2.7 MB); panics still report their message.
+        .strip = true,
+    });
+    const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod });
+    exe.entry = .disabled;
+    exe.rdynamic = true;
+    // The kernel's own stack (its shadow stack in linear memory): deep enough for the scheduler's recursion.
+    exe.stack_size = 8 << 20;
+    return b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "web" } } });
 }
 
 fn link(b: *std.Build, m: *std.Build.Module, wt: []const u8) void {

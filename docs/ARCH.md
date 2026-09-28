@@ -160,6 +160,30 @@ a scope, verified offline (`--packet`, `src/host/packet.ts`). A packet whose
 scope is a state record is a checkpoint: it is restored, and its index is not
 rebuilt. Rows without a tree get the stock system in code, through the same
 writer. See `docs/BOOTSTRAP.md`.
+## The browser as a host (issue #35)
+
+The same Zig kernel compiled to wasm (`kernel-zig`, `zig build web`) runs in a
+browser tab: in a Worker, programs on V8 with fuel counted by instrumentation
+(the same numbers as wasmtime's), the store in IndexedDB. A browser deployment
+is a skein host with a front end (#16): the page is the instance's router, for
+one instance whose identity is the connected wallet's (Yours) — user, instance
+and host are the same identity on three separate interfaces
+(`web/kernel/host.ts`):
+
+- **out**: `wallet` → the page's BRC-100 wallet; `resolve` → fetch of a
+  messagebox host's paymail PKI; `http` → fetch; an emit → BRC-231
+  `sendMessage` to the messagebox host (the router on :8100 speaks the standard
+  API), its outcome admitted back; an emit to the instance's own identity is
+  the page's to show.
+- **in**, the same one call: the page's chat (sealed by the wallet and admitted
+  directly, keeping the envelope shape), a poll of the instance identity's
+  mailbox on the messagebox host (`listMessages`, screened as the router
+  screens, acknowledged once durable), and a timer for wakes.
+- **intermittent**: nothing runs while the tab is closed; inbound waits in the
+  messagebox and wakes fire late, when the page is next open.
+
+The proof page is `web/kernel/` (no framework; `node web/kernel/serve.ts`,
+cross-origin isolated). Easel (#16) builds on this.
 
 ## Processes on David's machines, today
 

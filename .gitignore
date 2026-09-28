@@ -10,3 +10,4 @@ programs/messagebox/zig-out/
 .claude/worktrees/
 programs/fetch/.zig-cache/
 programs/fetch/zig-out/
+web/kernel/dist/

@@ -295,6 +295,7 @@ pub const Process = struct {
     fn range(p: *Process, ptr: i64, n: usize) Stop![]u8 {
         const start: u64 = @as(u32, @truncate(@as(u64, @bitCast(ptr))));
         if (start + n > p.mem.len) return p.fail("Offset is outside the bounds of the DataView");
+        engine.touch(p.mem, @intCast(start), n);
         return p.mem[@intCast(start)..@intCast(start + n)];
     }
     pub fn setU8(p: *Process, ptr: i64, v: u8) Stop!void {
@@ -325,12 +326,14 @@ pub const Process = struct {
     pub fn slice(p: *Process, ptr: i64, n: i64) ![]u8 {
         const start: usize = @min(@as(u32, @truncate(@as(u64, @bitCast(ptr)))), p.mem.len);
         const end: usize = @min(start + @as(usize, @as(u32, @truncate(@as(u64, @bitCast(n))))), p.mem.len);
+        engine.touch(p.mem, start, end - start);
         return p.alloc.dupe(u8, p.mem[start..end]);
     }
     /// Uint8Array.set(bytes, ptr): all of it or a RangeError.
     pub fn set(p: *Process, ptr: i64, bytes: []const u8) Stop!void {
         const start: u64 = @as(u32, @truncate(@as(u64, @bitCast(ptr))));
         if (start + bytes.len > p.mem.len) return p.fail("offset is out of bounds");
+        engine.touch(p.mem, @intCast(start), bytes.len);
         @memcpy(p.mem[@intCast(start)..@intCast(start + bytes.len)], bytes);
     }
     pub fn str(p: *Process, ptr: i64, n: i64) ![]u8 {
