@@ -18,11 +18,20 @@
 // the B that spends it, settlement messages to the owner's `settlement` box,
 // B's thread learning it as a new input, and a reorg re-broadcasting.
 //
+// Issue #34, when the wallet's component build is there
+// (wallet-zig/zig-out/bin/wallet.component.wasm from `zig build component`, or
+// $SKEIN_WALLET_COMPONENT): the preview1 store's log is replayed with the
+// component in the module's place (equiv/abi.ts: every update identical but
+// for fuel), and the whole scenario runs again with the component as the
+// wallet program (this script, SKEIN_WALLET_ABI=component: the same program
+// record but for code.wasm, installed unpinned through SKEIN_EXTRA_MODULES):
+// the same report, and its store replays to itself exactly.
+//
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/wallet.ts
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,12 +46,19 @@ import { messageBoxClient } from "../../src/host/messagebox.ts";
 import { Router } from "../../src/host/router.ts";
 import { decode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { WALLET, WALLET_CID } from "../../src/runtime/programs.ts";
+import { encode } from "../../src/runtime/cid.ts";
+import { MODULES, rawCid, WALLET as WALLET_P1 } from "../../src/runtime/programs.ts";
 import type { ThreadUpdate } from "../../src/runtime/types.ts";
 import { collect } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const component = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../wallet-zig/zig-out/bin/wallet.component.wasm");
+/** This run's ABI: the pinned preview1 module, or (issue #34) the component build of the same program. */
+const abi = process.env.SKEIN_WALLET_ABI === "component" ? "component" : "preview1";
+if (abi === "component") process.env.SKEIN_EXTRA_MODULES = component; // the kernel the router spawns installs it
+const WALLET = abi === "component" ? { ...WALLET_P1, code: { wasm: rawCid(readFileSync(component)) } } : WALLET_P1;
+const WALLET_CID = encode(WALLET).cid;
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-wallet-"));
 const db = join(home, "instances/wallettest/runtime.db");
@@ -352,6 +368,7 @@ await router.stop();
 hostDb.close();
 
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(eq(report.headers, [100, 100]), `headers 1..100 from the owner, chained from regtest's genesis (${JSON.stringify(report.headers)})`);
 check(eq(report.headerEntry, ["header", 102]), `plain header entries, routed by a sender-less subscription (${JSON.stringify(report.headerEntry)})`);
@@ -381,6 +398,26 @@ process.stdout.write(r.stdout);
 if (r.status !== 0) process.stdout.write(r.stderr);
 check(r.status === 0 && /identical .*the source store reproduced exactly/.test(r.stdout), "the store replays to itself exactly, twice over: oracle and http answers from the recorded calls");
 
+if (process.env.SKEIN_WALLET_REPORT) writeFileSync(process.env.SKEIN_WALLET_REPORT, JSON.stringify(report));
+
+// Issue #34: the component build, against this preview1 log and then live.
+if (abi === "preview1" && existsSync(component)) {
+  process.stdout.write(`== the preview1 log replayed with the wallet's component in the module's place (equiv/abi.ts)\n`);
+  const a = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "abi.ts"), db, MODULES.wallet.toString(), component], { encoding: "utf8" });
+  process.stdout.write(a.stdout.split("\n").filter((l) => l).map((l) => `  ${l}\n`).join(""));
+  if (a.status !== 0) process.stdout.write(a.stderr);
+  check(a.status === 0, "no DIVERGED; every update identical but for fuel");
+  const out = join(home, "component.json");
+  const c2 = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "wallet.ts")], { encoding: "utf8", env: { ...process.env, SKEIN_WALLET_ABI: "component", SKEIN_WALLET_REPORT: out } });
+  process.stdout.write(c2.stdout);
+  if (c2.status !== 0) process.stdout.write(c2.stderr);
+  check(c2.status === 0, "the scenario with the wallet as a component: all ok");
+  const theirs = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : {};
+  check(eq(theirs, JSON.parse(JSON.stringify(report))), "the component's run reports exactly what the module's did");
+} else if (abi === "preview1") {
+  process.stdout.write(`== the wallet as a component: skipped (no ${component}; \`cd wallet-zig && zig build component\`)\n`);
+}
+
 rmSync(home, { recursive: true, force: true });
-process.stdout.write(failures ? `wallet: ${failures} FAILED\n` : "wallet: all ok\n");
+process.stdout.write(failures ? `wallet (${abi}): ${failures} FAILED\n` : `wallet (${abi}): all ok\n`);
 process.exit(failures ? 1 : 0);

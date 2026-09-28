@@ -188,11 +188,11 @@ pub const Module = struct {
 /// listing): far beyond anything real, below wasmtime's i64 bound.
 pub const UNMETERED: u64 = 1 << 62;
 
-fn setFuel(ctx: *c.wasmtime_context_t, f: u64) void {
+pub fn setFuel(ctx: *c.wasmtime_context_t, f: u64) void {
     if (c.wasmtime_context_set_fuel(ctx, f)) |err| c.wasmtime_error_delete(err);
 }
 
-fn getFuel(ctx: *const c.wasmtime_context_t) u64 {
+pub fn getFuel(ctx: *const c.wasmtime_context_t) u64 {
     var f: u64 = 0;
     if (c.wasmtime_context_get_fuel(ctx, &f)) |err| c.wasmtime_error_delete(err);
     return f;

@@ -1,8 +1,12 @@
 // Running WASI modules: the engine, compiled modules by CID (cached for the
 // life of the process, as programs.ts loadModule does), and runModule
 // (shell.ts runModule): instantiate, run to exit, map traps as V8 reports them.
+// A module's bytes may be a preview1 core module or a WASI 0.2 component
+// (issue #34, component.zig): the kernel tells them apart by their preamble
+// and runs either, with the same process (tree, stdio, clock, random, skein).
 const std = @import("std");
 const engine = @import("engine.zig");
+const component = @import("component.zig");
 const wasi = @import("wasi.zig");
 const cidm = @import("cid.zig");
 const vfsm = @import("vfs.zig");
@@ -13,15 +17,22 @@ const Store = @import("store.zig").Store;
 pub const FUEL_EXHAUSTED = "fuel exhausted";
 
 pub const Compiled = struct {
-    mod: *engine.Module,
-    shell_bindings: []wasi.Fn,
-    prog_bindings: []wasi.Fn,
+    /// A preview1 core module, or
+    mod: ?*engine.Module = null,
+    /// a WASI 0.2 component (its imports are bound by name in its own linker).
+    comp: ?*component.Component = null,
+    shell_bindings: []wasi.Fn = &.{},
+    prog_bindings: []wasi.Fn = &.{},
 };
 
 pub const Runner = struct {
     gpa: std.mem.Allocator,
     eng: engine.Engine,
     cache: std.StringHashMap(*Compiled),
+    /// A module run in place of another (issue #34, `skein-kernel replay` with
+    /// SKEIN_REPLAY_MODULE): the same log replayed with a program's other build,
+    /// e.g. its component, to compare the ABIs update by update. Never in serve.
+    subst: ?struct { cid: []const u8, bytes: []const u8 } = null,
 
     pub fn init(gpa: std.mem.Allocator) !*Runner {
         const r = try gpa.create(Runner);
@@ -30,6 +41,12 @@ pub const Runner = struct {
     }
 
     pub fn compile(r: *Runner, bytes: []const u8, err_msg: *[]const u8) !*Compiled {
+        if (component.isComponent(bytes)) {
+            const comp = try component.Component.compile(&r.eng, r.gpa, bytes, err_msg);
+            const c = try r.gpa.create(Compiled);
+            c.* = .{ .comp = comp };
+            return c;
+        }
         const mod = try engine.Module.compile(&r.eng, r.gpa, bytes, err_msg);
         const c = try r.gpa.create(Compiled);
         c.* = .{
@@ -50,6 +67,15 @@ pub const Runner = struct {
     pub fn load(r: *Runner, s: Store, a: std.mem.Allocator, cid: []const u8, msg: *[]const u8) LoadError!*Compiled {
         const k = cidm.format(a, cid) catch return error.OutOfMemory;
         if (r.cache.get(k)) |c| return c;
+        if (r.subst) |sub| if (std.mem.eql(u8, sub.cid, cid)) {
+            var em: []const u8 = "";
+            const c = r.compile(sub.bytes, &em) catch {
+                msg.* = std.fmt.allocPrint(a, "WebAssembly.compile(): {s}", .{em}) catch "compile failed";
+                return error.Compile;
+            };
+            r.cache.put(r.gpa.dupe(u8, k) catch return error.OutOfMemory, c) catch return error.OutOfMemory;
+            return c;
+        };
         const bytes = (s.bytes(a, cid) catch return error.Store) orelse {
             msg.* = std.fmt.allocPrint(a, "module not in store: {s} (skein-dev install puts it there)", .{k}) catch "module not in store";
             return error.NotInStore;
@@ -75,7 +101,10 @@ pub const Runner = struct {
         p.prog = prog;
         p.bindings = if (prog != null) c.prog_bindings else c.shell_bindings;
         var em: []const u8 = "";
-        const outcome = c.mod.run(&r.eng, p, wasi.Process.call, &em, alloc, svc.state.meter) catch {
+        const outcome = (if (c.comp) |comp|
+            comp.run(&r.eng, p, &em, alloc, svc.state.meter)
+        else
+            c.mod.?.run(&r.eng, p, wasi.Process.call, &em, alloc, svc.state.meter)) catch {
             return p.fail(em);
         };
         switch (outcome) {
