@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 import { CID } from "multiformats/cid";
 import { install } from "../../src/dev/cli.ts";
+import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { scan } from "../../src/dev/scan.ts";
 import { openStore } from "../../src/runtime/sqlite.ts";
 import { DatabaseSync } from "node:sqlite";
@@ -97,7 +98,7 @@ steps.forEach((s, i) => {
 console.log("");
 
 // The repository as the store holds it.
-const st = openStore(db);
+const st = openStoreFile(db, { readOnly: true });   // the kernel may have moved it to the #30 format
 const getBytes = async (c: CID) => await st.bytes(c);
 async function treeEntries(c: CID) { return parseTree(await getBytes(c)); }
 async function walk(root: CID, path: string[]): Promise<CID> {

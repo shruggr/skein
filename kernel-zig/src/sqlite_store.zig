@@ -258,7 +258,25 @@ pub const SqliteStore = struct {
         var buf: [128]u8 = undefined;
         for (LEGACY) |t| {
             if (!try s.hasTable(t)) continue;
-            const q = try std.fmt.bufPrint(&buf, "ALTER TABLE \"{s}\" RENAME TO \"legacy_{s}\"", .{ t, t });
+            const legacy = try std.fmt.bufPrint(&buf, "legacy_{s}", .{t});
+            if (try s.hasTable(legacy)) {
+                // Already retired once; a TS opener (sqlite.ts) recreated the table empty
+                // on a later open. Drop the empty duplicate; a filled one is a real conflict.
+                var qb: [128]u8 = undefined;
+                const cnt = try s.db.prepare(try std.fmt.bufPrint(&qb, "SELECT COUNT(*) FROM \"{s}\"", .{t}));
+                _ = try cnt.step();
+                const n = cnt.int(0);
+                cnt.done();
+                if (n != 0) {
+                    std.log.err("store: both {s} and {s} hold rows; refusing to retire", .{ t, legacy });
+                    return error.LegacyConflict;
+                }
+                var qd: [128]u8 = undefined;
+                try s.db.exec(try std.fmt.bufPrint(&qd, "DROP TABLE \"{s}\"", .{t}));
+                continue;
+            }
+            var qr: [160]u8 = undefined;
+            const q = try std.fmt.bufPrint(&qr, "ALTER TABLE \"{s}\" RENAME TO \"legacy_{s}\"", .{ t, t });
             try s.db.exec(q);
         }
     }
