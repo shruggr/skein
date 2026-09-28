@@ -62,6 +62,19 @@ pub fn install(gpa: std.mem.Allocator, ss: *SqliteStore, say: ?*const fn (line: 
         try s.putBlock(c, bytes);
         if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ m.name, m.cid }));
     }
+    // SKEIN_EXTRA_MODULES=<file>:<file>…: modules that are not pinned, installed
+    // under their raw CIDs — how equiv/wallet.ts runs the wallet's component
+    // build (issue #34) without pinning it. Not for live instances.
+    if (std.posix.getenv("SKEIN_EXTRA_MODULES")) |list| {
+        var it = std.mem.tokenizeScalar(u8, list, ':');
+        while (it.next()) |path| {
+            const bytes = try std.fs.cwd().readFileAlloc(a, path, 1 << 30);
+            const c = try cidm.ofRaw(a, bytes);
+            if (try s.has(c)) continue;
+            try s.putBlock(c, bytes);
+            if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ path, try cidm.format(a, c) }));
+        }
+    }
 }
 
 /// log.ts copyLog: the entries exactly as written and the records they name.
@@ -114,6 +127,12 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
     try copyLog(a, src, dst);
 
     const r = try runner.Runner.init(gpa);
+    // SKEIN_REPLAY_MODULE=<cid>=<file>: run <file> wherever the log runs module
+    // <cid> (issue #34: a program's component build against its preview1 log).
+    if (std.posix.getenv("SKEIN_REPLAY_MODULE")) |spec| {
+        const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return error.BadReplayModule;
+        r.subst = .{ .cid = try cidm.parse(a, spec[0..eq]), .bytes = try std.fs.cwd().readFileAlloc(a, spec[eq + 1 ..], 1 << 30) };
+    }
     var cap = Capture{ .gpa = gpa, .lines = .init(gpa), .sent = .init(gpa), .echo = std.posix.getenv("SKEIN_REPLAY_ECHO") != null };
     const rt = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say, .send = Capture.send });
     rt.witness = try scheduler.Witness.from(gpa, src.store());
