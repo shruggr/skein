@@ -4,9 +4,11 @@ The skein kernel in Zig (issue #32): the block store, the input log, the
 index (issue #30: IPLD maps in the store and one state record), the
 scheduler, the subscriptions and heads chains, the filesystem over the
 store, the WASI preview1 imports and the `skein` imports — running the wasm
-programs through wasmtime's C API. It is replay-exact against the TypeScript
-runtime in `src/runtime` (the reference, frozen): the same log gives the same
-entries, the same records and CIDs, the same derived state. Delivery, the
+programs through wasmtime's C API. It was built replay-exact against the
+TypeScript runtime in `src/runtime` (frozen); since fuel went on the update
+record (issue #5) it is its own reference: the same log gives the same
+entries, records, CIDs, derived state and fuel on every replay, and the
+suite checks that Zig against Zig. Delivery, the
 tick, the resolver and the wallets stay TypeScript and are peers
 (`peer/peer.ts`), as they are around the TS runtime.
 
@@ -40,6 +42,7 @@ skein-kernel serve                         # the runtime process: a drop-in for 
 skein-kernel replay <source.db> <out.db>   # the log alone into a fresh store, no wallet (skein-dev replay)
 skein-kernel shell <store.db> < cases.json # shell cases as host-go's tests pass them
 skein-kernel dump <store.db>               # the derived state read through the index, as JSON (either format, read only)
+skein-kernel fuel <store.db> [--since n]   # fuel per thread and in total, from the steps whose input is entry n or later
 ```
 
 `serve` reads the environment `bin/skein-runtime` documents (`SKEIN_HOME`,
@@ -57,6 +60,58 @@ pointer only: `skein-host` (it reads blocks) is unaffected; the explorer and
 `skein-dev` open a store file through `src/runtime/index-store.ts`, which
 reads the maps when the file has the state pointer and the old tables when
 it does not — see "The index" below.
+
+## Fuel (issue #5)
+
+wasmtime's fuel is on for every instance the kernel runs (`engine.zig`:
+`wasmtime_config_consume_fuel_set`). Fuel is an instruction count, not a
+clock: the same module and input burn the same fuel on every machine, so it
+is recorded and replayed like any other field.
+
+- **Per step, one budget** (`engine.Meter`): a handler program's step, or a
+  shell step — the shell and every child it spawns (`skein.spawn`, pipes),
+  nested instances drawing on one pool. The meter settles the running
+  instance before a child starts and after it ends, so a step's fuel is the
+  sum over everything that ran in it. A shell thread's steps are its
+  segments: from a `running` update to the `waiting`/`finished`/`errored`
+  that ends it (a sleep ends one; the wake starts the next with a full
+  budget). Re-executing a thread from its origin on wake burns the same fuel
+  again, and every recomputed update — its fuel included — is verified
+  against the chain.
+- **The field**: every update that ends a step (`finished`, `errored`,
+  `waiting`) has `fuel` (an integer); `running` updates have none, nor do
+  heads and subscriptions chains. A step that failed before running wasm
+  records `fuel: 0`.
+- **The limit**: `fuelPerStep` in the genesis's `defaults` (a decimal
+  string, as every default is; `src/runtime/log.ts` `DEFAULTS` gives
+  `"1000000000000"`, 10^12), read at the start of each step; a genesis
+  without it gets the same 10^12 (`scheduler.FUEL_PER_STEP`). Out of fuel
+  (wasmtime's out-of-fuel trap, in whichever instance) the step ends
+  `errored` with `error: {kind: "cant-do", message: "fuel exhausted"}` and
+  `fuel` = the limit — stable, never retried. An errored step's update
+  lists the attested calls it made before failing, so a replay has their
+  answers. (wasmtime checks fuel at function entries and loop headers; a run
+  may overshoot its budget by the few instructions after its last check,
+  in which case its `fuel` is the limit without a trap.)
+- **Billing is a query over the log**: `skein-kernel fuel <db> [--since n]`
+  sums the updates' fuel per thread (in thread order, with the program's
+  name) and in total, over the steps whose input entry is n or later;
+  `skein-kernel dump` lists each update's fuel and the per-thread sums.
+  Anyone holding the log can replay it and get the same numbers.
+- **Cost**: replaying the generated corpus takes 0–9% longer with fuel on
+  (best of 5 per store, e.g. `gen-run` 1110 → 1210 ms, `gen-kurt` 594 →
+  593 ms; wasmtime's fuel instrumentation, plus a settle per nested
+  instance).
+- **Existing state**: update CIDs changed. The state record carries
+  `format: 1`; a store with a log whose state record has no `format` (the
+  kernel before #5), or in the TS runtime's tables, is refused for running
+  (`serve`, `shell`: "a store written before fuel metering (issue #5) …
+  refused (start a new store: re-genesis)"). Read-only uses still open it:
+  `dump`, `fuel`, and `replay` as a source (a log is a log — the replay
+  recomputes every update, with fuel, into a fresh store).
+- Not metered: host time outside the VM (the peers, the oracle), memory
+  (a module's own max), per-tree depth and step counts (countable from the
+  chain; enforced from config later).
 
 ## The index (issue #30)
 
@@ -150,32 +205,40 @@ resolver code is `src/host`'s, unchanged.
 
 ## Equivalence
 
+Since #5 the Zig kernel is its own reference: the TS runtime does not
+meter, so its update records (and CIDs) are no longer the Zig kernel's.
 `equiv/run.sh` runs all of it (it builds first):
 
-| check | what | result (2026-09-28, #30) |
+| check | what | result (2026-09-27, #5) |
 |---|---|---|
-| `zig build test` | dag-cbor encodings and CIDs, canonical re-encoding of non-canonical input, strict decoding, program-record CIDs, "anyone" signatures (log entries, envelopes), JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps through wasmtime reported in V8's words (the words read from Node 26 on the same hand-built modules); the Merkle search tree (put/get/replace/delete/range/prefix, canonical under shuffled order, copy-on-write sharing and path-only writes); the index over an in-memory backend (maps follow chains, commits, import = incremental, reopen) | 15/15 |
-| `equiv/shell.ts` | host-go's 64 shell cases, plus 7 for the script runtimes (#25: `node`/`qjs`/`python3` by name and by `#!`, argv, stdin, files, exit codes, the read-only stdlib mount, clock and random with `time`/`seed`, timers and `time.sleep` on the run's virtual clock), through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID | 71/71 identical (2026-09-27) |
-| `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 steps over one tree: `init add rm mv status diff commit log show branch checkout reset restore merge tag`, author from `.gitconfig`/env, dates from the run's clock; the commit's tree is the VFS's project tree; `.git/objects` holds gitlinks only; every object is one git-raw record, no zlib copy in the store; gc/repack write no pack; a second run gives identical trees and output | all ok (2026-09-27) |
-| `equiv/replays.ts` over `equiv/corpus.ts` | 8 stores the TS runtime writes: run/objects/head/subscribe handlers, the shell (writes, cwd, failures, one and two sleeps with their wakes), node/qjs/python scripts in a thread (attested clock and random; a `time.sleep` and a qjs timer resting the thread until the tick; #25), the loop with bash and message tools, replies, resolutions, a failed delivery resuming the loop, a refused infer, two agents talking | 8/8 identical; each also reproduces its source's thread and head tips |
-| `equiv/replays.ts` over copies of `~/.skein` | the live `martha` and `kurt` stores, their 6 backups, `~/.skein/runtime.db` and its eras | 10/10 replayable stores identical; the 6 pre-current-format eras are refused by both runtimes |
-| `equiv/serve.ts` | `serve` spawned as the supervisor spawns `bin/skein-runtime` (ipc channel included), with the real providers on an in-process messagebox: genesis, a run, a chat through the inference peer, a sleep woken by the tick, SIGTERM mid-sleep and the restart that finishes it, stop on channel close; then the store the Zig kernel wrote (the new format), replayed on both runtimes | all ok; the replays identical to each other and to the store |
+| `zig build test` | dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget | 23/23 |
+| `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25) through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID (none of which carries fuel) | 64/64 identical |
+| `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
+| `equiv/replays.ts` over `equiv/corpus.ts` | 8 logs the TS runtime writes (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, two agents, and `gen-fuel`: `fuelPerStep` 10^8, where run-handler's reply step runs out after its wallet call), each replayed by the Zig kernel into z1, and z1's log replayed into z2 | 8/8 identical |
+| pre-fuel refusal | a TS-written store with a log opened for running (`skein-kernel shell`) | refused, with the message |
+| `equiv/serve.ts` | `serve` spawned as the supervisor spawns `bin/skein-runtime`, with the real providers on an in-process messagebox: genesis, a run, a chat through the inference peer, a sleep woken by the tick, SIGTERM mid-sleep and the restart that finishes it, stop on channel close; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
-A replay comparison (issue #30: the two stores no longer share a format) is
-what the runtimes did and derived: the log entries (n, CID, the
-envelope/emit each is unique by); the records (every block of the TS store,
-and in the Zig store nothing else but index nodes and state records); the
-runtime's log lines, the emits handed to the outbox and the log tip; the
-derived state asked of the TS tables in SQL and of the Zig index through
-`skein-kernel dump` — chains and tips, every update's position, threads,
-resting threads in resume order, sleepers by deadline, awaits, edges,
-heads, the cursor; and the state record: the TS store's tables imported
-into the index give the same state CID as the Zig replay's. A store the Zig
-kernel wrote is given to the TS side as a TS store rebuilt from its blocks
-and log (`equiv/replay.ts`). Sources are copied (with their `-wal`) before
-anything opens them. The "vs the source" tip counts below 100% on the older
-backups are the sources' own history (the TS replay differs from them the
-same way).
+A replay comparison (`equiv/replays.ts`) requires z1 and z2 to be the
+same in: the replay reports (the runtime's log lines, the emits handed to
+the outbox, the log tip, the final state record — which covers every index
+node); everything `skein-kernel dump` derives (entries, chains and tips,
+every update with its fuel, threads, resting threads in resume order,
+sleepers, awaits, edges, heads, the cursor, fuel per thread and in total,
+every record's CID); `skein-kernel fuel`'s output; and every explorer page
+rendered over the two files (through `src/runtime/index-store.ts`). It also
+requires every update that ends a step to carry fuel (only `running` ones
+lack it), every `fuel exhausted` update to be `errored`/`cant-do` with fuel
+= the genesis's limit (and at least one in a `*fuel*` store), no `DIVERGED`
+or `cannot run` line, and — for a source the Zig kernel wrote itself (a
+format-1 store, from `serve.ts`) — the source's dump to equal z1's: the
+running kernel and the replay agree exactly. A corpus store from the TS
+runtime is only a log here (its updates carry no fuel). Sources are copied
+(with their `-wal`) before anything opens them.
+
+Dropped with #5: the comparisons with the TS runtime's replay
+(`equiv/replay.ts`, row-by-row tables, TS-built state CIDs, "vs the source"
+tips) and the replays of copies of the stores under `~/.skein` (they
+predate fuel; the live instances re-genesis when they move to this build).
 
 ## Layout
 
@@ -188,13 +251,14 @@ same way).
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
 | `log.zig`, `heads.zig`, `subscriptions.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, `subscriptions.ts`, `programs.ts`, `syscalls.ts` |
-| `engine.zig` | wasmtime behind compile/run/one host callback; traps as V8 names them |
+| `engine.zig` | wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |
 | `wasi.zig`, `vfs.zig`, `tree.zig` | `wasi/host.ts`, `wasi/vfs.ts`, `tree.ts` |
 | `objects.zig` | none: the synthetic `.git/objects` (issue #2, docs/VM.md), loose-object framing over git-raw records |
 | `runner.zig`, `shell.zig`, `program.zig` | module cache and `runModule`; `shell.ts`; `program.ts` + `wasi/skein-imports.ts` |
 | `scheduler.zig` | `scheduler.ts` |
 | `serve.zig`, `ipc.zig`, `peer/peer.ts` | `src/host/main.ts` as a process with its providers as a peer |
 | `replay.zig`, `cmd_shell.zig` | `skein-dev replay`; the shell test driver |
+| `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (billing as a query over the log); the fuel unit tests (issue #5) |
 
 ## What is not the same, or not here
 
@@ -219,12 +283,14 @@ same way).
   multiformats CID decode errors are approximated. They reach records only
   when a program prints what an import told it or a step fails that way.
 - **Engine limits**: wasmtime's default wasm stack (512 KiB) and V8's differ,
-  so a deep enough recursion overflows at a different depth. Fuel is off, as
-  on Node.
+  so a deep enough recursion overflows at a different depth. Fuel is on
+  here and not in the TS runtime (issue #5): the two no longer write the
+  same update records.
 - **The drain's own crash lines** (`runtime: <stack>`) are not stack traces.
 - **The store file** (#30): blocks and the state pointer, not the TS tables.
-  The TS runtime runs on it only through a rebuild (`equiv/replay.ts` shows
-  how); the explorer and `skein-dev` read it (`src/runtime/index-store.ts`).
+  The TS runtime ran on it only through a rebuild (the `equiv/replay.ts`
+  removed with #5 showed how); the explorer and `skein-dev` read it
+  (`src/runtime/index-store.ts`, which ignores the state record's `format`).
 - **Not ported**: the index rebuild of a stale older store (`edges.rebuild`;
   such a store is refused, `skein-dev rebuild` it first), `putMessage` and
   the `messages` table (the runtime does not write them), `handles`, the

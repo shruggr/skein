@@ -35,6 +35,8 @@ pub const Trap = enum {
     bad_signature,
     heap_misaligned,
     stack_overflow,
+    /// The step's fuel ran out (the scheduler records it as `fuel exhausted`, never as a trap).
+    out_of_fuel,
     other,
 
     /// What V8 says for the same trap (a RuntimeError's message), which the
@@ -52,6 +54,7 @@ pub const Trap = enum {
             .indirect_call_null, .bad_signature => "function signature mismatch", // V8 (Node 26) says this for a null entry too
             .heap_misaligned => "operation does not support unaligned accesses",
             .stack_overflow => "Maximum call stack size exceeded",
+            .out_of_fuel => "fuel exhausted",
             .other => "wasm trap",
         };
     }
@@ -76,6 +79,10 @@ pub const Engine = struct {
         if (!off) {
             if (c.wasmtime_config_cache_config_load(cfg, null)) |err| c.wasmtime_error_delete(err);
         }
+        // Fuel (issue #5): every instance counts the wasm it executes. An
+        // instruction count, not a clock: the same module and input burn the
+        // same fuel on every machine, so it is recorded and replays exactly.
+        c.wasmtime_config_consume_fuel_set(cfg, true);
         const e = c.wasm_engine_new_with_config(cfg) orelse return error.Engine;
         return .{ .e = e };
     }
@@ -140,12 +147,17 @@ pub const Module = struct {
         return mod;
     }
 
-    /// Instantiate in a store of its own and run `_start`.
-    pub fn run(mod: *Module, eng: *Engine, host_ctx: *anyopaque, host: HostFn, err_msg: *[]const u8, alloc: std.mem.Allocator) !Outcome {
+    /// Instantiate in a store of its own and run `_start`. With a meter the
+    /// instance draws on its budget (and what it burns is added to it); without
+    /// one it runs unmetered (UNMETERED fuel: runs outside a step).
+    pub fn run(mod: *Module, eng: *Engine, host_ctx: *anyopaque, host: HostFn, err_msg: *[]const u8, alloc: std.mem.Allocator, meter: ?*Meter) !Outcome {
         var session = Session{ .ctx = host_ctx, .host = host, .mod = mod };
         const store = c.wasmtime_store_new(eng.e, &session, null) orelse return error.Engine;
         defer c.wasmtime_store_delete(store);
         const ctx = c.wasmtime_store_context(store);
+        var frame = Meter.Frame{ .ctx = ctx.? };
+        if (meter) |m| m.enter(&frame) else setFuel(ctx.?, UNMETERED);
+        defer if (meter) |m| m.exit(&frame);
         var inst: c.wasmtime_instance_t = undefined;
         var trap: ?*c.wasm_trap_t = null;
         if (c.wasmtime_linker_instantiate(mod.linker, ctx, mod.m, &inst, &trap)) |err| {
@@ -172,6 +184,91 @@ pub const Module = struct {
     }
 };
 
+/// Fuel for a run outside any step (the shell test driver, the coreutils
+/// listing): far beyond anything real, below wasmtime's i64 bound.
+pub const UNMETERED: u64 = 1 << 62;
+
+fn setFuel(ctx: *c.wasmtime_context_t, f: u64) void {
+    if (c.wasmtime_context_set_fuel(ctx, f)) |err| c.wasmtime_error_delete(err);
+}
+
+fn getFuel(ctx: *const c.wasmtime_context_t) u64 {
+    var f: u64 = 0;
+    if (c.wasmtime_context_get_fuel(ctx, &f)) |err| c.wasmtime_error_delete(err);
+    return f;
+}
+
+/// One step's fuel (issue #5): a single budget shared by every instance that
+/// runs in the step — the handler program, or the shell and each child it
+/// spawns. Instances nest (a child runs while its parent waits in a host
+/// call), so the running ones form a stack: entering a child first settles
+/// what its parent burnt so far and gives the child what is left; leaving it
+/// settles the child and gives the parent what is left. `used` is the fuel
+/// burnt since the last `segment()` (a shell thread's step ends at each
+/// sleep); a run that exhausts the budget has used exactly `limit`.
+pub const Meter = struct {
+    limit: u64,
+    /// Fuel burnt over the meter's life by settled instances.
+    spent: u64 = 0,
+    /// `spent` when the current segment began.
+    base: u64 = 0,
+    top: ?*Frame = null,
+
+    pub const Frame = struct {
+        ctx: *c.wasmtime_context_t,
+        /// The fuel this instance held when last settled.
+        given: u64 = 0,
+        prev: ?*Frame = null,
+    };
+
+    pub fn init(limit: u64) Meter {
+        return .{ .limit = limit };
+    }
+
+    fn budget(m: *const Meter) u64 {
+        return m.limit -| (m.spent - m.base);
+    }
+
+    /// Add what the running instance burnt since it was last settled.
+    fn settle(m: *Meter) void {
+        const f = m.top orelse return;
+        const rem = getFuel(f.ctx);
+        m.spent += f.given -| rem;
+        f.given = rem;
+    }
+
+    fn give(m: *Meter, f: *Frame) void {
+        f.given = m.budget();
+        setFuel(f.ctx, f.given);
+    }
+
+    pub fn enter(m: *Meter, f: *Frame) void {
+        m.settle();
+        f.prev = m.top;
+        m.top = f;
+        m.give(f);
+    }
+
+    pub fn exit(m: *Meter, f: *Frame) void {
+        m.settle();
+        m.top = f.prev;
+        if (m.top) |p| m.give(p);
+    }
+
+    /// Fuel used in the current segment, the running instances included.
+    pub fn used(m: *Meter) u64 {
+        m.settle();
+        return @min(m.spent - m.base, m.limit);
+    }
+
+    /// Start a new segment with a full budget (a shell thread resumed after a sleep).
+    pub fn segment(m: *Meter) void {
+        m.settle();
+        m.base = m.spent;
+        if (m.top) |f| m.give(f);
+    }
+};
+
 const Session = struct {
     ctx: *anyopaque,
     host: HostFn,
@@ -195,6 +292,7 @@ fn outcomeOf(s: *Session, t: *c.wasm_trap_t) Outcome {
         c.WASMTIME_TRAP_CODE_INTEGER_DIVISION_BY_ZERO => .divide_by_zero,
         c.WASMTIME_TRAP_CODE_BAD_CONVERSION_TO_INTEGER => .bad_conversion,
         c.WASMTIME_TRAP_CODE_UNREACHABLE_CODE_REACHED => .unreachable_code,
+        c.WASMTIME_TRAP_CODE_OUT_OF_FUEL => .out_of_fuel,
         else => .other,
     } };
 }

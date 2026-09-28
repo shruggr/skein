@@ -3,8 +3,12 @@
 // (mst.zig) whose nodes are blocks beside every other record, and one state
 // record naming their roots:
 //
-//   {kind: "skein-state", log: <log tip>|null, cursor: <entries processed>,
+//   {kind: "skein-state", format: 1, log: <log tip>|null, cursor: <entries processed>,
 //    heads: <root>|null, index: {<map>: <root>|null, …}}
+//
+// `format` says what the records the maps reach look like: 1 = every step's
+// update carries its `fuel` (issue #5). A state record without it was written
+// before fuel; such a store (with a log) is refused for running (sqlite_store.zig).
 //
 // The state record's CID is the instance's one mutable pointer (the backend
 // keeps it under the name "state"); everything else is an immutable block.
@@ -65,6 +69,8 @@ pub const Map = enum(u8) { log, unique, chains, updates, threads, resting, sleep
 const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
+/// The store format this kernel writes (see the header): 1 = updates carry fuel (#5).
+pub const FORMAT: i64 = 1;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).
@@ -89,6 +95,7 @@ pub const State = struct {
     roots: [map_count]Root = [_]Root{.{}} ** map_count,
     tip: Root = .{},
     cursor: i64 = 0,
+    format: i64 = FORMAT,
 };
 
 pub const Stats = struct { commits: usize, nodes: usize, node_bytes: usize, states: usize };
@@ -101,6 +108,9 @@ pub const Index = struct {
     work: State = .{},
     committed: State = .{},
     has_state: bool = false,
+    /// The format of the state record the store held when opened: 0 = before fuel,
+    /// or no state record (an older file's tables, imported).
+    loaded_format: i64 = 0,
     commits: usize = 0,
     states: usize = 0,
 
@@ -150,14 +160,17 @@ pub const Index = struct {
         var s = State{};
         s.tip = Root.of(Value.cidOf(v.get("log")));
         s.cursor = @intCast(Value.intOf(v.get("cursor")) orelse 0);
+        s.format = @intCast(Value.intOf(v.get("format")) orelse 0);
         const idx = v.get("index") orelse return error.BadState;
         inline for (@typeInfo(Map).@"enum".fields) |fld| {
             const m: Map = @enumFromInt(fld.value);
             const r = if (m == .heads) v.get("heads") else idx.get(fld.name);
             s.roots[fld.value] = Root.of(Value.cidOf(r));
         }
-        ix.work = s;
+        ix.loaded_format = s.format;
         ix.committed = s;
+        if (!ix.read_only) s.format = FORMAT; // written in this kernel's format from here on
+        ix.work = s;
         ix.has_state = true;
         return true;
     }
@@ -169,6 +182,7 @@ pub const Index = struct {
         }
         var m = cbor.MapBuilder.init(a);
         try m.put("kind", cbor.string(STATE_KIND));
+        try m.put("format", cbor.int(s.format));
         try m.put("log", link(s.tip.get()));
         try m.put("cursor", cbor.int(s.cursor));
         try m.put("heads", link(s.roots[@intFromEnum(Map.heads)].get()));
@@ -209,7 +223,7 @@ pub const Index = struct {
     }
 
     fn same(x: *const State, y: *const State) bool {
-        if (x.cursor != y.cursor or !optEq(x.tip.get(), y.tip.get())) return false;
+        if (x.cursor != y.cursor or x.format != y.format or !optEq(x.tip.get(), y.tip.get())) return false;
         for (x.roots, y.roots) |p, q| if (!optEq(p.get(), q.get())) return false;
         return true;
     }
@@ -236,6 +250,7 @@ pub const Index = struct {
         if (ix.read_only) return;
         var s = ix.committed;
         s.tip = ix.work.tip;
+        s.format = ix.work.format;
         s.roots[@intFromEnum(Map.log)] = ix.work.roots[@intFromEnum(Map.log)];
         s.roots[@intFromEnum(Map.unique)] = ix.work.roots[@intFromEnum(Map.unique)];
         try ix.writeState(&s, &.{ .log, .unique });

@@ -6,11 +6,12 @@
 //
 //   {state, roots: {map: cid|null}, cursor, log,
 //    entries: [[n, cid, unique|null]], chains: [[origin, tip, seq, kind|null]],
-//    updates: [[origin, seq, cid]], threads: [origin] (at, origin),
+//    updates: [[origin, seq, cid, fuel|null]], threads: [origin] (at, origin),
 //    resting: [origin] (at, origin), sleepers: [[until, origin]],
 //    awaits: [[envelope, origin]], edges: [[from, seq, ord, to, rel, locator|null]],
-//    heads: [[name, tree]], blocks: [cid] (not index nodes or state records),
-//    indexBlocks: n}
+//    heads: [[name, tree]], fuel: {total, threads: [[origin, fuel, steps]]}
+//    (issue #5: each update's `fuel`, summed per thread in thread order),
+//    blocks: [cid] (not index nodes or state records), indexBlocks: n}
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -18,12 +19,12 @@ const index = @import("index.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
 const Value = cbor.Value;
 
-fn num(k: []const u8) i64 {
+pub fn num(k: []const u8) i64 {
     return @bitCast(std.mem.readInt(u64, k[0..8], .big) ^ (1 << 63));
 }
 
 /// A CID at the front of `k`: its length (binary CIDs are prefix-free).
-fn cidLen(k: []const u8) usize {
+pub fn cidLen(k: []const u8) usize {
     var pos: usize = 0;
     if (k.len >= 34 and k[0] == 0x12 and k[1] == 0x20) return 34;
     _ = cidm.readUvarint(k, &pos) catch return k.len;
@@ -124,6 +125,9 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
         try w.raw("]");
     }
     try w.raw("],\"updates\":[");
+    const Burn = struct { fuel: i64 = 0, steps: i64 = 0 };
+    var burns = std.StringHashMap(Burn).init(a);
+    var total: i64 = 0;
     for (try ix.all(a, .updates), 0..) |kv, i| {
         try w.sep(i);
         const l = cidLen(kv.key);
@@ -133,6 +137,17 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
         try w.int(num(kv.key[l..]));
         try w.raw(",");
         try w.cid(kv.value.cid);
+        try w.raw(",");
+        const u = try ss.store().get(a, kv.value.cid);
+        if (u != null and Value.intOf(u.?.get("fuel")) != null) {
+            const f: i64 = @intCast(Value.intOf(u.?.get("fuel")).?);
+            try w.int(f);
+            const g = try burns.getOrPut(kv.key[0..l]);
+            if (!g.found_existing) g.value_ptr.* = .{};
+            g.value_ptr.fuel += f;
+            g.value_ptr.steps += 1;
+            total += f;
+        } else try w.raw("null");
         try w.raw("]");
     }
     inline for (.{ "threads", "resting" }) |name| {
@@ -190,7 +205,25 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
         try w.cid(kv.value.cid);
         try w.raw("]");
     }
-    try w.raw("],\"blocks\":[");
+    try w.raw("],\"fuel\":{\"total\":");
+    try w.int(total);
+    try w.raw(",\"threads\":[");
+    {
+        var i: usize = 0;
+        for (try ix.all(a, .threads)) |kv| {
+            const b = burns.get(kv.key[8..]) orelse continue;
+            try w.sep(i);
+            i += 1;
+            try w.raw("[");
+            try w.cid(kv.key[8..]);
+            try w.raw(",");
+            try w.int(b.fuel);
+            try w.raw(",");
+            try w.int(b.steps);
+            try w.raw("]");
+        }
+    }
+    try w.raw("]},\"blocks\":[");
     var n_index: usize = 0;
     var first = true;
     for (try ss.allCids(a)) |c| {

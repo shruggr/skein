@@ -202,6 +202,29 @@ whose input is the thread tip and the message that woke it, and whose output
 is records to append and messages to emit. `step(tip, message) → {append,
 emit}` with only the imports above.
 
+### Fuel: every step is metered
+
+(Issue #5; built in the Zig kernel, `kernel-zig/src/engine.zig`, README
+"Fuel".) Every step runs with wasmtime's fuel on — an instruction count, not
+a clock, so the same program and input burn the same fuel on every machine.
+A step's fuel is the sum over every instance that ran in it (a handler
+program; a shell and each program it spawns), and it is one more field on
+the update that ends the step: `{state: "finished" | "errored" | "waiting",
+…, fuel: <integer>}` (a `running` update, which starts a shell step, has
+none). Replay verifies it like every other field: a different burn on
+re-execution is a divergence.
+
+One constant limits it: `fuelPerStep` in the genesis's `defaults` (default
+10^12). A step that runs out ends `errored` with `error: {kind: "cant-do",
+message: "fuel exhausted"}` and `fuel` equal to the limit — deterministic,
+never retried. Per-tree limits (depth, steps) need no field: both are
+countable from the chains.
+
+Billing is a query over the log: the sum of `fuel` per thread, instance or
+period (`skein-kernel fuel <db> [--since n]`), verifiable by anyone who
+replays the log. Fuel does not cover host time outside the VM (oracle,
+peers) or the router; storage and messages are visible in the log already.
+
 ## Messages
 
 A **message** is a record signed by an identity. It is the only way anything
@@ -360,7 +383,9 @@ path and shares every other node with the previous version, which stays
 readable.
 
 One **state record** names it all:
-`{kind: "skein-state", log: <log tip>, cursor, heads: <root>, index: {<map>: <root>…}}`.
+`{kind: "skein-state", format: 1, log: <log tip>, cursor, heads: <root>, index: {<map>: <root>…}}`
+(`format` 1: every step's update carries its fuel; a store without it predates
+fuel and is not run on).
 Its CID is the instance's single mutable pointer; the store is otherwise a
 pure key→bytes map of immutable records (SQLite today; IndexedDB in a
 browser, RocksDB on a server, a chain for checkpoints). The maps are a

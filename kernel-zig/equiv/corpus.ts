@@ -251,4 +251,22 @@ const done = async (name: string, ...is: Instance[]) => { for (const i of is) { 
   await done("gen-refused", b);
 }
 
+// ---------------------------------------------------------------- fuel: a low fuelPerStep (issue #5)
+// The TS runtime does not meter, so it runs everything; on the Zig kernel
+// the objects handler (~3M) fits in 10^8 and run-handler (~3·10^8, the Go
+// runtime starting) runs out in its first step: errored, "fuel exhausted".
+{
+  const { DEFAULTS } = await import("../../src/runtime/log.ts");
+  const i = await sqliteInstance("gen-fuel", { config: { defaults: { ...DEFAULTS, fuelPerStep: "100000000" } } });
+  const dir = await fixture({ "a.txt": "a\n" });
+  const { root, bundles } = await bundlesOf(dir);
+  for (const b of bundles) await send(i, "objects", b);
+  await settle(i);
+  later(i, 1);
+  await send(i, "run", { cmd: "ls", tree: root });
+  await settle(i);
+  await fs.rm(dir, { recursive: true, force: true });
+  await done("gen-fuel", i);
+}
+
 process.stdout.write(made.map((n) => join(out, `${n}.db`)).join("\n") + "\n");

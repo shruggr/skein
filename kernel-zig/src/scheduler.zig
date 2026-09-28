@@ -27,11 +27,25 @@ const shell = @import("shell.zig");
 const program = @import("program.zig");
 const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
+const engine = @import("engine.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
 const Value = cbor.Value;
 
 pub const OUTCOMES = "outcomes";
+
+/// Fuel per step when the genesis's `defaults` do not set `fuelPerStep` (issue #5):
+/// 10^12 wasm instructions, generous until something hits it.
+pub const FUEL_PER_STEP: u64 = 1_000_000_000_000;
+
+/// The one limit on a step's fuel: the genesis's `defaults.fuelPerStep` (a
+/// decimal string, as every default is), else FUEL_PER_STEP.
+pub fn fuelPerStep(g: ?Value) u64 {
+    const d = (g orelse return FUEL_PER_STEP).get("defaults") orelse return FUEL_PER_STEP;
+    const v = Value.str(d.get("fuelPerStep")) orelse return FUEL_PER_STEP;
+    const n = std.fmt.parseInt(u64, v, 10) catch return FUEL_PER_STEP;
+    return if (n == 0 or n > engine.UNMETERED) FUEL_PER_STEP else n;
+}
 
 /// BRC-100 wire call codes a program may make: key derivation and crypto only.
 const wallet_calls = [_]u8{ 8, 11, 12, 13, 14, 15, 16 };
@@ -635,7 +649,7 @@ pub const Runtime = struct {
         input: []const u8,
         clock: syscalls.ThreadClock = .{},
         random: syscalls.Entropy,
-        calls: std.array_list.Managed([]const u8),
+        calls: *std.array_list.Managed([]const u8),
         launched: std.array_list.Managed([]const u8),
         kept: std.array_list.Managed([]const u8),
         emits: std.array_list.Managed([]const u8),
@@ -657,13 +671,19 @@ pub const Runtime = struct {
         var after_emits: []const [2][]const u8 = &.{};
         var after_launched: []const []const u8 = &.{};
         var after_rested = false;
+        // The step's fuel: one budget for the whole step, read from the genesis at its start.
+        var meter = engine.Meter.init(fuelPerStep(rt.genesis));
+        // The attested calls the step made, kept even when it fails: an
+        // errored update lists them, so a replay has their answers.
+        var calls = std.array_list.Managed([]const u8).init(a);
         blk: {
             defer {
                 _ = rt.stepping.remove(key);
                 rt.gpa.free(key);
             }
-            const r = rt.stepBody(a, origin, ctx, resolved, reply, failed) catch |err| {
-                const msg = if (err == error.Failed or err == error.Fatal) last_error else @errorName(err);
+            const r = rt.stepBody(a, origin, ctx, resolved, reply, failed, &meter, &calls) catch |err| {
+                const exhausted = err == error.FuelExhausted;
+                const msg = if (exhausted) runner.FUEL_EXHAUSTED else if (err == error.Failed or err == error.Fatal) last_error else @errorName(err);
                 const label = if (err == error.Diverged) "DIVERGED" else if (err == error.NoWitness) "cannot run" else "failed";
                 rt.say("{s} step {s}: {s}", .{ short(a, origin), label, msg });
                 if (err == error.Diverged or err == error.NoWitness) return;
@@ -671,8 +691,11 @@ pub const Runtime = struct {
                 try m.put("state", cbor.string("errored"));
                 try m.put("input", cbor.cidv(ctx.cid));
                 try m.put("at", cbor.int(logm.stampOf(ctx.e.get("time")).?.ms()));
+                try m.put("fuel", cbor.int(meter.used()));
+                if (calls.items.len > 0) try m.put("calls", try cbor.cidArray(a, calls.items));
                 var em = cbor.MapBuilder.init(a);
-                try em.put("kind", cbor.string("blew-up"));
+                // Out of fuel is stable (the same step burns the same fuel again): can't-do, never retried.
+                try em.put("kind", cbor.string(if (exhausted) "cant-do" else "blew-up"));
                 try em.put("message", cbor.string(msg));
                 try m.put("error", em.value());
                 _ = rt.store.chainAppend(a, origin, m.value()) catch {};
@@ -690,7 +713,7 @@ pub const Runtime = struct {
 
     const After = struct { emits: []const [2][]const u8, launched: []const []const u8, rested: bool };
 
-    fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, failed: ?Value) anyerror!After {
+    fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, failed: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
         const o = try rt.getOrNotFound(a, origin);
         const prog = try rt.programOf(a, o);
         if (!hasWasm(prog)) return rt.failf(a, "not a wasm program", .{});
@@ -729,7 +752,7 @@ pub const Runtime = struct {
             .at = at,
             .input = try cbor.encode(a, input.value()),
             .random = syscalls.Entropy.init(ctx.cid, origin),
-            .calls = .init(a),
+            .calls = calls,
             .launched = .init(a),
             .kept = .init(a),
             .emits = .init(a),
@@ -765,7 +788,7 @@ pub const Runtime = struct {
             .subscribe = hSubscribe,
             .wallet = hWallet,
         };
-        var rs = wasi.RunState{};
+        var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
         const name = Value.str(prog.get("name")).?;
         const out = program.runProgram(a, rt.runner, mod, name, &host, &svc) catch |err| switch (err) {
@@ -775,6 +798,7 @@ pub const Runtime = struct {
                 return switch (f.kind) {
                     .diverged => error.Diverged,
                     .no_witness => error.NoWitness,
+                    .fuel => error.FuelExhausted,
                     .plain => error.Failed,
                 };
             },
@@ -796,6 +820,7 @@ pub const Runtime = struct {
         try u.put("step", cbor.int(n));
         try u.put("input", cbor.cidv(ctx.cid));
         try u.put("at", cbor.int(at));
+        try u.put("fuel", cbor.int(meter.used()));
         if (waiting) try u.put("waitingOn", try cbor.cidArray(a, st.launched.items));
         if (waiting) try u.put("awaits", try cbor.cidArray(a, st.awaits.items));
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
@@ -1046,6 +1071,10 @@ pub const Runtime = struct {
         /// Re-executing because of this wake entry: the sleep it reaches is woken by it.
         wake: ?Ctx = null,
         diverged: ?[]const u8 = null,
+        /// The fuel of the whole run (every instance of the shell and its
+        /// children); a segment per step: from a `running` update to the
+        /// `waiting`/`finished`/`errored` that ends it (issue #5).
+        meter: engine.Meter,
 
         fn drive(t: *ShellRun, c: Ctx) void {
             const s = logm.stampOf(c.e.get("time")).?;
@@ -1064,7 +1093,7 @@ pub const Runtime = struct {
         const ic = Value.cidOf(o.get("input")) orelse return error.NotFound;
         const launch = try rt.getOrNotFound(a, ic);
         if (!logm.isLogEntry(launch)) return rt.failf(a, "thread {s}: input is not a log entry", .{short(a, origin)});
-        var t = ShellRun{ .rt = rt, .a = a, .origin = origin, .o = o, .history = history, .wake = wake };
+        var t = ShellRun{ .rt = rt, .a = a, .origin = origin, .o = o, .history = history, .wake = wake, .meter = engine.Meter.init(fuelPerStep(rt.genesis)) };
         t.drive(.{ .cid = ic, .e = launch });
         if (!rt.live.contains(origin)) try rt.live.put(try rt.gpa.dupe(u8, origin), {});
         try rt.shellBody(&t);
@@ -1101,7 +1130,7 @@ pub const Runtime = struct {
             };
             var env = std.array_list.Managed([2][]const u8).init(a);
             if (args.?.get("env")) |e| for (e.map) |kv| try env.append(.{ kv.key, kv.value.string });
-            var st = wasi.RunState{};
+            var st = wasi.RunState{ .meter = &t.meter };
             var cwd_msg: []const u8 = "";
             const r = shell.runShell(a, rt.runner, rt.store, mods, .{
                 .tree = Value.cidOf(args.?.get("tree")).?,
@@ -1123,6 +1152,13 @@ pub const Runtime = struct {
                         rt.say("{s} DIVERGED: {s}", .{ short(a, t.origin), d });
                         break :body;
                     }
+                    if (st.fatal) |f| if (f.kind == .fuel) {
+                        var em = cbor.MapBuilder.init(a);
+                        try em.put("kind", cbor.string("cant-do"));
+                        try em.put("message", cbor.string(runner.FUEL_EXHAUSTED));
+                        try rt.appendShellError(t, em.value(), &ended);
+                        break :body;
+                    };
                     try rt.shellErrored(t, if (st.fatal) |f| f.message else "fatal", &ended);
                     break :body;
                 },
@@ -1174,6 +1210,8 @@ pub const Runtime = struct {
         const a = t.a;
         var m = cbor.MapBuilder.init(a);
         try m.put("state", cbor.string(state));
+        // A step ends at waiting/finished/errored: its fuel; `running` starts the next one.
+        if (std.mem.eql(u8, state, "running")) t.meter.segment() else try m.put("fuel", cbor.int(t.meter.used()));
         if (until) |u| try m.put("until", cbor.int(u));
         try m.put("result", result);
         try m.put("error", err_value);

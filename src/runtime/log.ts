@@ -95,7 +95,7 @@ export interface InstanceConfig {
   subscriptions?: Subscription[];
   /** Peers by role: `infer` is the inference peer the loop asks. */
   peers?: Record<string, Identity>;
-  /** Default: {model: "ripper/qwen38", thinking: "off"}. */
+  /** Default: {model: "ripper/qwen38", thinking: "off", fuelPerStep: "1000000000000"}. */
   defaults?: Record<string, string>;
   /** Handles for the owner and peers, by identity: what the programs' outbound envelopes name them. */
   names?: Record<Identity, { handle: string; domain: string }>;
@@ -103,7 +103,15 @@ export interface InstanceConfig {
   collect?: string[];
 }
 
-export const DEFAULTS: Record<string, string> = { model: "ripper/qwen38", thinking: "off" };
+/**
+ * `fuelPerStep` (issue #5): the one limit on a step's fuel (wasm instructions)
+ * in the Zig kernel, which records every step's fuel on its update; a step
+ * that runs out ends `errored`, "fuel exhausted". 10^12, generous until
+ * something hits it. The TS runtime does not meter.
+ */
+export const FUEL_PER_STEP = "1000000000000";
+
+export const DEFAULTS: Record<string, string> = { model: "ripper/qwen38", thinking: "off", fuelPerStep: FUEL_PER_STEP };
 
 /** The owner's boxes: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop, (owner, subscribe) → subscribe-handler. */
 export function defaultSubscriptions(owner: Identity): Subscription[] {
