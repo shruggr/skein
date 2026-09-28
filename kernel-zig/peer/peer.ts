@@ -14,7 +14,7 @@ import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../../src/runtime/cid.ts";
 import { rootIdentity } from "../../src/runtime/identity.ts";
-import { short, type LogEntry } from "../../src/runtime/log.ts";
+import { DEFAULTS, short, type LogEntry } from "../../src/runtime/log.ts";
 import type { Genesis } from "../../src/runtime/records.ts";
 import type { Outbound, Runtime } from "../../src/runtime/scheduler.ts";
 import { NotFound, Rejected, type Store } from "../../src/runtime/store.ts";
@@ -167,9 +167,12 @@ export async function runPeer(o: PeerOptions = {}): Promise<void> {
   if (!(await store.log.tip())) {
     const owner = env.SKEIN_OWNER;
     if (!owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-    const g = await ensureGenesis(store, wallet, host, configFor({ handle, domain }, {
+    const config = configFor({ handle, domain }, {
       owner, infer: env.SKEIN_INFER, ownerHandle: named(env.SKEIN_OWNER_HANDLE || "david@localhost"), inferHandle: named(env.SKEIN_INFER_HANDLE || "infer@localhost"),
-    }));
+    });
+    // The one limit on a step's fuel (issue #5), for a new genesis only; default DEFAULTS.fuelPerStep.
+    if (env.SKEIN_FUEL_PER_STEP) config.defaults = { ...DEFAULTS, fuelPerStep: env.SKEIN_FUEL_PER_STEP };
+    const g = await ensureGenesis(store, wallet, host, config);
     say(`genesis ${g.entry}`);
   }
   const g = await call("genesis") as Genesis;

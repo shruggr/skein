@@ -4,8 +4,10 @@
 // in-process messagebox (equiv/serve-peer.ts). Checks the ready line, a run
 // and a chat answered end to end, a sleep woken by the tick, a stop mid-sleep
 // and the restart that finishes it, and a stop when the supervisor's channel
-// closes. Then the store the Zig kernel wrote is replayed on both runtimes
-// (equiv/replays.ts): identical to each other and to the store itself.
+// closes, and (issue #5) a shell that never ends running out of fuel under a
+// low fuelPerStep. Then the stores the Zig kernel wrote are replayed by the
+// Zig kernel twice over (equiv/replays.ts): identical to each other and to
+// the stores themselves, fuel included.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/serve.ts
 
@@ -25,14 +27,14 @@ const pub = (h: string) => new PrivateKey(h, 16).toPublicKey().toString();
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
 
-async function serve(scenario: string, stopBy: "signal" | "channel" = "signal"): Promise<{ code: number | null; lines: string[]; report: Record<string, unknown> }> {
+async function serve(scenario: string, stopBy: "signal" | "channel" = "signal", instance = "zigtest", extra: Record<string, string> = {}): Promise<{ code: number | null; lines: string[]; report: Record<string, unknown> }> {
   rmSync(join(home, "scenario.json"), { force: true });
   rmSync(join(home, "scenario.done"), { force: true });
   const child = spawn(kernel, ["serve"], {
     env: {
-      ...process.env, SKEIN_HOME: home, SKEIN_DB: join(home, "instances/zigtest/runtime.db"), SKEIN_HANDLE: "zigtest@localhost",
+      ...process.env, SKEIN_HOME: home, SKEIN_DB: join(home, `instances/${instance}/runtime.db`), SKEIN_HANDLE: "zigtest@localhost",
       SKEIN_OWNER: pub(KEYS.owner), SKEIN_INFER: pub(KEYS.infer), SKEIN_IDENTITY: pub(KEYS.instance), SKEIN_HOST_DB: join(home, "none.db"),
-      SKEIN_KERNEL_PEER: join(here, "serve-peer.ts"), SKEIN_SCENARIO: scenario, SKEIN_SCENARIO_STOP: stopBy, SKEIN_MESSAGEBOX: "",
+      SKEIN_KERNEL_PEER: join(here, "serve-peer.ts"), SKEIN_SCENARIO: scenario, SKEIN_SCENARIO_STOP: stopBy, SKEIN_MESSAGEBOX: "", ...extra,
     },
     stdio: ["ignore", "pipe", "pipe", "ipc"],
   });
@@ -70,9 +72,19 @@ check(c.lines.some((l) => l.includes("re-executing from its origin")), "the slee
 const d = await serve("run", "channel");
 check(d.code === 0 && d.lines.includes("supervisor gone: stopping"), `stops when the supervisor's channel closes (exit ${d.code})`);
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db")], { encoding: "utf8" });
+// Fuel (issue #5): a shell that never ends, under a low fuelPerStep, runs out; the step is recorded.
+const LIMIT = "1000000000"; // run-handler's reply step (~6·10^8, sealing in Go) fits; the spinning shell does not
+const f = await serve("fuel", "signal", "fueltest", { SKEIN_FUEL_PER_STEP: LIMIT });
+const spun = f.report.spun as { exitCode?: number; stdout?: string; stderr?: string; error?: string } | undefined;
+check(f.report.ok === true, `the fuel scenario ran (${f.report.error ?? ""})`);
+check(JSON.stringify(spun ?? {}).includes("fuel exhausted"), `a spinning shell runs out of fuel and run-handler says so (${JSON.stringify(spun ?? null).slice(0, 200)})`);
+const fuelDb = join(home, "instances/fueltest/runtime.db");
+const fr = spawnSync(kernel, ["fuel", fuelDb], { encoding: "utf8" });
+check(fr.status === 0 && fr.stdout.split("\n").some((l) => l.startsWith(`${LIMIT}\t1\t`) && l.endsWith("\tshell")), "skein-kernel fuel: the shell's one step burnt exactly the limit");
+
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb], { encoding: "utf8" });
 process.stdout.write(r.stdout);
-check(r.status === 0 && /identical .* vs the source: (\d+)\/\1 /.test(r.stdout), "the store the Zig kernel wrote replays identically on both runtimes, and to itself");
+check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 2, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `serve: ${failures} FAILED\n` : "serve: all ok\n");

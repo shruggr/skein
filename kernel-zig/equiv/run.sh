@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# Everything that says the Zig kernel is the TS runtime: unit tests, the
-# shell cases, replay equivalence over a generated corpus and over copies of
-# the instance stores under $SKEIN_HOME (never opened in place), and the
-# process interface. Run from anywhere; needs node (26) and the repo's
-# node_modules.
+# The Zig kernel's checks: unit tests, the shell cases against the TS shell
+# (stdout/stderr/exit/tree carry no fuel), git in the VM, and replay
+# exactness Zig against Zig (issue #5: from fuel on the Zig kernel is its own
+# reference) over a generated corpus and over the stores `serve` writes.
+# Run from anywhere; needs node (26) and the repo's node_modules. Never
+# touches the stores under $SKEIN_HOME: they predate fuel.
 #
-#   kernel-zig/equiv/run.sh              # all of it
-#   SKEIN_EQUIV_LIVE=0 kernel-zig/equiv/run.sh   # skip the stores under $SKEIN_HOME
+#   kernel-zig/equiv/run.sh
 set -euo pipefail
 kz="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-root="$(cd "$kz/.." && pwd)"
 node=(node --experimental-strip-types --no-warnings)
 work="$(mktemp -d "${TMPDIR:-/tmp}/skein-kz-equiv-XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -24,22 +23,22 @@ echo "== shell: host-go's cases"
 echo "== git in the VM: the verbs, the synthetic object directory (issue #2)"
 "${node[@]}" "$kz/equiv/git.ts" | grep -E "^(ok|FAIL)|failed$|all ok" || status=1 # pipefail: git.ts's status counts
 
-echo "== replay: a generated corpus"
+echo "== replay, Zig against Zig: a generated corpus (logs written by the TS runtime)"
 "${node[@]}" "$kz/equiv/corpus.ts" "$work/gen" > "$work/gen.list"
 mapfile -t gen < "$work/gen.list"
 "${node[@]}" "$kz/equiv/replays.ts" "${gen[@]}" || status=1
 
-if [ "${SKEIN_EQUIV_LIVE:-1}" != 0 ]; then
-  home="${SKEIN_HOME:-$HOME/.skein}"
-  shopt -s nullglob
-  live=("$home"/instances/*/runtime.db "$home"/instances/*/runtime.db.pre-* "$home"/runtime.db "$home"/runtime.db.*-era "$home"/runtime.db.*-edge)
-  if [ ${#live[@]} -gt 0 ]; then
-    echo "== replay: copies of the stores under $home"
-    "${node[@]}" "$kz/equiv/replays.ts" "${live[@]}" || status=1
-  fi
+echo "== a store written before fuel is refused for running"
+cp "${gen[0]}" "$work/old.db"
+if echo '[]' | "$kz/zig-out/bin/skein-kernel" shell "$work/old.db" 2> "$work/old.err" > /dev/null; then
+  echo "FAIL a pre-fuel store with a log was opened"; status=1
+elif grep -q "before fuel metering" "$work/old.err"; then
+  echo "ok   refused: $(head -1 "$work/old.err")"
+else
+  echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1
 fi
 
-echo "== serve: the process interface"
+echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 
 exit $status
