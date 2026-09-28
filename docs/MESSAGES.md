@@ -311,6 +311,86 @@ message {to: "@handle@domain", text}
   that cannot be delivered comes back as a `failed` outcome; one that was
   delivered and never answered leaves the thread waiting.
 
+## The infer protocol
+
+Between the loop (`programs/loop`) and the inference peer (`src/peers/infer.ts`,
+`bin/skein-infer`), as decided in issue #12. The peer is **stateful**: it
+holds each sender's conversation graph; the engine behind it (an
+OpenAI-compatible endpoint) is not. Requests go in the peer's `infer` box,
+replies come back in the instance's `completions` box with `replyTo` = the
+request's id, as for any reply. Both bodies are dag-cbor records.
+
+**Nodes.** A node is one of the loop's `turn` records exactly as the instance
+keeps it, so its CID is the same on both sides. Every turn names the turn
+before it:
+
+```
+{kind: "turn", parent?: <turn cid>, of, role, …}   (the system turn, the root, has no parent)
+```
+
+so a conversation is a chain of nodes keyed by CID, and a fork or a revert is
+nothing more than a node naming an earlier parent. What each role carries is
+listed in `programs/loop/main.go`.
+
+**Request** (`infer`):
+
+```
+{ model: "<provider>/<model>", thinking?: "off"|"low"|"medium"|"high", tools?: [<OpenAI tool>],
+  parent?: <node cid>, nodes: [<turn>, …] }
+```
+
+- `nodes` are the turns new since the last request on this conversation, in
+  order: `nodes[0].parent` is `parent`, each later node's is the one before.
+  The loop sends the turns from its latest assistant turn on (the peer held
+  everything up to that turn's parent: the newest node of the request it
+  answered) and names that parent. The first request of a conversation has
+  no `parent` and carries the whole conversation, root first.
+- `model` and `thinking` are per request. The loop takes them from the
+  latest user turn — a `chat` may carry `model` and `thinking` beside `text`,
+  kept on the user turn — else from the genesis defaults (`defaults.model`,
+  else `ripper/qwen38`; `defaults.thinking`). The peer maps `model` to its
+  provider table (`<provider>/<model>`: the provider's `baseUrl` and
+  `apiKey`, the engine's model name after the slash) and `thinking` to the
+  engine's `chat_template_kwargs.enable_thinking` and `reasoning_effort`;
+  absent, the engine's default.
+
+**The peer.** It checks that the nodes chain, stores them, and walks from the
+newest node back through `parent` to the root. The path becomes the engine's
+whole chat: system → `system`, user → `user` (`text`), assistant →
+`assistant` (`content`, `tool_calls`), tool → `tool` (`tool_call_id` = `call`;
+a shell's `exit N`, stdout and `[stderr]`, or a message's answer, or
+`error: …`); other roles (the loop's `error` turns) are not the model's and are
+left out. Nodes are held per sender identity — one sender's CIDs never reach
+another's chat — in memory (the most recently used `SKEIN_INFER_NODES`,
+default 50000) and on disk under its own state directory
+(`SKEIN_INFER_CACHE`, default `$SKEIN_HOME/infer-cache`, one file per node at
+`<sender>/<cid>`, its dag-cbor bytes, checked against the CID when read back;
+`""` for memory only). Nothing prunes the directory.
+
+**Reply** (`completions`), one of:
+
+```
+{ replyTo, message: {role: "assistant", content?, reasoning?, tool_calls?}, usage?, model, ms }
+{ replyTo, missing: [<node cid>] }
+{ replyTo, error }
+```
+
+- **`missing`** is the peer's 404: it does not hold a node the request needs
+  — the named `parent`, or an ancestor on the way to the root (a restarted
+  peer with no cache, an evicted node) — and names the first it could not
+  find. No engine call is made.
+- **The loop on `missing`** keeps a note beside its turns (not a turn, not a
+  node), `{kind: "missing", of: <completions envelope>, missing}`, and sends
+  the whole conversation again — an ordinary `infer` with no `parent`,
+  emitted, recorded and replayed like any other — and awaits that. It
+  retries once: `missing` again right after the resend, or for a request
+  that already carried the whole conversation (the first), is an inference
+  error — an `error` turn, answered to the opener as "inference failed: …".
+  Everything the loop decides is from its own kept records, so replay is
+  exact; the peer's reply is an admitted entry like any other.
+- A request with `messages` and no `nodes` (a loop from before this
+  protocol) is passed to the engine as it is.
+
 ## Why the plaintext
 
 With the content hash in the sender's signature, the plaintext needs no one
