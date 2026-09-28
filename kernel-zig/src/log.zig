@@ -12,7 +12,10 @@
 //            or the recipient acknowledging)
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
-//             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?}
+//             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?}
+//            `tree` (issue #4): the system tree the instance booted from (a git
+//            tree, its objects pre-filled by the loader); processing the genesis
+//            sets the head `main` to it
 //   emit     {kind: "emit", to: bytes, box, body, envelope}   (the envelope in either encoding, envelope.zig)
 const std = @import("std");
 const cbor = @import("cbor.zig");
@@ -151,6 +154,7 @@ pub fn isGenesis(x: ?Value) bool {
         if (c != .array) return false;
         for (c.array) |b| if (b != .string or b.string.len == 0) return false;
     }
+    if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
     return true;
 }
 

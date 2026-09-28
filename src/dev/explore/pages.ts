@@ -478,8 +478,8 @@ function blob(b: Uint8Array): string {
 export async function headPage(w: World, name: string): Promise<string> {
   const moves = await headMoves(w.store, name);
   const rows = moves.map(({ cid, u }) => {
-    const t = w.byThread.get(u.thread.toString());
-    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${link(w, u.tree, u.tree.toString())}</td><td>${t ? threadLink(w, t) : link(w, u.thread)}</td><td>${entryLink(w, u.input)}</td></tr>`;
+    const t = u.thread ? w.byThread.get(u.thread.toString()) : undefined;
+    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${link(w, u.tree, u.tree.toString())}</td><td>${t ? threadLink(w, t) : u.thread ? link(w, u.thread) : `<span class="mut">genesis (system tree)</span>`}</td><td>${entryLink(w, u.input)}</td></tr>`;
   }).reverse().join("");
   return layout(`head ${name}`, `<h1>head ${esc(name)}</h1><div class="small mut">${moves.length} move${moves.length === 1 ? "" : "s"}, newest first</div>
 <table><tr><th>seq</th><th>at</th><th>tree</th><th>by thread</th><th>input</th></tr>${rows || `<tr><td class="mut">never moved</td></tr>`}</table>`);

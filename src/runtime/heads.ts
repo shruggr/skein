@@ -15,7 +15,7 @@ import { NotFound, type Store } from "./store.ts";
 import type { Ms } from "./types.ts";
 
 export type HeadOrigin = { kind: "head"; name: string };
-export type HeadUpdate = { origin: CID; prev: CID; seq: number; tree: CID; thread: CID; input: CID; at: Ms };
+export type HeadUpdate = { origin: CID; prev: CID; seq: number; tree: CID; /** Absent: moved by the genesis (a system tree, #4). */ thread?: CID; input: CID; at: Ms };
 
 export const MAIN = "main";
 

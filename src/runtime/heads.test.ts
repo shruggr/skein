@@ -36,7 +36,7 @@ for (const [name, make] of stores) {
     const u1 = await advanceHead(s, MAIN, tree, by);
     assert.ok((await headTree(s, MAIN))!.equals(tree));
     const r1 = await s.get(u1) as unknown as HeadUpdate;
-    assert.deepEqual({ ...r1, origin: fmt(r1.origin), prev: fmt(r1.prev), tree: fmt(r1.tree), thread: fmt(r1.thread), input: fmt(r1.input) },
+    assert.deepEqual({ ...r1, origin: fmt(r1.origin), prev: fmt(r1.prev), tree: fmt(r1.tree), thread: fmt(r1.thread!), input: fmt(r1.input) },
       { origin: fmt(headOrigin(MAIN)), prev: fmt(headOrigin(MAIN)), seq: 1, tree: fmt(tree), thread: fmt(by.thread), input: fmt(by.input), at: 7 });
     assert.ok((await advanceHead(s, MAIN, tree, { ...by, at: 8 })).equals(u1), "same tree: no new update");
     const u2 = await advanceHead(s, MAIN, other, { ...by, at: 9 });
@@ -116,7 +116,7 @@ test("heads: import sets `main` once; run with no tree starts from it; the owner
   assert.deepEqual([body.name, String(body.tree)], ["main", String(rb)], "the handler read the plaintext request from the entry");
   assert.equal(u.calls, undefined, "no wallet call");
   const move = await i.store.get(u.heads[0]) as unknown as HeadUpdate;
-  assert.ok(move.tree.equals(rb) && move.thread.equals(h) && move.origin.equals(headOrigin(MAIN)), "the step lists the head update it wrote, which names the step's thread");
+  assert.ok(move.tree.equals(rb) && move.thread!.equals(h) && move.origin.equals(headOrigin(MAIN)), "the step lists the head update it wrote, which names the step's thread");
   assert.equal(text((await run(i, "cat *.txt")).stdout), "beta\n", "no tree: the new main");
 
   // A head can only name a tree the instance holds: the step errors, main stays.

@@ -393,6 +393,15 @@ pub const Runtime = struct {
                 const m = s.get("match").?;
                 _ = try subs.subscribe(a, rt.store, .{ .op = "add", .sender = Value.bytesOf(m.get("sender")), .box = Value.str(m.get("box")) orelse "", .handler = Value.cidOf(s.get("handler")).? }, .{ .thread = null, .input = entry, .at = at });
             }
+            // A system tree (issue #4): the loader pre-filled its objects; `main` starts there.
+            if (Value.cidOf(g.get("tree"))) |tree| {
+                if (!(try rt.store.has(tree))) {
+                    last_error = try std.fmt.allocPrint(rt.life.allocator(), "#{d}: the genesis tree {s} is not in the store", .{ n, fmtCid(a, tree) });
+                    return error.NotFound;
+                }
+                _ = try heads.advanceHead(a, rt.store, "main", tree, .{ .thread = null, .input = entry, .at = at });
+                rt.say("#{d} genesis: main → {s} (system tree)", .{ n, short(a, tree) });
+            }
             rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} subscriptions", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(Value.bytesOf(g.get("owner")).?), ss.len });
             return;
         }

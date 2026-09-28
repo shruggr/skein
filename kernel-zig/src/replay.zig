@@ -16,6 +16,7 @@ const logm = @import("log.zig");
 const programs = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
+const tree = @import("tree.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
 const Value = cbor.Value;
 
@@ -93,6 +94,8 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         const b = (try src.bytes(a, h)) orelse continue;
         try dst.putBlock(h, b);
     }
+    // The system tree the genesis booted from (issue #4): pre-filled, not carried by any entry.
+    if (Value.cidOf(g.get("tree"))) |t| try copyTree(a, src, dst, t);
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) {
@@ -111,6 +114,18 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
             },
         }
     }
+}
+
+/// A git tree and everything under it (blobs, subtrees, gitlinked records the source holds).
+fn copyTree(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, t: []const u8) !void {
+    if (try dst.has(t)) return;
+    const b = (try src.bytes(a, t)) orelse return error.NotFound;
+    try dst.putBlock(t, b);
+    for (try tree.parseTree(a, b)) |e| switch (e.mode) {
+        .dir => try copyTree(a, src, dst, e.cid),
+        .module => if (try src.bytes(a, e.cid)) |x| try dst.putBlock(e.cid, x),
+        else => if (!(try dst.has(e.cid))) try dst.putBlock(e.cid, (try src.bytes(a, e.cid)) orelse return error.NotFound),
+    };
 }
 
 pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
