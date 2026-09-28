@@ -5,9 +5,11 @@
 // router. Checks a run and a chat answered end to end, a sleep woken by the
 // router's waker, an idle stop mid-sleep and the hydration that finishes it,
 // and (issue #5) a shell that never ends running out of fuel under a low
-// fuelPerStep. Then the stores the Zig kernel wrote are replayed by the Zig
-// kernel twice over (equiv/replays.ts): identical to each other and to the
-// stores themselves, fuel included.
+// fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
+// python) ending on their own under that limit, the clock being the entry
+// stamp + fuel × 1 ns. Then the stores the Zig kernel wrote are replayed by
+// the Zig kernel twice over (equiv/replays.ts): identical to each other and
+// to the stores themselves, fuel included.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/serve.ts
 
@@ -78,6 +80,7 @@ const inbox = async (b: string) => {
   }
   return out;
 };
+let waited: { exitCode?: number; stdout?: string } | undefined;
 const results = (n: number, b = "results", ms = 30_000) => until(`${n} in ${b}`, async () => { const x = await inbox(b); return x.length >= n ? x : undefined; }, ms);
 
 try {
@@ -134,6 +137,22 @@ try {
   await sendTo(ft, "fueltest", "run", { cmd: "echo start; while :; do :; done", tree: root });
   const [s] = await results(1, "results", 60_000);
   check(JSON.stringify(s!.body).includes("fuel exhausted"), `a spinning shell runs out of fuel and run-handler says so (${JSON.stringify(s!.body).slice(0, 160)})`);
+  await box.ack([s!.id]);
+
+  // The in-step clock (issue #38): entry stamp + fuel × 1 ns. A 50 ms busy-wait on the clock
+  // (qjs Date.now, python time.monotonic) ends on its own, under the same fuel limit.
+  db.add("clocktest", { store: join(home, "instances/clocktest/runtime.db") });
+  await router.hydrate("clocktest");
+  const ct = db.get("clocktest")!.identity!;
+  for (const b of bundles) await sendTo(ct, "clocktest", "objects", b);
+  const clockCmd = [
+    "qjs -e 'const t0 = Date.now(); let n = 0; while (Date.now() - t0 < 50) n++; console.log(\"qjs\", Date.now() - t0, n > 100)'",
+    "python3 -c 'import time\nt0 = time.monotonic()\nwhile time.monotonic() - t0 < 0.05: pass\nprint(\"python\", round((time.monotonic() - t0) * 1000))'",
+  ].join("; ");
+  await sendTo(ct, "clocktest", "run", { cmd: clockCmd, tree: root });
+  const [w] = await results(1, "results", 60_000);
+  waited = { exitCode: w!.body.exitCode as number, stdout: w!.body.stdout ? text(w!.body.stdout) : undefined };
+  await box.ack([w!.id]);
   await router.stop();
   await fs.rm(dir, { recursive: true, force: true });
 } catch (e) {
@@ -146,9 +165,20 @@ const fuelDb = join(home, "instances/fueltest/runtime.db");
 const fr = spawnSync(kernel, ["fuel", fuelDb], { encoding: "utf8" });
 check(fr.status === 0 && fr.stdout.split("\n").some((l) => l.startsWith(`${LIMIT}\t1\t`) && l.endsWith("\tshell")), "skein-kernel fuel: the shell's one step burnt exactly the limit");
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb], { encoding: "utf8" });
+// The in-step clock (issue #38), checked: the busy-waits ended 50 ms of fuel later.
+const CLOCK_LIMIT = Number(LIMIT);
+const [qjsLine, pyLine] = (waited?.stdout ?? "").trim().split("\n").map((l) => l.split(" "));
+const ms = (x?: string) => Number(x);
+check(waited?.exitCode === 0 && qjsLine?.[0] === "qjs" && ms(qjsLine[1]) >= 50 && ms(qjsLine[1]) < 60 && qjsLine[2] === "true", `a qjs busy-wait on Date.now for 50 ms ends, 50 ms of fuel later (${JSON.stringify(waited ?? null).slice(0, 200)})`);
+check(pyLine?.[0] === "python" && ms(pyLine[1]) >= 50 && ms(pyLine[1]) < 60, `a python busy-wait on time.monotonic for 50 ms ends (${waited?.stdout?.trim()})`);
+const clockDb = join(home, "instances/clocktest/runtime.db");
+const kr = spawnSync(kernel, ["fuel", clockDb], { encoding: "utf8" });
+const shellFuel = kr.stdout.split("\n").filter((l) => l.endsWith("\tshell")).map((l) => Number(l.split("\t")[0]));
+check(kr.status === 0 && shellFuel.length === 1 && shellFuel[0] >= 100_000_000 && shellFuel[0] < CLOCK_LIMIT, `the shell's step burnt at least the 2 × 50 ms it waited, under the limit (${shellFuel})`);
+
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb, clockDb], { encoding: "utf8" });
 process.stdout.write(r.stdout);
-check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 2, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
+check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 3, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `serve: ${failures} FAILED\n` : "serve: all ok\n");

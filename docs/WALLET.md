@@ -1,10 +1,18 @@
 # The wallet in the VM
 
-What is built for issue #29, phase 1 (branch `wallet-zig-29`). The design is
-the issue body ("Decided (2026-09-28)", "Browser with Yours"); this file
+What is built for issue #29 (phase 1 merged; phase 2 on branch
+`worktree-agent-aff20e1c30a3be594`). The design is the issue body ("Decided
+(2026-09-28)", "Browser with Yours") as revised in its comments (Q3/Q5, "drop
+the checkpoint op", "no messagebox for ARC or ChainTracks"); this file
 describes what exists. A wallet is two things: a **root key**, which stays
-outside as the per-instance **signing oracle**, and **wallet state**, which
-lives inside as records. Nothing here signs.
+outside as the per-instance **signing oracle** (a ProtoWallet, #18), and
+**wallet state**, which lives inside as records. Nothing in the VM holds a
+key: every key operation is a call to the oracle.
+
+The wallet runs on the **Zig kernel only**: its transactions and headers are
+`bitcoin-tx` / `bitcoin-block` blocks (the TS kernel's `putblock` refuses
+them) and it uses the kernel's `http` and `deadline` imports
+(kernel-zig/README.md, "For the wallet").
 
 ## Pieces
 
@@ -12,15 +20,18 @@ lives inside as records. Nothing here signs.
   and patched by `scripts/fetch-bsvz.sh`). The library (`src/`) and the
   handler program (`src/program.zig`, wasm32-wasi → `wasm/wallet.wasm`,
   module `MODULES.wallet`, program record `WALLET` in
-  `src/runtime/programs.ts`; not in a genesis by default).
+  `src/runtime/programs.ts`, installed by the Zig kernel; not in a genesis by
+  default). The index maps are the kernel's Merkle search trees:
+  `kernel-zig/src/mst.zig` built as a module of wallet-zig (`build.zig`),
+  shared, not copied.
 - `wallet-zig/vectors/` — the test-vector corpus (issue #14's rule): made by
   `gen-go` from go-sdk (fixtures snapshotted into `inputs/`, mainnet headers
   fetched from WhatsOnChain once), cross-checked by `gen-ts` against
   `@bsv/sdk` and the TS wallet-toolbox's chaintracks header utilities.
 - Nothing is taken from zig-wallet-toolbox: its "builder" is JSON glue around
   a remote storage's `createAction`, and its storage and services are HTTP.
-  bsvz supplies the primitives: transaction and BUMP parsing, the script
-  interpreter, BRC-42/43 key derivation, hashes.
+  bsvz supplies the primitives: transaction and BUMP parsing and merging,
+  sighash preimages, the script interpreter, BRC-42/43 key derivation, hashes.
 
 ### bsvz on wasm32-wasi
 
@@ -36,129 +47,204 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 
 ## Records
 
-Every record is dag-cbor (CIDv1, sha2-256), put through the `put` import.
+| record | block | fields | notes |
+|---|---|---|---|
+| header | `bitcoin-block` (0xb0, dbl-sha2-256) | the 80 bytes | CID = block hash; height is the `headers` map's key |
+| transaction | `bitcoin-tx` (0xb1, dbl-sha2-256) | the standard serialization | CID = txid |
+| `proof` | dag-cbor | `txid` (hex), `height`, `path` (BRC-74 bytes) | links a txid to the header at `height` |
+| `action` | dag-cbor | `txid`, `tx` (link), `description`, `labels`, `noSend?` | a transaction that is ours |
+| `output` | dag-cbor | `txid`, `vout`, `tx` (link), `basket`, `protocol`, protocol fields | satoshis and script come from the tx |
+| `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (outpoints), `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
+| `broadcast` | dag-cbor | `txid`, `subject` (the tx's CID), `arc` (URL), `txStatus` (last heard) | a transaction awaiting its status |
+| `wallet-state` | dag-cbor | `network`, `maps: {name: root \| null}` | what the head `wallet` names |
+| `wallet-result` | dag-cbor | `op`, per-op fields, `state` | a step's answer, kept in its thread |
 
-| kind | fields | notes |
-|---|---|---|
-| `header` | `height`, `raw` (80 bytes) | hash, target, work computed from `raw` |
-| `tx` | `raw` | the txid is computed (double SHA-256 of `raw`), not stored |
-| `proof` | `txid` (hex), `height`, `path` (BRC-74 bytes) | links a txid to the header at `height` |
-| `action` | `txid`, `tx` (link), `description`, `labels` | a transaction that is ours |
-| `output` | `txid`, `vout`, `tx` (link), `basket`, `protocol`, remittance fields | satoshis and script come from the tx |
-| `wallet-index` | `name`, `entries` {key: value} | an index map |
-| `wallet-state` | `indexes` {name: link} | what the head `wallet` names |
-| `wallet-result` | `op`, per-op fields, `state` | a step's answer, kept in its thread |
-
-An `output` from a BRC-29 payment has `basket: "default"`, `protocol:
-"wallet payment"`, `derivationPrefix`, `derivationSuffix`,
-`senderIdentityKey`; from a basket insertion, `protocol: "basket insertion"`,
-its `basket`, `tags`, `customInstructions?`.
+Output `protocol`s: `"wallet payment"` (a BRC-29 payment to us: basket
+`default`, `derivationPrefix`, `derivationSuffix`, `senderIdentityKey`),
+`"wallet change"` (our change: basket `default`, `derivationPrefix`,
+`derivationSuffix`, counterparty self), `"basket insertion"` (its `basket`,
+`tags`, `customInstructions?`). Only the first two are spent by the builder:
+the wallet holds their keys (through the oracle).
 
 ### Index maps
 
-Keys sort as dag-cbor sorts map keys (length, then bytes).
+Each is a Merkle search tree (#30: dag-cbor nodes `[left, [[key, value,
+right]…]]`, canonical — the same contents give the same root whatever the
+order), its root in the state record. Keys are bytes, ordered bytewise.
 
-| index | key → value | |
+| map | key → value | |
 |---|---|---|
-| `headers` | height (10 digits) → `header` | the best chain: header by height |
-| `txs` | txid → `tx` | every transaction we hold (ours and their ancestry) |
+| `headers` | height (u32 BE) → header | the best chain |
+| `heights` | block hash → height | the best chain, backwards (fork points) |
+| `txs` | txid → transaction | every transaction we hold (ours and their ancestry) |
 | `proofs` | txid → `proof` | proof by txid |
 | `actions` | txid → `action` | our transactions |
-| `outputs` | `txid.vout` → `output` | output by outpoint |
-| `spent` | `txid.vout` → spending txid | derived: inputs of our actions |
-| `byBasket` | `basket/spendable` \| `basket/spent` → [outpoint] | derived: outputs by basket + spendable |
-| `byStatus` | `proven` \| `unproven` → [txid] | derived: our actions by status |
+| `outputs` | txid ‖ vout (u32 BE) → `output` | output by outpoint |
+| `awaiting` | txid → `broadcast` | transactions awaiting a status |
+| `spent` | outpoint → spending txid | derived: inputs of our actions |
+| `byBasket` | len ‖ basket ‖ 0 (spendable) \| 1 (spent) ‖ outpoint → null | derived: outputs by basket + spendable |
+| `byStatus` | 0 (proven) \| 1 (unproven) ‖ txid → null | derived: our actions by status |
 
 **Status and spendability are computed, never stored.** `proven` means we
 hold a proof whose root is the merkle root of our best-chain header at its
-height; anything else is `unproven` (so a reorg that drops the block turns
-it back, with nothing to update). Spendable means ours (an `output`) and not
-consumed (no action of ours spends it). The derived maps are rebuilt from the
-primary ones on every save, so they are a function of the records and the
-best chain that anyone can recompute. They are flat records rewritten whole
-on change (#30's shape without its persistent-map spine; see "Open").
-"Transactions awaiting a callback" is not a map yet: it is the set of threads
-waiting on an Arcade reply, which does not exist until broadcast does.
+height; anything else is `unproven` (a reorg that drops the block turns it
+back, with nothing to update). Spendable means ours (an `output`) and not
+consumed (no action of ours spends it). The derived maps are rebuilt from
+the primary ones on every save: a function of the records and the best chain
+that anyone can recompute (same contents, same root). The ARC status in a
+`broadcast` record is provisional information only; nothing is decided by it
+but "stop awaiting".
 
 ## The chain tracker
 
-Header records from a **checkpoint** (trusted: the first header, sent by
-whoever the subscriptions let send it), extended by runs of headers that link
-to a header on our best chain. A header is accepted when its target is
-usable (not zero, negative or over 256 bits — where go-chaintracks and the TS
-toolbox disagree, `vectors/headers.json`), its hash meets that target, and it
-links; a competing branch replaces ours from the fork point when it carries
-more work. **Not checked:** the difficulty-adjustment rule (that `bits` is the
-one the chain requires), timestamps, versions. A peer can feed a branch at
-low difficulty; it only wins by carrying more work than ours.
+The anchor is the **network's genesis header**, a constant in the program
+(`main`, `test`, `regtest`; genesis `defaults.walletNetwork`, default
+`main`; the state record carries its network and a state made for another
+is refused). There is no trusted input: every header, from any sender, must
+chain back to it. An empty chain starts at height 0 with the genesis header;
+a run of headers is accepted when each target is usable (not zero, negative
+or over 256 bits — where go-chaintracks and the TS toolbox disagree,
+`vectors/headers.json`), each hash meets its target, they link, and the first
+links to a header on our best chain (found by hash in `heights`); a
+competing branch replaces ours from the fork point when it carries more
+work. **Not checked, by decision (Q3, permanent):** the difficulty-adjustment
+rule, timestamps, versions.
+
+The full mainnet chain (~900k × 80 B) is only held by an instance fed by a
+header service; an instance without a feed cannot validate transactions,
+and a signing-only wallet needs none. A bootstrap packet (#4) may ship the
+headers pre-verified. Tests: mainnet heights 0..10 (real, from WhatsOnChain)
+for the tracker; regtest chains mined from its genesis for the wallet.
 
 ## SPV
 
 `internalize` takes an Atomic BEEF (BRC-95). Every BUMP's root must be our
-header's merkle root at its height (an unknown height is refused, not
-deferred); every transaction must be in its BUMP, or have every input's
-source earlier in the BEEF or already held by us, with each input's script
-verified by bsvz's interpreter; a txid-only entry must be a transaction we
-hold. The subject may be unmined: it is recorded `unproven`, and its outputs
-are spendable at once (as in the toolbox).
+header's merkle root at its height (Q5: a payment is synchronous — it
+validates or it fails; an unknown height is refused, never deferred); every
+transaction must be in its BUMP, or have every input's source earlier in the
+BEEF or already held by us, with each input's script verified by bsvz's
+interpreter; a txid-only entry must be a transaction we hold. The subject
+may be unmined: it is recorded `unproven`, and its outputs are spendable at
+once.
+
+## The builder and the oracle
+
+`createAction` (BRC-100's, for the wallet's own funds): inputs are our
+spendable `default`-basket outputs (payments and change), largest first,
+until they cover the outputs and the fee; the outputs are the caller's, in
+order; then one change output, P2PKH to a fresh BRC-29 key of ours
+(protocol `[2, "3241645161d8"]`, keyID `"<prefix> <suffix>"` drawn from the
+thread's random, counterparty self). Fee: SatoshisPerKilobyte (genesis
+`defaults.walletFeeRate`, sat/kB, default 100) over the size with each P2PKH
+unlocking script estimated at 106 bytes (go-sdk's `EstimateLength`), change
+included; a change of zero drops the change output (go-sdk `Fee`,
+`ChangeDistributionEqual`). The result is the Atomic BEEF: ancestry back to
+proven transactions (their BUMPs, merged per block), parents first.
+`options.signAndProcess: false` keeps a `draft` and returns it signable
+(`reference`, the unsigned BEEF); `signAction({reference})` rebuilds the same
+transaction (its inputs must still be unspent) and signs it.
+`options.noSend: true` records without broadcasting. Caller-supplied inputs,
+`lockTime`, `randomizeOutputs`, `sendWith` are not taken.
+
+**Every key operation is an oracle call** over the `wallet` import (BRC-100
+wire frames, attested): `getPublicKey` (call 8; forSelf; counterparty the
+payment's sender, or self for change) for each input's key and the change
+key, and `createSignature` (call 15) with `hashToDirectlySign` = the input's
+BIP143/ForkID sighash (`ALL|FORKID`) — go-sdk's own pattern
+(transaction/template/pushdrop). The oracle sees a key reference and a
+32-byte hash, nothing else; the unlocking script is `<DER ‖ 0x41> <pubkey>`.
+`vectors/signing.json` (go-sdk ProtoWallet) fixes every frame, preimage,
+sighash, fee, change amount and the final transaction; wallet-zig reproduces
+them byte for byte.
+
+`internalize` asks the oracle only `getPublicKey` (the BRC-29 payee key).
+This is how Yours funds skein ("Browser with Yours"): a BRC-29 payment to a
+key derived for skein, internalized here as skein's own UTXO.
+
+## Feeds and calls: plain entries and `http`
+
+Two mechanisms, split by lifetime (#29, "no messagebox for ARC or
+ChainTracks"). Neither is a message: `emit` stays for identities.
+
+**Plain entries** — subscriptions are host wiring: the router holds the SSE
+feeds and webhooks (ChainTracks headers, ARC status callbacks, proofs) and
+admits each event as a plain, unsigned log entry `{kind: "log", n, prev,
+time, box, event}` for every instance whose config wants it; `event` names
+a record the router puts first. The wallet takes three kinds:
+
+| record | fields | |
+|---|---|---|
+| `header` | `raw` (80 bytes) | one header; added to the chain (self-validating) |
+| `proof` | `subject` (the tx's CID), `txid` (hex), `path` (BRC-74 bytes) | a merkle proof for a transaction we hold |
+| `status` | `subject`, `txid`, `txStatus` (ARC's), `merklePath?` (BRC-74 bytes), `extraInfo?` | ARC's callback |
+
+The kernel routes a plain entry to the thread whose tip awaits its `subject`
+(a transaction's CID is its txid), else to a subscription with **no sender**
+on the entry's box (the instance subscribes e.g. `{match: {box: "chain"},
+handler: WALLET}`). What arrives is validated inside: headers by work and
+links, proofs against our headers; a status is provisional until its proof.
+
+**`http`** — one-shot calls are made from the VM and answered by the host,
+recorded calls (request + response), so replay never touches
+the network. The kernel import is `http(request) → response`, dag-cbor
+`{method, url, headers?, body?}` → `{status, headers, body}`. This is the
+**pre-#15 shape**: #15 replaces the import with standard `wasi:http`,
+answered and recorded the same way. The wallet speaks ARC's native API:
+
+| call | when | |
+|---|---|---|
+| `POST {walletArc}/v1/tx`, `Content-Type: application/octet-stream`, body = the Atomic BEEF | after `createAction` / `signAction` (not `noSend`, only if genesis `defaults.walletArc` is set) | JSON `{txid, txStatus, merklePath?, extraInfo}`; a 4xx without a `txStatus` is a rejection |
+| `GET {walletArc}/v1/tx/{txid}` | at the deadline | the same JSON |
+
+**The awaiting-callback thread** is the whole monitor: after a broadcast
+the step notes it in `awaiting`, then `await`s the transaction's CID and
+sets a `deadline` (`defaults.walletRecheckMs`, default 600000), so the thread
+rests `waiting` with `until`. A `status` or `proof` entry for that CID steps
+it (`input.event`); the deadline's wake entry steps it too (`input.woke`),
+and it re-asks ARC over `http`. Each time: a merkle path proves the
+transaction (a header not yet held leaves it pending), a rejection
+(`REJECTED`, `DOUBLE_SPEND_ATTEMPTED`, `INVALID`, `MALFORMED`, or a 4xx)
+drops the action and its outputs so its inputs are spendable again; proven
+or rejected, it stops awaiting and the thread finishes; otherwise it awaits
+again with a new deadline. A fallback ARC is a different URL.
+
+Not built: catching up on headers after a gap over `http` (a feed's gap is
+refused as `Unconnected` until the missing headers arrive); fetching a
+missing proof on demand; the router side (holding the SSE feeds and
+webhooks, admitting the entries — #33), and whatever `status` records the
+router makes from ARC's callbacks beyond the shape above.
 
 ## The program: the `wallet` box
 
-A handler (`WALLET`), subscribed to a box like any program. Each step loads
-the state the head `wallet` names, applies the body, saves new index records
-and a new `wallet-state`, advances the head, puts a `wallet-result`, keeps it,
-and prints its CID. An error ends the step `errored`; no head moves.
+A handler (`WALLET`), subscribed to an owner's box (owner messages) and a
+sender-less box (plain entries). Each step loads the state the head `wallet`
+names, applies the input, saves new map nodes and a new `wallet-state`,
+advances the head, puts a `wallet-result`, keeps it, and prints its CID. An
+error ends the step `errored`; no head moves.
 
-| body | does |
+| body (owner) | does → result |
 |---|---|
-| `{op: "checkpoint", height, header}` | the first header, into an empty chain |
 | `{op: "headers", headers: [bytes]}` | a run of headers, parents first → `{added, known, replaced, ignored, tip}` |
-| `{op: "internalize", tx, outputs, description, labels?}` | BRC-100 `internalizeAction` (below) → `{txid, status, outputs}` |
+| `{op: "internalize", tx, outputs, description, labels?}` | BRC-100 `internalizeAction` → `{txid, status, outputs}` |
 | `{op: "proof", txid, path}` | a BRC-74 path for a transaction we hold → `{txid, status}` |
-| `{op: "list", basket?, includeSpent?}` | outputs in a basket (default `default`) → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
+| `{op: "createAction", description, outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?, arc?, outcome?, awaiting?}` |
+| `{op: "signAction", reference}` | → as createAction |
+| `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
+
+| plain entry / callback | result |
+|---|---|
+| `header` (args.event) | `{event: "header", added, known, replaced, ignored, tip}` |
+| `proof` / `status` (args.event) | `{event, txid, outcome: proven \| pending \| rejected}` |
+| a callback (input.event / input.woke) | `op: "callback"`: `{txid, outcome, event? \| arc?, awaiting?}` |
 
 `outputs` of `internalize` are BRC-100's: `{outputIndex, protocol: "wallet
 payment", paymentRemittance: {derivationPrefix, derivationSuffix,
 senderIdentityKey}}` or `{outputIndex, protocol: "basket insertion",
 insertionRemittance: {basket, customInstructions?, tags?}}`.
 
-**The oracle.** The only attested call is `getPublicKey` (wire call 8,
-`wallet-zig/src/wire.zig`) for the BRC-29 payee key: protocol `[2,
-"3241645161d8"]`, keyID `"<derivationPrefix> <derivationSuffix>"`,
-counterparty the sender, forSelf. The output is ours when it is P2PKH to that
-key. This is how Yours funds skein (#29, "Browser with Yours"): a BRC-29
-payment to a key derived for skein, internalized here as skein's own UTXO.
-Signing (`createSignature` for spends) is not called by anything yet.
-
-## Peers as message boxes (shapes only; not built)
-
-Both are peers reached by envelopes like any other; replies carry `replyTo`
-(the emit's CID), so a thread `await`s them. Bodies are dag-cbor; binary
-fields are bytes.
-
-**ChainTracks** — headers and proofs. Its messages need no authentication:
-they self-validate against the chain we hold, so its boxes may be subscribed
-for any sender and routed straight to `wallet`.
-
-| direction | box | body |
-|---|---|---|
-| → ChainTracks | `chaintracks` | `{op: "subscribe", from: height}` — push new headers from `from` on |
-| ← ChainTracks | `headers` | `{op: "headers", headers: [bytes]}` — the `wallet` program's own op, as is |
-| → ChainTracks | `chaintracks` | `{op: "headers-request", from: height, count}` |
-| → ChainTracks | `chaintracks` | `{op: "proof-request", txid}` |
-| ← ChainTracks | `headers` | `{op: "proof", txid, path}` (reply to a proof-request), or `{op: "proof", txid, unknown: true}` |
-
-**Arcade** — broadcast and status callbacks.
-
-| direction | box | body |
-|---|---|---|
-| → Arcade | `arcade` | `{op: "broadcast", beef: bytes}` — Atomic BEEF of the transaction |
-| ← Arcade | `arcade-status` | `{replyTo, txid, status: "accepted" \| "mined" \| "rejected" \| "double-spend", path?, reason?}` |
-| → Arcade | `arcade` | `{op: "status", txid}` — the re-ask after a deadline |
-
-Broadcast is: emit the BEEF, the thread awaits the reply; a deadline wake
-(`sleep`) re-asks the same box; a `mined` reply's `path` is a `proof` op. A
-fallback is the same message to a different peer. That is the whole monitor.
+Config (genesis `defaults`, strings): `walletNetwork` (`main` \| `test` \|
+`regtest`), `walletFeeRate` (sat/kB), `walletArc` (ARC base URL; unset: no
+broadcast), `walletRecheckMs`.
 
 ## Running it
 
@@ -166,22 +252,22 @@ fallback is the same message to a different peer. That is the whole monitor.
 scripts/fetch-bsvz.sh                         # bsvz at the pinned rev, patched, in .build/bsvz
 cd wallet-zig && zig build test               # library + vectors, native
 cd wallet-zig && zig build test-wasm          # the same, built for wasm32-wasi, under Node's WASI
-scripts/build-programs.sh && scripts/pin-programs.sh   # rebuild wasm/wallet.wasm, repin its CID
-npm test                                      # includes src/runtime/wallet-program.test.ts
+scripts/build-programs.sh && scripts/pin-programs.sh   # rebuild wasm/wallet.wasm, repin its CID (also kernel-zig/src/programs.zig)
+node --experimental-strip-types --no-warnings kernel-zig/equiv/wallet.ts   # end to end on the Zig kernel (also in equiv/run.sh)
 node wallet-zig/vectors/gen-ts/run.mjs        # TS cross-check of the vectors
 (cd wallet-zig/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
 ```
 
-The wasm build is reproducible (same bytes from another checkout path).
+Vector counts (`zig build test`): tx 39 (fees 429), BEEF 27, merkle 24,
+headers 46, BRC-29 24, wire 7, signing 10, plus 2 wallet scenarios; the TS
+cross-check: 458. The wasm build is reproducible.
 
 ## Open
 
-- Index maps are flat records rewritten whole; #30's persistent maps replace
-  them behind `store.Index` when #30 is built.
-- Transactions are `{kind: "tx", raw}` dag-cbor records, not `bitcoin-tx`
-  (0xb1, dbl-sha2-256) blocks whose CID *is* the txid: the TS kernel's
-  `putblock` accepts only git-raw/raw/dag-cbor with sha1/sha2-256.
-- Header validation stops at work and links (above).
-- Not built: createAction/signAction (the builder: inputs, fee and change,
-  BEEF assembly, asking the oracle to sign), the peers, certificates, labels
-  as their own index, relinquish.
+- The TS kernel does not run the wallet (frozen: no bitcoin codecs, no
+  `http`/`deadline`); `src/runtime/wallet-program.test.ts` is replaced by
+  `kernel-zig/equiv/wallet.ts`.
+- The plain-entry shape and the unsigned admission predate #33's entry
+  reshape (format 2); the router's side is #33.
+- Certificates, labels as their own index, relinquish, caller-supplied
+  inputs, output randomization: not built.

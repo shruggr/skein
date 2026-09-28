@@ -69,6 +69,12 @@ secret), and the program sees the authenticated sender as the entry's
 
 ### Session replies
 
+The interpretation in force (confirmed on #33, 2026-09-28): a **client's**
+reply to an agent, sent on the client's own BRC-104 session with this router,
+may go compact; an agent's messages to a client stay full envelopes for now
+(an instance has no BRC-104 session of its own: the router delivers its emits
+in process).
+
 On a BRC-104 session with the recipient's native messagebox (this router), a
 reply may be the **compact** §7.3 form — `{type: "reply", replyTo, body}`,
 dag-cbor, sent as a BRC-231 body — with `sender`, `recipient`, `host` and the
@@ -288,7 +294,7 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
   envelope and the plaintext body records; it reads the body and launches the
   next thread with arguments pointing at the body or a record derived from it
   — for `run`, the shell over the named tree. No decryption inside, no
-  attested call, no wallet.
+  recorded call, no wallet.
 - **A handler that errors** ends its thread `errored`, and that is all: no
   reply, no bounce. The sender learns nothing, as with any asynchronous
   message.
@@ -329,7 +335,7 @@ message {to: "@handle@domain", text}
 ```
 
 - **Addressing.** The loop resolves the handle to an identity key through the
-  host (`skein.Resolve`, the `resolve` import): an attested call — the host's
+  host (`skein.Resolve`, the `resolve` import): an recorded call — the host's
   `Resolver` answers, the **whole answer** is recorded, replay serves it. A
   handle that does not resolve is recorded as `{identityKey: "", error}` and
   becomes an error result. The emit is sealed to that key with the handle in
@@ -563,7 +569,7 @@ the plaintext, and an inbound message's ciphertext is not part of state;
 nothing depends on it. What the instance sends is different only in that the
 program produced it: its emit record carries the envelope complete,
 ciphertext and all, and the wallet's answers to the sign and encrypt calls
-are recorded like any attested call (the encryption's IV is the wallet's, so
+are recorded like any recorded call (the encryption's IV is the wallet's, so
 two live runs of one input differ there, and nowhere else; replay serves the
 recorded answer). Replay needs the log and nothing else — no keys, no wallet
 on the message path. Sharing state is sharing the log. (An

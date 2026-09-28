@@ -117,6 +117,11 @@ function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, answers: 
 
 const made: string[] = [];
 
+// The in-step clock is the Zig kernel's (issue #38: entry stamp + fuel ×
+// 1 ns). The scripts below print only clock invariants (orderings, elapsed ≥
+// the sleep, the year), as they did when the corpus was written by the TS
+// runtime; equiv/serve.ts prints real mid-step times.
+
 // ---------------------------------------------------------------- run: the shell under run-handler
 {
   const h = await host();
@@ -139,7 +144,7 @@ const made: string[] = [];
   await h.send(i, "run", { cmd: "echo from main; ls" }); // no tree: main's
   // Sleeps: one wake, then two in a row.
   h.later(1);
-  await h.send(i, "run", { cmd: "date +%s%N; echo $RANDOM; sleep 2; date +%s%N; echo $RANDOM; echo x > made.txt; ls", tree: root });
+  await h.send(i, "run", { cmd: "t0=$(date +%s%N); echo $RANDOM; sleep 2; t1=$(date +%s%N); echo $(( t1 - t0 >= 2000000000 )); echo $RANDOM; echo x > made.txt; ls", tree: root });
   await h.tick(1); // not due
   await h.tick(5);
   h.later(1);
@@ -155,19 +160,20 @@ const made: string[] = [];
 {
   const h = await host();
   const i = await h.add("gen-scripts");
-  const js = "#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('out.txt', fs.readFileSync('src/a.txt', 'utf8').toUpperCase());\nconsole.log(process.argv.slice(2), Date.now(), Math.random());\nprocess.exitCode = 2;\n";
-  const py = "#!/usr/bin/env python3\nimport sys, time, random, os, uuid, json\nprint(sys.argv[1:], time.time(), random.random(), os.urandom(4).hex(), hash('x'), uuid.uuid4())\njson.dump(sorted(os.listdir('src')), open('ls.json', 'w'))\n";
+  const js = "#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('out.txt', fs.readFileSync('src/a.txt', 'utf8').toUpperCase());\nconsole.log(process.argv.slice(2), Date.now() > 1.7e12, Math.random());\nprocess.exitCode = 2;\n";
+  const py = "#!/usr/bin/env python3\nimport sys, time, random, os, uuid, json\nprint(sys.argv[1:], time.time() > 1.7e9, random.random(), os.urandom(4).hex(), hash('x'), uuid.uuid4())\njson.dump(sorted(os.listdir('src')), open('ls.json', 'w'))\n";
   const dir = await fixture({ "src/a.txt": "alpha\n", "src/b.txt": "beta\n", "t.js": js, "t.py": py });
   const { root, bundles } = await bundlesOf(dir, 700);
   for (const b of bundles) await h.send(i, "objects", b);
   const cmds = [
     "node t.js a b; echo \"exit=$?\"; ./t.js c; cat out.txt",
-    "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now())'",
-    "qjs -e 'console.log(scriptArgs, Date.now())'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
+    "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now().year)'",
+    "qjs -e 'console.log(scriptArgs, Date.now() > 1.7e12)'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
   ];
   for (const cmd of cmds) { h.later(1); await h.send(i, "run", { cmd, tree: root }); }
+  // A sleep inside a runtime: python's time.sleep and a qjs timer rest the thread until the waker wakes it.
   h.later(1);
-  await h.send(i, "run", { cmd: "python3 -c 'import time; print(time.time()); time.sleep(2); print(time.time())'; node -e 'setTimeout(() => console.log(\"later\", Date.now()), 1000)'", tree: root });
+  await h.send(i, "run", { cmd: "python3 -c 'import time; t = time.time(); time.sleep(2); print(time.time() - t >= 2)'; node -e 'const t = Date.now(); setTimeout(() => console.log(\"later\", Date.now() - t >= 1000), 1000)'", tree: root });
   await h.tick(3);
   await h.tick(3);
   await fs.rm(dir, { recursive: true, force: true });

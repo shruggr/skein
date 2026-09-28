@@ -43,7 +43,7 @@ import { now as clockNow } from "./entry.ts";
 import { admit2, keyBytes, keyHex, writeGenesis } from "./genesis.ts";
 import { hostResolver } from "./host.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
-import { Kernel, type Sleeper } from "./kernel.ts";
+import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
 import type { MailStore } from "./mail.ts";
 import { VmMail } from "./vmmail.ts";
 
@@ -61,6 +61,10 @@ export interface RouterOptions {
   ownerHandle?: Named;
   inferHandle?: Named;
   fuelPerStep?: string;
+  /** A new genesis's extra seed subscriptions and defaults (over DEFAULTS), e.g. the wallet's (#29). */
+  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string> };
+  /** Answers programs' `http` requests (#29, pre-#15); default: SKEIN_HTTP=fetch performs them, else none is answered. */
+  http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never. Default 5 minutes. */
   idleMs?: number;
   /** The instance (handle) that keeps mailboxes registered here; default the first enabled row. */
@@ -86,6 +90,12 @@ export interface Delivered { status: number; body: Record<string, unknown> }
 const ok = (recipient: string, messageId: string): Delivered => ({ status: 200, body: { status: "success", message: "Your message has been sent to 1 recipient(s).", results: [{ recipient, messageId }] } });
 const err = (status: number, code: string, description: string): Delivered => ({ status, body: { status: "error", code, description } });
 const KEY = /^0[23][0-9a-f]{64}$/;
+
+/** SKEIN_HTTP=fetch: programs' http requests performed for real. */
+async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
+  const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined });
+  return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
+}
 
 /** A BRC-231 body that is a compact session reply ({type: "reply", replyTo, body}). */
 function compactOf(body: unknown): CompactReply | undefined {
@@ -144,6 +154,23 @@ export class Router {
     this.loaded.clear();
   }
 
+  /**
+   * A plain entry (#29): an event from a feed the router holds (a header, a
+   * proof, a transaction status; later SSE/webhooks, #29's revision), put as
+   * a record and admitted into the instance in `box`. The kernel routes it by
+   * its `subject` to the thread awaiting that record, else to a sender-less
+   * subscription on `box`.
+   */
+  async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
+    return await this.serial(handle, async () => {
+      const l = await this.hydrate(handle);
+      const cid = await l.kernel.store.put(event as never);
+      const e = await admit2(l.kernel, { box, event: cid } as never, {}, this.now());
+      this.settle(l);
+      return e;
+    });
+  }
+
   /** Until nothing is queued and every loaded kernel has processed what it was given (tests, corpus). */
   async settled(): Promise<void> {
     for (let i = 0; i < 1000; i++) {
@@ -195,6 +222,7 @@ export class Router {
         return await resolve(h, d);
       },
       log: (line) => this.say(handle, line),
+      http: this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined),
       sleepers: (s) => this.sleepersOf(handle, s),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
@@ -207,7 +235,8 @@ export class Router {
         if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
         const e = await writeGenesis(kernel, {
           identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-          defaults: this.o.fuelPerStep ? { ...DEFAULTS, fuelPerStep: this.o.fuelPerStep } : undefined,
+          defaults: this.o.fuelPerStep || this.o.genesis?.defaults ? { ...DEFAULTS, ...this.o.genesis?.defaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) } : undefined,
+          subscriptions: this.o.genesis?.subscriptions,
         }, this.now());
         this.say(handle, `genesis ${e}`);
       }

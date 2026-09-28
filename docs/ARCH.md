@@ -29,8 +29,10 @@ inside a message. When the host admits an input it reads its clock and writes
 the time into that log entry ("this arrived at *t*"; `MESSAGES.md`; since
 #33 the entry is not signed: the stamp is the environment's word, and the
 sequence is the order).
-Inside the machine, "now" is the entry's time plus a counter that advances
-one nanosecond per read (so time always moves forward and never backwards),
+Inside the machine, "now" is the entry's time plus the fuel the step has
+burnt so far at one nanosecond per unit, and never the same value twice
+(so time always moves forward and never backwards; issue #38, Zig kernel —
+the frozen TS runtime still advances one nanosecond per read),
 and random bytes are a stream keyed by the entry's CID — no seed is recorded,
 because a recorded seed is exactly as visible as a derived one. Nothing
 inside the machine may use that randomness for secrets; the wallet does
@@ -176,7 +178,7 @@ fetch, clone, run-on-machine) — are one message out and one signed message
 back, recorded and replayed. Time and random are pure: they derive from the
 stamp the runtime wrote on the current log entry.
 Request/response *is* attestation; peers all look the same from inside. A
-program waiting on an attested call is an ordinary thread at rest: the
+program waiting on an recorded call is an ordinary thread at rest: the
 suspended instance is its transient handle, the scheduler wakes it when the
 reply arrives, and a restart re-executes it from the log. Pipeline stages are
 threads too; their records are recomputable cache. Which syscall is bound to

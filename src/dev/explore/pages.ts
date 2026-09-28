@@ -202,6 +202,8 @@ export async function entryPage(w: World, cid: CID): Promise<string> {
     ["processed", e.n < w.cursor ? "yes" : `<span class="st new">pending</span>`],
     ...(e.sig ? [["sig", `<code>${Buffer.from(e.sig).toString("hex").slice(0, 24)}…</code> <span class="mut small">by the host</span>`] as [string, string]] : [["sig", `<span class="mut small">none: format 2 (#33), entries are unsigned</span>`] as [string, string]]),
   ]));
+  const plain = e as unknown as { event?: CID; box?: string };
+  if (plain.event) parts.push(`<h2>event in ${esc(plain.box ?? "")}</h2>${json(w, await maybe(w.store, plain.event))}`);
   if (e.genesis) parts.push(`<h2>genesis</h2>${json(w, await maybe(w.store, e.genesis))}`);
   if (e.wake) parts.push(`<h2>wake</h2><p>the deadline of ${w.byThread.get(e.wake.toString()) ? threadLink(w, w.byThread.get(e.wake.toString())!) : link(w, e.wake)}</p>`);
   if (e.outcome) {

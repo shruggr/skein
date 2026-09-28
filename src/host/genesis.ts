@@ -36,6 +36,8 @@ export interface Genesis2Config {
   defaults?: Record<string, string>;
   /** Anyone may open a `chat` (default true): the seed after the owner's boxes. */
   openChat?: boolean;
+  /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex) or none, a box, a handler program record. */
+  subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
 }
 
 /** The genesis record for a new instance over the kernel's programs (name → program record CID). */
@@ -48,6 +50,7 @@ export function genesis2(c: Genesis2Config, programs: Record<string, CID>): Reco
     ...(c.openChat === false ? [] : [sub("chat", "loop")]),
     // The messagebox's records for the identities this instance keeps mail for (vmmail.ts): the router's `mail` entries.
     ...(programs.messagebox ? [sub(":mail", "messagebox")] : []),
+    ...(c.subscriptions ?? []).map((x) => ({ match: { ...(x.sender ? { sender: keyBytes(x.sender) } : {}), box: x.box }, handler: x.handler })),
   ];
   const names = [{ identityKey: owner, ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });

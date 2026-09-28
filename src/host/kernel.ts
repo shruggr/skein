@@ -30,6 +30,8 @@ const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 export const KERNEL_BIN = process.env.SKEIN_KERNEL_BIN || join(ROOT, "kernel-zig/zig-out/bin/skein-kernel");
 
 type Frame = Record<string, unknown>;
+export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array };
+export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 export interface Sleeper { thread: CID; until: Ms }
 
 export interface KernelOptions {
@@ -41,6 +43,8 @@ export interface KernelOptions {
   wallet?: WalletInterface;
   /** Answers `resolve`: the whole Resolution, `identityKey: ""` (plus `error`) when unknown. */
   resolve?(handle: string, domain: string): Promise<Record<string, unknown>>;
+  /** Answers the `http` import (#29, pre-#15): a request {method, url, headers?, body?} → {status, headers, body}. Absent: refused. */
+  http?(req: HttpRequest): Promise<HttpResponse>;
   /** An emit to carry (after its step is recorded). */
   send?(o: Outbound): void | Promise<void>;
   /** The kernel's sleepers changed (earliest first). */
@@ -156,6 +160,12 @@ export class Kernel {
           const k = r.identityKey;
           r = { ...r, identityKey: typeof k === "string" && /^0[23][0-9a-f]{64}$/.test(k) ? Uint8Array.from(Buffer.from(k, "hex")) : k instanceof Uint8Array ? k : new Uint8Array() };
           return answer(decode(encode(r).bytes)); // dag-cbor as recorded (undefined dropped)
+        }
+        case "http": {
+          // A program's http request (#29, pre-#15), recorded by the kernel with its answer.
+          if (!this.o.http) throw new Error("this host answers no http");
+          const res = await this.o.http(decode<HttpRequest>(f.v as Uint8Array));
+          return answer(encode(res).bytes);
         }
         case "send": {
           const o = f.v as Outbound;

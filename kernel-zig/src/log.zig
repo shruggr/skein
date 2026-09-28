@@ -3,7 +3,8 @@
 // signed by their senders, the router's stamp is the environment's word — and
 // identity keys are 33-byte byte strings in every record (no hex).
 //
-//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome | mail}
+//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome | mail | event+box}
+//   event    a record from a feed (#29: a header, a proof, a status), routed by its `subject` or by box
 //   mail     {op: "put", recipient: bytes, box, sender: bytes, messageId, body: bytes, json?}
 //          | {op: "ack", recipient: bytes, messageIds: [text]}
 //            the messagebox's state changes for a hosted identity (issue #33), routed
@@ -39,7 +40,17 @@ pub fn isOutcome(x: ?Value) bool {
     return true;
 }
 
-/// log.ts isLogEntry.
+/// A plain entry (#29): an event the host admits from a feed it holds (a
+/// header, a proof, a transaction status), the record `event` names, routed
+/// by `box` (or its `subject`). No envelope: it self-validates inside the
+/// program that takes it.
+pub fn isEventEntry(e: Value) bool {
+    return isLogEntry(e) and e.get("event") != null;
+}
+
+/// The one entry encoding (format 2, #33): {kind: "log", prev, n, time} and
+/// exactly one of genesis | envelope (+box, body) | wake | outcome | mail |
+/// event (+box). No signature on any of them.
 pub fn isLogEntry(e: Value) bool {
     if (e != .map) return false;
     const kind = Value.str(e.get("kind")) orelse return false;
@@ -47,11 +58,18 @@ pub fn isLogEntry(e: Value) bool {
     if (!Value.isNumber(e.get("n"))) return false;
     if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
-    for ([_][]const u8{ "genesis", "envelope", "wake", "outcome", "mail" }) |k| {
+    for ([_][]const u8{ "genesis", "envelope", "wake", "outcome", "mail", "event" }) |k| {
         if (e.get(k) != null) count += 1;
     }
     if (count != 1) return false;
     if ((e.get("envelope") == null) != (e.get("body") == null)) return false;
+    // A box goes with an envelope or an event, and only with them.
+    const boxed = e.get("envelope") != null or e.get("event") != null;
+    if (boxed) {
+        const box = Value.str(e.get("box")) orelse return false;
+        if (box.len == 0) return false;
+    } else if (e.get("box") != null) return false;
+    if (e.get("event")) |v| if (v != .cid) return false;
     if (e.get("outcome")) |o| if (!isOutcome(o)) return false;
     if (e.get("mail")) |m| if (!isMail(m)) return false;
     return true;
@@ -157,7 +175,7 @@ pub fn isAttested(x: ?Value) bool {
     if (Value.cidOf(a.get("thread")) == null) return false;
     if (!Value.isNumber(a.get("step")) or !Value.isNumber(a.get("i"))) return false;
     const op = Value.str(a.get("op")) orelse return false;
-    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "resolve")) return false;
+    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "resolve") and !std.mem.eql(u8, op, "http")) return false;
     return Value.bytesOf(a.get("result")) != null;
 }
 

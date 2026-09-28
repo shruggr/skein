@@ -95,6 +95,9 @@ pub const Peers = struct {
     resolve: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, handle: []const u8, domain: []const u8) Value = null,
     /// An emitted message for the delivery provider: the emit record plus {emit, thread, cid}.
     send: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, outbound: Value) anyerror!void = null,
+    /// One HTTP request (dag-cbor {method, url, headers?, body?}) → the response
+    /// (dag-cbor {status, headers, body}): a program's `http` import (#29, pre-#15).
+    http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8) anyerror![]u8 = null,
     /// A thread started sleeping (the tick's cue).
     on_sleep: ?*const fn (ctx: *anyopaque, thread: []const u8, until: i64) void = null,
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
@@ -125,6 +128,10 @@ pub const Runtime = struct {
     live: std.StringHashMap(void),
     sleepers: std.array_list.Managed(Sleeper),
     stepping: std.StringHashMap(void),
+    /// A field for the next program step's input (#29): `event` (a plain
+    /// entry's record, to the thread awaiting its subject) or `woke` (the
+    /// thread's deadline came). Set by process(), taken by stepBody.
+    step_extra: ?cbor.Entry = null,
 
     pub fn init(gpa: std.mem.Allocator, s: Store, r: *runner.Runner, peers: Peers) !*Runtime {
         const rt = try gpa.create(Runtime);
@@ -278,9 +285,13 @@ pub const Runtime = struct {
     }
 
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, signed: ?Value, body: ?[]const u8) !?AdmitResult {
-        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want an envelope, wake, outcome or mail entry (format 2: unsigned)" };
+        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want an envelope, wake, outcome, mail or event entry (format 2: unsigned)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
+        if (Value.cidOf(entry.get("event"))) |ev| {
+            if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first)" };
+            return null;
+        }
         if (entry.get("outcome")) |o| {
             const emit = Value.cidOf(o.get("emit")).?;
             if (!logm.isEmit(rt.store.getOpt(a, emit))) return .{ .invalid = try std.fmt.allocPrint(a, "admit: outcome for {s}, which is not an emit in this store", .{fmtCid(a, emit)}) };
@@ -468,6 +479,8 @@ pub const Runtime = struct {
             return;
         }
 
+        if (Value.cidOf(e.get("event"))) |ev| return rt.processEvent(a, n, .{ .cid = entry, .e = e }, ev, at);
+
         if (Value.cidOf(e.get("envelope"))) |env_cid| {
             const box = Value.str(e.get("box")) orelse "";
             const env = rt.store.getOpt(a, env_cid);
@@ -530,6 +543,50 @@ pub const Runtime = struct {
             rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
             try rt.run(a, t);
         }
+    }
+
+    /// A plain entry (#29: a header, a proof, a transaction status the host
+    /// admits from a feed): the thread whose tip awaits the event's `subject`
+    /// (a CID; a transaction's is its txid) steps with it; else a
+    /// subscription with no sender on the entry's box launches its handler.
+    fn processEvent(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, ev: []const u8, at: i64) !void {
+        const box = Value.str(ctx.e.get("box")).?;
+        const rec = rt.store.getOpt(a, ev);
+        const kind = if (rec) |r| Value.str(r.get("kind")) orelse "?" else "?";
+        const what = try std.fmt.allocPrint(a, "#{d} {s} {s} in {s}", .{ n, kind, short(a, ev), box });
+        var info = cbor.MapBuilder.init(a);
+        try info.put("event", cbor.cidv(ev));
+        try info.put("box", cbor.string(box));
+        if (rec) |r| if (Value.cidOf(r.get("subject"))) |subj| {
+            try info.put("subject", cbor.cidv(subj));
+            for (try rt.store.awaiting(a, subj)) |t| {
+                const tip = rt.tipOf(a, t) catch null orelse continue;
+                if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), subj)) continue;
+                rt.say("{s} → {s} (awaits {s})", .{ what, short(a, t), short(a, subj) });
+                rt.step_extra = .{ .key = "event", .value = info.value() };
+                try rt.step(a, t, ctx, null, null, null);
+                return;
+            }
+        };
+        var sub: ?subs.Sub = null;
+        for ((try subs.current(a, rt.store)) orelse &.{}) |s| if (s.sender == null and (s.box == null or std.mem.eql(u8, s.box.?, box))) {
+            sub = s;
+            break;
+        };
+        if (sub == null) {
+            rt.say("{s}: no subscription; recorded, nothing runs", .{what});
+            return;
+        }
+        var origin = cbor.MapBuilder.init(a);
+        try origin.put("kind", cbor.string("thread"));
+        try origin.put("program", cbor.cidv(sub.?.handler));
+        try origin.put("args", info.value());
+        try origin.put("launchedBy", cbor.cidv(ev));
+        try origin.put("input", cbor.cidv(ctx.cid));
+        try origin.put("at", cbor.int(at));
+        const t = try rt.store.chainOpen(a, origin.value());
+        rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
+        try rt.run(a, t);
     }
 
     /// The envelope's sender as 33 bytes, whichever encoding it is kept in.
@@ -634,7 +691,10 @@ pub const Runtime = struct {
             if (tip == null) {
                 rt.say("{s} {s}: stepping (interrupted before its first step ended)", .{ short(a, origin), Value.str(p.?.get("name")).? });
                 try rt.run(a, origin);
-            } else try rt.maybeStep(a, origin, tip.?);
+            } else {
+                if (stateIs(tip, "waiting")) if (Value.intOf(tip.?.get("until"))) |u| try rt.addSleeper(origin, @intCast(u));
+                try rt.maybeStep(a, origin, tip.?);
+            }
             return;
         }
         if (rt.live.contains(origin)) return;
@@ -703,6 +763,8 @@ pub const Runtime = struct {
         moves: std.array_list.Managed([2][]const u8),
         rules: std.array_list.Managed(subs.Rule),
         children: std.array_list.Managed(Value),
+        /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most.
+        until: ?i64 = null,
     };
 
     fn stepOf(imp: *program.Imports) *StepState {
@@ -710,7 +772,11 @@ pub const Runtime = struct {
     }
 
     fn step(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, failed: ?Value) anyerror!void {
-        if (rt.stepping.contains(origin) or rt.stopped) return;
+        if (rt.stepping.contains(origin) or rt.stopped) {
+            rt.step_extra = null;
+            return;
+        }
+        rt.dropSleeper(origin); // a step supersedes the deadline it rested on
         const key = try rt.gpa.dupe(u8, origin);
         try rt.stepping.put(key, {});
         var after_emits: []const [2][]const u8 = &.{};
@@ -787,6 +853,8 @@ pub const Runtime = struct {
         try input.put("peers", g.get("peers"));
         try input.put("defaults", g.get("defaults"));
         try input.put("names", g.get("names"));
+        if (rt.step_extra) |x| try input.put(x.key, x.value);
+        rt.step_extra = null;
 
         var st = StepState{
             .rt = rt,
@@ -808,6 +876,7 @@ pub const Runtime = struct {
             .children = .init(a),
         };
         st.clock.drive(time.ns());
+        st.clock.meter = meter; // the in-step clock runs on the step's fuel (issue #38)
 
         var msg: []const u8 = "";
         const mod = rt.runner.load(rt.store, a, programs.wasmOf(prog) orelse return rt.failf(a, "not a wasm program", .{}), &msg) catch |err| switch (err) {
@@ -832,6 +901,8 @@ pub const Runtime = struct {
             .advance = hAdvance,
             .subscribe = hSubscribe,
             .wallet = hWallet,
+            .http = hHttp,
+            .deadline = hDeadline,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
@@ -851,7 +922,7 @@ pub const Runtime = struct {
         };
 
         if (rt.stopped) return .{ .emits = &.{}, .launched = &.{}, .rested = false };
-        const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0) "waiting" else "finished";
+        const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or st.until != null) "waiting" else "finished";
         const errored = std.mem.eql(u8, state, "errored");
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
         var head_updates = std.array_list.Managed([]const u8).init(a);
@@ -868,6 +939,7 @@ pub const Runtime = struct {
         try u.put("fuel", cbor.int(meter.used()));
         if (waiting) try u.put("waitingOn", try cbor.cidArray(a, st.launched.items));
         if (waiting) try u.put("awaits", try cbor.cidArray(a, st.awaits.items));
+        if (waiting) if (st.until) |t| try u.put("until", cbor.int(t));
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
         try u.put("launched", try cbor.cidArray(a, st.launched.items));
         try u.put("kept", try cbor.cidArray(a, st.kept.items));
@@ -889,6 +961,7 @@ pub const Runtime = struct {
             try u.put("error", em.value());
         }
         _ = try rt.store.chainAppend(a, origin, u.value());
+        if (waiting) if (st.until) |t| try rt.addSleeper(origin, t);
 
         // The log line.
         var line = std.array_list.Managed(u8).init(a);
@@ -1004,7 +1077,7 @@ pub const Runtime = struct {
         for (st.sealed.items) |s| if (std.mem.eql(u8, s, c)) {
             ok = true;
         };
-        if (!ok) return imp.failWith("await: not an envelope this step emitted");
+        if (!ok and !(st.rt.store.has(c) catch false)) return imp.failWith("await: not an envelope this step emitted, nor a record in the store");
         if (st.launched.items.len > 0) return imp.failWith("await: this step launched threads; a step waits on threads or on replies, not both");
         for (st.awaits.items) |x| if (std.mem.eql(u8, x, c)) return;
         try st.awaits.append(c);
@@ -1053,7 +1126,33 @@ pub const Runtime = struct {
         return attest(st, imp, "wallet", .{ .bytes = frame }, .{ .wallet = frame });
     }
 
-    const Perform = union(enum) { wallet: []const u8, resolve: [2][]const u8 };
+    fn hHttp(imp: *program.Imports, request: []const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        const r = cbor.decode(st.a, request) catch return imp.failWith("http: the request is not dag-cbor");
+        if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
+        return attest(st, imp, "http", .{ .bytes = request }, .{ .http = request });
+    }
+    fn hDeadline(imp: *program.Imports, until: i64) program.Err!void {
+        const st = stepOf(imp);
+        if (until <= st.at) return imp.failWith("deadline: not after the step's time");
+        st.until = if (st.until) |t| @min(t, until) else until;
+    }
+
+    /// A program thread resting until `until` (ms) is a sleeper: the tick's wake entry steps it.
+    fn addSleeper(rt: *Runtime, origin: []const u8, until: i64) !void {
+        for (rt.sleepers.items) |s| if (std.mem.eql(u8, s.origin, origin)) return;
+        try rt.sleepers.append(.{ .origin = try rt.gpa.dupe(u8, origin), .deadline = @as(i128, until) * 1_000_000 });
+        if (rt.peers.on_sleep) |f| f(rt.peers.ctx, origin, until);
+    }
+    fn dropSleeper(rt: *Runtime, origin: []const u8) void {
+        for (rt.sleepers.items, 0..) |s, i| if (std.mem.eql(u8, s.origin, origin)) {
+            rt.gpa.free(s.origin);
+            _ = rt.sleepers.orderedRemove(i);
+            return;
+        };
+    }
+
+    const Perform = union(enum) { wallet: []const u8, resolve: [2][]const u8, http: []const u8 };
 
     /// An attested call's answer, recorded: the witness's (replay), else the peer's.
     fn attest(st: *StepState, imp: *program.Imports, op: []const u8, request: Value, perform: Perform) program.Err![]const u8 {
@@ -1087,6 +1186,10 @@ pub const Runtime = struct {
                     };
                     if (Value.str(res.get("error"))) |e| if (e.len > 0) rt.say("{s} resolve {s}@{s}: {s}", .{ short(a, st.origin), hd[0], hd[1], e });
                     result = cbor.encode(a, res) catch return imp.failWith("resolve: the answer is not IPLD");
+                },
+                .http => |q| {
+                    const f = rt.peers.http orelse return imp.failWith("http: this host answers no http");
+                    result = f(rt.peers.ctx, a, q) catch |err| return imp.failFmt("http: {s}", .{@errorName(err)});
                 },
             }
         } else {
@@ -1144,12 +1247,18 @@ pub const Runtime = struct {
         const launch = try rt.getOrNotFound(a, ic);
         if (!logm.isLogEntry(launch)) return rt.failf(a, "thread {s}: input is not a log entry", .{short(a, origin)});
         var t = ShellRun{ .rt = rt, .a = a, .origin = origin, .o = o, .history = history, .wake = wake, .meter = engine.Meter.init(fuelPerStep(rt.genesis)) };
+        t.clock.meter = &t.meter; // one clock for the shell and its children, on their fuel (issue #38)
         t.drive(.{ .cid = ic, .e = launch });
         if (!rt.live.contains(origin)) try rt.live.put(try rt.gpa.dupe(u8, origin), {});
         try rt.shellBody(&t);
     }
 
     fn wakeSleeper(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, c: Ctx) !void {
+        const p: ?Value = rt.programOf(a, try rt.getOrNotFound(a, origin)) catch null;
+        if (p != null and hasWasm(p.?)) {
+            rt.step_extra = .{ .key = "woke", .value = .{ .bool = true } };
+            return rt.step(a, origin, c, null, null, null);
+        }
         try rt.runShellThread(a, origin, c);
     }
 
