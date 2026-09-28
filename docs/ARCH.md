@@ -28,8 +28,10 @@ Time and randomness are different: they are not another party's statement
 inside a message. When the host admits an input it reads its clock and writes
 the time into that log entry, which it signs as its own word ("this arrived
 at *t*"; `MESSAGES.md`).
-Inside the machine, "now" is the entry's time plus a counter that advances
-one nanosecond per read (so time always moves forward and never backwards),
+Inside the machine, "now" is the entry's time plus the fuel the step has
+burnt so far at one nanosecond per unit, and never the same value twice
+(so time always moves forward and never backwards; issue #38, Zig kernel —
+the frozen TS runtime still advances one nanosecond per read),
 and random bytes are a stream keyed by the entry's CID — no seed is recorded,
 because a recorded seed is exactly as visible as a derived one. Nothing
 inside the machine may use that randomness for secrets; the wallet does

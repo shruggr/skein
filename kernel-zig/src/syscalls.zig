@@ -1,9 +1,11 @@
 // Time and randomness inside the machine (src/runtime/syscalls.ts): both
 // derive from the log entry a thread is being driven by, so replay reproduces
-// them. A thread's clock reads the entry's stamp first, then +1 ns per read;
+// them. A thread's clock reads the entry's stamp plus the fuel the step has
+// burnt so far, 1 fuel unit = 1 ns (issue #38), and never the same value twice;
 // random bytes are SHA-256(key ‖ counter as u64 BE) blocks, key =
 // SHA-256(entry CID ‖ thread CID).
 const std = @import("std");
+const engine = @import("engine.zig");
 
 pub const Stamp = struct {
     sec: i64,
@@ -17,19 +19,36 @@ pub const Stamp = struct {
     }
 };
 
+/// A step's clock: `max(last + 1, base + fuel × 1 ns)`. `base` is the stamp of
+/// the entry driving the step (ns); `fuel` is the step's shared meter's
+/// `used()` (every instance of the run: a shell and its children read one
+/// clock), which restarts at a shell's new segment when a wake drives a new
+/// base. Deterministic, as fuel is: nothing is recorded.
 pub const ThreadClock = struct {
     base: i128 = 0,
     last: ?i128 = null,
+    /// The step's meter; null: no fuel term (the stamp, then +1 ns per read).
+    meter: ?*engine.Meter = null,
+
+    /// 1 fuel unit = 1 ns. Fixed, not calibrated: it only has to be the same everywhere.
+    pub const NS_PER_FUEL: i128 = 1;
 
     pub fn drive(c: *ThreadClock, ns: i128) void {
         if (ns > c.base) c.base = ns;
     }
+    fn now(c: *const ThreadClock) i128 {
+        const fuel: i128 = if (c.meter) |m| m.used() else 0;
+        return c.base + fuel * NS_PER_FUEL;
+    }
     pub fn read(c: *ThreadClock) i128 {
-        c.last = if (c.last == null or c.base > c.last.?) c.base else c.last.? + 1;
+        const t = c.now();
+        c.last = if (c.last == null or t > c.last.?) t else c.last.? + 1;
         return c.last.?;
     }
+    /// "Now" without consuming a read (a sleep's reference point).
     pub fn peek(c: *const ThreadClock) i128 {
-        return if (c.last == null or c.base > c.last.?) c.base else c.last.?;
+        const t = c.now();
+        return if (c.last == null or t > c.last.?) t else c.last.?;
     }
 };
 

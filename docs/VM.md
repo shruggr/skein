@@ -225,6 +225,26 @@ period (`skein-kernel fuel <db> [--since n]`), verifiable by anyone who
 replays the log. Fuel does not cover host time outside the VM (oracle,
 peers) or the router; storage and messages are visible in the log already.
 
+### The clock inside a step runs on fuel
+
+(Issue #38; Zig kernel, `kernel-zig/src/syscalls.zig` `ThreadClock`.) A
+program's clock (`clock_time_get`, realtime and monotonic alike) reads
+
+    t = max(last + 1, stamp + fuel × 1 ns)
+
+where `stamp` is the time of the log entry that started the step, `fuel` is
+what the step has burnt so far (its shared meter: a shell and every program
+it spawns read one clock), and `last` is the previous read, so no two reads
+are equal and time never goes back. **1 fuel unit = 1 ns**, a fixed
+constant, not a calibration. Nothing is recorded: fuel is deterministic, so
+replay and a fresh run read the same times. Time moves with work — a program
+that waits on the clock inside a step (a busy-wait, a timeout loop) sees it
+pass and ends on its own instead of spinning until fuel runs out, and
+mid-step timestamps spread with real work. A shell's sleep takes its
+deadline from this clock and rests the thread; the wake entry's stamp starts
+the next segment, its fuel counted from zero. (Before #38: the stamp, then
++1 ns per read — still the TS runtime's clock, which is frozen.)
+
 ## Messages
 
 A **message** is a record signed by an identity. It is the only way anything

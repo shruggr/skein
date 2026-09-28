@@ -113,6 +113,30 @@ is recorded and replayed like any other field.
   (a module's own max), per-tree depth and step counts (countable from the
   chain; enforced from config later).
 
+## The in-step clock runs on fuel (issue #38)
+
+`clock_time_get` inside a step (realtime and monotonic alike) returns
+`max(last + 1, stamp + fuel × 1 ns)` (`syscalls.ThreadClock`): `stamp` is the
+time of the entry driving the step, `fuel` the step's `engine.Meter.used()`
+so far — one meter for a handler step, one for a shell and every child it
+spawns, so they read one clock — and `last` the previous read (the +1 ns
+tie-break: no two reads equal). **1 fuel unit = 1 ns** (`NS_PER_FUEL`), fixed.
+Deterministic because fuel is; nothing is recorded. A busy-wait on the clock
+ends on its own: `equiv/serve.ts`'s clock scenario waits 50 ms on qjs
+`Date.now()` and on python `time.monotonic()` and the shell's step burns
+~3.6·10^8 fuel, under a 10^9 limit. A shell sleep's deadline is this clock
+plus the sleep; the wake entry drives the next segment's stamp and the
+meter's new segment counts from zero. Outside a thread (`skein-kernel
+shell`, no meter) the clock is `shell.Fixed`, as before.
+
+Changed by it: an update's `until` (a sleep's deadline) moves by the fuel
+burnt before the sleep; Go programs (run-handler, loop) burn ~1.2k more fuel
+per step (their runtime reads the clock); any printed mid-step time. The
+corpus (`equiv/corpus.ts`, logs written by the TS runtime, whose clock is
+the old one) therefore prints only what both clocks agree on — a printed
+mid-step time would change the reply the replay seals, which then has no
+recorded wallet answer.
+
 ## For the wallet (issue #29)
 
 What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md);

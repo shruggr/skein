@@ -81,6 +81,14 @@ async function sendAs(i: Instance, who: PrivateKey, box: string, body: unknown):
 const made: string[] = [];
 const done = async (name: string, ...is: Instance[]) => { for (const i of is) { await i.rt.idle(); await i.rt.stop(); await i.store.close(); } made.push(name); };
 
+// The in-step clock is the Zig kernel's own (issue #38: entry stamp + fuel
+// × 1 ns), not the TS runtime's (stamp + 1 ns per read): a mid-step time
+// printed into a reply would make the reply the replay seals differ from the
+// source's, with no witness for its wallet calls. So the scripts below read
+// the clock but print only what both clocks agree on (orderings, elapsed
+// ≥ the sleep, the year). equiv/serve.ts prints real mid-step times, in
+// stores the Zig kernel writes itself.
+
 // ---------------------------------------------------------------- run: the shell under run-handler
 {
   const i = await sqliteInstance("gen-run");
@@ -105,7 +113,7 @@ const done = async (name: string, ...is: Instance[]) => { for (const i of is) { 
   await settle(i);
   // Sleeps: one wake, then two in a row.
   later(i, 1);
-  await send(i, "run", { cmd: "date +%s%N; echo $RANDOM; sleep 2; date +%s%N; echo $RANDOM; echo x > made.txt; ls", tree: root });
+  await send(i, "run", { cmd: "t0=$(date +%s%N); echo $RANDOM; sleep 2; t1=$(date +%s%N); echo $(( t1 - t0 >= 2000000000 )); echo $RANDOM; echo x > made.txt; ls", tree: root });
   await settle(i);
   later(i, 1); await i.tick.fire(); // not due
   later(i, 5); await i.tick.fire(); await settle(i);
@@ -121,21 +129,21 @@ const done = async (name: string, ...is: Instance[]) => { for (const i of is) { 
 // ---------------------------------------------------------------- scripts: qjs/node and python in a thread (issue #25)
 {
   const i = await sqliteInstance("gen-scripts");
-  const js = "#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('out.txt', fs.readFileSync('src/a.txt', 'utf8').toUpperCase());\nconsole.log(process.argv.slice(2), Date.now(), Math.random());\nprocess.exitCode = 2;\n";
-  const py = "#!/usr/bin/env python3\nimport sys, time, random, os, uuid, json\nprint(sys.argv[1:], time.time(), random.random(), os.urandom(4).hex(), hash('x'), uuid.uuid4())\njson.dump(sorted(os.listdir('src')), open('ls.json', 'w'))\n";
+  const js = "#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('out.txt', fs.readFileSync('src/a.txt', 'utf8').toUpperCase());\nconsole.log(process.argv.slice(2), Date.now() > 1.7e12, Math.random());\nprocess.exitCode = 2;\n";
+  const py = "#!/usr/bin/env python3\nimport sys, time, random, os, uuid, json\nprint(sys.argv[1:], time.time() > 1.7e9, random.random(), os.urandom(4).hex(), hash('x'), uuid.uuid4())\njson.dump(sorted(os.listdir('src')), open('ls.json', 'w'))\n";
   const dir = await fixture({ "src/a.txt": "alpha\n", "src/b.txt": "beta\n", "t.js": js, "t.py": py });
   const { root, bundles } = await bundlesOf(dir, 700);
   for (const b of bundles) await send(i, "objects", b);
   await settle(i);
   const cmds = [
     "node t.js a b; echo \"exit=$?\"; ./t.js c; cat out.txt",
-    "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now())'",
-    "qjs -e 'console.log(scriptArgs, Date.now())'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
+    "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now().year)'",
+    "qjs -e 'console.log(scriptArgs, Date.now() > 1.7e12)'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
   ];
   for (const cmd of cmds) { later(i, 1); await send(i, "run", { cmd, tree: root }); await settle(i); }
   // A sleep inside a runtime: python's time.sleep and a qjs timer rest the thread until the tick wakes it.
   later(i, 1);
-  await send(i, "run", { cmd: "python3 -c 'import time; print(time.time()); time.sleep(2); print(time.time())'; node -e 'setTimeout(() => console.log(\"later\", Date.now()), 1000)'", tree: root });
+  await send(i, "run", { cmd: "python3 -c 'import time; t = time.time(); time.sleep(2); print(time.time() - t >= 2)'; node -e 'const t = Date.now(); setTimeout(() => console.log(\"later\", Date.now() - t >= 1000), 1000)'", tree: root });
   await settle(i);
   later(i, 3); await i.tick.fire(); await settle(i);
   later(i, 3); await i.tick.fire(); await settle(i);
