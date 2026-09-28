@@ -155,9 +155,9 @@ resolver code is `src/host`'s, unchanged.
 | check | what | result (2026-09-28, #30) |
 |---|---|---|
 | `zig build test` | dag-cbor encodings and CIDs, canonical re-encoding of non-canonical input, strict decoding, program-record CIDs, "anyone" signatures (log entries, envelopes), JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps through wasmtime reported in V8's words (the words read from Node 26 on the same hand-built modules); the Merkle search tree (put/get/replace/delete/range/prefix, canonical under shuffled order, copy-on-write sharing and path-only writes); the index over an in-memory backend (maps follow chains, commits, import = incremental, reopen) | 15/15 |
-| `equiv/shell.ts` | host-go's 64 shell cases through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID | 64/64 identical |
+| `equiv/shell.ts` | host-go's 64 shell cases, plus 7 for the script runtimes (#25: `node`/`qjs`/`python3` by name and by `#!`, argv, stdin, files, exit codes, the read-only stdlib mount, clock and random with `time`/`seed`, timers and `time.sleep` on the run's virtual clock), through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID | 71/71 identical (2026-09-27) |
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 steps over one tree: `init add rm mv status diff commit log show branch checkout reset restore merge tag`, author from `.gitconfig`/env, dates from the run's clock; the commit's tree is the VFS's project tree; `.git/objects` holds gitlinks only; every object is one git-raw record, no zlib copy in the store; gc/repack write no pack; a second run gives identical trees and output | all ok (2026-09-27) |
-| `equiv/replays.ts` over `equiv/corpus.ts` | 7 stores the TS runtime writes: run/objects/head/subscribe handlers, the shell (writes, cwd, failures, one and two sleeps with their wakes), the loop with bash and message tools, replies, resolutions, a failed delivery resuming the loop, a refused infer, two agents talking | 7/7 identical; each also reproduces its source's thread and head tips |
+| `equiv/replays.ts` over `equiv/corpus.ts` | 8 stores the TS runtime writes: run/objects/head/subscribe handlers, the shell (writes, cwd, failures, one and two sleeps with their wakes), node/qjs/python scripts in a thread (attested clock and random; a `time.sleep` and a qjs timer resting the thread until the tick; #25), the loop with bash and message tools, replies, resolutions, a failed delivery resuming the loop, a refused infer, two agents talking | 8/8 identical; each also reproduces its source's thread and head tips |
 | `equiv/replays.ts` over copies of `~/.skein` | the live `martha` and `kurt` stores, their 6 backups, `~/.skein/runtime.db` and its eras | 10/10 replayable stores identical; the 6 pre-current-format eras are refused by both runtimes |
 | `equiv/serve.ts` | `serve` spawned as the supervisor spawns `bin/skein-runtime` (ipc channel included), with the real providers on an in-process messagebox: genesis, a run, a chat through the inference peer, a sleep woken by the tick, SIGTERM mid-sleep and the restart that finishes it, stop on channel close; then the store the Zig kernel wrote (the new format), replayed on both runtimes | all ok; the replays identical to each other and to the store |
 
@@ -236,3 +236,17 @@ same way).
   map with one pointer: blocks by CID, a transaction, the state pointer);
   the scheduler, the index, the WASI and skein imports, the vfs and the
   codecs touch no OS. `serve.zig` and `replay.zig` are the native front ends.
+
+## Script runtimes (issue #25)
+
+The shell's `qjs`/`node` and `python`/`python3` (wasm/README.md, "Script
+runtimes") run here as in `shell.ts`: `programs.zig` lists the modules, the
+aliases (`node` → qjs, `python3` → python), FILES (`python314.zip`, installed
+with the modules) and the shell program record's `support` (so its CID is
+programs.ts's); `shell.zig` dispatches a `#!` script to its interpreter when
+that is an extra program, adds a program's env defaults (`PYTHONHOME`,
+`PYTHONDONTWRITEBYTECODE`) unless the caller set them, and mounts its support
+files read-only for that process only (`wasi.zig` `Services.mounts`, a
+preopen at fd 4 over in-memory nodes outside the tree; a write open there is
+EROFS). Outside a thread, a sleep moves the run's clock to its deadline
+(`shell.Fixed.sleep`), as `runShell` does without `clock`/`sleep`.

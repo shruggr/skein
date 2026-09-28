@@ -50,10 +50,29 @@ export const MODULES = {
   // Real git 2.55.0 for wasm32-wasip1 (issue #2; wasm/README.md "git"): its
   // .git/objects is the synthetic object directory of the Zig kernel.
   git: CID.parse("bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe"),
+  // Script runtimes (issue #25): QuickJS-ng (also run as `node`, a small
+  // shim) and CPython on WASI (also `python3`); its stdlib is FILES below.
+  qjs: CID.parse("bafkreig4lw4ceuhl5qvzr43ketajajhkexgqmg6et2rpjlx66dvavw6zwe"),
+  python: CID.parse("bafkreid5irpih6ehtwxvg2jf556f4bupz2p54c5n746i5r5spxpta2i42m"),
+} as const;
+
+/** Support files the shell's programs read (raw blocks, like the modules), each committed as wasm/<name>. */
+export const FILES = {
+  "python314.zip": CID.parse("bafkreigogn32gek27rar2k5pacj2knivlobbjc6tip25qki3hjr3d2v5ce"),
 } as const;
 
 /** The command names of the toolset (issue #13), each mapped to its module in MODULES by the same key. */
-const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git"] as const;
+const TOOL_NAMES = ["find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git", "qjs", "python"] as const;
+/** More command names for a module already in TOOL_NAMES (issue #25): `node` is qjs with its node shim (it checks argv[0]). */
+const TOOL_ALIASES = { node: "qjs", python3: "python" } as const;
+/**
+ * Python's stdlib, mounted read-only for python processes only at
+ * PYTHON_HOME (a stored zip: the WASI build has no zlib). PYTHONHOME points
+ * there; PYTHONDONTWRITEBYTECODE keeps __pycache__ out of the tree.
+ */
+const PYTHON_HOME = "/opt/skein/python";
+const PYTHON_FILES = { "lib/python314.zip": FILES["python314.zip"] } as const;
+const PYTHON_ENV = { PYTHONHOME: PYTHON_HOME, PYTHONDONTWRITEBYTECODE: "1" } as const;
 
 /** The `shell` program record. `code.ts` names the TypeScript driver; `modules` the WASI modules it runs. */
 export const SHELL_PROGRAM = {
@@ -63,6 +82,11 @@ export const SHELL_PROGRAM = {
   modules: {
     brush: MODULES.brush, coreutils: MODULES.coreutils,
     ...Object.fromEntries(TOOL_NAMES.map((n) => [n, MODULES[n]])),
+    ...Object.fromEntries(Object.entries(TOOL_ALIASES).map(([a, n]) => [a, MODULES[n]])),
+  },
+  support: {
+    python: { mount: PYTHON_HOME, files: PYTHON_FILES, env: PYTHON_ENV },
+    python3: { mount: PYTHON_HOME, files: PYTHON_FILES, env: PYTHON_ENV },
   },
   inputs: { cmd: "string", tree: "cid", cwd: "string?", env: "map?" },
   services: [],
@@ -177,6 +201,28 @@ export async function loadShellModules(blocks: Pick<Blocks, "bytes">): Promise<M
     loadModule(blocks, MODULES.coreutils),
     ...TOOL_NAMES.map((n) => loadModule(blocks, MODULES[n])),
   ]);
-  const extra = Object.fromEntries(TOOL_NAMES.map((n, i) => [n, tools[i]]));
-  return { brush, coreutils, extra };
+  const extra: Record<string, WebAssembly.Module> = Object.fromEntries(TOOL_NAMES.map((n, i) => [n, tools[i]]));
+  for (const [a, n] of Object.entries(TOOL_ALIASES)) extra[a] = extra[n];
+  const files = Object.fromEntries(await Promise.all(Object.entries(PYTHON_FILES).map(async ([p, cid]) => [p, await loadFile(blocks, cid)] as const)));
+  const python = { mount: PYTHON_HOME, files, env: { ...PYTHON_ENV } };
+  return { brush, coreutils, extra, support: { python, python3: python } };
+}
+
+const loaded = new Map<string, Promise<Uint8Array>>();
+
+/** A support file from the store by CID (cached per process), checked against the CID. */
+function loadFile(blocks: Pick<Blocks, "bytes">, cid: CID): Promise<Uint8Array> {
+  const k = cid.toString();
+  let f = loaded.get(k);
+  if (!f) {
+    f = (async () => {
+      let bytes: Uint8Array;
+      try { bytes = await blocks.bytes(cid); } catch { throw new Error(`file not in store: ${k} (skein-dev install puts it there)`); }
+      if (!rawCid(bytes).equals(cid)) throw new Error(`file ${k}: bytes do not match the CID`);
+      return bytes;
+    })();
+    f.catch(() => loaded.delete(k));
+    loaded.set(k, f);
+  }
+  return f;
 }

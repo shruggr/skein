@@ -189,6 +189,14 @@ filesystem. Agents keep writing ordinary shell commands; what runs them is
 inside the machine and limited to the tools the instance has registered.
 That is the "deterministic container with a limited toolset".
 
+Script runtimes are two of those programs (issue #25; `wasm/README.md`,
+"Script runtimes"; the skills audit in `docs/SKILLS.md`): `qjs` (QuickJS-ng,
+also `node` with a small file + stdio shim) and `python`/`python3` (CPython
+3.14). A `#!` script in the tree runs under its interpreter when that is a
+registered program. Python's stdlib is a support file of the shell program
+(a raw block, like the modules), mounted read-only for python processes only
+at `/opt/skein/python`; it is not part of the tree and never committed.
+
 A step function is the same idea one level up: the turn loop is a program
 whose input is the thread tip and the message that woke it, and whose output
 is records to append and messages to emit. `step(tip, message) → {append,

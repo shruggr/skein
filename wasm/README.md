@@ -2,9 +2,11 @@
 
 The programs the wasm shell (`src/runtime/shell.ts`) runs: brush + uutils
 coreutils, the toolset of issue #13 (search/edit/structured-data
-commands beyond coreutils, registered in `Modules.extra`) and git (issue
-#2, also in `Modules.extra`). All WASI preview1 modules (`wasm32-wasip1`),
-built with Rust 1.98.1 (git: C, wasi-sdk 34) and stripped of symbols.
+commands beyond coreutils, registered in `Modules.extra`), git (issue
+#2, also in `Modules.extra`), and the script runtimes of issue #25
+(`qjs`/`node`, `python`/`python3`; see "Script runtimes" below). All WASI
+preview1 modules (`wasm32-wasip1`), built with Rust 1.98.1 (git and qjs: C,
+wasi-sdk 34; python: a pinned upstream build) and stripped of symbols.
 `scripts/build-wasm.sh` rebuilds all of them from the pinned sources plus
 `patches/`, byte-identically on the same machine in the same checkout
 layout (paths of the build machine and even line numbers within a patched
@@ -28,9 +30,15 @@ other bytes — verified the hard way while pinning `sed.wasm`, see the
 | `which.wasm`     | 0.07 MB | first-party, `wasm/tools/which` — no Rust `which` CLI exists (library only) |
 | `grep.wasm`      | 1.57 MB | first-party, `wasm/tools/grep` on grep-matcher/grep-regex/grep-searcher (ripgrep's own libraries) — no GNU-grep-compatible CLI exists in Rust |
 | `git.wasm`       | 3.78 MB | git `2.55.0` (C, kernel.org release tarball) + zlib `1.3.2`, wasi-sdk 34, + `patches/git.patch` and `git/` (see "git" below) |
+| `qjs.wasm`       | 1.20 MB | quickjs-ng/quickjs `v0.17.0` (`6d46d07d`), wasi-sdk 34.0, + `patches/quickjs.patch` + `tools/qjs/`; registered as `qjs` and `node` (issue #25) |
+| `python.wasm`    | 7.63 MB | CPython 3.14.7 WASI build, brettcannon/cpython-wasi-build `v3.14.7` (`python-3.14.7-wasi_sdk-24.zip`, sha256 `2e064d3f…584b`), `llvm-strip`ped (30.5 MB with DWARF); registered as `python` and `python3` (issue #25) |
+| `python314.zip`  | 10.31 MB | not a module: that release's `lib/python3.14`, every `.py` (529 files), packed stored by `tools/python/zip-stdlib.mjs` |
 
 Base image growth: **10 files / 9 unique binaries, 13.71 MB committed
 (12.43 MB unique bytes** — `diff.wasm`/`cmp.wasm` are identical).
+
+Issue #25 adds 19.14 MB (qjs 1.20 + python 7.63 + stdlib 10.31); in git's
+packs it compresses to about 5.1 MB (gzip -9: 0.42 + 2.30 + 2.38).
 
 sha256 (as committed):
 
@@ -48,6 +56,9 @@ fad7b15e0c4eb00f8ca22e8325d8f8fc57d8b45265d29e97ed4b7145250cddf1  jq.wasm
 43612217922c4a6ddbebcf4b9503d8360c9a22c0c3b7b797689a37a6c67368c1  which.wasm
 e167efd302749254f77dd7b28fcdae6fafdd205b8902100e78f95fe80f7075c1  grep.wasm
 0ada3f26b9fab9d1842c9689c4cea4c34bcb6a655d0593038f47017339dad1b9  git.wasm
+dc5db82250ebec2b98f36a24c09024ea25cd061bc49ea2f4aefef0ea0adbd9b1  qjs.wasm
+7d445e83f8879daf536925ef7c5e068fce9fde0badff3c8ec7b27ddf30691cd3  python.wasm
+ce3377a3115afc411d2baf0093a535155b82148bd343f5d8291b3a63b1eabd11  python314.zip
 ```
 
 ## Why patched builds and not the releases
@@ -340,3 +351,93 @@ lacks (`pwd.h`, `grp.h`, `netdb.h`, `syslog.h`, `termios.h`, `sys/wait.h`).
   list. There is no synthetic object directory there, though: a loose
   object is an ordinary file, i.e. a zlib blob of the object, stored a
   second time.
+
+## Script runtimes (issue #25)
+
+Skill scripts that use only files and stdio run unmodified: `python3 x.py`,
+`node x.js`, `qjs x.mjs`, or `./x` for a `#!` script whose interpreter
+(its basename, through `/usr/bin/env`, skipping `env -S`) is one of the
+shell's extra programs; any other `#!` still runs under brush. Nothing in
+either runtime reaches a network, a process or a wall clock: every clock
+read is the runtime's `clock_time_get` (fixed outside a thread, the log
+entry's time inside one) and every random byte is the runtime's
+`random_get` stream. `src/runtime/scripts.test.ts` checks both. Outside a
+thread (`runShell` given no `clock` and no `sleep`), a sleep now moves the
+run's virtual clock to its deadline instead of returning with time
+unchanged: QuickJS's timers loop until the monotonic clock reaches their
+deadline, and with a clock that never moved `setTimeout` spun forever.
+Inside a thread the scheduler supplies both, as before.
+
+### qjs / node — QuickJS-ng
+
+Built from source with wasi-sdk's `wasi-sdk-p1.cmake` (`qjs_exe`, Release,
+`-DSKEIN_PRELUDE`), stripped with wasi-sdk's `llvm-strip`. ES2023 modules
+and scripts (autodetected; `.mjs` is a module), plus QuickJS's own
+`qjs:std` / `qjs:os` / `qjs:bjson` modules (`--std` makes them globals).
+No TypeScript: a `.ts` file is not stripped of its types.
+
+`patches/quickjs.patch` (all under `#ifdef SKEIN_PRELUDE`):
+- `qjs.c` evaluates the modules of `tools/qjs/` (compiled in as C strings
+  by `tools/qjs/gen-prelude.mjs`) before the script: `prelude.js` always —
+  `console.log/info/debug` on stdout, `console.error/warn/trace` on stderr,
+  with a Node-like value formatter and `%s %d %i %f %j %o %O` (upstream has
+  only `console.log`, printing objects as `[object Object]`); and, when
+  argv[0] is `node`, `node.js` plus the named modules `fs`, `fs/promises`,
+  `path`, `process`, `buffer` (bare and `node:`-prefixed). As `node` the
+  exit status is `process.exitCode` once the event loop drains.
+- `quickjs.c` seeds `Math.random` from `getentropy` (the runtime's
+  `random_get`) instead of the clock.
+
+What `node` is — a shim, not Node.js:
+
+| available | not available |
+|---|---|
+| `process.argv` (`["node", <abs script>, …args]`), `argv0`, `env`, `exit()`, `exitCode`, `cwd()`, `chdir()`, `platform` (`"wasi"`), `arch`, `stdout.write`, `stderr.write`, `nextTick`, `versions.quickjs` | `process.version`, `hrtime`, `memoryUsage`, `on('exit')` (a no-op), `stdin` as a stream (read it with `fs.readFileSync(0)`) |
+| `fs` sync: `readFileSync` (path or fd 0), `writeFileSync`/`appendFileSync` (path or fd 1/2), `existsSync`, `accessSync`, `statSync`/`lstatSync` (`isFile`/`isDirectory`/`isSymbolicLink`, `size`), `readdirSync` (`withFileTypes` too), `mkdirSync` (`recursive`), `rmSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `realpathSync`, `readlinkSync`, `symlinkSync`; `fs/promises` and `fs.promises`: the same, resolved | streams (`createReadStream`…), callback-style `fs.readFile(p, cb)`, `watch`, `chmod`, file descriptors (`openSync`…) |
+| `path` (POSIX): `join`, `resolve`, `normalize`, `dirname`, `basename`, `extname`, `relative`, `isAbsolute`, `parse`, `format`, `sep`, `delimiter` | `path.win32` |
+| `Buffer`: a `Uint8Array` with `toString(enc)`, `from`, `alloc`, `concat`, `isBuffer`, `byteLength`, `equals`; utf8, hex, base64, latin1/binary, ascii | the rest of Buffer's API (`readUInt32LE`, `write`…) |
+| `require` of those modules and of relative `.js`/`.cjs`/`.json` files; `module`, `exports`, `__filename`, `__dirname`, `global` | npm packages / `node_modules` resolution; `child_process`, `http`/`https`/`net`/`dns`, `fetch`, `crypto`, `os`, `util`, `events`, `stream`, `zlib`, `worker_threads`, `url`, … — `require` throws `MODULE_NOT_FOUND` naming the module; an `import` fails to load it |
+| `setTimeout`/`clearTimeout`/`setInterval`/`clearInterval`/`setImmediate` (global, over QuickJS's `qjs:os` timers; the waits are the runtime's sleeps), `queueMicrotask`, `atob`/`btoa` | `URL`, `TextEncoder`/`TextDecoder`, `structuredClone`, `AbortController`, `performance` |
+
+### python / python3 — CPython 3.14.7
+
+Not built here: the WASI build CPython's own WASI maintainer publishes
+(brettcannon/cpython-wasi-build, wasi-sdk 24), pinned by version and by the
+SHA-256 of the release zip, then stripped of DWARF (30.5 → 7.6 MB).
+Building CPython ourselves would add a CPython checkout, its `Tools/wasm`
+driver and a native build Python for no functional gain today.
+
+The stdlib is `wasm/python314.zip`: `lib/python3.14` of the same release,
+every `.py` file, packed **stored** (the build has no `zlib`, so
+`zipimport` could not inflate) with fixed timestamps, sorted. It is a raw
+block like the modules (`FILES` in `src/runtime/programs.ts`,
+`skein-dev install` puts it in the store). The shell mounts it read-only
+for python processes only (`Modules.support`, a second WASI preopen) at
+`/opt/skein/python/lib/python314.zip`, with `PYTHONHOME=/opt/skein/python`
+and `PYTHONDONTWRITEBYTECODE=1` as environment defaults (the caller's env
+wins). The mount is not in the tree, never committed, and other programs
+do not see it; writes to it fail with EROFS. The tree's own `/usr/local`
+is untouched, so pure-Python dependencies can live in the tree (next to a
+script, or on `PYTHONPATH`).
+
+Determinism, verified (`scripts.test.ts`): `time.time()`,
+`time.monotonic()`, `datetime.now()` read `clock_time_get` → the runtime's
+clock; `random` seeds from `os.urandom` → `random_get`; the `str` hash seed
+(`hash()`, set iteration order) and `uuid.uuid4()` too — same `seed`, same
+values; another seed, others. `time.sleep` is the runtime's sleep.
+
+Not available: `zlib` (so `gzip`, `zipfile` deflate, `tarfile.gz`),
+`_ssl`/`ssl`, sockets (`socket`, `urllib.request`, `http.client` fail at
+`getaddrinfo`), `subprocess`/`os.system` (`ENOTSUP`), threads
+(`RuntimeError: can't start new thread`), `sqlite3`, `ctypes`, `_lzma`,
+`_bz2`, pip / third-party packages (none installed; pure-Python ones can be
+put in the tree). Imports compile from source every run (no `.pyc` in the
+zip, and none written): start-up is about 0.3 s, importing json/argparse/
+re/pathlib/csv/datetime/dataclasses/hashlib about 0.6 s, on the dev
+machine.
+
+Size options if 19 MB matters: drop test/IDE-only packages from the zip
+(`_pyrepl`, `pydoc_data`, `turtle` — about 1.2 MB; the release already
+leaves out `test`, `idlelib`, `tkinter`, `ensurepip`); add `.pyc` (faster imports, roughly
+doubles the zip) or ship `.pyc` only (no source in tracebacks); or build
+CPython ourselves with zlib and a deflated zip (~2.4 MB).

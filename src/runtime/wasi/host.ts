@@ -96,6 +96,13 @@ export interface ProcessOptions {
   /** Host services for the shell (the "skein" import module). */
   spawn?: (req: SpawnRequest) => Promise<number | undefined>;
   commandExists?: (name: string) => boolean;
+  /**
+   * Read-only directories outside the tree, preopened at fd 4… under the given
+   * absolute paths (wasi-libc resolves a path by its longest preopen prefix,
+   * so these shadow the tree below them, for this process only). A program's
+   * support files, e.g. python's stdlib zip (shell.ts `Modules.files`).
+   */
+  mounts?: Array<{ path: string; dir: DirNode }>;
 }
 
 type Fn = (...a: never[]) => unknown;
@@ -109,6 +116,7 @@ export class Process {
     this.o = o;
     o.stdio.forEach((d, i) => this.fds.set(i, d));
     this.fds.set(3, { t: "dir", node: o.vfs.root, preopen: "/", ino: o.vfs.root.ino });
+    for (const m of o.mounts ?? []) this.add({ t: "dir", node: m.dir, preopen: m.path, ino: m.dir.ino });
   }
 
   private get dv() { return new DataView(this.memory.buffer); }
@@ -436,6 +444,7 @@ export class Process {
       return 0;
     }
     if (oflags & O.DIRECTORY) return E.NOTDIR;
+    if (wantWrite && node.parent?.readonly) return E.ROFS;
     await vfs.data(node);
     if (oflags & O.TRUNC && node.data!.length) this.setData(node, new Uint8Array(0));
     const desc: Desc = {

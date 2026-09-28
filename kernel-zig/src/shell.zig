@@ -17,7 +17,24 @@ pub const Modules = struct {
     coreutils: *runner.Compiled,
     extra: std.StringHashMap(*runner.Compiled),
     utils: std.StringHashMap(void),
+    /// FILES by name → bytes (python's stdlib zip), for programs.Support mounts.
+    files: std.StringHashMap([]const u8),
 };
+
+/// A support file from the store (programs.ts loadFile), checked against its CID.
+fn loadFile(gpa: std.mem.Allocator, s: Store, a: std.mem.Allocator, name: []const u8, msg: *[]const u8) ![]const u8 {
+    const text = programs.fileText(name);
+    const c = try cidm.parse(a, text);
+    const b = (s.bytes(gpa, c) catch null) orelse {
+        msg.* = try std.fmt.allocPrint(a, "file not in store: {s} (skein-dev install puts it there)", .{text});
+        return error.NotInStore;
+    };
+    if (!std.mem.eql(u8, try cidm.ofRaw(a, b), c)) {
+        msg.* = try std.fmt.allocPrint(a, "file {s}: bytes do not match the CID", .{text});
+        return error.BadHash;
+    }
+    return b;
+}
 
 var cached: ?*Modules = null;
 
@@ -29,8 +46,11 @@ pub fn loadModules(r: *runner.Runner, s: Store, a: std.mem.Allocator, msg: *[]co
     const coreutils = try r.load(s, a, try programs.moduleCid(a, "coreutils"), msg);
     var extra = std.StringHashMap(*runner.Compiled).init(r.gpa);
     for (programs.tool_names) |t| try extra.put(t, try r.load(s, a, try programs.moduleCid(a, t), msg));
+    for (programs.tool_aliases) |t| try extra.put(t.name, extra.get(t.of).?);
+    var files = std.StringHashMap([]const u8).init(r.gpa);
+    for (programs.files) |f| try files.put(f.name, try loadFile(r.gpa, s, a, f.name, msg));
     const m = try r.gpa.create(Modules);
-    m.* = .{ .brush = brush, .coreutils = coreutils, .extra = extra, .utils = std.StringHashMap(void).init(r.gpa) };
+    m.* = .{ .brush = brush, .coreutils = coreutils, .extra = extra, .utils = std.StringHashMap(void).init(r.gpa), .files = files };
 
     var arena = std.heap.ArenaAllocator.init(r.gpa);
     defer arena.deinit();
@@ -68,7 +88,85 @@ pub const Fixed = struct {
         const f: *Fixed = @ptrCast(@alignCast(ctx));
         if (f.zero) @memset(out, 0) else f.mix.fill(out);
     }
+    /// shell.ts's default sleep outside a thread: the run's clock moves to the
+    /// earliest deadline (QuickJS's timers wait for the clock to pass it).
+    fn sleep(ctx: *anyopaque, clocks: []const wasi.Clock) wasi.Stop!void {
+        const f: *Fixed = @ptrCast(@alignCast(ctx));
+        var until: ?u64 = null;
+        for (clocks) |c| {
+            const t = if (c.absolute) c.timeout else f.ns +% c.timeout;
+            if (until == null or t < until.?) until = t;
+        }
+        if (until) |u| if (u > f.ns) {
+            f.ns = u;
+        };
+    }
 };
+
+/// A `#!` line's interpreter (shell.ts shebang): its basename, through `env`
+/// (skipping env's options), and the arguments after it.
+const Shebang = struct { name: []const u8, args: []const []const u8 };
+fn shebang(a: std.mem.Allocator, data: []const u8) !?Shebang {
+    const end = std.mem.indexOfScalar(u8, data, '\n');
+    const line = data[2..if (end) |e| e else @min(data.len, 256)];
+    var words = std.array_list.Managed([]const u8).init(a);
+    var it = std.mem.tokenizeAny(u8, line, " \t\r\x0b\x0c");
+    while (it.next()) |w| try words.append(w);
+    var ws = words.items;
+    if (ws.len == 0) return null;
+    if (std.mem.eql(u8, std.fs.path.basenamePosix(ws[0]), "env")) {
+        ws = ws[1..];
+        while (ws.len > 0 and ws[0].len > 0 and ws[0][0] == '-') ws = ws[1..];
+        if (ws.len == 0) return null;
+    }
+    return .{ .name = lastPart(ws[0]), .args = ws[1..] };
+}
+/// `prog.split("/").pop()`: the part after the last slash (empty after a trailing one).
+fn lastPart(p: []const u8) []const u8 {
+    const i = std.mem.lastIndexOfScalar(u8, p, '/') orelse return p;
+    return p[i + 1 ..];
+}
+
+/// A read-only directory tree holding a program's support files, outside the
+/// Vfs's root (shell.ts mountDir; inode numbers from the descriptor range, in the same order).
+fn mountDir(a: std.mem.Allocator, v: *vfsm.Vfs, mods: *Modules, sup: *const programs.Support) !*vfsm.Node {
+    const newMap = struct {
+        fn f(al: std.mem.Allocator) !*std.StringHashMap(*vfsm.Node) {
+            const m = try al.create(std.StringHashMap(*vfsm.Node));
+            m.* = std.StringHashMap(*vfsm.Node).init(al);
+            return m;
+        }
+    }.f;
+    const root = try a.create(vfsm.Node);
+    root.* = .{ .kind = .dir, .entries = try newMap(a), .readonly = true, .ino = v.nextDescIno() };
+    const sorted = try a.dupe(programs.Module, sup.files);
+    std.mem.sort(programs.Module, sorted, {}, struct {
+        fn lt(_: void, x: programs.Module, y: programs.Module) bool {
+            return std.mem.lessThan(u8, x.name, y.name);
+        }
+    }.lt);
+    for (sorted) |f| {
+        var parts = std.array_list.Managed([]const u8).init(a);
+        var it = std.mem.tokenizeScalar(u8, f.name, '/');
+        while (it.next()) |x| try parts.append(x);
+        const name = parts.pop().?;
+        var dir = root;
+        for (parts.items) |p| {
+            const next = dir.entries.?.get(p) orelse blk: {
+                const d = try a.create(vfsm.Node);
+                d.* = .{ .kind = .dir, .entries = try newMap(a), .readonly = true, .ino = v.nextDescIno(), .parent = dir, .name = p };
+                try dir.entries.?.put(p, d);
+                break :blk d;
+            };
+            dir = next;
+        }
+        const bytes = mods.files.get(f.cid).?;
+        const node = try a.create(vfsm.Node);
+        node.* = .{ .kind = .file, .data = @constCast(bytes), .cap = bytes.len, .ino = v.nextDescIno(), .parent = dir, .name = name };
+        try dir.entries.?.put(name, node);
+    }
+    return root;
+}
 
 /// Where a thread's clock, random and sleeps come from; null: runShell's defaults (time/seed).
 pub const Thread = struct {
@@ -117,6 +215,7 @@ const Run = struct {
         var args = std.array_list.Managed([]const u8).init(a);
         const rest = if (req.argv.len > 0) req.argv[1..] else req.argv;
         var file: *runner.Compiled = undefined;
+        var name: ?[]const u8 = null;
         if (std.mem.indexOfScalar(u8, req.program, '/') == null) {
             if (isShell(req.program)) {
                 file = run.mods.brush;
@@ -129,34 +228,60 @@ const Run = struct {
                 try args.append(req.program);
             } else if (run.mods.extra.get(req.program)) |m| {
                 file = m;
+                name = req.program;
                 try args.append(req.program);
             } else return .not_found;
         } else {
-            // A path in the tree: scripts run under the shell; nothing else is executable.
+            // A path in the tree: a `#!` script. Its interpreter runs it when that
+            // is an extra program (`#!/usr/bin/env python3`); anything else runs
+            // under the shell. Nothing else is executable.
             const path = if (req.program[0] == '/') req.program else try std.fmt.allocPrint(a, "{s}/{s}", .{ req.cwd, req.program });
             const node = run.v.resolve(run.v.root, path, true) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return .not_found, // .catch(() => undefined)
             };
-            var ok = false;
+            var data: ?[]const u8 = null;
             if (node.kind == .file) {
                 const d = run.v.content(node) catch |err| switch (err) {
                     error.Errno => return .{ .errno = run.v.errno }, // NotFound → EIO, through guardAsync
                     error.Fatal => return error.Fatal,
                     error.OutOfMemory => return error.OutOfMemory,
                 };
-                ok = d.len >= 2 and d[0] == '#' and d[1] == '!';
+                if (d.len >= 2 and d[0] == '#' and d[1] == '!') data = d;
             }
-            if (!ok) {
+            if (data == null) {
                 const argv0 = if (req.argv.len > 0) req.argv[0] else "undefined";
-                wasi.writeTo(req.stdio[2], try std.fmt.allocPrint(a, "{s}: cannot execute: only shell scripts run from the tree\n", .{argv0}));
+                wasi.writeTo(req.stdio[2], try std.fmt.allocPrint(a, "{s}: cannot execute: only #! scripts run from the tree\n", .{argv0}));
                 return .{ .code = 126 };
             }
-            file = run.mods.brush;
-            try args.appendSlice(&.{ "bash", "--disable-color", req.program });
+            const interp = try shebang(a, data.?);
+            if (interp != null and !isShell(interp.?.name) and run.mods.extra.contains(interp.?.name)) {
+                name = interp.?.name;
+                file = run.mods.extra.get(interp.?.name).?;
+                try args.append(interp.?.name);
+                try args.appendSlice(interp.?.args);
+                try args.append(req.program);
+            } else {
+                file = run.mods.brush;
+                try args.appendSlice(&.{ "bash", "--disable-color", req.program });
+            }
         }
         try args.appendSlice(rest);
-        return .{ .code = try run.r.runModule(a, file, run.v, args.items, env.items, req.stdio, &run.svc, null) };
+        const sup = if (name) |n| programs.supportOf(n) else null;
+        if (sup == null) return .{ .code = try run.r.runModule(a, file, run.v, args.items, env.items, req.stdio, &run.svc, null) };
+        // Environment defaults the caller's env overrides; the support files mounted for this process only.
+        for (sup.?.env) |kv| {
+            var has = false;
+            for (env.items) |e| if (e.len > kv[0].len and std.mem.startsWith(u8, e, kv[0]) and e[kv[0].len] == '=') {
+                has = true;
+            };
+            if (!has) try env.append(try std.fmt.allocPrint(a, "{s}={s}", .{ kv[0], kv[1] }));
+        }
+        const mounts = try a.alloc(wasi.Mount, 1);
+        mounts[0] = .{ .path = sup.?.mount, .dir = try mountDir(a, run.v, run.mods, sup.?) };
+        var svc = run.svc;
+        svc.mounts = mounts;
+        return .{ .code = try run.r.runModule(a, file, run.v, args.items, env.items, req.stdio, &svc, null) };
     }
 };
 
@@ -220,7 +345,7 @@ pub fn runShell(a: std.mem.Allocator, r: *runner.Runner, s: Store, mods: *Module
         .clock = t.clock,
         .random = t.random,
         .sleep = t.sleep,
-    } else .{ .ctx = &fixed, .state = st, .clock = Fixed.clock, .random = Fixed.random };
+    } else .{ .ctx = &fixed, .state = st, .clock = Fixed.clock, .random = Fixed.random, .sleep = Fixed.sleep };
     // spawn and exists need the Run; the thread's callbacks their own ctx: route through a trampoline.
     var tramp = Trampoline{ .run = &runc, .inner = runc.svc };
     runc.svc = .{
@@ -228,7 +353,7 @@ pub fn runShell(a: std.mem.Allocator, r: *runner.Runner, s: Store, mods: *Module
         .state = st,
         .clock = Trampoline.clock,
         .random = Trampoline.random,
-        .sleep = if (o.thread != null) Trampoline.sleep else null,
+        .sleep = Trampoline.sleep,
         .spawn = Trampoline.spawn,
         .exists = Trampoline.exists,
     };

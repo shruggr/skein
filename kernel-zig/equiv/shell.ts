@@ -1,7 +1,9 @@
-// Shell equivalence (host-go's method, its 64 cases): the same command lines
-// over the same tree (src/runtime/shell.test.ts's fixture, plus a copy with a
-// 2 MB file) through runShell on Node and through `skein-kernel shell`,
-// compared byte for byte: stdout, stderr, exit code, tree CID.
+// Shell equivalence (host-go's method, its 64 cases, plus 7 for the script
+// runtimes of issue #25): the same command lines over the same tree
+// (src/runtime/shell.test.ts's fixture, plus a copy with a 2 MB file) through
+// runShell on Node and through `skein-kernel shell`, compared byte for byte:
+// stdout, stderr, exit code, tree CID. SKEIN_EQUIV_SHOW=1 prints what the
+// script cases gave.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/shell.ts [skein-kernel]
 
@@ -97,7 +99,47 @@ const cases: Case[] = [
   c(`echo '{"name":"widget","id":3}' > file.json && jq .name file.json`),
   c(`echo '[{"id":"a"},{"id":"b"}]' > list.json && jq -r '.[] | .id' list.json`),
   c("mkdir -p src && printf 'TODO: a\\nkeep\\n' > src/one.txt && printf 'nothing\\nTODO: b\\n' > src/two.txt && grep -rl TODO src/ | xargs wc -l | sed -n '1,2p' | awk '{print $2, $1}'"),
+  // Script runtimes (issue #25): qjs/node and python, by name and by `#!`;
+  // argv, stdin, files in the tree, exit codes; the stdlib mount; clock and random.
+  ...scriptCases(),
 ];
+
+function scriptCases(): Case[] {
+  const js = [
+    "#!/usr/bin/env node",
+    "const fs = require('fs'); const path = require('path');",
+    "const input = fs.readFileSync(0, 'utf8');",
+    "fs.mkdirSync('out', { recursive: true });",
+    "fs.writeFileSync('out/js.txt', fs.readFileSync(path.join(__dirname, 'a.txt'), 'utf8').toUpperCase());",
+    "console.log('js', process.argv.slice(2), input.trim(), { n: 1 }); console.error('to err');",
+    "process.exitCode = 3;",
+  ].join("\n");
+  const py = [
+    "#!/usr/bin/env python3",
+    "import sys, os, json, pathlib",
+    "data = pathlib.Path('a.txt').read_text()",
+    "os.makedirs('out', exist_ok=True)",
+    "json.dump({'lines': data.splitlines(), 'argv': sys.argv[1:], 'stdin': sys.stdin.read()}, open('out/py.json', 'w'), sort_keys=True)",
+    "print('py', sys.argv[1:]); print('to err', file=sys.stderr)",
+    "sys.exit(5)",
+  ].join("\n");
+  const ent = [
+    "import time, random, os, uuid, datetime",
+    "print(time.time(), time.monotonic(), datetime.datetime.now().isoformat())",
+    "print(random.random(), os.urandom(4).hex(), hash('skein'), uuid.uuid4())",
+  ].join("\n");
+  const put = (name: string, body: string) => `echo ${b64(body + "\n")} | base64 -d > ${name}`;
+  const js1 = put("t.js", js), py1 = put("t.py", py), e1 = put("e.py", ent);
+  return [
+    { cmd: `${js1} && ./t.js a b <<< piped; echo "exit=$?"; node t.js c; echo "exit=$?"; cat out/js.txt`, tree: tr },
+    { cmd: `${py1} && echo in | ./t.py a b; echo "exit=$?"; python t.py c < /dev/null; echo "exit=$?"; cat out/py.json`, tree: tr },
+    { cmd: `qjs -e 'import("qjs:std").then((std) => { console.log(scriptArgs, std.getenv("HOME")); std.exit(4) })'; echo "exit=$?"; qjs -e 'throw new Error("boom")'; echo "exit=$?"`, tree: tr },
+    { cmd: `${e1} && python3 e.py; node -e 'console.log(Date.now(), new Date().toISOString(), Math.random())'`, tree: tr, time: Date.UTC(2023, 10, 14, 22, 13, 20), seed: 7 },
+    { cmd: `node -e 'setTimeout((x) => console.log("later", x, Date.now()), 1500, 1); console.log("now", Date.now())'; python3 -c 'import time; time.sleep(2); print(time.time())'`, tree: tr },
+    c(`python3 -c 'import sys; print(sys.prefix, sys.path[1:3])'; python3 -c 'open("/opt/skein/python/lib/python314.zip", "ab")'; echo "exit=$?"; ls /opt; echo "exit=$?"`),
+    c(`node -e 'require("child_process")'; echo "exit=$?"; python3 -c 'import subprocess; subprocess.run(["ls"])' 2>&1 | tail -1`),
+  ];
+}
 
 // Node: runShell over the store, one process for the batch.
 const modules = await loadShellModules(store);
@@ -135,6 +177,7 @@ cases.forEach((k, i) => {
   if (eq) { same++; return; }
   process.stdout.write(`DIFF ${JSON.stringify(k.cmd)}\n node: ${a.error ?? `exit ${a.exitCode} tree ${a.tree}\n  stdout ${show(a.stdout)}\n  stderr ${show(a.stderr)}`}\n  zig: ${b.error ?? `exit ${b.exitCode} tree ${b.tree}\n  stdout ${show(b.stdout)}\n  stderr ${show(b.stderr)}`}\n`);
 });
+if (process.env.SKEIN_EQUIV_SHOW) cases.forEach((k, i) => { if (i >= cases.length - 7) process.stdout.write(`${k.cmd.slice(0, 60)}\n  exit ${node[i].exitCode} ${show(node[i].stdout)} ${show(node[i].stderr)}\n`); });
 process.stdout.write(`shell: ${same}/${cases.length} identical (node ${nodeMs} ms, zig ${zigMs} ms including compile)\n`);
 await fs.rm(dir, { recursive: true, force: true });
 process.exit(same === cases.length ? 0 : 1);
