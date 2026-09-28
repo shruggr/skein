@@ -9,8 +9,9 @@
 // Here only (not in the TS runtime), for the wallet (#29):
 //   http(req, len, out, cap) → n   a dag-cbor request {method, url, headers?, body?}
 //                                  → the response {status, headers, body}, answered
-//                                  by the host and attested (op "http"); the
-//                                  pre-#15 shape, replaced by standard wasi:http
+//                                  by the host and recorded (op "http"); kept for
+//                                  preview1 programs — a component's standard
+//                                  wasi:http becomes this same request (http.zig)
 //   deadline(until_ms) → 0         a step that ends waiting rests until then at most
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
@@ -41,9 +42,10 @@ pub const Host = struct {
     advance: *const fn (imp: *Imports, name: []const u8, tree: []const u8) Err!void,
     subscribe: *const fn (imp: *Imports, op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8) Err!void,
     wallet: *const fn (imp: *Imports, frame: []const u8) Err![]const u8,
-    /// One HTTP request (dag-cbor {method, url, headers?, body?}) → the response
-    /// (dag-cbor {status, headers, body}), answered by the host and attested
-    /// (#29; pre-#15: #15 replaces it with standard wasi:http).
+    /// One HTTP request (dag-cbor {method, url, headers?, body?, options?}) → the
+    /// response (dag-cbor {status, headers, body}), answered by the host and
+    /// recorded: the preview1 `http` import (#29) and a component's wasi:http
+    /// (#15, component.zig through http.zig) both come here.
     http: *const fn (imp: *Imports, request: []const u8) Err![]const u8,
     /// If this step ends waiting, rest no later than `until` (ms): a wake entry then steps it.
     deadline: *const fn (imp: *Imports, until: i64) Err!void,

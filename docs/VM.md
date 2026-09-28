@@ -240,8 +240,46 @@ replays exactly on the ABI it ran on (`kernel-zig/equiv/abi.ts`).
 The preview1 adapter and wasi-libc's 0.2 exit report any non-zero exit
 status as 1, because `wasi:cli/exit` is ok/err.
 
-`wasi:http` (#15) is to be added to the world, and then replaces
-`skein.http`.
+### Outgoing HTTP: `wasi:http`, answered by the host and recorded
+
+(Issue #15; built in the Zig kernel, `kernel-zig/src/component.zig` and
+`http.zig`.) A component makes HTTP requests through standard
+**`wasi:http/outgoing-handler`** (0.2.12, in the `handler` world) and knows
+nothing of skein: a program built against `wasi:http` runs unmodified. HTTP is
+a kernel call answered by the host — there is no provider peer and no message.
+
+- **One recorded-call shape.** The kernel serializes the outgoing request
+  into the shape a preview1 program hands the `skein.http` import itself:
+  dag-cbor `{method, url, headers?, body?, options?}` — `url` is scheme
+  (default `https`) `://` authority path-with-query (default `/`); `headers`
+  is `{name: text}`, a name given more than once joined with `", "`; `body`
+  only when the program wrote one; `options` only when a `request-options`
+  set a timeout (`connectTimeout`, `firstByteTimeout`,
+  `betweenBytesTimeout`, in ns). Both ABIs reach the same host function, so
+  the wallet's two builds make byte-identical requests (`equiv/abi.ts`).
+- **What is recorded.** Request and response go on the step's update as a
+  recorded call (op `http`: the request bytes and the host's answer
+  `{status, headers, body}`), like `wallet` and `resolve`. Nothing is
+  suspended: the step waits for the host inside the call.
+- **Replay** reads the response from the record and never touches the
+  network. A request that differs from the recorded one is a divergence.
+- **The host** (`src/host/router.ts`) answers with its handler (a test's
+  stand-in) or, with `SKEIN_HTTP=fetch`, real requests; it applies the
+  recorded options (connect + first-byte bound the wait for the head,
+  between-bytes each body read). A host failure is the program's
+  `error-code` `internal-error(message)`; it is not recorded (the step is
+  then refused a witness on replay, as for the preview1 import).
+- **Limits.** Bodies are buffered whole in both directions (at most 64 MiB
+  out); the request is sent at the first `future-incoming-response.get`
+  (its body is final then), and its future is always ready. No trailers:
+  request trailers are refused (`internal-error`), response trailers are
+  none. Response headers are what the host reports. No incoming handler, no
+  sockets.
+- **Long-lived feeds are not `wasi:http`**: the router holds SSE feeds and
+  webhooks and admits each event as an entry (#29, #33).
+
+A preview1 program keeps the `skein.http` import (the wallet's pinned build
+uses it); it is the same code path underneath.
 
 ### Fuel: every step is metered
 

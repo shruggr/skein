@@ -12,7 +12,8 @@ key: every key operation is a call to the oracle.
 The wallet runs on the **Zig kernel only**: its transactions and headers are
 `bitcoin-tx` / `bitcoin-block` blocks (the TS kernel's `putblock` refuses
 them) and it uses the kernel's `http` and `deadline` imports
-(kernel-zig/README.md, "For the wallet").
+(kernel-zig/README.md, "For the wallet") — its component build makes the
+HTTP calls over standard `wasi:http` instead (#15).
 
 ## Pieces
 
@@ -267,9 +268,13 @@ links, proofs against our headers; a status is provisional until its proof.
 **`http`** — one-shot calls are made from the VM and answered by the host,
 recorded calls (request + response), so replay never touches
 the network. The kernel import is `http(request) → response`, dag-cbor
-`{method, url, headers?, body?}` → `{status, headers, body}`. This is the
-**pre-#15 shape**: #15 replaces the import with standard `wasi:http`,
-answered and recorded the same way. The wallet speaks ARC's native API:
+`{method, url, headers?, body?}` → `{status, headers, body}` — the
+preview1 build (the pinned `wasm/wallet.wasm`) uses it. The **component
+build** (`zig build component`) makes the same calls over standard
+`wasi:http/outgoing-handler` (#15, `src/wasi_http.zig`), which the kernel
+serializes into the very same request: the recorded calls are identical
+across the two builds (`kernel-zig/equiv/abi.ts`). The wallet speaks ARC's
+native API:
 
 | call | when | |
 |---|---|---|

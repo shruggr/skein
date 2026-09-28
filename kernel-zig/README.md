@@ -163,8 +163,10 @@ the TS runtime has none of it.
   router's handler — a test's fake ARC, or `fetch` when `SKEIN_HTTP=fetch` —
   else refuses) and attested like
   `wallet`/`resolve` (op `http`): replay reads the answer from the record and
-  never touches the network. This is the pre-#15 shape: #15 replaces the
-  import with standard `wasi:http`, answered and recorded the same way.
+  never touches the network. Components use standard `wasi:http` instead
+  (#15, "Components" → "wasi:http"), which reaches this same host function
+  with the same request shape; the preview1 import stays for preview1
+  programs (the wallet's pin).
 
 ## For the bootstrap loader (issue #4)
 
@@ -197,7 +199,8 @@ A component targets `skein:kernel/handler` in `../wit/skein.wit` (see
 
 - WASI 0.2.12: `cli`, `clocks`, `filesystem`, `io` and `random`;
 - the interface `skein:kernel/skein`: the preview1 `skein` calls, including
-  the pre-#15 `http` and `deadline`;
+  `http` (the preview1 shape) and `deadline`;
+- `wasi:http/types` and `wasi:http/outgoing-handler` (#15, below);
 - the export `wasi:cli/run`.
 
 Imports the kernel does not answer, such as sockets, link as traps.
@@ -248,6 +251,41 @@ other imports:
 - **skein**: calls `program.Host` exactly as the preview1 imports do. Its
   errors are the `result`'s string.
 
+### wasi:http (issue #15)
+
+`wasi:http/outgoing-handler.handle` is a kernel call answered by the host,
+over the path the preview1 `http` import takes (`program.Host.http`, the
+scheduler's `hHttp`, the recorded call op `http`):
+
+- `fields`, `outgoing-request`, `request-options`, `outgoing-body`,
+  `future-incoming-response`, `incoming-response`, `incoming-body` and
+  `future-trailers` are host resources (`headers` and `trailers` are
+  `fields`). Field names compare without case; names and values are
+  checked (a token; no CR, LF or NUL).
+- Bodies are pipes behind hidden fds, so their `wasi:io` streams are the
+  same stream calls as every other. The request body is buffered whole
+  (64 MiB at most); the response body is the recorded one.
+- The request is performed at the first `future-incoming-response.get`: its
+  body is final then. `http.zig` serializes it to dag-cbor
+  `{method, url, headers?, body?, options?}` (the preview1 request shape,
+  `options` in ns only when set), the host answers `{status, headers, body}`,
+  and both are recorded on the update. Futures and their pollables are
+  always ready.
+- A host failure is `error-code.internal-error(message)`; an answer that is
+  not `{status, headers?, body?}` too. A diverged or missing record ends the
+  step as for any recorded call.
+- Not built: request trailers (refused with `internal-error`), response
+  trailers (none), `http-error-code` (none), streaming, the incoming handler
+  (server side).
+
+Tests: `http.zig` (the shape), `http_test.zig` (the `fetch` component,
+`../programs/fetch`, under a stand-in host: the request it hands the host,
+a 200 KB body read in chunks, a 404, a host failure, a malformed answer),
+`equiv/fetch.ts` (through the router: the update records request and
+response; the store replays exactly with no host to ask), and the wallet's
+component build, which broadcasts over `wasi:http` (`equiv/wallet.ts`,
+`equiv/abi.ts`: the same recorded requests as the preview1 build).
+
 Fuel is per store, so a component draws on the step's `engine.Meter` like a
 module. If fuel is 0 when the call fails, the step ran out of fuel. Other
 traps are read from wasmtime's message and reported in V8's wording, as for
@@ -290,8 +328,12 @@ A program that uses 0.2 directly needs no adapter: for example, C built with
 wasi-sdk's `wasm32-wasip2`, as in the unit test.
 
 The wallet's two builds share one source (`program.zig`, where `sk` is the
-preview1 imports or `skein_wit.zig`). The preview1 build stays byte-identical
-to the pinned `wasm/wallet.wasm`, and the pin stays on preview1.
+preview1 imports or `skein_wit.zig`). Its HTTP differs by build: the
+preview1 `http` import, or standard `wasi:http` (`wallet-zig/src/wasi_http.zig`,
+#15) in the component, with the same requests. The preview1 build stays
+byte-identical to the pinned `wasm/wallet.wasm`, and the pin stays on
+preview1. `../programs/fetch` is a second, minimal example (wasi:http, its
+URL from argv or the step's input).
 
 ### What is not the same
 
@@ -428,13 +470,15 @@ meter, so its update records (and CIDs) are no longer the Zig kernel's.
 
 | check | what | result (2026-09-28, #33) |
 |---|---|---|
-| `zig build test` | format 2 (§7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI | 31/31 |
+| `zig build test` | format 2 (§7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI; **wasi:http** (#15: `http.zig`, `http_test.zig`): the recorded-call request shape, and the `fetch` component under a stand-in host | 33/33 |
 | `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25) through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID (none of which carries fuel). Then (#34) the same cases with every plain preview1 tool (coreutils, find, diff/cmp, jq, grep, tree, awk, sed, qjs/node, python/python3) made a component with the preview1 adapter, against the modules | 71/71 identical; as components 66/71 identical, the other 5 differing only in a printed exit status above 1 (the adapter's ok/err) |
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 9 logs (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, two agents, and `gen-fuel`: `fuelPerStep` 10^8, where run-handler's reply step runs out after its wallet call), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #33 the corpus is format 2, written by the Zig kernel as the router drives it (on a script clock, clients over the real messagebox API, envelopes in both forms, the messagebox program's mail entries), so each source is also reproduced exactly by its replay | 9/9 identical, sources reproduced |
 | `equiv/wallet.ts` | the router drives `serve` with the instance's oracle (a ProtoWallet) and a fake ARC answering the `http` import; the wallet program (#29) subscribed to an owner's box and a sender-less `chain` box — headers from regtest's genesis (an owner's message, then plain `header` event entries admitted by the router), a BRC-29 payment internalized, a spend signed through the oracle and broadcast (the posted BEEF's scripts verify under @bsv/sdk), the thread's deadline woken by the router's waker and ARC re-asked, a plain `status` entry (MINED + path) routed by its `subject` to the awaiting thread, a rejected broadcast dropping its action, a draft signed by `signAction`; then the store replayed Zig against Zig | all ok; the store reproduced exactly |
 | `equiv/boot.ts` (#4) | `skein-host system` → a system tree (one handler as .wasm bytes, a SOUL.md, a config default); `add --boot <dir>` and `add --packet` of a mined ordfs-form packet of it (`--proofs`); a wrong `--scope` refused; both genesis name the tree, `main` is it, programs from bin/; each chatted with (the loop reads SOUL.md from main) and run over main; the wallet's component build (#34) as `bin/wallet.wasm` answering a `list`; `pack --checkpoint` restored on a second host (same master key): `dump` identical, still answering; both booted stores replayed Zig against Zig | all ok; both reproduced exactly |
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains, lines and emits; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly |
+| `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains, lines and emits; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly. Since #15 the component broadcasts and re-asks ARC over `wasi:http`, so this also shows the two ABIs make byte-identical recorded HTTP calls |
+| `equiv/fetch.ts` (#15) | the `fetch` component (wasi:http) as a box's handler through the router, the router's http handler standing in for the network; then `replays.ts` with no host | the body on stdout; the host asked once per step in the recorded-call shape; the update records request and response; a 404 comes back to the program; the store replays exactly with no host to ask |
 | older-format refusal | a TS-written store (host-signed entries, no fuel) opened for running (`skein-kernel shell`) | refused, with the message |
 | `equiv/serve.ts` | `serve` as the router drives it, the owner and the inference peer as standard messagebox clients over BRC-104: genesis, a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a router restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
@@ -478,7 +522,8 @@ predate fuel; the live instances re-genesis when they move to this build).
 | `serve.zig`, `ipc.zig` | the kernel as the router drives it (`src/host/kernel.ts`, issue #33) |
 | `replay.zig`, `cmd_shell.zig` | `skein-dev replay`; the shell test driver |
 | `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (billing as a query over the log); the fuel unit tests (issue #5) |
-| `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds (`build.sh`) |
+| `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
+| `http.zig`, `http_test.zig` | wasi:http's recorded-call shape (#15): the request a component's `outgoing-handler.handle` becomes, the response it reads back |
 
 ## What is not the same, or not here
 

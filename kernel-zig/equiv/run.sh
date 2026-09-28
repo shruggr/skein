@@ -50,6 +50,8 @@ fi
 
 echo "== bootstrap (#4): a system tree from a directory and from a packet, chatted with; a checkpoint restored; replayed"
 "${node[@]}" "$kz/equiv/boot.ts" || status=1
+echo "== wasi:http (#15): the fetch component through the router, its call recorded; replayed with no host to ask"
+"${node[@]}" "$kz/equiv/fetch.ts" || status=1
 
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
