@@ -30,7 +30,7 @@ export const MODULES = {
   "objects-handler": CID.parse("bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4"),
   "head-handler": CID.parse("bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q"),
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
-  "loop": CID.parse("bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa"),
+  "loop": CID.parse("bafkreibucy775ondafg447omm5735b6o3ggeas7ggrrqjfpiwtajs4fiuu"),
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (wallet-zig/, built by scripts/build-programs.sh).
   "wallet": CID.parse("bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs

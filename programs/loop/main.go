@@ -4,17 +4,31 @@
 // sender is the thread's opener.
 //
 // The conversation is the thread's own chain: every turn is a record the step
-// keeps (skein.Keep), and each step rebuilds the messages by walking the chain
-// back from its tip. Turns ({kind: "turn", of, role, …}), built from the
-// admitted plaintext bodies and the shell's results:
+// keeps (skein.Keep), and each step rebuilds it by walking the chain back from
+// its tip. Turns ({kind: "turn", parent?, of, role, …}), built from the
+// admitted plaintext bodies and the shell's results; `parent` is the turn
+// before (the system turn has none), so the turns are a graph of nodes keyed
+// by CID, which is what the inference peer holds (below):
 //
 //	system     {of: <tree>, role: "system", content}   (first, once: the conversation's prompt)
-//	user       {of: <chat envelope>, role: "user", text, tree?, model?}   (the opener's)
+//	user       {of: <chat envelope>, role: "user", text, tree?, model?, thinking?}   (the opener's)
 //	assistant  {of: <completions envelope>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
 //	tool       {of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}   (bash; outputs capped at 16 KiB)
 //	tool       {of: <their chat reply>, role: "tool", call, to, sent: <our chat envelope>, text}   (message)
 //	tool       {of: <entry>, role: "tool", call, to?, error}   (a message that could not be sent, or delivered)
 //	error      {of: <completions envelope | outcome entry>, role: "error", error}
+//
+// Kept beside the turns, not one of them: {kind: "missing", of: <completions
+// envelope>, missing: [<node>]} — the peer did not hold a node we named.
+//
+// The infer protocol (issue #12; docs/MESSAGES.md, "The infer protocol"):
+// each `infer` carries only the turns since the last request — from the
+// latest assistant turn on, since the peer held everything up to its parent —
+// and names the node they extend (`parent`); the first carries the whole
+// conversation. `model` and `thinking` are per request: the latest user
+// turn's, else the genesis defaults. A `missing` reply (a restarted or
+// evicted peer) is kept as above and answered with the whole conversation,
+// once; a second in a row is an inference error.
 //
 // The prompt: a new conversation reads /SOUL.md from the tree it starts on
 // (the chat's tree, else `main`'s) — else the fixed one below — and appends
@@ -86,11 +100,12 @@ type args struct {
 // or a reply. The loop's answer at the end of a turn also names its working
 // tree and its thread.
 type chatBody struct {
-	Text    string    `cbor:"text"`
-	Tree    skein.CID `cbor:"tree,omitzero"`
-	Model   string    `cbor:"model,omitempty"`
-	Thread  skein.CID `cbor:"thread,omitzero"`
-	ReplyTo skein.CID `cbor:"replyTo,omitzero"`
+	Text     string    `cbor:"text"`
+	Tree     skein.CID `cbor:"tree,omitzero"`
+	Model    string    `cbor:"model,omitempty"`
+	Thinking string    `cbor:"thinking,omitempty"`
+	Thread   skein.CID `cbor:"thread,omitzero"`
+	ReplyTo  skein.CID `cbor:"replyTo,omitzero"`
 }
 
 type function struct {
@@ -118,16 +133,19 @@ type completionBody struct {
 	Model   string            `cbor:"model,omitempty"`
 	Ms      int64             `cbor:"ms,omitempty"`
 	Error   string            `cbor:"error,omitempty"`
+	Missing []skein.CID       `cbor:"missing,omitempty"`
 }
 
 // turn is every turn the loop keeps; Role says which fields apply.
 type turn struct {
 	Kind      string          `cbor:"kind"`
+	Parent    skein.CID       `cbor:"parent,omitzero"`
 	Of        skein.CID       `cbor:"of"`
-	Role      string          `cbor:"role"`
+	Role      string          `cbor:"role,omitempty"`
 	Text      string          `cbor:"text,omitempty"`
 	Tree      skein.CID       `cbor:"tree,omitzero"`
 	Model     string          `cbor:"model,omitempty"`
+	Thinking  string          `cbor:"thinking,omitempty"`
 	Content   string          `cbor:"content,omitempty"`
 	Reasoning string          `cbor:"reasoning,omitempty"`
 	ToolCalls []toolCall      `cbor:"tool_calls,omitempty"`
@@ -140,21 +158,18 @@ type turn struct {
 	Stdout    *string         `cbor:"stdout,omitempty"`
 	Stderr    *string         `cbor:"stderr,omitempty"`
 	Error     string          `cbor:"error,omitempty"`
+	Missing   []skein.CID     `cbor:"missing,omitempty"`
 }
 
-// The `infer` body: OpenAI chat messages and tool definitions.
-type message struct {
-	Role       string     `cbor:"role"`
-	Content    string     `cbor:"content"`
-	ToolCalls  []toolCall `cbor:"tool_calls,omitempty"`
-	ToolCallID string     `cbor:"tool_call_id,omitempty"`
-}
-
+// The `infer` body: the turns new since the last request, as kept (their
+// stored bytes, so the peer keys them by the same CIDs), the node the first
+// extends, the model and thinking for this request, and the tool definitions.
 type inferBody struct {
-	Model    string    `cbor:"model"`
-	Messages []message `cbor:"messages"`
-	Tools    []any     `cbor:"tools,omitempty"`
-	Thinking string    `cbor:"thinking,omitempty"`
+	Model    string            `cbor:"model"`
+	Thinking string            `cbor:"thinking,omitempty"`
+	Tools    []any             `cbor:"tools,omitempty"`
+	Parent   skein.CID         `cbor:"parent,omitzero"`
+	Nodes    []cbor.RawMessage `cbor:"nodes"`
 }
 
 type shellArgs struct {
@@ -205,11 +220,14 @@ func main() {
 	}
 }
 
-// loop is one step's view: its input, the thread's args, and the conversation so far.
+// loop is one step's view: its input, the thread's args, the conversation so
+// far (its turns and their CIDs), and the kind of the last record kept.
 type loop struct {
 	step *skein.Step
 	a    args
 	conv []turn
+	cids []skein.CID
+	last string
 }
 
 func run() error {
@@ -235,7 +253,11 @@ func run() error {
 			if err := skein.Decode(b, &r); err != nil {
 				return fmt.Errorf("turn: %w", err)
 			}
-			l.conv = append(l.conv, r)
+			l.last = r.Kind
+			if r.Kind == "turn" {
+				l.conv = append(l.conv, r)
+				l.cids = append(l.cids, c)
+			}
 		}
 	}
 	switch {
@@ -254,17 +276,32 @@ func run() error {
 	}
 }
 
+// keep a turn: the next node of the conversation, its parent the last one.
 func (l *loop) keep(r turn) error {
 	r.Kind = "turn"
-	c, err := skein.Put(r)
-	if err != nil {
-		return fmt.Errorf("put turn: %w", err)
+	if n := len(l.cids); n > 0 {
+		r.Parent = l.cids[n-1]
 	}
-	if err := skein.Keep(c); err != nil {
-		return fmt.Errorf("keep: %w", err)
+	c, err := l.put(r)
+	if err != nil {
+		return err
 	}
 	l.conv = append(l.conv, r)
+	l.cids = append(l.cids, c)
 	return nil
+}
+
+// put and keep a record (a turn, or a note beside the turns).
+func (l *loop) put(r turn) (skein.CID, error) {
+	c, err := skein.Put(r)
+	if err != nil {
+		return nil, fmt.Errorf("put %s: %w", r.Kind, err)
+	}
+	if err := skein.Keep(c); err != nil {
+		return nil, fmt.Errorf("keep: %w", err)
+	}
+	l.last = r.Kind
+	return c, nil
 }
 
 // chat: the opener's line (the opening one, or their reply to our answer).
@@ -296,10 +333,10 @@ func (l *loop) chat(envelope, body skein.CID) error {
 			return err
 		}
 	}
-	if err := l.keep(turn{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model}); err != nil {
+	if err := l.keep(turn{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model, Thinking: b.Thinking}); err != nil {
 		return err
 	}
-	return l.infer()
+	return l.infer(false)
 }
 
 // completion: the inference peer's answer to our `infer`.
@@ -311,6 +348,19 @@ func (l *loop) completion(r *skein.Answer) error {
 	var b completionBody
 	if err := skein.Decode(plain, &b); err != nil {
 		return fmt.Errorf("completion body: %w", err)
+	}
+	if len(b.Missing) > 0 && b.Error == "" {
+		// The peer lost the conversation (a restart, an eviction): send it
+		// all, once. `missing` for a request that already carried it all —
+		// the first of the conversation (no assistant turn yet), or the
+		// resend itself — is an error.
+		if l.last != "missing" && l.lastAssistant() != nil {
+			if _, err := l.put(turn{Kind: "missing", Of: r.Envelope, Missing: b.Missing}); err != nil {
+				return err
+			}
+			return l.infer(true)
+		}
+		b.Error = fmt.Sprintf("the inference peer is missing %d node(s) after the whole conversation was sent", len(b.Missing))
 	}
 	if b.Error != "" || b.Message == nil {
 		msg := b.Error
@@ -396,7 +446,7 @@ func (l *loop) next() error {
 	}
 	last := l.lastAssistant()
 	if last != nil && len(last.ToolCalls) > 0 {
-		return l.infer()
+		return l.infer(false)
 	}
 	text := ""
 	if last != nil {
@@ -535,38 +585,49 @@ func (l *loop) launch(cmd string) error {
 	return err
 }
 
-// infer: the conversation to the inference peer; rest on its completion.
-func (l *loop) infer() error {
+// infer: ask the inference peer for the next completion; rest on it. The
+// request carries the turns from the latest assistant turn on — the peer holds
+// everything up to that turn's parent, the last node of the request it
+// answered — or, the first time and when `all`, the whole conversation.
+// `model` and `thinking`: the latest user turn's, else the genesis defaults.
+func (l *loop) infer(all bool) error {
 	peer := l.step.Peers["infer"]
 	if peer == "" {
 		return l.answer("no inference peer is configured (genesis peers.infer)")
 	}
-	model := l.step.Defaults["model"]
+	model, thinking := l.step.Defaults["model"], l.step.Defaults["thinking"]
 	if model == "" {
 		model = defaultModel
 	}
-	sys := system // a conversation from before prompts were kept
-	for _, r := range l.conv {
-		if r.Role == "system" {
-			sys = r.Content
-			break
-		}
-	}
-	msgs := []message{{Role: "system", Content: sys}}
-	for _, r := range l.conv {
-		switch r.Role {
-		case "user":
+	for i := len(l.conv) - 1; i >= 0; i-- {
+		if r := l.conv[i]; r.Role == "user" {
 			if r.Model != "" {
 				model = r.Model
 			}
-			msgs = append(msgs, message{Role: "user", Content: r.Text})
-		case "assistant":
-			msgs = append(msgs, message{Role: "assistant", Content: r.Content, ToolCalls: r.ToolCalls})
-		case "tool":
-			msgs = append(msgs, message{Role: "tool", ToolCallID: r.Call, Content: toolText(r)})
+			if r.Thinking != "" {
+				thinking = r.Thinking
+			}
+			break
 		}
 	}
-	env, err := envelope.Send(peer, "", "", "infer", inferBody{Model: model, Messages: msgs, Tools: []any{bashTool, messageTool}, Thinking: l.step.Defaults["thinking"]})
+	from, parent := 0, skein.CID(nil)
+	if !all {
+		for i := len(l.conv) - 1; i >= 0; i-- {
+			if l.conv[i].Role == "assistant" {
+				from, parent = i, l.conv[i].Parent
+				break
+			}
+		}
+	}
+	body := inferBody{Model: model, Thinking: thinking, Tools: []any{bashTool, messageTool}, Parent: parent}
+	for _, c := range l.cids[from:] {
+		b, err := skein.Get(c)
+		if err != nil {
+			return fmt.Errorf("get turn: %w", err)
+		}
+		body.Nodes = append(body.Nodes, b)
+	}
+	env, err := envelope.Send(peer, "", "", "infer", body)
 	if err != nil {
 		return err
 	}
@@ -662,27 +723,6 @@ func prompt(tree skein.CID) string {
 		}
 	}
 	return p
-}
-
-func toolText(r turn) string {
-	if r.ExitCode == nil { // a message: the answer, or what went wrong
-		if r.Error != "" {
-			return "error: " + r.Error
-		}
-		return r.Text
-	}
-	var b strings.Builder
-	if r.ExitCode != nil {
-		fmt.Fprintf(&b, "exit %d\n", *r.ExitCode)
-	}
-	if r.Stdout != nil {
-		b.WriteString(*r.Stdout)
-	}
-	if r.Stderr != nil && *r.Stderr != "" {
-		b.WriteString("\n[stderr]\n")
-		b.WriteString(*r.Stderr)
-	}
-	return b.String()
 }
 
 func capText(b []byte) string {

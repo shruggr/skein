@@ -98,7 +98,17 @@ async function answers(i: Instance): Promise<Array<{ env: Envelope; cid: CID; bo
   return out;
 }
 
-/** All turns a thread kept, in order. */
+/** The `infer` bodies waiting in the peer's box (not yet answered), opened with the peer's key. */
+async function inferBodies(i: Instance, key: PrivateKey): Promise<Json[]> {
+  const out = [];
+  for (const m of i.hub.pending(key.toPublicKey().toString(), "infer")) {
+    const env = JSON.parse(m.body as string) as Envelope;
+    out.push(dagCbor.decode((await open(ephemeralWallet(key), env)).body) as Json);
+  }
+  return out;
+}
+
+/** All records a thread kept (its turns, and notes beside them), in order. */
 async function turns(store: Store, th: CID): Promise<Json[]> {
   const out: Json[] = [];
   for (const u of await history(store, th)) for (const r of (u.kept as CID[] | undefined) ?? []) out.push(await store.get(r) as Json);
@@ -277,8 +287,8 @@ test("chat: an inference error is kept and answered to David; the thread awaits 
   await i.rt.stop();
 });
 
-test("restart mid-turn: the runtime stops while the loop awaits the peer; a new runtime on the same store takes the completion; replay needs no wallet", async (t) => {
-  const { i, root, inferKey, peer } = await setup(t, [answer({ content: "", tool_calls: [toolCall("c1", "cat README")] }), answer({ content: "It says hello." })]);
+test("restart mid-turn: the runtime stops while the loop awaits the peer; a new runtime on the same store takes the completion; the peer restarted too, so it answers the next delta `missing` and the loop resends the whole conversation; replay needs no wallet", async (t) => {
+  const { i, root, inferKey, peer, api } = await setup(t, [answer({ content: "", tool_calls: [toolCall("c1", "cat README")] }), answer({ content: "It says hello." })]);
   await send(i, "chat", { text: "read the readme", tree: root });
   await settle(i);
   await i.rt.stop();
@@ -286,18 +296,140 @@ test("restart mid-turn: the runtime stops while the loop awaits the peer; a new 
   await peer.poll(); // the peer answers while the instance is down
   const b = await instance({ store: i.store, instanceKey: i.instanceKey, ownerKey: i.owner.key, hostKey: i.host.key, hub: i.hub, clock: i.clock });
   await settle(b);
+  // A new peer process: nothing in memory, no cache. The delta names a parent it does not hold.
   const p2 = inferPeer(b, inferKey, (peer as unknown as { o: { fetch: typeof fetch } }).o.fetch);
+  const [delta] = await inferBodies(b, inferKey);
+  assert.deepEqual((delta.nodes as Json[]).map((n) => n.role), ["assistant", "tool"], "the delta: the completion's turn and the tool result");
+  await p2.poll();
+  assert.equal(api.requests.length, 1, "a missing node costs no engine call");
+  await settle(b);
+  const [loop] = await loops(b.store);
+  const kept = await turns(b.store, loop);
+  const note = kept.at(-1)!;
+  assert.equal(note.kind, "missing");
+  assert.ok((note.missing as CID[])[0].equals(delta.parent as CID), "the note names the node the peer lacked: the delta's parent");
+  const [resend] = await inferBodies(b, inferKey);
+  assert.equal(resend.parent, undefined, "the resend names no parent…");
+  assert.deepEqual((resend.nodes as Json[]).map((n) => n.role), ["system", "user", "assistant", "tool"], "…and carries the whole conversation");
   await p2.poll();
   await settle(b);
   t.diagnostic(b.lines.join("\n"));
   const [s] = await answers(b);
   assert.equal(s.body.text, "It says hello.");
-  const [loop] = await loops(b.store);
-  const [, ...rs] = await turns(b.store, loop);
-  assert.deepEqual(rs.map((r) => r.role), ["user", "assistant", "tool", "assistant"]);
-  assert.equal(rs[2].stdout, "hello\n");
+  assert.deepEqual((api.requests[1].messages as Json[]).map((m) => m.role), ["system", "user", "assistant", "tool"]);
+  const rs = (await turns(b.store, loop)).filter((r) => r.kind === "turn");
+  assert.deepEqual(rs.map((r) => r.role), ["system", "user", "assistant", "tool", "assistant"]);
+  assert.equal(rs[3].stdout, "hello\n");
   await b.rt.stop();
-  await replayMatches(b.store);
+  const sent = await replayMatches(b.store);
+  assert.deepEqual(sent.map((o) => o.box), ["infer", "infer", "infer", "chat"], "the retry is an ordinary emit, replayed like the others");
+});
+
+// ---------------------------------------------------------------- the infer protocol (#12)
+
+test("infer protocol: the first request carries the whole conversation; each later one only the turns since, naming the node they extend; every node chains to its parent by CID; the peer rebuilds the whole chat", async (t) => {
+  const { i, root, inferKey, peer, api } = await setup(t, [
+    answer({ content: "", tool_calls: [toolCall("c1", "ls")] }),
+    answer({ content: "README and src." }),
+    answer({ content: "Bye." }),
+  ]);
+  await send(i, "chat", { text: "what is here?", tree: root });
+  await settle(i);
+  const [first] = await inferBodies(i, inferKey);
+  assert.equal(first.parent, undefined);
+  assert.deepEqual((first.nodes as Json[]).map((n) => n.role), ["system", "user"]);
+  assert.equal(first.model, "ripper/qwen38", "the genesis default");
+  assert.equal(first.thinking, "off", "the genesis default");
+  await peer.poll();
+  await settle(i);
+  const [second] = await inferBodies(i, inferKey);
+  assert.deepEqual((second.nodes as Json[]).map((n) => n.role), ["assistant", "tool"]);
+  const [loop] = await loops(i.store);
+  const kept = await turns(i.store, loop);
+  const cids = kept.map((r) => encode(r).cid);
+  assert.ok((second.parent as CID).equals(cids[1]), "names the user turn: the last node of the first request");
+  for (let n = 1; n < kept.length; n++) assert.ok((kept[n].parent as CID).equals(cids[n - 1]), `turn ${n} names turn ${n - 1}`);
+  assert.equal(kept[0].parent, undefined, "the system turn is the root");
+  await peer.poll();
+  await settle(i);
+  assert.deepEqual((api.requests[1].messages as Json[]).map((m) => m.role), ["system", "user", "assistant", "tool"], "the engine gets the whole chat");
+
+  // The next user turn: the delta is the final answer and the new user turn.
+  const [s] = await answers(i);
+  await send(i, "chat", { text: "thanks", replyTo: s.cid });
+  await settle(i);
+  const [third] = await inferBodies(i, inferKey);
+  assert.deepEqual((third.nodes as Json[]).map((n) => [n.role, n.text ?? n.content]), [["assistant", "README and src."], ["user", "thanks"]]);
+  await peer.poll();
+  assert.deepEqual((api.requests[2].messages as Json[]).map((m) => m.role), ["system", "user", "assistant", "tool", "assistant", "user"]);
+  await settle(i);
+  assert.equal((await answers(i)).at(-1)!.body.text, "Bye.");
+  await i.rt.stop();
+  await replayMatches(i.store);
+});
+
+test("infer protocol: model and thinking per request — from the chat that opened the turn, else the genesis defaults", async (t) => {
+  const { i, root, inferKey, peer, api } = await setup(t, [answer({ content: "one" }), answer({ content: "two" })]);
+  await send(i, "chat", { text: "think hard", tree: root, model: "ripper/big", thinking: "high" });
+  await settle(i);
+  const [first] = await inferBodies(i, inferKey);
+  assert.deepEqual([first.model, first.thinking], ["ripper/big", "high"]);
+  await peer.poll();
+  assert.deepEqual([api.requests[0].model, api.requests[0].reasoning_effort, api.requests[0].chat_template_kwargs], ["big", "high", { enable_thinking: true }]);
+  await settle(i);
+  // The next chat names neither: back to the genesis defaults.
+  const [s] = await answers(i);
+  await send(i, "chat", { text: "and now?", replyTo: s.cid });
+  await settle(i);
+  const [second] = await inferBodies(i, inferKey);
+  assert.deepEqual([second.model, second.thinking], ["ripper/qwen38", "off"]);
+  await peer.poll();
+  assert.deepEqual([api.requests[1].model, api.requests[1].reasoning_effort, api.requests[1].chat_template_kwargs], ["qwen38", undefined, { enable_thinking: false }]);
+  const [loop] = await loops(i.store);
+  const user = (await turns(i.store, loop)).find((r) => r.role === "user")!;
+  assert.deepEqual([user.model, user.thinking], ["ripper/big", "high"], "the user turn keeps what the chat asked for");
+  await settle(i);
+  await i.rt.stop();
+  await replayMatches(i.store);
+});
+
+test("infer protocol: `missing` again after the resend → an inference error answered to the opener (one retry only); `missing` to a first request, which carried everything, is an error at once", async (t) => {
+  const { i, root, inferId, inferKey, peer } = await setup(t, [answer({ content: "", tool_calls: [toolCall("c1", "ls")] })]);
+  await send(i, "chat", { text: "hi", tree: root });
+  await settle(i);
+  await peer.poll(); // a tool call; the loop runs it and sends the delta
+  await settle(i);
+  // A peer that has lost everything, for good: answer each request `missing` by hand.
+  const reply = async () => {
+    const [m] = i.hub.pending(inferId, "infer");
+    const env = JSON.parse(m.body as string) as Envelope;
+    await i.hub.as(inferId).ack([m.messageId]);
+    const out = await seal(ephemeralWallet(inferKey), { recipient: { identityKey: i.identity, handle: "skein", domain: "localhost" }, body: dagCbor.encode({ replyTo: encode(signedPart(env)).cid, missing: [encode({ lost: 1 }).cid] }), created: iso(i.clock.now()) });
+    await i.hub.as(inferId).send({ recipient: i.identity, box: "completions", body: out });
+  };
+  await reply();
+  await settle(i);
+  assert.equal(i.hub.pending(inferId, "infer").length, 1, "resent once");
+  await reply();
+  await settle(i);
+  assert.equal(i.hub.pending(inferId, "infer").length, 0, "not twice");
+  const [loop] = await loops(i.store);
+  const kept = await turns(i.store, loop);
+  assert.deepEqual(kept.map((r) => r.role ?? r.kind), ["system", "user", "assistant", "tool", "missing", "error"], i.lines.join("\n"));
+  assert.match(String(kept[5].error), /missing 1 node\(s\) after the whole conversation was sent/);
+  const [s] = await answers(i);
+  assert.match(String(s.body.text), /^inference failed: the inference peer is missing/);
+
+  // A new conversation: its first request carries everything, so `missing` is an error with no resend.
+  await send(i, "chat", { text: "again" });
+  await settle(i);
+  await reply();
+  await settle(i);
+  assert.equal(i.hub.pending(inferId, "infer").length, 0, "no resend of a whole conversation");
+  const second = (await loops(i.store)).find((l) => !l.equals(loop))!;
+  assert.deepEqual((await turns(i.store, second)).map((r) => r.role ?? r.kind), ["system", "user", "error"]);
+  await i.rt.stop();
+  await replayMatches(i.store);
 });
 
 // ---------------------------------------------------------------- the prompt from the tree

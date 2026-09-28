@@ -16,7 +16,7 @@ pub const modules = [_]Module{
     .{ .name = "objects-handler", .cid = "bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4" },
     .{ .name = "head-handler", .cid = "bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q" },
     .{ .name = "subscribe-handler", .cid = "bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e" },
-    .{ .name = "loop", .cid = "bafkreibbaveunirjy3jmyjseq3ttqprcbok7rnudaghrf36vpforjxeppa" },
+    .{ .name = "loop", .cid = "bafkreibucy775ondafg447omm5735b6o3ggeas7ggrrqjfpiwtajs4fiuu" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },

@@ -7,35 +7,140 @@
 // is how the runtime delivers it to the loop thread awaiting it). It is the
 // only thing in skein that fetches for inference.
 //
-//   infer        {model: "<provider>/<model>", messages, tools?, thinking?: "off"|"low"|"medium"|"high"}
+// It is stateful (issue #12; docs/MESSAGES.md, "The infer protocol"): it holds
+// each sender's conversation graph — the loop's `turn` records, keyed by CID,
+// each naming its `parent` — so a request carries only the nodes that are new
+// since the last one and names the node they extend. The engine behind it is
+// stateless: the peer walks the graph back from the newest node to the root
+// and sends that whole path as OpenAI chat messages.
+//
+//   infer        {model: "<provider>/<model>", thinking?: "off"|"low"|"medium"|"high", tools?,
+//                 parent?: <node cid>, nodes: [<turn>…]}
 //   completions  {replyTo, message: {role: "assistant", content?, reasoning?, tool_calls?}, usage?, model, ms}
+//              | {replyTo, missing: [<node cid>]}     (the peer does not hold that node: resend)
 //              | {replyTo, error}
+//
+// (A request with `messages` and no `nodes` — a loop from before #12 — is
+// passed through as it is.)
 //
 // Providers come from ~/.skein/infer.json: {"ripper": {"baseUrl": "http://…/v1", "apiKey": "…"}}.
 
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
+import { CID } from "multiformats/cid";
 import { isEnvelope, isoTime, open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
 import { encode } from "../runtime/cid.ts";
 import type { Listed, MessageBox } from "../host/messagebox.ts";
 
 export interface Provider { baseUrl: string; apiKey?: string }
 
-export interface InferRequest {
+export type Thinking = "off" | "low" | "medium" | "high";
+const THINKING: readonly string[] = ["off", "low", "medium", "high"];
+
+/** One engine call: the whole chat. */
+export interface EngineRequest {
   model: string;
   messages: unknown[];
   tools?: unknown[];
-  thinking?: "off" | "low" | "medium" | "high";
+  thinking?: Thinking;
+}
+
+/**
+ * A conversation node: one of the loop's `turn` records (programs/loop), as
+ * kept in the instance, so its CID here is its CID there. `parent` is the node
+ * before it; the root (the system prompt) has none.
+ */
+export interface TurnNode {
+  kind: "turn";
+  parent?: CID;
+  role: string;
+  text?: string;
+  content?: string;
+  tool_calls?: unknown[];
+  call?: string;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  [k: string]: unknown;
+}
+
+/** An `infer` body: the nodes new since the sender's last request, and the node they extend. */
+export interface InferRequest {
+  model: string;
+  thinking?: Thinking;
+  tools?: unknown[];
+  /** The node `nodes[0]` extends; absent when the nodes start at the root. */
+  parent?: CID;
+  nodes?: TurnNode[];
+  /** Before #12: the whole chat, passed through. */
+  messages?: unknown[];
 }
 
 export type Completion =
   | { message: { role: "assistant"; content?: string; reasoning?: string; tool_calls?: unknown[] }; usage?: unknown; model: string; ms: number }
+  | { missing: CID[] }
   | { error: string };
+
+/**
+ * The peer's side of the conversation graph: nodes by CID, per sender (one
+ * sender's nodes never reach another's chat). In memory, the `max` most
+ * recently used; with a `dir`, every node is also on disk as
+ * `<dir>/<sender>/<cid>` (its dag-cbor bytes) and read back after a restart or
+ * an eviction. Nothing prunes the directory.
+ */
+export class NodeGraph {
+  private readonly mem = new Map<string, TurnNode>();
+  private readonly o: { dir?: string; max?: number };
+  constructor(o: { dir?: string; max?: number } = {}) {
+    this.o = o;
+    if (o.dir) mkdirSync(o.dir, { recursive: true });
+  }
+
+  get(sender: string, cid: CID): TurnNode | undefined {
+    const k = `${sender}/${cid}`;
+    const hit = this.mem.get(k);
+    if (hit) { this.mem.delete(k); this.mem.set(k, hit); return hit; }
+    if (!this.o.dir) return undefined;
+    let bytes: Uint8Array;
+    try { bytes = readFileSync(join(this.o.dir, sender, cid.toString())); } catch { return undefined; }
+    const node = dagCbor.decode(bytes) as TurnNode;
+    if (!encode(node).cid.equals(cid)) return undefined; // a damaged file is a missing node
+    this.remember(k, node);
+    return node;
+  }
+
+  put(sender: string, cid: CID, node: TurnNode, bytes: Uint8Array): void {
+    const k = `${sender}/${cid}`;
+    if (this.mem.has(k)) return;
+    this.remember(k, node);
+    if (this.o.dir) {
+      const d = join(this.o.dir, sender);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, cid.toString()), bytes);
+    }
+  }
+
+  /** Drop everything held in memory, as a restart would; the disk stays. */
+  forget(): void { this.mem.clear(); }
+
+  get size(): number { return this.mem.size; }
+
+  private remember(k: string, node: TurnNode): void {
+    this.mem.set(k, node);
+    const max = this.o.max ?? 50_000;
+    for (const old of this.mem.keys()) { if (this.mem.size <= max) break; this.mem.delete(old); }
+  }
+}
 
 export interface InferOptions {
   wallet: WalletInterface;
   box: MessageBox;
   providers: Record<string, Provider>;
+  /** The conversation graph. Default: in memory only. */
+  graph?: NodeGraph;
   /** Default: global fetch. Tests script it. */
   fetch?: typeof fetch;
   /** This peer's handle, for the envelopes it seals. Default infer@localhost. */
@@ -51,6 +156,7 @@ const short = (s: string) => s.slice(-8);
 
 export class InferPeer {
   private readonly o: InferOptions;
+  readonly graph: NodeGraph;
   private readonly say: (line: string) => void;
   private timer?: ReturnType<typeof setInterval>;
   private polling?: Promise<unknown>;
@@ -58,6 +164,7 @@ export class InferPeer {
   constructor(o: InferOptions) {
     this.o = o;
     this.say = o.log ?? (() => {});
+    this.graph = o.graph ?? new NodeGraph();
   }
 
   start(ms = 1000): void {
@@ -99,18 +206,55 @@ export class InferPeer {
     let result: Completion;
     try {
       const req = dagCbor.decode((await open(this.o.wallet, env)).body) as InferRequest;
-      result = await this.complete(req);
+      result = await this.answer(env.sender.identityKey, req);
     } catch (e) {
       result = { error: (e as Error).message };
     }
     await this.reply(env, { replyTo, ...result });
-    this.say(`infer ${short(replyTo.toString())} from ${short(env.sender.identityKey)}: ${"error" in result ? `error: ${result.error}` : `${result.model} ${result.ms} ms${result.message.tool_calls?.length ? ` · ${result.message.tool_calls.length} tool call(s)` : ""}`}`);
+    this.say(`infer ${short(replyTo.toString())} from ${short(env.sender.identityKey)}: ${"error" in result ? `error: ${result.error}` : "missing" in result ? `missing ${result.missing.map((c) => short(c.toString())).join(", ")}` : `${result.model} ${result.ms} ms${result.message.tool_calls?.length ? ` · ${result.message.tool_calls.length} tool call(s)` : ""}`}`);
     return true;
   }
 
-  /** Call the provider the model names ("<provider>/<model>"). */
-  async complete(req: InferRequest): Promise<Completion> {
+  /**
+   * One request from `sender`: take its nodes into the graph, walk back from
+   * the newest to the root, and complete the chat that path is. A node it
+   * cannot find — the named parent, or an ancestor it no longer holds — is a
+   * `missing` reply naming it, and no engine call.
+   */
+  async answer(sender: string, req: InferRequest): Promise<Completion> {
+    const wants = "infer wants {model, thinking?, tools?, parent?, nodes}";
+    if (typeof req?.model !== "string") return { error: wants };
+    if (req.nodes === undefined && Array.isArray(req.messages)) return this.complete(req as EngineRequest);
+    if (!Array.isArray(req.nodes) || req.nodes.length === 0) return { error: `${wants}: no nodes` };
+    const parent = req.parent === undefined ? undefined : CID.asCID(req.parent) ?? undefined;
+    if (req.parent !== undefined && !parent) return { error: "infer: parent is not a CID" };
+    let prev = parent;
+    const blocks: Array<{ node: TurnNode; cid: CID; bytes: Uint8Array }> = [];
+    for (const [i, node] of req.nodes.entries()) {
+      if (!node || typeof node !== "object" || node.kind !== "turn" || typeof node.role !== "string") return { error: `infer: node ${i} is not a turn` };
+      const up = node.parent === undefined ? undefined : CID.asCID(node.parent) ?? undefined;
+      if (!(up === prev || (up && prev && up.equals(prev)))) return { error: `infer: node ${i} does not extend ${i === 0 ? "the named parent" : `node ${i - 1}`}` };
+      const b = encode(node);
+      blocks.push({ node, ...b });
+      prev = b.cid;
+    }
+    for (const b of blocks) this.graph.put(sender, b.cid, b.node, b.bytes);
+    // The path to the newest node, root first. What is not held is missing.
+    const path: TurnNode[] = [];
+    for (let c: CID | undefined = prev; c; ) {
+      const n = this.graph.get(sender, c);
+      if (!n) return { missing: [c] };
+      path.push(n);
+      c = n.parent === undefined ? undefined : CID.asCID(n.parent) ?? undefined;
+    }
+    path.reverse();
+    return this.complete({ model: req.model, thinking: req.thinking, tools: req.tools, messages: chat(path) });
+  }
+
+  /** Call the provider the model names ("<provider>/<model>") with the whole chat. */
+  async complete(req: EngineRequest): Promise<Completion> {
     if (typeof req?.model !== "string" || !Array.isArray(req.messages)) return { error: "infer wants {model, messages, tools?, thinking?}" };
+    if (req.thinking !== undefined && !THINKING.includes(req.thinking)) return { error: `thinking must be one of ${THINKING.join(", ")}, not ${JSON.stringify(req.thinking)}` };
     const slash = req.model.indexOf("/");
     const [name, model] = slash > 0 ? [req.model.slice(0, slash), req.model.slice(slash + 1)] : [req.model, req.model];
     const p = this.o.providers[name];
@@ -150,6 +294,31 @@ export class InferPeer {
     });
     await this.o.box.send({ recipient: to.sender.identityKey, box: "completions", body: out });
   }
+}
+
+/**
+ * A path of turns as OpenAI chat messages: system, user, assistant and tool
+ * turns in order; the others (errors) are the loop's records, not the model's.
+ */
+export function chat(path: TurnNode[]): unknown[] {
+  const out: unknown[] = [];
+  for (const t of path) {
+    switch (t.role) {
+      case "system": out.push({ role: "system", content: t.content ?? "" }); break;
+      case "user": out.push({ role: "user", content: t.text ?? "" }); break;
+      case "assistant": out.push(clean({ role: "assistant", content: t.content ?? "", tool_calls: t.tool_calls?.length ? t.tool_calls : undefined })); break;
+      case "tool": out.push({ role: "tool", tool_call_id: t.call ?? "", content: toolText(t) }); break;
+    }
+  }
+  return out;
+}
+
+/** A tool turn as the model reads it: a message's answer (or what went wrong), or a shell's exit, stdout and stderr. */
+function toolText(t: TurnNode): string {
+  if (t.exitCode === undefined) return t.error ? `error: ${t.error}` : t.text ?? "";
+  let s = `exit ${t.exitCode}\n${t.stdout ?? ""}`;
+  if (t.stderr) s += `\n[stderr]\n${t.stderr}`;
+  return s;
 }
 
 /** Drop undefined and null members (dag-cbor has no undefined; the loop wants absent, not null). */
