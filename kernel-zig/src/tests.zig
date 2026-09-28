@@ -18,6 +18,7 @@ test {
     _ = @import("index_test.zig");
     _ = @import("objects.zig");
     _ = @import("fuel_test.zig");
+    _ = @import("component_test.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {
