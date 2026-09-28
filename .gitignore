@@ -5,4 +5,6 @@ node_modules/
 .build/
 wallet-zig/.zig-cache/
 wallet-zig/zig-out/
+programs/messagebox/.zig-cache/
+programs/messagebox/zig-out/
 .claude/worktrees/

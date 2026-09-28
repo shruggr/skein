@@ -75,6 +75,30 @@ test "anyone signatures and envelopes verify as in TS" {
     }
 }
 
+test "format 2 (issue #33): §7.3 envelopes verify over the dag-cbor preimage; genesis keys are bytes; entries unsigned" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try std.fs.cwd().readFileAlloc(a, "test/format2.json", 1 << 20);
+    const f = (try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{})).object;
+    const envelope = @import("envelope.zig");
+    const logm = @import("log.zig");
+    const e = f.get("envelope").?.object;
+    const signed = try cbor.decode(a, try unhex(a, e.get("signed").?.string));
+    const full = try cbor.decode(a, try unhex(a, e.get("full").?.string));
+    try std.testing.expectEqual(envelope.Form.cbor, envelope.formOf(signed).?);
+    try std.testing.expect(envelope.isSigned(signed) and !envelope.isEnvelope(signed) and envelope.isEnvelope(full));
+    try std.testing.expect(envelope.verify(a, signed));
+    try std.testing.expect(envelope.verify(a, full)); // the BRC-78 sender is the signer
+    try std.testing.expect(envelope.hashMatches(signed, try unhex(a, e.get("body").?.string)));
+    try std.testing.expect(!envelope.hashMatches(signed, "other"));
+    try std.testing.expect(!envelope.verify(a, try cbor.decode(a, try unhex(a, f.get("tampered").?.string))));
+    try std.testing.expect(logm.isGenesis(try cbor.decode(a, try unhex(a, f.get("genesis").?.string))));
+    try std.testing.expect(!logm.isGenesis(try cbor.decode(a, try unhex(a, f.get("genesisWithHost").?.string))));
+    try std.testing.expect(logm.isLogEntry(try cbor.decode(a, try unhex(a, f.get("entry").?.string))));
+    try std.testing.expect(!logm.isLogEntry(try cbor.decode(a, try unhex(a, f.get("entrySigned").?.string))));
+}
+
 test "entropy stream and the fixed CIDs" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -91,7 +115,14 @@ test "entropy stream and the fixed CIDs" {
     const c = f.object.get("cids").?.object;
     try std.testing.expectEqualStrings(c.get("shell").?.string, try cidm.format(a, try programs.programCid(a, "shell")));
     var it = c.get("programs").?.object.iterator();
-    while (it.next()) |kv| try std.testing.expectEqualStrings(kv.value_ptr.string, try cidm.format(a, try programs.programCid(a, kv.key_ptr.*)));
+    // The handler programs are format-2 builds here (issue #33); the fixtures'
+    // are the frozen TS runtime's (wasm/v1): only the shell's record compares.
+    while (it.next()) |kv| {
+        const v1 = for ([_][]const u8{ "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop" }) |h| {
+            if (std.mem.eql(u8, h, kv.key_ptr.*)) break true;
+        } else false;
+        if (!v1) try std.testing.expectEqualStrings(kv.value_ptr.string, try cidm.format(a, try programs.programCid(a, kv.key_ptr.*)));
+    }
     try std.testing.expectEqualStrings(c.get("headMain").?.string, try cidm.format(a, try @import("heads.zig").headOrigin(a, "main")));
     try std.testing.expectEqualStrings(c.get("subscriptions").?.string, try cidm.format(a, try @import("subscriptions.zig").origin(a)));
     try std.testing.expectEqualStrings(c.get("emptyTree").?.string, try cidm.format(a, (try @import("tree.zig").hashTree(a, &.{})).cid));

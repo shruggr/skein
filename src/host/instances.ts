@@ -19,9 +19,21 @@ CREATE TABLE IF NOT EXISTS instances (
   knows             TEXT,                             -- JSON array of the handles this agent knows (its ROSTER.md); ["*"]: everyone; NULL: nobody
   status            TEXT NOT NULL DEFAULT 'enabled' CHECK (status IN ('enabled', 'disabled')),
   created_at        TEXT NOT NULL
+);
+-- Mailboxes this host keeps for identities that are not instances (#33): the
+-- owner's wallet, the inference peer, … Each is kept by one instance (its
+-- messagebox records live in that instance's store).
+CREATE TABLE IF NOT EXISTS mailboxes (
+  identity          TEXT PRIMARY KEY,                 -- hex identity key
+  handle            TEXT NOT NULL,                    -- its handle here (POST /account/register {username})
+  domain            TEXT NOT NULL DEFAULT 'localhost',
+  instance          TEXT NOT NULL,                    -- the instance (handle) that keeps its mail
+  created_at        TEXT NOT NULL
 );`;
 
 export type Status = "enabled" | "disabled";
+
+export interface Mailbox { identity: string; handle: string; domain: string; instance: string; created_at: string }
 
 export interface InstanceRow {
   handle: string;
@@ -96,7 +108,8 @@ export class HostDb {
   /** The recorded identity for handle@domain (the resolver's first answer), if any. */
   identityOf(handle: string, domain: string): string | undefined {
     const r = this.db.prepare("SELECT identity FROM instances WHERE handle = ? AND domain = ?").get(handle, domain) as { identity: string | null } | undefined;
-    return r?.identity ?? undefined;
+    if (r?.identity) return r.identity;
+    try { return this.mailboxByHandle(handle, domain)?.identity; } catch { return undefined; } // a read-only file from before mailboxes
   }
 
   list(status?: Status): InstanceRow[] {
@@ -117,6 +130,33 @@ export class HostDb {
   /** Remove the row (not its store or wallet); false if there was none. */
   remove(handle: string): boolean {
     return Number(this.db.prepare("DELETE FROM instances WHERE handle = ?").run(handle).changes) > 0;
+  }
+
+  /** A mailbox for a non-instance identity, kept by `instance`; replaces the handle of an existing one. */
+  addMailbox(identity: string, handle: string, domain: string, instance: string, now = new Date()): Mailbox {
+    this.db.prepare("INSERT INTO mailboxes (identity, handle, domain, instance, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(identity) DO UPDATE SET handle = excluded.handle, domain = excluded.domain")
+      .run(identity, handle, domain, instance, now.toISOString());
+    return this.mailbox(identity)!;
+  }
+
+  mailbox(identity: string): Mailbox | undefined {
+    const r = this.db.prepare("SELECT * FROM mailboxes WHERE identity = ?").get(identity);
+    return r ? { ...r } as unknown as Mailbox : undefined;
+  }
+
+  mailboxByHandle(handle: string, domain: string): Mailbox | undefined {
+    const r = this.db.prepare("SELECT * FROM mailboxes WHERE handle = ? AND domain = ?").get(handle, domain);
+    return r ? { ...r } as unknown as Mailbox : undefined;
+  }
+
+  mailboxes(): Mailbox[] {
+    return this.db.prepare("SELECT * FROM mailboxes ORDER BY created_at").all().map((r) => ({ ...r }) as unknown as Mailbox);
+  }
+
+  /** The enabled row whose identity is `identity`. */
+  byIdentity(identity: string): InstanceRow | undefined {
+    const r = this.db.prepare("SELECT * FROM instances WHERE identity = ? AND status = 'enabled'").get(identity);
+    return r ? { ...r } as unknown as InstanceRow : undefined;
   }
 
   close(): void { this.db.close(); }

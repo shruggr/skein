@@ -109,14 +109,23 @@ export async function roster(rows: InstanceRow[], open: (row: InstanceRow) => Pr
 export interface HostRow {
   handle: string; domain: string; identity: string; status: "live" | "idle" | "not run";
   store: string; tree: string; pid?: number; restarts: number; explorer?: string;
+  /** The router's waker: the instance's earliest sleeper deadline (ms), if it has one. */
+  wake?: number;
+}
+
+/** The router's side of the page (#33): where the messagebox is, and the mailboxes it keeps for other identities. */
+export interface HostInfo {
+  messagebox?: string;
+  router?: string;
+  mailboxes?: Array<{ handle: string; domain: string; identity: string; instance: string }>;
 }
 
 const esc = (x: unknown) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
 /** The host's operator page (#23, "Host explorer"): read-only, one row per enabled instance, a link to each one's explorer. */
-export function hostPage(rows: HostRow[]): string {
+export function hostPage(rows: HostRow[], info: HostInfo = {}): string {
   const body = rows.map((r) => `<tr><td><b>${esc(r.handle)}</b>@${esc(r.domain)}</td><td class="k" title="${esc(r.identity)}">${r.identity ? `${esc(r.identity.slice(0, 16))}…` : "—"}</td>
-<td class="${r.status === "live" ? "ok" : "mut"}">${esc(r.status)}${r.restarts ? ` <span class="mut">(${r.restarts} restart${r.restarts === 1 ? "" : "s"})</span>` : ""}</td><td>${r.pid ?? "—"}</td>
+<td class="${r.status === "live" ? "ok" : "mut"}">${esc(r.status)}${r.restarts ? ` <span class="mut">(${r.restarts} restart${r.restarts === 1 ? "" : "s"})</span>` : ""}${r.wake !== undefined ? ` <span class="mut small" title="the waker hydrates it then">wakes ${esc(new Date(r.wake).toISOString().replace("T", " ").slice(0, 19))}</span>` : ""}</td><td>${r.pid ?? "—"}</td>
 <td class="k">${esc(r.store)}</td><td class="k" title="${esc(r.tree)}">${r.tree ? `…${esc(r.tree.slice(-12))}` : "—"}</td><td>${r.explorer ? `<a href="${esc(r.explorer)}">explore</a>` : "—"}</td></tr>`).join("\n");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>skein host</title>
 <style>:root{--bg:#fbfaf7;--fg:#1d1c1a;--mut:#6b6760;--line:#e3e0d8;--acc:#2f5fd0;--ok:#1f7a3d}
@@ -125,8 +134,11 @@ body{margin:0 auto;max-width:1100px;padding:14px 16px;background:var(--bg);color
 a{color:var(--acc)}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 th{font-size:13px;color:var(--mut);font-weight:600}.k{font-family:ui-monospace,monospace;font-size:13px}.mut{color:var(--mut)}.ok{color:var(--ok)}</style></head>
 <body><h1 style="font-size:19px">skein host <span class="mut" style="font-size:13px">${rows.length} instance${rows.length === 1 ? "" : "s"} · <a href="/roster.json">roster.json</a></span></h1>
+${info.messagebox ? `<p class="mut">messagebox <code>${esc(info.messagebox)}</code>${info.router ? ` · router identity <code title="${esc(info.router)}">${esc(info.router.slice(0, 16))}…</code>` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
 <table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>explorer</th></tr>
-${body}</table></body></html>`;
+${body}</table>
+${info.mailboxes ? `<h2 style="font-size:16px">mailboxes kept here</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>identity</th><th>kept by</th></tr>
+${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.identity)}">${esc(m.identity.slice(0, 16))}…</td><td>${esc(m.instance)}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (POST /account/register)</p>`}` : ""}</body></html>`;
 }
 
 /**

@@ -1,13 +1,15 @@
 # skein
 
 A deterministic WASI machine over a content-addressed graph. Its only inputs
-are an ordered log of host-signed entries — BRC-169 messages (the sender's
-signed metadata and the plaintext) delivered from the host's messagebox,
-wakes for sleepers, and the host's report on each envelope it sent (delivered,
-or failed); its only outputs are envelopes.
-Programs run inside it: handler programs (Go, `wasip1`) per box, and a
+are an ordered log of entries — BRC-169 messages (the sender's signed
+metadata and the plaintext) admitted by the router, which is the host's
+messagebox, mail for the identities an instance keeps a mailbox for, wakes
+for sleepers, and the router's report on each envelope it sent (delivered, or
+failed); its only outputs are envelopes. Entries are unsigned (issue #33):
+messages are signed by their senders, `prev` fixes the order.
+Programs run inside it: handler programs (Go, `wasip1`; Zig) per box, and a
 bash-compatible wasm shell over git-shaped trees. Time and randomness are not
-inputs: the host stamps each log entry with its clock and signs it, and
+inputs: the router stamps each log entry with its clock at admission, and
 programs see that stamp (+1 ns per read) as "now" and a stream keyed by the
 entry's CID as random bytes. Replaying the log reproduces the graph, with no
 wallet.
@@ -29,23 +31,29 @@ src/runtime/     the machine — no disk, network, clock, randomness, messagebox
   shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
   syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
   store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
-src/host/        the providers and the kernel configuration, outside the machine
-  main.ts          `skein-runtime`: store + wallets + runtime, wired to its providers (host.ts startInstance)
-  cli.ts host.ts   `skein-host`: the management database (instances.ts, host.db); host.ts: one instance from a row, the resolver
-  supervisor.ts    `skein-host run`: one `skein-runtime` process per enabled row, restarted, prefixed, stopped; host page, roster, explorers
-  messagebox.ts    message delivery: screen, decrypt, stamp, host-sign and admit; send emits as sealed (no wallet call), retry, admit each one's outcome
-  tick.ts          wakes: the next deadline → one host-signed wake entry
-  entry.ts         the host's clock and entry signing; genesis
-src/envelope.ts  BRC-169 envelopes: sign/seal/open through a wallet (shared with the client); the pure part (canonical form, contentHash, BRC-78 framing, verify) is src/runtime/envelope.ts
+src/host/        the host, outside the machine
+  router.ts        `skein-host run` (#33): the BRC-33 messagebox (auth.ts: BRC-104), hydrate/idle-stop kernels, the waker, delivery and outcomes
+  kernel.ts        one `skein-kernel serve` process: frames on stdin/stdout; answers its wallet (the oracle) and resolve calls
+  oracle.ts        the master secret; per-instance ProtoWallets (BRC-42 child, key ID = the handle)
+  genesis.ts       format 2: the genesis (keys as bytes) and unsigned admissions
+  vmmail.ts mail.ts  mail for hosted identities, kept by an instance's messagebox program
+  brc231.ts        a BRC-231 (dag-cbor) messagebox client
+  cli.ts           `skein-host`: the management database (instances.ts, host.db), the router, deploy, roster
+  host.ts          the resolver (rows, BRC-169, paymail); startInstance (the frozen TS runtime)
+  supervisor.ts    the explorers' supervisor
+  messagebox.ts tick.ts entry.ts main.ts   the frozen TS runtime's providers (format 1: host-signed entries)
+kernel-zig/      the kernel (Zig): store, log, scheduler, WASI, programs through wasmtime; `skein-kernel serve|replay|shell|dump|fuel`
+src/envelope.ts  BRC-169 §7.2 (JSON) envelopes: sign/seal/open through a wallet (shared with the client); the pure part (canonical form, contentHash, BRC-78 framing, verify) is src/runtime/envelope.ts
+src/envelope-cbor.ts  BRC-169 §7.3 (dag-cbor) envelopes: seal, verify, open; either form from a BRC-33 body
 programs/        the handler programs (Go, wasip1): skein (the imports), envelope (sealing through the wallet import), wallet, the handlers
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        handler programs in Go: run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop); skein/ (the ABI)
+programs/        handler programs in Go: run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop); skein/ (the ABI); messagebox/ (Zig)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
-wasm/            the committed modules; their CIDs are pinned in src/runtime/programs.ts
+wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (and src/runtime/programs.ts, whose handler builds are wasm/v1/)
 ```
 
 `src/runtime/isolation.test.ts` fails if anything under `src/runtime` imports
@@ -55,78 +63,78 @@ anything outside `src/runtime`, or uses `fetch`, `Date.now`, `Math.random`,
 
 ## Running it
 
-Needs Node 26 (JSPI, `node:sqlite`, type stripping) and the dev host
-(`scripts/host/README.md`: the instance, owner, infer and host wallets, the messagebox at
-http://127.0.0.1:8100/messagebox, grants).
+Needs Node 26 (`node:sqlite`, type stripping), Zig 0.15.2 (`mise`) for the
+kernel, and the dev host (`scripts/host/README.md`).
+
+The instances run on the Zig kernel (`kernel-zig/`) behind the **router**
+(issue #33): `skein-host run` is the host. It serves the BRC-33 messagebox
+(BRC-104 mutual auth, the same API and URL as the `1sat serve` messagebox
+it replaces: http://127.0.0.1:8100/messagebox), looks up which instance
+serves a recipient (host.db), starts that instance's kernel on demand
+(`skein-kernel serve` over its store, frames on stdin/stdout) and stops it
+when idle, admits the message as a log entry, and keeps each instance's
+earliest sleeper deadline to wake it. It is also every instance's signing
+oracle: a ProtoWallet over a key derived from one master secret
+(`~/.skein/master.key`; `src/host/oracle.ts`). No wallet-api per instance, no
+host key: log entries are unsigned (format 2).
 
 ```
 npm install
-scripts/host/up.sh                          # wallets, messagebox, grants, accounts (idempotent)
-bin/skein-runtime                           # the instance: installs modules, writes a genesis (the owner's boxes, chat from anyone) into an empty store
+(cd kernel-zig && mise exec -- zig build --release)
+bin/skein-host add martha                   # a row: identity derived from the master secret, store ~/.skein/instances/martha/runtime.db
+scripts/host/up.sh                          # the client wallets (owner 3322, infer 3323), their grants, the router on :8100, accounts
+bin/skein-host deploy martha <dir>          # SOUL.md, IDENTITY.md, skills/ into it through `objects`, as the owner
 bin/skein import ~/Work/easel               # the client: tree objects into `objects`; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'   # no --tree: the `main` head (the first import sets it)
-bin/skein head main <cid>                   # move `main` to a tree the instance holds
-bin/skein subscribe add --sender <key> chat loop   # route that sender's `chat` to the loop (remove: undo); a handler by name or program CID
 bin/skein inbox --wait                      # the result envelope, opened by the owner
 bin/skein-infer                             # the inference peer (its own wallet on 3323; providers in ~/.skein/infer.json)
 bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers with a `chat` reply in David's `chat` box
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
-bin/skein-dev replay [--db <path>]          re-derive the store from the log alone, no wallet, and compare
 npm test
 ```
 
-`bin/skein-runtime` fills the environment from `~/.skein`: `SKEIN_OWNER`
-(`owner.identity`), `SKEIN_MESSAGEBOX` (`messagebox.url`).
-Also: `SKEIN_DB` (`~/.skein/runtime.db`), `SKEIN_HANDLE` (`skein@localhost`),
-`SKEIN_OWNER_HANDLE` (`david@localhost`: a new genesis's `names`), `SKEIN_WALLET_URL`
-(`http://127.0.0.1:3321`), `SKEIN_HOST_WALLET_URL` (`http://127.0.0.1:3324`),
-`SKEIN_HOST_DB` (`~/.skein/host.db` if it exists: handles its rows answer),
-`SKEIN_POLL_MS` (1000), `SKEIN_SEND_ATTEMPTS` (8) and `SKEIN_SEND_BACKOFF_MS`
-(1000: retrying a send that fails transiently, before its outcome is `failed`),
-`SKEIN_WALLET=ephemeral` (throwaway keys). The full list is at the top of
-`src/host/main.ts`.
+`bin/skein-runtime` (`src/host/main.ts`) is the frozen TypeScript runtime as a
+standalone process (format 1: host-signed entries, its own handler builds in
+`wasm/v1/`); nothing in the dev stack runs it any more.
 
-### Many instances: `skein-host`
+### The host: `skein-host`
 
-`skein-host run` supervises every enabled row of its management database,
-`$SKEIN_HOME/host.db` (#23): one `skein-runtime` process per row, given the
-row in its environment, restarted if it exits, stopped with the supervisor.
-Each has its own store, runtime, wallet, messagebox session and tick; host.db
-(read-only for them), the host wallet (3324), which signs every entry, and the
-messagebox are all they share. A new instance's genesis is the owner's boxes
-plus `chat` from anyone (an open subscription) — only the seed of its
-subscriptions chain; `skein-host subscribe` changes it later — and the host
-resolves `handle@domain` for its programs: host.db, then BRC-169 (the
-domain's manifest and resolve endpoint, the handle certificate checked), then
-the paymail PKI last (`docs/MESSAGES.md`, "Resolution").
+`$SKEIN_HOME/host.db` (#23) is the identity → instance map: one row per
+instance (handle, domain, identity, store, deployed tree), and the
+**mailboxes** it keeps for other identities (the owner's wallet, the
+inference peer, …: `POST /account/register`, as the front end's Register
+does), each kept by an instance. `skein-host run` is the router
+(`src/host/router.ts`):
+
+- `sendMessage` to an instance: the envelope is screened (signed by the
+  authenticated sender, addressed to this instance, new), decrypted through
+  its oracle and admitted; to a kept mailbox: admitted into the keeping
+  instance as a `mail` entry, which its messagebox program (`programs/messagebox`,
+  Zig) keeps in log order; `listMessages` reads those records, `acknowledgeMessage`
+  admits an `ack`. An unknown recipient: `403 ERR_ACCOUNT_REQUIRED`.
+- an instance's emits are delivered the same way in process; each one's
+  outcome goes back into it as an `outcome` entry.
+- JSON requests get JSON (the standard `@bsv/message-box-client`: the front
+  end, the owner's client); `application/cbor` requests get BRC-231 dag-cbor.
+- `GET /bsvalias/id/<handle>@<domain>`: the paymail PKI for rows and
+  mailboxes (the resolvers' and the front end's lookup).
+- the host page and roster on :4600, a read-only explorer per row on :4610+.
+
+A new instance's genesis (written by the router at its first hydration) is
+the owner's boxes, `chat` from anyone, and `:mail` → messagebox.
 
 ```
-scripts/host/up.sh                          # as above: the messagebox, the host and owner wallets
-scripts/host/instance.sh martha             # a wallet-api on the next free port from 3401, grants, account, host.db row (idempotent)
-scripts/host/instance.sh kurt
-bin/skein-host list                         # handle, status, identity, wallet, store, tree
-bin/skein-host run [--only martha,kurt]     # a process per enabled row; lines prefixed [handle]; host page :4600/, roster /roster.json, explorers :4610+
-bin/skein-host deploy martha <dir>          # SOUL.md, IDENTITY.md, skills/ into it through `objects`, as the owner; sets/moves main
+bin/skein-host list                         # handle, status, identity, wallet (legacy), store, tree
+bin/skein-host identity [handle]            # the router's BRC-104 identity, or an instance's
+bin/skein-host mailboxes                    # handle, identity, keeping instance
+bin/skein-host run                          # the router; SKEIN_ROUTER_PORT, SKEIN_IDLE_MS, SKEIN_MAILBOX_HOST, SKEIN_MASTER_KEY
 bin/skein-host subscribe martha add --sender <key> run run-handler   # a `subscribe` message as the owner; no new genesis
-bin/skein-host disable kurt                 # also: add <handle> [--wallet-url --store --tree --domain --identity], enable, remove
+bin/skein-host disable kurt                 # also: add <handle> [--domain --derive --store --tree], enable, remove
 ```
-
-`scripts/host/README.md`, "Instances", has the details.
-
-The instance wallet (`1sat serve wallet-api`, origin `skein`) needs, besides
-the transport grants in `scripts/host/grants.sh`:
-
-```
-1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone  # outbound envelopes, signed by the program in the step
-1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty <owner>      # inbound content (the provider) and outbound (the program)
-```
-
-The host wallet (127.0.0.1:3324, origin `skein-host`, `SKEIN_HOST_WALLET_URL`)
-signs every log entry: `"identity key retrieval"` and
-`"skein log" --level 2 --counterparty anyone`.
 
 Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.sh`
-(the build is reproducible; the pins are the modules' raw CIDs).
+(the build is reproducible; the pins are the modules' raw CIDs, in
+`kernel-zig/src/programs.zig`).
 
 ## Records
 

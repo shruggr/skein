@@ -1,29 +1,51 @@
 # Host setup on David's machine
 
-What runs where so the client (`bin/skein`) can reach an instance through a
-messagebox (docs/MESSAGES.md). Everything here is dev-only: the keys are
-throwaway, generated on this machine, and hold no funds.
+What runs where so the clients (`bin/skein`, the bopen-skein front end, the
+inference peer) reach the instances (docs/ARCH.md, "The router"). Everything
+here is dev-only: the keys are throwaway, generated on this machine, and hold
+no funds.
 
 ```
-scripts/host/up.sh      # all of it, idempotent: wallets, messagebox, grants, accounts
+bin/skein-host add martha                   # a row: identity derived from ~/.skein/master.key (made on first use), no wallet process
+scripts/host/up.sh                          # the client wallets, their grants, the router on :8100, accounts (idempotent)
 ```
 
-| process | address | HOME | key | log |
-|---|---|---|---|---|
-| instance wallet `1sat serve wallet-api` | 127.0.0.1:3321 | `$HOME` (`~/.1sat/cli`) | `~/.skein/dev-wallet.env` | `~/.skein/logs/wallet-instance.log` |
-| owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | `~/.skein/owner-home` | `~/.skein/owner-wallet.env` | `~/.skein/logs/wallet-owner.log` |
-| infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | `~/.skein/infer-home` | `~/.skein/infer-wallet.env` | `~/.skein/logs/wallet-infer.log` |
-| host wallet `1sat serve wallet-api` (signs log entries) | 127.0.0.1:3324 | `~/.skein/host-wallet-home` | `~/.skein/host-wallet.env` | `~/.skein/logs/wallet-host.log` |
-| messagebox host `1sat serve` | 127.0.0.1:8100, messagebox at `/messagebox` | `~/.skein/host-home` | `~/.skein/host.env` | `~/.skein/logs/messagebox.log` |
+| process | address | what | log |
+|---|---|---|---|
+| router `bin/skein-host run` | 127.0.0.1:8100 (`/messagebox`), host page 127.0.0.1:4600, explorers 4610+ | the BRC-33 messagebox (BRC-104 auth), each instance's kernel started on demand (`skein-kernel serve`, stopped when idle), the waker, the oracle (instance keys from `~/.skein/master.key`) | `~/.skein/logs/host.log` |
+| owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
+| infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
+| inference peer `bin/skein-infer` | — | polls its `infer` box on the router, answers `completions` (either envelope form, in kind) | as run |
 
-Files the scripts write for the client and the runtime:
+Gone since the router (#33), scripts kept and marked legacy: the `1sat serve`
+messagebox (`messagebox.sh`, `messagebox-migrate.mjs`), the instance wallet
+3321 and the host wallet 3324 (`wallets.sh` with no arguments starts them all),
+one wallet-api per instance on 3401+ (`instance.sh`), their grants
+(`grants-legacy.sh`). Instances need no grants: the router's oracle signs
+for them.
 
-- `~/.skein/instance.identity`, `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity`, `~/.skein/host-wallet.identity`, `~/.skein/host.identity` (the messagebox's) — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once, kept after; `owner-dev.identity` is always the owner wallet's (3322) own key, so `up.sh` can tell whether they're the same wallet.
-- `~/.skein/infer.json` — the inference peer's providers, `{"ripper": {"baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm"}}` (written if absent)
-- `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`
-- `~/.skein/*.env` — `PRIVATE_KEY_WIF=…`, mode 0600, created by `genkey.ts` only if absent. Never printed, never committed.
+Files:
 
-## The messagebox
+- `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key and the router's BRC-104 key derive from it; losing it loses the instances' identities.
+- `~/.skein/router.identity` — the router's BRC-104 identity (grants.sh writes it; the clients' "auth message signature" counterparty).
+- `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322).
+- `~/.skein/infer.json` — the inference peer's providers (written if absent).
+- `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`.
+- `~/.skein/host.db` — the instances (identity → store) and the mailboxes kept for other identities (`skein-host list`, `skein-host mailboxes`).
+
+Registering (`POST /account/register {username}` over BRC-104, what `up.sh`
+does for david and infer through `register.ts`, and the front end's Register)
+gives an identity a mailbox kept by an instance (`SKEIN_MAILBOX_HOST`, default
+the first enabled row): its mail is that instance's log. The router answers
+`403 ERR_ACCOUNT_REQUIRED` for a recipient that is neither an instance nor
+registered, as `1sat serve` did.
+
+The sections below describe the pre-router layout (the `1sat serve`
+messagebox, a wallet-api per instance, host-signed entries) where they talk
+about those processes; `skein-host deploy`, `subscribe` and the roster work
+the same against the router.
+
+## The messagebox (legacy: `1sat serve`)
 
 `1sat serve` (1sat CLI 0.0.121) is the unified host: wallet storage RPC,
 accounts, paymail and `@bopen-io/messagebox-server` behind one BRC-103/104

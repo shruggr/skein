@@ -26,8 +26,9 @@ to the delivery provider.
 
 Time and randomness are different: they are not another party's statement
 inside a message. When the host admits an input it reads its clock and writes
-the time into that log entry, which it signs as its own word ("this arrived
-at *t*"; `MESSAGES.md`).
+the time into that log entry ("this arrived at *t*"; `MESSAGES.md`; since
+#33 the entry is not signed: the stamp is the environment's word, and the
+sequence is the order).
 Inside the machine, "now" is the entry's time plus the fuel the step has
 burnt so far at one nanosecond per unit, and never the same value twice
 (so time always moves forward and never backwards; issue #38, Zig kernel —
@@ -97,30 +98,70 @@ Out: a thread's result names a tree CID. A peer that wants bytes on a disk
 fetches the objects and materializes them, or pushes them as a git commit
 through gib. The runtime never writes to a disk.
 
+## The router (issue #33)
+
+The host is a **router**, and the instance is the messagebox host. The kernel's
+surface is its table: three things leave the VM — `wallet` (the signing
+oracle), `emit` (these bytes to that identity), `resolve` (handle → identity
+key) — and one call comes in: **admit an entry and run the step**. A
+`sendMessage` from the web, a wake, an outcome, a mailbox change and a deploy
+are all that one call.
+
+- **Transport and auth** end at the router (`src/host/router.ts`, `auth.ts`):
+  the BRC-33 API of the TypeScript messagebox (`/sendMessage`,
+  `/listMessages`, `/acknowledgeMessage` under BRC-103/104 mutual auth, plus
+  `/account/register` and the paymail PKI), JSON or BRC-231 dag-cbor, so the
+  stock `@bsv/message-box-client` works against it unchanged. The router's
+  BRC-104 identity is its own (one URL, one handshake for every instance), a
+  child of the master secret.
+- **Routing**: host.db maps an identity to the instance that serves it — its
+  own identity, or a mailbox it keeps for another identity (the owner's
+  wallet, the inference peer, a roster). A message to an instance is screened
+  (signed by the authenticated sender, addressed to it, new), decrypted
+  through its oracle and admitted as an envelope entry; mail for a hosted
+  identity is admitted into the keeping instance as a `mail` entry, and the
+  **messagebox program** (`programs/messagebox`, Zig, run by the `:mail`
+  subscription) keeps it under the head `mailbox`, in log order;
+  `listMessages` is a read of those records, `acknowledgeMessage` an `ack`
+  entry. Down means down; nothing waits for a receipt.
+- **Hydration**: an instance is a kernel the router can load
+  (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
+  length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
+  demand and stops it when it has been idle `SKEIN_IDLE_MS`; recovery after an
+  environment failure happens at hydrate time from the log (a thread whose
+  step was cut off — the router gone mid-call — runs again; a deterministic
+  error is recorded and never retried).
+- **The waker** is the router's timer: the kernel reports its sleepers; the
+  router keeps each instance's earliest deadline, and when it comes it
+  hydrates the instance and admits the wake.
+- **The oracle** (#18): one master secret (`$SKEIN_HOME/master.key`), a
+  per-instance root key derived from it with BRC-42/43 (`[2, "skein
+  instance"]`, key ID = the handle, self), a ProtoWallet each
+  (`src/host/oracle.ts`) answering the kernel's `wallet` import in process.
+  Provisioning an instance is picking a handle (`skein-host add`).
+- **No host key** (#9): entries are unsigned — the sender signed the message,
+  `prev` fixes its place, the stamp is the environment's word. Time (#10): the
+  router stamps each entry at admission; the sequence is the order.
+- **Format 2** (#21): identity keys, hashes and signatures are byte strings in
+  every record; envelopes are kept in the encoding they were made in — §7.2
+  JSON from JSON clients (the front end), §7.3 dag-cbor from instances and
+  BRC-231 clients — and an instance answers a party in the form it wrote in.
+  `kernel-zig/src/log.zig` has the shapes.
+
 ## Processes on David's machines, today
 
-- `skein-runtime` — the runtime: one process, one instance, one store file,
-  with its providers (the messagebox delivery and its outcomes, the tick, the
-  host's resolver) wired by `src/host/main.ts`.
-- `skein-host run` — the host, a **supervisor** (#23, "a process per
-  instance"; `src/host/supervisor.ts`): for each enabled row of its
-  management database (`host.db`) it spawns one `skein-runtime` with that row
-  in its environment (`SKEIN_DB`, `SKEIN_HANDLE`, `SKEIN_WALLET_URL`,
-  `SKEIN_IDENTITY`, `SKEIN_HOST_DB`, …), restarts a child that exits (with a
-  backoff), prefixes each child's lines with `[handle]`, and stops them all on
-  SIGINT/SIGTERM (a child whose supervisor dies stops too: its IPC channel
-  closes). Each instance is its own OS process; nothing of any instance runs
-  in the supervisor. What they share is the host's: host.db (read-only for
-  the children's resolvers), the host wallet, which signs every entry, and the
-  messagebox. The supervisor also serves an operator page and the roster
-  (`:4600`, `/` and `/roster.json`) and one read-only `skein-explore` per
-  ready row.
-- `1sat serve wallet-api` — the wallets: the instance's, and the host's,
-  which signs every log entry.
-- a **client** — David's terminal or easel: scans, prompts, renders, signs as
-  David.
-- **peers** — inference (ripper), a machine runner for commands that cannot
-  run inside, each with its own derived identity.
+- `skein-host run` — the router: the messagebox on `127.0.0.1:8100`
+  (`/messagebox`), a `skein-kernel serve` child per instance while it has
+  work, the host page and roster on `:4600`, one read-only `skein-explore` per
+  instance on `:4610+`. Log in `~/.skein/logs/host.log` when `up.sh` starts it.
+- `1sat serve wallet-api` — the clients' wallets only: the dev owner (3322)
+  and the inference peer (3323). No wallet per instance, no host wallet, no
+  `1sat serve` messagebox (their scripts are kept, marked legacy).
+- a **client** — David's terminal (`bin/skein`) or the bopen-skein front end
+  (Yours wallet): scans, prompts, renders, signs as David, over the standard
+  messagebox client.
+- **peers** — inference (`bin/skein-infer`, ripper behind it), each with its
+  own identity and a mailbox kept here.
 
 The v1 daemon glued a runtime and a local client into one process and let
 the "skein" CLI read the disk. That is the thing this note corrects.

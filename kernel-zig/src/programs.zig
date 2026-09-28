@@ -12,13 +12,15 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
-    .{ .name = "run-handler", .cid = "bafkreiawt6fpfgcnjokta75shlzu7ej3o3jzyon2bqhdu3q5gl7gywezjm" },
-    .{ .name = "objects-handler", .cid = "bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4" },
-    .{ .name = "head-handler", .cid = "bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q" },
-    .{ .name = "subscribe-handler", .cid = "bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e" },
-    .{ .name = "loop", .cid = "bafkreihi2lx7lj54qaw4lopithify5x5gm7tcdomfig3bjijoqzj5sj2ty" },
+    .{ .name = "run-handler", .cid = "bafkreif57vlek2v7lbfa5y43txx7svtlseanithrjxjldqveknwvt3vfwm" },
+    .{ .name = "objects-handler", .cid = "bafkreiauysb5a3aj7ucs3eqeq27qgu5xo6vcw2olx5lhbbr54xy5qalgm4" },
+    .{ .name = "head-handler", .cid = "bafkreiftxmnqsysrb4cfz5me7suztijkx5deovtaquohi2kzledivjq2ua" },
+    .{ .name = "subscribe-handler", .cid = "bafkreibz2k42tzmitpxy5xqzakko6xuxigcp3x6gcg4dt64mqpztnnazia" },
+    .{ .name = "loop", .cid = "bafkreiabv7a5lwimtdlt3bj4ac7il27xdurdil2lgbngavvotpfb3m3doq" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreidmvqntqpjg2755dp5bcp5lyxzhq6yitakseobllznmobdgi5h5jy" },
+    // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
+    .{ .name = "messagebox", .cid = "bafkreigslxz6zej4d4mv6skofj2dc2qzaqc6fhsmezi3xjqw6qcj7parwq" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -94,7 +96,17 @@ const handler_inputs = [_]cbor.Entry{
     .{ .key = "sender", .value = .{ .string = "identity" } },
 };
 
-const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8 };
+const mail_inputs = [_]cbor.Entry{
+    .{ .key = "op", .value = .{ .string = "string" } },
+    .{ .key = "recipient", .value = .{ .string = "identity" } },
+    .{ .key = "box", .value = .{ .string = "string?" } },
+    .{ .key = "sender", .value = .{ .string = "identity?" } },
+    .{ .key = "messageId", .value = .{ .string = "string?" } },
+    .{ .key = "body", .value = .{ .string = "bytes?" } },
+    .{ .key = "messageIds", .value = .{ .string = "array?" } },
+};
+
+const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
 const handlers = [_]Handler{
     .{ .name = "run-handler", .services = &.{}, .description = "The `run` box: read the body {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), run the shell over it, reply in `results`." },
@@ -102,10 +114,11 @@ const handlers = [_]Handler{
     .{ .name = "head-handler", .services = &.{}, .description = "The `head` box: read the body {name, tree}, advance the named head to the tree." },
     .{ .name = "subscribe-handler", .services = &.{}, .description = "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store)." },
     .{ .name = "loop", .services = &.{ "infer", "outcomes" }, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs." },
+    .{ .name = "messagebox", .services = &.{}, .inputs = &mail_inputs, .description = "The reserved box `:mail`: the BRC-33 messagebox's records for the identities this instance keeps mail for — {op: put, recipient, box, sender, messageId, body} keeps a message, {op: ack, recipient, messageIds} deletes; state is the head `mailbox`." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop" };
+pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
@@ -149,7 +162,7 @@ pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
         var code = cbor.MapBuilder.init(alloc);
         try code.put("wasm", cbor.cidv(try moduleCid(alloc, name)));
         try m.put("code", code.value());
-        try m.put("inputs", .{ .map = &handler_inputs });
+        try m.put("inputs", .{ .map = h.inputs });
         const sv = try alloc.alloc(Value, h.services.len);
         for (h.services, 0..) |s, i| sv[i] = cbor.string(s);
         try m.put("services", .{ .array = sv });

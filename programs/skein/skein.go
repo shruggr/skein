@@ -13,6 +13,7 @@ package skein
 
 import (
 	"crypto/sha1"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"unsafe"
@@ -158,7 +159,7 @@ type Answer struct {
 	Envelope CID    `cbor:"envelope"`
 	Body     CID    `cbor:"body"`
 	Box      string `cbor:"box"`
-	Sender   string `cbor:"sender"`
+	Sender   Key    `cbor:"sender"`
 	ReplyTo  CID    `cbor:"replyTo"`
 }
 
@@ -168,7 +169,7 @@ type Answer struct {
 type DeliveryFailed struct {
 	Emit     CID    `cbor:"emit"`
 	Envelope CID    `cbor:"envelope"`
-	To       string `cbor:"to"`
+	To       Key    `cbor:"to"`
 	Box      string `cbor:"box"`
 	Reason   string `cbor:"reason"`
 }
@@ -188,9 +189,63 @@ type Step struct {
 	Failed   *DeliveryFailed   `cbor:"deliveryFailed,omitempty"`
 	At       int64             `cbor:"at"`              // the entry's stamp, ms since the epoch: an envelope's `created`
 	Self     Name              `cbor:"self"`            // the instance's handle and domain (the genesis's)
-	Peers    map[string]string `cbor:"peers,omitempty"` // genesis peers by role (e.g. "infer")
-	Defaults map[string]string `cbor:"defaults,omitempty"`
-	Names    map[string]Name   `cbor:"names,omitempty"` // genesis names: handles for identities (the owner, peers) by key // genesis defaults (e.g. "model")
+	Peers    map[string]Key    `cbor:"peers,omitempty"`    // genesis peers by role (e.g. "infer")
+	Defaults map[string]string `cbor:"defaults,omitempty"` // genesis defaults (e.g. "model")
+	Names    []KeyName         `cbor:"names,omitempty"`    // genesis names: handles for identities (the owner, peers)
+}
+
+// KeyName is a genesis `names` entry: the handle an identity goes by.
+type KeyName struct {
+	IdentityKey Key    `cbor:"identityKey"`
+	Handle      string `cbor:"handle"`
+	Domain      string `cbor:"domain"`
+}
+
+// NameOf is the genesis's name for the identity key `hex`, if it has one.
+func (s *Step) NameOf(hex string) (Name, bool) {
+	for _, n := range s.Names {
+		if n.IdentityKey.Hex() == hex {
+			return Name{Handle: n.Handle, Domain: n.Domain}, true
+		}
+	}
+	return Name{}, false
+}
+
+// Key is an identity key as records hold it since format 2 (issue #33): its
+// 33 bytes. It also decodes from hex text (a JSON-form envelope's
+// sender.identityKey, kept as the sender made it).
+type Key []byte
+
+// Hex is the key in lowercase hex (how programs name identities).
+func (k Key) Hex() string { return hex.EncodeToString(k) }
+
+func (k *Key) UnmarshalCBOR(data []byte) error {
+	var v any
+	if err := cbor.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case []byte:
+		*k = Key(x)
+	case string:
+		b, err := hex.DecodeString(x)
+		if err != nil {
+			return fmt.Errorf("identity key %q: %w", x, err)
+		}
+		*k = Key(b)
+	default:
+		return fmt.Errorf("identity key: want bytes or hex, got %T", v)
+	}
+	return nil
+}
+
+// KeyFromHex parses a hex identity key.
+func KeyFromHex(s string) (Key, error) {
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 33 {
+		return nil, fmt.Errorf("identity key %q: not 33 bytes of hex", s)
+	}
+	return Key(b), nil
 }
 
 // Name is a handle at a domain.
@@ -315,7 +370,7 @@ func Await(env CID) error {
 // endpoint's whole response (BRC-169 §5.2: identityKey, certificate,
 // messagebox, ttl, …) plus how the host got it and what it checked.
 type Resolution struct {
-	IdentityKey string          `cbor:"identityKey"`
+	IdentityKey Key             `cbor:"identityKey"`
 	Via         string          `cbor:"via,omitempty"`
 	Messagebox  string          `cbor:"messagebox,omitempty"`
 	TTL         int64           `cbor:"ttl,omitempty"`
@@ -335,7 +390,7 @@ func Resolve(handle, domain string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return r.IdentityKey, nil
+	return r.IdentityKey.Hex(), nil
 }
 
 // ResolveAll is Resolve with the whole recorded answer.
@@ -374,9 +429,9 @@ func Advance(name string, tree CID) error {
 
 // Subscribe changes the instance's subscriptions when this step ends without
 // error (docs/VM.md, "Subscriptions"): op "add" appends the rule (sender, box)
-// → handler, "remove" deletes it. sender "" is any sender; handler is a
-// program record in the store.
-func Subscribe(op, sender, box string, handler CID) error {
+// → handler, "remove" deletes it. sender nil is any sender (else the
+// identity key's 33 bytes); handler is a program record in the store.
+func Subscribe(op string, sender Key, box string, handler CID) error {
 	o, s, b := []byte(op), []byte(sender), []byte(box)
 	if _subscribe(ptr(o), uint32(len(o)), ptr(s), uint32(len(s)), ptr(b), uint32(len(b)), ptr(handler), uint32(len(handler))) < 0 {
 		return lastError()

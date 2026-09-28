@@ -30,6 +30,36 @@ export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting",
 export type MapName = typeof MAPS[number];
 export const STATE_KIND = "skein-state";
 
+// ---------------------------------------------------------------- format 2, for display
+
+const KEY_FIELDS = new Set(["identity", "owner", "sender", "to", "identityKey"]);
+const HEX_FIELDS = new Set(["contentHash", "signature"]);
+const hexOf = (b: Uint8Array) => Buffer.from(b).toString("hex");
+
+/**
+ * A record as the TypeScript readers (the explorer, skein-dev, skein-host)
+ * show it. Format 2 (issue #33, kernel-zig/src/log.zig) keeps identity keys,
+ * hashes and signatures as byte strings and a genesis's `names` as a list;
+ * here they read back as the hex (and the `{key: name}` map) the display code
+ * knows, and a §7.3 envelope's `content` as base64. Display only: the
+ * record's CID is its stored bytes'.
+ */
+export function display(v: unknown): unknown {
+  if (!v || typeof v !== "object" || v instanceof Uint8Array || isCID(v)) return v;
+  if (Array.isArray(v)) return v.map(display);
+  const o = v as Obj;
+  const out: Obj = {};
+  for (const [k, x] of Object.entries(o)) {
+    if (x instanceof Uint8Array && KEY_FIELDS.has(k) && x.length === 33) out[k] = hexOf(x);
+    else if (x instanceof Uint8Array && HEX_FIELDS.has(k)) out[k] = hexOf(x);
+    else if (x instanceof Uint8Array && k === "content" && o.metanetHandles === "1.0") out[k] = Buffer.from(x).toString("base64");
+    else if (k === "peers" && x && typeof x === "object" && !Array.isArray(x)) out[k] = Object.fromEntries(Object.entries(x as Obj).map(([r, p]) => [r, p instanceof Uint8Array ? hexOf(p) : p]));
+    else if (k === "names" && Array.isArray(x) && o.kind === "genesis") out[k] = Object.fromEntries(x.map((n) => { const e = n as Obj; return [e.identityKey instanceof Uint8Array ? hexOf(e.identityKey) : String(e.identityKey), { handle: e.handle, domain: e.domain }]; }));
+    else out[k] = display(x);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- keys
 
 export function be64(n: number | bigint): Uint8Array {
@@ -343,7 +373,7 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): Sq
       blockPut.run(b.cid.bytes, b.bytes);
       return b.cid;
     },
-    async get<T extends Block = Block>(cid: CID) { return block<T>(cid); },
+    async get<T extends Block = Block>(cid: CID) { return display(block<T>(cid)) as T; },
     async has(cid) { return blockHas.get(cid.bytes) !== undefined; },
     async bytes(cid) { const b = get(cid); if (!b) throw new NotFound(fmt(cid)); return b; },
     async putBlock(cid, bytes) { if (!blockPut) throw new ReadOnly("putBlock"); blockPut.run(cid.bytes, bytes); },

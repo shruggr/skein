@@ -30,7 +30,8 @@ import { join } from "node:path";
 import type { WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { isEnvelope, isoTime, open, seal, signedPart, verify, type Envelope } from "../envelope.ts";
+import { isoTime, open, seal, type Envelope } from "../envelope.ts";
+import { asEnvelope, inspect, isCborEnvelope, openCbor, sealCbor, wrapCbor, type AnyEnvelope } from "../envelope-cbor.ts";
 import { encode } from "../runtime/cid.ts";
 import type { Listed, MessageBox } from "../host/messagebox.ts";
 
@@ -196,22 +197,26 @@ export class InferPeer {
   /** One request: screen, open, complete, reply. False if rejected (logged). */
   async handle(m: Listed): Promise<boolean> {
     const reject = (why: string) => { this.say(`infer ${m.messageId}: rejected: ${why}`); return false; };
-    let env: unknown = m.body;
-    try { for (let i = 0; i < 2 && typeof env === "string"; i++) env = JSON.parse(env); } catch { return reject("body is not JSON"); }
-    if (!isEnvelope(env) || !verify(env)) return reject("not a verifiable BRC-169 envelope");
-    if (m.sender !== undefined && m.sender !== env.sender.identityKey) return reject("messagebox sender is not envelope.sender");
+    // Either envelope form (issue #33): §7.2 JSON, or §7.3 dag-cbor (BRC-231 bytes, or {"dag-cbor": base64} in a JSON listing).
+    const env = asEnvelope(m.body);
+    if (!env) return reject("not a BRC-169 envelope");
+    let x: ReturnType<typeof inspect>;
+    try { x = inspect(env); } catch (e) { return reject((e as Error).message); }
+    if (!x.verified) return reject("not a verifiable BRC-169 envelope");
+    if (m.sender !== undefined && m.sender !== x.sender) return reject("messagebox sender is not envelope.sender");
     const now = (this.o.now ?? Date.now)();
     if (Math.abs(now - Date.parse(env.created)) > (this.o.freshnessMs ?? 10 * 60_000)) return reject(`created ${env.created} is not fresh`);
-    const replyTo = encode(signedPart(env)).cid;
+    const replyTo = x.id;
     let result: Completion;
     try {
-      const req = dagCbor.decode((await open(this.o.wallet, env)).body) as InferRequest;
-      result = await this.answer(env.sender.identityKey, req);
+      const plain = isCborEnvelope(env) ? await openCbor(this.o.wallet, env) : await open(this.o.wallet, env as Envelope);
+      const req = dagCbor.decode(plain.body) as InferRequest;
+      result = await this.answer(x.sender, req);
     } catch (e) {
       result = { error: (e as Error).message };
     }
-    await this.reply(env, { replyTo, ...result });
-    this.say(`infer ${short(replyTo.toString())} from ${short(env.sender.identityKey)}: ${"error" in result ? `error: ${result.error}` : "missing" in result ? `missing ${result.missing.map((c) => short(c.toString())).join(", ")}` : `${result.model} ${result.ms} ms${result.message.tool_calls?.length ? ` · ${result.message.tool_calls.length} tool call(s)` : ""}`}`);
+    await this.reply(env, x.sender, { replyTo, ...result });
+    this.say(`infer ${short(replyTo.toString())} from ${short(x.sender)}: ${"error" in result ? `error: ${result.error}` : "missing" in result ? `missing ${result.missing.map((c) => short(c.toString())).join(", ")}` : `${result.model} ${result.ms} ms${result.message.tool_calls?.length ? ` · ${result.message.tool_calls.length} tool call(s)` : ""}`}`);
     return true;
   }
 
@@ -284,15 +289,17 @@ export class InferPeer {
     }) as Completion;
   }
 
-  private async reply(to: Envelope, body: object): Promise<void> {
+  /** Answer in the form the request came in (a JSON-form request gets a JSON-form reply). */
+  private async reply(to: AnyEnvelope, sender: string, body: object): Promise<void> {
     const [user, domain] = (this.o.handle ?? "infer@localhost").split("@");
-    const out = await seal(this.o.wallet, {
-      recipient: { identityKey: to.sender.identityKey, handle: to.sender.handle ?? to.sender.identityKey.slice(0, 16), domain: to.sender.domain ?? domain ?? "localhost" },
+    const args = {
+      recipient: { identityKey: sender, handle: to.sender.handle ?? sender.slice(0, 16), domain: to.sender.domain ?? domain ?? "localhost" },
       sender: { handle: user, domain: this.o.domain ?? domain ?? "localhost" },
       body: dagCbor.encode(clean(body)),
       created: isoTime((this.o.now ?? Date.now)()),
-    });
-    await this.o.box.send({ recipient: to.sender.identityKey, box: "completions", body: out });
+    };
+    const out = isCborEnvelope(to) ? wrapCbor(await sealCbor(this.o.wallet, args)) : await seal(this.o.wallet, args);
+    await this.o.box.send({ recipient: sender, box: "completions", body: out });
   }
 }
 

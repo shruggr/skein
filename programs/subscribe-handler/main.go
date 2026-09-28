@@ -24,7 +24,7 @@ type args struct {
 
 type subscribeBody struct {
 	Op      string    `cbor:"op"`
-	Sender  string    `cbor:"sender,omitempty"`
+	Sender  skein.Key `cbor:"sender,omitempty"` // 33 bytes, or hex from a JSON-era client
 	Box     string    `cbor:"box"`
 	Handler skein.CID `cbor:"handler"`
 }

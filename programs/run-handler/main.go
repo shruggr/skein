@@ -22,7 +22,7 @@ type args struct {
 	Envelope skein.CID `cbor:"envelope"`
 	Body     skein.CID `cbor:"body"`
 	Box      string    `cbor:"box"`
-	Sender   string    `cbor:"sender"`
+	Sender   skein.Key `cbor:"sender"`
 }
 
 type runBody struct {

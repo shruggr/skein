@@ -64,7 +64,7 @@ pub fn install(gpa: std.mem.Allocator, ss: *SqliteStore, say: ?*const fn (line: 
     }
 }
 
-/// log.ts copyLog: the entries exactly as signed and the records they name.
+/// log.ts copyLog: the entries exactly as written and the records they name.
 pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void {
     const src = from.store();
     const dst = to.store();
@@ -80,11 +80,10 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         const b = (try src.bytes(a, h)) orelse continue;
         try dst.putBlock(h, b);
     }
-    const host = Value.str(g.get("host")).?;
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
-        if (!logm.verifyEntry(a, e, host)) {
-            std.debug.print("log: entry #{d} has a bad signature\n", .{Value.intOf(e.get("n")) orelse -1});
+        if (!logm.isLogEntry(e)) {
+            std.debug.print("log: entry #{d} is not a format-2 entry (issue #33: unsigned, keys as bytes)\n", .{Value.intOf(e.get("n")) orelse -1});
             return error.BadSignature;
         }
         for ([_][]const u8{ "genesis", "envelope", "body", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
