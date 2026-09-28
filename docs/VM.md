@@ -243,6 +243,12 @@ status as 1, because `wasi:cli/exit` is ok/err.
 `wasi:http` (#15) is to be added to the world, and then replaces
 `skein.http`.
 
+In the browser (issue #35) the same kernel, compiled to wasm, runs preview1
+modules on V8 through a JS shim; components are not run there yet (refused
+with a message). A preview1 program behaves the same on both engines — the
+same imports answered by the same kernel code, the same fuel — so a log
+written in the browser replays natively and the other way round.
+
 ### Fuel: every step is metered
 
 (Issue #5; built in the Zig kernel, `kernel-zig/src/engine.zig`, README
@@ -260,6 +266,13 @@ One constant limits it: `fuelPerStep` in the genesis's `defaults` (default
 message: "fuel exhausted"}` and `fuel` equal to the limit — deterministic,
 never retried. Per-tree limits (depth, steps) need no field: both are
 countable from the chains.
+
+The same count on every engine (issue #35): in the browser build the kernel
+runs programs on V8, which has no fuel, so it rewrites each module to count
+its own — the same costs, accounting points and checks as wasmtime's
+(`kernel-zig/src/wasm_fuel.zig`, README "The browser build") — and meters that
+counter. The fuel on an update does not depend on where the step ran: the
+corpus replays in Chrome with identical updates and state.
 
 Billing is a query over the log: the sum of `fuel` per thread, instance or
 period (`skein-kernel fuel <db> [--since n]`), verifiable by anyone who
