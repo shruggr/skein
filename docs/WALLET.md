@@ -93,6 +93,11 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `byStatus` | 0 (proven) \| 1 (unproven) \| 2 (rejected) ‖ txid → null | derived: our actions by status |
 | `bySettlement` | 0 \| 1 \| 2 ‖ txid → null | derived: every transaction we hold by status |
 
+The same record also carries an overlay's maps (#36: `admitted`, `consumed`,
+`applied` and the derived `spentAdmitted`, `byTopic`, `byScript`;
+docs/OVERLAY.md): one chain and one settlement for a wallet and an overlay
+in one instance. A wallet-only instance has them empty.
+
 **Status and spendability are computed, never stored.** `rejected` means a
 `settlement` record for the txid is in `rejected`; else `proven` means we
 hold a proof whose root is the merkle root of our best-chain header at its
@@ -139,7 +144,7 @@ output record by outpoint, `d` a draft by CID, `r` any other record by CID):
 |---|---|---|
 | `spends` | every input of every transaction we hold (a BEEF's ancestry, ours, a competing spend) → the transaction it consumes | yes |
 | `derives-from` | our action, each output record, each draft's inputs → the transaction | yes |
-| `admits` | reserved for overlays (#36): an admitted output → its transaction | yes |
+| `admits` | an overlay's admitted output (tag `m`) or judgement (tag `p`) → its transaction (#36, docs/OVERLAY.md): removed on rejection | yes |
 | `mentions` | a record that merely names the transaction | no |
 
 **Bubbling** (`Wallet.reject`): the rejected txid is queued; for each

@@ -161,6 +161,18 @@ scope is a state record is a checkpoint: it is restored, and its index is not
 rebuilt. Rows without a tree get the stock system in code, through the same
 writer. See `docs/BOOTSTRAP.md`.
 
+## Overlay services (issue #36)
+
+An instance can be a BRC-22/24 overlay node: the router answers `POST
+/submit`, `POST /lookup` and overlay-express's listing routes for the
+instances whose config serves the topics and services named. Each request is
+a plain entry into the instance; the `overlay` program (`programs/overlay`)
+verifies the BEEF against the held headers and launches the topic managers
+and lookup services, which are programs too. What topics admit is kept as
+index maps in the same state record as the wallet's (wallet-zig
+`overlay.zig`), so a transaction's settlement (#37) is one thing for both: a
+rejection makes its admittances vanish. See `docs/OVERLAY.md`.
+
 ## Processes on David's machines, today
 
 - `skein-host run` — the router: the messagebox on `127.0.0.1:8100`

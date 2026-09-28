@@ -478,14 +478,15 @@ docs/WALLET.md "Settlement") matters to it:
 | rel | meaning | propagates a rejection |
 |---|---|---|
 | `spends` | consumes an output of the target transaction | yes |
-| `admits` | an overlay admitted an output of it (#36; reserved) | yes |
+| `admits` | an overlay admitted an output of it (#36, docs/OVERLAY.md) | yes |
 | `derives-from` | built on it (an action, a draft, a record computed from it) | yes |
 | `mentions` | merely names it (a message, a turn, a wallet result) | no |
 
 Propagation happens in **derived state**, never in threads: the wallet
 recomputes its maps from the records that remain (its own `dependents`
 map carries the same kinds), and an overlay's admitted outputs will be
-recomputed the same way (#36). A **thread** whose history took the
+recomputed the same way (#36: a rejected transaction's admittances vanish,
+a rejected spend frees what it consumed; docs/OVERLAY.md). A **thread** whose history took the
 transaction as input is never replayed — the log never un-happens anything.
 The rejection reaches it as a new input: a `status` entry for the
 transaction's CID goes to the thread awaiting that subject, which continues
