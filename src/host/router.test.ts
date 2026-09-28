@@ -103,3 +103,26 @@ test("router: messagebox client → instance → owner's mailbox; list/ack; idle
   // A recipient with no account here is refused as the messagebox refused it.
   await assert.rejects(mb.sendMessage({ recipient: PrivateKey.fromRandom().toPublicKey().toString(), messageBox: "x", body: "hi", skipEncryption: true }, `${base}/messagebox`), /HTTP 403 \(ERR_ACCOUNT_REQUIRED\)/);
 });
+
+test("skein-host run: the router with the oracle — a row added by the CLI gets the derived identity; its kernel's genesis is that identity; host page and roster", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-run-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const { main, runHost } = await import("./cli.ts");
+  const { Oracle, masterKey } = await import("./oracle.ts");
+  const out: string[] = [];
+  const vars = { SKEIN_HOME: home, SKEIN_ROUTER_PORT: "0", SKEIN_HOST_PORT: "0", SKEIN_EXPLORE_BASE_PORT: "off", SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), SKEIN_KERNEL_BIN: KERNEL_BIN };
+  const env = { vars, out: (l: string) => out.push(l), err: (l: string) => out.push(l) };
+  assert.equal(await main(["add", "solo", "--domain", "example.test"], env), 0);
+  const db = new HostDb(join(home, "host.db"));
+  t.after(() => db.close());
+  const id = new Oracle(masterKey(vars, home)).identity("solo");
+  assert.equal(db.get("solo")!.identity, id);
+  const host = await runHost(db, env);
+  t.after(() => host.stop());
+  assert.ok(out.some((l) => l.startsWith("[router] hydrated solo")), out.join("\n"));
+  await until("the ready line", () => out.some((l) => l.startsWith(`[solo] skein runtime ${id} (solo@example.test)`)), 5000);
+  const roster = await (await fetch(`http://127.0.0.1:${host.port}/roster.json`)).json() as Array<{ handle: string; status: string }>;
+  assert.deepEqual(roster.map((r) => [r.handle, r.status]), [["solo", "live"]]);
+  assert.match(await (await fetch(`http://127.0.0.1:${host.port}/`)).text(), /<b>solo<\/b>@example\.test/);
+  assert.equal((await (await fetch(`http://127.0.0.1:${host.messagebox}/bsvalias/id/solo@example.test`)).json() as { pubkey: string }).pubkey, id);
+});

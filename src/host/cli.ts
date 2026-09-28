@@ -1,15 +1,18 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-host`: the host's management database (instances.ts, $SKEIN_HOME/host.db)
-// and the supervisor that runs every enabled row as its own process (supervisor.ts).
-//   skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
+// and the router (router.ts, #33) that serves every enabled row.
+//   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host knows <handle> [a,b | --all | --none]
 //   skein-host list
 //   skein-host enable|disable|remove <handle>
-//   skein-host run [--only a,b]
+//   skein-host run
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
 //   skein-host roster [--for <handle> | --deploy]
 //   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
-// `add` inserts, or updates the given fields of an existing row. `deploy`
+// `add` inserts, or updates the given fields of an existing row. A new row's
+// identity is the oracle's (oracle.ts, #18): derived from the router's master
+// secret with key ID = the handle, no wallet process; `--derive` sets it again
+// on an existing row (its store must then be a new one: re-genesis). `deploy`
 // sends a directory into an instance through its `objects` box as the owner
 // (deploy.ts) and records its root as the row's `tree` (and the directory as
 // its `source`, which `--all` deploys again), with the row's generated
@@ -20,20 +23,23 @@
 // instance's store) with the new one. `subscribe` changes an instance's
 // subscriptions (#3) by a `subscribe` message as the owner, as `deploy` sends
 // (a new instance's genesis carries only the seed: the owner's boxes and
-// `chat` from anyone). `run` supervises one `bin/skein-runtime` per enabled
-// row (`--only`: those handles), each given its row — SKEIN_DB (the store),
-// SKEIN_HANDLE, SKEIN_WALLET_URL/_ORIGINATOR, SKEIN_IDENTITY, SKEIN_HOST_DB —
-// and everything else from this environment, which it reads like
-// skein-runtime (bin/skein-host fills it from $SKEIN_HOME):
-//   SKEIN_HOME            default ~/.skein; host.db lives here
-//   SKEIN_WALLET          "remote" (default) or "ephemeral" (throwaway keys for every instance and its host, per process)
-//   SKEIN_HOST_WALLET_URL the host wallet, default http://127.0.0.1:3324, origin "skein-host": signs every entry of every instance
+// `chat` from anyone). `run` is the router: the BRC-33 messagebox (BRC-104
+// auth) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance started on
+// demand and stopped when idle, the waker, the oracle; plus one read-only
+// explorer per enabled row and the host page. It reads (bin/skein-host fills
+// it from $SKEIN_HOME):
+//   SKEIN_HOME            default ~/.skein; host.db and master.key live here
+//   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
+//   SKEIN_ROUTER_PORT     the messagebox (the router), default 8100: http://127.0.0.1:8100/messagebox
+//   SKEIN_IDLE_MS         stop a kernel this long after its last work, default 300000; 0 never
+//   SKEIN_MAILBOX_HOST    the instance that keeps registered mailboxes, default the first enabled row
 //   SKEIN_OWNER           a new instance's owner;   SKEIN_OWNER_HANDLE its genesis name, default david@localhost
 //   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE its genesis name, default infer@localhost
-//   SKEIN_MESSAGEBOX      the messagebox host;   SKEIN_POLL_MS default 1000;   SKEIN_SEND_ATTEMPTS, SKEIN_SEND_BACKOFF_MS
+//   SKEIN_FUEL_PER_STEP   a new genesis's fuelPerStep
 //   SKEIN_HOST_PORT       the host page (/) and roster (/roster.json) on 127.0.0.1, default 4600
 //   SKEIN_EXPLORE_BASE_PORT  row i's explorer (skein-explore) listens on base + i (i: its place among the enabled rows);
 //                         default 4610; "off" starts none
+//   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
 // `deploy` and `subscribe` read SKEIN_MESSAGEBOX, SKEIN_OWNER (checked against the wallet),
 // and signs through the owner's wallet as bin/skein does:
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
@@ -46,7 +52,8 @@ import { short } from "../runtime/log.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
-import { ephemeralWallet, remoteWallet, type WalletInterface } from "../wallet.ts";
+import { remoteWallet, type WalletInterface } from "../wallet.ts";
+import { masterKey, Oracle } from "./oracle.ts";
 import { subscribeBody } from "../client/client.ts";
 import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
 import { Supervisor, type Supervised } from "./supervisor.ts";
@@ -66,7 +73,7 @@ export interface Env {
 }
 
 const USAGE = `usage:
-  skein-host add <handle> [--domain d] [--identity hex] [--wallet-url url] [--originator o] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
+  skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
   skein-host list
   skein-host enable|disable|remove <handle>
@@ -91,12 +98,14 @@ export async function main(argv: string[], env: Env): Promise<number> {
       case "add": {
         const { values: v, positionals: [handle] } = parseArgs({
           args: rest, allowPositionals: true,
-          options: { domain: { type: "string" }, identity: { type: "string" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" } },
+          options: { domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" } },
         });
         if (!handle) { env.err(USAGE); return 2; }
         const f: RowFields = { domain: v.domain, identity: v.identity, wallet_url: v["wallet-url"], wallet_originator: v.originator, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
+        // The identity is the oracle's (#18): derived from the master secret, key ID = the handle.
+        if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Oracle(masterKey(env.vars, home)).identity(handle);
         const r = db.add(handle, f);
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
         return 0;
@@ -326,19 +335,14 @@ export interface Host {
   stop(): Promise<void>;
 }
 
-/** The instances' wallets and the entry key, from the environment (SKEIN_WALLET, row.wallet_url, SKEIN_HOST_WALLET_URL). */
-function wallets(v: Env["vars"]): Pick<RouterOptions, "walletFor" | "host" | "authWallet"> {
-  const ephemeral = v.SKEIN_WALLET === "ephemeral";
-  const eph = new Map<string, WalletInterface>();
-  return {
-    walletFor: (row) => {
-      if (ephemeral) { let w = eph.get(row.handle); if (!w) eph.set(row.handle, (w = ephemeralWallet())); return w; }
-      if (!row.wallet_url) throw new Error("no wallet_url (skein-host add --wallet-url)");
-      return remoteWallet(row.wallet_url, row.wallet_originator);
-    },
-    host: ephemeral ? ephemeralWallet() : remoteWallet(v.SKEIN_HOST_WALLET_URL || "http://127.0.0.1:3324", "skein-host"),
-    authWallet: ephemeralWallet(),
-  };
+/**
+ * The oracle (#18, oracle.ts): every instance's wallet is a ProtoWallet over a
+ * key derived from the router's master secret (key ID = the handle); the
+ * router's BRC-104 identity is another child of it.
+ */
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "host" | "authWallet"> {
+  const oracle = new Oracle(masterKey(v, home));
+  return { walletFor: (row) => oracle.wallet(row.handle), host: oracle.routerWallet(), authWallet: oracle.routerWallet() };
 }
 
 /**
@@ -352,7 +356,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const home = homeOf(v);
   const named = (s: string | undefined, d: string) => { const [handle, domain = "localhost"] = (s || d).split("@"); return { handle: handle!, domain }; };
   const router = new Router({
-    db, ...wallets(v),
+    db, ...wallets(v, home),
     owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, mailboxHost: v.SKEIN_MAILBOX_HOST,
     kernel: { env: { SKEIN_HOME: home } },
