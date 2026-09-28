@@ -79,6 +79,7 @@ resolver code is `src/host`'s, unchanged.
 |---|---|---|
 | `zig build test` | dag-cbor encodings and CIDs, canonical re-encoding of non-canonical input, strict decoding, program-record CIDs, "anyone" signatures (log entries, envelopes), JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps through wasmtime reported in V8's words (the words read from Node 26 on the same hand-built modules) | 10/10 |
 | `equiv/shell.ts` | host-go's 64 shell cases through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID | 64/64 identical |
+| `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 steps over one tree: `init add rm mv status diff commit log show branch checkout reset restore merge tag`, author from `.gitconfig`/env, dates from the run's clock; the commit's tree is the VFS's project tree; `.git/objects` holds gitlinks only; every object is one git-raw record, no zlib copy in the store; gc/repack write no pack; a second run gives identical trees and output | all ok (2026-09-27) |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 7 stores the TS runtime writes: run/objects/head/subscribe handlers, the shell (writes, cwd, failures, one and two sleeps with their wakes), the loop with bash and message tools, replies, resolutions, a failed delivery resuming the loop, a refused infer, two agents talking | 7/7 identical; each also reproduces its source store exactly |
 | `equiv/replays.ts` over copies of `~/.skein` | the live `martha` and `kurt` stores, their 6 backups, `~/.skein/runtime.db` and its eras | 10/10 replayable stores identical; the 6 pre-current-format eras are refused by both runtimes |
 | `equiv/serve.ts` | `serve` spawned as the supervisor spawns `bin/skein-runtime` (ipc channel included), with the real providers on an in-process messagebox: genesis, a run, a chat through the inference peer, a sleep woken by the tick, SIGTERM mid-sleep and the restart that finishes it, stop on channel close; then the store the Zig kernel wrote, replayed on both runtimes | all ok; the replays identical to each other and to the store |
@@ -100,12 +101,22 @@ opens them.
 | `log.zig`, `heads.zig`, `subscriptions.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, `subscriptions.ts`, `programs.ts`, `syscalls.ts` |
 | `engine.zig` | wasmtime behind compile/run/one host callback; traps as V8 names them |
 | `wasi.zig`, `vfs.zig`, `tree.zig` | `wasi/host.ts`, `wasi/vfs.ts`, `tree.ts` |
+| `objects.zig` | none: the synthetic `.git/objects` (issue #2, docs/VM.md), loose-object framing over git-raw records |
 | `runner.zig`, `shell.zig`, `program.zig` | module cache and `runModule`; `shell.ts`; `program.ts` + `wasi/skein-imports.ts` |
 | `scheduler.zig` | `scheduler.ts` |
 | `serve.zig`, `ipc.zig`, `peer/peer.ts` | `src/host/main.ts` as a process with its providers as a peer |
 | `replay.zig`, `cmd_shell.zig` | `skein-dev replay`; the shell test driver |
 
 ## What is not the same, or not here
+
+- **The synthetic object directory** (issue #2) is only here. In a tree,
+  `.git/objects/xx/yyyy…` is a gitlink naming the git-raw record; to
+  programs it is a read-only file of zlib bytes; a loose object that git
+  writes is hash-checked and kept as the record; `.git/objects/pack` takes
+  nothing new (docs/VM.md). The TypeScript runtime treats those paths as
+  plain files and gitlinks as empty directories. So a log in which `git`
+  writes objects replays on this kernel only, and trees without
+  `.git/objects` behave the same on both.
 
 - **Sleeping shells** are not parked mid-instance (no JSPI): the run is
   abandoned at the sleep after writing `waiting`, and the wake re-executes the

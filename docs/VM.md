@@ -54,6 +54,54 @@ patch between them is derivable, exactly as a git commit is.
 Anything outside the tree — the host's real filesystem, the network — is not
 machine state and is unreachable from inside.
 
+### The synthetic object directory
+
+A repository in the tree is an ordinary git repository: `git` (real git,
+compiled to WASI; `wasm/README.md`, "git") runs in the shell over a project
+directory, and its `.git/` — `HEAD`, refs, `index`, `config` — is a set of
+ordinary files in the tree. The exception is `.git/objects`. Each loose
+object git keeps there is a git object the store already holds natively:
+same bytes, same sha1, a git-raw record. Storing git's zlib file of it as a
+blob would store everything twice. So the kernel's VFS makes that
+directory synthetic (issue #2; Zig kernel only, `kernel-zig/src/objects.zig`
+and `vfs.zig`):
+
+- **In the tree**, `<repo>/.git/objects/xx/yyyy…` (any directory `xx` of
+  two hex digits directly inside a `.git/objects`, any entry of 38 hex
+  digits in it) is a **gitlink**: a tree entry of mode `160000` whose hash
+  is the object's own id. The tree names the object and holds none of its
+  bytes. This keeps the objects enumerable, so git's abbreviated ids and
+  `fsck` work, and reachable from the tree like any other record.
+- **A read** (open, stat, read) sees a read-only file: the git-raw record,
+  fetched from the store and zlib-framed on the fly as git's loose-object
+  format, header `<type> <size>\0` and content. The kernel writes stored
+  (uncompressed) deflate blocks: a valid zlib stream, no compression cost,
+  the same bytes on every host, and never stored. Opening one for writing
+  is EACCES, as with git's own 0444 objects.
+- **A write**: git writes `objects/xx/tmp_obj_…` as an ordinary file, then
+  links or renames it to its name. At that moment the kernel inflates it,
+  checks the header and the sha1 against the name (EIO if they differ, and
+  nothing moves), and the file becomes the object. The record goes to the
+  store when the run's tree is committed, once (a record the store already
+  has is not written again). A file written straight to an object's name
+  is checked the same way at commit, and stays an ordinary file if it is
+  not that object. An object moved out of the directory becomes an
+  ordinary file of its zlib bytes.
+- **No packs.** Nothing new may be linked into `.git/objects/pack` (EPERM),
+  so `git gc`/`git repack` fail there instead of writing every object again
+  as a pack. The git build does no automatic maintenance.
+
+So a repository's commits, trees and blobs are first-class records shared
+with everything else. The tree a commit names is the same record as the
+project directory's tree in the VFS, minus `.git` (and every subdirectory
+is shared outright), so a deployed agent tree *is* its repository's tree.
+`kernel-zig/equiv/git.ts` checks this on the Zig kernel: the verbs, the
+commit tree against the VFS tree, one record per object and no zlib copy
+anywhere, and replay giving the same trees.
+
+The TypeScript runtime (frozen) does not have this feature. There, git
+runs over plain files, and its loose objects are stored as zlib blobs.
+
 ### Heads
 
 A **head** is a named pointer to a tree, kept as a chain like any other
