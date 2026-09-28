@@ -11,7 +11,10 @@ export interface ClientConfig {
   /** Owner (David) wallet-api: `1sat serve wallet-api` on its own port. */
   walletUrl: string;
   originator: string;
-  messageboxUrl: string;
+  /** The instance's own URL (its front door): http://<handle>.localhost:8100 or http://127.0.0.1:8100/@<handle>. */
+  instanceUrl: string;
+  /** David's mailbox: the mailbox instance his instances deliver to (#40). */
+  mailboxUrl: string;
   instance: { identityKey: string; handle: string; domain: string };
   /** Local client state: sent envelope cids. */
   stateDir: string;
@@ -26,11 +29,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ClientConfig {
   const identityKey = env.SKEIN_INSTANCE_IDENTITY ?? read(join(home, "instance.identity"));
   if (!identityKey) throw new Error(`no instance identity: run scripts/host/wallets.sh (writes ${join(home, "instance.identity")}) or set SKEIN_INSTANCE_IDENTITY`);
   const [handle, domain] = (env.SKEIN_INSTANCE_HANDLE ?? "skein@localhost").split("@");
+  const host = (env.SKEIN_HOST_URL ?? "http://127.0.0.1:8100").replace(/\/+$/, "");
   return {
     home,
     walletUrl: env.SKEIN_OWNER_WALLET ?? "http://127.0.0.1:3322",
     originator: env.SKEIN_ORIGINATOR ?? "skein-client",
-    messageboxUrl: env.SKEIN_MESSAGEBOX ?? read(join(home, "messagebox.url")) ?? "http://127.0.0.1:8100/messagebox",
+    instanceUrl: env.SKEIN_INSTANCE_URL ?? `${host}/@${handle}`,
+    mailboxUrl: env.SKEIN_MAILBOX_URL ?? read(join(home, "mailbox.url")) ?? `${host}/@${env.SKEIN_MAILBOX_HANDLE ?? "david"}`,
     instance: { identityKey, handle: handle!, domain: domain ?? "localhost" },
     stateDir: join(home, "client"),
   };

@@ -3,16 +3,17 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuthFetch, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
-import { MessageBoxClient } from "@bsv/message-box-client";
+import { existsSync } from "node:fs";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { blobCid } from "../runtime/tree.ts";
-import { SkeinClient, envelopeCid } from "./client.ts";
+import { SkeinClient } from "./client.ts";
 import { formatReply, parseCli } from "./cli.ts";
 import { asConversation, chatBody, conversationFrom, loadConversation, parseReplLine, parseReply, saveConversation, type Conversation } from "./conversation.ts";
-import { open, seal, verify, type Envelope } from "./envelope.ts";
 import type { ClientConfig } from "./config.ts";
+import { RawBox } from "./raw.ts";
+import { KERNEL_BIN } from "../host/kernel.ts";
+import { testHost } from "../host/testhost.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "skein-chat-"));
 const cid = (s: string) => blobCid(new TextEncoder().encode(s));
@@ -93,70 +94,54 @@ test("parseReplLine", () => {
   assert.equal(parseReplLine("/frob").kind, "error");
 });
 
-// ---------------------------------------------------------------- live messagebox
+// ---------------------------------------------------------------- on a host
 
-const HOST = process.env.SKEIN_TEST_MESSAGEBOX_HOST ?? "http://127.0.0.1:8100";
-const wallet = (): WalletInterface => new ProtoWallet(PrivateKey.fromRandom()) as unknown as WalletInterface;
-const idk = async (w: WalletInterface) => (await w.getPublicKey({ identityKey: true })).publicKey;
-
-async function hostUp(): Promise<boolean> {
-  try { await fetch(`${HOST}/exchange-rate`, { signal: AbortSignal.timeout(1000) }); return true; } catch { return false; }
-}
-async function register(w: WalletInterface): Promise<void> {
-  const res = await new AuthFetch(w).fetch(`${HOST}/account/register`, {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ username: `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}` }),
-  });
-  assert.equal(res.status, 200, await res.text());
-}
-
-test("messagebox: chat out, a chat reply back, the next chat continues (real local server)", async (t) => {
-  if (!(await hostUp())) { t.skip(`no messagebox at ${HOST} (scripts/host/messagebox.sh --bg)`); return; }
-  const david = wallet(), inst = wallet();
-  await register(david); await register(inst);
+test("chat on a host (#40): out to the instance's front door, the reply read from David's mailbox instance, the next chat continues", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const h = await testHost(t);
+  h.mailbox("david", h.ownerId);
+  // The instance, played by hand: a mailbox instance for its key (its chat box kept for it).
+  const instKey = h.keyOf("inst-owner");
+  const instId = instKey.toPublicKey().toString();
+  h.mailbox("inst", instId);
+  const { ephemeralWallet } = await import("../wallet.ts");
+  const inst = ephemeralWallet(instKey);
   const cfg: ClientConfig = {
-    home: tmp(), walletUrl: "unused", originator: "skein-client-test", messageboxUrl: `${HOST}/messagebox`,
-    instance: { identityKey: await idk(inst), handle: "skein", domain: "localhost" }, stateDir: join(tmp(), "client"),
+    home: tmp(), walletUrl: "unused", originator: "skein-client-test",
+    instanceUrl: h.origin("inst"), mailboxUrl: h.origin("david"),
+    instance: { identityKey: instId, handle: "inst", domain: "localhost" }, stateDir: join(tmp(), "client"),
   };
-  const client = new SkeinClient(cfg, david);
+  const client = new SkeinClient(cfg, h.owner);
   const tree = cid("tree").toString();
   const first = await client.chat({ text: "hello", tree, model: "ripper/qwen38" });
   assert.equal(first.replyTo, undefined);
 
-  const mb = new MessageBoxClient({ host: cfg.messageboxUrl, walletClient: inst });
-  const got = await mb.listMessagesLite({ messageBox: "chat", host: cfg.messageboxUrl });
+  const mine = new RawBox(inst, h.origin("inst"));
+  const got = await mine.list("chat");
   assert.equal(got.length, 1);
-  const env = got[0]!.body as unknown as Envelope;
-  assert.ok(verify(env));
-  const req = dagCbor.decode((await open(inst, env)).body) as Record<string, unknown>;
+  assert.equal(got[0]!.messageId, first.cid, "the id the client keeps is the id the recipient lists");
+  const req = got[0]!.value as Record<string, unknown>;
   assert.equal(req.text, "hello");
   assert.equal(req.model, "ripper/qwen38");
   assert.equal(String(req.tree), tree);
   assert.equal(req.replyTo, undefined);
-  await mb.acknowledgeMessage({ messageIds: [got[0]!.messageId], host: cfg.messageboxUrl });
+  await mine.ack([got[0]!.messageId]);
 
   const newTree = cid("tree2");
-  const reply = await seal(inst, {
-    recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" },
-    body: dagCbor.encode({ text: "hi David", page: "# notes\n", tree: newTree, thread: cid("thread"), replyTo: CID.parse(first.cid) }),
-  });
-  await mb.sendMessage({ recipient: await idk(david), messageBox: "chat", body: reply as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
+  const { id: replyId } = await new RawBox(inst, h.origin("david")).send(h.ownerId, "chat", { text: "hi David", page: "# notes\n", tree: newTree, thread: cid("thread"), replyTo: CID.parse(first.cid) });
 
   const seen: string[] = [];
   const hit = await client.waitFor([{ box: "chat", replyTo: first.cid }], { timeoutMs: 10_000, intervalMs: 200, onResult: (r) => seen.push(r.box) });
   assert.ok(hit, "the reply arrived");
   assert.equal(hit!.body!.text, "hi David");
-  const replyCid = (await envelopeCid(reply)).toString();
-  assert.equal(hit!.cid, replyCid);
-  assert.deepEqual(client.conversation()?.reply, replyCid);
+  assert.equal(hit!.cid, replyId.toString());
+  assert.deepEqual(client.conversation()?.reply, replyId.toString());
   assert.equal(client.conversation()?.tree, newTree.toString());
 
   const second = await client.chat({ text: "more" });
-  assert.equal(second.replyTo, replyCid);
+  assert.equal(second.replyTo, replyId.toString());
   assert.equal(second.tree, newTree.toString());
-  const got2 = await mb.listMessagesLite({ messageBox: "chat", host: cfg.messageboxUrl });
-  const req2 = dagCbor.decode((await open(inst, got2[0]!.body as unknown as Envelope)).body) as Record<string, unknown>;
-  assert.equal(String(req2.replyTo), replyCid);
+  const got2 = await mine.list("chat");
+  const req2 = got2[0]!.value as Record<string, unknown>;
+  assert.equal(String(req2.replyTo), replyId.toString());
   assert.equal(String(req2.tree), newTree.toString());
-  await mb.acknowledgeMessage({ messageIds: got2.map((m) => m.messageId), host: cfg.messageboxUrl });
 });

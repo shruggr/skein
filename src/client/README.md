@@ -1,13 +1,19 @@
 # The client (`bin/skein`)
 
-David's side: it signs through his wallet-api and talks only to the messagebox
-(host setup: scripts/host/README.md). Every message is a BRC-169 envelope with a
-dag-cbor body; the envelope's signed `contentHash` binds the body to David's
-signature, and the BRC-78 content encryption is for the wire only. An
-envelope's id (a `replyTo`) is the CID of its signed part, without `content`.
-State lives in `~/.skein/client/`: `sent.jsonl` (every envelope sent) and
-`conversation.json` (the instance's last `chat` reply received). `import` names the
-root tree on its last bundle; the instance makes it `main` if it has none.
+David's side: it signs through his wallet-api and speaks raw BRC-33 on a
+BRC-104 session (#40; src/client/raw.ts). It sends to the instance's own front
+door — the instance is an HTTP server, at `SKEIN_INSTANCE_URL` (default
+`$SKEIN_HOST_URL/@<handle>`, or its host name `http://<handle>.localhost:8100`)
+— and reads David's boxes from his mailbox: the mailbox instance his instances
+deliver to (`skein-host add david --mailbox --owner <his key>`; the client finds
+it at `SKEIN_MAILBOX_URL`, `~/.skein/mailbox.url`, else `$SKEIN_HOST_URL/@david`).
+Bodies are dag-cbor (an `application/cbor` request, BRC-231). There is no
+envelope: the session proves who sends, and a message's id is the CID of its
+record, which the sender and the recipient compute alike — what a reply's
+`replyTo` names. State lives in `~/.skein/client/`: `sent.jsonl` (every message
+sent, with its id) and `conversation.json` (the instance's last `chat` reply
+received). `import` names the root tree on its last bundle; the instance makes it
+`main` if it has none.
 
 ```
 skein whoami
@@ -25,7 +31,7 @@ skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
 | box | direction | body |
 |---|---|---|
 | `chat` | david → instance | `{ text, tree?: CID, model?: string, replyTo?: CID }` |
-| `chat` | instance → david | `{ text, page?: markdown, tree?: CID, thread?: CID, replyTo: CID }` — a reply (replyTo = the envelope it answers); the answer at the end of a turn names tree and thread |
+| `chat` | instance → david | `{ text, page?: markdown, tree?: CID, thread?: CID, replyTo: CID }` — a reply (replyTo = the id of the message it answers); the answer at the end of a turn names tree and thread |
 | `results` | instance → david | `{ exitCode, stdout, stderr, tree, replyTo }` (answers a `run`) |
 | `head` | david → instance | `{ name, tree: CID }` — moves the named head; no reply |
 | `subscribe` | david → instance | `{ op: "add" \| "remove", sender?: identity, box, handler: CID }` — adds or removes the subscription (sender, box) → handler (no sender: anyone); no reply |

@@ -1,32 +1,29 @@
-// David's client: a peer that signs as David through his wallet-api and talks
-// only to the messagebox (docs/ARCH.md "Everything outside is a peer";
-// docs/MESSAGES.md). Every message is a BRC-169 envelope to the instance, sent
-// with the messagebox client's own body encryption off.
+// David's client: a peer that signs as David through his wallet-api (docs/ARCH.md
+// "Everything outside is a peer"; docs/MESSAGES.md). It speaks raw BRC-33 on a
+// BRC-104 session (#40, raw.ts): a message is sent to the instance's own front
+// door (its URL: the instance is an HTTP server), and David's boxes are read
+// from his mailbox — the mailbox instance the instance delivers to (the one
+// peer its genesis names, etc/config.json `owner.messagebox`). No envelope: the
+// session proves who sends; a message's id is its record's CID, which a reply's
+// `replyTo` names.
 
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { MessageBoxClient } from "@bsv/message-box-client";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { sha256 } from "multiformats/hashes/sha2";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
-import { open, seal, signedPart, verify, type Envelope, type Signed } from "./envelope.ts";
+import { RawBox } from "./raw.ts";
 import { chatBody, conversationFrom, loadConversation, parseReply, saveConversation, type Conversation } from "./conversation.ts";
 
 export const BOX = { objects: "objects", run: "run", head: "head", subscribe: "subscribe", results: "results", chat: "chat" } as const;
 
 /** The boxes David reads, in this order: `run` results, then `chat` (the instance's replies, and chats from others). */
 export const INBOX = [BOX.results, BOX.chat] as const;
-
-/** The message's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part (the envelope without `content`). */
-export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
-  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
-}
 
 /** A subscription change as the `subscribe` box takes it. */
 export interface SubscribeArgs { op: "add" | "remove"; sender?: string; box: string; handler: string }
@@ -82,9 +79,10 @@ export interface Sent { cid: string; box: string; messageId: string; at: string;
 export interface Result {
   box: string;
   messageId: string;
-  /** CID of the received envelope (the instance's `chat` reply's CID is the next chat's replyTo). */
+  /** The message's id as a CID (the instance's `chat` reply's is the next chat's replyTo). */
   cid?: string;
   sender: string;
+  /** Always true: the sender is the BRC-104 session's identity, which the mailbox checked. */
   verified: boolean;
   created?: string;
   body?: Record<string, unknown>;
@@ -99,19 +97,23 @@ export function isInstanceReply(r: Result, instance: string): boolean {
 export class SkeinClient {
   readonly cfg: ClientConfig;
   readonly wallet: WalletInterface;
-  readonly mb: MessageBoxClient;
+  /** The instance's front door. */
+  readonly toInstance: RawBox;
+  /** David's mailbox (instance). */
+  readonly mailbox: RawBox;
 
-  constructor(cfg: ClientConfig, wallet?: WalletInterface) {
+  constructor(cfg: ClientConfig, wallet?: WalletInterface, o: { fetch?: typeof fetch } = {}) {
     this.cfg = cfg;
     this.wallet = wallet ?? remoteWallet(cfg.walletUrl, cfg.originator);
-    this.mb = new MessageBoxClient({ host: cfg.messageboxUrl, walletClient: this.wallet, originator: cfg.originator });
+    this.toInstance = new RawBox(this.wallet, cfg.instanceUrl, { originator: cfg.originator, fetch: o.fetch });
+    this.mailbox = new RawBox(this.wallet, cfg.mailboxUrl, { originator: cfg.originator, fetch: o.fetch });
   }
 
   async identityKey(): Promise<string> {
     return (await this.wallet.getPublicKey({ identityKey: true })).publicKey;
   }
 
-  /** Seal `body` (dag-cbor encoded here) to the instance and deliver it into `box`. */
+  /** Send `body` (dag-cbor encoded here) to the instance's `box`. */
   send(box: string, body: unknown, note: Partial<Sent> = {}): Promise<Sent> {
     return this.sendBytes(box, dagCbor.encode(body), note);
   }
@@ -128,17 +130,11 @@ export class SkeinClient {
     return { root, records, bundles: sent };
   }
 
-  /** Seal already-encoded body bytes to the instance and deliver the envelope into `box`. */
+  /** Send already-encoded body bytes (dag-cbor) to the instance's `box`: its front door's sendMessage. */
   async sendBytes(box: string, body: Uint8Array, note: Partial<Sent> = {}): Promise<Sent> {
-    const env = await seal(this.wallet, { recipient: this.cfg.instance, body });
-    const cid = (await envelopeCid(env)).toString();
-    const r = await this.mb.sendMessage(
-      // skipEncryption: the envelope's content is the encryption; the client's
-      // own body encryption would hide the envelope metadata (MESSAGES.md).
-      { recipient: this.cfg.instance.identityKey, messageBox: box, body: env as unknown as Record<string, unknown>, skipEncryption: true },
-      this.cfg.messageboxUrl, // never resolve the host through the overlay
-    );
-    const sent: Sent = { cid, box, messageId: r.messageId, at: new Date().toISOString(), ...note };
+    const { id } = await this.toInstance.send(this.cfg.instance.identityKey, box, body);
+    const cid = id.toString();
+    const sent: Sent = { cid, box, messageId: cid, at: new Date().toISOString(), ...note };
     mkdirSync(this.cfg.stateDir, { recursive: true });
     appendFileSync(join(this.cfg.stateDir, "sent.jsonl"), JSON.stringify(sent) + "\n");
     return sent;
@@ -189,11 +185,14 @@ export class SkeinClient {
   async inbox(opts: { ack?: boolean } = {}): Promise<Result[]> {
     const out: Result[] = [];
     for (const box of INBOX) {
-      const msgs = await this.mb.listMessagesLite({ messageBox: box, host: this.cfg.messageboxUrl });
-      for (const m of msgs) out.push(await this.readOne(box, m.messageId, m.sender, m.body));
-      if ((opts.ack ?? true) && msgs.length) {
-        await this.mb.acknowledgeMessage({ messageIds: msgs.map((m) => m.messageId), host: this.cfg.messageboxUrl });
+      const msgs = await this.mailbox.list(box);
+      for (const m of msgs) {
+        const r: Result = { box, messageId: m.messageId, cid: m.messageId, sender: m.sender, verified: true };
+        if (m.value && typeof m.value === "object" && !Array.isArray(m.value) && !(m.value instanceof Uint8Array)) r.body = m.value as Record<string, unknown>;
+        else r.error = "the body is not a record";
+        out.push(r);
       }
+      if ((opts.ack ?? true) && msgs.length) await this.mailbox.ack(msgs.map((m) => m.messageId));
     }
     const prev = this.conversation();
     let newest: Conversation | undefined;
@@ -227,23 +226,6 @@ export class SkeinClient {
       if (Date.now() > deadline) return undefined;
       await new Promise((res) => setTimeout(res, opts.intervalMs ?? 1000));
     }
-  }
-
-  private async readOne(box: string, messageId: string, sender: string, raw: unknown): Promise<Result> {
-    const r: Result = { box, messageId, sender, verified: false };
-    try {
-      const env = (typeof raw === "string" ? JSON.parse(raw) : raw) as Envelope;
-      r.created = env.created;
-      r.cid = (await envelopeCid(env)).toString();
-      r.verified = verify(env);
-      if (!r.verified) throw new Error("envelope signature does not verify");
-      if (env.sender.identityKey !== sender) throw new Error(`envelope sender ${env.sender.identityKey} is not the messagebox sender ${sender}`);
-      const { body } = await open(this.wallet, env);
-      r.body = dagCbor.decode(body) as Record<string, unknown>;
-    } catch (e) {
-      r.error = (e as Error).message;
-    }
-    return r;
   }
 
   lastSent(box?: string): Sent | undefined {
