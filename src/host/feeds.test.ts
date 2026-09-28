@@ -35,6 +35,18 @@ test("feeds: header parsing, the genesis's feeds, ARC's status record", () => {
   assert.equal(statusOf({ txStatus: "MINED" }), "no txid");
 });
 
+test("feeds: declared in a system's etc/config.json, carried by its genesis; the session default", async () => {
+  const { resolveSystem, genesisRecord } = await import("./genesis.ts");
+  const k = "02" + "11".repeat(32);
+  const c = { identity: k, owner: k, handle: "w", domain: "localhost" };
+  const feeds = [{ kind: "headers" as const, url: "http://ct.test/sse" }, { kind: "arc-callback" as const, token: "t" }];
+  const g = genesisRecord(c, resolveSystem(c, {}, [], { feeds }));
+  assert.deepEqual(feedsOf(g), feeds);
+  assert.equal((g.defaults as Record<string, string>).sessionTtlMs, "86400000");
+  assert.throws(() => resolveSystem(c, {}, [], { feeds: [{ kind: "headers" } as never] }), /a feed is/);
+  assert.equal(genesisRecord(c, resolveSystem(c, {}, [])).feeds, undefined);
+});
+
 test("feeds: an SSE header feed fanned out to its subscribers, resumed after a drop, bounded; ARC callbacks", async (t) => {
   const conns: ServerResponse[] = [];
   const lastIds: Array<string | undefined> = [];

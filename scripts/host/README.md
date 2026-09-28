@@ -12,7 +12,7 @@ scripts/host/up.sh                          # the client wallets, their grants, 
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (`/messagebox`), host page 127.0.0.1:4600, explorers 4610+ | the BRC-33 messagebox (BRC-104 auth), each instance's kernel started on demand (`skein-kernel serve`, stopped when idle), the waker, the oracle (instance keys from `~/.skein/master.key`) | `~/.skein/logs/host.log` |
+| router `bin/skein-host run` | 127.0.0.1:8100 (`/messagebox`), host page 127.0.0.1:4600, explorers 4610+ | the BRC-33 messagebox, forwarding BRC-104 sessions to the instances (the bare URL: the front instance, the mailbox host; `<handle>.localhost:8100`: that instance), each instance's kernel started on demand (`skein-kernel serve`, stopped when idle), the waker, the oracle (instance keys from `~/.skein/master.key`), the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its `infer` box on the router, answers `completions` (either envelope form, in kind) | as run |
@@ -26,8 +26,8 @@ for them.
 
 Files:
 
-- `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key and the router's BRC-104 key derive from it; losing it loses the instances' identities.
-- `~/.skein/router.identity` — the router's BRC-104 identity (grants.sh writes it; the clients' "auth message signature" counterparty).
+- `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities.
+- `~/.skein/router.identity` — the BRC-104 identity at the bare messagebox URL: since #33 part 2 the **front instance's** (the mailbox host; `skein-host identity`), not a router key — sessions belong to the instances. grants.sh writes it and grants "auth message signature" toward every instance (a client meets an instance's own identity on its per-instance origin).
 - `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322).
 - `~/.skein/infer.json` — the inference peer's providers (written if absent).
 - `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`.
@@ -39,6 +39,26 @@ gives an identity a mailbox kept by an instance (`SKEIN_MAILBOX_HOST`, default
 the first enabled row): its mail is that instance's log. The router answers
 `403 ERR_ACCOUNT_REQUIRED` for a recipient that is neither an instance nor
 registered, as `1sat serve` did.
+
+Sessions (#33 part 2): the BRC-103/104 handshake and every signed request go
+into the instance (the `:auth` entries of its log, answered by its messagebox
+program through its oracle); session records live in the instance (head
+`sessions`) and survive the router, expiring by the instance's
+`defaults.sessionTtlMs` (a day). **Switching a live stack**: existing stores
+have no `:auth` subscription in their genesis, so they need a re-genesis
+(`skein-host add <h> --derive` with a new `--store`), and clients must grant
+"auth message signature" toward the front instance instead of the old router
+key (`scripts/host/grants.sh` again). A client already holding a session with
+the old router identity gets `Authenticated Message Box server identity
+changed` from the stock client once: restart it.
+
+Feeds: an instance's `etc/config.json` may declare `feeds: [{kind:
+"headers", url, box?}, {kind: "arc-callback", box?, token?}]` (the genesis
+carries them): the router holds the SSE connection (reconnecting with
+backoff, at most 1000 items queued per instance) and takes ARC's callbacks
+at `POST http://127.0.0.1:8100/callback/<handle>` (with `Authorization:
+Bearer <token>` when a token is set), admitting `header` / `status` entries
+into the box (default `chain`).
 
 The sections below describe the pre-router layout (the `1sat serve`
 messagebox, a wallet-api per instance, host-signed entries) where they talk

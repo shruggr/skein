@@ -30,7 +30,8 @@ bin/<name>.wasm          a handler program: a WASI preview 1 core module or a WA
 bin/<name>.cid           the CID (raw, bafkrei…) of a module the source or the kernel holds
 bin/<name>.json          optional: the program record's {inputs, services, description}
                          (default: the handler inputs {envelope, body, box, sender}, no services)
-etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box]}
+etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
+                                   feeds: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}]}  (the router holds them, #33)
 etc/subscriptions.json   required: [{sender?: key, box, handler}]
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```

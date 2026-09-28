@@ -107,13 +107,32 @@ key) — and one call comes in: **admit an entry and run the step**. A
 `sendMessage` from the web, a wake, an outcome, a mailbox change and a deploy
 are all that one call.
 
-- **Transport and auth** end at the router (`src/host/router.ts`, `auth.ts`):
-  the BRC-33 API of the TypeScript messagebox (`/sendMessage`,
-  `/listMessages`, `/acknowledgeMessage` under BRC-103/104 mutual auth, plus
+- **Transport** ends at the router (`src/host/router.ts`): the BRC-33 API of
+  the TypeScript messagebox (`/sendMessage`, `/listMessages`,
+  `/acknowledgeMessage` under BRC-103/104 mutual auth, plus
   `/account/register` and the paymail PKI), JSON or BRC-231 dag-cbor, so the
-  stock `@bsv/message-box-client` works against it unchanged. The router's
-  BRC-104 identity is its own (one URL, one handshake for every instance), a
-  child of the master secret.
+  stock `@bsv/message-box-client` works against it unchanged.
+- **Sessions belong to the instances** (#33, decided 2026-09-29): the router
+  is a forwarder with no auth state (`auth.ts`). It picks the instance an
+  HTTP request is for (`Router.front`: a `/@<handle>` path prefix, a
+  `<handle>.` host name — the stock AuthFetch keeps one session per origin —
+  else the front instance, the mailbox host), puts each authentication
+  message (the handshake, each signed request, each response to sign) into
+  that instance as a plain `event` entry in the reserved box `:auth`, awaits
+  the step and returns its answer as the HTTP reply. The messagebox program
+  (`programs/messagebox/auth.zig`) verifies and signs through the
+  instance's oracle and keeps the sessions as records (head `sessions`,
+  expiring by `defaults.sessionTtlMs` over entry stamps), so every session
+  signature in the log verifies with the instance's key alone.
+  docs/MESSAGES.md, "Sessions".
+- **Feeds** (`src/host/feeds.ts`): the router holds long-lived subscriptions
+  an instance declares in its config (`etc/config.json` `feeds`, carried by
+  the genesis) — an SSE header stream (`{kind: "headers", url}`) and ARC's
+  status callbacks (`{kind: "arc-callback", token?}` at `POST
+  /callback/<handle>`) — and admits each item as a plain `header` / `status`
+  entry (`Router.admitEvent`) through a bounded per-instance queue; SSE
+  reconnects with backoff. It judges nothing: the instance's chain tracker
+  validates.
 - **Routing**: host.db maps an identity to the instance that serves it — its
   own identity, or a mailbox it keeps for another identity (the owner's
   wallet, the inference peer, a roster). A message to an instance is screened

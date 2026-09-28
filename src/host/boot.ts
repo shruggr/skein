@@ -4,7 +4,7 @@
 //   bin/<name>.wasm   a handler program's module (WASI), or
 //   bin/<name>.cid    the CID (raw, bafkrei…) of a module the source or the kernel holds
 //   bin/<name>.json   optional: the program record's {inputs, services, description}
-//   etc/config.json   optional: {defaults, peers, names, collect} (keys hex or $owner/$infer)
+//   etc/config.json   optional: {defaults, peers, names, collect, feeds} (keys hex or $owner/$infer; feeds: feeds.ts)
 //   etc/subscriptions.json   [{sender?, box, handler}] (sender hex/$owner/$infer, handler a bin/ name or a CID)
 //   … anything else: the instance's files (SOUL.md, skills/ …)
 //
