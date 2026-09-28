@@ -1,13 +1,14 @@
-// A generated corpus for the replay equivalence: instance stores in format 2
-// (issue #33), written by the Zig kernel as the router drives it
-// (src/host/router.ts: messages admitted through the BRC-33 messagebox API,
-// wakes by the waker, emits delivered in process with their outcomes), on a
-// script clock. It exercises the shell under run-handler (writes, cwd,
-// failures, sleeps and their wakes), the script runtimes, objects/head/
-// subscribe handlers, the loop with bash and message tools, replies,
-// resolutions, delivery outcomes, inference errors, two agents talking, and a
-// low fuelPerStep. Envelopes in both forms: the owner's client sends §7.2
-// JSON; the instances and the inference peer send §7.3 dag-cbor.
+// A generated corpus for the replay equivalence: instance stores in format 3
+// (issue #40), written by the Zig kernel as the router drives it (each
+// instance an HTTP server — its front door — messages admitted as `mail`
+// entries, sessions and acknowledgements as events, delivery over http from
+// the VM, wakes by the waker), on a script clock. It exercises the shell
+// under run-handler (writes, cwd, failures, sleeps and their wakes), the
+// script runtimes, objects/head/subscribe handlers, the loop with bash and
+// message tools, replies, resolves and claims, delivery failures, inference
+// errors, two agents talking, the owner's mailbox instance, and a low
+// fuelPerStep. The owner speaks raw BRC-33 (src/client/raw.ts); the
+// inference peer answers from its own mailbox instance.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/corpus.ts <out-dir>
 
@@ -15,17 +16,14 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AuthFetch, PrivateKey } from "@bsv/sdk";
-import * as dagCbor from "@ipld/dag-cbor";
-import { seal, signedPart, type Envelope } from "../../src/envelope.ts";
+import { PrivateKey } from "@bsv/sdk";
+import { CID } from "multiformats/cid";
+import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { cborBoxClient } from "../../src/host/brc231.ts";
-import { messageBoxClient, type MessageBox } from "../../src/host/messagebox.ts";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
-import { encode } from "../../src/runtime/cid.ts";
-import { DEFAULTS, stampMs } from "../../src/runtime/log.ts";
-import { bundlesOf, iso, scriptClock } from "../../src/testkit.ts";
+import { DEFAULTS } from "../../src/runtime/log.ts";
+import { bundlesOf, scriptClock } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 type Json = Record<string, unknown>;
@@ -35,87 +33,120 @@ const out = process.argv[2]!;
 await fs.mkdir(out, { recursive: true });
 const verbose = !!process.env.VERBOSE;
 
-// Fixed keys, so the corpus is the same every time it is made (up to wallet IVs).
+// Fixed keys, so the corpus is the same every time it is made (up to wallet IVs and session nonces).
 let seed = 0x5eed00n;
 const key = () => new PrivateKey((seed++).toString(16), 16);
 
 async function fixture(files: Record<string, string>): Promise<string> {
   const dir = await fs.mkdtemp(join(tmpdir(), "skein-kz-corpus-"));
-  for (const [p, s] of Object.entries(files)) {
+  for (const [p, t] of Object.entries(files)) {
     await fs.mkdir(join(dir, p, ".."), { recursive: true });
-    await fs.writeFile(join(dir, p), s);
+    await fs.writeFile(join(dir, p), t);
   }
   return dir;
 }
 
 function scripted(answers: Array<Json | { status: number; text: string }>) {
   return (async () => {
-    const a = answers.shift();
-    if (!a) return new Response("no more answers", { status: 500 });
-    if ("status" in a && typeof a.status === "number") return new Response(String(a.text), { status: a.status });
-    return new Response(JSON.stringify(a), { status: 200, headers: { "content-type": "application/json" } });
+    const x = answers.shift();
+    if (!x) return new Response("no more answers", { status: 500 });
+    if ("status" in x && typeof x.status === "number") return new Response(String(x.text), { status: x.status });
+    return new Response(JSON.stringify(x), { status: 200, headers: { "content-type": "application/json" } });
   }) as unknown as typeof fetch;
 }
 const toolCall = (id: string, cmd: string) => ({ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ cmd }) } });
 const messageCall = (id: string, to: string, text: string) => ({ id, type: "function", function: { name: "message", arguments: JSON.stringify({ to, text }) } });
 const answer = (message: Json) => ({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" });
 
-/** One host: a router over its own host.db, its instances' stores written to out/<name>.db, on a script clock. */
-async function host(o: { defaults?: Record<string, string>; resolve?: (h: string, d: string) => Promise<Json>; infer?: PrivateKey } = {}) {
+/**
+ * One host: a router over its own host.db, its agents' stores written to
+ * out/<name>.db, the owner's mailbox instance `david` (in the corpus as
+ * out/<first agent>-david.db), on a script clock.
+ */
+async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-kz-corpus-home-"));
   const db = new HostDb(join(home, "host.db"));
   const clock = scriptClock();
   const keys = new Map<string, PrivateKey>();
+  const handles = new Map<string, string>(); // key → handle
   const ownerKey = key();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const router = new Router({
-    db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), authWallet: ephemeralWallet(key()),
-    owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, resolve: o.resolve,
+    db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home,
+    owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, ledgerMs: 3_600_000,
     fuelPerStep: o.defaults?.fuelPerStep, kernel: { command: kernel, env: { SKEIN_HOME: home } },
-    log: (s, l) => { if (verbose) process.stdout.write(`  | [${s}] ${l}\n`); },
+    log: (src, l) => { if (verbose) process.stdout.write(`  | [${src}] ${l}\n`); },
   });
-  const server = await router.listen(0);
-  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const box = (w: ReturnType<typeof ephemeralWallet>) => messageBoxClient(w, `${base}/messagebox`, "skein-client");
-  const register = async (w: ReturnType<typeof ephemeralWallet>, name: string) => {
-    const r = await new AuthFetch(w).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: name }) });
-    if (r.status !== 200) throw new Error(`register ${name}: ${r.status} ${await r.text()}`);
+  await router.listen(0);
+  const base = `http://127.0.0.1:${router.port}`;
+  const boxes = new Map<string, RawBox>();
+  const boxOf = (w: ReturnType<typeof ephemeralWallet>, wid: string, handle: string) => {
+    const k = `${wid}/${handle}`;
+    let b = boxes.get(k);
+    if (!b) { b = new RawBox(w, `${base}/@${handle}`); boxes.set(k, b); }
+    return b;
   };
-  let registered = false;
+  /** A mailbox instance for identity `whose`. */
+  const mailbox = (name: string, whose: string, store?: string) => {
+    keys.set(name, key());
+    router.addMailbox(name, whose);
+    db.add(name, { identity: keys.get(name)!.toPublicKey().toString(), ...(store ? { store } : {}) });
+  };
+  let first: string | undefined;
   const add = async (name: string) => {
     keys.set(name, key());
     await fs.rm(join(out, `${name}.db`), { force: true });
+    if (!first) {
+      // The owner's mailbox before the first agent's genesis (which names it): in the corpus too.
+      first = name;
+      await fs.rm(join(out, `${name}-david.db`), { force: true });
+      mailbox("david", ownerId, join(out, `${name}-david.db`));
+      mailboxes.push(`${name}-david`);
+    }
     db.add(name, { store: join(out, `${name}.db`), identity: keys.get(name)!.toPublicKey().toString() });
     await router.hydrate(name);
-    if (!registered) { registered = true; await register(owner, "david"); } // kept by the first instance
-    return keys.get(name)!.toPublicKey().toString();
+    const id = keys.get(name)!.toPublicKey().toString();
+    handles.set(id, name);
+    return id;
   };
-  const ownerBox: MessageBox = box(owner);
   const h = {
-    db, router, clock, owner, ownerKey, ownerId, box, register, add, base,
+    db, router, clock, owner, ownerKey, ownerId, add, mailbox, base,
     /** Let every kernel finish what it was given. */
     settle: () => router.settled(),
-    later(s: number) { const [sec, ns] = clock.now(); clock.set([sec + s, ns + 1000]); },
+    later(sec: number) { const [s0, ns] = clock.now(); clock.set([s0 + sec, ns + 1000]); },
     /** Advance the clock and let the waker admit what is due. */
-    async tick(s: number) { h.later(s); await router.wake(); await router.settled(); },
-    /** The owner's client: seal `body` (JSON form) to `to` in `box`. */
-    async send(to: string, boxName: string, body: unknown, as = owner): Promise<Envelope> {
-      const env = await seal(as, { recipient: { identityKey: to, handle: "skein", domain: "localhost" }, body: body instanceof Uint8Array ? body : dagCbor.encode(body), created: iso(clock.now()) });
-      await (as === owner ? ownerBox : box(as)).send({ recipient: to, box: boxName, body: env });
+    async tick(sec: number) { h.later(sec); await router.wake(); await router.settled(); },
+    /** Raw BRC-33 to `to` (an agent's key) in `box`, as the owner (or `as`); the message's id. */
+    async send(to: string, boxName: string, body: unknown, as = owner, asId = ownerId): Promise<CID> {
+      const r = await boxOf(as, asId, handles.get(to)!).send(to, boxName, body);
       await router.settled();
-      return env;
+      return r.id;
     },
+    /** The owner's mailbox: a box's messages. */
+    list: (boxName: string) => boxOf(owner, ownerId, "david").list(boxName),
     async done() { await router.settled(); await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true }); },
   };
   return h;
 }
 
+/** The inference peer on its own mailbox instance `infer` (raw BRC-33), answering from a script. */
 function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, answers: Array<Json | { status: number; text: string }>) {
   const w = ephemeralWallet(k);
-  return new InferPeer({ log: () => {}, wallet: w, box: h.box(w), providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: scripted(answers), now: () => stampMs(h.clock.now()) });
+  h.mailbox("infer", k.toPublicKey().toString());
+  const outs = new Map<string, RawBox>();
+  return new InferPeer({
+    log: () => {}, wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, fetch: scripted(answers),
+    raw: {
+      inbox: new RawBox(w, `${h.base}/@infer`),
+      outbox: (url) => { let b = outs.get(url); if (!b) { b = new RawBox(w, url); outs.set(url, b); } return b; },
+      resolve: async (handle, domain) => await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=${handle}@${domain}`)).json() as { identityKey: string; messagebox: string },
+    },
+  });
 }
 
 const made: string[] = [];
+/** The owners' mailbox instances: in the corpus if anything was delivered there (it has a store). */
+const mailboxes: string[] = [];
 
 // The in-step clock is the Zig kernel's (issue #38: entry stamp + fuel ×
 // 1 ns). The scripts below print only clock invariants (orderings, elapsed ≥
@@ -187,19 +218,18 @@ const made: string[] = [];
   const i = await h.add("gen-subs");
   const stranger = key();
   const sw = ephemeralWallet(stranger), sid = stranger.toPublicKey().toString();
-  await h.register(sw, "stranger"); // its replies have somewhere to go
   const dir = await fixture({ "a.txt": "a\n" });
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await h.send(i, "objects", b);
   const handler = (await h.router.loaded.get("gen-subs")!.kernel.call("programs") as Record<string, unknown>)["run-handler"];
-  await h.send(i, "chat", { text: "hello?" }, sw);
+  await h.send(i, "chat", { text: "hello?" }, sw, sid);
   // The subscribe body's sender: bytes (format 2), and once as hex (a JSON-era client; the handler takes both).
   await h.send(i, "subscribe", { op: "add", sender: Uint8Array.from(Buffer.from(sid, "hex")), box: "run", handler });
   await h.send(i, "subscribe", { op: "add", sender: sid, box: "run", handler }); // no change
   h.later(1);
-  await h.send(i, "run", { cmd: "ls; echo stranger", tree: root }, sw);
+  await h.send(i, "run", { cmd: "ls; echo stranger", tree: root }, sw, sid); // run; its result has nowhere to go (no peer record)
   await h.send(i, "subscribe", { op: "remove", sender: Uint8Array.from(Buffer.from(sid, "hex")), box: "run", handler });
-  await h.send(i, "run", { cmd: "echo again", tree: root }, sw);
+  await h.send(i, "run", { cmd: "echo again", tree: root }, sw, sid).catch(() => {}); // not subscribed: refused, nothing written
   await h.send(i, "subscribe", { op: "bogus", box: "run", handler });
   await h.send(i, "head", { name: "work", tree: root });
   await h.send(i, "head", { name: "bad name", tree: root });
@@ -221,16 +251,15 @@ const made: string[] = [];
     { status: 500, text: "upstream down" },
   ]);
   const i = await h.add("gen-chat");
-  await h.register(ephemeralWallet(inferKey), "infer");
   const poll = async () => { await peer.poll(); await h.settle(); };
   const dir = await fixture({ "README": "hello\n", "src/a.txt": "alpha\n", "SOUL.md": "Be brief.\n" });
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await h.send(i, "objects", b);
   const chat = await h.send(i, "chat", { text: "What is here?", tree: root });
   await poll(); await poll();
-  // David replies to the answer: the same thread.
-  const [ans] = await h.box(h.owner).list("chat");
-  const ansCid = encode(signedPart((typeof ans!.body === "string" ? JSON.parse(ans!.body) : ans!.body) as Envelope)).cid;
+  // David replies to the answer (its id: the messageId his mailbox lists): the same thread.
+  const [ans] = await h.list("chat");
+  const ansCid = CID.parse(ans!.messageId);
   h.later(2);
   await h.send(i, "chat", { text: "Make more, then wait a second.", replyTo: ansCid });
   await poll();
@@ -240,27 +269,21 @@ const made: string[] = [];
   h.later(1);
   await h.send(i, "chat", { text: "again?" });
   await poll();
-  // A session reply (#33): the compact form {type: "reply", replyTo, body} on a BRC-104 session, answering
-  // the loop's "Done." — it resumes that thread like a full envelope would.
-  const chats = await h.box(h.owner).list("chat");
-  const done = chats[1]!;
-  const doneId = encode(signedPart((typeof done.body === "string" ? JSON.parse(done.body) : done.body) as Envelope)).cid;
-  await cborBoxClient(h.owner, `${h.base}/messagebox`).send({ recipient: i, box: "chat", body: dagCbor.encode({ type: "reply", replyTo: doneId, body: dagCbor.encode({ text: "and the rest?" }) }) });
-  await h.settle();
+  // A reply to the loop's "Done." resumes that thread.
+  const done = (await h.list("chat")).find((m) => (m.value as { text?: string }).text === "Done.")!;
+  await h.send(i, "chat", { text: "and the rest?", replyTo: CID.parse(done.messageId) });
   await poll();
-  // A stray reply nobody awaits.
-  await h.send(i, "chat", { text: "stray", replyTo: encode(signedPart(chat)).cid });
+  // A stray reply nobody awaits: the chat we sent names no message the instance sent us.
+  await h.send(i, "chat", { text: "stray", replyTo: chat });
   await fs.rm(dir, { recursive: true, force: true });
   await h.done();
   made.push("gen-chat");
 }
 
-// ---------------------------------------------------------------- two agents talking (dag-cbor envelopes between them); resolutions; outcomes
+// ---------------------------------------------------------------- two agents talking (raw BRC-33 between them); resolves, claims; delivery failures
 {
   const inferKey = key();
   const h = await host({ infer: inferKey });
-  const directory: Record<string, string> = {};
-  h.router.o.resolve = async (hd, d) => directory[`${hd}@${d}`] ? { identityKey: directory[`${hd}@${d}`], via: "host" } : { identityKey: "", error: "unknown handle" };
   // One inference peer serves both; each agent's requests in turn (martha's first, as the conversation goes).
   const peer = inferPeer(h, inferKey, [
     answer({ content: "", tool_calls: [messageCall("m1", "@gen-kurt@localhost", "What does the blue one cost?")] }), // martha
@@ -271,32 +294,30 @@ const made: string[] = [];
     answer({ content: "Blue is 5." }), // martha
   ]);
   const martha = await h.add("gen-martha");
-  const kurt = await h.add("gen-kurt");
-  await h.register(ephemeralWallet(inferKey), "infer");
-  directory["gen-martha@localhost"] = martha;
-  directory["gen-kurt@localhost"] = kurt;
+  await h.add("gen-kurt");
   await h.send(martha, "chat", { text: "ask kurt about the blue one" });
   for (let n = 0; n < 12; n++) { if (await peer.poll() === 0) break; await h.settle(); }
   await h.done();
   made.push("gen-martha", "gen-kurt");
 }
 {
+  // The admin's `peers` box: bob at a URL where nothing answers — the delivery fails, an error result for the model.
   const inferKey = key();
-  const bob = key().toPublicKey().toString(); // no mailbox on this host: the delivery fails
-  const h = await host({ infer: inferKey, resolve: async () => ({ identityKey: bob }) });
+  const bob = key().toPublicKey().toString();
+  const h = await host({ infer: inferKey });
   const peer = inferPeer(h, inferKey, [
     answer({ content: "", tool_calls: [messageCall("m1", "@bob@localhost", "hi bob")] }),
     answer({ content: "Bob cannot be reached." }),
   ]);
   const i = await h.add("gen-outcome");
-  await h.register(ephemeralWallet(inferKey), "infer");
+  await h.send(i, "peers", { op: "add", key: Uint8Array.from(Buffer.from(bob, "hex")), url: `${h.base}/@gone`, handle: "bob", domain: "localhost" });
   await h.send(i, "chat", { text: "ask bob" });
   for (let n = 0; n < 4; n++) { await peer.poll(); await h.settle(); }
   await h.done();
   made.push("gen-outcome");
 }
 {
-  // The inference peer has no mailbox here: the loop's infer fails; an inference error to the opener.
+  // The inference peer has no mailbox anywhere: its handle does not resolve; an inference error to the opener.
   const h = await host({ infer: key() });
   const i = await h.add("gen-refused");
   await h.send(i, "chat", { text: "hello" });
@@ -305,10 +326,11 @@ const made: string[] = [];
 }
 
 // ---------------------------------------------------------------- fuel: a low fuelPerStep (issue #5)
-// The objects handler (~3M) fits in 10^8 and run-handler (~3·10^8, the Go
-// runtime starting) runs out in its first step: errored, "fuel exhausted".
+// The objects handler (~3.3M) fits in 4·10^6 and run-handler (~8M over its two
+// steps: the shell launched, then the result delivered over http) runs out:
+// errored, "fuel exhausted".
 {
-  const h = await host({ defaults: { ...DEFAULTS, fuelPerStep: "100000000" } });
+  const h = await host({ defaults: { ...DEFAULTS, fuelPerStep: "4000000" } });
   const i = await h.add("gen-fuel");
   const dir = await fixture({ "a.txt": "a\n" });
   const { root, bundles } = await bundlesOf(dir);
@@ -320,4 +342,5 @@ const made: string[] = [];
   made.push("gen-fuel");
 }
 
+for (const m of mailboxes) if (await fs.stat(join(out, `${m}.db`)).then(() => true, () => false)) made.push(m);
 process.stdout.write(made.map((n) => join(out, `${n}.db`)).join("\n") + "\n");

@@ -284,6 +284,7 @@ pub fn send(a: Allocator, in: Value, arg: Value) !Value {
     if ((Value.intOf(sent.r.get("status")) orelse 0) == 401) {
         // The recipient forgot the session (expired, restarted): shake hands again, once.
         session = try handshake(a, me, peer, at);
+        try claim(a, in, peer, session, me);
         sent = try request(a, peer, session, me, "/sendMessage", body);
     }
     const status = Value.intOf(sent.r.get("status")) orelse 0;

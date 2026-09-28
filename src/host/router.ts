@@ -72,6 +72,8 @@ export interface RouterOptions {
   instanceOrigin?: string;
   /** This host's own origin (the manifest, a genesis's resolveOrigin); default http://127.0.0.1:{port}. */
   origin?: string;
+  /** The port it serves on, for origins named before it listens (a boot, `skein-host add`); listening sets it. */
+  port?: number;
   /** The owner's messagebox URL for a new agent's genesis; default the owner's mailbox instance here, if there is one. */
   ownerMessagebox?: string;
   /** How often the fuel ledger is written (ms); default 5000. */
@@ -159,10 +161,10 @@ export class Router {
   nowStamp(): Stamp { return this.now(); }
 
   /** This host's own origin. */
-  origin(): string { return (this.o.origin ?? "http://127.0.0.1:{port}").replace("{port}", String(this.port)); }
+  origin(): string { return (this.o.origin ?? "http://127.0.0.1:{port}").replace("{port}", String(this.port || this.o.port || 0)); }
   /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
   originOf(handle: string): string {
-    return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port));
+    return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
   }
 
   /** Hydrate every enabled row once (recovery at hydrate time; it reports its sleepers), then let them idle out. */

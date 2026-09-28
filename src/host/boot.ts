@@ -230,7 +230,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
   // A tree takes only the shell from the kernel: the other pinned records would sit in the store unreferenced (a replay would not reproduce them).
-  const kernelPrograms = await k.call("programs", src.kind === "code" ? undefined : ["shell"]) as Record<string, CID>;
+  const kernelPrograms = await k.call("programs", src.kind === "code" ? (c.mailbox ? ["frontdoor", "messagebox"] : undefined) : ["shell"]) as Record<string, CID>;
   if (src.kind === "code") {
     const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
     return { entry, objects: 0, programs: Object.keys(kernelPrograms) };

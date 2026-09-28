@@ -20,7 +20,7 @@ pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreid2kaqltmak2eayvteju5gopb7z5eww2mk5ciiysfbgvp6ptum3aa" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreieqrn4illeokbe5f6amrcom6vq2nnowk6cpmyzedond4ienizacgu" },
+    .{ .name = "messagebox", .cid = "bafkreiehhusheqk3oguayz43gbtwdqdx6fcpatiuztzomuglrj7ksm266m" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreiasbghv2rbnzvy75af32rkqnhrbnidnt7pyi3st3mnjn6kwuumj3a" },
     // The peer table's writer (#40): BRC-169 resolve, the admin's `peers`, `register` claims (programs/resolve).

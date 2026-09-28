@@ -36,7 +36,8 @@ export class RawBox {
     this.url = url.replace(/\/+$/, "");
     const u = new URL(this.url);
     const prefix = u.pathname === "/" ? "" : u.pathname;
-    const base = o.fetch ?? fetch;
+    // A bound fetch: the browser's must be called on the window.
+    const base = o.fetch ?? (((input: string | URL | Request, init?: RequestInit) => globalThis.fetch(input, init)) as typeof fetch);
     // AuthFetch shakes hands at <origin>/.well-known/auth: under the path prefix, if the URL has one.
     const f = prefix
       ? ((input: string | URL | Request, init?: RequestInit) => {

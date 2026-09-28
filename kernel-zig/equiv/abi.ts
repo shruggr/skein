@@ -34,7 +34,7 @@ const src = join(work, "src.db");
 copyFileSync(source, src);
 if (existsSync(`${source}-wal`)) copyFileSync(`${source}-wal`, `${src}-wal`);
 
-type Report = { lines: string[]; sent: string[]; state: string; index: { record: string } };
+type Report = { lines: string[]; state: string; index: { record: string } };
 function replay(out: string, env: Record<string, string> = {}): Report {
   const r = spawnSync(kernel, ["replay", src, out], { maxBuffer: 1 << 30, env: { ...process.env, ...env } });
   if (r.status !== 0) throw new Error(`skein-kernel replay: ${r.stderr}`);
@@ -53,7 +53,7 @@ const c2 = replay(join(work, "component2.db"), sub);
 const bad = (r: Report) => r.lines.filter((l) => /DIVERGED|cannot run|failed/.test(l));
 check(bad(m).length === 0 && bad(c).length === 0, `no DIVERGED or failed step on either ABI${[...bad(m), ...bad(c)].map((l) => `\n    ${l}`).join("")}`);
 check(JSON.stringify(m.lines) === JSON.stringify(c.lines), `the same ${m.lines.length} log lines`);
-check(JSON.stringify(m.sent) === JSON.stringify(c.sent) && m.state === c.state, `the same emits (${m.sent.length}) and log tip`);
+check(m.state === c.state, "the same log tip");
 check(c.index.record === c2.index.record, `the component's replay reproduces itself exactly, fuel included (state record ${c.index.record.slice(-12)})`);
 
 // Update by update, through the index.
