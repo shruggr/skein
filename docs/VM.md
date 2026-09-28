@@ -167,7 +167,8 @@ schema, and the host services it may message. Threads reference programs by
 CID. A **tool** is a program with a declared calling shape; the definition an
 LLM sees is derived from the record.
 
-Programs run **inside** the machine as WASI modules. The host satisfies only
+Programs run **inside** the machine as WASI modules or WASI 0.2 components
+(below, "The ABI"). The host satisfies only
 these imports:
 
 - `wasi:filesystem`, backed by the current tree (reads resolve blobs, writes
@@ -201,6 +202,46 @@ A step function is the same idea one level up: the turn loop is a program
 whose input is the thread tip and the message that woke it, and whose output
 is records to append and messages to emit. `step(tip, message) → {append,
 emit}` with only the imports above.
+
+### The ABI: preview1 modules and WASI 0.2 components
+
+(Issue #34; built in the Zig kernel, `kernel-zig/src/component.zig`, README
+"Components".) A program's `code.wasm` may be either of two binaries, and
+the kernel runs both:
+
+- a **preview1 core module**, which imports `wasi_snapshot_preview1` and the
+  `skein` namespace (pointers into its memory, `f(…, out, cap) → n`, with
+  `take`/`error`; `src/runtime/wasi/skein-imports.ts`);
+- a **WASI 0.2 component**, which targets the world `skein:kernel/handler`
+  (`wit/skein.wit`). That is WASI 0.2.12's `cli`, `clocks`, `filesystem`,
+  `io` and `random`, plus the interface `skein:kernel/skein`, and the export
+  `wasi:cli/run`. The interface has the same calls as the `skein` namespace.
+  Results come back through the canonical ABI, errors as
+  `result<_, string>`, and `head` returns an `option`.
+
+The kernel tells them apart by the binary's preamble. Both get **one
+behaviour**, because the 0.2 imports are answered by the preview1
+implementation itself:
+
+- a `descriptor` is a process fd, and a stream reads and writes through
+  `fd_read` and `fd_write`;
+- the tree, errors and inode numbers are the same;
+- the clock is the entry's stamp, and random is the entry-derived stream;
+- the skein calls reach the same host functions.
+
+Fuel is per wasmtime store, so a component draws on the step's budget the
+same way.
+
+A component's fuel is its own, not the module's: the preview1 adapter and
+the canonical-ABI glue are instructions too. So the same program built for
+both ABIs gives the same updates in every field but `fuel`, and its log
+replays exactly on the ABI it ran on (`kernel-zig/equiv/abi.ts`).
+
+The preview1 adapter and wasi-libc's 0.2 exit report any non-zero exit
+status as 1, because `wasi:cli/exit` is ok/err.
+
+`wasi:http` (#15) is to be added to the world, and then replaces
+`skein.http`.
 
 ### Fuel: every step is metered
 

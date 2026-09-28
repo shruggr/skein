@@ -5,6 +5,7 @@
 const std = @import("std");
 const cidm = @import("cid.zig");
 const shell = @import("shell.zig");
+const programs = @import("programs.zig");
 const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
@@ -20,6 +21,11 @@ pub fn main(gpa: std.mem.Allocator, db: []const u8) !void {
         std.debug.print("{s}: {s}\n", .{ @errorName(e), msg });
         return e;
     };
+
+    // Issue #34: SKEIN_SHELL_COMPONENTS=<dir> runs the tools found there as
+    // <name>.wasm (components made with the preview1 adapter) in place of the
+    // pinned modules, so equiv/shell.ts can compare the two ABIs case by case.
+    if (std.posix.getenv("SKEIN_SHELL_COMPONENTS")) |dir| try useComponents(gpa, r, mods, dir);
 
     const input = try std.fs.File.stdin().readToEndAlloc(gpa, 1 << 30);
     const cases = try std.json.parseFromSliceLeaky(std.json.Value, arena0.allocator(), input, .{});
@@ -69,4 +75,22 @@ pub fn main(gpa: std.mem.Allocator, db: []const u8) !void {
     }
     try out.append(']');
     try std.fs.File.stdout().writeAll(out.items);
+}
+
+fn useComponents(gpa: std.mem.Allocator, r: *runner.Runner, mods: *shell.Modules, dir: []const u8) !void {
+    var names = std.array_list.Managed([]const u8).init(gpa);
+    try names.append("coreutils");
+    var it = mods.extra.keyIterator();
+    while (it.next()) |k| try names.append(k.*);
+    for (names.items) |n| {
+        const path = try std.fmt.allocPrint(gpa, "{s}/{s}.wasm", .{ dir, n });
+        const bytes = std.fs.cwd().readFileAlloc(gpa, path, 1 << 30) catch continue;
+        var em: []const u8 = "";
+        const comp = r.compile(bytes, &em) catch |e| {
+            std.debug.print("{s}: {s}\n", .{ path, em });
+            return e;
+        };
+        if (std.mem.eql(u8, n, "coreutils")) mods.coreutils = comp else try mods.extra.put(n, comp);
+    }
+    for (programs.tool_aliases) |t| try mods.extra.put(t.name, mods.extra.get(t.of).?);
 }
