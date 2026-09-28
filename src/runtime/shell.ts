@@ -29,9 +29,14 @@ export interface ShellOptions {
   clock?: (id: number) => bigint | Promise<bigint>;
   /** random_get. Default: a splitmix stream from `seed`. */
   random?: (len: number) => Uint8Array | Promise<Uint8Array>;
-  /** A sleep (poll_oneoff on clocks). Default: returns at once. */
+  /**
+   * A sleep (poll_oneoff on clocks). Default: returns at once — and, when
+   * `clock` is not given either, moves the run's virtual clock to the
+   * deadline, so a program that waits until a time has passed (QuickJS's
+   * timers) sees it pass instead of spinning.
+   */
   sleep?: (clocks: Array<{ timeout: bigint; absolute: boolean }>) => void | Promise<void>;
-  /** Without `clock`: the time every clock read returns, in ms since the epoch. Default 0. */
+  /** Without `clock`: the time clock reads start at, in ms since the epoch (it moves only by sleeps). Default 0. */
   time?: number;
   /** Without `random`: seed for the stream. Default 0. */
   seed?: number;
@@ -210,10 +215,13 @@ export async function runShell(blocks: TreeBlocks, o: ShellOptions): Promise<She
   const limit = o.limit ?? 64 << 20;
   const stdout = new Pipe(limit), stderr = new Pipe(limit);
   const stdin = new Pipe(Math.max(limit, o.stdin?.length ?? 0), o.stdin);
-  const fixed = BigInt(o.time ?? 0) * 1_000_000n;
-  const clock = o.clock ?? (() => fixed);
+  let now = BigInt(o.time ?? 0) * 1_000_000n;
+  const clock = o.clock ?? (() => now);
   const random = o.random ?? prng(o.seed ?? 0);
-  const sleep = o.sleep;
+  const sleep = o.sleep ?? (o.clock ? undefined : (clocks: Array<{ timeout: bigint; absolute: boolean }>) => {
+    const until = clocks.map((c) => (c.absolute ? c.timeout : now + c.timeout)).reduce((a, b) => (a < b ? a : b));
+    if (until > now) now = until;
+  });
   const { brush, coreutils, extra = {}, support = {} } = o.modules;
   const utils = await utilities(coreutils);
   const exists = (name: string) => SHELLS.has(name) || name === "coreutils" || utils.has(name) || name in extra;

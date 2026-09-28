@@ -108,6 +108,8 @@ test("node (qjs + shim): argv, stdin, files in the tree, exit code; run by #! an
   const missing = await sh(`node -e 'require("child_process")'; echo "exit=$?"`);
   assert.equal(missing.out, "exit=1\n");
   assert.match(missing.err, /Cannot find module 'child_process': skein's node shim/);
+  const timers = await sh(`node -e 'setTimeout((x) => console.log("later", x), 10, 1); console.log("now")'`);
+  assert.equal(timers.out, "now\nlater 1\n", timers.err);
   const net = await sh(`node -e 'fetch("http://example.com")'; echo "exit=$?"`);
   assert.equal(net.out, "exit=1\n");
   assert.match(net.err, /fetch is not defined/);

@@ -17,7 +17,8 @@ const node = [
   ["buffer", "modules/buffer.js"], ["node:buffer", "modules/buffer.js"],
 ];
 
-const cstr = (s) => JSON.stringify(s); // JSON string escapes are valid C for this ASCII-only source
+// JSON string escapes are valid C for this ASCII-only source; `?` is escaped so `??=` is never a trigraph.
+const cstr = (s) => JSON.stringify(s).replace(/\?/g, "\\?");
 for (const [, f] of [...always, ...node]) if (/[^\x00-\x7f]/.test(src(f))) throw new Error(`${f}: keep the prelude ASCII`);
 const table = (name, list) =>
   `static const struct { const char *name; const char *src; } ${name}[] = {\n` +

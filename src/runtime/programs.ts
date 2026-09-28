@@ -49,7 +49,7 @@ export const MODULES = {
   sed: CID.parse("bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy"),
   // Script runtimes (issue #25): QuickJS-ng (also run as `node`, a small
   // shim) and CPython on WASI (also `python3`); its stdlib is FILES below.
-  qjs: CID.parse("bafkreihiymsg5bwnssiliip7bpmzyv2rjwsodni74lhbzeflc3cytfy7ye"),
+  qjs: CID.parse("bafkreig4lw4ceuhl5qvzr43ketajajhkexgqmg6et2rpjlx66dvavw6zwe"),
   python: CID.parse("bafkreid5irpih6ehtwxvg2jf556f4bupz2p54c5n746i5r5spxpta2i42m"),
 } as const;
 

@@ -393,6 +393,12 @@ globalThis.exports = globalThis.module.exports;
 globalThis.__filename = scriptPath;
 globalThis.__dirname = mainDir;
 globalThis.global = globalThis;
+// QuickJS keeps its timers in qjs:os; Node has them global. Sleeps are the runtime's.
+globalThis.setTimeout ??= (fn, ms, ...a) => os.setTimeout(() => fn(...a), ms ?? 0);
+globalThis.clearTimeout ??= (t) => t !== undefined && os.clearTimeout(t);
+globalThis.setInterval ??= (fn, ms, ...a) => os.setInterval(() => fn(...a), ms ?? 0);
+globalThis.clearInterval ??= (t) => t !== undefined && os.clearInterval(t);
+globalThis.setImmediate ??= (fn, ...a) => os.setTimeout(() => fn(...a), 0);
 
 /** Read by qjs after the event loop drains (patches/quickjs.patch): the exit status. */
 globalThis.__skeinExitCode = () => (exiting ? undefined : Number(process.exitCode ?? 0) | 0);
