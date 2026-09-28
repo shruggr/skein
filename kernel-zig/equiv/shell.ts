@@ -136,7 +136,7 @@ function scriptCases(): Case[] {
   const put = (name: string, body: string) => `echo ${b64(body + "\n")} | base64 -d > ${name}`;
   const js1 = put("t.js", js), py1 = put("t.py", py), e1 = put("e.py", ent);
   return [
-    { cmd: `${js1} && ./t.js a b <<< piped; echo "exit=$?"; node t.js c; echo "exit=$?"; cat out/js.txt`, tree: tr },
+    hi({ cmd: `${js1} && ./t.js a b <<< piped; echo "exit=$?"; node t.js c; echo "exit=$?"; cat out/js.txt`, tree: tr }),
     hi({ cmd: `${py1} && echo in | ./t.py a b; echo "exit=$?"; python t.py c < /dev/null; echo "exit=$?"; cat out/py.json`, tree: tr }),
     hi({ cmd: `qjs -e 'import("qjs:std").then((std) => { console.log(scriptArgs, std.getenv("HOME")); std.exit(4) })'; echo "exit=$?"; qjs -e 'throw new Error("boom")'; echo "exit=$?"`, tree: tr }),
     { cmd: `${e1} && python3 e.py; node -e 'console.log(Date.now(), new Date().toISOString(), Math.random())'`, tree: tr, time: Date.UTC(2023, 10, 14, 22, 13, 20), seed: 7 },
