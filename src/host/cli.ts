@@ -43,7 +43,7 @@ import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { short } from "../runtime/log.ts";
-import { openStore } from "../runtime/sqlite.ts";
+import { openStoreFile } from "../runtime/index-store.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
@@ -257,7 +257,7 @@ function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promis
   const given = env.store?.(row);
   if (given) return { blocks: given };
   if (!existsSync(row.store)) return {};
-  const s = openStore(row.store, { readOnly: true });
+  const s = openStoreFile(row.store, { readOnly: true });
   return { blocks: s, close: () => s.close() };
 }
 
