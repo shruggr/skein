@@ -3,7 +3,9 @@
 # in wasm/patches. Needs rustup with the wasm32-wasip1 target
 # (mise use -g rust@latest && rustup target add wasm32-wasip1). findutils'
 # `onig` (C) dependency needs a WASI C toolchain; this script fetches
-# wasi-sdk itself (pinned below) into .build/ if it isn't there yet. Work
+# wasi-sdk itself (pinned below) into .build/ if it isn't there yet; qjs
+# (issue #25) is C built with it via cmake + make; python is a pinned upstream
+# WASI build checked by SHA-256 (needs curl, unzip, node). Work
 # happens in .build/ (git-ignored). See wasm/README.md for what each patch
 # does and the toolset survey (issue #13).
 set -euo pipefail
@@ -17,6 +19,9 @@ JAQ_REV=c866e70303b5dbc37d83a0b0cbacf10e90af9c8c         # 01mf02/jaq tag v3.1.1
 SED_REV=2ce633cb8dd83912d0a01cfdc6fefafdb9f28eaf         # uutils/sed tag 0.2.0
 TREE_REV=dfed2820d8d761107b2ddc4bf68b4746c82af302        # peteretelej/tree tag v1.3.0
 RAWK_REV=4addaefab9ff35c1e8d00ce348aacee259cf8b26        # quinnjr/rawk tag v0.2.0
+QUICKJS_REV=6d46d07d04041b40f4f49eaa7fdebe44c314c699     # quickjs-ng/quickjs tag v0.17.0
+PYTHON_VERSION=3.14.7                                     # brettcannon/cpython-wasi-build release v3.14.7
+PYTHON_ZIP_SHA256=2e064d3fb8172471d39d741348efa722349c40b96301f69968dff714999c584b  # python-3.14.7-wasi_sdk-24.zip
 WASI_SDK_VERSION=34.0
 export CARGO_PROFILE_RELEASE_STRIP=true
 
@@ -94,4 +99,32 @@ cp wasm/tools/which/target/wasm32-wasip1/release/which.wasm wasm/which.wasm
 (cd wasm/tools/grep && cargo build --release --target wasm32-wasip1)
 cp wasm/tools/grep/target/wasm32-wasip1/release/grep.wasm wasm/grep.wasm
 
-sha256sum wasm/*.wasm
+# --- script runtimes (issue #25): JavaScript and Python ---
+
+# qjs: QuickJS-ng with wasi-sdk (C), + patches/quickjs.patch, which compiles
+# in wasm/tools/qjs (console methods; the `node` shim when run as `node`).
+fetch https://github.com/quickjs-ng/quickjs .build/quickjs "$QUICKJS_REV"
+git -C .build/quickjs apply "$ROOT/wasm/patches/quickjs.patch"
+node wasm/tools/qjs/gen-prelude.mjs .build/quickjs/skein-prelude.h
+cmake -S .build/quickjs -B .build/quickjs/build-wasi \
+  -DCMAKE_TOOLCHAIN_FILE="$WASI_SDK_PATH/share/cmake/wasi-sdk-p1.cmake" -DWASI_SDK_PREFIX="$WASI_SDK_PATH" \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS=-DSKEIN_PRELUDE >/dev/null
+make -s -C .build/quickjs/build-wasi -j"$(nproc)" qjs_exe
+"$WASI_SDK_PATH/bin/llvm-strip" -o wasm/qjs.wasm .build/quickjs/build-wasi/qjs
+
+# python: the CPython WASI build published by a CPython core dev
+# (brettcannon/cpython-wasi-build, built with wasi-sdk 24), checked against
+# its pinned SHA-256; stripped of its debug sections; the stdlib packed into
+# a stored zip (the build has no zlib) that the shell mounts read-only.
+if ! echo "$PYTHON_ZIP_SHA256  .build/python-wasi.zip" | sha256sum -c --status 2>/dev/null; then
+  curl -sSL -o .build/python-wasi.zip \
+    "https://github.com/brettcannon/cpython-wasi-build/releases/download/v${PYTHON_VERSION}/python-${PYTHON_VERSION}-wasi_sdk-24.zip"
+  echo "$PYTHON_ZIP_SHA256  .build/python-wasi.zip" | sha256sum -c --quiet
+fi
+rm -rf .build/python-wasi
+mkdir -p .build/python-wasi
+(cd .build/python-wasi && unzip -q ../python-wasi.zip)
+"$WASI_SDK_PATH/bin/llvm-strip" -o wasm/python.wasm .build/python-wasi/python.wasm
+node wasm/tools/python/zip-stdlib.mjs ".build/python-wasi/lib/python${PYTHON_VERSION%.*}" "wasm/python$(echo "${PYTHON_VERSION%.*}" | tr -d .).zip"
+
+sha256sum wasm/*.wasm wasm/*.zip
