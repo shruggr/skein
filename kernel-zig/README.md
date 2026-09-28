@@ -53,9 +53,10 @@ supervisor's IPC channel (`NODE_CHANNEL_FD`) closes. With
 `SKEIN_KERNEL=zig`, `bin/skein-runtime` execs it instead of `src/host/main.ts`,
 so `SKEIN_KERNEL=zig skein-host run` runs every instance on the Zig kernel
 (build it first). Since #30 the store file holds blocks and the state
-pointer only: `skein-host` (it reads blocks) is unaffected, the explorer and
-`skein-dev` (they read the old tables) are not yet ported — see "The index"
-below.
+pointer only: `skein-host` (it reads blocks) is unaffected; the explorer and
+`skein-dev` open a store file through `src/runtime/index-store.ts`, which
+reads the maps when the file has the state pointer and the old tables when
+it does not — see "The index" below.
 
 ## The index (issue #30)
 
@@ -117,8 +118,13 @@ are renamed `legacy_*`; opened read only (a replay's source, `dump`), the
 import stays in memory. A store whose old index is stale is refused as
 before (`skein-dev rebuild` it).
 
-**Not yet:** the explorer and `skein-dev` read the old tables, so they see
-nothing of a store this kernel wrote (question on #30); the wallet's flat
+**From TypeScript** (`src/runtime/index-store.ts`): a read-only `Store` over
+the maps (the pointer re-read on every call, so it follows a live kernel),
+used by the explorer and `skein-dev` (`rebuild` is refused on such a store:
+the kernel keeps its index); and `buildIndex`, the same maps built
+canonically in TypeScript — equiv checks it reaches the kernel's state CID,
+and that every explorer page renders the same over the TS and the Zig
+replays' files. **Not yet:** the wallet's flat
 index (`wallet-zig`, #29) moves onto `mst.zig` in #29 phase 2; pruning old
 spine nodes and state records; a cache bound (decoded nodes are dropped at
 every commit).
@@ -206,8 +212,8 @@ same way).
   on Node.
 - **The drain's own crash lines** (`runtime: <stack>`) are not stack traces.
 - **The store file** (#30): blocks and the state pointer, not the TS tables.
-  The TS runtime reads it only through a rebuild (`equiv/replay.ts` shows
-  how); the explorer and `skein-dev` do not read it yet.
+  The TS runtime runs on it only through a rebuild (`equiv/replay.ts` shows
+  how); the explorer and `skein-dev` read it (`src/runtime/index-store.ts`).
 - **Not ported**: the index rebuild of a stale older store (`edges.rebuild`;
   such a store is refused, `skein-dev rebuild` it first), `putMessage` and
   the `messages` table (the runtime does not write them), `handles`, the

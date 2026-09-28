@@ -14,7 +14,10 @@
 //     deadline), awaits, edges, heads, the cursor;
 //   - the state record: the TS store's tables imported into the index
 //     (`skein-kernel dump ts.db`) give the same state CID as the Zig replay's
-//     own — the index is a function of the log.
+//     own — the index is a function of the log — and so does the index
+//     TypeScript builds from them (src/runtime/index-store.ts);
+//   - the explorer: every page rendered over the TS replay's file and over
+//     the Zig replay's file (read through index-store.ts) is the same.
 //
 // Also reports how each replay compares with the source store itself (thread
 // and head tips), and the index's cost per log entry.
@@ -31,6 +34,10 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
+import { buildIndex, hasStatePointer, openStoreFile } from "../../src/runtime/index-store.ts";
+import { openStore } from "../../src/runtime/sqlite.ts";
+import { render } from "../../src/dev/explore/server.ts";
+import { load } from "../../src/dev/explore/view.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
@@ -103,6 +110,25 @@ function compare(what: string, x: unknown[], y: unknown[], ordered: boolean): st
   return `${what}: ${xs.length} vs ${ys.length}, ${onlyTs.length} only in ts, ${onlyZig.length} only in zig${onlyTs.length ? `\n    ts:  ${onlyTs.slice(0, 3).join("\n         ")}` : ""}${onlyZig.length ? `\n    zig: ${onlyZig.slice(0, 3).join("\n         ")}` : ""}`;
 }
 
+/** Every explorer page over the two files; the first that differs, if any. */
+async function explorerDiff(tsPath: string, zigPath: string): Promise<string | undefined> {
+  const x = openStoreFile(tsPath, { readOnly: true }), y = openStoreFile(zigPath, { readOnly: true });
+  try {
+    if (!("state" in y)) return "explorer: the Zig store did not open through the index";
+    const w = await load(x);
+    const pages = ["/", "/log", "/s", "/threads", "/h/main"];
+    for (const t of w.threads) pages.push(`/t/${t.cid}`, `/r/${t.cid}`, ...t.updates.map(({ cid }) => `/r/${cid}`));
+    for (const { cid } of w.log) pages.push(`/e/${cid}`);
+    for (const p of pages) {
+      const a = await render(x, new URL(p, "http://x")), b = await render(y, new URL(p, "http://x"));
+      if (a.status !== b.status || a.body !== b.body) return `explorer: ${p} differs (status ${a.status} vs ${b.status})`;
+    }
+    explorerPages += pages.length;
+    return undefined;
+  } finally { await x.close(); await y.close(); }
+}
+let explorerPages = 0;
+
 let allSame = true;
 for (const source of sources) {
   const work = mkdtempSync(join(tmpdir(), "skein-kz-replay-"));
@@ -146,6 +172,14 @@ for (const source of sources) {
   if (tj.state !== zj.state || (b.log ?? "") !== zj.state) diffs.push(`log tip: ts ${tj.state} vs zig ${zj.state} (index: ${b.log})`);
   const imported = dump(tsDb);
   if (imported.state !== b.state) diffs.push(`state record: the TS tables imported give ${imported.state}, the Zig replay has ${b.state}`);
+  { const ts = openStore(tsDb, { readOnly: true }); const built = (await buildIndex(ts)).state.toString(); await ts.close(); if (built !== b.state) diffs.push(`state record: TypeScript builds ${built} from the TS tables, the Zig replay has ${b.state}`); }
+  const pageDiff = await explorerDiff(tsDb, zigDb);
+  if (pageDiff) diffs.push(pageDiff);
+  // A store the Zig kernel wrote itself (serve.ts): the explorer over it, as over the replay of its log.
+  if (hasStatePointer(src) && dump(src).state === b.state) {
+    const srcDiff = await explorerDiff(tsDb, src);
+    if (srcDiff) diffs.push(`${srcDiff} (the source store)`);
+  }
   if (zj.index.record !== b.state) diffs.push(`state record: the replay ended at ${zj.index.record}, the store holds ${b.state}`);
 
   const want = tips(dump(src)), got = tips(b);
@@ -163,4 +197,5 @@ for (const source of sources) {
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }
+process.stdout.write(`explorer: ${explorerPages} pages identical over the TS and the Zig replays' files\n`);
 process.exit(allSame ? 0 : 1);

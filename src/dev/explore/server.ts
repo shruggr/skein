@@ -16,7 +16,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { CID } from "multiformats/cid";
 import { parse } from "../../runtime/cid.ts";
-import { openStore } from "../../runtime/sqlite.ts";
+import { openStoreFile } from "../../runtime/index-store.ts";
 import { NotFound, type Store } from "../../runtime/store.ts";
 import { dbPath, resolveCid } from "../cli.ts";
 import { entryPage, errorPage, headPage, logPage, overview, recordPage, subscriptionsPage, threadBody, threadPage, threadsPage, tipOf } from "./pages.ts";
@@ -74,7 +74,7 @@ export function serve(store: Store, port: number, host = "127.0.0.1") {
 
 if (import.meta.main) {
   const port = Number(process.argv[2] ?? 4500);
-  const store = openStore(dbPath(), { readOnly: true });
+  const store = openStoreFile(dbPath(), { readOnly: true });
   serve(store, port, process.env.SKEIN_WEB_HOST ?? "127.0.0.1").on("listening", () => console.log(`skein explore: http://localhost:${port} (${dbPath()}, read-only)`));
   if (process.connected) process.once("disconnect", () => process.exit(0)); // started by `skein-host run`, which is gone
 }

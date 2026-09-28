@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 type Row = Record<string, SQLOutputValue>;
 type Obj = Record<string, unknown>;
-interface EdgeRow { to: string; rel: string; locator: string | null }
+export interface EdgeRow { to: string; rel: string; locator: string | null }
 
 /** The SQLite store adds prefix lookup over origins (for the CLI's short CIDs). */
 export interface SqliteStore extends Store {
@@ -573,7 +573,7 @@ function edge(to: unknown, rel: string, locator?: unknown): EdgeRow[] {
   return [];
 }
 
-function originEdges(b: Obj): EdgeRow[] {
+export function originEdges(b: Obj): EdgeRow[] {
   const out: EdgeRow[] = [];
   if (Array.isArray(b.refs)) {
     for (const r of b.refs) if (isObj(r) && typeof r.rel === "string") out.push(...edge(r.to, r.rel, r.locator));
@@ -582,7 +582,7 @@ function originEdges(b: Obj): EdgeRow[] {
   return out;
 }
 
-function updateEdges(u: Obj): EdgeRow[] {
+export function updateEdges(u: Obj): EdgeRow[] {
   const out: EdgeRow[] = [];
   const rest = isObj(u.rest) ? u.rest : {};
   for (const w of [u.waitingOn, rest.waitingOn]) {
@@ -593,7 +593,7 @@ function updateEdges(u: Obj): EdgeRow[] {
   return out;
 }
 
-function toRef(to: CID | string, rel: string, locator: SQLOutputValue): Ref {
+export function toRef(to: CID | string, rel: string, locator: SQLOutputValue): Ref {
   let target: CID | string = to;
   if (typeof to === "string" && !to.includes(":")) {
     try { target = parse(to); } catch { /* not a CID after all; hand back the string */ }

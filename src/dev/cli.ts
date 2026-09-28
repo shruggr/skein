@@ -21,7 +21,8 @@ import { copyLog, readLog } from "../runtime/log.ts";
 import { memoryStore } from "../runtime/memory.ts";
 import { MODULES, rawCid } from "../runtime/programs.ts";
 import { Runtime, witnessFrom } from "../runtime/scheduler.ts";
-import { openStore, type SqliteStore } from "../runtime/sqlite.ts";
+import type { SqliteStore } from "../runtime/sqlite.ts";
+import { openStoreFile } from "../runtime/index-store.ts";
 import type { HeadOrigin } from "../runtime/heads.ts";
 import type { Store } from "../runtime/store.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
@@ -33,7 +34,7 @@ const WASM_DIR = fileURLToPath(new URL("../../wasm/", import.meta.url));
 function openDefault(path?: string): SqliteStore {
   const p = path || dbPath();
   mkdirSync(dirname(p), { recursive: true });
-  return openStore(p);
+  return openStoreFile(p);
 }
 
 // ---------------------------------------------------------------- args

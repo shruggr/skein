@@ -1,0 +1,490 @@
+// The store format of issue #30, read from TypeScript: a SQLite file holding
+// only `blocks` and a `pointers` row `state` → the state record
+// {kind: "skein-state", log, cursor, heads, index: {<map>: <root>}}, whose
+// maps are Merkle search trees of dag-cbor nodes [left, [[key, value, right]…]]
+// (kernel-zig/src/mst.zig, index.zig; kernel-zig/README.md "The index").
+//
+// - `openStoreFile(path)`: the right reader for a store file — this one when
+//   the file has the state pointer, else sqlite.ts's (the TS runtime's
+//   format). The explorer and skein-dev open files through it.
+// - `indexStore(db)`: the `Store` interface over the maps, read only (blocks
+//   may be added: they are a key→bytes map). The pointer is read on every
+//   call, so a reader beside a live kernel follows it.
+// - `buildIndex(store)`: the same maps built here from any Store's chains and
+//   log, canonically — the state record CID the kernel reaches for the same
+//   log (equiv/replays.ts checks it). `writeIndexFile` writes a store file in
+//   the new format from one in the old (tests, conversions).
+//
+// Keys: numbers 8-byte big-endian with the sign bit flipped; binary CIDs;
+// strings uvarint-length-prefixed. The derivation is sqlite.ts's.
+
+import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
+import { CID, decode, encode, fmt, fromBytes, isCID } from "./cid.ts";
+import { openStore, originEdges, toRef, updateEdges, type SqliteStore } from "./sqlite.ts";
+import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
+import type { Block, Ref } from "./types.ts";
+
+type Obj = Record<string, unknown>;
+export const MAPS = ["log", "unique", "chains", "updates", "threads", "resting", "sleepers", "awaits", "edges", "heads"] as const;
+export type MapName = typeof MAPS[number];
+export const STATE_KIND = "skein-state";
+
+// ---------------------------------------------------------------- keys
+
+export function be64(n: number | bigint): Uint8Array {
+  const u = BigInt.asUintN(64, BigInt(n)) ^ (1n << 63n);
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, u);
+  return b;
+}
+export function readBe64(b: Uint8Array, at = 0): number {
+  const u = new DataView(b.buffer, b.byteOffset + at, 8).getBigUint64(0) ^ (1n << 63n);
+  return Number(BigInt.asIntN(64, u));
+}
+export function strKey(s: string): Uint8Array {
+  const t = new TextEncoder().encode(s);
+  const len: number[] = [];
+  let v = t.length;
+  while (v >= 0x80) { len.push((v & 0x7f) | 0x80); v >>>= 7; }
+  len.push(v);
+  return cat(Uint8Array.from(len), t);
+}
+function readStrKey(b: Uint8Array): { s: string; used: number } {
+  let n = 0, shift = 0, i = 0;
+  for (;;) { const c = b[i++]; n += (c & 0x7f) * 2 ** shift; if (!(c & 0x80)) break; shift += 7; }
+  return { s: new TextDecoder().decode(b.subarray(i, i + n)), used: i + n };
+}
+export function cat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((s, p) => s + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+export function compare(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+/** The length of the binary CID at the front of `b` (binary CIDs are prefix-free). */
+function cidLen(b: Uint8Array): number {
+  if (b[0] === 0x12 && b[1] === 0x20) return 34;
+  let i = 0;
+  const varint = () => { let n = 0, shift = 0; for (;;) { const c = b[i++]; n += (c & 0x7f) * 2 ** shift; if (!(c & 0x80)) return n; shift += 7; } };
+  varint(); varint(); varint();
+  const len = varint();
+  return i + len;
+}
+/** A number as SQLite orders it: an integer as is, a float floored, anything else the least. */
+function numKey(v: unknown): bigint {
+  if (typeof v !== "number" || !Number.isFinite(v)) return -(1n << 63n);
+  return BigInt(Math.floor(v));
+}
+const succ = (p: Uint8Array): Uint8Array | undefined => {
+  const b = Uint8Array.from(p);
+  for (let i = b.length - 1; i >= 0; i--) { if (b[i] !== 0xff) { b[i]++; return b.subarray(0, i + 1); } }
+  return undefined;
+};
+
+// ---------------------------------------------------------------- the tree
+
+/** A key's level: sha2-256(key)'s leading zero 5-bit groups. */
+export function level(key: Uint8Array): number {
+  const d = createHash("sha256").update(key).digest();
+  let bit = 0;
+  while (bit < 255 && !((d[bit >> 3] >> (7 - (bit & 7))) & 1)) bit++;
+  return Math.floor(bit / 5);
+}
+
+type Entry = [Uint8Array, unknown, CID | null];
+type Node = [CID | null, Entry[]];
+
+/** Read the trees through `get` (a block's bytes by CID). */
+export class Trees {
+  private cache = new Map<string, Node>();
+  private readonly get: (cid: CID) => Uint8Array | undefined;
+  constructor(get: (cid: CID) => Uint8Array | undefined) { this.get = get; }
+
+  node(cid: CID): Node {
+    const k = cid.toString();
+    let n = this.cache.get(k);
+    if (n) return n;
+    const b = this.get(cid);
+    if (!b) throw new NotFound(k);
+    n = decode<Node>(b);
+    if (this.cache.size > 20_000) this.cache.clear();
+    this.cache.set(k, n);
+    return n;
+  }
+
+  lookup(root: CID | null, key: Uint8Array): unknown {
+    for (let c = root; c;) {
+      const [left, es] = this.node(c);
+      let i = 0;
+      while (i < es.length && compare(es[i][0], key) < 0) i++;
+      if (i < es.length && compare(es[i][0], key) === 0) return es[i][1];
+      c = i === 0 ? left : es[i - 1][2];
+    }
+    return undefined;
+  }
+
+  /** Entries with lo <= key < hi, in key order. */
+  *range(root: CID | null, lo?: Uint8Array, hi?: Uint8Array): Generator<[Uint8Array, unknown]> {
+    if (!root) return;
+    const [left, es] = this.node(root);
+    for (let j = 0; j <= es.length; j++) {
+      const gap = j === 0 ? left : es[j - 1][2];
+      const loOk = j === es.length || !lo || compare(lo, es[j][0]) < 0;
+      const hiOk = j === 0 || !hi || compare(es[j - 1][0], hi) < 0;
+      if (loOk && hiOk) yield* this.range(gap, lo, hi);
+      if (j === es.length) break;
+      const k = es[j][0];
+      if (hi && compare(k, hi) >= 0) break;
+      if (!lo || compare(k, lo) >= 0) yield [k, es[j][1]];
+    }
+  }
+
+  prefixed(root: CID | null, p: Uint8Array) { return this.range(root, p, succ(p)); }
+}
+
+/** The canonical tree of these pairs: its root, and its nodes (to store). */
+export function buildTree(pairs: Array<[Uint8Array, unknown]>): { root: CID | null; blocks: Array<{ cid: CID; bytes: Uint8Array }> } {
+  const sorted = [...pairs].sort((a, b) => compare(a[0], b[0]));
+  const lv = sorted.map(([k]) => level(k));
+  const blocks: Array<{ cid: CID; bytes: Uint8Array }> = [];
+  const make = (from: number, to: number): CID | null => {
+    if (from >= to) return null;
+    let top = -1;
+    for (let i = from; i < to; i++) top = Math.max(top, lv[i]);
+    const at: number[] = [];
+    for (let i = from; i < to; i++) if (lv[i] === top) at.push(i);
+    const left = make(from, at[0]);
+    const es: Entry[] = at.map((i, j) => [sorted[i][0], sorted[i][1], make(i + 1, j + 1 < at.length ? at[j + 1] : to)]);
+    const blk = encode([left, es]);
+    blocks.push(blk);
+    return blk.cid;
+  };
+  return { root: make(0, sorted.length), blocks };
+}
+
+// ---------------------------------------------------------------- the state
+
+export interface State { cid: CID; log: CID | null; cursor: number; roots: Record<MapName, CID | null> }
+
+export function readState(get: (cid: CID) => Uint8Array | undefined, cid: CID): State {
+  const b = get(cid);
+  if (!b) throw new NotFound(cid.toString());
+  const v = decode<Obj>(b);
+  if (v.kind !== STATE_KIND) throw new Error(`${cid} is not a state record`);
+  const idx = v.index as Record<string, CID | null>;
+  const roots = Object.fromEntries(MAPS.map((m) => [m, (m === "heads" ? v.heads : idx[m]) as CID | null ?? null])) as State["roots"];
+  return { cid, log: (v.log as CID | null) ?? null, cursor: Number(v.cursor ?? 0), roots };
+}
+
+function stateRecord(log: CID | null, cursor: number, roots: Record<MapName, CID | null>) {
+  const index = Object.fromEntries(MAPS.filter((m) => m !== "heads").map((m) => [m, roots[m]]));
+  return encode({ kind: STATE_KIND, log, cursor, heads: roots.heads, index });
+}
+
+// ---------------------------------------------------------------- building (the derivation)
+
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v) && !isCID(v);
+
+/** Every map's pairs for a store's chains and log, as index.zig derives them. */
+export async function derive(store: Store): Promise<{ pairs: Record<MapName, Array<[Uint8Array, unknown]>>; log: CID | null; cursor: number }> {
+  const pairs = Object.fromEntries(MAPS.map((m) => [m, []])) as unknown as Record<MapName, Array<[Uint8Array, unknown]>>;
+  let tip: CID | null = null;
+  for await (const { cid, entry } of store.log.entries()) {
+    pairs.log.push([be64(entry.n), cid]);
+    const u = entry.envelope ?? entry.outcome?.emit;
+    if (u) pairs.unique.push([u.bytes, cid]);
+    tip = cid;
+  }
+  const seenEdge = new Set<string>();
+  for await (const origin of store.edges.query({})) {
+    const o = (await store.get(origin)) as unknown as Obj;
+    const kind = typeof o.kind === "string" ? o.kind : undefined;
+    const ups: CID[] = [];
+    for await (const c of store.chains.history(origin)) if (!c.equals(origin)) ups.push(c);
+    const tipCid = ups.at(-1) ?? origin;
+    pairs.chains.push([origin.bytes, { tip: tipCid, seq: ups.length, ...(kind !== undefined ? { kind } : {}) }]);
+    const edges = (seq: number, rows: Array<{ to: string; rel: string; locator: string | null }>) => rows.forEach((e, ord) => {
+      const k = cat(strKey(e.to), origin.bytes, be64(seq), be64(ord));
+      const ks = Buffer.from(k).toString("hex");
+      if (seenEdge.has(ks)) return;
+      seenEdge.add(ks);
+      pairs.edges.push([k, [e.rel, e.locator]]);
+    });
+    edges(0, originEdges(o));
+    for (const [i, c] of ups.entries()) {
+      pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
+      edges(i + 1, updateEdges((await store.get(c)) as unknown as Obj));
+    }
+    const t = ups.length ? (await store.get(tipCid)) as unknown as Obj : undefined;
+    if (kind === "thread") {
+      const at = be64(numKey(o.at));
+      pairs.threads.push([cat(at, origin.bytes), null]);
+      if (t?.state !== "finished") pairs.resting.push([cat(at, origin.bytes), null]);
+      if (t && t.state === "waiting" && typeof t.until === "number") pairs.sleepers.push([cat(be64(numKey(t.until)), origin.bytes), null]);
+      if (t && Array.isArray(t.awaits)) for (const c of t.awaits) if (isCID(c)) pairs.awaits.push([cat(c.bytes, at, origin.bytes), null]);
+    } else if (kind === "head" && t && typeof o.name === "string" && isCID(t.tree)) pairs.heads.push([strKey(o.name), t.tree]);
+  }
+  return { pairs, log: tip, cursor: await store.live.cursor.get() };
+}
+
+/** The index for a store's chains and log: the state record and every block of it. */
+export async function buildIndex(store: Store): Promise<{ state: CID; blocks: Array<{ cid: CID; bytes: Uint8Array }> }> {
+  const d = await derive(store);
+  const blocks: Array<{ cid: CID; bytes: Uint8Array }> = [];
+  const roots = {} as Record<MapName, CID | null>;
+  for (const m of MAPS) {
+    const t = buildTree(d.pairs[m]);
+    roots[m] = t.root;
+    blocks.push(...t.blocks);
+  }
+  const s = stateRecord(d.log, d.cursor, roots);
+  blocks.push(s);
+  return { state: s.cid, blocks };
+}
+
+const DDL = `
+CREATE TABLE IF NOT EXISTS blocks (cid BLOB PRIMARY KEY, bytes BLOB NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS pointers (name TEXT PRIMARY KEY, cid BLOB NOT NULL) WITHOUT ROWID;
+`;
+
+/** Write `to` as a store file in the new format holding `from`'s blocks and its index. Returns the state CID. */
+export async function writeIndexFile(from: string, to: string): Promise<CID> {
+  const src = openStore(from, { readOnly: true });
+  const built = await buildIndex(src);
+  await src.close();
+  const raw = new DatabaseSync(from, { readOnly: true });
+  const db = new DatabaseSync(to);
+  db.exec(DDL);
+  const put = db.prepare("INSERT OR IGNORE INTO blocks (cid, bytes) VALUES (?, ?)");
+  db.exec("BEGIN");
+  for (const r of raw.prepare("SELECT cid, bytes FROM blocks").iterate()) put.run(r.cid as Uint8Array, r.bytes as Uint8Array);
+  for (const b of built.blocks) put.run(b.cid.bytes, b.bytes);
+  db.prepare("INSERT OR REPLACE INTO pointers (name, cid) VALUES ('state', ?)").run(built.state.bytes);
+  db.exec("COMMIT");
+  db.close();
+  raw.close();
+  return built.state;
+}
+
+// ---------------------------------------------------------------- reading (the Store)
+
+/** Does this SQLite file carry the state pointer (the format of #30)? */
+export function hasStatePointer(path: string): boolean {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const t = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pointers'").get();
+    return !!t && !!db.prepare("SELECT 1 FROM pointers WHERE name = 'state'").get();
+  } finally { db.close(); }
+}
+
+/**
+ * A store file, whichever format it is in: the new format (#30) through the
+ * index, read only (blocks may be added unless `readOnly`); the TS runtime's
+ * through sqlite.ts.
+ */
+export function openStoreFile(path: string, o: { readOnly?: boolean } = {}): SqliteStore {
+  let fresh = true;
+  try { fresh = !hasStatePointer(path); } catch { /* no such file yet: sqlite.ts makes it */ }
+  if (fresh) return openStore(path, o);
+  return indexStore(new DatabaseSync(path, { readOnly: o.readOnly ?? false }), o);
+}
+
+class ReadOnly extends Error {
+  constructor(what: string) { super(`${what}: this store's index is kept by the Zig kernel (issue #30); readonly here`); }
+}
+
+export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): SqliteStore & { state(): State } {
+  db.exec("PRAGMA busy_timeout = 5000;");
+  const blockGet = db.prepare("SELECT bytes FROM blocks WHERE cid = ?");
+  const blockHas = db.prepare("SELECT 1 AS x FROM blocks WHERE cid = ?");
+  const blockPut = o.readOnly ? undefined : db.prepare("INSERT OR IGNORE INTO blocks (cid, bytes) VALUES (?, ?)");
+  const pointer = db.prepare("SELECT cid FROM pointers WHERE name = 'state'");
+  const get = (c: CID) => blockGet.get(c.bytes)?.bytes as Uint8Array | undefined;
+  const trees = new Trees(get);
+  let last: State | undefined;
+  const state = (): State => {
+    const r = pointer.get();
+    if (!r) throw new Error("no state pointer");
+    const c = fromBytes(r.cid as Uint8Array);
+    if (!last || !last.cid.equals(c)) last = readState(get, c);
+    return last;
+  };
+  const root = (m: MapName) => state().roots[m];
+  const block = <T>(c: CID): T => { const b = get(c); if (!b) throw new NotFound(fmt(c)); return decode<T>(b); };
+  const chain = (origin: CID) => trees.lookup(root("chains"), origin.bytes) as { tip: CID; seq: number; kind?: string } | undefined;
+  const updatesOf = (origin: CID) => [...trees.prefixed(root("updates"), origin.bytes)].map(([, v]) => v as CID);
+  const tipOf = (origin: CID, row: { tip: CID }) => (row.tip.equals(origin) ? undefined : block<Obj>(row.tip));
+
+  type Meta = { cid: CID; kind?: string; o: Obj; t?: Obj; at: number | null; tipAt: number | null };
+  const metas = (): Meta[] => [...trees.range(root("chains"))].map(([k, v]) => {
+    const cid = fromBytes(k);
+    const row = v as { tip: CID; kind?: string };
+    const o = block<Obj>(cid);
+    const t = tipOf(cid, row);
+    const at = typeof o.at === "number" ? o.at : null;
+    return { cid, kind: row.kind, o, t, at, tipAt: t ? (typeof t.at === "number" ? t.at : null) : at };
+  });
+  const threadsBy = (pred: (m: Meta) => boolean): CID[] => metas()
+    .filter((m) => m.kind === "thread" && pred(m))
+    .sort((a, b) => (a.at ?? -Infinity) - (b.at ?? -Infinity) || compare(a.cid.bytes, b.cid.bytes))
+    .map((m) => m.cid);
+  const cids = (list: unknown) => (Array.isArray(list) ? list.filter(isCID).map(fmt) : []);
+
+  const store: SqliteStore & { state(): State } = {
+    state,
+    async put(value: Block) {
+      if (!blockPut) throw new ReadOnly("put");
+      const b = encode(value);
+      blockPut.run(b.cid.bytes, b.bytes);
+      return b.cid;
+    },
+    async get<T extends Block = Block>(cid: CID) { return block<T>(cid); },
+    async has(cid) { return blockHas.get(cid.bytes) !== undefined; },
+    async bytes(cid) { const b = get(cid); if (!b) throw new NotFound(fmt(cid)); return b; },
+    async putBlock(cid, bytes) { if (!blockPut) throw new ReadOnly("putBlock"); blockPut.run(cid.bytes, bytes); },
+    async putMessage() { throw new ReadOnly("putMessage"); },
+    async findByPrefix(prefix) {
+      return [...trees.range(root("chains"))].map(([k]) => fromBytes(k)).filter((c) => fmt(c).startsWith(prefix));
+    },
+
+    chains: {
+      async open() { throw new ReadOnly("chains.open"); },
+      async append() { throw new ReadOnly("chains.append"); },
+      async tip(origin) {
+        const row = chain(origin);
+        if (!row) throw new NotFound(fmt(origin));
+        return row.tip;
+      },
+      async *history(origin) {
+        if (!chain(origin)) throw new NotFound(fmt(origin));
+        yield origin;
+        yield* updatesOf(origin);
+      },
+      async originOf(cid) {
+        if (chain(cid)) return cid;
+        const b = get(cid);
+        if (b) {
+          const u = decode<unknown>(b);
+          if (isObj(u) && isCID(u.origin) && typeof u.seq === "number") {
+            const at = trees.lookup(root("updates"), cat(u.origin.bytes, be64(u.seq)));
+            if (isCID(at) && at.equals(cid)) return u.origin;
+          }
+        }
+        throw new NotFound(fmt(cid));
+      },
+    },
+
+    log: {
+      async append() { throw new ReadOnly("log.append"); },
+      async byEnvelope(envelope) {
+        const c = trees.lookup(root("unique"), envelope.bytes) as CID | undefined;
+        return c && block<LogEntry>(c).envelope ? c : undefined;
+      },
+      async outcomeOf(emit) {
+        const c = trees.lookup(root("unique"), emit.bytes) as CID | undefined;
+        return c && block<LogEntry>(c).outcome ? c : undefined;
+      },
+      async tip() { return state().log ?? undefined; },
+      async *entries(from = 0) {
+        for (const [, v] of [...trees.range(root("log"), be64(from))]) yield { cid: v as CID, entry: block<LogEntry>(v as CID) };
+      },
+    },
+
+    edges: {
+      async refsFrom(cid) {
+        const row = chain(cid);
+        if (!row) return [];
+        const rows: Array<{ pos: number; to: string; rel: string; locator: string | null }> = [];
+        originEdges(block<Obj>(cid)).forEach((e, ord) => rows.push({ pos: ord, ...e }));
+        updatesOf(cid).forEach((u, i) => updateEdges(block<Obj>(u)).forEach((e, ord) => rows.push({ pos: (i + 1) * 1048576 + ord, ...e })));
+        const first = new Map<string, (typeof rows)[number]>();
+        for (const r of rows) {
+          const k = JSON.stringify([r.to, r.rel, r.locator]);
+          const had = first.get(k);
+          if (!had || r.pos < had.pos) first.set(k, r);
+        }
+        return [...first.values()].sort((a, b) => a.pos - b.pos).map((r) => toRef(r.to, r.rel, r.locator));
+      },
+      async refsTo(cid) {
+        const p = strKey(fmt(cid));
+        const groups = new Map<string, { from: CID; rel: string; locator: string | null; at: number | null }>();
+        for (const [k, v] of trees.prefixed(root("edges"), p)) {
+          const rest = k.subarray(p.length);
+          const from = fromBytes(rest.subarray(0, cidLen(rest)));
+          const [rel, locator] = v as [string, string | null];
+          const g = JSON.stringify([fmt(from), rel, locator]);
+          if (groups.has(g)) continue;
+          const o = block<Obj>(from);
+          groups.set(g, { from, rel, locator, at: typeof o.at === "number" ? o.at : null });
+        }
+        return [...groups.values()]
+          .sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity) || compare(b.from.bytes, a.from.bytes))
+          .map((g) => ({ ...toRef(cid, g.rel, g.locator), from: g.from }));
+      },
+      async *query(f: Filter) {
+        if (f.kind === "message" || (f.kind === undefined && (f.from !== undefined || f.to !== undefined))) return; // the kernel keeps no messages
+        const key = (m: Meta) => (f.orderBy === "tipAt" ? m.tipAt : m.at);
+        const hits = metas()
+          .filter((m) => !f.kind || m.kind === f.kind)
+          .filter((m) => !f.thread || (m.kind === "node" && isCID(m.o.thread) && m.o.thread.equals(f.thread)))
+          .filter((m) => !f.program || (m.kind === "thread" && isCID(m.o.program) && m.o.program.equals(f.program)))
+          .filter((m) => !f.state || (m.kind === "thread" && typeof m.t?.state === "string" && (f.state as string[]).includes(m.t.state)))
+          .filter((m) => f.parentless === undefined || (m.kind === "thread" && !isCID(m.o.launchedBy) === f.parentless))
+          .filter((m) => f.since === undefined || (m.at !== null && m.at >= f.since))
+          .filter((m) => f.before === undefined || (m.at !== null && m.at < f.before))
+          .sort((a, b) => (key(b) ?? -Infinity) - (key(a) ?? -Infinity) || compare(b.cid.bytes, a.cid.bytes));
+        yield* hits.slice(0, f.limit ?? hits.length).map((m) => m.cid);
+      },
+      async rebuild() { throw new ReadOnly("rebuild"); },
+    },
+
+    live: {
+      handles: {
+        async set() { throw new ReadOnly("handles.set"); },
+        async get() { return undefined; },
+        async clear() { throw new ReadOnly("handles.clear"); },
+      },
+      async *resting(f = {}) {
+        let n = 0;
+        for (const [k] of [...trees.range(root("resting"))]) {
+          if (f.limit !== undefined && n >= f.limit) return;
+          const origin = fromBytes(k.subarray(8));
+          if (f.state) {
+            const row = chain(origin);
+            const t = row ? tipOf(origin, row) : undefined;
+            if (typeof t?.state !== "string" || !(f.state as string[]).includes(t.state)) continue;
+          }
+          n++;
+          yield origin;
+        }
+      },
+      async *due(now) {
+        for (const [k] of [...trees.range(root("sleepers"), undefined, be64(Math.floor(now) + 1))]) yield fromBytes(k.subarray(8));
+      },
+      async *waitersOn(thread) {
+        yield* threadsBy((m) => cids(m.t?.waitingOn).includes(fmt(thread)));
+      },
+      async *waitingFrom(identity) {
+        yield* threadsBy((m) => m.t?.waitingFrom === identity);
+      },
+      async *awaiting(envelope) {
+        for (const [k] of [...trees.prefixed(root("awaits"), envelope.bytes)]) yield fromBytes(k.subarray(envelope.bytes.length + 8));
+      },
+      cursor: {
+        async get() { return state().cursor; },
+        async set() { throw new ReadOnly("cursor.set"); },
+      },
+    },
+
+    async close() { db.close(); },
+  };
+  return store;
+}
+
+export { readStrKey, cidLen };
+export type { Ref };
