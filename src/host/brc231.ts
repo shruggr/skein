@@ -9,11 +9,18 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { isCborEnvelope } from "../envelope-cbor.ts";
 import type { Listed, MessageBox } from "./messagebox.ts";
 
-/** Over `wallet`'s own BRC-104 session, or an existing AuthFetch's (a MessageBoxClient's `authFetch`: the same session). */
-export function cborBoxClient(wallet: WalletInterface | AuthFetch, host: string): MessageBox {
+/**
+ * Over `wallet`'s own BRC-104 session, or an existing AuthFetch's (a
+ * MessageBoxClient's `authFetch`: the same session). `compact`: ask the
+ * instance for compact (session) messages on this session (the signed header
+ * `x-bsv-skein-compact`, docs/MESSAGES.md "Sessions"); its messages to this
+ * identity are then listed as the compact record's bytes.
+ */
+export function cborBoxClient(wallet: WalletInterface | AuthFetch, host: string, o: { compact?: boolean } = {}): MessageBox {
   const f = wallet instanceof AuthFetch ? wallet : new AuthFetch(wallet);
+  const headers: Record<string, string> = { "content-type": "application/cbor", ...(o.compact ? { "x-bsv-skein-compact": "1" } : {}) };
   const call = async (path: string, body: unknown): Promise<Record<string, unknown>> => {
-    const res = await f.fetch(`${host}${path}`, { method: "POST", headers: { "content-type": "application/cbor" }, body: dagCbor.encode(body) });
+    const res = await f.fetch(`${host}${path}`, { method: "POST", headers, body: dagCbor.encode(body) });
     const out = dagCbor.decode(new Uint8Array(await res.arrayBuffer())) as Record<string, unknown>;
     if (!res.ok || out.status !== "success") throw new Error(`Message Box ${path} failed with HTTP ${res.status} (${String(out.code)}): ${String(out.description)}`);
     return out;

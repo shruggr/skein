@@ -531,7 +531,7 @@ export class Router {
         if (s.compact && s.authenticated && s.peer && Buffer.from(s.peer).equals(me)) { any = true; break; }
       }
       if (!any) return undefined;
-      const a = await askIn(k, { op: "seal", emit: o.emit as CID }, this.now());
+      const a = await askIn(k, { op: "seal", emit: o.emit as CID, id: o.cid }, this.now());
       return a.ok ? a.compact as Record<string, unknown> : undefined;
     });
   }

@@ -15,9 +15,13 @@
 //!       a BRC-104 general message (the request's signed payload as the transport frames it)
 //!   {kind: "auth", op: "respond", yourNonce, payload: bytes}
 //!       sign the response to a request on the session `yourNonce` names
-//!   {kind: "auth", op: "seal", emit: cid}
-//!       the instance's emit, compact on a session with its recipient that
-//!       negotiated it (`x-bsv-skein-compact` on a signed request), if there is one
+//!   {kind: "auth", op: "seal", emit: cid, id: cid}
+//!       the instance's emit (`id`: its envelope's CID, what a reply names),
+//!       compact on a session with its recipient that negotiated it
+//!       (`x-bsv-skein-compact` on a signed request), if there is one:
+//!       {type: "reply" | "message", replyTo?, id, body} signed on the session
+//!       (the payload is its dag-cbor), kept as that map plus
+//!       session: {payload, signature, nonce, yourNonce}
 //!
 //! State: the head `sessions` names {kind: "sessions", sessions: [{nonce, session: cid}]}
 //! (sorted by nonce), each {kind: "session", peer: bytes(33), sessionNonce,
@@ -437,6 +441,8 @@ fn seal(a: Allocator, st: *State, ev: Value, at: i128, ans: *Answer) !void {
     var m = cbor.MapBuilder.init(a);
     try m.put("type", cbor.string(if (reply_to != null) "reply" else "message"));
     try m.put("replyTo", cbor.optCid(reply_to));
+    // What a reply to it names (the emitted envelope's id, which the emitting thread awaits).
+    try m.put("id", cbor.optCid(Value.cidOf(ev.get("id"))));
     try m.put("body", .{ .bytes = body });
     const payload = try cbor.encode(a, m.value());
     const nonce = try random64(a);
