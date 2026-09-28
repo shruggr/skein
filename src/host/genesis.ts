@@ -3,7 +3,7 @@
 //
 //   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome}   — no `sig`: no host key
 //   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs,
-//             subscriptions: [{match: {sender?: bytes(33), box}, handler}], peers?: {role: bytes(33)},
+//             subscriptions: [{match: {sender?: bytes(33), box}, handler}], peers?: {role: bytes(33)},   (last: `:mail` → messagebox)
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect}
 //
 // The stamp is the router's clock at admission (#10): the sequence is the
@@ -46,6 +46,8 @@ export function genesis2(c: Genesis2Config, programs: Record<string, CID>): Reco
     sub("run", "run-handler", owner), sub("objects", "objects-handler", owner), sub("head", "head-handler", owner),
     sub("chat", "loop", owner), sub("subscribe", "subscribe-handler", owner),
     ...(c.openChat === false ? [] : [sub("chat", "loop")]),
+    // The messagebox's records for the identities this instance keeps mail for (vmmail.ts): the router's `mail` entries.
+    ...(programs.messagebox ? [sub(":mail", "messagebox")] : []),
   ];
   const names = [{ identityKey: owner, ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });

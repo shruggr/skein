@@ -142,6 +142,10 @@ const Server = struct {
             var m = cbor.MapBuilder.init(a);
             for (programsm.program_names) |name| try m.put(name, cbor.cidv(try s.store.put(a, try programsm.program(a, name))));
             s.reply(a, id, m.value(), null, null);
+        } else if (eq(u8, op, "head")) {
+            // A named head's record, read (the router reads the messagebox's `mailbox` head).
+            const name = Value.str(v) orelse return error.BadRequest;
+            s.reply(a, id, cbor.optCid(try s.store.headTree(a, name)) orelse .null, null, null);
         } else if (eq(u8, op, "genesis")) {
             s.reply(a, id, logm.genesisOf(a, s.store) catch .null, null, null);
         } else if (eq(u8, op, "boxes")) {

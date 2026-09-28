@@ -278,7 +278,7 @@ pub const Runtime = struct {
     }
 
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, signed: ?Value, body: ?[]const u8) !?AdmitResult {
-        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want an envelope, wake or outcome entry (format 2: unsigned)" };
+        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want an envelope, wake, outcome or mail entry (format 2: unsigned)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
         if (entry.get("outcome")) |o| {
@@ -433,6 +433,36 @@ pub const Runtime = struct {
             try f.put("box", rec.?.get("box"));
             try f.put("reason", cbor.string(reason orelse ""));
             try rt.step(a, t.?, .{ .cid = entry, .e = e }, null, null, f.value());
+            return;
+        }
+
+        if (e.get("mail")) |mail| {
+            // The messagebox's state change for a hosted identity (#33): routed by
+            // subscription on the reserved box, from the mail's sender (the
+            // recipient, for an acknowledgement); the args are the mail itself.
+            const op = Value.str(mail.get("op")).?;
+            const who = Value.bytesOf(mail.get("sender")) orelse Value.bytesOf(mail.get("recipient")).?;
+            const what = try std.fmt.allocPrint(a, "#{d} mail {s} for {s}", .{ n, op, shortKey(Value.bytesOf(mail.get("recipient")).?) });
+            var sub: ?subs.Sub = null;
+            const rules = (try subs.current(a, rt.store)) orelse &.{};
+            for (rules) |s| if (subs.matches(s, who, logm.MAIL_BOX)) {
+                sub = s;
+                break;
+            };
+            if (sub == null) {
+                rt.say("{s}: no subscription for {s}; recorded, nothing runs", .{ what, logm.MAIL_BOX });
+                return;
+            }
+            var origin = cbor.MapBuilder.init(a);
+            try origin.put("kind", cbor.string("thread"));
+            try origin.put("program", cbor.cidv(sub.?.handler));
+            try origin.put("args", mail);
+            try origin.put("launchedBy", cbor.cidv(entry));
+            try origin.put("input", cbor.cidv(entry));
+            try origin.put("at", cbor.int(at));
+            const t = try rt.store.chainOpen(a, origin.value());
+            rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
+            try rt.run(a, t);
             return;
         }
 
@@ -1039,7 +1069,12 @@ pub const Runtime = struct {
             result = Value.bytesOf(x.get("result")).?;
         } else if (rt.has_wallet) {
             switch (perform) {
-                .wallet => |f| result = rt.peers.wallet.?(rt.peers.ctx, a, f) catch |err| return imp.failFmt("{s}", .{@errorName(err)}),
+                // The router gone mid-call is the environment failing, not the step: nothing is
+                // recorded, and the thread runs again at the next hydration (#33).
+                .wallet => |f| result = rt.peers.wallet.?(rt.peers.ctx, a, f) catch |err| return if (err == error.PeerGone)
+                    imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (wallet): the router is gone", .{ short(a, st.origin), st.n, i }))
+                else
+                    imp.failFmt("{s}", .{@errorName(err)}),
                 .resolve => |hd| {
                     const res: Value = if (rt.peers.resolve) |rf| rf(rt.peers.ctx, a, hd[0], hd[1]) else blk: {
                         var m = cbor.MapBuilder.init(a);

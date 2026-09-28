@@ -19,6 +19,8 @@ pub const modules = [_]Module{
     .{ .name = "loop", .cid = "bafkreiabv7a5lwimtdlt3bj4ac7il27xdurdil2lgbngavvotpfb3m3doq" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24" },
+    // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
+    .{ .name = "messagebox", .cid = "bafkreigslxz6zej4d4mv6skofj2dc2qzaqc6fhsmezi3xjqw6qcj7parwq" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -94,7 +96,17 @@ const handler_inputs = [_]cbor.Entry{
     .{ .key = "sender", .value = .{ .string = "identity" } },
 };
 
-const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8 };
+const mail_inputs = [_]cbor.Entry{
+    .{ .key = "op", .value = .{ .string = "string" } },
+    .{ .key = "recipient", .value = .{ .string = "identity" } },
+    .{ .key = "box", .value = .{ .string = "string?" } },
+    .{ .key = "sender", .value = .{ .string = "identity?" } },
+    .{ .key = "messageId", .value = .{ .string = "string?" } },
+    .{ .key = "body", .value = .{ .string = "bytes?" } },
+    .{ .key = "messageIds", .value = .{ .string = "array?" } },
+};
+
+const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
 const handlers = [_]Handler{
     .{ .name = "run-handler", .services = &.{}, .description = "The `run` box: read the body {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), run the shell over it, reply in `results`." },
@@ -102,10 +114,11 @@ const handlers = [_]Handler{
     .{ .name = "head-handler", .services = &.{}, .description = "The `head` box: read the body {name, tree}, advance the named head to the tree." },
     .{ .name = "subscribe-handler", .services = &.{}, .description = "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store)." },
     .{ .name = "loop", .services = &.{ "infer", "outcomes" }, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs." },
+    .{ .name = "messagebox", .services = &.{}, .inputs = &mail_inputs, .description = "The reserved box `:mail`: the BRC-33 messagebox's records for the identities this instance keeps mail for — {op: put, recipient, box, sender, messageId, body} keeps a message, {op: ack, recipient, messageIds} deletes; state is the head `mailbox`." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop" };
+pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
@@ -149,7 +162,7 @@ pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
         var code = cbor.MapBuilder.init(alloc);
         try code.put("wasm", cbor.cidv(try moduleCid(alloc, name)));
         try m.put("code", code.value());
-        try m.put("inputs", .{ .map = &handler_inputs });
+        try m.put("inputs", .{ .map = h.inputs });
         const sv = try alloc.alloc(Value, h.services.len);
         for (h.services, 0..) |s, i| sv[i] = cbor.string(s);
         try m.put("services", .{ .array = sv });

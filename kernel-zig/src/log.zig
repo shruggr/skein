@@ -3,7 +3,12 @@
 // signed by their senders, the router's stamp is the environment's word — and
 // identity keys are 33-byte byte strings in every record (no hex).
 //
-//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome}
+//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome | mail}
+//   mail     {op: "put", recipient: bytes, box, sender: bytes, messageId, body: bytes, json?}
+//          | {op: "ack", recipient: bytes, messageIds: [text]}
+//            the messagebox's state changes for a hosted identity (issue #33), routed
+//            by subscription on the reserved box `:mail` (sender: the mail's sender,
+//            or the recipient acknowledging)
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?}
@@ -42,13 +47,40 @@ pub fn isLogEntry(e: Value) bool {
     if (!Value.isNumber(e.get("n"))) return false;
     if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
-    for ([_][]const u8{ "genesis", "envelope", "wake", "outcome" }) |k| {
+    for ([_][]const u8{ "genesis", "envelope", "wake", "outcome", "mail" }) |k| {
         if (e.get(k) != null) count += 1;
     }
     if (count != 1) return false;
     if ((e.get("envelope") == null) != (e.get("body") == null)) return false;
     if (e.get("outcome")) |o| if (!isOutcome(o)) return false;
+    if (e.get("mail")) |m| if (!isMail(m)) return false;
     return true;
+}
+
+/// The box a `mail` entry is routed in (subscriptions.zig): reserved, never a BRC-33 box a client names.
+pub const MAIL_BOX = ":mail";
+
+pub fn isMail(x: ?Value) bool {
+    const m = x orelse return false;
+    if (m != .map) return false;
+    if (!secp.isKey(Value.bytesOf(m.get("recipient")) orelse return false)) return false;
+    const op = Value.str(m.get("op")) orelse return false;
+    if (std.mem.eql(u8, op, "put")) {
+        if (!secp.isKey(Value.bytesOf(m.get("sender")) orelse return false)) return false;
+        const box = Value.str(m.get("box")) orelse return false;
+        if (box.len == 0) return false;
+        if ((Value.str(m.get("messageId")) orelse return false).len == 0) return false;
+        if (Value.bytesOf(m.get("body")) == null) return false;
+        if (m.get("json")) |j| if (j != .bool) return false;
+        return true;
+    }
+    if (std.mem.eql(u8, op, "ack")) {
+        const ids = m.get("messageIds") orelse return false;
+        if (ids != .array or ids.array.len == 0) return false;
+        for (ids.array) |i| if (i != .string) return false;
+        return true;
+    }
+    return false;
 }
 
 fn isCidMap(v: ?Value) bool {

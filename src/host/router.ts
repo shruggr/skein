@@ -44,7 +44,8 @@ import { admit2, keyBytes, keyHex, writeGenesis } from "./genesis.ts";
 import { hostResolver } from "./host.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type Sleeper } from "./kernel.ts";
-import { memoryMail, type MailStore } from "./mail.ts";
+import type { MailStore } from "./mail.ts";
+import { VmMail } from "./vmmail.ts";
 
 type Named = { handle: string; domain: string };
 
@@ -64,6 +65,7 @@ export interface RouterOptions {
   idleMs?: number;
   /** The instance (handle) that keeps mailboxes registered here; default the first enabled row. */
   mailboxHost?: string;
+  /** Where hosted identities' mail is kept; default the keeping instance's messagebox program (vmmail.ts). */
   mail?: MailStore;
   /** Tests: the clock entries are stamped with. */
   now?: () => Stamp;
@@ -107,7 +109,12 @@ export class Router {
   constructor(o: RouterOptions) {
     this.o = o;
     this.auth = new AuthServer(o.authWallet);
-    this.mail = o.mail ?? memoryMail();
+    // Mail for hosted identities lives in the keeping instance's log (the messagebox program), unless a test gives a store.
+    this.mail = o.mail ?? new VmMail({
+      keeper: (r) => this.o.db.mailbox(r)?.instance,
+      withKernel: (h, f) => this.serial(h, async () => f((await this.hydrate(h)).kernel)),
+      now: () => this.now(),
+    });
     const idle = o.idleMs ?? 300_000;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
   }

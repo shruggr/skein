@@ -102,6 +102,32 @@ test("router: messagebox client → instance → owner's mailbox; list/ack; idle
 
   // A recipient with no account here is refused as the messagebox refused it.
   await assert.rejects(mb.sendMessage({ recipient: PrivateKey.fromRandom().toPublicKey().toString(), messageBox: "x", body: "hi", skipEncryption: true }, `${base}/messagebox`), /HTTP 403 \(ERR_ACCOUNT_REQUIRED\)/);
+
+  // The owner's mail is the instance's records (the messagebox program), not the router's memory: a new router lists it.
+  await router.stop();
+  const again = new Router({ db, walletFor: () => ephemeralWallet(instanceKey), authWallet: ephemeralWallet(), owner: ownerId, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
+  t.after(() => again.stop());
+  const base2 = `http://127.0.0.1:${((await again.listen(0)).address() as { port: number }).port}`;
+  const mb2 = new MessageBoxClient({ host: `${base2}/messagebox`, walletClient: owner });
+  const kept = await mb2.listMessagesLite({ messageBox: "results", host: `${base2}/messagebox` });
+  assert.deepEqual(kept.map((m) => m.messageId), [r3!.messageId], "unacknowledged mail survives the router");
+  await mb2.acknowledgeMessage({ messageIds: [r3!.messageId], host: `${base2}/messagebox` });
+  assert.equal((await mb2.listMessagesLite({ messageBox: "results", host: `${base2}/messagebox` })).length, 0);
+  await assert.rejects(mb2.acknowledgeMessage({ messageIds: ["nope"], host: `${base2}/messagebox` }), /Failed to acknowledge/);
+
+  // BRC-231: a §7.3 (dag-cbor) envelope in, the answer in the same form, listed as bytes.
+  const { cborBoxClient } = await import("./brc231.ts");
+  const { sealCbor, openCbor, asEnvelope, isCborEnvelope } = await import("../envelope-cbor.ts");
+  const cb = cborBoxClient(owner, `${base2}/messagebox`);
+  const env = await sealCbor(owner, { recipient: { identityKey: alpha, handle: "alpha", domain: "localhost" }, body: dagCbor.encode({ cmd: "echo cbor", tree: root }) });
+  await cb.send({ recipient: alpha, box: "run", body: env });
+  const [c1] = await until("the CBOR answer", async () => { const x = await cb.list("results"); return x.length ? x : undefined; });
+  assert.ok(c1!.body instanceof Uint8Array);
+  const back = asEnvelope(c1!.body);
+  assert.ok(back && isCborEnvelope(back), "answered in the form it was asked in");
+  assert.equal(Buffer.from((dagCbor.decode((await openCbor(owner, back)).body) as { stdout: Uint8Array }).stdout).toString(), "cbor\n");
+  await cb.ack([c1!.messageId]);
+  assert.equal((await cb.list("results")).length, 0);
 });
 
 test("skein-host run: the router with the oracle — a row added by the CLI gets the derived identity; its kernel's genesis is that identity; host page and roster", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {

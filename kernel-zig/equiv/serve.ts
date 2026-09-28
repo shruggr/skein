@@ -117,14 +117,14 @@ try {
   await listen(router);
   box = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
   await router.start();
-  // Mail kept by the old router was in memory (until the mailbox program keeps it): the reply comes to this one.
+  // The owner's mail is the instance's records (the messagebox program): kept across the restart.
   const [r3] = await results(1, "results", 20_000);
   check(text(r3!.body.stdout) === "again\n", "a router restart mid-sleep: hydrated at start, the wake still fires");
+  await box.ack([r3!.id]);
   await router.stop();
 
   // Fuel (issue #5): a shell that never ends, under a low fuelPerStep, runs out; the step is recorded.
   db.add("fueltest", { store: join(home, "instances/fueltest/runtime.db") });
-  db.setStatus("zigtest", "disabled");
   router = make(LIMIT);
   await listen(router);
   box = messageBoxClient(owner, `${base}/messagebox`, "skein-client");
