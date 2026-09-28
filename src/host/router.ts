@@ -63,7 +63,7 @@ export interface RouterOptions {
   fuelPerStep?: string;
   /** A new genesis's extra seed subscriptions and defaults (over DEFAULTS), e.g. the wallet's (#29). */
   genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string> };
-  /** Answers programs' `http` requests (#29, pre-#15); default: SKEIN_HTTP=fetch performs them, else none is answered. */
+  /** Answers programs' HTTP — the preview1 `http` import (#29) and wasi:http (#15), one request shape; default: SKEIN_HTTP=fetch performs them (fetchHttp), else none is answered. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never. Default 5 minutes. */
   idleMs?: number;
@@ -91,10 +91,35 @@ const ok = (recipient: string, messageId: string): Delivered => ({ status: 200, 
 const err = (status: number, code: string, description: string): Delivered => ({ status, body: { status: "error", code, description } });
 const KEY = /^0[23][0-9a-f]{64}$/;
 
-/** SKEIN_HTTP=fetch: programs' http requests performed for real. */
-async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
-  const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined });
-  return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
+/**
+ * SKEIN_HTTP=fetch: programs' http requests performed for real. A wasi:http
+ * request's options (#15, recorded with the request, in ns) are applied here:
+ * connect + first-byte bound the wait for the response head, between-bytes
+ * each read of the body.
+ */
+export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
+  const o = req.options ?? {};
+  const head = (o.connectTimeout ?? 0) + (o.firstByteTimeout ?? 0);
+  const ctl = new AbortController();
+  const timer = head > 0 ? setTimeout(() => ctl.abort(new Error("timed out waiting for the response")), Math.ceil(head / 1e6)) : undefined;
+  try {
+    const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: ctl.signal });
+    clearTimeout(timer);
+    const headers = Object.fromEntries(r.headers.entries());
+    if (!o.betweenBytesTimeout || !r.body) return { status: r.status, headers, body: new Uint8Array(await r.arrayBuffer()) };
+    const chunks: Uint8Array[] = [];
+    const reader = r.body.getReader();
+    for (;;) {
+      let t: ReturnType<typeof setTimeout> | undefined;
+      const stall = new Promise<never>((_, no) => { t = setTimeout(() => no(new Error("timed out between bytes")), Math.ceil(o.betweenBytesTimeout! / 1e6)); });
+      const { done, value } = await Promise.race([reader.read(), stall]).finally(() => clearTimeout(t));
+      if (done) break;
+      chunks.push(value);
+    }
+    return { status: r.status, headers, body: Buffer.concat(chunks) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** A BRC-231 body that is a compact session reply ({type: "reply", replyTo, body}). */

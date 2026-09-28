@@ -30,7 +30,11 @@ const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 export const KERNEL_BIN = process.env.SKEIN_KERNEL_BIN || join(ROOT, "kernel-zig/zig-out/bin/skein-kernel");
 
 type Frame = Record<string, unknown>;
-export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array };
+/**
+ * A program's HTTP request: the recorded-call shape of the preview1 `http` import and of wasi:http (#15, kernel-zig/src/http.zig).
+ * `options` (wasi:http request-options, nanoseconds) is recorded with the request and applied by the host.
+ */
+export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; options?: { connectTimeout?: number; firstByteTimeout?: number; betweenBytesTimeout?: number } };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 export interface Sleeper { thread: CID; until: Ms }
 
@@ -43,7 +47,7 @@ export interface KernelOptions {
   wallet?: WalletInterface;
   /** Answers `resolve`: the whole Resolution, `identityKey: ""` (plus `error`) when unknown. */
   resolve?(handle: string, domain: string): Promise<Record<string, unknown>>;
-  /** Answers the `http` import (#29, pre-#15): a request {method, url, headers?, body?} → {status, headers, body}. Absent: refused. */
+  /** Answers programs' HTTP (the preview1 `http` import, #29, and wasi:http, #15 — one shape): a request {method, url, headers?, body?, options?} → {status, headers, body}. Absent: refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** An emit to carry (after its step is recorded). */
   send?(o: Outbound): void | Promise<void>;
