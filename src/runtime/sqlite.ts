@@ -593,6 +593,23 @@ export function updateEdges(u: Obj): EdgeRow[] {
   return out;
 }
 
+/**
+ * The edges an update's kept records declare (#37, the Zig kernel's
+ * index.zig `updateEdgesWithKept`): each kept record with `refs: [{to, rel,
+ * locator?}]` gives an edge with the record's own rel, after the update's own
+ * edges. `kept` is the update's kept records, resolved (undefined: not held
+ * or not a dag-cbor map). This TS kernel does not write them; readers of a
+ * Zig store use it.
+ */
+export function keptEdges(kept: unknown[]): EdgeRow[] {
+  const out: EdgeRow[] = [];
+  for (const r of kept) {
+    if (!isObj(r) || !Array.isArray(r.refs)) continue;
+    for (const x of r.refs) if (isObj(x) && typeof x.rel === "string") out.push(...edge(x.to, x.rel, x.locator));
+  }
+  return out;
+}
+
 export function toRef(to: CID | string, rel: string, locator: SQLOutputValue): Ref {
   let target: CID | string = to;
   if (typeof to === "string" && !to.includes(":")) {

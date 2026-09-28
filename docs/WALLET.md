@@ -55,7 +55,8 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 | `action` | dag-cbor | `txid`, `tx` (link), `description`, `labels`, `noSend?` | a transaction that is ours |
 | `output` | dag-cbor | `txid`, `vout`, `tx` (link), `basket`, `protocol`, protocol fields | satoshis and script come from the tx |
 | `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (outpoints), `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
-| `broadcast` | dag-cbor | `txid`, `subject` (the tx's CID), `arc` (URL), `txStatus` (last heard) | a transaction awaiting its status |
+| `broadcast` | dag-cbor | `txid`, `subject` (the tx's CID), `arc` (URL), `txStatus` (last heard), `since` (ms, first broadcast) | a transaction awaiting its status |
+| `settlement` | dag-cbor | `txid`, `status: "rejected"`, `reason`, `cause?` (the root txid), `at` | a transaction that will never be mined (#37) |
 | `wallet-state` | dag-cbor | `network`, `maps: {name: root \| null}` | what the head `wallet` names |
 | `wallet-result` | dag-cbor | `op`, per-op fields, `state` | a step's answer, kept in its thread |
 
@@ -81,19 +82,98 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `actions` | txid → `action` | our transactions |
 | `outputs` | txid ‖ vout (u32 BE) → `output` | output by outpoint |
 | `awaiting` | txid → `broadcast` | transactions awaiting a status |
-| `spent` | outpoint → spending txid | derived: inputs of our actions |
+| `spenders` | outpoint ‖ spending txid → null | every input of every transaction we hold |
+| `dependents` | txid ‖ tag ‖ id → rel (text) | what depends on a transaction, and how (see Settlement) |
+| `rejected` | txid → `settlement` | transactions that will never be mined |
+| `proofHeights` | height (u32 BE) ‖ txid → null | proofs by block height: what a reorg reverts |
+| `drafts` | draft CID → null \| `settlement` | signable drafts; a link once rejected |
+| `watchers` | identity key (33 bytes) → null | who is sent settlement messages |
+| `spent` | outpoint → spending txid | derived: consumed by a transaction we hold that is not rejected |
 | `byBasket` | len ‖ basket ‖ 0 (spendable) \| 1 (spent) ‖ outpoint → null | derived: outputs by basket + spendable |
-| `byStatus` | 0 (proven) \| 1 (unproven) ‖ txid → null | derived: our actions by status |
+| `byStatus` | 0 (proven) \| 1 (unproven) \| 2 (rejected) ‖ txid → null | derived: our actions by status |
+| `bySettlement` | 0 \| 1 \| 2 ‖ txid → null | derived: every transaction we hold by status |
 
-**Status and spendability are computed, never stored.** `proven` means we
+**Status and spendability are computed, never stored.** `rejected` means a
+`settlement` record for the txid is in `rejected`; else `proven` means we
 hold a proof whose root is the merkle root of our best-chain header at its
 height; anything else is `unproven` (a reorg that drops the block turns it
 back, with nothing to update). Spendable means ours (an `output`) and not
-consumed (no action of ours spends it). The derived maps are rebuilt from
-the primary ones on every save: a function of the records and the best chain
-that anyone can recompute (same contents, same root). The ARC status in a
-`broadcast` record is provisional information only; nothing is decided by it
-but "stop awaiting".
+consumed (no transaction we hold, other than a rejected one, spends it). The
+derived maps are rebuilt from the primary ones on every save: a function of
+the records and the best chain that anyone can recompute (same contents,
+same root). The ARC status in a `broadcast` record is provisional
+information, except a rejection (below).
+
+## Settlement (#37)
+
+Every transaction the wallet holds has a settlement state resolved later:
+`unproven` (held, no proof), `proven` (a merkle path against a header on our
+best chain) or `rejected`. Anything derived from an unproven transaction is
+provisional until it settles.
+
+**Transitions.**
+
+| from → to | by | |
+|---|---|---|
+| unproven → proven | a `proof` / `status` entry with a path, ARC's answer, `{op: "proof"}` | the path's root is our header's at its height |
+| proven → unproven | a reorg (a heavier branch replaces ours from height h) | every proof at ≥ h (`proofHeights`) stops holding; ours are re-posted to ARC and awaited like a fresh broadcast |
+| unproven → rejected | ARC says `REJECTED` / `DOUBLE_SPEND_ATTEMPTED` / `INVALID` / `MALFORMED` (or a 4xx) | reason: ARC's status |
+| unproven → rejected | a competing spend of one of its inputs is proven | reason `double-spent` (a transaction arriving after such a proof is rejected at once) |
+| unproven → rejected | still awaited `walletAbandonMs` after its broadcast (the `since` of its `broadcast` record), at a deadline wake | reason `abandoned` |
+| unproven → rejected | a transaction it depends on is rejected | reason `input-rejected`, `cause` the root txid |
+
+A proven transaction is never rejected. In this build a rejection is
+terminal: a proof arriving later for a rejected transaction is kept as a
+record, the status stays `rejected`.
+
+A rejection is recorded as `{kind: "settlement", txid, status: "rejected",
+reason, cause?, at}` (the step's time), named by `rejected`; status stays
+computed from it.
+
+**Relations.** Where the wallet writes a record it writes the relation to
+the transaction the record depends on, with its kind, in `dependents` (key
+target txid ‖ tag ‖ id; tag `t` a transaction, `a` our action, `o` an
+output record by outpoint, `d` a draft by CID, `r` any other record by CID):
+
+| rel | written for | propagates |
+|---|---|---|
+| `spends` | every input of every transaction we hold (a BEEF's ancestry, ours, a competing spend) → the transaction it consumes | yes |
+| `derives-from` | our action, each output record, each draft's inputs → the transaction | yes |
+| `admits` | reserved for overlays (#36): an admitted output → its transaction | yes |
+| `mentions` | a record that merely names the transaction | no |
+
+**Bubbling** (`Wallet.reject`): the rejected txid is queued; for each
+transaction taken from the queue (skipped if already rejected or proven): a
+settlement record, drop it from `awaiting`, then walk its `dependents` in key
+order following only propagating relations — a `t` dependent (a spend) is
+queued (transitively rejected, `input-rejected`), an `o` output record is
+removed from `outputs` (the output vanishes), a `d` draft is marked rejected
+(signAction refuses it: `DraftRejected`). Then `save` recomputes the derived
+maps from what remains: the inputs the rejected transactions consumed are
+spendable again unless another held transaction spends them. Breadth first
+in key order, from records only: the same rejection on the same state gives
+the same state record. This is the "replay of the affected subgraph" — as
+recomputation of derived state, recorded as one update on the wallet's head
+by the step that learned it.
+
+**Threads fork, they do not replay.** A thread whose history took the
+transaction as input is never re-run. The thread awaiting the transaction's
+CID (the broadcast's awaiting-callback thread, or any program that
+`await`ed it) receives the `status` entry as a new input, routed by its
+`subject`; a wallet thread whose transaction was rejected by another step
+finds it rejected at its next deadline and finishes. Records that merely
+`mentions` a transaction change nothing. A program that wants to follow the
+settlement of transactions it kept opts in: `{op: "watch"}` to the wallet
+box (from the identity that should hear), and the wallet sends every change
+of a transaction of ours — `{kind: "settlement", txid, status: proven |
+unproven | rejected, reason, cause?}` — as a message to each watcher's
+`settlement` box (a §7.3 envelope sealed through the oracle; a subscription
+on that box routes it to the program). `{op: "watch", settlement: false}`
+opts out.
+
+The wallet's own result records name the transactions they are about as
+`refs: [{to: <tx CID>, rel: "mentions"}]`; the kernel makes those edges
+(docs/VM.md, "Edges").
 
 ## The chain tracker
 
@@ -204,9 +284,12 @@ it (`input.event`); the deadline's wake entry steps it too (`input.woke`),
 and it re-asks ARC over `http`. Each time: a merkle path proves the
 transaction (a header not yet held leaves it pending), a rejection
 (`REJECTED`, `DOUBLE_SPEND_ATTEMPTED`, `INVALID`, `MALFORMED`, or a 4xx)
-drops the action and its outputs so its inputs are spendable again; proven
-or rejected, it stops awaiting and the thread finishes; otherwise it awaits
-again with a new deadline. A fallback ARC is a different URL.
+rejects it and bubbles (Settlement, above); proven or rejected, it stops
+awaiting and the thread finishes; otherwise it awaits again with a new
+deadline. At a deadline, a transaction awaited for `defaults.walletAbandonMs`
+(default 86400000) since its broadcast is abandoned instead of re-asked. One
+thread may await several transactions (a reorg re-broadcasts all it reverted
+from one step): the result lists them as `awaited`. A fallback ARC is a different URL.
 
 Not built: catching up on headers after a gap over `http` (a feed's gap is
 refused as `Unconnected` until the missing headers arrive); fetching a
@@ -230,12 +313,17 @@ error ends the step `errored`; no head moves.
 | `{op: "createAction", description, outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?, arc?, outcome?, awaiting?}` |
 | `{op: "signAction", reference}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
+| `{op: "watch", settlement?}` | the sender opts in (default true) or out of settlement messages → `{settlement}` |
 
 | plain entry / callback | result |
 |---|---|
-| `header` (args.event) | `{event: "header", added, known, replaced, ignored, tip}` |
+| `header` (args.event) | `{event: "header", added, known, replaced, ignored, tip, reverted?}` |
 | `proof` / `status` (args.event) | `{event, txid, outcome: proven \| pending \| rejected}` |
-| a callback (input.event / input.woke) | `op: "callback"`: `{txid, outcome, event? \| arc?, awaiting?}` |
+| a callback (input.event / input.woke) | `op: "callback"`: `{txid, outcome, event? \| arc?, awaiting?, awaited?}` |
+
+Any result may also carry `settlement` (this step's changes, as sent to
+watchers), `sent` (messages emitted), `reverted` (after a reorg) and `refs`
+(the transactions it names, rel `mentions`).
 
 `outputs` of `internalize` are BRC-100's: `{outputIndex, protocol: "wallet
 payment", paymentRemittance: {derivationPrefix, derivationSuffix,
@@ -244,7 +332,7 @@ insertionRemittance: {basket, customInstructions?, tags?}}`.
 
 Config (genesis `defaults`, strings): `walletNetwork` (`main` \| `test` \|
 `regtest`), `walletFeeRate` (sat/kB), `walletArc` (ARC base URL; unset: no
-broadcast), `walletRecheckMs`.
+broadcast), `walletRecheckMs`, `walletAbandonMs` (default 86400000; 0: never).
 
 ## Running it
 
@@ -259,7 +347,8 @@ node wallet-zig/vectors/gen-ts/run.mjs        # TS cross-check of the vectors
 ```
 
 Vector counts (`zig build test`): tx 39 (fees 429), BEEF 27, merkle 24,
-headers 46, BRC-29 24, wire 7, signing 10, plus 2 wallet scenarios; the TS
+headers 46, BRC-29 24, wire 7, signing 10, plus 5 wallet scenarios (3 of
+them settlement: each transition, bubbling, double spend, abandonment); the TS
 cross-check: 458. The wasm build is reproducible.
 
 ## Open

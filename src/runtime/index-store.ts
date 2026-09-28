@@ -21,7 +21,7 @@
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { CID, decode, encode, fmt, fromBytes, isCID } from "./cid.ts";
-import { openStore, originEdges, toRef, updateEdges, type SqliteStore } from "./sqlite.ts";
+import { keptEdges, openStore, originEdges, toRef, updateEdges, type SqliteStore } from "./sqlite.ts";
 import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
@@ -248,7 +248,9 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
     edges(0, originEdges(o));
     for (const [i, c] of ups.entries()) {
       pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
-      edges(i + 1, updateEdges((await store.get(c)) as unknown as Obj));
+      const u = (await store.get(c)) as unknown as Obj;
+      const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) ? store.get(k).catch(() => undefined) : undefined)));
+      edges(i + 1, [...updateEdges(u), ...keptEdges(kept)]);
     }
     const t = ups.length ? (await store.get(tipCid)) as unknown as Obj : undefined;
     if (kind === "thread") {
@@ -431,7 +433,11 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): Sq
         if (!row) return [];
         const rows: Array<{ pos: number; to: string; rel: string; locator: string | null }> = [];
         originEdges(block<Obj>(cid)).forEach((e, ord) => rows.push({ pos: ord, ...e }));
-        updatesOf(cid).forEach((u, i) => updateEdges(block<Obj>(u)).forEach((e, ord) => rows.push({ pos: (i + 1) * 1048576 + ord, ...e })));
+        const withKept = (u: Obj) => [...updateEdges(u), ...keptEdges((Array.isArray(u.kept) ? u.kept : []).map((k) => {
+          const b = isCID(k) ? get(k) : undefined;
+          try { return b && decode(b); } catch { return undefined; }
+        }))];
+        updatesOf(cid).forEach((u, i) => withKept(block<Obj>(u)).forEach((e, ord) => rows.push({ pos: (i + 1) * 1048576 + ord, ...e })));
         const first = new Map<string, (typeof rows)[number]>();
         for (const r of rows) {
           const k = JSON.stringify([r.to, r.rel, r.locator]);
