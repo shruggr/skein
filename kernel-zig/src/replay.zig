@@ -73,6 +73,13 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
         try dst.putBlock(p.value.cid, b);
     }
+    // Handlers the genesis subscribes that are not among its programs (the wallet, #29).
+    for (g.get("subscriptions").?.array) |s| {
+        const h = Value.cidOf(s.get("handler")) orelse continue;
+        if (try dst.has(h)) continue;
+        const b = (try src.bytes(a, h)) orelse continue;
+        try dst.putBlock(h, b);
+    }
     const host = Value.str(g.get("host")).?;
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
@@ -80,7 +87,7 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
             std.debug.print("log: entry #{d} has a bad signature\n", .{Value.intOf(e.get("n")) orelse -1});
             return error.BadSignature;
         }
-        for ([_][]const u8{ "genesis", "envelope", "body" }) |k| if (Value.cidOf(e.get(k))) |x| {
+        for ([_][]const u8{ "genesis", "envelope", "body", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
             try dst.putBlock(x, b);
         };

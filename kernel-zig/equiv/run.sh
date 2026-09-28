@@ -38,6 +38,9 @@ else
   echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1
 fi
 
+echo "== the wallet in the VM (#29): oracle signing, plain entries, http to a fake ARC, deadline wakes; replayed"
+"${node[@]}" "$kz/equiv/wallet.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 

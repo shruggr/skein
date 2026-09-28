@@ -32,6 +32,12 @@ pub const Host = struct {
     advance: *const fn (imp: *Imports, name: []const u8, tree: []const u8) Err!void,
     subscribe: *const fn (imp: *Imports, op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8) Err!void,
     wallet: *const fn (imp: *Imports, frame: []const u8) Err![]const u8,
+    /// One HTTP request (dag-cbor {method, url, headers?, body?}) → the response
+    /// (dag-cbor {status, headers, body}), answered by the host and attested
+    /// (#29; pre-#15: #15 replaces it with standard wasi:http).
+    http: *const fn (imp: *Imports, request: []const u8) Err![]const u8,
+    /// If this step ends waiting, rest no later than `until` (ms): a wake entry then steps it.
+    deadline: *const fn (imp: *Imports, until: i64) Err!void,
 };
 
 pub const Imports = struct {
@@ -123,6 +129,11 @@ pub const Imports = struct {
                 return 0;
             },
             .wallet => return imp.out(p, try h.wallet(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
+            .http => return imp.out(p, try h.http(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
+            .deadline => {
+                try h.deadline(imp, a[0]);
+                return 0;
+            },
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
                 p.set(a[0], imp.held) catch return imp.failWith("offset is out of bounds");
