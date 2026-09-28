@@ -12,45 +12,82 @@ scripts/host/up.sh                          # the client wallets, their grants, 
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (`/messagebox`), host page 127.0.0.1:4600, explorers 4610+ | the BRC-33 messagebox, forwarding BRC-104 sessions to the instances (the bare URL: the front instance, the mailbox host; `<handle>.localhost:8100`: that instance), each instance's kernel started on demand (`skein-kernel serve`, stopped when idle), the waker, the oracle (instance keys from `~/.skein/master.key`), the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`) | `~/.skein/logs/host.log` |
+| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`, stopped when idle), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
-| inference peer `bin/skein-infer` | — | polls its `infer` box on the router, answers `completions` (either envelope form, in kind) | as run |
+| inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox, raw BRC-33 on BRC-104 sessions | as run |
 
 Gone since the router (#33), scripts kept and marked legacy: the `1sat serve`
 messagebox (`messagebox.sh`, `messagebox-migrate.mjs`), the instance wallet
 3321 and the host wallet 3324 (`wallets.sh` with no arguments starts them all),
 one wallet-api per instance on 3401+ (`instance.sh`), their grants
-(`grants-legacy.sh`). Instances need no grants: the router's oracle signs
-for them.
+(`grants-legacy.sh`). Gone since #40: the router's shared `/messagebox`, its
+mailbox keeping and its BRC-104 server. Instances need no grants: the
+router's oracle signs for them.
+
+## The router: a reverse proxy (#40)
+
+The router picks the instance a request is for and forwards it; it holds no
+auth state and no mail. Routing comes before authentication, because a
+BRC-104 handshake does not name its recipient: the URL is the recipient.
+
+- **By host name**: `http://<handle>.localhost:8100/…` (the `Host` header;
+  `SKEIN_INSTANCE_ORIGIN` sets another template, default
+  `http://{handle}.localhost:{port}`). The stock `AuthFetch` keeps one session
+  per origin and shakes hands at `<origin>/.well-known/auth`, so this is the
+  form the stock `@bsv/message-box-client` and the SDK's overlay clients use.
+  `*.localhost` resolves to ::1: the router listens on 127.0.0.1 and ::1.
+- **By path prefix**: `http://127.0.0.1:8100/@<handle>/…` (a dev form). The
+  router strips the prefix for the routes; the client signs the path it sent,
+  and its handshake goes under the prefix (`src/client/raw.ts`, `RawBox`).
+
+A request for an instance is one kernel `call` of its front door
+(`programs/frontdoor`): BRC-103/104 against the session records in the
+instance's state, the routes table, the handler, the signed answer. The
+entries it returns (a message, a handshake's session, an acknowledgement)
+are admitted; a read — a poll, a lookup, the explorer — writes nothing. Its
+fuel is charged to the **fuel ledger** (host.db `fuel_ledger`, by instance,
+caller and route; `skein-host ledger [handle]`).
+
+The router's own endpoints:
+
+| | |
+|---|---|
+| `GET /manifest.json` | BRC-169: `metanet.handles.resolve` |
+| `GET /.well-known/metanet-handles/resolve?handle=<h>@<d>` | `{handle, domain, identityKey, messagebox}`: an agent's own identity and origin; for a mailbox instance, its owner's key and the instance's origin |
+| `GET /bsvalias/id/<handle>@<domain>` | paymail PKI (identity keys by handle) |
+| `POST /account/register {username, identityKey, signature}` | a mailbox instance for that identity: the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username, counterparty anyone, over `register <username>` → `{identityKey, username, handle, messagebox}` (409 if the name is taken) |
+| `POST /callback/<handle>` | ARC's status callback (an `arc-callback` feed) |
+
+The instances' outbound http (a messagebox delivering, a resolve) comes back
+through the router: a URL of this host's is answered in process (the same
+path, no socket), any other goes out (`SKEIN_HTTP=fetch`).
+
+**Mailbox instances.** A person or peer outside the host gets a mailbox: an
+instance of its own with only the front door and the messagebox, keeping
+every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
+--mailbox --owner <key>` makes one; so does a signed registration
+(`register.ts`, what `up.sh` does for `david` and `infer`, and the front
+end's Register). `skein-host mailboxes` lists them (whose, and where). The
+owner's is where every instance delivers what it sends him: a new genesis
+names it (`defaults.ownerMessagebox`: `SKEIN_OWNER_MESSAGEBOX`, else the
+owner's mailbox instance here), the one peer a genesis names.
 
 Files:
 
-- `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities.
-- `~/.skein/router.identity` — the BRC-104 identity at the bare messagebox URL: since #33 part 2 the **front instance's** (the mailbox host; `skein-host identity`), not a router key — sessions belong to the instances. grants.sh writes it and grants "auth message signature" toward every instance (a client meets an instance's own identity on its per-instance origin).
+- `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities. `skein-host identity <handle>` prints one.
 - `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322).
 - `~/.skein/infer.json` — the inference peer's providers (written if absent).
-- `~/.skein/messagebox.url` — `http://127.0.0.1:8100/messagebox`.
-- `~/.skein/host.db` — the instances (identity → store) and the mailboxes kept for other identities (`skein-host list`, `skein-host mailboxes`).
+- `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
+- `~/.skein/host.db` — the instances (identity → store; `kind` agent or mailbox, a mailbox's `owner`) and the fuel ledger (`skein-host list`, `skein-host mailboxes`, `skein-host ledger`).
 
-Registering (`POST /account/register {username}` over BRC-104, what `up.sh`
-does for david and infer through `register.ts`, and the front end's Register)
-gives an identity a mailbox kept by an instance (`SKEIN_MAILBOX_HOST`, default
-the first enabled row): its mail is that instance's log. The router answers
-`403 ERR_ACCOUNT_REQUIRED` for a recipient that is neither an instance nor
-registered, as `1sat serve` did.
-
-Sessions (#33 part 2): the BRC-103/104 handshake and every signed request go
-into the instance (the `:auth` entries of its log, answered by its messagebox
-program through its oracle); session records live in the instance (head
-`sessions`) and survive the router, expiring by the instance's
-`defaults.sessionTtlMs` (a day). **Switching a live stack**: existing stores
-have no `:auth` subscription in their genesis, so they need a re-genesis
-(`skein-host add <h> --derive` with a new `--store`), and clients must grant
-"auth message signature" toward the front instance instead of the old router
-key (`scripts/host/grants.sh` again). A client already holding a session with
-the old router identity gets `Authenticated Message Box server identity
-changed` from the stock client once: restart it.
+Sessions: the handshake writes one session record into the instance (a
+`:sessions` entry, kept by the front door under head `sessions`); every
+later request is verified against it, and writes nothing. Sessions expire by
+the instance's `defaults.sessionTtlMs` (a day); an expired one is a plain 401,
+and the stock client shakes hands again. **Switching a live stack**: stores
+from before #40 (log format 2) are refused; they need a new genesis
+(`skein-host add <h> --derive` with a new `--store`).
 
 Feeds: an instance's `etc/config.json` may declare `feeds: [{kind:
 "headers", url, box?}, {kind: "arc-callback", box?, token?}]` (the genesis
@@ -61,9 +98,10 @@ Bearer <token>` when a token is set), admitting `header` / `status` entries
 into the box (default `chain`).
 
 The sections below describe the pre-router layout (the `1sat serve`
-messagebox, a wallet-api per instance, host-signed entries) where they talk
-about those processes; `skein-host deploy`, `subscribe` and the roster work
-the same against the router.
+messagebox, a wallet-api per instance, host-signed entries, BRC-169
+envelopes) where they talk about those processes; `skein-host deploy`,
+`subscribe` and the roster work the same against the router, speaking raw
+BRC-33 to the row's front door (`SKEIN_HOST_URL`/@<handle>) as the owner.
 
 ## The messagebox (legacy: `1sat serve`)
 
@@ -418,7 +456,7 @@ An instance whose genesis predates it keeps the old loop, which ignores
 `skein-host run` on this build, `deploy` again — `knows` survives in
 host.db).
 
-Two limits of the dev wallets and messagebox, not of skein:
+Two limits of the legacy layout (the `1sat serve` messagebox and per-instance wallets; neither applies to the router), not of skein:
 
 - **The open subscription needs a grant per sender.** wallet-api has no
   any-counterparty grant, so a `chat` from an identity the instance's wallet
@@ -438,27 +476,31 @@ Two limits of the dev wallets and messagebox, not of skein:
 ```
 bin/skein whoami
 bin/skein import ~/Work/easel                        # prints the root tree CID
-bin/skein run --tree <cid> -- 'ls | head -3'         # prints the run envelope's CID
-bin/skein inbox --wait                               # until a result with replyTo = that CID
+bin/skein run --tree <cid> -- 'ls | head -3'         # prints the run message's id
+bin/skein inbox --wait                               # until a result with replyTo = that id
 ```
 
 - Wallet: `HTTPWalletJSON('skein-client', http://127.0.0.1:3322)`. Override
-  with `SKEIN_OWNER_WALLET`, `SKEIN_MESSAGEBOX`, `SKEIN_INSTANCE_IDENTITY`,
+  with `SKEIN_OWNER_WALLET`, `SKEIN_ORIGINATOR`, `SKEIN_INSTANCE_IDENTITY`,
   `SKEIN_INSTANCE_HANDLE` (default `skein@localhost`), `SKEIN_HOME`.
+- Where: raw BRC-33 on a BRC-104 session (#40). It sends to the instance's
+  front door, `SKEIN_INSTANCE_URL` (default `$SKEIN_HOST_URL/@<handle>`,
+  `SKEIN_HOST_URL` default `http://127.0.0.1:8100`), and reads David's
+  mailbox instance, `SKEIN_MAILBOX_URL`, else `~/.skein/mailbox.url`, else
+  `$SKEIN_HOST_URL/@david`.
 - Boxes: `objects` (bundles `{records: [{cid, bytes}]}`, dag-cbor, ≤ 1 MiB;
   blobs first, the root tree last), `run` (`{cmd, tree: CID, cwd?, env?}`),
   and David's own `results` (`{replyTo, exitCode, stdout, stderr, tree}`).
-  All sent with `skipEncryption: true`: the envelope's BRC-78 `content` is the
-  encryption.
-- `replyTo` is matched against the **envelope CID** (the message id): CIDv1,
-  dag-cbor codec, sha2-256 of `dagCbor.encode(signed)` where `signed` is the
-  JSON object as sent without `content` (`envelopeCid` in
-  `src/client/client.ts`). Sent envelopes are logged in
+  Bodies are dag-cbor, sent as `application/cbor` (BRC-231). No envelope and
+  no encryption layer: the session proves the sender.
+- `replyTo` is matched against the **message id**: the CID of the mail record
+  the instance admitted, which the send's answer returns (`id`) and the
+  mailbox lists as `messageId`. Sent messages are logged in
   `~/.skein/client/sent.jsonl`.
 
 ## Checking by hand
 
 ```
-node --experimental-strip-types --no-warnings --test src/client/client.test.ts   # includes a live messagebox round trip
-sqlite3 ~/.skein/host-home/.1sat/cli/data/messagebox-main.db 'select messageBoxId, count(*) from messages group by 1'
+node --experimental-strip-types --no-warnings --test src/client/client.test.ts src/client/chat.test.ts   # on a scratch host, real kernel
+bin/skein-host ledger david          # what the polls of david's mailbox cost
 ```

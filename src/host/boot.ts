@@ -106,7 +106,7 @@ export interface SystemTree {
 }
 
 /** A handler program's record inputs when bin/<name>.json gives none (the kernel's handler inputs). */
-const HANDLER_INPUTS = { envelope: "cid", body: "cid", box: "string", sender: "identity" };
+const HANDLER_INPUTS = { message: "cid", body: "cid", box: "string", sender: "identity" };
 
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {
   const b = await objects.get(cid);

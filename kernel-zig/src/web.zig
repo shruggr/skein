@@ -28,8 +28,8 @@
 //   skein_host_call(instance, index, nargs, memlen) → 0 | 1   a program's import (engine_v8.zig)
 //
 // Imports: `skein_engine` (engine_v8.zig), `skein_store` (web_store.zig), and
-// `skein_peer`: request(op, v) → the answer (wallet, resolve, http: blocking,
-// like serve's requests), notify(op, v) (send, sleepers, onSleep, say), take.
+// `skein_peer`: request(op, v) → the answer (wallet, http: blocking,
+// like serve's requests), notify(op, v) (sleepers, onSleep, say), take. Ops include `call` (#40).
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");

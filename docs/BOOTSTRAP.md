@@ -19,9 +19,14 @@ The objects come from one of two sources. Both go through the same code:
 
 An instance with no tree (a plain `skein-host add`, and so the live agents)
 gets the **stock system in code** through the same writer
-(`genesis.ts codeSystem`). That is the kernel's pinned programs and
-`STOCK_SUBSCRIPTIONS`. Its genesis is byte for byte what code genesis wrote
-before. The router's hydration of an empty store calls `boot` with this source.
+(`genesis.ts codeSystem`). That is the kernel's pinned programs,
+`STOCK_SUBSCRIPTIONS`, `STOCK_ROUTES` and `STOCK_READS`. The router's
+hydration of an empty store calls `boot` with this source. A **mailbox
+instance** (#40, `skein-host add <h> --mailbox --owner <key>`) is code genesis
+too, with only the kernel's `frontdoor` and `messagebox` programs,
+`MAILBOX_SUBSCRIPTIONS` (`:sessions` → frontdoor, `:ack` → messagebox, every
+message from anyone in any box → messagebox), the stock routes and reads, and
+no peers or names.
 
 ## The system tree
 
@@ -31,15 +36,36 @@ bin/<name>.cid           the CID (raw, bafkrei…) of a module the source or the
 bin/<name>.json          optional: the program record's {inputs, services, description}
                          (default: the handler inputs {envelope, body, box, sender}, no services)
 etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
-                                   feeds: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}]}  (the router holds them, #33)
-etc/subscriptions.json   required: [{sender?: key, box, handler}]
+                                   feeds: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}]  (the router holds them, #33),
+                                   owner: {messagebox: url}}  (#40: the owner's messagebox, the one peer a genesis names)
+etc/subscriptions.json   required: [{sender?: key, box?, handler}]
+etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op}]; default the stock routes
+etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
 
 - A **key** is an identity key in hex, or `$owner` / `$infer`. Those are the
   host's (`SKEIN_OWNER`, `SKEIN_INFER`), so one published tree serves any
   owner. A subscription with no `sender` takes anyone.
-- A **handler** is a `bin/` name or a program record's CID.
+- A **handler** is a `bin/` name or a program record's CID; so is a route's
+  `program`. A route to a program the system lacks is dropped.
+- **Routes and reads** (#40) are the front door's tables (docs/MESSAGES.md):
+  an exact `path` or a `prefix` (exact paths first, then the longest prefix),
+  the program and function the front door calls with the request, `auth:
+  "none"` for an open route (an overlay's, docs/OVERLAY.md), else BRC-104,
+  and `read` an op the reads table must allow the caller. The stock routes
+  are the BRC-33 messagebox — `sendMessage`, `listMessages`,
+  `acknowledgeMessage` at the root and under `/messagebox` (program
+  `messagebox`) — and the explorer, prefix `/explore` (program `frontdoor`,
+  fn `explore`, `read: "explore"`). The stock reads are
+  `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
+  writes `etc/routes.json` replaces the stock routes whole (include them to
+  keep the messagebox); likewise `etc/reads.json`.
+- **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
+  where the instance delivers what it sends its owner. Unset, the host's
+  (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
+  fills it. It is the only peer a genesis names: the peer table
+  (head `peers`) is written only by the instance's own programs.
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
   plus the kernel's `shell`. The shell is the VM's own program: its modules
@@ -62,7 +88,8 @@ etc/subscriptions.json   required: [{sender?: key, box, handler}]
   (`thread` is absent from that head update).
 
 `skein-host system <dir>` writes the stock system as such a tree:
-`bin/*.cid` + `bin/*.json` taken from the kernel's own records, plus `etc/`.
+`bin/*.cid` + `bin/*.json` taken from the kernel's own records, plus `etc/`
+(`config.json`, `subscriptions.json`, `routes.json`, `reads.json`).
 Booting from it unchanged gives the same programs and subscriptions as code
 genesis, plus the tree.
 
@@ -107,8 +134,7 @@ from go-deltasync/vcdiff, the library 1sat-stack's gateway uses.
 A checkpoint packet's scope is the instance's state record (#30). Its closure
 covers the log, every index map node, every record and tree, and every module
 a program names. Records a step wrote that no link reaches go in as **extras**.
-Examples are a run's args, and the signed part of an emitted §7.2 envelope,
-which a compact session reply's `replyTo` names. Extras are listed in the index,
+An example is a run's args. Extras are listed in the index,
 and each is verified and kept. Restoring (`boot` with a checkpoint →
 `putblock` for each block, then the kernel's `restore` frame) moves the state
 pointer onto the record. The index is **read, not rebuilt**. `restore` only
@@ -183,7 +209,7 @@ processes the genesis at that first start. The owner is `SKEIN_OWNER`.
 
 - **Extras.** A checkpoint's records that no link reaches travel as index
   extras. A follow-up for the kernel is to make them reachable, for example by
-  linking a step's args and an emit's signed part from its update. Then
+  linking a step's args from its update. Then
   completeness could require them.
 - **Real carriers.** Real inscription (1sat `ord`) and B-protocol carriers are
   not mapped yet. Only the OP_RETURN `(content-type, payload)` form is read.

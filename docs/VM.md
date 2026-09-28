@@ -131,15 +131,22 @@ per change `{op: "add" | "remove", sender?, box, handler, thread?, input,
 at}`. The rules are the updates folded in order: `add` appends the rule
 `(sender, box) → handler` at the end of the list, `remove` deletes it; an add
 of a rule already listed, or a remove of one that is not, writes nothing. No
-`sender` is any sender. The scheduler routes each envelope by the rules as
-they stand when its entry is processed, first match wins, replies before any
-of them (docs/MESSAGES.md). Replay writes the same chain.
+`sender` is any sender, and no `box` is any box (a genesis-only catch-all: a
+mailbox instance's, #40). The scheduler routes each message (a `mail`
+record, below "Messages") by the rules as they stand when its entry is
+processed, first match wins, replies before any of them (docs/MESSAGES.md).
+Replay writes the same chain.
 
 - **The genesis carries only the seed.** Its `subscriptions` are written as
   the chain's first updates when the genesis entry is processed (no
-  `thread`); nothing reads them for routing afterwards. By default: the
-  owner's `run`, `objects`, `head`, `chat` and `subscribe` boxes; the host
-  adds `chat` from anyone.
+  `thread`); nothing reads them for routing afterwards. By default
+  (`STOCK_SUBSCRIPTIONS`, src/host/genesis.ts): the owner's `run`,
+  `objects`, `head`, `chat`, `subscribe` and `peers` (→ `resolve`) boxes;
+  `chat` from anyone; `register` from anyone (→ `resolve`: a handle claim);
+  and the reserved boxes the host admits into, `:sessions` (→ `frontdoor`: a
+  handshake's session) and `:ack` (→ `messagebox`: a reader's pointer). A
+  mailbox instance's seed is `:sessions`, `:ack` and every message from anyone
+  in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`).
 - The chain changes only by an explicit act: a program's step calls the
   `subscribe` import (the handler must be a program record in the store, a
   wasm program's module too), and the change is written when that step ends
@@ -154,9 +161,9 @@ of them (docs/MESSAGES.md). Replay writes the same chain.
   `subscribe` from anyone else is recorded, and nothing runs.
 - **Registering a program** is subscribing a box to its CID. Its record (and
   module) must be in the store first: `objects` delivers them.
-- `runtime.boxes()` — what the delivery provider collects — is the boxes the
-  rules name plus the genesis's `collect`, re-read every poll, so a box
-  subscribed at runtime is collected from the next poll.
+- Nothing polls for messages (#40): a message arrives at the instance's front
+  door (a `sendMessage` request) and is admitted as an entry; a box
+  subscribed at runtime takes messages from the next one.
 - A store whose log predates the chain has no chain, so nothing would route:
   the runtime refuses to start it. It needs a new genesis (no migration).
 
@@ -200,8 +207,9 @@ at `/opt/skein/python`; it is not part of the tree and never committed.
 
 A step function is the same idea one level up: the turn loop is a program
 whose input is the thread tip and the message that woke it, and whose output
-is records to append and messages to emit. `step(tip, message) → {append,
-emit}` with only the imports above.
+is records to append. A message out is not an output of the step: the step
+delivers it itself (#40), calling its messagebox program's `send`, whose
+`http` request is recorded on the step like any other.
 
 ### The ABI: preview1 modules and WASI 0.2 components
 
@@ -259,7 +267,7 @@ a kernel call answered by the host — there is no provider peer and no message.
   the wallet's two builds make byte-identical requests (`equiv/abi.ts`).
 - **What is recorded.** Request and response go on the step's update as a
   recorded call (op `http`: the request bytes and the host's answer
-  `{status, headers, body}`), like `wallet` and `resolve`. Nothing is
+  `{status, headers, body}`), like `wallet`. Nothing is
   suspended: the step waits for the host inside the call.
 - **Replay** reads the response from the record and never touches the
   network. A request that differs from the recorded one is a divergence.
@@ -298,7 +306,8 @@ function over the current state and return a value. It writes nothing.
   `input()` returns `{kind: "call", fn, arg: bytes, caller?, now, self:
   {handle, domain, identity}, owner, programs, peers, defaults, names, routes,
   reads, subscriptions: [{sender?, box?, handler}], pending: [entry CIDs
-  admitted and not yet processed], state: <the committed state record>}`;
+  admitted and not yet processed], state: <the committed state record>}`
+  (an in-VM call from a step adds `step: {thread, step, entry, at}`);
   the program dispatches on `fn` and writes its result to stdout. A non-zero
   exit is the error, with the last line of stderr as its message. The
   serve frame is `{op: "call", v: {program: <CID or a genesis program's
@@ -323,7 +332,13 @@ function over the current state and return a value. It writes nothing.
   fuel). From a **step** the callee is part of the step: its recorded calls,
   kept records, launches and head moves are the step's, on the step's fuel,
   and replay re-runs it with the step. A step sees its own head moves: a
-  head a callee advanced reads back as moved in the rest of the step.
+  head a callee advanced reads back as moved in the rest of the step. Calls
+  nest to depth 8; an answer is at most 64 MiB.
+- **What calls are for.** The front door (`programs/frontdoor`) is a call:
+  the host hands it each HTTP request (fn `http`), and a read — a poll, a
+  lookup, the explorer — is answered from state with no entry and no byte
+  written. A request that must write returns the entries for the host to
+  admit (docs/MESSAGES.md, docs/ARCH.md).
 
 ### Fuel: every step is metered
 
@@ -377,34 +392,41 @@ the next segment, its fuel counted from zero. (Before #38: the stamp, then
 
 ## Messages
 
-A **message** is a record signed by an identity. It is the only way anything
-enters an instance and the only way anything leaves it.
+(Issue #40; `kernel-zig/src/log.zig`, log format 3. The signed-message
+design this section once described — every input a signed message, sends as
+outbound messages the host carries out — is superseded.) Messages are state:
+the log is what arrived, and an entry is one of
 
 ```
-message { kind: "message", from: <identity key>, to?: <identity key | handle>,
-          seq: n /* per sender */, at, body, refs, sig }
+entry  {kind: "log", prev, n, time, genesis | mail | wake | event+box}
+mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, json?,
+        session?: {payload, signature, nonce, yourNonce}}
 ```
 
-Inbound messages, in order, are the instance's entire input:
+- **`mail`** is a BRC-33 message that arrived at the front door: its sender
+  is the identity of the BRC-104 session it came on (authentication is by
+  key; `session` keeps the signed request, so the log verifies with keys
+  alone), its body a record of its own (admitted with the entry:
+  `admit(entry, {body})`). The mail record's CID is the message's id — what
+  the sender computes too, and what a reply's `replyTo` names; a second
+  admit of the same record is refused (the `unique` map). It is routed to
+  the thread awaiting the message its body's `replyTo` names (a reply is from
+  the identity that message was sent to), else by subscription on (sender,
+  box).
+- **`event`** in a box: a record from a feed the host holds (#29: a header,
+  a proof, a status) or a front door's own write (`:sessions`, `:ack`, an
+  overlay's `submit`), routed by its `subject` or by box.
+- **`wake`**: a sleeper's deadline.
+- **`genesis`**: who the instance is, its programs, seed subscriptions,
+  routes and reads.
 
-- a person's line (signed by their wallet), an envelope from a BRC-33
-  messagebox addressed per BRC-169;
-- a model completion, a wallet result, a chain-tracking event (broadcast
-  accepted, mined with merkle path, rejected) — signed by the host service
-  that produced it;
-- a time attestation, signed by the host;
-- configuration: subscriptions, program registrations, written by the admin
-  key.
-
-Outbound messages are the effects only the outside can do: run a model call,
-sign or broadcast a transaction, send to a BRC-169 recipient, request a
-timestamp. The host carries them out and the results come back as inbound
-messages. Running a command is **not** an outbound message: it happens inside.
-
-Because every input is a signed message in a fixed order, replaying the log
-against an empty store reproduces the graph exactly, re-executing programs
-along the way. "What did this instance see, and who told it" is a query over
-the log.
+Nothing a front door merely reads or verifies is an entry. A message leaves
+an instance by the instance's own program: its messagebox's `send` (a BRC-104
+client, over recorded `http`) to the recipient's messagebox URL, which its
+peer table names (written only by its own programs: `resolve`'s BRC-169
+lookup, the owner's `peers` box, a verified `register` claim) or, for the
+owner, the genesis's `defaults.ownerMessagebox`. A store in an older format
+is refused (start a new store).
 
 ## Time
 
@@ -428,10 +450,10 @@ is a request plus its typed emissions; a step is one model call's node; a
 turn is a run of steps. Two changes from v1:
 
 - **Every thread is launched by a record**: a step (a tool call, a subagent,
-  a model call) or an inbound message (a person's opening line, an envelope,
+  a model call) or an inbound message (a person's opening line, a message,
   a cron event). "Top-level" means launched by a message.
 - **There is no `david` runner.** A thread that needs a person waits on *a
-  message from that identity*. The subscription table is what makes David's
+  message from that identity* (the `await` import on the message it sent). The subscription table is what makes David's
   messages resolve waiting threads while a stranger's are routed to a
   handler program or refused. Cron is a time attestation that a subscription
   routes to whatever waits for it.
@@ -491,9 +513,9 @@ Node/TypeScript; programs are Rust or anything else that targets WASI.
 - **Every inbound record is signed by its source**, including host services.
   A service on another machine is just another identity exchanging signed
   messages; location is not part of the model.
-- People, other instances and outside agents are addressed per BRC-169 and
-  reached through their messagebox. Delegation (scope, spend cap, expiry,
-  revocable) is BRC-169 §9.
+- People, other instances and outside agents are known by their identity
+  key and reached at their messagebox URL (#40): BRC-169 is only discovery
+  (a handle → key and URL, the `resolve` program), not part of delivery.
 
 ## The shared store
 
@@ -514,15 +536,15 @@ correctness one.
 
 (Issue #30; built in the Zig kernel, `kernel-zig/src/index.zig`, `mst.zig`.)
 The questions the scheduler asks — which entry is number n, which entry
-admitted this envelope, where is this chain's tip, which threads are not
-finished, which sleep until when, which await a reply to this envelope, what
+admitted this message, where is this chain's tip, which threads are not
+finished, which sleep until when, which await a reply to this message, what
 points at this record, what tree does this head name — are answered by
 **persistent maps kept as records in the store**, not by database tables.
 Each query shape is its own map, keyed so that the question is a lookup, a
-range or a prefix: `log` (n → entry), `unique` (envelope or emit → entry),
+range or a prefix: `log` (n → entry), `unique` (message CID → entry),
 `chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
 and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
-(envelope ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
+(record ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
 (name → tree).
 
 A map is a **Merkle search tree** of dag-cbor nodes (fan-out ~32; a key's
