@@ -221,7 +221,8 @@ log entry; `sleepersDue()` (cued by `onSleep`) for the next deadline; and its
 An instance talks to another the way David talks to it: a `chat`. There is
 one chat envelope, the same in both directions, whoever the parties are: a
 new conversation has no `replyTo`; everything after it is a `chat` **reply**
-(`replyTo` = the envelope it answers). There is no `say`. A conversation is
+(`replyTo` = the envelope it answers). The answer is never a `say` (that is
+an optional tool; "The turn stream", below). A conversation is
 pairwise — one sender, one recipient, `replyTo` one parent — and a thread is
 one party's participation in one conversation.
 
@@ -356,7 +357,8 @@ listed in `programs/loop/main.go`.
 
 **The peer.** It checks that the nodes chain, stores them, and walks from the
 newest node back through `parent` to the root. The path becomes the engine's
-whole chat: system → `system`, user → `user` (`text`), assistant →
+whole chat: system → `system`, user → `user` (`text`, then its
+`annotations`, if any), assistant →
 `assistant` (`content`, `tool_calls`), tool → `tool` (`tool_call_id` = `call`;
 a shell's `exit N`, stdout and `[stderr]`, or a message's answer, or
 `error: …`); other roles (the loop's `error` turns) are not the model's and are
@@ -390,6 +392,71 @@ default 50000) and on disk under its own state directory
   exact; the peer's reply is an admitted entry like any other.
 - A request with `messages` and no `nodes` (a loop from before this
   protocol) is passed to the engine as it is.
+
+## The turn stream
+
+As decided in issue #19. The answer to the opener is still the `chat` reply
+with `replyTo` (above), and it still closes the turn. Beside it, the loop can
+send the opener — the sender of the chat that opened the thread, David or
+another agent — ordinary messages in its **`turn`** box: one per event, a
+dag-cbor record with a `kind`, emitted in the step where it happens, in
+order, and never awaited (a `failed` outcome for one is recorded and nothing
+runs). The front end (easel, #16) subscribes to it; what it speaks or renders
+is its business.
+
+**Config** (genesis `defaults`, strings; both off by default, so an instance
+that does not set them behaves as before):
+
+- `defaults.tools`: the optional tools to offer the model, a comma-separated
+  list of `say`, `present`, `annotate`. A tool not named is not offered, and a
+  call to it is an unknown tool.
+- `defaults.stream`: `"on"` sends the non-model kinds as well (`thinking`,
+  `log`, `error`, and the opener's own annotations).
+
+**Tools.** `say`, `present` and `annotate` are ordinary tools, called when the
+conversation's rules call for them (a spoken line where a voice channel is
+established; a page and its annotations when something is being discussed),
+not by default and not once per turn:
+
+```
+say      {text}
+present  {page: <markdown or HTML>, blocks?: [{id, …}]}     (ids unique; other fields are kept as given)
+annotate {present: <cid>, block?, note}                      (a page presented in this thread; block one of its ids)
+```
+
+Each call puts its record, keeps it in the thread (listed in the step's
+`kept`, beside the turns), sends it to the opener in `turn`, and answers the
+model with a `tool` turn `{of: <the record>, role: "tool", call, text}`
+whose text is JSON: `{"say": "<cid>"}`, `{"present": "<cid>", "blocks":
+[<ids>]}`, `{"annotation": "<cid>"}`. Bad arguments are an error result
+(`{role: "tool", call, error}`) and nothing is sent. The call (with the page
+in its arguments) and its result are turns, so a presented page lives on in
+every later prompt by its CID and need not be presented again.
+
+**The opener's annotations.** A `chat` may carry `annotations: [{present:
+<cid>, block?, note}]` beside `text`. The loop keeps them on the user turn —
+the inference peer renders them after the text, `[annotations]` then `- on
+<cid> block <id>: <note>` per line — and puts each as an annotation record of
+that turn, kept, and (with `stream`) sent back in `turn` with its CID.
+
+**Records** (`of` is always a CID; the kept ones are exactly the bodies
+sent, so a message's body CID is the kept record's):
+
+```
+{kind: "say",        of: <assistant turn>, call, text}                                   kept · tools
+{kind: "present",    of: <assistant turn>, call, page, blocks?}                          kept · tools
+{kind: "annotation", of: <assistant turn>, by: "model", call, present, block?, note}     kept · tools
+{kind: "annotation", of: <user turn>,      by: "user", present, block?, note}            kept · sent with stream
+{kind: "thinking",   of: <assistant turn>, text}                                         a completion's reasoning · stream
+{kind: "log",        of: <assistant turn>, call, name, event: "started"}                 a tool call begun · stream
+{kind: "log",        of: <tool turn>,      call, name, event: "finished", exitCode?, tree?, error?}   · stream
+{kind: "error",      of: <error turn>,     error}                                        · stream
+```
+
+`log`, `thinking` and `error` are sent, not kept: the turns hold the same
+facts. Every tool call logs `started` when the loop takes it up and
+`finished` when its result turn is kept — a `bash` call across two steps
+(launch, then the shell at rest), a `message` across the wait for the reply.
 
 ## Why the plaintext
 

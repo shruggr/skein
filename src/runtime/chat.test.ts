@@ -35,12 +35,15 @@ type Json = Record<string, unknown>;
 /** The loop's fixed system prompt, for a tree with no SOUL.md (programs/loop/main.go). */
 const DEFAULT_PROMPT = "You are working with David through skein. Use the bash tool to run commands over the working tree; when you are done or need David, answer in plain text; keep answers short.";
 
-/** A scripted OpenAI-compatible endpoint: answers in order, records each request body. */
-function scripted(answers: Array<Json | { status: number; text: string }>) {
+type Scripted = Json | { status: number; text: string } | ((req: Json) => Json);
+
+/** A scripted OpenAI-compatible endpoint: answers in order (a function answers from the request), records each request body. */
+function scripted(answers: Scripted[]) {
   const requests: Json[] = [];
   const f = (async (_url: string, init: { body: string }) => {
     requests.push(JSON.parse(init.body));
-    const a = answers.shift();
+    const next = answers.shift();
+    const a = typeof next === "function" ? next(requests.at(-1)!) : next;
     if (!a) return new Response("no more answers", { status: 500 });
     if ("status" in a && typeof a.status === "number") return new Response(String(a.text), { status: a.status });
     return new Response(JSON.stringify(a), { status: 200, headers: { "content-type": "application/json" } });
@@ -52,7 +55,7 @@ const toolCall = (id: string, cmd: string) => ({ id, type: "function", function:
 const messageCall = (id: string, to: string, text: string) => ({ id, type: "function", function: { name: "message", arguments: JSON.stringify({ to, text }) } });
 const answer = (message: Json) => ({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" });
 
-async function setup(t: { after(fn: () => Promise<void>): void }, answers: Array<Json | { status: number; text: string }>, o: { hub?: Hub; files?: Record<string, string> } = {}) {
+async function setup(t: { after(fn: () => Promise<void>): void }, answers: Scripted[], o: { hub?: Hub; files?: Record<string, string>; defaults?: Record<string, string> } = {}) {
   const dir = await fs.mkdtemp(join(tmpdir(), "skein-chat-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.mkdir(join(dir, "src"));
@@ -61,7 +64,7 @@ async function setup(t: { after(fn: () => Promise<void>): void }, answers: Array
   for (const [name, text] of Object.entries(o.files ?? {})) await fs.writeFile(join(dir, name), text);
   const inferKey = PrivateKey.fromRandom();
   const inferId = inferKey.toPublicKey().toString();
-  const i = await instance({ hub: o.hub, config: { peers: { infer: inferId } } });
+  const i = await instance({ hub: o.hub, config: { peers: { infer: inferId }, ...(o.defaults ? { defaults: o.defaults } : {}) } });
   const api = scripted(answers);
   const peer = inferPeer(i, inferKey, api.fetch);
   const { root, bundles } = await bundlesOf(dir);
@@ -846,4 +849,169 @@ test("outcome: a program that does not list \"outcomes\" among its services (a l
   assert.ok(i.lines.some((l) => /outcome failed .* loop does not take delivery failures/.test(l)), i.lines.join("\n"));
   assert.equal((await turns(i.store, th)).at(-1)!.role, "user", "no step ran on the failure");
   await i.rt.stop();
+});
+
+// ---------------------------------------------------------------- the turn stream: say, present, annotate (#19)
+
+const fnCall = (id: string, name: string, args: unknown) => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
+const ON = { model: "ripper/qwen38", thinking: "off", tools: "say,present,annotate", stream: "on" };
+const toolNames = (req: Json) => (req.tools as Json[]).map((x) => (x.function as Json).name);
+
+/** What the opener finds in its `turn` box: each message verified, opened, decoded, in order. */
+async function stream(i: Instance): Promise<Array<{ env: Envelope; sender?: string; body: Json }>> {
+  const out = [];
+  for (const m of i.hub.pending(i.owner.identity, "turn")) {
+    const env = JSON.parse(m.body as string) as Envelope;
+    assert.ok(verify(env));
+    out.push({ env, sender: m.sender, body: dagCbor.decode((await open(i.owner.wallet, env)).body) as Json });
+  }
+  return out;
+}
+const kinds = (s: Array<{ body: Json }>) => s.map(({ body: b }) => b.kind === "log" ? `log ${b.event} ${b.name}` : String(b.kind));
+
+test("turn stream: say, present and annotate are tools the model calls; each record is kept, sent to the opener in `turn`, and answered with its CID; thinking and tool logs stream beside them; the page and the opener's annotations reach the next prompt; replay is exact", async (t) => {
+  let present = "";
+  const { i, root, peer, api } = await setup(t, [
+    answer({
+      content: "", reasoning_content: "show a plan",
+      tool_calls: [
+        fnCall("s1", "say", { text: "Let me show you." }),
+        fnCall("p1", "present", { page: "# Plan\n\n1. read\n2. write\n", blocks: [{ id: "read", line: 3 }, { id: "write", line: 4 }] }),
+        toolCall("c1", "ls"),
+      ],
+    }),
+    (req) => {
+      const tool = (req.messages as Json[]).find((m) => m.tool_call_id === "p1")!;
+      present = (JSON.parse(tool.content as string) as Json).present as string;
+      return answer({ content: "", tool_calls: [fnCall("n1", "annotate", { present, block: "write", note: "this part is new" }), fnCall("n2", "annotate", { present, block: "nope", note: "x" })] });
+    },
+    answer({ content: "Here is the plan." }),
+    answer({ content: "Because it was missing." }),
+  ], { defaults: ON });
+  const chat = await send(i, "chat", { text: "plan it", tree: root });
+  await settle(i);
+  for (let n = 0; n < 3; n++) { await peer.poll(); await settle(i); }
+  assert.deepEqual(toolNames(api.requests[0]), ["bash", "message", "say", "present", "annotate"], "the tools the config enables are offered");
+
+  // The answer is still the chat reply, closing the turn.
+  const [s1] = await answers(i);
+  assert.equal(s1.body.text, "Here is the plan.", i.lines.join("\n"));
+  assert.ok((s1.body.replyTo as CID).equals(encode(signedPart(chat)).cid));
+
+  // Kept: the artefacts beside the turns, each answered by a tool turn of it.
+  const [loop] = await loops(i.store);
+  const kept = await turns(i.store, loop);
+  assert.deepEqual(kept.map((r) => r.kind === "turn" ? r.role : r.kind), ["system", "user", "assistant", "say", "tool", "present", "tool", "tool", "assistant", "annotation", "tool", "tool", "assistant"]);
+  const cid = (r: Json) => encode(r).cid;
+  const [, , a1, say, sayResult, pres, presResult, , a2, note, noteResult, badResult] = kept;
+  assert.deepEqual([say.text, say.call], ["Let me show you.", "s1"]);
+  assert.ok((say.of as CID).equals(cid(a1)), "of: the assistant turn that called it");
+  assert.ok((sayResult.of as CID).equals(cid(say)));
+  assert.deepEqual(JSON.parse(sayResult.text as string), { say: cid(say).toString() });
+  assert.deepEqual(pres.blocks, [{ id: "read", line: 3 }, { id: "write", line: 4 }]);
+  assert.equal(present, cid(pres).toString());
+  assert.deepEqual(JSON.parse(presResult.text as string), { present, blocks: ["read", "write"] });
+  assert.deepEqual([note.by, note.block, note.note, note.call], ["model", "write", "this part is new", "n1"]);
+  assert.ok((note.present as CID).equals(cid(pres)), "the annotation names the page by CID");
+  assert.ok((note.of as CID).equals(cid(a2)));
+  assert.deepEqual(JSON.parse(noteResult.text as string), { annotation: cid(note).toString() });
+  assert.match(String(badResult.error), /the page has no block "nope" \(its blocks: read, write\)/);
+
+  // The stream: to the opener, in `turn`, in the order it happened; nothing awaited.
+  const s = await stream(i);
+  assert.deepEqual(kinds(s), [
+    "thinking", "log started say", "say", "log finished say", "log started present", "present", "log finished present", "log started bash",
+    "log finished bash",
+    "log started annotate", "annotation", "log finished annotate", "log started annotate", "log finished annotate",
+  ]);
+  for (const m of s) assert.equal(m.sender, i.identity);
+  assert.deepEqual([s[0].body.text, (s[0].body.of as CID).equals(cid(a1))], ["show a plan", true]);
+  assert.deepEqual(s[2].body, say, "the say sent is the record kept");
+  assert.deepEqual(s[5].body, pres);
+  assert.deepEqual(s[10].body, note);
+  const bash = s[8].body;
+  assert.deepEqual([bash.call, bash.exitCode], ["c1", 0]);
+  assert.ok((bash.tree as CID).equals(root));
+  assert.match(String(s[13].body.error), /no block "nope"/);
+  assert.equal(s[13].body.exitCode, undefined);
+  for (const u of await history(i.store, loop)) for (const a of u.awaits ?? []) assert.ok(!s.some(({ env }) => encode(signedPart(env)).cid.equals(a)), "no turn message is awaited");
+
+  // The opener's next chat annotates the page: kept as a record of the user turn, streamed back, and in the prompt.
+  await send(i, "chat", { text: "why this part?", replyTo: s1.cid, annotations: [{ present: cid(pres), block: "write", note: "why?" }] });
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  const all = await turns(i.store, loop);
+  const [user, mine] = all.slice(-3, -1);
+  assert.equal(user.role, "user");
+  assert.deepEqual([mine.kind, mine.by, mine.block, mine.note], ["annotation", "user", "write", "why?"]);
+  assert.ok((mine.of as CID).equals(cid(user)));
+  assert.ok((mine.present as CID).equals(cid(pres)));
+  const s2 = await stream(i);
+  assert.deepEqual(s2.at(-1)!.body, mine);
+  // The page lives on by CID: the next turn's prompt carries the present call, its CID, and the annotations on it.
+  const msgs = api.requests[3].messages as Json[];
+  const call = (msgs.find((m) => m.role === "assistant" && (m.tool_calls as Json[] | undefined)?.some((c) => c.id === "p1"))!.tool_calls as Json[]).find((c) => c.id === "p1")!;
+  assert.match(String((call.function as Json).arguments), /# Plan/);
+  assert.ok(msgs.some((m) => m.tool_call_id === "p1" && String(m.content).includes(present)));
+  assert.ok(msgs.some((m) => m.tool_call_id === "n1" && String(m.content).includes(cid(note).toString())));
+  assert.equal(msgs.at(-1)!.content, `why this part?\n\n[annotations]\n- on ${present} block write: why?`);
+  assert.equal((await answers(i)).at(-1)!.body.text, "Because it was missing.");
+
+  await i.rt.stop();
+  const sent = await replayMatches(i.store);
+  assert.deepEqual(sent.filter((o) => o.box === "turn").length, s2.length, "replay sends the same turn messages");
+  assert.deepEqual(sent.filter((o) => o.box !== "turn").map((o) => o.box), ["infer", "infer", "infer", "chat", "infer", "chat"]);
+});
+
+test("turn stream: off by default — no optional tool is offered (a call to one is an unknown tool), nothing goes to `turn`, and a chat's annotations are kept but not sent", async (t) => {
+  const { i, root, peer, api } = await setup(t, [
+    answer({ content: "", reasoning_content: "hm", tool_calls: [fnCall("s1", "say", { text: "hi" })] }),
+    answer({ content: "ok" }),
+  ]);
+  await send(i, "chat", { text: "hi", tree: root, annotations: [{ present: encode({ some: "page" }).cid, note: "n" }] });
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  await peer.poll();
+  await settle(i);
+  assert.deepEqual(toolNames(api.requests[0]), ["bash", "message"]);
+  const [loop] = await loops(i.store);
+  const kept = await turns(i.store, loop);
+  assert.deepEqual(kept.map((r) => r.kind === "turn" ? r.role : r.kind), ["system", "user", "annotation", "assistant", "tool", "assistant"]);
+  assert.equal(kept[4].stderr, "unknown tool say");
+  assert.equal(i.hub.pending(i.owner.identity, "turn").length, 0);
+  assert.equal((await answers(i))[0].body.text, "ok");
+  await i.rt.stop();
+  const sent = await replayMatches(i.store);
+  assert.deepEqual(sent.map((o) => o.box), ["infer", "infer", "chat"]);
+});
+
+test("turn stream: tools without `stream` send only the model's artefacts; `stream` alone sends errors (an inference error here) and offers no tool", async (t) => {
+  const a = await setup(t, [answer({ content: "", reasoning_content: "hm", tool_calls: [fnCall("s1", "say", { text: "Hello." }), fnCall("s2", "say", {})] }), answer({ content: "done" })], { defaults: { model: "ripper/qwen38", thinking: "off", tools: "say" } });
+  await send(a.i, "chat", { text: "hi", tree: a.root });
+  await settle(a.i);
+  for (let n = 0; n < 2; n++) { await a.peer.poll(); await settle(a.i); }
+  assert.deepEqual(toolNames(a.api.requests[0]), ["bash", "message", "say"]);
+  const s = await stream(a.i);
+  assert.deepEqual(kinds(s), ["say"], "no thinking, no logs, no error for the bad call");
+  assert.equal(s[0].body.text, "Hello.");
+  assert.match(String((a.api.requests[1].messages as Json[]).find((m) => m.tool_call_id === "s2")!.content), /^error: say wants/);
+  await a.i.rt.stop();
+  await replayMatches(a.i.store);
+
+  const b = await setup(t, [{ status: 503, text: "overloaded" }], { defaults: { model: "ripper/qwen38", thinking: "off", stream: "on" } });
+  await send(b.i, "chat", { text: "hi", tree: b.root });
+  await settle(b.i);
+  await b.peer.poll();
+  await settle(b.i);
+  assert.deepEqual(toolNames(b.api.requests[0]), ["bash", "message"]);
+  const e = await stream(b.i);
+  assert.deepEqual(kinds(e), ["error"]);
+  assert.match(String(e[0].body.error), /HTTP 503 overloaded/);
+  const [loop] = await loops(b.i.store);
+  const err = (await turns(b.i.store, loop)).at(-1)!;
+  assert.ok((e[0].body.of as CID).equals(encode(err).cid), "of: the error turn");
+  await b.i.rt.stop();
+  await replayMatches(b.i.store);
 });

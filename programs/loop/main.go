@@ -11,15 +11,24 @@
 // by CID, which is what the inference peer holds (below):
 //
 //	system     {of: <tree>, role: "system", content}   (first, once: the conversation's prompt)
-//	user       {of: <chat envelope>, role: "user", text, tree?, model?, thinking?}   (the opener's)
+//	user       {of: <chat envelope>, role: "user", text, tree?, model?, thinking?, annotations?}   (the opener's)
 //	assistant  {of: <completions envelope>, role: "assistant", content?, reasoning?, tool_calls?, model, ms?, usage?}
 //	tool       {of: <shell thread>, role: "tool", call, exitCode, stdout, stderr, tree}   (bash; outputs capped at 16 KiB)
 //	tool       {of: <their chat reply>, role: "tool", call, to, sent: <our chat envelope>, text}   (message)
 //	tool       {of: <entry>, role: "tool", call, to?, error}   (a message that could not be sent, or delivered)
+//	tool       {of: <say|present|annotation record>, role: "tool", call, text}   (the record's CID, as JSON)
+//	tool       {of: <entry>, role: "tool", call, error}   (a say/present/annotate call with bad arguments)
 //	error      {of: <completions envelope | outcome entry>, role: "error", error}
 //
 // Kept beside the turns, not one of them: {kind: "missing", of: <completions
-// envelope>, missing: [<node>]} — the peer did not hold a node we named.
+// envelope>, missing: [<node>]} — the peer did not hold a node we named; and
+// the conversation's artefacts (issue #19; docs/MESSAGES.md, "The turn
+// stream"):
+//
+//	{kind: "say", of: <assistant turn>, call, text}
+//	{kind: "present", of: <assistant turn>, call, page, blocks?: [{id, …}]}
+//	{kind: "annotation", of: <assistant turn>, by: "model", call, present, block?, note}
+//	{kind: "annotation", of: <user turn>, by: "user", present, block?, note}   (from a chat's `annotations`)
 //
 // The infer protocol (issue #12; docs/MESSAGES.md, "The infer protocol"):
 // each `infer` carries only the turns since the last request — from the
@@ -48,7 +57,22 @@
 // ({to: "@handle@domain", text}: a `chat` to another party, sealed to the
 // identity the handle resolves to through the host — skein.Resolve, attested
 // — then rest on the reply as on an `infer`; their reply is the tool result).
-// Calls run one at a time, in order.
+// Calls run one at a time, in order. With `defaults.tools` in the genesis
+// naming them (a comma-separated list; default none), three more: `say`
+// ({text}), `present` ({page, blocks?}) and `annotate` ({present, block?,
+// note}) — ordinary tools the model calls when the conversation calls for
+// them. Each puts its record, keeps it (so the page lives on by CID, and the
+// call and its result reach every later prompt), sends it to the opener in
+// their `turn` box — a message, not awaited — and answers the model with the
+// record's CID (and a present's block ids).
+//
+// The turn stream: with `defaults.stream` "on", the loop also sends the opener,
+// in `turn`, the moment each happens: {kind: "thinking", of: <assistant
+// turn>, text} (a completion's reasoning), {kind: "log", of, call, name,
+// event: "started"|"finished", exitCode?, tree?, error?} (each tool call; `of`
+// the assistant turn when started, the tool turn when finished), {kind:
+// "error", of: <error turn>, error}, and the opener's own annotations as
+// kept. These are sent, not kept: the turns hold the same facts.
 //
 // The answer: a turn ends with a `chat` to the opener, {text, tree, thread,
 // replyTo: <their latest envelope>}, and rests on their reply; that reply is
@@ -71,6 +95,7 @@
 package main
 
 import (
+	"encoding/base32"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,6 +131,15 @@ type chatBody struct {
 	Thinking string    `cbor:"thinking,omitempty"`
 	Thread   skein.CID `cbor:"thread,omitzero"`
 	ReplyTo  skein.CID `cbor:"replyTo,omitzero"`
+	// The opener's notes on a page the model presented (issue #19).
+	Annotations []userNote `cbor:"annotations,omitempty"`
+}
+
+// userNote is an annotation as a chat carries it, and as its user turn keeps it.
+type userNote struct {
+	Present skein.CID `cbor:"present"`
+	Block   string    `cbor:"block,omitempty"`
+	Note    string    `cbor:"note"`
 }
 
 type function struct {
@@ -159,6 +193,28 @@ type turn struct {
 	Stderr    *string         `cbor:"stderr,omitempty"`
 	Error     string          `cbor:"error,omitempty"`
 	Missing   []skein.CID     `cbor:"missing,omitempty"`
+	// user turns: the chat's annotations
+	Annotations []userNote `cbor:"annotations,omitempty"`
+}
+
+// record is what the loop sends on the turn stream (and, for say, present and
+// annotation, keeps); Kind says which fields apply.
+type record struct {
+	Kind     string           `cbor:"kind"`
+	Of       skein.CID        `cbor:"of"`
+	By       string           `cbor:"by,omitempty"`
+	Call     string           `cbor:"call,omitempty"`
+	Name     string           `cbor:"name,omitempty"`
+	Event    string           `cbor:"event,omitempty"`
+	Text     string           `cbor:"text,omitempty"`
+	Page     string           `cbor:"page,omitempty"`
+	Blocks   []map[string]any `cbor:"blocks,omitempty"`
+	Present  skein.CID        `cbor:"present,omitzero"`
+	Block    string           `cbor:"block,omitempty"`
+	Note     string           `cbor:"note,omitempty"`
+	ExitCode *int             `cbor:"exitCode,omitempty"`
+	Tree     skein.CID        `cbor:"tree,omitzero"`
+	Error    string           `cbor:"error,omitempty"`
 }
 
 // The `infer` body: the turns new since the last request, as kept (their
@@ -213,6 +269,65 @@ var bashTool = map[string]any{
 	},
 }
 
+// The optional tools (issue #19), offered in this order when defaults.tools names them.
+var optionalTools = []string{"say", "present", "annotate"}
+
+var sayTool = map[string]any{
+	"type": "function",
+	"function": map[string]any{
+		"name":        "say",
+		"description": "Say a line aloud to the person you are talking with, now, while you work. Only where the conversation calls for it (a voice channel is established); your answer at the end of the turn is still your plain-text reply.",
+		"parameters": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"text": map[string]any{"type": "string", "description": "the line to say"}},
+			"required":   []string{"text"},
+		},
+	},
+}
+
+var presentTool = map[string]any{
+	"type": "function",
+	"function": map[string]any{
+		"name":        "present",
+		"description": "Show the person a page (markdown or HTML) to discuss. Only when you are discussing something that is better seen than said. The page stays in the conversation by its CID (the result); give blocks ids so you and they can annotate parts of it.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"page": map[string]any{"type": "string", "description": "the page: markdown or HTML"},
+				"blocks": map[string]any{
+					"type":        "array",
+					"description": "the page's annotatable parts, each with a unique id",
+					"items": map[string]any{
+						"type":       "object",
+						"properties": map[string]any{"id": map[string]any{"type": "string"}},
+						"required":   []string{"id"},
+					},
+				},
+			},
+			"required": []string{"page"},
+		},
+	},
+}
+
+var annotateTool = map[string]any{
+	"type": "function",
+	"function": map[string]any{
+		"name":        "annotate",
+		"description": "Add a note to a page presented in this conversation, on one of its blocks.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"present": map[string]any{"type": "string", "description": "the page's CID, as `present` returned it"},
+				"block":   map[string]any{"type": "string", "description": "the block's id"},
+				"note":    map[string]any{"type": "string", "description": "the note"},
+			},
+			"required": []string{"present", "note"},
+		},
+	},
+}
+
+var toolDefs = map[string]any{"say": sayTool, "present": presentTool, "annotate": annotateTool}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "loop:", err)
@@ -228,6 +343,34 @@ type loop struct {
 	conv []turn
 	cids []skein.CID
 	last string
+	// the pages presented in this thread: their CIDs and block ids
+	presents []presented
+	// the opener's handle and domain, read once (for the turn stream and the answer)
+	openerName *skein.Name
+}
+
+type presented struct {
+	cid    skein.CID
+	blocks []string
+}
+
+// enabled: whether defaults.tools names this optional tool.
+func (l *loop) enabled(tool string) bool {
+	for _, t := range strings.FieldsFunc(l.step.Defaults["tools"], func(r rune) bool { return r == ',' || r == ' ' }) {
+		if t == tool {
+			return true
+		}
+	}
+	return false
+}
+
+// streaming: whether defaults.stream turns the non-model kinds on.
+func (l *loop) streaming() bool {
+	switch l.step.Defaults["stream"] {
+	case "on", "true", "1", "yes":
+		return true
+	}
+	return false
 }
 
 func run() error {
@@ -254,9 +397,16 @@ func run() error {
 				return fmt.Errorf("turn: %w", err)
 			}
 			l.last = r.Kind
-			if r.Kind == "turn" {
+			switch r.Kind {
+			case "turn":
 				l.conv = append(l.conv, r)
 				l.cids = append(l.cids, c)
+			case "present":
+				var p record
+				if err := skein.Decode(b, &p); err != nil {
+					return fmt.Errorf("present: %w", err)
+				}
+				l.presents = append(l.presents, presented{cid: c, blocks: blockIDs(p.Blocks)})
 			}
 		}
 	}
@@ -278,30 +428,95 @@ func run() error {
 
 // keep a turn: the next node of the conversation, its parent the last one.
 func (l *loop) keep(r turn) error {
+	_, err := l.keepTurn(r)
+	return err
+}
+
+// keepTurn is keep, returning the turn's CID.
+func (l *loop) keepTurn(r turn) (skein.CID, error) {
 	r.Kind = "turn"
 	if n := len(l.cids); n > 0 {
 		r.Parent = l.cids[n-1]
 	}
-	c, err := l.put(r)
+	c, err := l.put(r.Kind, r)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	l.conv = append(l.conv, r)
 	l.cids = append(l.cids, c)
-	return nil
+	return c, nil
 }
 
-// put and keep a record (a turn, or a note beside the turns).
-func (l *loop) put(r turn) (skein.CID, error) {
+// put and keep a record (a turn, a note beside the turns, an artefact).
+func (l *loop) put(kind string, r any) (skein.CID, error) {
 	c, err := skein.Put(r)
 	if err != nil {
-		return nil, fmt.Errorf("put %s: %w", r.Kind, err)
+		return nil, fmt.Errorf("put %s: %w", kind, err)
 	}
 	if err := skein.Keep(c); err != nil {
 		return nil, fmt.Errorf("keep: %w", err)
 	}
-	l.last = r.Kind
+	l.last = kind
 	return c, nil
+}
+
+// fail keeps an error turn and sends it on the turn stream.
+func (l *loop) fail(of skein.CID, msg string) error {
+	c, err := l.keepTurn(turn{Of: of, Role: "error", Error: msg})
+	if err != nil {
+		return err
+	}
+	if l.streaming() {
+		return l.stream(record{Kind: "error", Of: c, Error: msg})
+	}
+	return nil
+}
+
+// result keeps a tool call's result turn and logs the call finished.
+func (l *loop) result(call toolCall, t turn) error {
+	t.Role, t.Call = "tool", call.ID
+	c, err := l.keepTurn(t)
+	if err != nil {
+		return err
+	}
+	if !l.streaming() {
+		return nil
+	}
+	return l.stream(record{Kind: "log", Of: c, Call: call.ID, Name: call.Function.Name, Event: "finished", ExitCode: t.ExitCode, Tree: t.Tree, Error: t.Error})
+}
+
+// started logs a tool call started.
+func (l *loop) started(call toolCall) error {
+	if !l.streaming() {
+		return nil
+	}
+	return l.stream(record{Kind: "log", Of: l.lastAssistantCID(), Call: call.ID, Name: call.Function.Name, Event: "started"})
+}
+
+// opener: the handle and domain the opening chat's sender gave.
+func (l *loop) opener() (skein.Name, error) {
+	if l.openerName == nil {
+		opening, err := skein.Get(l.a.Envelope)
+		if err != nil {
+			return skein.Name{}, err
+		}
+		var env skein.Envelope
+		if err := skein.Decode(opening, &env); err != nil {
+			return skein.Name{}, err
+		}
+		l.openerName = &skein.Name{Handle: env.Sender.Handle, Domain: env.Sender.Domain}
+	}
+	return *l.openerName, nil
+}
+
+// stream sends a record to the opener in their `turn` box: a message, not awaited.
+func (l *loop) stream(r record) error {
+	n, err := l.opener()
+	if err != nil {
+		return err
+	}
+	_, err = envelope.Send(l.a.Sender, n.Handle, n.Domain, "turn", r)
+	return err
 }
 
 // chat: the opener's line (the opening one, or their reply to our answer).
@@ -333,8 +548,22 @@ func (l *loop) chat(envelope, body skein.CID) error {
 			return err
 		}
 	}
-	if err := l.keep(turn{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model, Thinking: b.Thinking}); err != nil {
+	user, err := l.keepTurn(turn{Of: envelope, Role: "user", Text: b.Text, Tree: b.Tree, Model: b.Model, Thinking: b.Thinking, Annotations: b.Annotations})
+	if err != nil {
 		return err
+	}
+	// The opener's annotations: each a record of its own, kept beside the turn
+	// (which carries them into the prompt), and streamed back with its CID.
+	for _, a := range b.Annotations {
+		r := record{Kind: "annotation", Of: user, By: "user", Present: a.Present, Block: a.Block, Note: a.Note}
+		if _, err := l.put(r.Kind, r); err != nil {
+			return err
+		}
+		if l.streaming() {
+			if err := l.stream(r); err != nil {
+				return err
+			}
+		}
 	}
 	return l.infer(false)
 }
@@ -355,7 +584,7 @@ func (l *loop) completion(r *skein.Answer) error {
 		// the first of the conversation (no assistant turn yet), or the
 		// resend itself — is an error.
 		if l.last != "missing" && l.lastAssistant() != nil {
-			if _, err := l.put(turn{Kind: "missing", Of: r.Envelope, Missing: b.Missing}); err != nil {
+			if _, err := l.put("missing", turn{Kind: "missing", Of: r.Envelope, Missing: b.Missing}); err != nil {
 				return err
 			}
 			return l.infer(true)
@@ -367,14 +596,20 @@ func (l *loop) completion(r *skein.Answer) error {
 		if msg == "" {
 			msg = "completion has no message"
 		}
-		if err := l.keep(turn{Of: r.Envelope, Role: "error", Error: msg}); err != nil {
+		if err := l.fail(r.Envelope, msg); err != nil {
 			return err
 		}
 		return l.answer("inference failed: " + msg)
 	}
 	m := b.Message
-	if err := l.keep(turn{Of: r.Envelope, Role: "assistant", Content: m.Content, Reasoning: m.Reasoning, ToolCalls: m.ToolCalls, Model: b.Model, Ms: b.Ms, Usage: b.Usage}); err != nil {
+	c, err := l.keepTurn(turn{Of: r.Envelope, Role: "assistant", Content: m.Content, Reasoning: m.Reasoning, ToolCalls: m.ToolCalls, Model: b.Model, Ms: b.Ms, Usage: b.Usage})
+	if err != nil {
 		return err
+	}
+	if l.streaming() && m.Reasoning != "" {
+		if err := l.stream(record{Kind: "thinking", Of: c, Text: m.Reasoning}); err != nil {
+			return err
+		}
 	}
 	return l.next()
 }
@@ -404,7 +639,7 @@ func (l *loop) toolDone(res skein.Resolved) error {
 		_ = skein.Decode(res.Error, &e)
 		stderr = "shell " + res.State + ": " + e.Message
 	}
-	if err := l.keep(turn{Of: res.Thread, Role: "tool", Call: call.ID, ExitCode: &code, Stdout: &stdout, Stderr: &stderr, Tree: tree}); err != nil {
+	if err := l.result(call, turn{Of: res.Thread, ExitCode: &code, Stdout: &stdout, Stderr: &stderr, Tree: tree}); err != nil {
 		return err
 	}
 	return l.next()
@@ -414,6 +649,9 @@ func (l *loop) toolDone(res skein.Resolved) error {
 // if the last answer called tools, else answer with its content.
 func (l *loop) next() error {
 	for _, call := range l.pending() {
+		if err := l.started(call); err != nil {
+			return err
+		}
 		if call.Function.Name == "message" {
 			to, h, d, text, msg := messageArgs(call)
 			if msg == "" {
@@ -423,7 +661,13 @@ func (l *loop) next() error {
 				}
 				msg = err.Error()
 			}
-			if err := l.keep(turn{Of: l.step.Entry, Role: "tool", Call: call.ID, To: to, Error: msg}); err != nil {
+			if err := l.result(call, turn{Of: l.step.Entry, To: to, Error: msg}); err != nil {
+				return err
+			}
+			continue
+		}
+		if l.enabled(call.Function.Name) && toolDefs[call.Function.Name] != nil {
+			if err := l.artefact(call); err != nil {
 				return err
 			}
 			continue
@@ -440,7 +684,7 @@ func (l *loop) next() error {
 			msg = "bash wants {\"cmd\": string}"
 		}
 		code, empty := 2, ""
-		if err := l.keep(turn{Of: l.step.Entry, Role: "tool", Call: call.ID, ExitCode: &code, Stdout: &empty, Stderr: &msg, Tree: l.tree()}); err != nil {
+		if err := l.result(call, turn{Of: l.step.Entry, ExitCode: &code, Stdout: &empty, Stderr: &msg, Tree: l.tree()}); err != nil {
 			return err
 		}
 	}
@@ -531,19 +775,19 @@ func (l *loop) messaging() *toolCall {
 func (l *loop) undelivered(f *skein.DeliveryFailed) error {
 	if call := l.messaging(); call != nil && f.Box == "chat" {
 		to, _, _, _, _ := messageArgs(*call)
-		if err := l.keep(turn{Of: l.step.Entry, Role: "tool", Call: call.ID, To: to, Error: "could not deliver to " + to + ": " + f.Reason}); err != nil {
+		if err := l.result(*call, turn{Of: l.step.Entry, To: to, Error: "could not deliver to " + to + ": " + f.Reason}); err != nil {
 			return err
 		}
 		return l.next()
 	}
 	if f.Box == "infer" {
 		msg := "could not deliver to the inference peer: " + f.Reason
-		if err := l.keep(turn{Of: l.step.Entry, Role: "error", Error: msg}); err != nil {
+		if err := l.fail(l.step.Entry, msg); err != nil {
 			return err
 		}
 		return l.answer("inference failed: " + msg)
 	}
-	return l.keep(turn{Of: l.step.Entry, Role: "error", Error: "could not deliver the answer: " + f.Reason})
+	return l.fail(l.step.Entry, "could not deliver the answer: "+f.Reason)
 }
 
 // messageDone: the other party's reply to our message: kept as its tool result.
@@ -560,7 +804,7 @@ func (l *loop) messageDone(r *skein.Answer) error {
 	if err := skein.Decode(plain, &b); err != nil {
 		return fmt.Errorf("message answer: %w", err)
 	}
-	if err := l.keep(turn{Of: r.Envelope, Role: "tool", Call: call.ID, To: to, Sent: r.ReplyTo, Text: b.Text}); err != nil {
+	if err := l.result(*call, turn{Of: r.Envelope, To: to, Sent: r.ReplyTo, Text: b.Text}); err != nil {
 		return err
 	}
 	return l.next()
@@ -619,7 +863,13 @@ func (l *loop) infer(all bool) error {
 			}
 		}
 	}
-	body := inferBody{Model: model, Thinking: thinking, Tools: []any{bashTool, messageTool}, Parent: parent}
+	tools := []any{bashTool, messageTool}
+	for _, t := range optionalTools {
+		if l.enabled(t) {
+			tools = append(tools, toolDefs[t])
+		}
+	}
+	body := inferBody{Model: model, Thinking: thinking, Tools: tools, Parent: parent}
 	for _, c := range l.cids[from:] {
 		b, err := skein.Get(c)
 		if err != nil {
@@ -645,19 +895,25 @@ func (l *loop) answer(text string) error {
 	if len(replyTo) == 0 {
 		replyTo = l.a.Envelope
 	}
-	opening, err := skein.Get(l.a.Envelope)
+	n, err := l.opener()
 	if err != nil {
 		return err
 	}
-	var env skein.Envelope
-	if err := skein.Decode(opening, &env); err != nil {
-		return err
-	}
-	c, err := envelope.Send(l.a.Sender, env.Sender.Handle, env.Sender.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
+	c, err := envelope.Send(l.a.Sender, n.Handle, n.Domain, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo})
 	if err != nil {
 		return err
 	}
 	return skein.Await(c)
+}
+
+// lastAssistantCID: the latest assistant turn's CID (what a tool call is of).
+func (l *loop) lastAssistantCID() skein.CID {
+	for i := len(l.conv) - 1; i >= 0; i-- {
+		if l.conv[i].Role == "assistant" {
+			return l.cids[i]
+		}
+	}
+	return nil
 }
 
 func (l *loop) lastAssistant() *turn {
@@ -733,3 +989,153 @@ func capText(b []byte) string {
 }
 
 func isEmptyTree(c skein.CID) bool { return string(c) == string(skein.EmptyTree) }
+
+// artefact runs a say, present or annotate call: put its record, keep it,
+// send it to the opener in `turn`, and answer the model with its CID (and a
+// present's block ids). Bad arguments are an error result, and nothing is sent.
+func (l *loop) artefact(call toolCall) error {
+	var a struct {
+		Text    string           `json:"text"`
+		Page    string           `json:"page"`
+		Blocks  []map[string]any `json:"blocks"`
+		Present string           `json:"present"`
+		Block   string           `json:"block"`
+		Note    string           `json:"note"`
+	}
+	r := record{Kind: call.Function.Name, Of: l.lastAssistantCID(), Call: call.ID}
+	problem := ""
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &a); err != nil {
+		problem = call.Function.Name + ": arguments are not a JSON object: " + err.Error()
+	}
+	switch {
+	case problem != "":
+	case call.Function.Name == "say":
+		if a.Text == "" {
+			problem = "say wants {\"text\": string}"
+		}
+		r.Text = a.Text
+	case call.Function.Name == "present":
+		if a.Page == "" {
+			problem = "present wants {\"page\": string, \"blocks\"?: [{\"id\": string, …}]}"
+		} else if msg := checkBlocks(a.Blocks); msg != "" {
+			problem = "present: " + msg
+		}
+		r.Page, r.Blocks = a.Page, normalize(a.Blocks)
+	default: // annotate
+		r.Kind, r.By, r.Block, r.Note = "annotation", "model", a.Block, a.Note
+		if a.Present == "" || a.Note == "" {
+			problem = "annotate wants {\"present\": <cid>, \"block\"?: string, \"note\": string}"
+			break
+		}
+		p := l.presented(a.Present)
+		if p == nil {
+			problem = "annotate: no page " + strconv.Quote(a.Present) + " was presented in this conversation"
+			break
+		}
+		if a.Block != "" && len(p.blocks) > 0 && !contains(p.blocks, a.Block) {
+			problem = "annotate: the page has no block " + strconv.Quote(a.Block) + " (its blocks: " + strings.Join(p.blocks, ", ") + ")"
+			break
+		}
+		r.Present = p.cid
+	}
+	if problem != "" {
+		return l.result(call, turn{Of: l.step.Entry, Error: problem})
+	}
+	c, err := l.put(r.Kind, r)
+	if err != nil {
+		return err
+	}
+	if r.Kind == "present" {
+		l.presents = append(l.presents, presented{cid: c, blocks: blockIDs(r.Blocks)})
+	}
+	if err := l.stream(r); err != nil {
+		return err
+	}
+	out := map[string]any{r.Kind: cidString(c)}
+	if r.Kind == "present" {
+		out["blocks"] = blockIDs(r.Blocks)
+	}
+	text, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	return l.result(call, turn{Of: c, Text: string(text)})
+}
+
+// presented: the page presented in this thread whose CID is s, or nil.
+func (l *loop) presented(s string) *presented {
+	for i := range l.presents {
+		if cidString(l.presents[i].cid) == strings.TrimSpace(s) {
+			return &l.presents[i]
+		}
+	}
+	return nil
+}
+
+// checkBlocks: what is wrong with a present's blocks, or "".
+func checkBlocks(blocks []map[string]any) string {
+	seen := map[string]bool{}
+	for i, b := range blocks {
+		id, ok := b["id"].(string)
+		if !ok || id == "" {
+			return fmt.Sprintf("block %d has no string id", i)
+		}
+		if seen[id] {
+			return "two blocks have the id " + strconv.Quote(id)
+		}
+		seen[id] = true
+	}
+	return ""
+}
+
+// blockIDs: the blocks' ids, in order.
+func blockIDs(blocks []map[string]any) []string {
+	ids := []string{}
+	for _, b := range blocks {
+		if id, ok := b["id"].(string); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// normalize JSON values for dag-cbor: a whole number is an integer (as the
+// runtime's re-encoding would make it), not a float.
+func normalize(blocks []map[string]any) []map[string]any {
+	var fix func(v any) any
+	fix = func(v any) any {
+		switch x := v.(type) {
+		case float64:
+			if x == float64(int64(x)) {
+				return int64(x)
+			}
+		case []any:
+			for i := range x {
+				x[i] = fix(x[i])
+			}
+		case map[string]any:
+			for k := range x {
+				x[k] = fix(x[k])
+			}
+		}
+		return v
+	}
+	for _, b := range blocks {
+		fix(b)
+	}
+	return blocks
+}
+
+func contains(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// cidString: a binary CIDv1 as its base32 string ("b…"), as the model reads it.
+func cidString(c skein.CID) string {
+	return "b" + strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(c))
+}

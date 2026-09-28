@@ -305,12 +305,20 @@ export function chat(path: TurnNode[]): unknown[] {
   for (const t of path) {
     switch (t.role) {
       case "system": out.push({ role: "system", content: t.content ?? "" }); break;
-      case "user": out.push({ role: "user", content: t.text ?? "" }); break;
+      case "user": out.push({ role: "user", content: userText(t) }); break;
       case "assistant": out.push(clean({ role: "assistant", content: t.content ?? "", tool_calls: t.tool_calls?.length ? t.tool_calls : undefined })); break;
       case "tool": out.push({ role: "tool", tool_call_id: t.call ?? "", content: toolText(t) }); break;
     }
   }
   return out;
+}
+
+/** A user turn as the model reads it: the text, then the notes it made on presented pages (issue #19), each naming the page by CID. */
+function userText(t: TurnNode): string {
+  const notes = Array.isArray(t.annotations) ? t.annotations as Array<{ present?: unknown; block?: unknown; note?: unknown }> : [];
+  if (!notes.length) return t.text ?? "";
+  const lines = notes.map((a) => `- on ${CID.asCID(a.present)?.toString() ?? String(a.present)}${typeof a.block === "string" && a.block ? ` block ${a.block}` : ""}: ${String(a.note ?? "")}`);
+  return `${t.text ?? ""}\n\n[annotations]\n${lines.join("\n")}`;
 }
 
 /** A tool turn as the model reads it: a message's answer (or what went wrong), or a shell's exit, stdout and stderr. */

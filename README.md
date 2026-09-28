@@ -159,7 +159,7 @@ thread, over `tree` or else `main`'s; the loop sends `infer` (`{model, messages,
 `peers.infer`, which answers in `completions` (`{replyTo, message: {role,
 content?, reasoning?, tool_calls?}, usage?, model, ms}` or `{replyTo, error}`),
 and answers David with a `chat` reply `{text, tree, thread, replyTo: <his chat>}`
-(the same box, both directions; there is no `say`). David's next `chat` carries
+(the same box, both directions; the answer is never a `say`). David's next `chat` carries
 `replyTo: <that reply>` and continues the thread. The system prompt is the
 starting tree's `/SOUL.md` (else a fixed one), then `/IDENTITY.md`. Besides
 `bash`, the model has `message` (`{to: "@handle@domain", text}`): the loop
@@ -167,7 +167,11 @@ sends `chat` to another party and rests on their `chat` reply, which is the
 tool result. A chat to a party the thread already talks with (its opener, or
 one that answered its messages) is a reply to that party's latest envelope,
 so their waiting thread resumes; two agents alternate on one thread each
-(docs/MESSAGES.md, "Chat between instances").
+(docs/MESSAGES.md, "Chat between instances"). With `defaults.tools` naming them, the
+model also has `say`, `present` and `annotate`, whose records the loop keeps
+and sends the opener in its `turn` box; `defaults.stream: "on"` adds
+thinking, tool-call logs and errors there (docs/MESSAGES.md, "The turn
+stream").
 
 **Replies.** An admitted envelope whose plaintext body has `replyTo` goes
 only to the thread whose tip `awaits` that envelope,
