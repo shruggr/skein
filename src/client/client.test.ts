@@ -115,7 +115,7 @@ test("bin/skein on a host (#40): run to the instance's front door, the result re
   const results = await until("the result", async () => { const r = await client.inbox(); return r.length ? r : undefined; });
   assert.equal(results.length, 1);
   const r = results[0]!;
-  assert.ok(r.verified && !r.error, r.error);
+  assert.ok(r.verified && !r.error, r.error ?? "");
   assert.equal(r.sender, alpha);
   assert.equal(String(r.body!.replyTo), sent.cid);
   assert.equal(r.body!.exitCode, 0);

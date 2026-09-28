@@ -74,7 +74,5 @@ for other in "$skein"/instances/*/; do
   HOME="$other/home" q 1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty "$inst"
 done
 
-# The messagebox account (the handle) and the row.
-mb="$(cat "$skein/messagebox.url")"
-node --experimental-strip-types --no-warnings "$here/register.ts" "http://127.0.0.1:$port" skein "$handle" "${mb%/messagebox}"
+# The row (#40: the instance is its own messagebox at its router origin, http://<handle>.localhost:8100; no account to register).
 "$root/bin/skein-host" add "$handle" --identity "$inst" --wallet-url "http://127.0.0.1:$port" --store "$dir/runtime.db"

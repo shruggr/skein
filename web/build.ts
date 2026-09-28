@@ -43,13 +43,14 @@ export async function buildPage(): Promise<void> {
   const c = loadConfig();
   const config = {
     instance: c.instance,
-    messageboxUrl: c.messageboxUrl,
-    hostUrl: process.env.SKEIN_HOST_URL ?? new URL(c.messageboxUrl).origin,
+    instanceUrl: c.instanceUrl,
+    mailboxUrl: c.mailboxUrl,
+    hostUrl: process.env.SKEIN_HOST_URL ?? new URL(c.instanceUrl).origin,
     expectedOwner: process.env.SKEIN_YOURS_IDENTITY ?? YOURS_IDENTITY,
   };
   mkdirSync(join(WEB, "dist"), { recursive: true });
   writeFileSync(join(WEB, "dist/config.json"), JSON.stringify(config, null, 2) + "\n");
-  console.log(`web/dist/app.js, web/dist/config.json (instance ${config.instance.handle}@${config.instance.domain}, ${config.messageboxUrl})`);
+  console.log(`web/dist/app.js, web/dist/config.json (instance ${config.instance.handle}@${config.instance.domain}, ${config.instanceUrl}, mailbox ${config.mailboxUrl})`);
 }
 
 if (import.meta.main) await buildPage();

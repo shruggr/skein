@@ -26,13 +26,21 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import type { WalletInterface } from "@bsv/sdk";
-import { brc78Decode, brc78Encode, canonical, contentHash, ENVELOPE_KEY_ID, ENVELOPE_PROTOCOL, MESSAGE_ENCRYPTION, type Envelope, type Signed } from "./runtime/envelope.ts";
+import * as dagCbor from "@ipld/dag-cbor";
+import { CID } from "multiformats/cid";
+import { sha256 } from "multiformats/hashes/sha2";
+import { brc78Decode, brc78Encode, canonical, contentHash, ENVELOPE_KEY_ID, ENVELOPE_PROTOCOL, MESSAGE_ENCRYPTION, signedPart, type Envelope, type Signed } from "./runtime/envelope.ts";
 
 export * from "./runtime/envelope.ts";
 
 // ---------------------------------------------------------------- sign, seal, open
 
 /** A `created` value: ISO 8601 of a time in ms since the epoch. */
+/** An envelope's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part (the envelope without `content`). */
+export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
+  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
+}
+
 export const isoTime = (ms: number): string => new Date(ms).toISOString();
 
 export interface SealArgs {

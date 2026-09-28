@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CID } from "multiformats/cid";
-import { envelopeCid } from "../client/client.ts";
+import { envelopeCid } from "../envelope.ts";
 import { bundlesOf, collect, installWasm, instance, results, send, type Instance } from "../testkit.ts";
 import { encode, fmt } from "./cid.ts";
 import { advanceHead, headOrigin, headTree, MAIN, type HeadUpdate } from "./heads.ts";
