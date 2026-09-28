@@ -116,7 +116,14 @@ pub const Services = struct {
     sleep: ?*const fn (ctx: *anyopaque, clocks: []const Clock) Stop!void = null,
     spawn: ?*const fn (ctx: *anyopaque, parent: *Process, req: SpawnRequest) Stop!SpawnResult = null,
     exists: ?*const fn (ctx: *anyopaque, name: []const u8) bool = null,
+    /// Read-only directories outside the tree, preopened at fd 4… under the
+    /// given absolute paths (host.ts `mounts`): a program's support files,
+    /// e.g. python's stdlib zip. Per process: the shell passes a copy of its
+    /// services with these set for the programs that have support.
+    mounts: []const Mount = &.{},
 };
+
+pub const Mount = struct { path: []const u8, dir: *Node };
 
 /// Why a process is being unwound, beyond its own exit: recorded on the process.
 pub const Stop = error{
@@ -245,6 +252,11 @@ pub const Process = struct {
         const root = try alloc.create(Desc);
         root.* = .{ .t = .dir, .node = v.root, .preopen = "/", .ino = v.root.ino };
         try p.fds.put(3, root);
+        for (svc.mounts, 0..) |m, i| {
+            const d = try alloc.create(Desc);
+            d.* = .{ .t = .dir, .node = m.dir, .preopen = m.path, .ino = m.dir.ino };
+            try p.fds.put(@intCast(4 + i), d);
+        }
         return p;
     }
 
@@ -701,6 +713,7 @@ pub const Process = struct {
         }
         if ((oflags & O_DIRECTORY) != 0) return E.NOTDIR;
         if (n.kind == .object and want_write) return E.ACCES; // a loose object is 0444, as git makes it
+        if (want_write and n.parent != null and n.parent.?.readonly) return E.ROFS; // a mount (host.ts)
         _ = try v.content(n);
         if ((oflags & O_TRUNC) != 0 and n.data.?.len > 0) {
             n.data = n.data.?[0..0];

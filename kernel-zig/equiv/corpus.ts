@@ -118,6 +118,31 @@ const done = async (name: string, ...is: Instance[]) => { for (const i of is) { 
   await done("gen-run", i);
 }
 
+// ---------------------------------------------------------------- scripts: qjs/node and python in a thread (issue #25)
+{
+  const i = await sqliteInstance("gen-scripts");
+  const js = "#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('out.txt', fs.readFileSync('src/a.txt', 'utf8').toUpperCase());\nconsole.log(process.argv.slice(2), Date.now(), Math.random());\nprocess.exitCode = 2;\n";
+  const py = "#!/usr/bin/env python3\nimport sys, time, random, os, uuid, json\nprint(sys.argv[1:], time.time(), random.random(), os.urandom(4).hex(), hash('x'), uuid.uuid4())\njson.dump(sorted(os.listdir('src')), open('ls.json', 'w'))\n";
+  const dir = await fixture({ "src/a.txt": "alpha\n", "src/b.txt": "beta\n", "t.js": js, "t.py": py });
+  const { root, bundles } = await bundlesOf(dir, 700);
+  for (const b of bundles) await send(i, "objects", b);
+  await settle(i);
+  const cmds = [
+    "node t.js a b; echo \"exit=$?\"; ./t.js c; cat out.txt",
+    "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now())'",
+    "qjs -e 'console.log(scriptArgs, Date.now())'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
+  ];
+  for (const cmd of cmds) { later(i, 1); await send(i, "run", { cmd, tree: root }); await settle(i); }
+  // A sleep inside a runtime: python's time.sleep and a qjs timer rest the thread until the tick wakes it.
+  later(i, 1);
+  await send(i, "run", { cmd: "python3 -c 'import time; print(time.time()); time.sleep(2); print(time.time())'; node -e 'setTimeout(() => console.log(\"later\", Date.now()), 1000)'", tree: root });
+  await settle(i);
+  later(i, 3); await i.tick.fire(); await settle(i);
+  later(i, 3); await i.tick.fire(); await settle(i);
+  await fs.rm(dir, { recursive: true, force: true });
+  await done("gen-scripts", i);
+}
+
 // ---------------------------------------------------------------- heads and subscriptions
 {
   const i = await sqliteInstance("gen-subs");

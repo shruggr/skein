@@ -30,10 +30,53 @@ pub const modules = [_]Module{
     .{ .name = "awk", .cid = "bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju" },
     .{ .name = "sed", .cid = "bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy" },
     .{ .name = "git", .cid = "bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe" },
+    // Script runtimes (issue #25): QuickJS-ng (also `node`) and CPython (also `python3`).
+    .{ .name = "qjs", .cid = "bafkreig4lw4ceuhl5qvzr43ketajajhkexgqmg6et2rpjlx66dvavw6zwe" },
+    .{ .name = "python", .cid = "bafkreid5irpih6ehtwxvg2jf556f4bupz2p54c5n746i5r5spxpta2i42m" },
+};
+
+/// FILES: support files the shell's programs read (raw blocks, like the
+/// modules), each committed as wasm/<name>; installed with the modules.
+pub const files = [_]Module{
+    .{ .name = "python314.zip", .cid = "bafkreigogn32gek27rar2k5pacj2knivlobbjc6tip25qki3hjr3d2v5ce" },
 };
 
 /// The shell's extra single-purpose tools (programs.ts TOOL_NAMES).
-pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git" };
+pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git", "qjs", "python" };
+
+/// TOOL_ALIASES: more command names for a module in tool_names (`node` is qjs
+/// with its node shim, chosen by argv[0]).
+pub const Alias = struct { name: []const u8, of: []const u8 };
+pub const tool_aliases = [_]Alias{ .{ .name = "node", .of = "qjs" }, .{ .name = "python3", .of = "python" } };
+
+/// What an extra program needs besides its module (shell.ts Support):
+/// files mounted read-only at `mount` for that program only, and env
+/// defaults the caller's env overrides. Python's stdlib (programs.ts PYTHON_*).
+pub const Support = struct {
+    mount: []const u8,
+    files: []const Module, // path under mount → FILES name
+    env: []const [2][]const u8,
+};
+pub const python_home = "/opt/skein/python";
+const python_support = Support{
+    .mount = python_home,
+    .files = &.{.{ .name = "lib/python314.zip", .cid = "python314.zip" }},
+    .env = &.{ .{ "PYTHONHOME", python_home }, .{ "PYTHONDONTWRITEBYTECODE", "1" } },
+};
+pub const supported = [_]struct { name: []const u8, support: Support }{
+    .{ .name = "python", .support = python_support },
+    .{ .name = "python3", .support = python_support },
+};
+
+pub fn supportOf(name: []const u8) ?*const Support {
+    for (&supported) |*x| if (std.mem.eql(u8, x.name, name)) return &x.support;
+    return null;
+}
+
+pub fn fileText(name: []const u8) []const u8 {
+    for (files) |f| if (std.mem.eql(u8, f.name, name)) return f.cid;
+    unreachable;
+}
 
 pub fn moduleText(name: []const u8) []const u8 {
     for (modules) |m| if (std.mem.eql(u8, m.name, name)) return m.cid;
@@ -77,7 +120,21 @@ pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
         try mods.put("brush", cbor.cidv(try moduleCid(alloc, "brush")));
         try mods.put("coreutils", cbor.cidv(try moduleCid(alloc, "coreutils")));
         for (tool_names) |t| try mods.put(t, cbor.cidv(try moduleCid(alloc, t)));
+        for (tool_aliases) |t| try mods.put(t.name, cbor.cidv(try moduleCid(alloc, t.of)));
         try m.put("modules", mods.value());
+        var sup = cbor.MapBuilder.init(alloc);
+        for (supported) |x| {
+            var one = cbor.MapBuilder.init(alloc);
+            try one.put("mount", cbor.string(x.support.mount));
+            var fs = cbor.MapBuilder.init(alloc);
+            for (x.support.files) |f| try fs.put(f.name, cbor.cidv(try cidm.parse(alloc, fileText(f.cid))));
+            try one.put("files", fs.value());
+            var env = cbor.MapBuilder.init(alloc);
+            for (x.support.env) |kv| try env.put(kv[0], cbor.string(kv[1]));
+            try one.put("env", env.value());
+            try sup.put(x.name, one.value());
+        }
+        try m.put("support", sup.value());
         var inputs = cbor.MapBuilder.init(alloc);
         try inputs.put("cmd", cbor.string("string"));
         try inputs.put("tree", cbor.string("cid"));

@@ -42,20 +42,21 @@ pub fn wasmDir(gpa: std.mem.Allocator) ![]const u8 {
     return std.fs.path.join(gpa, &.{ exe, "..", "..", "..", "wasm" });
 }
 
-/// skein-dev install: the pinned modules from the wasm directory, checked against their CIDs.
+/// skein-dev install: the pinned modules and support files (FILES) from the wasm directory, checked against their CIDs.
 pub fn install(gpa: std.mem.Allocator, ss: *SqliteStore, say: ?*const fn (line: []const u8) void) !void {
     const s = ss.store();
     const dir = try wasmDir(gpa);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    for (programs.modules) |m| {
+    for (programs.modules ++ programs.files, 0..) |m, i| {
         const c = try cidm.parse(a, m.cid);
         if (try s.has(c)) continue;
-        const path = try std.fmt.allocPrint(a, "{s}/{s}.wasm", .{ dir, m.name });
+        const file = if (i < programs.modules.len) try std.fmt.allocPrint(a, "{s}.wasm", .{m.name}) else m.name;
+        const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, file });
         const bytes = try std.fs.cwd().readFileAlloc(a, path, 1 << 30);
         if (!std.mem.eql(u8, try cidm.ofRaw(a, bytes), c)) {
-            std.debug.print("wasm/{s}.wasm does not match the pinned {s}\n", .{ m.name, m.cid });
+            std.debug.print("wasm/{s} does not match the pinned {s}\n", .{ file, m.cid });
             return error.ModuleMismatch;
         }
         try s.putBlock(c, bytes);
