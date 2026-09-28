@@ -148,10 +148,13 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return 0;
       }
       case "identity": {
-        // The oracle's keys (oracle.ts): the router's BRC-104 identity, or an instance's.
+        // The oracle's keys (oracle.ts): an instance's; with no handle, the front instance's — the
+        // BRC-104 identity a client meets at the bare messagebox URL (sessions belong to the instances, #33).
         const [handle] = rest;
         const oracle = new Oracle(masterKey(env.vars, home));
-        env.out(handle ? oracle.identity(handle) : (await oracle.routerWallet().getPublicKey({ identityKey: true })).publicKey);
+        const front = handle ?? env.vars.SKEIN_MAILBOX_HOST ?? db.list("enabled")[0]?.handle;
+        if (!front) { env.err("identity: no enabled instance"); return 1; }
+        env.out(oracle.identity(front));
         return 0;
       }
       case "mailboxes":
@@ -391,9 +394,9 @@ export interface Host {
  * key derived from the router's master secret (key ID = the handle); the
  * router's BRC-104 identity is another child of it.
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "authWallet"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), authWallet: oracle.routerWallet() };
+  return { walletFor: (row) => oracle.wallet(row.handle) };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
@@ -567,7 +570,9 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   });
   const live = (row: InstanceRow) => router.loaded.has(row.handle);
   const port = Number(v.SKEIN_HOST_PORT || 4600);
-  const routerId = await router.o.authWallet.getPublicKey({ identityKey: true }).then((r) => r.publicKey, () => undefined);
+  // The BRC-104 identity at the bare messagebox URL: the front instance's (sessions belong to the instances).
+  const front = router.front("/");
+  const routerId = (front ? db.get(front.handle)?.identity : undefined) ?? undefined;
   const page = async () => hostPage(db.list("enabled").map((r): HostRow => {
     const l = router.loaded.get(r.handle), x = explorers.get(r.handle);
     return {

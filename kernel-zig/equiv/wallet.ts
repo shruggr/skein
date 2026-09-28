@@ -2,17 +2,20 @@
 // the router (src/host/router.ts, #33): the instance's signing oracle a
 // ProtoWallet, a fake ARC answering the wallet program's `http` calls, the
 // owner a standard messagebox client, and plain header/status event entries
-// admitted by the router (as its feeds will). Then the store it wrote is
+// admitted by the router's feeds (#33 part 2: the genesis declares a fake SSE
+// header feed and an ARC callback; feeds.ts). Then the store it wrote is
 // replayed Zig against Zig (equiv/replays.ts): the oracle's and ARC's answers
 // come from the recorded calls, nothing is asked again.
 //
 // The chain is regtest from its genesis (defaults.walletNetwork): headers
-// 1..100 in an owner's message, the rest as plain `header` entries; the
+// 1..100 in an owner's message, the rest as plain `header` entries from the
+// SSE feed; the
 // owner funds the instance with a BRC-29 payment; the instance pays someone
 // (createAction: signed through the oracle, broadcast to ARC over http), the
 // thread rests awaiting the transaction's CID with a deadline — the router's
-// waker wakes it and it re-asks ARC — until a `status` entry (MINED, with the
-// merkle path) routed by its subject proves it; a rejected broadcast gives
+// waker wakes it and it re-asks ARC — until ARC's callback (MINED, with the
+// merkle path: POST /callback/<handle>, a `status` entry routed by its
+// subject) proves it; a rejected broadcast gives
 // the inputs back; a draft (signAndProcess: false) is signed by signAction.
 // Then settlement (#37, settlementScenario): a rejection bubbling from A to
 // the B that spends it, settlement messages to the owner's `settlement` box,
@@ -32,6 +35,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -115,6 +119,20 @@ async function fakeArc(r: HttpRequest): Promise<HttpResponse> {
   return json(404, { title: "not found" });
 }
 
+// ---------------------------------------------------------------- a fake header feed (SSE), ARC's callback token
+
+const sse: ServerResponse[] = [];
+const sseServer = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": headers\n\n"); sse.push(res); });
+await new Promise<void>((r) => sseServer.listen(0, "127.0.0.1", r));
+const SSE_URL = `http://127.0.0.1:${(sseServer.address() as { port: number }).port}/headers`;
+let sseId = 0;
+/** A header on the feed: its hex as the event's data (the router admits it as a plain `header` entry). */
+const feedHeader = async (raw: Uint8Array) => {
+  for (let i = 0; !sse.length && i < 200; i++) await sleep(25);
+  sse.at(-1)!.write(`id: ${++sseId}\ndata: ${Buffer.from(raw).toString("hex")}\n\n`);
+};
+const ARC_TOKEN = "arc-callback-token";
+
 // ---------------------------------------------------------------- the router, the owner and the results
 
 const hostDb = new HostDb(join(home, "host.db"));
@@ -125,6 +143,7 @@ const router = new Router({
   genesis: {
     subscriptions: [{ box: "wallet", sender: ownerId, handler: WALLET_CID }, { box: "chain", handler: WALLET_CID }],
     defaults: { walletNetwork: "regtest", walletArc: "https://arc.test", walletRecheckMs: "3000", walletFeeRate: "100" },
+    feeds: [{ kind: "headers", url: SSE_URL }, { kind: "arc-callback", token: ARC_TOKEN }],
   },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
@@ -291,11 +310,11 @@ try {
     prev = sha256d(headers.at(-1)!);
   }
 
-  // Headers: 1..100 from the owner, 101 and 102 as plain entries (a header feed).
+  // Headers: 1..100 from the owner, 101 and 102 as plain entries from the router's SSE header feed.
   let r = await owned(identity, { op: "headers", headers: headers.slice(0, 100) });
   report.headers = [r.result.added, r.result.tip];
   for (const raw of headers.slice(100)) {
-    await router.admitEvent("wallettest", "chain", { kind: "header", raw });
+    await feedHeader(raw);
     r = await nextResult("a header entry");
     report.headerEntry = [r.result.event, r.result.tip];
   }
@@ -332,10 +351,16 @@ try {
 
   // Mined at 103: the header, then ARC's status (MINED, with the path) as a plain entry for the transaction.
   const h103 = mine(prev, internal(spendTxid), 1_790_000_000 + 103 * 600);
-  await router.admitEvent("wallettest", "chain", { kind: "header", raw: h103 });
+  await feedHeader(h103);
   r = await nextResult("header 103");
   const path = new MerklePath(103, [[{ offset: 0, hash: spendTxid, txid: true }]]);
-  await router.admitEvent("wallettest", "chain", { kind: "status", subject: txCid(spendTxid), txid: spendTxid, txStatus: "MINED", merklePath: new Uint8Array(path.toBinary()) });
+  // ARC's callback to the router's webhook: a status entry for the transaction's CID.
+  const cb = (auth: string) => fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/callback/wallettest`, {
+    method: "POST", headers: { "content-type": "application/json", authorization: auth },
+    body: JSON.stringify({ timestamp: new Date().toISOString(), txid: spendTxid, txStatus: "MINED", blockHeight: 103, blockHash: "00".repeat(32), merklePath: path.toHex(), extraInfo: "" }),
+  });
+  report.callbackRefused = (await cb("Bearer wrong")).status;
+  report.callback = (await cb(`Bearer ${ARC_TOKEN}`)).status;
   r = await nextResult("the MINED status");
   report.mined = { same: r.thread.equals(spendThread), outcome: r.result.outcome, state: r.state };
 
@@ -366,19 +391,22 @@ try {
 }
 await router.stop();
 hostDb.close();
+for (const r of sse) r.end();
+sseServer.close();
 
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(eq(report.headers, [100, 100]), `headers 1..100 from the owner, chained from regtest's genesis (${JSON.stringify(report.headers)})`);
-check(eq(report.headerEntry, ["header", 102]), `plain header entries, routed by a sender-less subscription (${JSON.stringify(report.headerEntry)})`);
+check(eq(report.headerEntry, ["header", 102]), `plain header entries from the router's SSE feed, routed by a sender-less subscription (${JSON.stringify(report.headerEntry)})`);
 check(eq(report.internalize, [true, "unproven"]), `a BRC-29 payment internalized (${JSON.stringify(report.internalize)})`);
 const c = (report.create ?? {}) as Record<string, unknown> & { outputs?: number[] };
 check(c.state === "waiting" && c.awaiting === true && c.outcome === "pending" && c.arc === "SEEN_ON_NETWORK", `createAction: signed, broadcast over http, the thread awaits its status (${JSON.stringify(c)})`);
 check(c.postedIsTheTx === true && c.scriptsVerify === true, "ARC received the transaction as Atomic BEEF; @bsv/sdk verifies its scripts (signatures from the oracle)");
 check(eq(c.outputs?.slice(0, 1), [10000]) && c.outputs?.length === 2, `the payment and our change (${JSON.stringify(c.outputs)})`);
 check(eq(report.woke, { same: true, op: "callback", outcome: "pending", state: "waiting", gets: 1 }), `the deadline: the router's waker wakes the thread, it re-asks ARC over http, rests again (${JSON.stringify(report.woke)})`);
-check(eq(report.mined, { same: true, outcome: "proven", state: "finished" }), `a status entry (MINED + path) for the transaction's CID steps the awaiting thread: proven (${JSON.stringify(report.mined)})`);
+check(report.callbackRefused === 401 && report.callback === 200, `ARC's callback at /callback/<handle>: the wrong token refused, the right one taken (${String(report.callbackRefused)}, ${String(report.callback)})`);
+check(eq(report.mined, { same: true, outcome: "proven", state: "finished" }), `the callback's status entry (MINED + path) for the transaction's CID steps the awaiting thread: proven (${JSON.stringify(report.mined)})`);
 check(Array.isArray(report.list) && (report.list as unknown[][]).some((o) => o[0] === "change" && o[2] === true && o[3] === "proven") && (report.list as unknown[][]).some((o) => o[0] === "payment" && o[2] === false), `list: the change spendable and proven, the payment spent (${JSON.stringify(report.list)})`);
 check(eq(report.rejected, { outcome: "rejected", state: "finished", awaiting: false }) && report.afterReject === report.total, `a rejected broadcast drops the action: the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
 const d = (report.draft ?? {}) as Record<string, unknown>;

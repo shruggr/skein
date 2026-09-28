@@ -25,7 +25,7 @@ an instance nor a registered mailbox). Nothing waits for a receipt; down
 means down.
 
 **Entries are unsigned** (format 2, #9 revised): `{kind: "log", prev, n,
-time, genesis | envelope+box+body | wake | outcome | mail}`. The sender
+time, genesis | envelope+box+body | wake | outcome | mail | event+box}`. The sender
 signed the message, `prev` fixes the order, the stamp is the router's clock
 at admission (#10); receipt order = log order = message order. The genesis
 has no `host`. Identity keys, hashes and signatures are byte strings in every
@@ -62,21 +62,79 @@ recipient's `{kind: "mail", identity, messages: [{messageId, box, sender,
 body, json?, at}]}` in admission order. `listMessages` is a read of that
 record through the kernel (no entry); `acknowledgeMessage` admits `{op:
 "ack", recipient, messageIds}`. The mail is the instance's state: it outlives
-the router. BRC-104 auth stays in the router — one URL and one handshake for
-every instance, so its identity is the router's (a child of the master
-secret), and the program sees the authenticated sender as the entry's
+the router. The program sees the authenticated sender as the entry's
 `sender`.
+
+### Sessions (in the instance)
+
+Decided on #33 (2026-09-29): a BRC-103/104 session is with an **instance's
+identity**, not the router's. The router forwards; it keeps nothing but the
+identity → instance map.
+
+- **Which instance.** The stock AuthFetch keeps one session per origin, so the
+  route is per origin: a host name `<handle>.<domain>` reaches that instance;
+  a `/@<handle>` path prefix does too, for a transport whose base URL names it
+  (the rest of the path is what it signs); anything else — the bare
+  `http://127.0.0.1:8100/messagebox` — is the **front instance**, the mailbox
+  host (`SKEIN_MAILBOX_HOST`, default the first enabled row). `skein-host
+  identity` prints the front instance's key: the BRC-104 counterparty of a
+  client at the bare URL. A message for another instance, sent on a session
+  with the front instance, is delivered as before (a full envelope, screened
+  by its recipient).
+- **In the VM.** Each authentication message is a plain `event` entry in the
+  reserved box `:auth` (the stock genesis routes it to the messagebox
+  program, `programs/messagebox/auth.zig`); the router awaits the step and
+  reads the answer (head `auth`):
+
+  ```
+  {kind: "auth", op: "handshake", message}                      the initialRequest JSON as it came → our nonce, our signature
+  {kind: "auth", op: "request", identityKey, nonce, yourNonce, signature, payload}
+                                                                a signed request (payload: SimplifiedFetchTransport's framing) → verified, or not
+  {kind: "auth", op: "respond", yourNonce, payload}             the response to sign on that session → nonce, signature
+  {kind: "auth", op: "seal", emit, id}                          an emit, compact on a session with its recipient (below)
+  ```
+
+  Nonces are BRC-104's (16 bytes and their HMAC under `[2, "server hmac"]`,
+  self — the 16 bytes printable ASCII, so the SDK's `verifyNonce` accepts
+  them), signatures `[2, "auth message signature"]` with the peer, both
+  through the kernel's `wallet` import (recorded calls). Sessions are records
+  under the head `sessions`: `{kind: "session", peer, sessionNonce,
+  peerNonce, created, lastSeen, authenticated, compact, seen}` (`seen`: the
+  last 4096 message nonces, for replay). **Expiry** is the instance's policy,
+  `defaults.sessionTtlMs` (genesis default a day), judged by entry stamps: a
+  request on an expired session gets a plain 401 and the stock client shakes
+  hands again by itself. Sessions outlive the router.
+- **Proof from the log.** Every signed request is in the log (the event
+  record: payload, signature, nonces), and every signature the instance made
+  is a recorded call; all of them verify with the instance's key alone.
+
+### Compact both ways
+
+On a session with an instance, messages may be compact in **both
+directions**; a party gets them only if it asked:
+
+- **Client → instance**: a reply on the client's session with the
+  recipient's instance (below, "Session replies").
+- **Instance → client**: a client that sends the signed header
+  `x-bsv-skein-compact: 1` on a request marks its session; the instance's
+  emits to that identity (a kept mailbox) then go as `{type: "reply" |
+  "message", replyTo?, id, body}` — `body` the plaintext dag-cbor, `id` the
+  emitted envelope's CID (what a reply to it names) — signed on the session:
+  the payload is that map's dag-cbor, signed under `[2, "auth message
+  signature"]`, key ID `"<nonce> <client's session nonce>"`, counterparty the
+  client. It is kept (and listed: BRC-231 as its bytes, JSON as `{"dag-cbor":
+  base64}`) as that map plus `session: {payload, signature, nonce,
+  yourNonce}`; its message id is SHA-256 of the payload. The client verifies
+  it with its own wallet (counterparty: the sender). The stock
+  `@bsv/message-box-client` never asks, so toward it (and the front end) the
+  agent's messages stay full envelopes (as for `bin/skein` and the inference
+  peer today); a BRC-231 client asks with `cborBoxClient(…, {compact:
+  true})` (src/host/brc231.ts).
 
 ### Session replies
 
-The interpretation in force (confirmed on #33, 2026-09-28): a **client's**
-reply to an agent, sent on the client's own BRC-104 session with this router,
-may go compact; an agent's messages to a client stay full envelopes for now
-(an instance has no BRC-104 session of its own: the router delivers its emits
-in process).
-
-On a BRC-104 session with the recipient's native messagebox (this router), a
-reply may be the **compact** §7.3 form — `{type: "reply", replyTo, body}`,
+On a BRC-104 session with the recipient's instance (the one keeping the
+recipient's mail, or the recipient itself), a reply may be the **compact** §7.3 form — `{type: "reply", replyTo, body}`,
 dag-cbor, sent as a BRC-231 body — with `sender`, `recipient`, `host` and the
 envelope signature left out, because the session supplies them. The first
 message on a session, and anything for an external store-and-forward box,
@@ -97,9 +155,10 @@ instead of an envelope signature:
 ```
 
 Authorship is the BRC-104 message signature over `payload` with the session
-nonces; the router verifies it at the session, and the record keeps it so the
-proof outlives the session (verifying it again needs the router's key: a
-BRC-104 signature is to its counterparty). The kernel checks the record's
+nonces; the instance verified it at the session (its `request` step), and
+the record keeps it so the proof outlives the session: it verifies with the
+instance's own key (a BRC-104 signature is to its counterparty — now the
+instance, not the router). The kernel checks the record's
 shape, that `messageId` is the payload's hash, that the payload carries the
 body, and the body against `contentHash`; `replyTo` is read from the record
 (a full envelope's is in its body), and the reply resumes the awaiting thread
@@ -120,8 +179,9 @@ there; the host hands the message to the instance that owns the handle; the
 instance routes by box; subscriptions take it from there.
 
 BRC-103/104 mutual authentication between clients and the messagebox is
-transport, terminated by the router (#33). It is not in the VM; a session
-reply's proof is recorded in the log ("Session replies", above).
+with the instance (#33, "Sessions (in the instance)", above): the router
+forwards the handshake and every signed request into it, and the proofs are
+in its log.
 
 ## The envelope
 

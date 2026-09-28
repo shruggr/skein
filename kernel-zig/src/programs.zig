@@ -20,7 +20,7 @@ pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreihkpdmj2fdp6c7xowww5kyi3noetmentxwsw7zdv6vrvsaf6w2t5q" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreigslxz6zej4d4mv6skofj2dc2qzaqc6fhsmezi3xjqw6qcj7parwq" },
+    .{ .name = "messagebox", .cid = "bafkreih4oiormhd3vxjoee3xl65jgadyv6lxcgrnisnboa2lkrnckyunbu" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },

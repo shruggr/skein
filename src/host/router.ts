@@ -1,7 +1,7 @@
 // The host as a router (#33): a light web server in front of the instances.
 //
 // It takes a BRC-33 request — `/sendMessage`, `/listMessages`,
-// `/acknowledgeMessage`, under BRC-103/104 mutual auth (auth.ts), the paths
+// `/acknowledgeMessage`, under BRC-103/104 mutual auth, the paths
 // and shapes the TypeScript messagebox (`1sat serve`) exposes, so the stock
 // @bsv/message-box-client works against it unchanged — looks up which
 // instance serves the recipient (host.db: an instance's own identity, or a
@@ -10,7 +10,15 @@
 // (admit an entry) and returns the response. Nothing runs between requests: a
 // kernel with nothing to do is stopped after `idleMs`.
 //
-//   POST /.well-known/auth                      the BRC-104 handshake
+// BRC-103/104 sessions belong to the instances (auth.ts): the router forwards
+// each authentication message to the instance the request is for (`front`: a
+// `/@<handle>` path prefix, a `<handle>.` host name, else the front instance —
+// the mailbox host) and awaits its answer; it keeps nothing but the identity →
+// instance map. It also holds the instances' feeds (feeds.ts): SSE header
+// streams and ARC callbacks, admitted as plain entries.
+//
+//   POST /.well-known/auth                      the BRC-104 handshake (answered by the instance)
+//   POST /callback/<handle>                     ARC's status callback (an arc-callback feed), no auth
 //   POST [/messagebox]/sendMessage              deliver: admit into the recipient instance, or keep it in a mailbox
 //   POST [/messagebox]/listMessages             the caller's mailbox, in arrival order
 //   POST [/messagebox]/acknowledgeMessage       delete from the caller's mailbox
@@ -38,7 +46,8 @@ import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Outbound } from "../runtime/scheduler.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { AuthServer, send, type AppResponse, type AuthedRequest, type Session } from "./auth.ts";
+import { askIn, InstanceSessions, send, type AppResponse, type AuthedRequest, type Session } from "./auth.ts";
+import { Feeds, feedsOf, type FeedSpec } from "./feeds.ts";
 import { now as clockNow } from "./entry.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { admit2, keyBytes, keyHex, type Genesis2Config } from "./genesis.ts";
@@ -55,8 +64,8 @@ export interface RouterOptions {
   db: HostDb;
   /** Each row's oracle: the wallet its kernel's `wallet` import is answered from. */
   walletFor(row: InstanceRow): Promise<WalletInterface> | WalletInterface;
-  /** The router's own identity for BRC-104. */
-  authWallet: WalletInterface;
+  /** Unused since sessions belong to the instances (#33 part 2); kept so older callers still type-check. */
+  authWallet?: WalletInterface;
   /** A new instance's genesis: the owner (required to write one), the inference peer, their names. */
   owner?: string;
   infer?: string;
@@ -64,7 +73,9 @@ export interface RouterOptions {
   inferHandle?: Named;
   fuelPerStep?: string;
   /** A new genesis's extra seed subscriptions and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string> };
+  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[] };
+  /** The router-held feeds' limits (feeds.ts). */
+  feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** Answers programs' HTTP — the preview1 `http` import (#29) and wasi:http (#15), one request shape; default: SKEIN_HTTP=fetch performs them (fetchHttp), else none is answered. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never. Default 5 minutes. */
@@ -137,7 +148,8 @@ const bodyJson = (b: unknown): unknown => b instanceof Uint8Array ? { "dag-cbor"
 
 export class Router {
   readonly o: RouterOptions;
-  readonly auth: AuthServer;
+  readonly sessions: InstanceSessions;
+  readonly feeds: Feeds;
   readonly mail: MailStore;
   /** BRC-22 submit, BRC-24 lookup and the listings, routed to the instances that serve them (#36). */
   readonly overlay = new OverlayRoutes(this);
@@ -153,7 +165,11 @@ export class Router {
 
   constructor(o: RouterOptions) {
     this.o = o;
-    this.auth = new AuthServer(o.authWallet);
+    this.sessions = new InstanceSessions({ withKernel: (h, f) => this.serial(h, async () => f((await this.hydrate(h)).kernel)), now: () => this.now() });
+    this.feeds = new Feeds({
+      admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
+      maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
+    });
     // Mail for hosted identities lives in the keeping instance's log (the messagebox program), unless a test gives a store.
     this.mail = o.mail ?? new VmMail({
       keeper: (r) => this.o.db.mailbox(r)?.instance,
@@ -182,6 +198,7 @@ export class Router {
     clearInterval(this.idleTimer);
     this.server?.close();
     this.overlay.close();
+    this.feeds.stop();
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
   }
@@ -275,6 +292,7 @@ export class Router {
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done
       if (!row.identity) this.o.db.add(row.handle, { identity });
+      this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
     } catch (e) {
       await kernel.stop(1000);
       throw e;
@@ -309,7 +327,7 @@ export class Router {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
         identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn,
+        feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn,
       };
     }
     return {
@@ -317,6 +335,7 @@ export class Router {
       // Code genesis takes DEFAULTS under the host's.
       defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
       subscriptions: this.o.genesis?.subscriptions,
+      feeds: this.o.genesis?.feeds,
     };
   }
 
@@ -430,6 +449,8 @@ export class Router {
   private async deliverCompact(m: { sender: string; recipient: string; box: string; body: unknown; messageId: string; session?: Session }, d: { instance: InstanceRow } | { mailbox: string }, c: CompactReply): Promise<Delivered> {
     const s = m.session;
     if (!s) return err(400, "ERR_REJECTED", "a compact reply is for a BRC-104 session with the recipient's messagebox; send the full envelope");
+    const keeper = "mailbox" in d ? d.mailbox : d.instance.handle;
+    if (s.instance !== keeper) return err(400, "ERR_REJECTED", "a compact reply is for a BRC-104 session with the recipient's instance (this session is with another): send the full envelope");
     const raw = m.body as Uint8Array;
     if (Buffer.from(s.payload).indexOf(Buffer.from(raw)) < 0) return err(400, "ERR_REJECTED", "a compact reply travels as BRC-231 bytes (the signed request must carry it)");
     try {
@@ -497,8 +518,13 @@ export class Router {
     let r: Delivered;
     try {
       // An envelope in the §7.3 form travels as its dag-cbor bytes (BRC-231), the §7.2 form as the JSON object.
-      const body = isCborEnvelope(o.envelope) ? dagCbor.encode(o.envelope) : o.envelope;
-      r = await this.deliver({ sender: identity, recipient: to, box: o.box, body, messageId: o.cid.toString() });
+      const compact = await this.compactFor(handle, to, o).catch((e: Error) => { this.say(handle, `${what}: compact: ${e.message}`); return undefined; });
+      if (compact) {
+        r = await this.deliverSealed(identity, to, o.box, compact);
+      } else {
+        const body = isCborEnvelope(o.envelope) ? dagCbor.encode(o.envelope) : o.envelope;
+        r = await this.deliver({ sender: identity, recipient: to, box: o.box, body, messageId: o.cid.toString() });
+      }
     } catch (e) {
       r = err(500, "ERR_INTERNAL", (e as Error).message);
     }
@@ -512,7 +538,63 @@ export class Router {
     }).catch((e: Error) => this.say(handle, `${what}: outcome not admitted: ${e.message}`));
   }
 
+  /**
+   * Compact both ways (docs/MESSAGES.md, "Sessions"): an emit to a client that
+   * holds a session with the emitting instance and negotiated compact
+   * messages on it (`x-bsv-skein-compact` on a signed request) goes as the
+   * compact form, signed by the instance on that session. Only toward kept
+   * mailboxes (clients); instances get full envelopes. The session check is
+   * a read of the instance's `sessions` head; the instance signs (or
+   * declines: expired) in a `seal` step.
+   */
+  private async compactFor(handle: string, to: string, o: Outbound): Promise<Record<string, unknown> | undefined> {
+    const d = this.destination(to);
+    if (!d || !("mailbox" in d) || !o.emit) return undefined;
+    return await this.serial(handle, async () => {
+      const k = (await this.hydrate(handle)).kernel;
+      const root = await k.call("head", "sessions") as CID | null;
+      if (!root) return undefined;
+      const r = await k.store.get(root) as { sessions?: Array<{ session: CID }> };
+      const me = Buffer.from(to, "hex");
+      let any = false;
+      for (const x of r.sessions ?? []) {
+        const s = await k.store.get(x.session) as { peer?: Uint8Array; compact?: boolean; authenticated?: boolean };
+        if (s.compact && s.authenticated && s.peer && Buffer.from(s.peer).equals(me)) { any = true; break; }
+      }
+      if (!any) return undefined;
+      const a = await askIn(k, { op: "seal", emit: o.emit as CID, id: o.cid }, this.now());
+      return a.ok ? a.compact as Record<string, unknown> : undefined;
+    });
+  }
+
+  /** A compact message from an instance into a client's kept mailbox: kept as its dag-cbor; its id the hash of the signed payload. */
+  private async deliverSealed(sender: string, to: string, box: string, c: Record<string, unknown>): Promise<Delivered> {
+    const payload = (c.session as { payload: Uint8Array }).payload;
+    const messageId = createHash("sha256").update(payload).digest("hex");
+    await this.mail.put(to, box, { messageId, sender, body: dagCbor.encode(c), createdAt: new Date(stampMs(this.now())).toISOString() });
+    return ok(to, messageId);
+  }
+
   // ---------------------------------------------------------------- HTTP
+
+  /**
+   * Which instance an HTTP request is for: `/@<handle>/…` (a transport whose
+   * base URL names the instance; the rest of the path is what it signs), a
+   * host name `<handle>.…` (a per-instance origin: the stock AuthFetch keeps
+   * one session per origin), else the front instance — the mailbox host
+   * (SKEIN_MAILBOX_HOST, default the first enabled row).
+   */
+  front(url: string, host?: string): { handle: string; path: string } | undefined {
+    const path = new URL(url, "http://router").pathname;
+    const enabled = (h: string) => this.o.db.get(h)?.status === "enabled";
+    const m = /^\/@([^/]+)(\/.*)?$/.exec(path);
+    if (m) return enabled(decodeURIComponent(m[1]!)) ? { handle: decodeURIComponent(m[1]!), path: m[2] ?? "/" } : undefined;
+    const name = (host ?? "").split(":")[0]!.toLowerCase();
+    const label = name.includes(".") ? name.split(".")[0]! : "";
+    if (label && enabled(label)) return { handle: label, path };
+    const f = this.o.mailboxHost ?? this.o.db.list("enabled")[0]?.handle;
+    return f ? { handle: f, path } : undefined;
+  }
 
   /** The BRC-33 routes (JSON, or BRC-231 dag-cbor), the registration and the paymail PKI, after auth. */
   private async app(r: AuthedRequest): Promise<AppResponse> {
@@ -530,7 +612,7 @@ export class Router {
       case "/sendMessage": {
         const m = body.message as Record<string, unknown> | undefined;
         if (!m) return error(400, "ERR_MESSAGE_REQUIRED", "Please provide a valid message to send!");
-        if (typeof m.messageBox !== "string" || !m.messageBox.trim()) return error(400, "ERR_INVALID_MESSAGEBOX", "Invalid message box.");
+        if (typeof m.messageBox !== "string" || !m.messageBox.trim() || m.messageBox.trim().startsWith(":")) return error(400, "ERR_INVALID_MESSAGEBOX", "Invalid message box.");
         if (m.body === undefined || m.body === null || m.body === "") return error(400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.");
         let recipient = Array.isArray(m.recipient) ? m.recipient[0] : m.recipient;
         if (recipient instanceof Uint8Array) recipient = keyHex(recipient);
@@ -588,6 +670,13 @@ export class Router {
       const path = url.pathname;
       // The overlay routes (#36: BRC-22/24 and the listings), unauthenticated as overlay-express is.
       if (this.overlay.handle(req, res, url)) return;
+      const callback = /^\/callback\/([^/]+)$/.exec(path);
+      if (callback && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => send(res, this.feeds.callback(decodeURIComponent(callback[1]!), req.headers, new Uint8Array(Buffer.concat(chunks)))));
+        return;
+      }
       if (req.method === "GET") {
         const m = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
         if (m) {
@@ -602,7 +691,9 @@ export class Router {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
-        this.auth.handle(req, res, new Uint8Array(Buffer.concat(chunks)), (r) => this.app(r))
+        const to = this.front(req.url ?? "/", req.headers.host);
+        if (!to) { send(res, { status: 404, body: { status: "error", code: "ERR_NOT_FOUND", description: "no instance here" } }); return; }
+        this.sessions.handle(req, res, new Uint8Array(Buffer.concat(chunks)), to.handle, to.path, (r) => this.app(r))
           .catch((e: Error) => { if (!res.headersSent) send(res, { status: 500, body: { status: "error", code: "ERR_INTERNAL", description: e.message } }); });
       });
     };

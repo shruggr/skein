@@ -134,7 +134,7 @@ body{margin:0 auto;max-width:1100px;padding:14px 16px;background:var(--bg);color
 a{color:var(--acc)}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 th{font-size:13px;color:var(--mut);font-weight:600}.k{font-family:ui-monospace,monospace;font-size:13px}.mut{color:var(--mut)}.ok{color:var(--ok)}</style></head>
 <body><h1 style="font-size:19px">skein host <span class="mut" style="font-size:13px">${rows.length} instance${rows.length === 1 ? "" : "s"} · <a href="/roster.json">roster.json</a></span></h1>
-${info.messagebox ? `<p class="mut">messagebox <code>${esc(info.messagebox)}</code>${info.router ? ` · router identity <code title="${esc(info.router)}">${esc(info.router.slice(0, 16))}…</code>` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
+${info.messagebox ? `<p class="mut">messagebox <code>${esc(info.messagebox)}</code>${info.router ? ` · session identity (front instance) <code title="${esc(info.router)}">${esc(info.router.slice(0, 16))}…</code>` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
 <table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>explorer</th></tr>
 ${body}</table>
 ${info.mailboxes ? `<h2 style="font-size:16px">mailboxes kept here</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>identity</th><th>kept by</th></tr>
