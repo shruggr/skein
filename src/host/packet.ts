@@ -364,6 +364,16 @@ export async function readPacket(bytes: Uint8Array, o: ReadOptions = {}): Promis
     const s = decode<{ kind?: string }>(blocks[0]!.bytes);
     if (s?.kind !== "skein-state") throw new PacketError("malformed", "a dag-cbor scope must be a skein-state record (a checkpoint)");
   }
+  // Extras: what the index lists beyond the closure (a checkpoint's records no link reaches) — each verified, then kept.
+  const inClosure = new Set(blocks.map((b) => b.cid.toString()));
+  for (const e of p.index ?? []) {
+    const c = CID.asCID(e.cid)!;
+    if (inClosure.has(c.toString())) continue;
+    inClosure.add(c.toString());
+    const b = await get(c);
+    if (!b) throw new PacketError("incomplete", `the index lists ${c}, which the bag does not carry`);
+    blocks.push({ cid: c, bytes: b });
+  }
   if (o.chainTracker) {
     for (const txid of used) {
       const bt = beef.findTxid(txid);
@@ -389,6 +399,12 @@ export interface WriteOptions {
   maxBytes?: number;
   /** Leave the index out (readers then scan). */
   noIndex?: boolean;
+  /**
+   * Blocks to carry beyond the scope's closure (a checkpoint's records that no
+   * link reaches: a run's args, an emitted envelope's signed part). Listed in
+   * the index, so a reader verifies and keeps them; the index is then required.
+   */
+  extras?: Array<{ cid: CID; bytes: Uint8Array }>;
 }
 
 export interface Written { bytes: Uint8Array; packet: PacketRecord; txids: string[]; roots: Record<number, string>; objects: number }
@@ -404,6 +420,14 @@ export async function writePacket(scope: CID, objects: Objects, o: WriteOptions 
     return b;
   });
   if (missing.length) throw new PacketError("incomplete", `the source lacks ${missing.length} object(s): ${missing.slice(0, 5).join(", ")}`);
+  if (o.extras?.length && o.noIndex) throw new PacketError("malformed", "extras need the index");
+  const have = new Set(blocks.map((b) => b.cid.toString()));
+  for (const x of o.extras ?? []) {
+    if (have.has(x.cid.toString())) continue;
+    if (!hashMatches(x.cid, x.bytes)) throw new PacketError("hash-mismatch", `extra ${x.cid} does not hash to it`);
+    have.add(x.cid.toString());
+    blocks.push(x);
+  }
   const form = o.form ?? "ordfs";
   const maxOutputs = Math.min(o.maxOutputs ?? 200, 256), maxBytes = o.maxBytes ?? 1 << 20;
   const byCid = new Map(blocks.map((b) => [b.cid.toString(), b]));

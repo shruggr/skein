@@ -11,6 +11,13 @@
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
 //   skein-host roster [--for <handle> | --deploy]
 //   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
+//   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
+//   skein-host system <dir>
+//   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+// `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
+// store: its objects pre-filled, its genesis from the system tree (or a
+// checkpoint restored). `system` writes the stock system as such a tree;
+// `pack` writes a packet (packet.ts: synthetic transactions, never broadcast).
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the oracle's (oracle.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
@@ -46,7 +53,14 @@
 // and signs through the owner's wallet as bin/skein does:
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import type { CID } from "multiformats/cid";
+import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
+import { DatabaseSync } from "node:sqlite";
+import { headTree, MAIN } from "../runtime/heads.ts";
+import { anyOf, dirSource, MemBlocks, packetSource, stockSystemFiles, storeObjects, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { Kernel } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -87,7 +101,11 @@ const USAGE = `usage:
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed
-  skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>`;
+  skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
+  skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
+  skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
+  skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
+  skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]`;
 
 export const homeOf = (vars: Env["vars"]) => vars.SKEIN_HOME || join(vars.HOME ?? ".", ".skein");
 
@@ -102,7 +120,10 @@ export async function main(argv: string[], env: Env): Promise<number> {
       case "add": {
         const { values: v, positionals: [handle] } = parseArgs({
           args: rest, allowPositionals: true,
-          options: { domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" } },
+          options: {
+            domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" },
+            boot: { type: "string" }, from: { type: "string" }, packet: { type: "string" }, scope: { type: "string" }, proofs: { type: "string" },
+          },
         });
         if (!handle) { env.err(USAGE); return 2; }
         const f: RowFields = { domain: v.domain, identity: v.identity, wallet_url: v["wallet-url"], wallet_originator: v.originator, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
@@ -110,8 +131,20 @@ export async function main(argv: string[], env: Env): Promise<number> {
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
         // The identity is the oracle's (#18): derived from the master secret, key ID = the handle.
         if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Oracle(masterKey(env.vars, home)).identity(handle);
+        if (v.boot && v.packet) { env.err("skein-host add: --boot or --packet, not both"); return 2; }
         const r = db.add(handle, f);
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
+        if (v.boot || v.packet) {
+          // The loader (#4): pre-fill the new store and write its genesis from the tree (or restore a checkpoint).
+          try {
+            const src = await bootSourceOf(v, r);
+            const b = await new Router({ ...routerOptions(db, env), idleMs: 0 }).bootRow(handle, src);
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}`);
+          } catch (e) {
+            env.err(`skein-host add ${handle}: ${(e as Error).message}`);
+            return 1;
+          }
+        }
         return 0;
       }
       case "identity": {
@@ -145,6 +178,10 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await rosterCmd(db, rest, env);
       case "subscribe":
         return await subscribeCmd(db, rest, env);
+      case "system":
+        return await systemCmd(rest, env);
+      case "pack":
+        return await packCmd(db, rest, env);
       default:
         env.err(USAGE);
         return 2;
@@ -359,6 +396,150 @@ function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" 
   return { walletFor: (row) => oracle.wallet(row.handle), authWallet: oracle.routerWallet() };
 }
 
+/** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
+function routerOptions(db: HostDb, env: Env): RouterOptions {
+  const v = env.vars;
+  const home = homeOf(v);
+  const named = (s: string | undefined, d: string) => { const [handle, domain = "localhost"] = (s || d).split("@"); return { handle: handle!, domain }; };
+  return {
+    db, ...wallets(v, home),
+    owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
+    fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, mailboxHost: v.SKEIN_MAILBOX_HOST,
+    kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
+    log: (source, line) => env.out(`[${source}] ${line}`),
+  };
+}
+
+// ---------------------------------------------------------------- bootstrap (#4)
+
+const WASM_DIR = join(ROOT, "wasm");
+
+/** The source `add --boot/--packet` names (boot.ts): a directory, a tree CID in a store, or a packet file. */
+async function bootSourceOf(v: { boot?: string; from?: string; packet?: string; scope?: string; proofs?: string }, row: InstanceRow): Promise<BootSource> {
+  if (v.packet) {
+    const { rootsTracker } = await import("./packet.ts");
+    return packetSource(new Uint8Array(readFileSync(v.packet)), {
+      scope: v.scope ? parseCid(v.scope) : undefined,
+      chainTracker: v.proofs ? rootsTracker(JSON.parse(readFileSync(v.proofs, "utf8"))) : undefined,
+    });
+  }
+  const spec = v.boot!;
+  if (existsSync(spec) && statSync(spec).isDirectory()) {
+    const d = await dirSource(resolve(spec));
+    return { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(WASM_DIR)) };
+  }
+  const root = parseCid(spec);
+  const path = v.from ?? row.store;
+  if (!existsSync(path)) throw new Error(`--boot ${spec}: no store at ${path} to read the tree from (--from)`);
+  const s = openStoreFile(path, { readOnly: true });
+  // The objects are read now: the row's own store is about to be written by its kernel.
+  const blocks = new MemBlocks();
+  const { closure } = await import("./packet.ts");
+  const src = storeObjects(s);
+  const c = await closure(root, (x) => src.get(x));
+  s.close();
+  for (const b of c.blocks) await blocks.putBlock(b.cid, b.bytes);
+  return { kind: "tree", root, objects: anyOf(blocks, wasmDirObjects(WASM_DIR)) };
+}
+
+/** `skein-host system <dir>`: the stock system (what code genesis writes) as a system tree to start from. */
+async function systemCmd(rest: string[], env: Env): Promise<number> {
+  const [dir, ...more] = rest;
+  if (!dir || more.length) { env.err(USAGE); return 2; }
+  const tmp = mkdtempSync(join(tmpdir(), "skein-system-"));
+  const k = new Kernel({ db: join(tmp, "k.db"), handle: "system", domain: "localhost", command: env.vars.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: tmp } });
+  try {
+    const files = await stockSystemFiles(k);
+    for (const [p, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, p)), { recursive: true });
+      writeFileSync(join(dir, p), text);
+    }
+    env.out(`${dir}: ${Object.keys(files).length} files (${Object.keys(files).filter((f) => f.endsWith(".cid")).length} programs, etc/config.json, etc/subscriptions.json)`);
+    return 0;
+  } finally {
+    await k.stop(5000);
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** An index node or a state record (#30): history a checkpoint leaves behind (dump.zig isIndexBlock). */
+function isIndexBlock(cid: CID, bytes: Uint8Array): boolean {
+  if (cid.code !== 0x71) return false;
+  let v: unknown;
+  try { v = decodeCbor(bytes); } catch { return false; }
+  if (v && typeof v === "object" && !Array.isArray(v)) return (v as { kind?: unknown }).kind === "skein-state";
+  if (!Array.isArray(v) || v.length !== 2 || !Array.isArray(v[1]) || (v[0] !== null && !CIDClass.asCID(v[0]))) return false;
+  return v[1].length > 0 && v[1].every((e: unknown) => Array.isArray(e) && e.length === 3 && e[0] instanceof Uint8Array && (e[2] === null || !!CIDClass.asCID(e[2])));
+}
+
+/** Every block of a store file except the index's (nodes and state records): a checkpoint's extras candidates. */
+function looseRecords(path: string): Array<{ cid: CID; bytes: Uint8Array }> {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const out: Array<{ cid: CID; bytes: Uint8Array }> = [];
+    for (const r of db.prepare("SELECT cid, bytes FROM blocks").all() as Array<{ cid: Uint8Array; bytes: Uint8Array }>) {
+      const cid = CIDClass.decode(new Uint8Array(r.cid));
+      const bytes = new Uint8Array(r.bytes);
+      if (!isIndexBlock(cid, bytes)) out.push({ cid, bytes });
+    }
+    return out;
+  } finally { db.close(); }
+}
+
+/** `skein-host pack <handle|dir|tree-cid> <out>`: a packet (packet.ts) of a system tree or, with --checkpoint, a whole instance. */
+async function packCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [what, out, ...more] } = parseArgs({
+    args: rest, allowPositionals: true,
+    options: { from: { type: "string" }, checkpoint: { type: "boolean" }, form: { type: "string" }, "no-index": { type: "boolean" }, mined: { type: "string" }, tree: { type: "string" } },
+  });
+  if (!what || !out || more.length || (v.form !== undefined && v.form !== "ordfs" && v.form !== "git")) { env.err(USAGE); return 2; }
+  const { writePacket } = await import("./packet.ts");
+  let scope: CID, objects: Objects, close = () => {}, extras: Array<{ cid: CID; bytes: Uint8Array }> | undefined;
+  const row = db.get(what);
+  if (row) {
+    if (!existsSync(row.store)) { env.err(`skein-host pack: ${row.handle} has no store yet`); return 1; }
+    const s = openStoreFile(row.store, { readOnly: true }) as ReturnType<typeof openStoreFile> & { state?(): { cid: CID } };
+    close = () => s.close();
+    objects = anyOf(storeObjects(s), wasmDirObjects(WASM_DIR));
+    if (v.checkpoint) {
+      if (!s.state) { env.err(`skein-host pack: ${row.handle}'s store predates the state record (#30)`); close(); return 1; }
+      scope = s.state().cid;
+      extras = looseRecords(row.store);
+    } else if (v.tree) scope = parseCid(v.tree);
+    else {
+      // The system tree it booted from, else its `main`.
+      const tip = await s.log.tip();
+      let first = tip ? await s.get(tip) as Record<string, unknown> : undefined;
+      while (first && first.prev) first = await s.get(first.prev as CID) as Record<string, unknown>;
+      const g = first?.genesis ? await s.get(first.genesis as CID) as { tree?: CID } : undefined;
+      const main = await headTree(s, MAIN);
+      const t = g?.tree ?? main;
+      if (!t) { env.err(`skein-host pack: ${row.handle} has no system tree and no main (--tree, or --checkpoint)`); close(); return 1; }
+      scope = t;
+    }
+  } else if (existsSync(what) && statSync(what).isDirectory()) {
+    const d = await dirSource(resolve(what));
+    scope = d.root;
+    objects = anyOf(d.objects, wasmDirObjects(WASM_DIR));
+  } else {
+    scope = parseCid(what);
+    if (!v.from) { env.err("skein-host pack <tree-cid>: --from <store.db> (where the objects are)"); return 2; }
+    const s = openStoreFile(v.from, { readOnly: true });
+    close = () => s.close();
+    objects = anyOf(storeObjects(s), wasmDirObjects(WASM_DIR));
+  }
+  try {
+    const w = await writePacket(scope, objects, { form: v.form as "ordfs" | "git" | undefined, noIndex: v["no-index"], mined: v.mined !== undefined, extras });
+    writeFileSync(out, w.bytes);
+    if (v.mined) writeFileSync(v.mined, `${JSON.stringify(w.roots, null, 2)}\n`);
+    env.out(`${out}: scope ${scope} · ${w.objects} objects in ${w.txids.length} transaction(s) (synthetic, not broadcast) · ${w.bytes.length} bytes${v.mined ? ` · header roots in ${v.mined}` : ""}`);
+    return 0;
+  } catch (e) {
+    env.err(`skein-host pack: ${(e as Error).message}`);
+    return 1;
+  } finally { close(); }
+}
+
 /**
  * `skein-host run`: the router (router.ts) on SKEIN_ROUTER_PORT (default
  * 8100, the messagebox URL clients already use), every enabled row hydrated
@@ -368,15 +549,7 @@ function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" 
 export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise<Host> {
   const v = env.vars;
   const home = homeOf(v);
-  const named = (s: string | undefined, d: string) => { const [handle, domain = "localhost"] = (s || d).split("@"); return { handle: handle!, domain }; };
-  const router = new Router({
-    db, ...wallets(v, home),
-    owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
-    fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, mailboxHost: v.SKEIN_MAILBOX_HOST,
-    kernel: { env: { SKEIN_HOME: home } },
-    log: (source, line) => env.out(`[${source}] ${line}`),
-    ...o.router,
-  });
+  const router = new Router({ ...routerOptions(db, env), ...o.router });
   const supervisor = new Supervisor({ out: env.out, err: env.err, killAfterMs: o.killAfterMs });
   const explorers = new Map<string, { port: number; s: Supervised }>();
   const enabled = db.list("enabled");

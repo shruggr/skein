@@ -268,3 +268,40 @@ export async function bootStore(o: { db: string; handle: string; domain: string;
     await k.stop(5000);
   }
 }
+
+// ---------------------------------------------------------------- more sources
+
+/** Blocks out of a store (a store file opened read-only, or anything with `bytes`). */
+export function storeObjects(s: { bytes(cid: CID): Promise<Uint8Array> }): Objects {
+  return { get: async (cid) => { try { return await s.bytes(cid); } catch { return undefined; } } };
+}
+
+/** The first source that has the block. */
+export function anyOf(...sources: Objects[]): Objects {
+  return { get: async (cid) => { for (const s of sources) { const b = await s.get(cid); if (b) return b; } return undefined; } };
+}
+
+/** The modules in a wasm directory (the repo's wasm/: the pinned builds), by their raw CIDs; hashed on first use. */
+export function wasmDirObjects(dir: string): Objects {
+  let byCid: Map<string, string> | undefined;
+  return {
+    get: async (cid) => {
+      if (cid.code !== RAW) return undefined;
+      const { readdirSync, readFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      if (!byCid) {
+        byCid = new Map();
+        for (const f of readdirSync(dir)) if (f.endsWith(".wasm") || f.endsWith(".zip")) byCid.set(rawCid(readFileSync(join(dir, f))).toString(), join(dir, f));
+      }
+      const p = byCid.get(cid.toString());
+      return p ? new Uint8Array(readFileSync(p)) : undefined;
+    },
+  };
+}
+
+/** Source B: a packet file, verified (packet.ts) — a system tree to boot, or a checkpoint to restore. */
+export async function packetSource(bytes: Uint8Array, o: import("./packet.ts").ReadOptions = {}): Promise<BootSource> {
+  const { readPacket } = await import("./packet.ts");
+  const v = await readPacket(bytes, o);
+  return v.kind === "tree" ? { kind: "tree", root: v.scope, objects: v.blocks } : { kind: "checkpoint", state: v.scope, blocks: v.list };
+}

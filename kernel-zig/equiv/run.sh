@@ -42,6 +42,9 @@ fi
 echo "== the wallet in the VM (#29): oracle signing, plain entries, http to a fake ARC, deadline wakes; replayed"
 "${node[@]}" "$kz/equiv/wallet.ts" || status=1
 
+echo "== bootstrap (#4): a system tree from a directory and from a packet, chatted with; a checkpoint restored; replayed"
+"${node[@]}" "$kz/equiv/boot.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 
