@@ -13,6 +13,7 @@ const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
 const ipc = @import("ipc.zig");
 const logm = @import("log.zig");
+const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
 const replay = @import("replay.zig");
@@ -136,6 +137,11 @@ const Server = struct {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
                 .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
             }
+        } else if (eq(u8, op, "programs")) {
+            // The programs this kernel pins (a genesis's `programs`): their records put, name → CID.
+            var m = cbor.MapBuilder.init(a);
+            for (programsm.program_names) |name| try m.put(name, cbor.cidv(try s.store.put(a, try programsm.program(a, name))));
+            s.reply(a, id, m.value(), null, null);
         } else if (eq(u8, op, "genesis")) {
             s.reply(a, id, logm.genesisOf(a, s.store) catch .null, null, null);
         } else if (eq(u8, op, "boxes")) {
@@ -216,7 +222,7 @@ const Server = struct {
         m.put("domain", cbor.string(d)) catch {};
         return ctx(p).request(a, "resolve", m.value()) catch |err| blk: {
             var e = cbor.MapBuilder.init(a);
-            e.put("identityKey", cbor.string("")) catch {};
+            e.put("identityKey", .{ .bytes = "" }) catch {};
             e.put("error", cbor.string(if (err == error.PeerError) last_peer_error else @errorName(err))) catch {};
             break :blk e.value();
         };

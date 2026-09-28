@@ -12,11 +12,11 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
-    .{ .name = "run-handler", .cid = "bafkreiawt6fpfgcnjokta75shlzu7ej3o3jzyon2bqhdu3q5gl7gywezjm" },
-    .{ .name = "objects-handler", .cid = "bafkreid6muh6uqwhrouywofov75uubrpv26ykojydfb5j2x5abpb342al4" },
-    .{ .name = "head-handler", .cid = "bafkreibffmjtkr6q7xalmzia3uzant7kyt6orrpx5l76tbmnmz2wmmso7q" },
-    .{ .name = "subscribe-handler", .cid = "bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e" },
-    .{ .name = "loop", .cid = "bafkreihi2lx7lj54qaw4lopithify5x5gm7tcdomfig3bjijoqzj5sj2ty" },
+    .{ .name = "run-handler", .cid = "bafkreif57vlek2v7lbfa5y43txx7svtlseanithrjxjldqveknwvt3vfwm" },
+    .{ .name = "objects-handler", .cid = "bafkreiauysb5a3aj7ucs3eqeq27qgu5xo6vcw2olx5lhbbr54xy5qalgm4" },
+    .{ .name = "head-handler", .cid = "bafkreiftxmnqsysrb4cfz5me7suztijkx5deovtaquohi2kzledivjq2ua" },
+    .{ .name = "subscribe-handler", .cid = "bafkreibz2k42tzmitpxy5xqzakko6xuxigcp3x6gcg4dt64mqpztnnazia" },
+    .{ .name = "loop", .cid = "bafkreiabv7a5lwimtdlt3bj4ac7il27xdurdil2lgbngavvotpfb3m3doq" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreibcgstrnbzzrjii3unfynwt3tj6jo26qe4i5ktiueh7fc6brxke24" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },

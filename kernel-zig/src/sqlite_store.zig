@@ -50,16 +50,21 @@ pub const SqliteStore = struct {
         return init(alloc, db, path, true);
     }
 
-    /// A store to run on, created if missing. A store written before fuel
-    /// metering (issue #5) that holds a log is refused: its updates carry no
-    /// fuel, so it cannot be carried on or replayed as it stands (re-genesis).
+    /// A store to run on, created if missing. A store with a log in an older
+    /// format is refused (re-genesis): before fuel metering (issue #5) its
+    /// updates carry no fuel; before format 2 (issue #33) its entries are
+    /// host-signed and its keys hex.
     pub fn open(alloc: std.mem.Allocator, path: []const u8) !*SqliteStore {
         if (std.fs.cwd().statFile(path)) |st| {
             if (st.size > 0) {
                 const probe = try openReadOnly(alloc, path);
                 defer probe.close();
                 if (probe.predatesFuel()) {
-                    std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    if (probe.ix.loaded_format < 1) {
+                        std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    } else {
+                        std.log.err("{s}: a store written before format 2 (issue #33: unsigned entries, keys as bytes): refused (start a new store: re-genesis)", .{path});
+                    }
                     return error.PredatesFuel;
                 }
             }
@@ -98,8 +103,8 @@ pub const SqliteStore = struct {
         return s;
     }
 
-    /// Holds a log whose updates were written before fuel (a state record
-    /// without `format`, or an older file's tables).
+    /// Holds a log written in an older format than this kernel's (a state
+    /// record without `format` or with a lower one, or an older file's tables).
     pub fn predatesFuel(s: *SqliteStore) bool {
         return s.ix.loaded_format < index.FORMAT and s.ix.work.tip.get() != null;
     }

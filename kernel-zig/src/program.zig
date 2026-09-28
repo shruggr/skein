@@ -117,7 +117,8 @@ pub const Imports = struct {
             },
             .subscribe => {
                 const op = try imp.strAt(p, a[0], a[1]);
-                const sender: ?[]const u8 = if (a[3] != 0) try imp.strAt(p, a[2], a[3]) else null;
+                // The sender is an identity key's 33 bytes (format 2, #33), not text.
+                const sender: ?[]const u8 = if (a[3] != 0) try imp.alloc.dupe(u8, p.slice(a[2], a[3]) catch return error.OutOfMemory) else null;
                 const box = try imp.strAt(p, a[4], a[5]);
                 try h.subscribe(imp, op, sender, box, try imp.cidAt(p, a[6], a[7]));
                 return 0;

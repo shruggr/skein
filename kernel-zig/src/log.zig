@@ -1,6 +1,13 @@
-// The input log (src/runtime/log.ts) and the record shapes the scheduler
-// checks (records.ts): entry validation and its host signature, the genesis,
-// emits, attested calls.
+// The input log and the record shapes the scheduler checks, in format 2
+// (issue #33): entries are unsigned — `prev` fixes the order, messages are
+// signed by their senders, the router's stamp is the environment's word — and
+// identity keys are 33-byte byte strings in every record (no hex).
+//
+//   entry    {kind: "log", prev, n, time, genesis | envelope+box+body | wake | outcome}
+//   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
+//             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
+//             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?}
+//   emit     {kind: "emit", to: bytes, box, body, envelope}   (the envelope in either encoding, envelope.zig)
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -33,7 +40,7 @@ pub fn isLogEntry(e: Value) bool {
     const kind = Value.str(e.get("kind")) orelse return false;
     if (!std.mem.eql(u8, kind, "log")) return false;
     if (!Value.isNumber(e.get("n"))) return false;
-    if (Value.bytesOf(e.get("sig")) == null) return false;
+    if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
     for ([_][]const u8{ "genesis", "envelope", "wake", "outcome" }) |k| {
         if (e.get(k) != null) count += 1;
@@ -42,17 +49,6 @@ pub fn isLogEntry(e: Value) bool {
     if ((e.get("envelope") == null) != (e.get("body") == null)) return false;
     if (e.get("outcome")) |o| if (!isOutcome(o)) return false;
     return true;
-}
-
-/// The signed bytes: the entry's dag-cbor without `sig`.
-pub fn entryBytes(a: std.mem.Allocator, e: Value) ![]u8 {
-    return cbor.encode(a, try cbor.without(a, e, "sig"));
-}
-
-pub fn verifyEntry(a: std.mem.Allocator, e: Value, host: []const u8) bool {
-    const sig = Value.bytesOf(e.get("sig")) orelse return false;
-    const bytes = entryBytes(a, e) catch return false;
-    return secp.verifyAnyone(host, 2, "skein log", "1", bytes, sig);
 }
 
 fn isCidMap(v: ?Value) bool {
@@ -67,7 +63,7 @@ fn isSubscription(x: Value) bool {
     if (x != .map) return false;
     const m = x.get("match") orelse return false;
     if (m != .map) return false;
-    if (m.get("sender")) |s| if (s != .string or !secp.isIdentity(s.string)) return false;
+    if (m.get("sender")) |s| if (!secp.isKey(Value.bytesOf(s) orelse return false)) return false;
     if (m.get("box")) |b| if (b != .string) return false;
     return Value.cidOf(x.get("handler")) != null;
 }
@@ -77,9 +73,10 @@ pub fn isGenesis(x: ?Value) bool {
     const g = x orelse return false;
     if (g != .map) return false;
     if (!std.mem.eql(u8, Value.str(g.get("kind")) orelse return false, "genesis")) return false;
-    for ([_][]const u8{ "identity", "owner", "host" }) |k| {
-        if (!secp.isIdentity(Value.str(g.get(k)) orelse return false)) return false;
+    for ([_][]const u8{ "identity", "owner" }) |k| {
+        if (!secp.isKey(Value.bytesOf(g.get(k)) orelse return false)) return false;
     }
+    if (g.get("host") != null) return false; // format 1
     if (Value.str(g.get("handle")) == null or Value.str(g.get("domain")) == null) return false;
     if (!isCidMap(g.get("programs"))) return false;
     const subs = g.get("subscriptions") orelse return false;
@@ -87,17 +84,17 @@ pub fn isGenesis(x: ?Value) bool {
     for (subs.array) |s| if (!isSubscription(s)) return false;
     if (g.get("peers")) |p| {
         if (p != .map) return false;
-        for (p.map) |e| if (e.value != .string or !secp.isIdentity(e.value.string)) return false;
+        for (p.map) |e| if (!secp.isKey(Value.bytesOf(e.value) orelse return false)) return false;
     }
     if (g.get("defaults")) |d| {
         if (d != .map) return false;
         for (d.map) |e| if (e.value != .string) return false;
     }
     if (g.get("names")) |n| {
-        if (n != .map) return false;
-        for (n.map) |e| {
-            if (!secp.isIdentity(e.key)) return false;
-            if (e.value != .map or Value.str(e.value.get("handle")) == null or Value.str(e.value.get("domain")) == null) return false;
+        if (n != .array) return false;
+        for (n.array) |e| {
+            if (e != .map or !secp.isKey(Value.bytesOf(e.get("identityKey")) orelse return false)) return false;
+            if (Value.str(e.get("handle")) == null or Value.str(e.get("domain")) == null) return false;
         }
     }
     if (g.get("collect")) |c| {
@@ -112,12 +109,12 @@ pub fn isEmit(x: ?Value) bool {
     const e = x orelse return false;
     if (e != .map) return false;
     if (!std.mem.eql(u8, Value.str(e.get("kind")) orelse return false, "emit")) return false;
-    if (!secp.isIdentity(Value.str(e.get("to")) orelse return false)) return false;
+    if (!secp.isKey(Value.bytesOf(e.get("to")) orelse return false)) return false;
     const box = Value.str(e.get("box")) orelse return false;
     if (box.len == 0) return false;
     if (Value.cidOf(e.get("body")) == null) return false;
     const env = e.get("envelope") orelse return false;
-    return env == .map and Value.str(env.get("content")) != null;
+    return env == .map and env.get("content") != null;
 }
 
 /// records.ts isAttested.

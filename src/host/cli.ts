@@ -340,9 +340,9 @@ export interface Host {
  * key derived from the router's master secret (key ID = the handle); the
  * router's BRC-104 identity is another child of it.
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "host" | "authWallet"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "authWallet"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), host: oracle.routerWallet(), authWallet: oracle.routerWallet() };
+  return { walletFor: (row) => oracle.wallet(row.handle), authWallet: oracle.routerWallet() };
 }
 
 /**

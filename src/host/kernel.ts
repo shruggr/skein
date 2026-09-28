@@ -152,6 +152,9 @@ export class Kernel {
           try {
             r = this.o.resolve ? await this.o.resolve(handle, domain) : { identityKey: "", error: "no resolver" };
           } catch (e) { r = { identityKey: "", error: (e as Error).message }; }
+          // Format 2 (#33): the identity key as its 33 bytes (empty when unknown); the rest as answered.
+          const k = r.identityKey;
+          r = { ...r, identityKey: typeof k === "string" && /^0[23][0-9a-f]{64}$/.test(k) ? Uint8Array.from(Buffer.from(k, "hex")) : k instanceof Uint8Array ? k : new Uint8Array() };
           return answer(decode(encode(r).bytes)); // dag-cbor as recorded (undefined dropped)
         }
         case "send": {

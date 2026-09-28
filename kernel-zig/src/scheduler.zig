@@ -150,9 +150,10 @@ pub const Runtime = struct {
         s(rt.peers.ctx, buf.items);
     }
 
+    /// The instance's identity key (33 bytes).
     pub fn identity(rt: *Runtime) []const u8 {
         const g = rt.genesis orelse return "";
-        return Value.str(g.get("identity")) orelse "";
+        return Value.bytesOf(g.get("identity")) orelse "";
     }
 
     // ------------------------------------------------------------ small helpers
@@ -209,7 +210,7 @@ pub const Runtime = struct {
         try rt.loadGenesis();
         rt.cursor = try rt.store.cursorGet();
         if (rt.cursor > 0 and (try rt.store.chainTip(a, try subs.origin(a))) == null) return error.PredatesSubscriptions;
-        rt.say("runtime {s} · log {d} processed{s}", .{ shortStr(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
+        rt.say("runtime {s} · log {d} processed{s}", .{ shortKey(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
         try rt.store.commit();
@@ -277,11 +278,9 @@ pub const Runtime = struct {
     }
 
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, signed: ?Value, body: ?[]const u8) !?AdmitResult {
-        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a signed envelope, wake or outcome entry" };
+        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want an envelope, wake or outcome entry (format 2: unsigned)" };
         try rt.loadGenesis();
-        const g = rt.genesis orelse return .{ .invalid = "admit: no genesis" };
-        const host = Value.str(g.get("host")).?;
-        if (!logm.verifyEntry(a, entry, host)) return .{ .rejected = .{ .reason = .bad_signature, .message = try std.fmt.allocPrint(a, "admit: entry #{d} is not signed by the host {s}", .{ Value.intOf(entry.get("n")) orelse 0, shortStr(host) }) } };
+        if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
         if (entry.get("outcome")) |o| {
             const emit = Value.cidOf(o.get("emit")).?;
             if (!logm.isEmit(rt.store.getOpt(a, emit))) return .{ .invalid = try std.fmt.allocPrint(a, "admit: outcome for {s}, which is not an emit in this store", .{fmtCid(a, emit)}) };
@@ -295,10 +294,8 @@ pub const Runtime = struct {
         const bv = cbor.decode(a, bb) catch return .{ .invalid = "CBOR decode error" };
         const blk = try cbor.block(a, bv);
         if (!std.mem.eql(u8, blk.bytes, bb)) return .{ .invalid = "admit: the body is not canonical dag-cbor" };
-        var hb: [64]u8 = undefined;
-        const want = envelope.contentHash(&hb, bb);
-        const ch = Value.str(sp.get("contentHash")) orelse "";
-        if (!std.mem.eql(u8, ch, want)) return .{ .invalid = "admit: the body does not match the envelope's contentHash" };
+        if (!envelope.isSigned(sp) or !envelope.verify(a, sp)) return .{ .invalid = "admit: the envelope's signature does not verify" };
+        if (!envelope.hashMatches(sp, bb)) return .{ .invalid = "admit: the body does not match the envelope's contentHash" };
         const ec = try cbor.cidOfValue(a, sp);
         if (!std.mem.eql(u8, blk.cid, Value.cidOf(entry.get("body")).?) or !std.mem.eql(u8, ec, env_cid)) return .{ .invalid = "admit: the records are not the ones the entry names" };
         if (try rt.store.byEnvelope(a, env_cid) != null) return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "envelope {s} is already admitted", .{fmtCid(a, env_cid)}) } };
@@ -369,8 +366,8 @@ pub const Runtime = struct {
             last_error = try std.fmt.allocPrint(rt.life.allocator(), "#{d}: no genesis", .{n});
             return error.NoGenesis;
         };
-        if (!logm.isLogEntry(e) or !logm.verifyEntry(a, e, Value.str(g.get("host")).?)) {
-            last_error = try std.fmt.allocPrint(rt.life.allocator(), "#{d} {s}: bad log entry signature; stopping", .{ n, short(a, entry) });
+        if (!logm.isLogEntry(e)) {
+            last_error = try std.fmt.allocPrint(rt.life.allocator(), "#{d} {s}: not a format-2 log entry; stopping", .{ n, short(a, entry) });
             return error.BadSignature;
         }
         const time = logm.stampOf(e.get("time")).?;
@@ -381,9 +378,9 @@ pub const Runtime = struct {
             const ss = g.get("subscriptions").?.array;
             for (ss) |s| {
                 const m = s.get("match").?;
-                _ = try subs.subscribe(a, rt.store, .{ .op = "add", .sender = Value.str(m.get("sender")), .box = Value.str(m.get("box")) orelse "", .handler = Value.cidOf(s.get("handler")).? }, .{ .thread = null, .input = entry, .at = at });
+                _ = try subs.subscribe(a, rt.store, .{ .op = "add", .sender = Value.bytesOf(m.get("sender")), .box = Value.str(m.get("box")) orelse "", .handler = Value.cidOf(s.get("handler")).? }, .{ .thread = null, .input = entry, .at = at });
             }
-            rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} subscriptions", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortStr(Value.str(g.get("owner")).?), ss.len });
+            rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} subscriptions", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(Value.bytesOf(g.get("owner")).?), ss.len });
             return;
         }
 
@@ -442,8 +439,8 @@ pub const Runtime = struct {
         if (Value.cidOf(e.get("envelope"))) |env_cid| {
             const box = Value.str(e.get("box")) orelse "";
             const env = rt.store.getOpt(a, env_cid);
-            const sender = senderOf(env);
-            const what = try std.fmt.allocPrint(a, "#{d} envelope {s} in {s} from {s}", .{ n, short(a, env_cid), box, if (sender) |x| shortStr(x) else "?" });
+            const sender = senderOf(a, env);
+            const what = try std.fmt.allocPrint(a, "#{d} envelope {s} in {s} from {s}", .{ n, short(a, env_cid), box, if (sender) |x| shortKey(x) else "?" });
             const rto = rt.replyToOf(a, Value.cidOf(e.get("body")));
             switch (rto) {
                 .none => {},
@@ -466,7 +463,7 @@ pub const Runtime = struct {
                     try r.put("envelope", cbor.cidv(env_cid));
                     try r.put("body", cbor.cidv(Value.cidOf(e.get("body")).?));
                     try r.put("box", cbor.string(box));
-                    try r.put("sender", cbor.string(sender.?));
+                    try r.put("sender", .{ .bytes = sender.? });
                     try r.put("replyTo", cbor.cidv(reply_to));
                     try rt.step(a, t.?, .{ .cid = entry, .e = e }, null, r.value(), null);
                     return;
@@ -488,7 +485,7 @@ pub const Runtime = struct {
             try args.put("envelope", cbor.cidv(env_cid));
             try args.put("body", cbor.optCid(Value.cidOf(e.get("body"))));
             try args.put("box", cbor.string(box));
-            try args.put("sender", cbor.string(sender.?));
+            try args.put("sender", .{ .bytes = sender.? });
             var origin = cbor.MapBuilder.init(a);
             try origin.put("kind", cbor.string("thread"));
             try origin.put("program", cbor.cidv(sub.?.handler));
@@ -502,11 +499,26 @@ pub const Runtime = struct {
         }
     }
 
-    fn senderOf(env: ?Value) ?[]const u8 {
+    /// The envelope's sender as 33 bytes, whichever encoding it is kept in.
+    fn senderOf(a: std.mem.Allocator, env: ?Value) ?[]const u8 {
         const e = env orelse return null;
-        const s = e.get("sender") orelse return null;
-        const k = Value.str(s.get("identityKey")) orelse return null;
-        return if (secp.isIdentity(k)) k else null;
+        var kb: [33]u8 = undefined;
+        const k = envelope.senderKey(&kb, e) orelse return null;
+        return a.dupe(u8, k) catch null;
+    }
+
+    /// The last 8 hex digits of a key's bytes, for log lines.
+    fn shortKey(k: []const u8) []const u8 {
+        const S = struct {
+            threadlocal var bufs: [4][8]u8 = undefined;
+            threadlocal var next: usize = 0;
+        };
+        if (k.len < 4) return "?";
+        const hex = std.fmt.bytesToHex(k[k.len - 4 ..][0..4].*, .lower);
+        const buf = &S.bufs[S.next % 4];
+        S.next +%= 1;
+        buf.* = hex;
+        return buf;
     }
 
     const ReplyTo = union(enum) { none, not_cid, cid: []const u8 };
@@ -534,7 +546,7 @@ pub const Runtime = struct {
                 const e = rt.store.getOpt(a, c.cid);
                 if (!logm.isEmit(e)) continue;
                 const ok = switch (which) {
-                    .to => |to| std.mem.eql(u8, Value.str(e.?.get("to")).?, to),
+                    .to => |to| std.mem.eql(u8, Value.bytesOf(e.?.get("to")).?, to),
                     .emit => |em| std.mem.eql(u8, c.cid, em),
                 };
                 if (!ok) continue;
@@ -975,7 +987,7 @@ pub const Runtime = struct {
         const domain = name[at.? + 1 ..];
         const answer = try attest(st, imp, "resolve", .{ .bytes = name }, .{ .resolve = .{ handle, domain } });
         const r = cbor.decode(a, answer) catch return imp.failFmt("resolve: {s} did not resolve to an identity key", .{name});
-        if (r != .map or !secp.isIdentity(Value.str(r.get("identityKey")) orelse "")) return imp.failFmt("resolve: {s} did not resolve to an identity key", .{name});
+        if (r != .map or !secp.isKey(Value.bytesOf(r.get("identityKey")) orelse "")) return imp.failFmt("resolve: {s} did not resolve to an identity key", .{name});
         return answer;
     }
     fn hHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
@@ -1031,7 +1043,7 @@ pub const Runtime = struct {
                 .resolve => |hd| {
                     const res: Value = if (rt.peers.resolve) |rf| rf(rt.peers.ctx, a, hd[0], hd[1]) else blk: {
                         var m = cbor.MapBuilder.init(a);
-                        try m.put("identityKey", cbor.string(""));
+                        try m.put("identityKey", .{ .bytes = "" });
                         try m.put("error", cbor.string("no resolver"));
                         break :blk m.value();
                     };
@@ -1350,14 +1362,15 @@ fn jsTrim(a: std.mem.Allocator, b: []const u8) ![]const u8 {
 fn emitProblem(a: std.mem.Allocator, e: Value, body: []const u8, identity: []const u8) !?[]const u8 {
     const env = e.get("envelope").?;
     if (!envelope.isEnvelope(env)) return "the envelope is not a complete BRC-169 envelope";
-    const key = Value.str(env.get("sender").?.get("identityKey")).?;
-    if (!std.mem.eql(u8, key, identity)) return try std.fmt.allocPrint(a, "the envelope's sender is {s}, not this instance", .{key[key.len -| 8..]});
+    var kb: [33]u8 = undefined;
+    const key = envelope.senderKey(&kb, env).?;
+    if (!std.mem.eql(u8, key, identity)) return try std.fmt.allocPrint(a, "the envelope's sender is {s}, not this instance", .{Runtime.shortKey(key)});
     if (!envelope.verify(a, env)) return "the envelope's signature does not verify";
-    const raw = try envelope.base64Decode(a, Value.str(env.get("content")).?);
+    const raw = envelope.contentBytes(a, env) catch return "the envelope has no content";
     const m = envelope.brc78Decode(raw) catch |err| return try envelope.brc78Message(a, raw, err);
-    const to = Value.str(e.get("to")).?;
-    if (!std.mem.eql(u8, &m.recipient, to)) return try std.fmt.allocPrint(a, "the content is encrypted to {s}, not {s}", .{ m.recipient[58..], to[to.len -| 8..] });
-    var hb: [64]u8 = undefined;
-    if (!std.mem.eql(u8, Value.str(env.get("contentHash")).?, envelope.contentHash(&hb, body))) return "contentHash is not the body's";
+    const to = Value.bytesOf(e.get("to")).?;
+    const to_hex = std.fmt.bytesToHex(to[0..33].*, .lower);
+    if (!std.mem.eql(u8, &m.recipient, &to_hex)) return try std.fmt.allocPrint(a, "the content is encrypted to {s}, not {s}", .{ m.recipient[58..], to_hex[58..] });
+    if (!envelope.hashMatches(env, body)) return "contentHash is not the body's";
     return null;
 }

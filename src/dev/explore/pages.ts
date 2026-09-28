@@ -137,7 +137,7 @@ export async function overview(w: World): Promise<string> {
   return layout(`${g.handle}@${g.domain}`, `<h1>${esc(g.handle)}@${esc(g.domain)}</h1>
 ${kv([
     ["identity", ident(g.identity)],
-    ["host", ident(g.host)],
+    ["host", g.host ? ident(g.host) : `<span class="mut small">none (format 2)</span>`],
     ["owner", ident(g.owner)],
     ...Object.entries(g.peers ?? {}).map(([r, id]): [string, string] => [`peer ${r}`, ident(id)]),
     ["state hash", tip ? link(w, tip.cid, tip.cid.toString()) : "(empty)"],
@@ -200,7 +200,7 @@ export async function entryPage(w: World, cid: CID): Promise<string> {
     ["prev", e.prev ? link(w, e.prev, e.prev.toString()) : "—"],
     ["time", `${time(stampMs(e.time))} <span class="mut small">[${e.time.join(", ")}]</span>`],
     ["processed", e.n < w.cursor ? "yes" : `<span class="st new">pending</span>`],
-    ["sig", `<code>${Buffer.from(e.sig).toString("hex").slice(0, 24)}…</code> <span class="mut small">by the host</span>`],
+    ...(e.sig ? [["sig", `<code>${Buffer.from(e.sig).toString("hex").slice(0, 24)}…</code> <span class="mut small">by the host</span>`] as [string, string]] : [["sig", `<span class="mut small">none: format 2 (#33), entries are unsigned</span>`] as [string, string]]),
   ]));
   if (e.genesis) parts.push(`<h2>genesis</h2>${json(w, await maybe(w.store, e.genesis))}`);
   if (e.wake) parts.push(`<h2>wake</h2><p>the deadline of ${w.byThread.get(e.wake.toString()) ? threadLink(w, w.byThread.get(e.wake.toString())!) : link(w, e.wake)}</p>`);

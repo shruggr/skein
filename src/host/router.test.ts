@@ -40,7 +40,7 @@ test("router: messagebox client → instance → owner's mailbox; list/ack; idle
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
   const router = new Router({
-    db, walletFor: () => ephemeralWallet(instanceKey), host: ephemeralWallet(), authWallet: ephemeralWallet(),
+    db, walletFor: () => ephemeralWallet(instanceKey), authWallet: ephemeralWallet(),
     owner: ownerId, idleMs: 1500, kernel: { env: { SKEIN_HOME: home } },
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });

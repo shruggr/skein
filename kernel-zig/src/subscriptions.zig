@@ -1,6 +1,7 @@
 // Subscriptions (src/runtime/subscriptions.ts): the routing table as one chain,
 // origin {kind: "subscriptions"}, one update per change {op, sender?, box,
 // handler, thread?, input, at}; the rules are the updates folded in order.
+// The sender is an identity key's 33 bytes (format 2, #33).
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const json = @import("json.zig");
@@ -43,7 +44,7 @@ pub fn matches(s: Sub, sender: []const u8, box: []const u8) bool {
 /// `op`, `sender`, `box` are given as the raw strings the program passed.
 pub fn ruleProblem(a: std.mem.Allocator, op: []const u8, sender: ?[]const u8, box: []const u8) !?[]u8 {
     if (!std.mem.eql(u8, op, "add") and !std.mem.eql(u8, op, "remove")) return try std.fmt.allocPrint(a, "op {s} is not add or remove", .{try json.quoted(a, op)});
-    if (sender) |s| if (!secp.isIdentity(s)) return try std.fmt.allocPrint(a, "sender {s} is not an identity key", .{try json.quoted(a, s)});
+    if (sender) |s| if (!secp.isKey(s)) return try std.fmt.allocPrint(a, "sender ({d} bytes) is not an identity key", .{s.len});
     if (!isBox(box)) return try std.fmt.allocPrint(a, "box {s} is not a box name", .{try json.quoted(a, box)});
     return null;
 }
@@ -53,7 +54,7 @@ pub fn fold(a: std.mem.Allocator, updates: []const Value) ![]Sub {
     for (updates) |u| {
         const r = Rule{
             .op = Value.str(u.get("op")) orelse "",
-            .sender = Value.str(u.get("sender")),
+            .sender = Value.bytesOf(u.get("sender")),
             .box = Value.str(u.get("box")) orelse "",
             .handler = Value.cidOf(u.get("handler")) orelse "",
         };
@@ -95,7 +96,7 @@ pub fn subscribe(a: std.mem.Allocator, s: Store, r: Rule, by: By) !?[]u8 {
     const o = try open(a, s);
     var m = cbor.MapBuilder.init(a);
     try m.put("op", cbor.string(r.op));
-    try m.put("sender", cbor.optStr(r.sender));
+    try m.put("sender", if (r.sender) |x| Value{ .bytes = x } else null);
     try m.put("box", cbor.string(r.box));
     try m.put("handler", cbor.cidv(r.handler));
     try m.put("thread", cbor.optCid(by.thread));

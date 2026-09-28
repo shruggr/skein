@@ -25,19 +25,23 @@
 // router is also the instances' oracle (oracle.ts): it answers each kernel's
 // `wallet` import from that instance's derived key.
 
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { CID } from "multiformats/cid";
 import type { WalletInterface } from "@bsv/sdk";
-import { brc78Decode, isEnvelope, open, signedPart, verify, type Envelope } from "../envelope.ts";
+import * as dagCbor from "@ipld/dag-cbor";
+import { isEnvelope, open, type Envelope } from "../envelope.ts";
+import { asEnvelope, inspect, isCborEnvelope, openCbor } from "../envelope-cbor.ts";
 import { decode, encode } from "../runtime/cid.ts";
-import { rootIdentity, type KeyWallet } from "../runtime/identity.ts";
+import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
-import type { Runtime, Outbound } from "../runtime/scheduler.ts";
+import type { Outbound } from "../runtime/scheduler.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { AuthServer, send, type AppResponse, type AuthedRequest } from "./auth.ts";
-import { admitEntry, ensureGenesis, now as clockNow } from "./entry.ts";
-import { configFor, hostResolver } from "./host.ts";
+import { now as clockNow } from "./entry.ts";
+import { admit2, keyBytes, keyHex, writeGenesis } from "./genesis.ts";
+import { hostResolver } from "./host.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type Sleeper } from "./kernel.ts";
 import { memoryMail, type MailStore } from "./mail.ts";
@@ -48,8 +52,6 @@ export interface RouterOptions {
   db: HostDb;
   /** Each row's oracle: the wallet its kernel's `wallet` import is answered from. */
   walletFor(row: InstanceRow): Promise<WalletInterface> | WalletInterface;
-  /** Signs every entry (the log format before #33's format 2). */
-  host: KeyWallet;
   /** The router's own identity for BRC-104. */
   authWallet: WalletInterface;
   /** A new instance's genesis: the owner (required to write one), the inference peer, their names. */
@@ -71,6 +73,8 @@ export interface RouterOptions {
   kernel?: { command?: string; env?: Record<string, string | undefined> };
   /** The resolver's origin for BRC-169/paymail beyond the rows (default: none; rows and mailboxes only). */
   resolveOrigin?: string;
+  /** Tests: answer every kernel's `resolve` instead of the rows. */
+  resolve?(handle: string, domain: string): Promise<Record<string, unknown>>;
 }
 
 interface Loaded { row: InstanceRow; kernel: Kernel; identity: string; wallet: WalletInterface }
@@ -80,6 +84,11 @@ export interface Delivered { status: number; body: Record<string, unknown> }
 const ok = (recipient: string, messageId: string): Delivered => ({ status: 200, body: { status: "success", message: "Your message has been sent to 1 recipient(s).", results: [{ recipient, messageId }] } });
 const err = (status: number, code: string, description: string): Delivered => ({ status, body: { status: "error", code, description } });
 const KEY = /^0[23][0-9a-f]{64}$/;
+
+/** A kept body for a BRC-231 listing: bytes as they came, JSON as its UTF-8 text. */
+const bodyBytes = (b: unknown): Uint8Array => b instanceof Uint8Array ? b : new TextEncoder().encode(typeof b === "string" ? b : JSON.stringify(b));
+/** A kept body for a JSON listing: bytes wrapped as {"dag-cbor": base64}, JSON as it came. */
+const bodyJson = (b: unknown): unknown => b instanceof Uint8Array ? { "dag-cbor": Buffer.from(b).toString("base64") } : b;
 
 export class Router {
   readonly o: RouterOptions;
@@ -93,7 +102,6 @@ export class Router {
   private timer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setInterval>;
   private stopped = false;
-  private hostKey?: Promise<string>;
   server?: Server;
 
   constructor(o: RouterOptions) {
@@ -121,6 +129,16 @@ export class Router {
     this.server?.close();
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
+  }
+
+  /** Until nothing is queued and every loaded kernel has processed what it was given (tests, corpus). */
+  async settled(): Promise<void> {
+    for (let i = 0; i < 1000; i++) {
+      await Promise.all([...this.queues.values()]);
+      await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {})));
+      await new Promise((r) => setImmediate(r));
+      if (!this.queues.size && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
+    }
   }
 
   /** Run `f` after everything else queued for this instance (admissions are serial per instance). */
@@ -159,6 +177,7 @@ export class Router {
     const kernel = new Kernel({
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       resolve: async (h, d) => {
+        if (this.o.resolve) return await this.o.resolve(h, d);
         if (!this.o.resolveOrigin) { const k = rows(h, d); return k ? { identityKey: k, via: "host" } : { identityKey: "", error: `${h}@${d}: not an instance or mailbox on this host` }; }
         return await resolve(h, d);
       },
@@ -173,15 +192,15 @@ export class Router {
     try {
       if (!(await kernel.store.log.tip())) {
         if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-        const config = configFor(row, { owner: this.o.owner, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle });
-        if (this.o.fuelPerStep) config.defaults = { ...DEFAULTS, fuelPerStep: this.o.fuelPerStep };
-        const g = await ensureGenesis(kernel.store, wallet, this.o.host, config, this.now());
-        this.say(handle, `genesis ${g.entry}`);
+        const e = await writeGenesis(kernel, {
+          identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
+          defaults: this.o.fuelPerStep ? { ...DEFAULTS, fuelPerStep: this.o.fuelPerStep } : undefined,
+        }, this.now());
+        this.say(handle, `genesis ${e}`);
       }
-      const g = await kernel.genesis() as { identity?: string; host?: string };
-      if (g.identity !== identity) throw new Error(`the oracle (${short(identity)}) is not this instance's identity (${short(String(g.identity))})`);
-      const hostKey = await (this.hostKey ??= rootIdentity(this.o.host));
-      if (g.host !== undefined && g.host !== hostKey) throw new Error(`the router's entry key (${short(hostKey)}) is not this instance's host (${short(String(g.host))})`);
+      const g = await kernel.genesis() as { identity?: unknown } | null;
+      if (!g) throw new Error("the store's log does not start with a format-2 genesis (issue #33): start a new store (re-genesis)");
+      if (keyHex(g.identity) !== identity) throw new Error(`the oracle (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done
@@ -236,7 +255,7 @@ export class Router {
           const at = this.now();
           for (const { thread, until } of l.kernel.sleepersDue()) {
             if (until > stampMs(at)) break;
-            const e = await admitEntry(l.kernel as unknown as Runtime, this.o.host, { wake: thread }, {}, at);
+            const e = await admit2(l.kernel, { wake: thread }, {}, at);
             this.say(handle, `tick: wake ${short(thread)} as ${short(e)}`);
           }
           this.settle(l);
@@ -280,10 +299,9 @@ export class Router {
         this.say(handle, `inbox ${m.box} ${m.messageId.slice(0, 12)}: rejected: ${s.reason}`);
         return err(400, "ERR_REJECTED", s.reason);
       }
-      const signed = signedPart(s.envelope);
-      const envelope = encode(signed).cid;
+      const envelope = s.id;
       try {
-        const entry = await admitEntry(l.kernel as unknown as Runtime, this.o.host, { envelope, box: m.box, body: encode(decode(s.body)).cid }, { envelope: signed, body: s.body }, this.now());
+        const entry = await admit2(l.kernel, { envelope, box: m.box, body: encode(decode(s.body)).cid }, { envelope: s.signed, body: s.body }, this.now());
         this.say(handle, `inbox ${m.box}: admitted ${short(envelope)} as ${short(entry)}`);
         this.settle(l);
       } catch (e) {
@@ -294,27 +312,25 @@ export class Router {
     });
   }
 
-  /** docs/MESSAGES.md "Replay protection": a BRC-169 envelope, signed by the authenticated sender, to this instance, new, decrypting to canonical dag-cbor matching contentHash. */
-  private async screen(l: Loaded, sender: string, raw: unknown): Promise<{ ok: true; envelope: Envelope; body: Uint8Array } | { ok: false; reason: string; duplicate?: boolean }> {
-    let env: unknown = raw;
-    try {
-      for (let i = 0; i < 2 && typeof env === "string"; i++) env = JSON.parse(env);
-    } catch {
-      return { ok: false, reason: "body is not JSON" };
-    }
-    if (!isEnvelope(env)) return { ok: false, reason: "body is not a BRC-169 envelope" };
-    if (!verify(env)) return { ok: false, reason: "envelope signature does not verify" };
-    if (sender !== env.sender.identityKey) return { ok: false, reason: `authenticated sender ${short(sender)} is not envelope.sender ${short(env.sender.identityKey)}` };
-    try {
-      if (brc78Decode(Buffer.from(env.content, "base64")).recipient !== l.identity) return { ok: false, reason: "not addressed to this instance" };
-    } catch (e) {
-      return { ok: false, reason: (e as Error).message };
-    }
-    const id = encode(signedPart(env)).cid;
-    if (await l.kernel.store.log.byEnvelope(id)) return { ok: false, reason: `envelope ${short(id)} was already admitted`, duplicate: true };
+  /**
+   * docs/MESSAGES.md "Replay protection": a BRC-169 envelope in either form
+   * (§7.2 JSON from JSON clients, §7.3 dag-cbor from BRC-231 clients and
+   * instances), signed by the authenticated sender, to this instance, new,
+   * decrypting (through the oracle) to canonical dag-cbor matching
+   * contentHash. Kept in the form it was made in.
+   */
+  private async screen(l: Loaded, sender: string, raw: unknown): Promise<{ ok: true; signed: object; id: CID; body: Uint8Array } | { ok: false; reason: string; duplicate?: boolean }> {
+    const env = asEnvelope(raw);
+    if (!env) return { ok: false, reason: "body is not a BRC-169 envelope (§7.2 JSON or §7.3 dag-cbor)" };
+    let x: ReturnType<typeof inspect>;
+    try { x = inspect(env); } catch (e) { return { ok: false, reason: (e as Error).message }; }
+    if (!x.verified) return { ok: false, reason: "envelope signature does not verify" };
+    if (sender !== x.sender) return { ok: false, reason: `authenticated sender ${short(sender)} is not envelope.sender ${short(x.sender)}` };
+    if (x.recipient !== l.identity) return { ok: false, reason: "not addressed to this instance" };
+    if (await l.kernel.store.log.byEnvelope(x.id)) return { ok: false, reason: `envelope ${short(x.id)} was already admitted`, duplicate: true };
     let body: Uint8Array;
     try {
-      body = (await open(l.wallet, env)).body;
+      body = (isCborEnvelope(env) ? await openCbor(l.wallet, env) : await open(l.wallet, env as Envelope)).body;
     } catch (e) {
       return { ok: false, reason: (e as Error).message };
     }
@@ -323,15 +339,18 @@ export class Router {
     } catch {
       return { ok: false, reason: "the body is not dag-cbor" };
     }
-    return { ok: true, envelope: env, body };
+    return { ok: true, signed: x.signed, id: x.id, body };
   }
 
   /** An instance's emit: delivered here or refused; its outcome goes back into the emitter. */
   private async route(handle: string, identity: string, o: Outbound): Promise<void> {
-    const what = `outbox ${o.box} → ${short(o.to)}: ${short(o.cid)}`;
+    const to = keyHex(o.to);
+    const what = `outbox ${o.box} → ${short(to)}: ${short(o.cid)}`;
     let r: Delivered;
     try {
-      r = await this.deliver({ sender: identity, recipient: o.to, box: o.box, body: o.envelope, messageId: o.cid.toString() });
+      // An envelope in the §7.3 form travels as its dag-cbor bytes (BRC-231), the §7.2 form as the JSON object.
+      const body = isCborEnvelope(o.envelope) ? dagCbor.encode(o.envelope) : o.envelope;
+      r = await this.deliver({ sender: identity, recipient: to, box: o.box, body, messageId: o.cid.toString() });
     } catch (e) {
       r = err(500, "ERR_INTERNAL", (e as Error).message);
     }
@@ -340,48 +359,57 @@ export class Router {
     this.say(handle, `${what}${failed ? `: ${reason}: failed` : ""}`);
     void this.serial(handle, async () => {
       const l = await this.hydrate(handle);
-      await admitEntry(l.kernel as unknown as Runtime, this.o.host, { outcome: { emit: o.emit as CID, status: failed ? "failed" : "delivered", ...(reason ? { reason } : {}) } }, {}, this.now());
+      await admit2(l.kernel, { outcome: { emit: o.emit as CID, status: failed ? "failed" : "delivered", ...(reason ? { reason } : {}) } }, {}, this.now());
       this.settle(l);
     }).catch((e: Error) => this.say(handle, `${what}: outcome not admitted: ${e.message}`));
   }
 
   // ---------------------------------------------------------------- HTTP
 
-  /** The BRC-33 routes, the registration and the paymail PKI, after auth. */
+  /** The BRC-33 routes (JSON, or BRC-231 dag-cbor), the registration and the paymail PKI, after auth. */
   private async app(r: AuthedRequest): Promise<AppResponse> {
     const path = r.path.replace(/^\/messagebox(?=\/)/, "");
+    // BRC-231: a request in dag-cbor is answered in dag-cbor (keys and bodies as bytes); JSON in JSON.
+    const cbor = String(r.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase() === "application/cbor";
+    const reply = (status: number, b: Record<string, unknown>): AppResponse => cbor ? { status, type: "application/cbor", body: dagCbor.encode(b) } : { status, body: b };
+    const error = (status: number, code: string, description: string) => reply(status, { status: "error", code, description });
     let body: Record<string, unknown> = {};
-    try { if (r.body.length) body = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { return { status: 400, body: { status: "error", code: "ERR_BAD_JSON", description: "The body is not JSON." } }; }
-    if (r.method !== "POST") return { status: 404, body: { status: "error", code: "ERR_NOT_FOUND" } };
+    try {
+      if (r.body.length) body = (cbor ? dagCbor.decode(r.body) : JSON.parse(new TextDecoder().decode(r.body))) as Record<string, unknown>;
+    } catch { return error(400, "ERR_BAD_BODY", `The body is not ${cbor ? "dag-cbor" : "JSON"}.`); }
+    if (r.method !== "POST") return error(404, "ERR_NOT_FOUND", "not found");
     switch (path) {
       case "/sendMessage": {
         const m = body.message as Record<string, unknown> | undefined;
-        if (!m) return { status: 400, body: { status: "error", code: "ERR_MESSAGE_REQUIRED", description: "Please provide a valid message to send!" } };
-        if (typeof m.messageBox !== "string" || !m.messageBox.trim()) return { status: 400, body: { status: "error", code: "ERR_INVALID_MESSAGEBOX", description: "Invalid message box." } };
-        if (m.body === undefined || m.body === null || m.body === "") return { status: 400, body: { status: "error", code: "ERR_INVALID_MESSAGE_BODY", description: "Invalid message body." } };
-        const recipient = Array.isArray(m.recipient) ? m.recipient[0] : m.recipient;
-        const messageId = Array.isArray(m.messageId) ? m.messageId[0] : m.messageId;
-        if (typeof recipient !== "string" || !KEY.test(recipient.trim())) return { status: 400, body: { status: "error", code: "ERR_INVALID_RECIPIENT_KEY", description: `Invalid recipient key: ${String(recipient)}` } };
-        if (typeof messageId !== "string" || !messageId.trim()) return { status: 400, body: { status: "error", code: "ERR_MESSAGEID_REQUIRED", description: "Missing messageId." } };
+        if (!m) return error(400, "ERR_MESSAGE_REQUIRED", "Please provide a valid message to send!");
+        if (typeof m.messageBox !== "string" || !m.messageBox.trim()) return error(400, "ERR_INVALID_MESSAGEBOX", "Invalid message box.");
+        if (m.body === undefined || m.body === null || m.body === "") return error(400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.");
+        let recipient = Array.isArray(m.recipient) ? m.recipient[0] : m.recipient;
+        if (recipient instanceof Uint8Array) recipient = keyHex(recipient);
+        let messageId = Array.isArray(m.messageId) ? m.messageId[0] : m.messageId;
+        if (messageId === undefined && m.body instanceof Uint8Array) messageId = createHash("sha256").update(m.body).digest("hex"); // BRC-231 names none
+        if (typeof recipient !== "string" || !KEY.test(recipient.trim())) return error(400, "ERR_INVALID_RECIPIENT_KEY", `Invalid recipient key: ${String(recipient)}`);
+        if (typeof messageId !== "string" || !messageId.trim()) return error(400, "ERR_MESSAGEID_REQUIRED", "Missing messageId.");
         const d = await this.deliver({ sender: r.identityKey, recipient: recipient.trim(), box: m.messageBox.trim(), body: m.body, messageId });
-        return { status: d.status, body: d.body };
+        return reply(d.status, cbor && d.status === 200 ? { status: "success", messageId } : d.body);
       }
       case "/listMessages": {
         const box = body.messageBox;
-        if (typeof box !== "string" || !box) return { status: 400, body: { status: "error", code: "ERR_MESSAGEBOX_REQUIRED", description: "Please provide the name of a valid MessageBox!" } };
+        if (typeof box !== "string" || !box) return error(400, "ERR_MESSAGEBOX_REQUIRED", "Please provide the name of a valid MessageBox!");
         const ms = await this.mail.list(r.identityKey, box);
-        return { status: 200, body: { status: "success", messages: ms.map((m) => ({ messageId: m.messageId, body: JSON.stringify({ message: m.body }), sender: m.sender, createdAt: m.createdAt, updatedAt: m.createdAt })) } };
+        if (cbor) return reply(200, { status: "success", messages: ms.map((m) => ({ messageId: m.messageId, body: bodyBytes(m.body), sender: keyBytes(m.sender) })) });
+        return reply(200, { status: "success", messages: ms.map((m) => ({ messageId: m.messageId, body: JSON.stringify({ message: bodyJson(m.body) }), sender: m.sender, createdAt: m.createdAt, updatedAt: m.createdAt })) });
       }
       case "/acknowledgeMessage": {
         const ids = body.messageIds;
-        if (!Array.isArray(ids) || !ids.length || ids.some((x) => typeof x !== "string")) return { status: 400, body: { status: "error", code: "ERR_INVALID_MESSAGE_ID", description: "Message IDs must be formatted as an array of strings!" } };
+        if (!Array.isArray(ids) || !ids.length || ids.some((x) => typeof x !== "string")) return error(400, "ERR_INVALID_MESSAGE_ID", "Message IDs must be formatted as an array of strings!");
         const n = await this.mail.ack(r.identityKey, ids as string[]);
-        if (!n) return { status: 400, body: { status: "error", code: "ERR_INVALID_ACKNOWLEDGMENT", description: "Message not found!" } };
-        return { status: 200, body: { status: "success" } };
+        if (!n) return error(400, "ERR_INVALID_ACKNOWLEDGMENT", "Message not found!");
+        return reply(200, { status: "success" });
       }
       case "/account/register": return this.register(r.identityKey, body.username);
     }
-    return { status: 404, body: { status: "error", code: "ERR_NOT_FOUND" } };
+    return error(404, "ERR_NOT_FOUND", "not found");
   }
 
   /** A mailbox for `identity` under `username` (kept by the mailbox host instance). 409 if the name is another's. */
