@@ -42,7 +42,8 @@ pub fn headTree(a: std.mem.Allocator, s: Store, name: []const u8) !?[]const u8 {
     return s.headTree(a, name);
 }
 
-pub const By = struct { thread: []const u8, input: []const u8, at: i64 };
+/// `thread` null: moved by the genesis (a system tree, issue #4), not by a thread.
+pub const By = struct { thread: ?[]const u8, input: []const u8, at: i64 };
 
 pub fn advanceHead(a: std.mem.Allocator, s: Store, name: []const u8, tree: []const u8, by: By) ![]const u8 {
     const origin = try s.chainOpen(a, try originValue(a, name));
@@ -53,7 +54,7 @@ pub fn advanceHead(a: std.mem.Allocator, s: Store, name: []const u8, tree: []con
     }
     var m = cbor.MapBuilder.init(a);
     try m.put("tree", cbor.cidv(tree));
-    try m.put("thread", cbor.cidv(by.thread));
+    try m.put("thread", cbor.optCid(by.thread));
     try m.put("input", cbor.cidv(by.input));
     try m.put("at", cbor.int(by.at));
     return s.chainAppend(a, origin, m.value());

@@ -148,6 +148,28 @@ pub const SqliteStore = struct {
         return out.items;
     }
 
+    /// Adopt a checkpoint (issue #4): the state record `state`, whose blocks
+    /// the loader has already put (verified against its packet), becomes this
+    /// store's state — the pointer moves to it and the index is read from it,
+    /// never rebuilt. Only into a store with no log; only this kernel's format.
+    pub fn restore(s: *SqliteStore, state: []const u8) !void {
+        if (s.read_only) return error.ReadOnly;
+        if (s.ix.work.tip.get() != null or s.ix.work.cursor != 0) return error.StoreNotEmpty;
+        var arena = std.heap.ArenaAllocator.init(s.alloc);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const b = (try getFn(s, a, state)) orelse return error.MissingState;
+        const v = cbor.decode(a, b) catch return error.BadState;
+        if (!std.mem.eql(u8, Value.str(v.get("kind")) orelse "", index.STATE_KIND)) return error.BadState;
+        if ((Value.intOf(v.get("format")) orelse 0) != index.FORMAT) return error.PredatesFuel;
+        try beginFn(s);
+        errdefer rollbackFn(s);
+        try setPointerFn(s, index.POINTER, state);
+        try commitFn(s);
+        s.ix.forest.reset(true);
+        if (!try s.ix.load()) return error.MissingState;
+    }
+
     // -------------------------------------------------------- the backend
 
     fn backend(s: *SqliteStore) index.Backend {

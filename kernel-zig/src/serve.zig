@@ -132,6 +132,19 @@ const Server = struct {
             s.reply(a, id, (try s.store.get(a, c)) orelse .null, null, null);
         } else if (eq(u8, op, "put")) {
             s.reply(a, id, cbor.cidv(try s.store.put(a, v)), null, null);
+        } else if (eq(u8, op, "putblock")) {
+            // The loader's pre-fill (issue #4): a block minted elsewhere (git-raw, raw,
+            // dag-cbor, bitcoin-tx/-block), hash-checked against its CID before it is kept.
+            const c = Value.cidOf(v.get("cid")) orelse return error.BadRequest;
+            const b = Value.bytesOf(v.get("bytes")) orelse return error.BadRequest;
+            if (!cidm.hashMatches(c, b)) return s.reply(a, id, null, try std.fmt.allocPrint(a, "putblock: bytes do not hash to {s}", .{try cidm.format(a, c)}), null);
+            try s.store.putBlock(c, b);
+            s.reply(a, id, cbor.cidv(c), null, null);
+        } else if (eq(u8, op, "restore")) {
+            // A checkpoint (issue #4): its blocks already put, the state record becomes this store's state.
+            const c = Value.cidOf(v) orelse return error.BadRequest;
+            try s.ss.restore(c);
+            s.reply(a, id, cbor.cidv(c), null, null);
         } else if (eq(u8, op, "append")) {
             switch (try s.store.logAppend(a, v)) {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
