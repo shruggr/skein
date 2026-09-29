@@ -7,7 +7,7 @@ messagebox, mail for the identities an instance keeps a mailbox for, wakes
 for sleepers, and the router's report on each envelope it sent (delivered, or
 failed); its only outputs are envelopes. Entries are unsigned (issue #33):
 messages are signed by their senders, `prev` fixes the order.
-Programs run inside it: handler programs (Go, `wasip1`; Zig) per box, and a
+Programs run inside it: handler programs (Zig, `wasm32-wasi`) per box, and a
 bash-compatible wasm shell over git-shaped trees. Time and randomness are not
 inputs: the router stamps each log entry with its clock at admission, and
 programs see that stamp (+1 ns per read) as "now" and a stream keyed by the
@@ -45,13 +45,12 @@ src/host/        the host, outside the machine
 kernel-zig/      the kernel (Zig): store, log, scheduler, WASI, programs through wasmtime; `skein-kernel serve|replay|shell|dump|fuel`
 src/envelope.ts  BRC-169 §7.2 (JSON) envelopes: sign/seal/open through a wallet (shared with the client); the pure part (canonical form, contentHash, BRC-78 framing, verify) is src/runtime/envelope.ts
 src/envelope-cbor.ts  BRC-169 §7.3 (dag-cbor) envelopes: seal, verify, open; either form from a BRC-33 body
-programs/        the handler programs (Go, wasip1): skein (the imports), envelope (sealing through the wallet import), wallet, the handlers
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        handler programs in Go: run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop); skein/ (the ABI); messagebox/ (Zig)
+programs/        the stock programs, all Zig (#54): run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop), messagebox, frontdoor, resolve, wire-probe (a test); lib/ (the `skein` imports and the helpers over them)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
 wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (and src/runtime/programs.ts, whose handler builds are wasm/v1/)
 ```

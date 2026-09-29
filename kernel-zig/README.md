@@ -128,8 +128,9 @@ meter's new segment counts from zero. Outside a thread (`skein-kernel
 shell`, no meter) the clock is `shell.Fixed`, as before.
 
 Changed by it: an update's `until` (a sleep's deadline) moves by the fuel
-burnt before the sleep; Go programs (run-handler, loop) burn ~1.2k more fuel
-per step (their runtime reads the clock); any printed mid-step time. The
+burnt before the sleep; the Go programs of the time (run-handler, loop; Zig
+since #54) burnt ~1.2k more fuel per step (their runtime read the clock);
+any printed mid-step time. The
 corpus (`equiv/corpus.ts`, logs written by the TS runtime, whose clock is
 the old one) therefore prints only what both clocks agree on — a printed
 mid-step time would change the reply the replay seals, which then has no

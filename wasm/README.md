@@ -441,3 +441,18 @@ Size options if 19 MB matters: drop test/IDE-only packages from the zip
 leaves out `test`, `idlelib`, `tkinter`, `ensurepip`); add `.pyc` (faster imports, roughly
 doubles the zip) or ship `.pyc` only (no source in tracebacks); or build
 CPython ourselves with zlib and a deflated zip (~2.4 MB).
+
+## The stock programs
+
+Beside the shell's programs, `wasm/` holds the stock programs a genesis
+installs: the handlers (`run-handler`, `objects-handler`, `head-handler`,
+`subscribe-handler`), the turn loop (`loop`), `messagebox`, `frontdoor`,
+`resolve`, the `wallet`, and `wire-probe` (a test program, not in a
+genesis). All Zig 0.16.0, `wasm32-wasi` (since #54 the handlers and the
+loop too; they were Go `wasip1`, 3.7–5.6 MB each, now 73–246 KB), built by
+`scripts/build-programs.sh` from `programs/` and `wallet-zig/` and pinned by
+`scripts/pin-programs.sh` in `kernel-zig/src/programs.zig`. `wasm/v1/` keeps
+the frozen TS runtime's Go builds of the handlers, pinned in
+`src/runtime/programs.ts`, never rebuilt. Go `wasip1` (or Rust, C, …) stays
+a valid target for third-party programs: the `skein` imports are the ABI
+(`wit/skein.wit`), not a language.

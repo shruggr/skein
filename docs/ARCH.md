@@ -322,7 +322,9 @@ the "skein" CLI read the disk. That is the thing this note corrects.
 Skein is a WASI machine: the runtime's import table is its kernel, and the
 userland is anything compiled to plain WASI (Rust `wasm32-wasip1`, wasi-sdk
 C/C++, Go `wasip1`, interpreters as modules). Programs target WASI, never
-skein. Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
+skein. (The stock programs — the handlers, the loop, the messagebox, the
+front door — are all Zig since #54; Go `wasip1` remains a userland target
+for third-party programs.) Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
 — are answered inside, deterministically, and never recorded. **Attested**
 ones — anything that leaves the runtime: the wallet, `http` (a message
 delivered to a peer, a fetch, a resolve) — are recorded and replayed. A

@@ -229,7 +229,8 @@ wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
     chain the genesis only seeds; the `subscribe` box (subscribe-handler, the
     `subscribe` import) changes them in the log (docs/VM.md,
     "Subscriptions"). Owner, peers and defaults are still fixed at genesis.
-31. **Handler binaries are big.** 4 MB each (Go runtime + fxamacker/cbor +
+31. ~~**Handler binaries are big.**~~ Done (#54): the handlers and the loop
+    are Zig (73–246 KB each), the Go module is gone. Before: 4 MB each (Go runtime + fxamacker/cbor +
     crypto); those that link go-sdk — wire-probe, and since #26 run-handler
     and loop, which seal their own envelopes — are 8–9 MB. fxamacker was chosen over
     go-ipld-prime for size and a plain struct API; TinyGo could cut both by
@@ -285,7 +286,8 @@ the store before the step ends; only the send is still fire-once.
     `chat` shape; `ripper/qwen38` with thinking on is much slower. A `chat`
     field or a per-conversation setting would let David choose.
 41. **Handler builds were not reproducible across commits** — Go embedded the
-    VCS revision. `build-programs.sh` now passes `-buildvcs=false`; the pins
+    VCS revision. `build-programs.sh` then passed `-buildvcs=false` (the Zig
+    builds since #54 are reproducible as they are); the pins
     changed once more for it. Existing stores keep their old modules (a
     genesis names program records, which name modules by CID), so an old
     instance keeps running the loop it started with.

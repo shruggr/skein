@@ -190,7 +190,7 @@ the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
 An instance delivers its own messages: the messagebox program's `send`
 (`deliver.zig`), called from a step — the loop's `message` tool, its `infer`
-and its answer, the run handler's result (`skein.Send` in Go) — as a BRC-103/104
+and its answer, the run handler's result (`sk.send`, programs/lib) — as a BRC-103/104
 client of the recipient's messagebox.
 
 ```
