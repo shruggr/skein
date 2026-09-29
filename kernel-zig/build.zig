@@ -25,9 +25,9 @@ pub fn build(b: *std.Build) void {
         return;
     }
 
-    const home = std.process.getEnvVarOwned(b.allocator, "HOME") catch "/root";
+    const home = b.graph.environ_map.get("HOME") orelse "/root";
     const default_wt = b.fmt("{s}/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api", .{home});
-    const env_wt = std.process.getEnvVarOwned(b.allocator, "WASMTIME_C_API") catch null;
+    const env_wt = b.graph.environ_map.get("WASMTIME_C_API");
     const wt = b.option([]const u8, "wasmtime", "wasmtime C API directory (include/, lib/)") orelse env_wt orelse default_wt;
 
     const mod = b.createModule(.{

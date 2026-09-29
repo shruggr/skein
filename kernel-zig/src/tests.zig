@@ -28,7 +28,7 @@ test {
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {
-    const text = try std.fs.cwd().readFileAlloc(a, "test/fixtures.json", 1 << 24);
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/fixtures.json", a, .limited(1 << 24));
     return (try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}));
 }
 
@@ -86,7 +86,7 @@ test "format 2 (issue #33): §7.3 envelopes verify over the dag-cbor preimage; g
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const text = try std.fs.cwd().readFileAlloc(a, "test/format2.json", 1 << 20);
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/format2.json", a, .limited(1 << 20));
     const f = (try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{})).object;
     const envelope = @import("envelope.zig");
     const logm = @import("log.zig");

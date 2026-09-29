@@ -45,16 +45,16 @@ const W = struct {
     out: std.array_list.Managed(u8),
     a: std.mem.Allocator,
     fn cid(w: *W, c: ?[]const u8) !void {
-        if (c) |x| try w.out.writer().print("\"{s}\"", .{try cidm.format(w.a, x)}) else try w.out.appendSlice("null");
+        if (c) |x| try w.out.print("\"{s}\"", .{try cidm.format(w.a, x)}) else try w.out.appendSlice("null");
     }
     fn str(w: *W, s: ?[]const u8) !void {
-        if (s) |x| try w.out.writer().print("{f}", .{std.json.fmt(x, .{})}) else try w.out.appendSlice("null");
+        if (s) |x| try w.out.print("{f}", .{std.json.fmt(x, .{})}) else try w.out.appendSlice("null");
     }
     fn raw(w: *W, s: []const u8) !void {
         try w.out.appendSlice(s);
     }
     fn int(w: *W, n: i64) !void {
-        try w.out.writer().print("{d}", .{n});
+        try w.out.print("{d}", .{n});
     }
     fn sep(w: *W, i: usize) !void {
         if (i > 0) try w.out.append(',');
@@ -74,7 +74,7 @@ fn isIndexBlock(a: std.mem.Allocator, c: []const u8, bytes: []const u8) bool {
     return v.array[1].array.len > 0;
 }
 
-pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
+pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
     const ss = try SqliteStore.openReadOnly(gpa, path);
     defer ss.close();
     const ix = ss.ix;
@@ -89,7 +89,7 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
     try w.raw(",\"roots\":{");
     inline for (@typeInfo(index.Map).@"enum".fields, 0..) |f, i| {
         try w.sep(i);
-        try w.out.writer().print("\"{s}\":", .{f.name});
+        try w.out.print("\"{s}\":", .{f.name});
         try w.cid(ix.work.roots[f.value].get());
     }
     try w.raw("},\"cursor\":");
@@ -237,7 +237,7 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
         first = false;
         try w.cid(c);
     }
-    try w.out.writer().print("],\"indexBlocks\":{d}}}\n", .{n_index});
-    try std.fs.File.stdout().writeAll(w.out.items);
+    try w.out.print("],\"indexBlocks\":{d}}}\n", .{n_index});
+    try std.Io.File.stdout().writeStreamingAll(io, w.out.items);
     return 0;
 }

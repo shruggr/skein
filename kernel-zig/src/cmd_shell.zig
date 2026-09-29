@@ -3,6 +3,7 @@
 // is {cmd, tree, cwd?, env?: [[k, v]…], stdin?: base64, time?, seed?}; a
 // result {exitCode, stdout, stderr (base64), tree} or {error}.
 const std = @import("std");
+const envm = @import("env.zig");
 const cidm = @import("cid.zig");
 const shell = @import("shell.zig");
 const programs = @import("programs.zig");
@@ -10,8 +11,8 @@ const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
 
-pub fn main(gpa: std.mem.Allocator, db: []const u8) !void {
-    const ss = try SqliteStore.open(gpa, db);
+pub fn main(gpa: std.mem.Allocator, io: std.Io, db: []const u8) !void {
+    const ss = try SqliteStore.open(gpa, io, db);
     defer ss.close();
     const s = ss.store();
     const r = try runner.Runner.init(gpa);
@@ -25,9 +26,11 @@ pub fn main(gpa: std.mem.Allocator, db: []const u8) !void {
     // Issue #34: SKEIN_SHELL_COMPONENTS=<dir> runs the tools found there as
     // <name>.wasm (components made with the preview1 adapter) in place of the
     // pinned modules, so equiv/shell.ts can compare the two ABIs case by case.
-    if (std.posix.getenv("SKEIN_SHELL_COMPONENTS")) |dir| try useComponents(gpa, r, mods, dir);
+    if (envm.get("SKEIN_SHELL_COMPONENTS")) |dir| try useComponents(gpa, io, r, mods, dir);
 
-    const input = try std.fs.File.stdin().readToEndAlloc(gpa, 1 << 30);
+    var in_buf: [4096]u8 = undefined;
+    var in = std.Io.File.stdin().readerStreaming(io, &in_buf);
+    const input = try in.interface.allocRemaining(gpa, .limited(1 << 30));
     const cases = try std.json.parseFromSliceLeaky(std.json.Value, arena0.allocator(), input, .{});
     var out = std.array_list.Managed(u8).init(gpa);
     try out.append('[');
@@ -64,27 +67,27 @@ pub fn main(gpa: std.mem.Allocator, db: []const u8) !void {
                 error.Fatal => if (st.fatal) |f| f.message else "fatal",
                 else => @errorName(err),
             };
-            try out.writer().print("{{\"error\":{f}}}", .{std.json.fmt(m, .{})});
+            try out.print("{{\"error\":{f}}}", .{std.json.fmt(m, .{})});
             continue;
         };
         const so = try a.alloc(u8, b64.calcSize(res.stdout.len));
         const se = try a.alloc(u8, b64.calcSize(res.stderr.len));
-        try out.writer().print("{{\"exitCode\":{d},\"stdout\":\"{s}\",\"stderr\":\"{s}\",\"tree\":\"{s}\"}}", .{
+        try out.print("{{\"exitCode\":{d},\"stdout\":\"{s}\",\"stderr\":\"{s}\",\"tree\":\"{s}\"}}", .{
             res.exit_code, b64.encode(so, res.stdout), b64.encode(se, res.stderr), try cidm.format(a, res.tree),
         });
     }
     try out.append(']');
-    try std.fs.File.stdout().writeAll(out.items);
+    try std.Io.File.stdout().writeStreamingAll(io, out.items);
 }
 
-fn useComponents(gpa: std.mem.Allocator, r: *runner.Runner, mods: *shell.Modules, dir: []const u8) !void {
+fn useComponents(gpa: std.mem.Allocator, io: std.Io, r: *runner.Runner, mods: *shell.Modules, dir: []const u8) !void {
     var names = std.array_list.Managed([]const u8).init(gpa);
     try names.append("coreutils");
     var it = mods.extra.keyIterator();
     while (it.next()) |k| try names.append(k.*);
     for (names.items) |n| {
         const path = try std.fmt.allocPrint(gpa, "{s}/{s}.wasm", .{ dir, n });
-        const bytes = std.fs.cwd().readFileAlloc(gpa, path, 1 << 30) catch continue;
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch continue;
         var em: []const u8 = "";
         const comp = r.compile(bytes, &em) catch |e| {
             std.debug.print("{s}: {s}\n", .{ path, em });

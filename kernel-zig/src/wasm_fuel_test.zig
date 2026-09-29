@@ -50,7 +50,7 @@ test "instrumented fuel: the same reading at every host call and at the end as w
     const a = arena.allocator();
     var eng = try engine.Engine.init();
     defer eng.deinit();
-    const bytes = try std.fs.cwd().readFileAlloc(a, "test/fuel/probe.wasm", 1 << 20);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/fuel/probe.wasm", a, .limited(1 << 20));
     for ([_][]const u8{ "f", "trap" }) |entry| {
         const native = try trace(a, &eng, bytes, false, entry, 1 << 40);
         const counted = try trace(a, &eng, bytes, true, entry, 1 << 40);
@@ -67,7 +67,7 @@ test "instrumented fuel: exhaustion at the same point for every limit" {
     const a = arena.allocator();
     var eng = try engine.Engine.init();
     defer eng.deinit();
-    const bytes = try std.fs.cwd().readFileAlloc(a, "test/fuel/probe.wasm", 1 << 20);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/fuel/probe.wasm", a, .limited(1 << 20));
     const need = (try trace(a, &eng, bytes, false, "f", 1 << 40)).used;
     var limit: u64 = 1;
     var exhausted: usize = 0;
@@ -89,13 +89,14 @@ test "instrumented fuel: every pinned program instruments to a valid module" {
     const a = arena.allocator();
     var eng = try engine.Engine.init();
     defer eng.deinit();
-    var dir = try std.fs.cwd().openDir("../wasm", .{ .iterate = true });
-    defer dir.close();
+    const io = std.testing.io;
+    var dir = try std.Io.Dir.cwd().openDir(io, "../wasm", .{ .iterate = true });
+    defer dir.close(io);
     var it = dir.iterate();
     var n: usize = 0;
-    while (try it.next()) |e| {
+    while (try it.next(io)) |e| {
         if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".wasm")) continue;
-        const bytes = try dir.readFileAlloc(a, e.name, 1 << 30);
+        const bytes = try dir.readFileAlloc(io, e.name, a, .limited(1 << 30));
         if (!std.mem.eql(u8, bytes[4..8], "\x01\x00\x00\x00")) continue; // a component
         const ins = try wasm_fuel.instrument(a, bytes);
         var m: ?*engine.c.wasmtime_module_t = null;

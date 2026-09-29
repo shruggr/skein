@@ -54,8 +54,8 @@ pub const SqliteStore = struct {
     /// format is refused (re-genesis): before fuel metering (issue #5) its
     /// updates carry no fuel; before format 2 (issue #33) its entries are
     /// host-signed and its keys hex.
-    pub fn open(alloc: std.mem.Allocator, path: []const u8) !*SqliteStore {
-        if (std.fs.cwd().statFile(path)) |st| {
+    pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !*SqliteStore {
+        if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
             if (st.size > 0) {
                 const probe = try openReadOnly(alloc, path);
                 defer probe.close();

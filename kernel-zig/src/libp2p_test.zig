@@ -118,7 +118,7 @@ test "libp2p: a component's typed calls are the recorded dag-cbor requests; the 
     const a = arena.allocator();
     Fake.requests = std.array_list.Managed([]const u8).init(a);
     const r = try runner.Runner.init(std.heap.page_allocator);
-    const bytes = try std.fs.cwd().readFileAlloc(a, "test/components/p2p.wasm", 1 << 24);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/components/p2p.wasm", a, .limited(1 << 24));
     var em: []const u8 = "";
     const c = r.compile(bytes, &em) catch |e| {
         std.debug.print("p2p.wasm: {s}\n", .{em});

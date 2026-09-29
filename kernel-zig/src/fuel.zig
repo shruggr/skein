@@ -62,7 +62,7 @@ fn programName(a: std.mem.Allocator, ss: *SqliteStore, origin: []const u8) []con
     return "?";
 }
 
-pub fn main(gpa: std.mem.Allocator, path: []const u8, since: i64) !u8 {
+pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8, since: i64) !u8 {
     const ss = try SqliteStore.openReadOnly(gpa, path);
     defer ss.close();
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -71,10 +71,10 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8, since: i64) !u8 {
     const t = try totals(a, ss, since);
     var out = std.array_list.Managed(u8).init(gpa);
     defer out.deinit();
-    const w = out.writer();
-    try w.writeAll("fuel\tsteps\tthread\tprogram\n");
+    const w = &out;
+    try w.appendSlice("fuel\tsteps\tthread\tprogram\n");
     for (t.threads) |x| try w.print("{d}\t{d}\t{s}\t{s}\n", .{ x.burn.fuel, x.burn.steps, try cidm.format(a, x.origin), programName(a, ss, x.origin) });
     try w.print("total\t{d}\t{d} steps\t{d} threads{s}\n", .{ t.total.fuel, t.total.steps, t.threads.len, if (since > 0) try std.fmt.allocPrint(a, "\tsince #{d}", .{since}) else "" });
-    try std.fs.File.stdout().writeAll(out.items);
+    try std.Io.File.stdout().writeStreamingAll(io, out.items);
     return 0;
 }

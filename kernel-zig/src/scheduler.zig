@@ -118,6 +118,8 @@ pub const Peers = struct {
     /// A thread started sleeping (the tick's cue).
     on_sleep: ?*const fn (ctx: *anyopaque, thread: []const u8, until: i64) void = null,
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
+    /// The host's Io (native): a call's real randomness. The browser build has none.
+    io: ?std.Io = null,
 };
 
 const Sleeper = struct { origin: []u8, deadline: i128 };
@@ -170,7 +172,7 @@ pub const Runtime = struct {
         const s = rt.peers.say orelse return;
         var buf = std.array_list.Managed(u8).init(rt.gpa);
         defer buf.deinit();
-        buf.writer().print(f, args) catch return;
+        buf.print(f, args) catch return;
         s(rt.peers.ctx, buf.items);
     }
 
@@ -779,7 +781,7 @@ pub const Runtime = struct {
         const o = try rt.getOrNotFound(a, origin);
         const prog = try rt.programOf(a, o);
         if (!hasWasm(prog)) return rt.failf(a, "not a wasm program", .{});
-        const n: i64 = @intCast(1 + ((try rt.store.chainUpdates(a, origin)) orelse &.{}).len);
+        const n: i64 = @intCast(1 + if (try rt.store.chainUpdates(a, origin)) |us| us.len else 0);
         const tip_cid = (try rt.store.chainTip(a, origin)).?;
         const time = logm.stampOf(ctx.e.get("time")).?;
         const at = time.ms();
@@ -917,21 +919,21 @@ pub const Runtime = struct {
 
         // The log line.
         var line = std.array_list.Managed(u8).init(a);
-        const w = line.writer();
+        const w = &line;
         try w.print("{s} {s} step {d} → {s}", .{ short(a, origin), name, n, state });
         if (st.calls.items.len > 0) try w.print(" · {d} attested", .{st.calls.items.len});
         if (st.kept.items.len > 0) try w.print(" · {d} kept", .{st.kept.items.len});
         if (st.launched.items.len > 0) {
-            try w.writeAll(" · launched ");
+            try w.appendSlice(" · launched ");
             for (st.launched.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
         }
         if (head_updates.items.len > 0) {
-            try w.writeAll(" · moved ");
+            try w.appendSlice(" · moved ");
             for (st.moves.items, 0..) |m, i| try w.print("{s}{s}→{s}", .{ if (i > 0) "," else "", m[0], short(a, m[1]) });
         }
         if (sub_updates.items.len > 0) try w.print(" · {d} subscription change{s}", .{ sub_updates.items.len, if (sub_updates.items.len == 1) "" else "s" });
         if (st.awaits.items.len > 0) {
-            try w.writeAll(" · awaits ");
+            try w.appendSlice(" · awaits ");
             for (st.awaits.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
         }
         // What the program wrote on stderr: the error, or a note of a step that
@@ -1255,7 +1257,7 @@ pub const Runtime = struct {
         var meter = engine.Meter.init(callFuelLimit(rt.genesis));
         var cs = CallState{ .rt = rt, .a = a, .overlay = std.StringHashMap([]const u8).init(a), .meter = &meter, .random = undefined };
         var seed: [32]u8 = undefined;
-        realRandom(&seed, now);
+        realRandom(rt.peers.io, &seed, now);
         cs.random = syscalls.Entropy.init(&seed, prog);
         cs.clock.drive(@as(i128, now) * 1_000_000);
         cs.clock.meter = &meter;
@@ -1628,16 +1630,16 @@ pub const Runtime = struct {
         t.history = hist;
         t.pos += 1;
         var line = std.array_list.Managed(u8).init(a);
-        const w = line.writer();
+        const w = &line;
         try w.print("{s} shell {s} → {s}", .{ short(a, t.origin), from, state });
         var bits = std.array_list.Managed([]const u8).init(a);
         if (until) |u| try bits.append(try std.fmt.allocPrint(a, "until {d}", .{u}));
         if (result) |r| try bits.append(try std.fmt.allocPrint(a, "exit {d}", .{Value.intOf(r.get("exitCode")) orelse 0}));
         if (err_value) |e| try bits.append(try std.fmt.allocPrint(a, "{s}: {s}", .{ Value.str(e.get("kind")).?, Value.str(e.get("message")).? }));
         if (bits.items.len > 0) {
-            try w.writeAll(" (");
+            try w.appendSlice(" (");
             for (bits.items, 0..) |b, i| try w.print("{s}{s}", .{ if (i > 0) ", " else "", b });
-            try w.writeAll(")");
+            try w.appendSlice(")");
         }
         rt.say("{s}", .{line.items});
     }
@@ -1741,7 +1743,7 @@ fn lastLine(a: std.mem.Allocator, stderr: []const u8, code: i32) []const u8 {
 
 /// Real randomness for a call's stream: a call needs no determinism, and a
 /// nonce it makes (a front door's session nonce) must not be guessable.
-fn realRandom(out: []u8, now: i64) void {
+fn realRandom(io: ?std.Io, out: []u8, now: i64) void {
     if (engine.web) {
         // The browser build runs no front door; the call's time and a counter will do there.
         const S = struct {
@@ -1750,5 +1752,5 @@ fn realRandom(out: []u8, now: i64) void {
         S.n +%= 1;
         var sm = syscalls.SplitMix{ .s = @as(u32, @truncate(@as(u64, @bitCast(now)))) ^ (S.n *% 0x9e3779b9) };
         sm.fill(out);
-    } else std.crypto.random.bytes(out);
+    } else (io orelse @panic("realRandom: no Io")).random(out);
 }

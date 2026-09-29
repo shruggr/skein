@@ -10,6 +10,7 @@
 // equiv/replay.ts does the same with the TypeScript runtime; equiv/replays.ts
 // compares the two runs and what they derived.
 const std = @import("std");
+const envm = @import("env.zig");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
 const logm = @import("log.zig");
@@ -32,16 +33,16 @@ const Capture = struct {
     }
 };
 
-pub fn wasmDir(gpa: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("SKEIN_WASM_DIR")) |d| return d;
-    const exe = try std.fs.selfExeDirPathAlloc(gpa);
+pub fn wasmDir(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
+    if (envm.get("SKEIN_WASM_DIR")) |d| return d;
+    const exe = try std.process.executableDirPathAlloc(io, gpa);
     return std.fs.path.join(gpa, &.{ exe, "..", "..", "..", "wasm" });
 }
 
 /// skein-dev install: the pinned modules and support files (FILES) from the wasm directory, checked against their CIDs.
-pub fn install(gpa: std.mem.Allocator, ss: *SqliteStore, say: ?*const fn (line: []const u8) void) !void {
+pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: *SqliteStore, say: ?*const fn (line: []const u8) void) !void {
     const s = ss.store();
-    const dir = try wasmDir(gpa);
+    const dir = try wasmDir(gpa, io);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -50,7 +51,7 @@ pub fn install(gpa: std.mem.Allocator, ss: *SqliteStore, say: ?*const fn (line: 
         if (try s.has(c)) continue;
         const file = if (i < programs.modules.len) try std.fmt.allocPrint(a, "{s}.wasm", .{m.name}) else m.name;
         const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, file });
-        const bytes = try std.fs.cwd().readFileAlloc(a, path, 1 << 30);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
         if (!std.mem.eql(u8, try cidm.ofRaw(a, bytes), c)) {
             std.debug.print("wasm/{s} does not match the pinned {s}\n", .{ file, m.cid });
             return error.ModuleMismatch;
@@ -61,10 +62,10 @@ pub fn install(gpa: std.mem.Allocator, ss: *SqliteStore, say: ?*const fn (line: 
     // SKEIN_EXTRA_MODULES=<file>:<file>…: modules that are not pinned, installed
     // under their raw CIDs — how equiv/wallet.ts runs the wallet's component
     // build (issue #34) without pinning it. Not for live instances.
-    if (std.posix.getenv("SKEIN_EXTRA_MODULES")) |list| {
+    if (envm.get("SKEIN_EXTRA_MODULES")) |list| {
         var it = std.mem.tokenizeScalar(u8, list, ':');
         while (it.next()) |path| {
-            const bytes = try std.fs.cwd().readFileAlloc(a, path, 1 << 30);
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
             const c = try cidm.ofRaw(a, bytes);
             if (try s.has(c)) continue;
             try s.putBlock(c, bytes);
@@ -135,27 +136,27 @@ fn copyTree(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import(
     };
 }
 
-pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
+pub fn main(gpa: std.mem.Allocator, io: std.Io, source: []const u8, out: []const u8) !u8 {
     const src = try SqliteStore.openReadOnly(gpa, source);
     defer src.close();
-    const dst = try SqliteStore.open(gpa, out);
+    const dst = try SqliteStore.open(gpa, io, out);
     defer dst.close();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
 
-    try install(gpa, dst, null);
+    try install(gpa, io, dst, null);
     for (try src.blocksOfCodec(a, cidm.RAW)) |b| try dst.store().putBlock(b[0], b[1]);
     try copyLog(a, src, dst);
 
     const r = try runner.Runner.init(gpa);
     // SKEIN_REPLAY_MODULE=<cid>=<file>: run <file> wherever the log runs module
     // <cid> (issue #34: a program's component build against its preview1 log).
-    if (std.posix.getenv("SKEIN_REPLAY_MODULE")) |spec| {
+    if (envm.get("SKEIN_REPLAY_MODULE")) |spec| {
         const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return error.BadReplayModule;
-        r.subst = .{ .cid = try cidm.parse(a, spec[0..eq]), .bytes = try std.fs.cwd().readFileAlloc(a, spec[eq + 1 ..], 1 << 30) };
+        r.subst = .{ .cid = try cidm.parse(a, spec[0..eq]), .bytes = try std.Io.Dir.cwd().readFileAlloc(io, spec[eq + 1 ..], a, .limited(1 << 30)) };
     }
-    var cap = Capture{ .gpa = gpa, .lines = .init(gpa), .echo = std.posix.getenv("SKEIN_REPLAY_ECHO") != null };
+    var cap = Capture{ .gpa = gpa, .lines = .init(gpa), .echo = envm.get("SKEIN_REPLAY_ECHO") != null };
     const rt = try scheduler.Runtime.init(gpa, dst.store(), r, .{ .ctx = &cap, .say = Capture.say });
     rt.witness = try scheduler.Witness.from(gpa, src.store());
     try rt.start();
@@ -164,14 +165,14 @@ pub fn main(gpa: std.mem.Allocator, source: []const u8, out: []const u8) !u8 {
 
     const tip = (try dst.store().logTip(a)) orelse "";
     var o = std.array_list.Managed(u8).init(gpa);
-    const w = o.writer();
-    try w.writeAll("{\"lines\":[");
+    const w = &o;
+    try w.appendSlice("{\"lines\":[");
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
     try dst.store().commit();
     const st = dst.ix.stats();
     try w.print("],\"state\":\"{s}\",\"index\":{{\"states\":{d},\"commits\":{d},\"nodes\":{d},\"bytes\":{d},\"record\":\"{s}\"}}}}\n", .{
         if (tip.len > 0) try cidm.format(a, tip) else "", st.states, st.commits, st.nodes, st.node_bytes, try cidm.format(a, try dst.ix.stateCid(a)),
     });
-    try std.fs.File.stdout().writeAll(o.items);
+    try std.Io.File.stdout().writeStreamingAll(io, o.items);
     return 0;
 }

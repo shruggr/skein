@@ -47,7 +47,7 @@ fn run(a: std.mem.Allocator, r: *runner.Runner, c: *runner.Compiled, args: []con
 }
 
 fn load(a: std.mem.Allocator, r: *runner.Runner, path: []const u8) !*runner.Compiled {
-    const bytes = try std.fs.cwd().readFileAlloc(a, path, 1 << 24);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 24));
     var em: []const u8 = "";
     return r.compile(bytes, &em) catch |err| {
         std.debug.print("{s}: {s}\n", .{ path, em });
@@ -62,7 +62,7 @@ test "components: a preview1 module, it through the adapter, and a native 0.2 co
     const r = try runner.Runner.init(std.heap.page_allocator);
     var outs: [builds.len]Out = undefined;
     for (builds, 0..) |b, i| {
-        const bytes = try std.fs.cwd().readFileAlloc(a, b, 1 << 24);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, b, a, .limited(1 << 24));
         try std.testing.expectEqual(i != 0, component.isComponent(bytes));
         outs[i] = try run(a, r, try load(a, r, b), &.{ "probe", "fs" }, null);
     }

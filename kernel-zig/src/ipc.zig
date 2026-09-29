@@ -1,6 +1,6 @@
 // Frames between the kernel and the router (serve.zig, src/host/kernel.ts):
-// a 4-byte big-endian length, then one dag-cbor map. Blocking IO on file
-// descriptors; the reader buffers partial frames.
+// a 4-byte big-endian length, then one dag-cbor map. Blocking IO: the reader
+// reads its file descriptor (serve.zig polls it) and buffers partial frames.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 
@@ -49,15 +49,10 @@ pub const Reader = struct {
     }
 };
 
-pub fn write(fd: std.posix.fd_t, a: std.mem.Allocator, v: cbor.Value) !void {
+pub fn write(io: std.Io, f: std.Io.File, a: std.mem.Allocator, v: cbor.Value) !void {
     const body = try cbor.encode(a, v);
     var h: [4]u8 = undefined;
     std.mem.writeInt(u32, &h, @intCast(body.len), .big);
-    try writeAll(fd, &h);
-    try writeAll(fd, body);
-}
-
-fn writeAll(fd: std.posix.fd_t, b: []const u8) !void {
-    var off: usize = 0;
-    while (off < b.len) off += try std.posix.write(fd, b[off..]);
+    try f.writeStreamingAll(io, &h);
+    try f.writeStreamingAll(io, body);
 }

@@ -4,6 +4,7 @@
 // wasmtime's own (`consume_fuel`). The browser build puts V8 behind the same
 // calls (engine_v8.zig).
 const std = @import("std");
+const envm = @import("env.zig");
 pub const c = @cImport(@cInclude("wasmtime.h"));
 
 const iface = @import("engine.zig");
@@ -23,7 +24,7 @@ pub fn instrumentMode() bool {
     const S = struct {
         var v: ?bool = null;
     };
-    if (S.v == null) S.v = if (std.posix.getenv("SKEIN_FUEL_MODE")) |m| std.mem.eql(u8, m, "instrument") else false;
+    if (S.v == null) S.v = if (envm.get("SKEIN_FUEL_MODE")) |m| std.mem.eql(u8, m, "instrument") else false;
     return S.v.?;
 }
 
@@ -34,7 +35,7 @@ pub const Engine = struct {
         const cfg = c.wasm_config_new() orelse return error.Engine;
         // The on-disk compilation cache (~/.cache/wasmtime): a cache of the
         // machine code for module bytes, not state. SKEIN_WASMTIME_CACHE=0 turns it off.
-        const off = if (std.posix.getenv("SKEIN_WASMTIME_CACHE")) |v| std.mem.eql(u8, v, "0") else false;
+        const off = if (envm.get("SKEIN_WASMTIME_CACHE")) |v| std.mem.eql(u8, v, "0") else false;
         if (!off) {
             if (c.wasmtime_config_cache_config_load(cfg, null)) |err| c.wasmtime_error_delete(err);
         }

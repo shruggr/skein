@@ -26,6 +26,11 @@ const sk = struct {
     extern "skein" fn @"error"(out: [*]u8, cap: u32) i32;
 };
 
+/// The program's Io: one single-threaded WASI process, no concurrency.
+fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
 var errbuf: [1024]u8 = undefined;
 
 fn fail(what: []const u8) noreturn {
@@ -33,7 +38,7 @@ fn fail(what: []const u8) noreturn {
     const m = if (n > 0) errbuf[0..@min(@as(usize, @intCast(n)), errbuf.len)] else "";
     var out: [1200]u8 = undefined;
     const line = std.fmt.bufPrint(&out, "probe: {s}: {s}\n", .{ what, m }) catch "probe: failed\n";
-    std.fs.File.stderr().writeAll(line) catch {};
+    std.Io.File.stderr().writeStreamingAll(io(), line) catch {};
     std.process.exit(1);
 }
 
@@ -88,30 +93,30 @@ pub fn main() u8 {
     var buf: [65536]u8 = undefined;
     const in = a.dupe(u8, result(a, sk.input(&buf, buf.len), &buf, "input")) catch fail("oom");
     const kind = field(in, "kind") orelse fail("no kind");
-    const out = std.fs.File.stdout();
+    const out = std.Io.File.stdout();
     if (std.mem.eql(u8, kind, "step")) {
         // A subscription's handler: the event record names the probe's own CID.
         const ev = field(in, "event") orelse fail("step: no event");
         const rec = result(a, sk.get(ev.ptr, @intCast(ev.len), &buf, buf.len), &buf, "get event");
         const self = a.dupe(u8, field(rec, "probe") orelse fail("the event names no probe")) catch fail("oom");
         const r = result(a, sk.call(self.ptr, @intCast(self.len), "advance", 7, "from a step", 11, &buf, buf.len), &buf, "call advance");
-        out.writeAll(r) catch {};
+        out.writeStreamingAll(io(), r) catch {};
         return 0;
     }
     const func = field(in, "fn") orelse fail("no fn");
     const arg = field(in, "arg") orelse "";
     if (std.mem.eql(u8, func, "echo")) {
-        out.writeAll(arg) catch {};
+        out.writeStreamingAll(io(), arg) catch {};
     } else if (std.mem.eql(u8, func, "input")) {
-        out.writeAll(in) catch {};
+        out.writeStreamingAll(io(), in) catch {};
     } else if (std.mem.eql(u8, func, "put")) {
         var cb: [128]u8 = undefined;
         const c = a.dupe(u8, result(a, sk.put(arg.ptr, @intCast(arg.len), &cb, cb.len), &cb, "put")) catch fail("oom");
         const back = result(a, sk.get(c.ptr, @intCast(c.len), &buf, buf.len), &buf, "get");
-        out.writeAll(c) catch {};
-        out.writeAll(back) catch {};
+        out.writeStreamingAll(io(), c) catch {};
+        out.writeStreamingAll(io(), back) catch {};
     } else if (std.mem.eql(u8, func, "head")) {
-        out.writeAll(result(a, sk.head(arg.ptr, @intCast(arg.len), &buf, buf.len), &buf, "head")) catch {};
+        out.writeStreamingAll(io(), result(a, sk.head(arg.ptr, @intCast(arg.len), &buf, buf.len), &buf, "head")) catch {};
     } else if (std.mem.eql(u8, func, "advance")) {
         // {kind: "probe", arg}
         var rec = std.array_list.Managed(u8).init(a);
@@ -127,7 +132,7 @@ pub fn main() u8 {
         var cb: [128]u8 = undefined;
         const c = result(a, sk.put(rec.items.ptr, @intCast(rec.items.len), &cb, cb.len), &cb, "put");
         if (sk.advance("probe", 5, c.ptr, @intCast(c.len)) < 0) fail("advance");
-        out.writeAll(c) catch {};
+        out.writeStreamingAll(io(), c) catch {};
     } else if (std.mem.eql(u8, func, "spin")) {
         var x: u64 = 0;
         while (true) {
@@ -136,7 +141,7 @@ pub fn main() u8 {
         }
     } else if (std.mem.eql(u8, func, "nest")) {
         const r = result(a, sk.call(arg.ptr, @intCast(arg.len), "echo", 4, "nested", 6, &buf, buf.len), &buf, "call");
-        out.writeAll(r) catch {};
+        out.writeStreamingAll(io(), r) catch {};
     } else if (std.mem.eql(u8, func, "whoami")) {
         // A front-door handler (#40): {status: 200, type: "application/octet-stream", body: <the caller's key>}.
         const caller = field(in, "caller") orelse "";
@@ -147,9 +152,9 @@ pub fn main() u8 {
         r.appendSlice(&.{ 0x64, 't', 'y', 'p', 'e', 0x78, 24 }) catch fail("oom");
         r.appendSlice("application/octet-stream") catch fail("oom");
         r.appendSlice(&.{ 0x66, 's', 't', 'a', 't', 'u', 's', 0x18, 200 }) catch fail("oom");
-        out.writeAll(r.items) catch {};
+        out.writeStreamingAll(io(), r.items) catch {};
     } else if (std.mem.eql(u8, func, "fail")) {
-        std.fs.File.stderr().writeAll("probe: asked to fail\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(io(), "probe: asked to fail\n") catch {};
         return 1;
     } else fail("unknown fn");
     return 0;

@@ -10,6 +10,7 @@
 // requests (the oracle and the network) and keeps its earliest sleeper
 // deadline (`sleepers`) to wake it. Log lines go to stderr.
 const std = @import("std");
+const envm = @import("env.zig");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
 const ipc = @import("ipc.zig");
@@ -25,15 +26,19 @@ const Value = cbor.Value;
 var sig_pipe: [2]std.posix.fd_t = .{ -1, -1 };
 var sig_name: []const u8 = "";
 
-fn onSignal(sig: c_int) callconv(.c) void {
-    sig_name = if (sig == std.posix.SIG.INT) "SIGINT" else "SIGTERM";
-    _ = std.posix.write(sig_pipe[1], "x") catch {};
+/// The process's Io (main's): stderr, the peer channel, the clock, files.
+var io: std.Io = undefined;
+
+fn onSignal(sig: std.posix.SIG) callconv(.c) void {
+    sig_name = if (sig == .INT) "SIGINT" else "SIGTERM";
+    // write(2) itself: async-signal-safe, and a full pipe only drops a wakeup already pending.
+    _ = std.posix.system.write(sig_pipe[1], "x", 1);
 }
 
 fn say(line: []const u8) void {
-    var f = std.fs.File.stderr();
-    f.writeAll(line) catch {};
-    f.writeAll("\n") catch {};
+    const f = std.Io.File.stderr();
+    f.writeStreamingAll(io, line) catch {};
+    f.writeStreamingAll(io, "\n") catch {};
 }
 
 fn sayf(comptime fmt: []const u8, args: anytype) void {
@@ -45,7 +50,7 @@ fn sayf(comptime fmt: []const u8, args: anytype) void {
 fn die(comptime fmt: []const u8, args: anytype) noreturn {
     var buf: [4096]u8 = undefined;
     const s = std.fmt.bufPrint(&buf, "skein-runtime: " ++ fmt ++ "\n", args) catch "skein-runtime: error\n";
-    std.fs.File.stderr().writeAll(s) catch {};
+    std.Io.File.stderr().writeStreamingAll(io, s) catch {};
     std.process.exit(1);
 }
 
@@ -54,7 +59,7 @@ const Server = struct {
     ss: *SqliteStore,
     store: storem.Store,
     rt: *scheduler.Runtime,
-    to_peer: std.posix.fd_t,
+    to_peer: std.Io.File,
     from_peer: ipc.Reader,
     next_id: i64 = 1,
     idle_waiters: std.array_list.Managed(i64),
@@ -76,7 +81,7 @@ const Server = struct {
         var m = cbor.MapBuilder.init(a);
         m.put("op", cbor.string(op)) catch return;
         m.put("v", payload) catch return;
-        ipc.write(s.to_peer, a, m.value()) catch |err| std.log.err("peer write: {s}", .{@errorName(err)});
+        ipc.write(io, s.to_peer, a, m.value()) catch |err| std.log.err("peer write: {s}", .{@errorName(err)});
     }
 
     fn reply(s: *Server, a: std.mem.Allocator, id: i64, ok: ?Value, err: ?[]const u8, rejected: ?[]const u8) void {
@@ -85,7 +90,7 @@ const Server = struct {
         if (ok) |v| m.put("ok", v) catch return else if (err == null and rejected == null) m.put("ok", .null) catch return;
         m.put("error", cbor.optStr(err)) catch return;
         m.put("rejected", cbor.optStr(rejected)) catch return;
-        ipc.write(s.to_peer, a, m.value()) catch |e| std.log.err("peer write: {s}", .{@errorName(e)});
+        ipc.write(io, s.to_peer, a, m.value()) catch |e| std.log.err("peer write: {s}", .{@errorName(e)});
     }
 
     /// A request to the peer; serves the peer's own requests while it waits.
@@ -99,7 +104,7 @@ const Server = struct {
         try m.put("id", cbor.int(id));
         try m.put("op", cbor.string(op));
         try m.put("v", payload);
-        try ipc.write(s.to_peer, a, m.value());
+        try ipc.write(io, s.to_peer, a, m.value());
         while (true) {
             const f = if (s.answers.fetchRemove(id)) |kv| blk: {
                 defer s.gpa.free(kv.value);
@@ -218,7 +223,7 @@ const Server = struct {
             };
             const func = Value.str(v.get("fn")) orelse return error.BadRequest;
             const arg = Value.bytesOf(v.get("arg")) orelse "";
-            const now = Value.intOf(v.get("now")) orelse std.time.milliTimestamp();
+            const now = Value.intOf(v.get("now")) orelse std.Io.Clock.real.now(io).toMilliseconds();
             const r = try s.rt.call(a, prog, func, arg, Value.bytesOf(v.get("caller")), @intCast(now));
             var m = cbor.MapBuilder.init(a);
             try m.put("ok", .{ .bool = r.ok });
@@ -306,10 +311,11 @@ const Server = struct {
     }
 };
 
-pub fn main(gpa: std.mem.Allocator) !void {
-    const home = std.posix.getenv("SKEIN_HOME") orelse try std.fmt.allocPrint(gpa, "{s}/.skein", .{std.posix.getenv("HOME") orelse "."});
-    const db_path = std.posix.getenv("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
-    const handle_full = std.posix.getenv("SKEIN_HANDLE") orelse "skein@localhost";
+pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
+    io = process_io;
+    const home = envm.get("SKEIN_HOME") orelse try std.fmt.allocPrint(gpa, "{s}/.skein", .{envm.get("HOME") orelse "."});
+    const db_path = envm.get("SKEIN_DB") orelse try std.fmt.allocPrint(gpa, "{s}/runtime.db", .{home});
+    const handle_full = envm.get("SKEIN_HANDLE") orelse "skein@localhost";
     var handle: []const u8 = handle_full;
     var domain: []const u8 = "localhost";
     if (std.mem.indexOfScalar(u8, handle_full, '@')) |i| {
@@ -319,7 +325,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
     }
 
     // Signals.
-    sig_pipe = try std.posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+    if (std.posix.errno(std.posix.system.pipe2(&sig_pipe, .{ .CLOEXEC = true, .NONBLOCK = true })) != .SUCCESS) die("{s}@{s}: pipe2 failed", .{ handle, domain });
     const sa = std.posix.Sigaction{ .handler = .{ .handler = onSignal }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
@@ -327,9 +333,9 @@ pub fn main(gpa: std.mem.Allocator) !void {
     std.posix.sigaction(std.posix.SIG.PIPE, &ign, null);
 
     // The store, with the pinned modules installed.
-    if (std.fs.path.dirname(db_path)) |d| std.fs.cwd().makePath(d) catch {};
-    const ss = SqliteStore.open(gpa, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
-    replay.install(gpa, ss, say) catch |err| die("{s}@{s}: install: {s}", .{ handle, domain, @errorName(err) });
+    if (std.fs.path.dirname(db_path)) |d| std.Io.Dir.cwd().createDirPath(io, d) catch {};
+    const ss = SqliteStore.open(gpa, io, db_path) catch |err| die("{s}@{s}: {s}: {s}", .{ handle, domain, db_path, @errorName(err) });
+    replay.install(gpa, io, ss, say) catch |err| die("{s}@{s}: install: {s}", .{ handle, domain, @errorName(err) });
 
     const r = try runner.Runner.init(gpa);
     var server = Server{
@@ -337,7 +343,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .ss = ss,
         .store = ss.store(),
         .rt = undefined,
-        .to_peer = std.posix.STDOUT_FILENO,
+        .to_peer = std.Io.File.stdout(),
         .from_peer = ipc.Reader.init(gpa, std.posix.STDIN_FILENO),
         .idle_waiters = .init(gpa),
         .answers = .init(gpa),
@@ -352,6 +358,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .libp2p = Server.pLibp2p,
         .on_sleep = Server.pOnSleep,
         .say = Server.pSay,
+        .io = io,
     });
 
     var fds_buf: [2]std.posix.pollfd = undefined;

@@ -10,20 +10,21 @@ const shellcmd = @import("cmd_shell.zig");
 const replay = @import("replay.zig");
 const serve = @import("serve.zig");
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa = if (@import("builtin").mode == .Debug) gpa_state.allocator() else std.heap.c_allocator;
-    const args = try std.process.argsAlloc(gpa);
+pub fn main(init: std.process.Init) !void {
+    // The debug allocator in Debug builds, libc's malloc otherwise (std's choice when libc is linked).
+    const gpa = init.gpa;
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) return usage();
     const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "shell") and args.len == 3) return shellcmd.main(gpa, args[2]);
-    if (std.mem.eql(u8, cmd, "replay") and args.len == 4) return std.process.exit(try replay.main(gpa, args[2], args[3]));
-    if (std.mem.eql(u8, cmd, "dump") and args.len == 3) return std.process.exit(try @import("dump.zig").main(gpa, args[2]));
+    if (std.mem.eql(u8, cmd, "shell") and args.len == 3) return shellcmd.main(gpa, io, args[2]);
+    if (std.mem.eql(u8, cmd, "replay") and args.len == 4) return std.process.exit(try replay.main(gpa, io, args[2], args[3]));
+    if (std.mem.eql(u8, cmd, "dump") and args.len == 3) return std.process.exit(try @import("dump.zig").main(gpa, io, args[2]));
     if (std.mem.eql(u8, cmd, "fuel") and (args.len == 3 or (args.len == 5 and std.mem.eql(u8, args[3], "--since")))) {
         const since: i64 = if (args.len == 5) std.fmt.parseInt(i64, args[4], 10) catch return usage() else 0;
-        return std.process.exit(try @import("fuel.zig").main(gpa, args[2], since));
+        return std.process.exit(try @import("fuel.zig").main(gpa, io, args[2], since));
     }
-    if (std.mem.eql(u8, cmd, "serve")) return serve.main(gpa);
+    if (std.mem.eql(u8, cmd, "serve")) return serve.main(gpa, io);
     return usage();
 }
 

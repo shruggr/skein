@@ -18,13 +18,13 @@ pub const modules = [_]Module{
     .{ .name = "subscribe-handler", .cid = "bafkreiaotl4zkhkuxe2yykptlkhc23imyawimbt5vhuxqxjamov5k2e7di" },
     .{ .name = "loop", .cid = "bafkreidg25u5fpsjpaw2ueknexdtfls5vqk4heafx7yohn2a25t4pz3k7e" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreielnk7gblrqulkncoe7gsvq3pc7e23guwqbhbwmup2hqxmpjnqjzu" },
+    .{ .name = "wallet", .cid = "bafkreibvevizthbn7o4rsbzglrbkomdpgs2cp5s34jcxs5nyku36f7vtzu" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreihin6mnmscg2r7crlawfedwlkdz6fnfcfdd2fgzpv4ere25pjamwq" },
+    .{ .name = "messagebox", .cid = "bafkreibrnt5gr63umbolu7b67eulchldjbzizlg67bhtc2kw32etoru34y" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreieih562zr4qr46iy7otrqekda7dutqy7th3fh457s5ect6eqdq25i" },
+    .{ .name = "frontdoor", .cid = "bafkreic7crgva4zrnloxyshasl6ircdbcuakrpcrurtabefeuahiftxhrm" },
     // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
-    .{ .name = "resolve", .cid = "bafkreicxsp4aoppj6xvfmdgh5lh7g4dxmajv7zepyykaovrrixujvnv63y" },
+    .{ .name = "resolve", .cid = "bafkreif5ymrtyt5uobxikyq4z5xrq3rzyxc6avm3etbrxtbwhqwqxz6yxi" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },

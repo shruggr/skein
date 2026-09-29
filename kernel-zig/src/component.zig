@@ -19,6 +19,7 @@
 // imports do. What cannot be the same is listed in kernel-zig/README.md
 // ("Components").
 const std = @import("std");
+const envm = @import("env.zig");
 const engine = @import("engine.zig");
 const wasi = @import("wasi.zig");
 const program = @import("program.zig");
@@ -1890,6 +1891,6 @@ fn errorCodeName(e: u16) []const u8 {
 /// SKEIN_COMPONENT_TRACE=1: every component call and the preview1 call behind it, on stderr (debugging).
 var trace_on: ?bool = null;
 fn traceOn() bool {
-    if (trace_on == null) trace_on = if (std.posix.getenv("SKEIN_COMPONENT_TRACE")) |v| std.mem.eql(u8, v, "1") else false;
+    if (trace_on == null) trace_on = if (envm.get("SKEIN_COMPONENT_TRACE")) |v| std.mem.eql(u8, v, "1") else false;
     return trace_on.?;
 }

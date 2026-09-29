@@ -467,8 +467,8 @@ fn replayInto(src_id: u32, dst_id: u32) !i32 {
 
     const tip = (try dst.store().logTip(a)) orelse "";
     var o = std.array_list.Managed(u8).init(a);
-    const w = o.writer();
-    try w.writeAll("{\"lines\":[");
+    const w = &o;
+    try w.appendSlice("{\"lines\":[");
     for (cap.lines.items, 0..) |l, i| try w.print("{s}{f}", .{ if (i > 0) "," else "", std.json.fmt(l, .{}) });
     try dst.store().commit();
     const st = dst.ix.stats();

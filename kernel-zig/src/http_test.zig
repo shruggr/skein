@@ -115,7 +115,7 @@ test "wasi:http: a component's GET is the recorded-call request; the answer is i
     const a = arena.allocator();
     Fake.requests = std.array_list.Managed([]const u8).init(a);
     const r = try runner.Runner.init(std.heap.page_allocator);
-    const bytes = try std.fs.cwd().readFileAlloc(a, "test/components/fetch.wasm", 1 << 24);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/components/fetch.wasm", a, .limited(1 << 24));
     var em: []const u8 = "";
     const c = r.compile(bytes, &em) catch |e| {
         std.debug.print("fetch.wasm: {s}\n", .{em});
