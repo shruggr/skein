@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
-# Build the handler programs under programs/ (Go, GOOS=wasip1 GOARCH=wasm) and
-# the wallet (wallet-zig/, Zig wasm32-wasi) and the messagebox (programs/messagebox, Zig) into
-# wasm/<name>.wasm, and print their CIDv1(raw, sha2-256) for src/runtime/programs.ts.
-# Needs Go >= 1.24 (mise). go-sdk comes from ../bsv/go-sdk via a replace directive.
+# Build the stock programs into wasm/<name>.wasm and print their
+# CIDv1(raw, sha2-256) (scripts/pin-programs.sh writes them into the pins):
+# all Zig 0.16.0 (mise.toml), wasm32-wasi — the handlers under programs/
+# (run, objects, head, subscribe, the loop; issue #54), the wire-probe test
+# program, the messagebox, the front door, resolve (over the kernel's dag-cbor
+# and programs/lib), and the wallet (wallet-zig/, over bsvz).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-for p in run-handler objects-handler head-handler subscribe-handler loop wire-probe; do
-  (cd programs && GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "../wasm/$p.wasm" "./$p")
+for p in run-handler objects-handler head-handler subscribe-handler loop wire-probe messagebox frontdoor resolve; do
+  (cd "programs/$p" && zig build)
+  cp "programs/$p/zig-out/bin/$p.wasm" "wasm/$p.wasm"
 done
-# The wallet (issue #29): Zig 0.16.0 (mise.toml), over bsvz (scripts/fetch-bsvz.sh).
+# The wallet (issue #29): over bsvz (scripts/fetch-bsvz.sh).
 [ -d .build/bsvz/.git ] || scripts/fetch-bsvz.sh
 (cd wallet-zig && zig build program)
 cp wallet-zig/zig-out/bin/wallet.wasm wasm/wallet.wasm
-# The messagebox's records in the VM (issue #33): Zig, over the kernel's dag-cbor.
-(cd programs/messagebox && zig build)
-cp programs/messagebox/zig-out/bin/messagebox.wasm wasm/messagebox.wasm
-# The front door (#40): Zig, over the kernel's dag-cbor and programs/lib.
-(cd programs/frontdoor && zig build)
-cp programs/frontdoor/zig-out/bin/frontdoor.wasm wasm/frontdoor.wasm
-(cd programs/resolve && zig build)
-cp programs/resolve/zig-out/bin/resolve.wasm wasm/resolve.wasm
 node --experimental-strip-types --no-warnings -e '
   const { readFileSync } = await import("node:fs");
   const { rawCid } = await import("./src/runtime/programs.ts");
