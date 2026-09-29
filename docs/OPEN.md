@@ -50,7 +50,8 @@ tool call expresses file edits, mapped onto the host filesystem.
 
 ## From the wasm shell prototype (2026-09-25)
 
-`runShell` (src/runtime/shell.ts) runs patched brush + uutils coreutils as WASI
+The shell (first `runShell` in TypeScript; since #55 only the kernel's,
+kernel-zig/src/shell.zig) runs patched brush + uutils coreutils as WASI
 modules over the tree; see wasm/README.md for builds and patches.
 
 1. **Pipelines run stage by stage.** Every external command runs to
@@ -132,10 +133,10 @@ random are now pure, derived from the runtime's own stamp on each log entry
     The real path is messages carrying (or announcing, then streaming) the
     objects, and a program registration message naming module CIDs; the
     shell program's module CIDs are pinned in code for now.
-12. **The wallet edge is an import.** `main.ts` imports `../wallet.ts`
-    (HTTP to wallet-api); it is the one allowed escape from the isolation
-    rule. The wallet's signatures are deterministic (RFC 6979, checked for
-    both ProtoWallet and wallet-api) — replay depends on it for results.
+12. ~~**The wallet edge is an import.**~~ Resolved: the TypeScript runtime
+    that imported `../wallet.ts` is deleted (#55); the kernel's wallet calls
+    are answered by the router's oracle (a ProtoWallet per instance). The
+    signatures are deterministic (RFC 6979) — replay depends on it.
 13. **Identities share one wallet here.** runtime, admin, david and timer are
     keyIDs under one wallet; a real client signs with its own.
 14. **Stat times are the epoch** (git records no times). `ls -l` shows 1970.
@@ -151,11 +152,9 @@ random are now pure, derived from the runtime's own stamp on each log entry
     wallet does those). Decide whether a drawn, stored seed is wanted.
 18. **Stamp resolution** is Date.now() (ms) as `[sec, nsec]`; nothing inside
     depends on it being finer. process.hrtime could add sub-ms precision.
-19. **Sleep needs an input to wake.** Time passes inside only when an entry
-    is admitted. `main.ts` admits a `tick` (signed by `timer`) about once a
-    second (`SKEIN_TICK_MS`) while any thread sleeps, and never otherwise, so
-    ticks are in the log and replay exactly — but they are log noise, and a
-    sleep's real duration is quantised to the tick period.
+19. ~~**Sleep needs an input to wake.**~~ Resolved: the router keeps each
+    instance's earliest deadline and admits one `wake` entry when it comes
+    (no periodic ticks).
 20. **Stamps are the runtime's word.** They are unsigned and trusted as
     written; tampering shows up only against a checkpoint signature. A
     runtime with a wrong clock stamps wrong times, monotonically.
@@ -172,17 +171,15 @@ random are now pure, derived from the runtime's own stamp on each log entry
 ## From the envelope/handler build (2026-09-25)
 
 Settled by the build, for the record: `hello`, `tick`, the `timer` identity,
-the unix socket (items 5, 15, 19 above) are gone; wakes are signed entries
-written by `main.ts`'s timer at each deadline, one per wake. Identities no
+the unix socket (items 5, 15, 19 above) are gone; wakes are entries
+written at each deadline, one per wake (then by the TS runtime's timer; now
+by the router). Identities no
 longer share one wallet (13): the instance has its own; the owner is another
 wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
 
-21. **The root key is in the runtime process.** The edge (`inbox.ts`) derives
-    message keys from `SKEIN_INSTANCE_WIF`, and it runs in the same process as
-    the machine (`main.ts` reads the env). Nothing inside the machine sees it,
-    but "the runtime never holds the key" holds only by code discipline. A
-    separate host-edge process that hands `{envelope, key}` to the runtime
-    over a local channel would make it structural.
+21. ~~**The root key is in the runtime process.**~~ Resolved: the kernel
+    process holds no key; the router's oracle (another process) answers its
+    wallet calls.
 22. **Freshness is judged against admission time.** An envelope older than
     `SKEIN_FRESHNESS_MS` when the runtime gets to it is rejected and
     acknowledged — so a runtime that was down for 10 minutes drops what
@@ -206,9 +203,9 @@ wallet. The old `~/.skein/runtime.db` was moved to `runtime.db.socket-era`.
     is emitted; the client waits forever. An error envelope in `results`
     from an errored first step (the runtime could emit it, or the handler
     could always exit 0 and reply) is the obvious fix.
-26. **Modules still enter by the side door.** `skein-dev install`
-    (`bin/skein-runtime` runs it) puts brush, coreutils and the handlers into
-    the store; they are 4–10 MB, over the 1 MiB bundle, and a record cannot
+26. **Modules still enter by the side door.** The kernel installs its pinned
+    modules (brush, coreutils, the handlers) into the store at start
+    (`skein-dev install` does it for a plain store file); they are 4–10 MB, over the 1 MiB bundle, and a record cannot
     be split across bundles yet. Chunked records (a manifest record plus
     parts) would let `objects` carry them — and a program registration
     through a config box would replace the pins.

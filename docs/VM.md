@@ -99,9 +99,6 @@ is shared outright), so a deployed agent tree *is* its repository's tree.
 commit tree against the VFS tree, one record per object and no zlib copy
 anywhere, and replay giving the same trees.
 
-The TypeScript runtime (frozen) does not have this feature. There, git
-runs over plain files, and its loose objects are stored as zlib blobs.
-
 ### Heads
 
 A **head** is a named pointer to a tree, kept as a chain like any other
@@ -220,7 +217,7 @@ the kernel runs both:
 
 - a **preview1 core module**, which imports `wasi_snapshot_preview1` and the
   `skein` namespace (pointers into its memory, `f(…, out, cap) → n`, with
-  `take`/`error`; `src/runtime/wasi/skein-imports.ts`);
+  `take`/`error`; `kernel-zig/src/program.zig`);
 - a **WASI 0.2 component**, which targets the world `skein:kernel/handler`
   (`wit/skein.wit`). That is WASI 0.2.12's `cli`, `clocks`, `filesystem`,
   `io` and `random`, plus the interface `skein:kernel/skein`, and the export
@@ -438,7 +435,7 @@ pass and ends on its own instead of spinning until fuel runs out, and
 mid-step timestamps spread with real work. A shell's sleep takes its
 deadline from this clock and rests the thread; the wake entry's stamp starts
 the next segment, its fuel counted from zero. (Before #38: the stamp, then
-+1 ns per read — still the TS runtime's clock, which is frozen.)
++1 ns per read.)
 
 ## Messages
 

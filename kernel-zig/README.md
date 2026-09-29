@@ -5,9 +5,10 @@ index (issue #30: IPLD maps in the store and one state record), the
 scheduler, the subscriptions and heads chains, the filesystem over the
 store, the WASI preview1 imports and the `skein` imports, and the same as a
 WASI 0.2 world for components (issue #34) — running the wasm programs
-through wasmtime's C API. It was built replay-exact against the
-TypeScript runtime in `src/runtime` (frozen); since fuel went on the update
-record (issue #5) it is its own reference: the same log gives the same
+through wasmtime's C API. It was built replay-exact against a first
+kernel in TypeScript (deleted in #55: this is the one kernel implementation;
+`src/runtime` keeps only the formats and the store reader); since fuel went
+on the update record (issue #5) it is its own reference: the same log gives the same
 entries, records, CIDs, derived state and fuel on every replay, and the
 suite checks that Zig against Zig. Since #33 the router
 (`src/host/router.ts`, TypeScript) drives it, over one channel per kernel;
@@ -32,7 +33,7 @@ commands with `mise exec --` or activate mise).
 ```
 cd kernel-zig
 zig build --release          # zig-out/bin/skein-kernel (ReleaseSafe)
-zig build test               # unit tests, incl. test/fixtures.json made by the TS runtime
+zig build test               # unit tests, incl. test/fixtures.json made by src/runtime's formats
 ```
 
 wasmtime's compilation cache (`~/.cache/wasmtime`) is on: a cache of machine
@@ -41,9 +42,9 @@ code for module bytes, not state. `SKEIN_WASMTIME_CACHE=0` turns it off.
 ## Run
 
 ```
-skein-kernel serve                         # the runtime process: a drop-in for bin/skein-runtime
-skein-kernel replay <source.db> <out.db>   # the log alone into a fresh store, no wallet (skein-dev replay)
-skein-kernel shell <store.db> < cases.json # shell cases as host-go's tests pass them
+skein-kernel serve                         # the runtime process the router spawns
+skein-kernel replay <source.db> <out.db>   # the log alone into a fresh store, no wallet
+skein-kernel shell <store.db> < cases.json # shell cases as equiv/shell.ts passes them
 skein-kernel dump <store.db>               # the derived state read through the index, as JSON (either format, read only)
 skein-kernel fuel <store.db> [--since n]   # fuel per thread and in total, from the steps whose input is entry n or later
 ```
@@ -102,7 +103,7 @@ is recorded and replayed like any other field.
   instance).
 - **Existing state**: update CIDs changed. The state record carries
   `format: 1`; a store with a log whose state record has no `format` (the
-  kernel before #5), or in the TS runtime's tables, is refused for running
+  kernel before #5), or in the older tables (sqlite.ts's, host-signed entries), is refused for running
   (`serve`, `shell`: "a store written before fuel metering (issue #5) …
   refused (start a new store: re-genesis)"). Read-only uses still open it:
   `dump`, `fuel`, and `replay` as a source (a log is a log — the replay
@@ -129,16 +130,11 @@ shell`, no meter) the clock is `shell.Fixed`, as before.
 
 Changed by it: an update's `until` (a sleep's deadline) moves by the fuel
 burnt before the sleep; Go programs (run-handler, loop) burn ~1.2k more fuel
-per step (their runtime reads the clock); any printed mid-step time. The
-corpus (`equiv/corpus.ts`, logs written by the TS runtime, whose clock is
-the old one) therefore prints only what both clocks agree on — a printed
-mid-step time would change the reply the replay seals, which then has no
-recorded wallet answer.
+per step (their runtime reads the clock); any printed mid-step time.
 
 ## For the wallet (issue #29)
 
-What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md);
-the TS runtime has none of it.
+What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md).
 
 - **Bitcoin codecs** (`cid.zig`, `bitcoin.zig`, #42): `putblock` accepts
   `bitcoin-tx` (0xb1) and `bitcoin-block` (0xb0, 80 bytes) with
@@ -444,15 +440,15 @@ time is unchanged within noise (e.g. the generated `run` store: 1.36 s
 before, 1.21–1.35 s after; `kurt/runtime.db.pre-replies` 0.57 s → 0.59–0.62
 s): the wasm runs dominate.
 
-**Older stores.** A file in the format before #30 (the TS runtime's, or this
-kernel's before #30) has no state record: it is imported from its tables —
+**Older stores.** A file in the format before #30 (this kernel's before #30,
+or the deleted TS runtime's) has no state record: it is imported from its tables —
 the log from `entries`, each chain from its origin and `updates`, the cursor
 from `meta` — through the same derivation, so the import and the
 incremental path reach the same state CID (the suite checks it on every
 replay). Opened for writing, the state record is written and the old tables
 are renamed `legacy_*`; opened read only (a replay's source, `dump`), the
-import stays in memory. A store whose old index is stale is refused as
-before (`skein-dev rebuild` it).
+import stays in memory. A store whose old index is stale is refused (nothing
+rebuilds it any more: `skein-dev rebuild` went with the TS runtime, #55).
 
 **From TypeScript** (`src/runtime/index-store.ts`): a read-only `Store` over
 the maps (the pointer re-read on every call, so it follows a live kernel),
@@ -550,8 +546,7 @@ clients); the handler programs seal §7.3 unless the party they answer wrote in
 §7.2. A new entry kind, `mail`, carries the messagebox's state changes for a
 hosted identity to the `messagebox` program (`programs/messagebox`, Zig), run
 by the reserved box `:mail`. A store written in an older format is refused
-for running; the handler programs the frozen TypeScript runtime runs are its
-own builds, `wasm/v1/`.
+for running.
 
 ## The browser build (issue #35)
 
@@ -680,14 +675,13 @@ memory (IdbStore loads everything).
 
 ## Equivalence
 
-Since #5 the Zig kernel is its own reference: the TS runtime does not
-meter, so its update records (and CIDs) are no longer the Zig kernel's.
-`equiv/run.sh` runs all of it (it builds first):
+Since #5 the Zig kernel is its own reference (the TS runtime did not
+meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 
 | check | what | result (2026-09-29, #40) |
 |---|---|---|
-| `zig build test` | format 3's records (mail, genesis routes/reads) and, kept from format 2, §7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures the TS runtime made (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI; **wasi:http** (#15: `http.zig`, `http_test.zig`): the recorded-call request shape, and the `fetch` component under a stand-in host | 38/38 |
-| `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25) through `runShell` on Node and `skein-kernel shell`: stdout, stderr, exit code, tree CID (none of which carries fuel). Then (#34) the same cases with every plain preview1 tool (coreutils, find, diff/cmp, jq, grep, tree, awk, sed, qjs/node, python/python3) made a component with the preview1 adapter, against the modules | 71/71 identical; as components 66/71 identical, the other 5 differing only in a printed exit status above 1 (the adapter's ok/err) |
+| `zig build test` | format 3's records (mail, genesis routes/reads) and, kept from format 2, §7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures src/runtime's formats make (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI; **wasi:http** (#15: `http.zig`, `http_test.zig`): the recorded-call request shape, and the `fetch` component under a stand-in host | 38/38 |
+| `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25; `equiv/shell-cases.ts`) through `skein-kernel shell`, against the results recorded from the TypeScript shell before it was deleted (`equiv/shell-expected.json`, #55): stdout, stderr, exit code, tree CID (none of which carries fuel). Then (#34) the same cases with every plain preview1 tool (coreutils, find, diff/cmp, jq, grep, tree, awk, sed, qjs/node, python/python3) made a component with the preview1 adapter, against the modules | 71/71 identical; as components 66/71 identical, the other 5 differing only in a printed exit status above 1 (the adapter's ok/err) |
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 16 logs: 9 agents (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, two agents, and `gen-fuel`: `fuelPerStep` 4·10^6, where a step runs out) and the 7 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is format 3, written by the Zig kernel as the router drives it (on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering over recorded `http`), so each source is also reproduced exactly by its replay | 16/16 identical, sources reproduced |
 | `equiv/wallet.ts` | the router drives `serve` with the instance's oracle (a ProtoWallet) and a fake ARC answering the `http` import; the wallet program (#29) subscribed to an owner's box and a sender-less `chain` box — headers from regtest's genesis (an owner's message, then plain `header` event entries admitted by the router), a BRC-29 payment internalized, a spend signed through the oracle and broadcast (the posted BEEF's scripts verify under @bsv/sdk), the thread's deadline woken by the router's waker and ARC re-asked, a plain `status` entry (MINED + path) routed by its `subject` to the awaiting thread, a rejected broadcast dropping its action, a draft signed by `signAction`; then the store replayed Zig against Zig | all ok; the store reproduced exactly |
@@ -699,7 +693,7 @@ meter, so its update records (and CIDs) are no longer the Zig kernel's.
 | instrumented fuel (#35) | the corpus replayed natively with `SKEIN_FUEL_MODE=instrument` (every module metered by its own counter) | 16/16 identical reports |
 | `equiv/browser.ts` (#35) | the corpus replayed by the wasm kernel in headless Chrome into IndexedDB, read back, against the native replay: report and dump | 16/16 identical |
 | `equiv/browser-live.ts` (#35) | an instance in Chrome chats an agent on a scratch router; the reply admitted; its store replayed natively | all ok |
-| older-format refusal | a TS-written store (host-signed entries, no fuel) opened for running (`skein-kernel shell`) | refused, with the message |
+| older-format refusal | a store in sqlite.ts's tables with a host-signed genesis (`equiv/old-store.ts`: format 1, no fuel) opened for running (`skein-kernel shell`) | refused, with the message |
 | `equiv/overlay.ts` (#36, #40) | an overlay node served by its own front door (routes.json): the stock `TopicBroadcaster` and `LookupResolver` at its host-name origin; submit the one write, lookups, dupes, refusals and listings none; then replayed | all ok; reproduced exactly |
 | `equiv/serve.ts` | `serve` as the router drives it, the owner (raw BRC-33, and a signed `/account/register`) and the inference peer on BRC-104 sessions with the instances' front doors and their mailbox instances: genesis, a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a router restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
@@ -718,30 +712,30 @@ store now: the corpus and `serve.ts`) — the source's dump to equal z1's: the
 running kernel and the replay agree exactly. Sources are copied
 (with their `-wal`) before anything opens them.
 
-Dropped with #5: the comparisons with the TS runtime's replay
-(`equiv/replay.ts`, row-by-row tables, TS-built state CIDs, "vs the source"
-tips) and the replays of copies of the stores under `~/.skein` (they
-predate fuel; the live instances re-genesis when they move to this build).
+Dropped with #5: the comparisons with the TS runtime's replay (row-by-row
+tables, TS-built state CIDs, "vs the source" tips) and the replays of copies
+of the stores under `~/.skein` (they predate fuel; the live instances
+re-genesis when they move to this build).
 
 ## Layout
 
-| file | what (TS counterpart) |
+| file | what (the TypeScript it was ported from; the machine's parts were deleted in #55) |
 |---|---|
 | `cbor.zig`, `cid.zig` | dag-cbor as @ipld/dag-cbor + cborg do it; CIDs (`cid.ts`) |
 | `json.zig` | JSON.stringify quoting, Number::toString, RFC 8785 (`envelope.ts jcs`) |
 | `secp.zig` | BRC-42 "anyone" keys, ECDSA verify as @bsv/sdk (`identity.ts`) |
 | `envelope.zig` | BRC-169 envelope checks, BRC-78 framing (`runtime/envelope.ts`) |
-| `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`) |
+| `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`; `index-store.ts` reads this format) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
 | `log.zig`, `heads.zig`, `subscriptions.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, `subscriptions.ts`, `programs.ts`, `syscalls.ts` |
 | `engine.zig`, `engine_wasmtime.zig` | the engine interface; wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |
 | `engine_v8.zig`, `web_store.zig`, `component_web.zig`, `web.zig`, `wasm_fuel.zig`, `web/` | the browser build (#35): V8 through the shim, the shim's stores, preview1 only, the exported ABI, fuel by instrumentation, the JS shim |
-| `wasi.zig`, `vfs.zig`, `tree.zig` | `wasi/host.ts`, `wasi/vfs.ts`, `tree.ts` |
+| `wasi.zig`, `vfs.zig`, `tree.zig` | the WASI host and vfs (deleted); `tree.ts` |
 | `objects.zig` | none: the synthetic `.git/objects` (issue #2, docs/VM.md), loose-object framing over git-raw records |
-| `runner.zig`, `shell.zig`, `program.zig` | module cache and `runModule`; `shell.ts`; `program.ts` + `wasi/skein-imports.ts` |
-| `scheduler.zig` | `scheduler.ts` |
+| `runner.zig`, `shell.zig`, `program.zig` | module cache and `runModule`; the shell; one program step and the `skein` imports (deleted) |
+| `scheduler.zig` | the scheduler (deleted) |
 | `serve.zig`, `ipc.zig` | the kernel as the router drives it (`src/host/kernel.ts`, issue #33) |
-| `replay.zig`, `cmd_shell.zig` | `skein-dev replay`; the shell test driver |
+| `replay.zig`, `cmd_shell.zig` | `skein-kernel replay` (was `skein-dev replay`); the shell test driver |
 | `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (billing as a query over the log); the fuel unit tests (issue #5) |
 | `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
 | `http.zig`, `http_test.zig` | wasi:http's recorded-call shape (#15): the request a component's `outgoing-handler.handle` becomes, the response it reads back |
@@ -752,14 +746,12 @@ predate fuel; the live instances re-genesis when they move to this build).
   `.git/objects/xx/yyyy…` is a gitlink naming the git-raw record; to
   programs it is a read-only file of zlib bytes; a loose object that git
   writes is hash-checked and kept as the record; `.git/objects/pack` takes
-  nothing new (docs/VM.md). The TypeScript runtime treats those paths as
-  plain files and gitlinks as empty directories. So a log in which `git`
-  writes objects replays on this kernel only, and trees without
-  `.git/objects` behave the same on both.
+  nothing new (docs/VM.md). The TypeScript runtime treated those paths as
+  plain files and gitlinks as empty directories.
 
 - **Sleeping shells** are not parked mid-instance (no JSPI): the run is
   abandoned at the sleep after writing `waiting`, and the wake re-executes the
-  thread from its origin, verifying every update against its chain — the TS
+  thread from its origin, verifying every update against its chain — the
   restart path — and carries on under the wake entry. Same records; a
   re-execution per wake.
 - **Messages that only exist as JavaScript text**: trap messages are mapped
@@ -769,16 +761,13 @@ predate fuel; the live instances re-genesis when they move to this build).
   multiformats CID decode errors are approximated. They reach records only
   when a program prints what an import told it or a step fails that way.
 - **Engine limits**: wasmtime's default wasm stack (512 KiB) and V8's differ,
-  so a deep enough recursion overflows at a different depth. Fuel is on
-  here and not in the TS runtime (issue #5): the two no longer write the
-  same update records.
+  so a deep enough recursion overflows at a different depth.
 - **The drain's own crash lines** (`runtime: <stack>`) are not stack traces.
-- **The store file** (#30): blocks and the state pointer, not the TS tables.
-  The TS runtime ran on it only through a rebuild (the `equiv/replay.ts`
-  removed with #5 showed how); the explorer and `skein-dev` read it
+- **The store file** (#30): blocks and the state pointer, not sqlite.ts's
+  tables; the explorer, `skein-dev` and `skein-host` read it
   (`src/runtime/index-store.ts`, which ignores the state record's `format`).
 - **Not ported**: the index rebuild of a stale older store (`edges.rebuild`;
-  such a store is refused, `skein-dev rebuild` it first), `putMessage` and
+  such a store is refused), `putMessage` and
   the `messages` table (the runtime does not write them), `handles`, the
   `waitersOn`/`waitingFrom`/`due` queries (the kernel does not ask them; the
   maps would be `launched ‖ origin` and `identity ‖ origin`, and `due` is a
