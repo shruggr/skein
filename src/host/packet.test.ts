@@ -123,3 +123,36 @@ test("packet: a dag-cbor scope must be a state record (a checkpoint)", async () 
   await refuses(readPacket(w.bytes), "malformed");
   assert.ok(CID.asCID(decodePacket(w.bytes).scope));
 });
+
+test("packet: a checkpoint's bitcoin blocks are walked by their typed links (#42): header → root node → transactions → what they spend; sparse targets are not missing", async () => {
+  const { createHash } = await import("node:crypto");
+  const { BITCOIN_BLOCK, BITCOIN_TX, hashCid } = await import("../runtime/bitcoin.ts");
+  const dbl = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
+  const cidOf = (code: number, b: Uint8Array) => hashCid(code, dbl(b));
+  // A transaction held (spending one that is not), a sibling not held, the root node over them, a header naming the root.
+  const tx = new Transaction();
+  tx.addInput({ sourceTXID: "11".repeat(32), sourceOutputIndex: 2, unlockingScript: Script.fromHex("51"), sequence: 0xffffffff });
+  tx.addOutput({ satoshis: 1, lockingScript: Script.fromHex("6a") });
+  const txBytes = Uint8Array.from(tx.toBinary());
+  const txc = cidOf(BITCOIN_TX, txBytes);
+  const node = Uint8Array.from([...txc.multihash.digest, ...Buffer.alloc(32, 7)]);
+  const nodeCid = cidOf(BITCOIN_TX, node);
+  const header = new Uint8Array(80);
+  header[0] = 1;
+  header.set(Buffer.alloc(32, 9), 4); // a previous header not held
+  header.set(nodeCid.multihash.digest, 36);
+  const headerCid = cidOf(BITCOIN_BLOCK, header);
+  const state = encode({ kind: "skein-state", format: 3, log: null, cursor: 0, heads: null, index: { tip: headerCid } });
+  const objects = new MemBlocks();
+  for (const [c, b] of [[state.cid, state.bytes], [headerCid, header], [nodeCid, node], [txc, txBytes]] as const) await objects.putBlock(c, b);
+
+  const got = await closure(state.cid, (c) => objects.get(c));
+  assert.deepEqual(got.missing, [], "the previous header, the sibling and the spent transaction are sparse: not missing");
+  assert.deepEqual(got.blocks.map((b) => b.cid.toString()), [state.cid, headerCid, nodeCid, txc].map(String), "state → header → root node → transaction");
+
+  // Written and read back: the bag carries them, every hash checked.
+  const w = await writePacket(state.cid, objects);
+  const r = await readPacket(w.bytes);
+  assert.equal(r.kind, "checkpoint");
+  for (const c of [headerCid, nodeCid, txc]) assert.ok(await r.blocks.has(c), `${c} restored`);
+});
