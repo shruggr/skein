@@ -1,21 +1,24 @@
 //! The front door (#40): the instance as an HTTP server. The host invokes it
 //! through the kernel's `call` with the raw request; it runs BRC-103/104
 //! (the handshake, and the verification of every signed request) against the
-//! session records in the instance's state, matches the path against the
-//! routes table, invokes the route's handler (an in-VM call) and signs the
-//! answer. Nothing it does on a request is written — a handler that wants a
-//! write returns an entry for the host to admit — except the one auth write:
-//! a handshake returns a `session` event for the host to admit, which this
-//! program, stepped on the reserved box `:sessions`, keeps.
+//! instance's session table, matches the path against the routes table,
+//! invokes the route's handler (an in-VM call) and signs the answer. Nothing
+//! it does on a request is written — a handler that wants a write returns an
+//! entry for the host to admit. Auth writes nothing at all: sessions are not
+//! state (#40, "sessions are not state").
 //!
 //! Called: fn "http", arg (dag-cbor)
-//!   {method, path, route?, query, headers: {name: value}, body: bytes}
-//!   path   the path as the client sent it (what a BRC-104 request signs)
-//!   route  the path the routes table sees (the host strips `/@<handle>`); default path
-//! → {status, headers: {name: value}, body: bytes, admit?: [entry], then?: {program, fn, arg}}
+//!   {method, path, route?, query, headers: {name: value}, body: bytes, scratch?: {key: bytes}}
+//!   path     the path as the client sent it (what a BRC-104 request signs)
+//!   route    the path the routes table sees (the host strips `/@<handle>`); default path
+//!   scratch  the instance's session table, as the host holds it in memory
+//! → {status, headers: {name: value}, body: bytes, admit?: [entry], then?: {program, fn, arg},
+//!    scratch?: [{key, value?: bytes}]}
 //!   an entry is {mail: <record>, body: bytes} or {event: <record>, box}: the
 //!   host puts the records and admits each entry; `then` is a call the host
-//!   makes once they are processed (an overlay submit's answer).
+//!   makes once they are processed (an overlay submit's answer). `scratch`
+//!   lists the table's changes (no value: the key is dropped), which the host
+//!   applies before it answers the client.
 //!
 //! The routes table (the genesis's `routes`, from etc/routes.json):
 //!   [{path | prefix, program: <cid>, fn, auth?: "none", read?: <op>}]
@@ -26,21 +29,25 @@
 //!   [{caller?: <key>, op}] — no caller: anyone.
 //! A handler gets (dag-cbor) {caller?, method, path, route, query, headers,
 //! body, contentType, session?: {payload, signature, nonce, yourNonce}} and
-//! answers {status, type?, body: bytes, admit?, then?}.
+//! answers {status, type?, body: bytes, admit?, then?}. A handler never sees
+//! the session table; a message it admits carries the sender key, the 104
+//! signature and both nonces, so its authorship verifies from the log alone.
 //!
 //! Its other function, "explore", is a route handler (explore.zig): the
 //! instance's log, threads, heads and records as JSON, behind a read rule.
 //!
-//! Sessions: the head `sessions` names {kind: "sessions", sessions: [{nonce,
-//! session: <cid>}]} (sorted by nonce), each {kind: "session", peer, sessionNonce
-//! (ours), peerNonce, created}. A request's session is looked up by its
-//! `yourNonce` among them and the `:sessions` events admitted but not yet
-//! processed (the call's `pending`), so a handshake answered a moment ago
-//! serves the next request. Expiry: `defaults.sessionTtlMs` (a day) from
-//! `created`; an unknown or expired session is a plain 401 and the stock
-//! client shakes hands again. Replay: a replayed request verifies (nothing
-//! remembers nonces: that would be a write per request); a replayed write is
-//! the same message record, which the kernel admits once.
+//! Sessions: the table is a key → bytes map the host keeps in memory for the
+//! instance while its kernel process runs (src/host/frontdoor.ts; a new
+//! process starts with an empty one). Only this program reads or writes its
+//! entries: key = our session nonce, value (dag-cbor) {peer, peerNonce,
+//! created}. A request's session is looked up by its `yourNonce`. Expiry:
+//! `defaults.sessionTtlMs` (a day) from `created`; an unknown or expired
+//! session is a plain 401 and the stock client shakes hands again. The table
+//! is bounded: a handshake drops the expired sessions, and the oldest past
+//! MAX_SESSIONS. Replay: a replayed initialRequest (the peer and initial
+//! nonce of a session held) is refused; a replayed signed request verifies
+//! (its nonce is not remembered: a replayed read reads again), and a replayed
+//! write is the same message record, which the kernel admits once.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -51,9 +58,9 @@ const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
-pub const SESSIONS_BOX = ":sessions";
-const SESSIONS_HEAD = "sessions";
 const DEFAULT_TTL_MS: i128 = 24 * 60 * 60 * 1000;
+/// The session table's bound: a handshake past it drops the oldest session.
+const MAX_SESSIONS = 1024;
 
 pub fn main() u8 {
     return sk.main("frontdoor", run);
@@ -62,8 +69,7 @@ pub fn main() u8 {
 fn run(a: Allocator) !void {
     const in = try sk.input(a);
     const kind = Value.str(in.get("kind")) orelse "";
-    if (eql(u8, kind, "step")) return step(a, in);
-    if (!eql(u8, kind, "call")) return sk.report("the front door is called (fn \"http\") or stepped on `:sessions`");
+    if (!eql(u8, kind, "call")) return sk.report("the front door is called (fn \"http\"); it is never stepped");
     const func = Value.str(in.get("fn")) orelse "";
     const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
     if (eql(u8, func, "http")) return sk.answer(a, try http(a, in, arg));
@@ -87,6 +93,7 @@ const Resp = struct {
     headers: std.ArrayList(brc.Header) = .empty,
     admit: ?Value = null,
     then: ?Value = null,
+    scratch: ?Value = null,
 
     fn value(r: *Resp, a: Allocator) !Value {
         var h = cbor.MapBuilder.init(a);
@@ -98,6 +105,7 @@ const Resp = struct {
         try m.put("body", .{ .bytes = r.body });
         try m.put("admit", r.admit);
         try m.put("then", r.then);
+        try m.put("scratch", r.scratch);
         return m.value();
     }
 };
@@ -226,34 +234,32 @@ fn ttlOf(in: Value) i128 {
     return std.fmt.parseInt(i128, t, 10) catch DEFAULT_TTL_MS;
 }
 
-fn sessionOf(v: Value) ?Session {
-    if (!eql(u8, Value.str(v.get("kind")) orelse "", "session")) return null;
+/// One entry of the session table: key = our nonce, value = dag-cbor {peer, peerNonce, created}.
+fn sessionOf(a: Allocator, key: []const u8, bytes: []const u8) ?Session {
+    const v = cbor.decode(a, bytes) catch return null;
     return .{
         .peer = Value.bytesOf(v.get("peer")) orelse return null,
-        .ours = Value.str(v.get("sessionNonce")) orelse return null,
+        .ours = key,
         .theirs = Value.str(v.get("peerNonce")) orelse return null,
         .created = Value.intOf(v.get("created")) orelse 0,
     };
 }
 
-/// The sessions in state and those admitted and not yet processed, in no order.
-fn sessions(a: Allocator, in: Value) ![]Session {
+/// The session table the host passed in (the request's `scratch`), in no order.
+fn sessions(a: Allocator, req: Value) ![]Session {
     var out: std.ArrayList(Session) = .empty;
-    if (try sk.head(a, SESSIONS_HEAD)) |root| {
-        const r = try sk.get(a, root);
-        if (r.get("sessions")) |ss| if (ss == .array) for (ss.array) |x| {
-            const c = Value.cidOf(x.get("session")) orelse continue;
-            if (sessionOf(try sk.get(a, c))) |s| try out.append(a, s);
-        };
-    }
-    if (in.get("pending")) |p| if (p == .array) for (p.array) |x| {
-        const c = Value.cidOf(x) orelse continue;
-        const e = try sk.get(a, c);
-        if (!eql(u8, Value.str(e.get("box")) orelse "", SESSIONS_BOX)) continue;
-        const ev = Value.cidOf(e.get("event")) orelse continue;
-        if (sessionOf(try sk.get(a, ev))) |s| try out.append(a, s);
-    };
+    const t = req.get("scratch") orelse return out.items;
+    if (t != .map) return out.items;
+    for (t.map) |e| if (Value.bytesOf(e.value)) |b| if (sessionOf(a, e.key, b)) |s| try out.append(a, s);
     return out.items;
+}
+
+/// A change to the host's session table: no `value` drops `key`.
+fn change(a: Allocator, key: []const u8, value: ?[]const u8) !Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("key", cbor.string(key));
+    if (value) |v| try m.put("value", .{ .bytes = v });
+    return m.value();
 }
 
 const Verified = struct { peer: []const u8, session: Session, proof: Value };
@@ -279,7 +285,7 @@ fn verify(a: Allocator, in: Value, req: Value, request_id: []const u8) !Verified
     const now = Value.intOf(in.get("now")) orelse 0;
     const ttl = ttlOf(in);
     var found: ?Session = null;
-    for (try sessions(a, in)) |s| if (eql(u8, s.ours, your)) {
+    for (try sessions(a, req)) |s| if (eql(u8, s.ours, your)) {
         found = s;
     };
     const s = found orelse return unauthorized("Session not found for nonce (expired or unknown)");
@@ -314,7 +320,8 @@ fn sign(a: Allocator, in: Value, r: *Resp, v: Verified, request_id: []const u8) 
 }
 
 /// BRC-103 initialRequest → initialResponse: our nonce, our signature over
-/// both nonces, and the session for the host to admit.
+/// both nonces, and the new session as a change to the host's in-memory
+/// table (with the expired sessions dropped, and the oldest past MAX_SESSIONS).
 fn handshake(a: Allocator, in: Value, req: Value) !Resp {
     const raw = Value.bytesOf(req.get("body")) orelse "";
     const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, raw, .{}) catch return jsonError(a, 400, "ERR_AUTH_MALFORMED", "The BRC-104 handshake message is malformed.");
@@ -330,7 +337,8 @@ fn handshake(a: Allocator, in: Value, req: Value) !Resp {
     if (inj != .string or inj.string.len == 0 or inj.string.len > 256) return jsonError(a, 400, "ERR_AUTH_MALFORMED", "bad initialNonce");
     const theirs = inj.string;
     const their_raw = brc.decode64(a, theirs) orelse return jsonError(a, 400, "ERR_AUTH_MALFORMED", "initialNonce is not base64");
-    for (try sessions(a, in)) |s| if (eql(u8, s.peer, peer) and eql(u8, s.theirs, theirs)) return jsonError(a, 401, "ERR_AUTH_FAILED", "Replayed initialRequest nonce.");
+    const held = try sessions(a, req);
+    for (held) |s| if (eql(u8, s.peer, peer) and eql(u8, s.theirs, theirs)) return jsonError(a, 401, "ERR_AUTH_FAILED", "Replayed initialRequest nonce.");
 
     const ours = try brc.createNonce(a);
     const ours_raw = brc.decode64(a, ours).?;
@@ -356,52 +364,26 @@ fn handshake(a: Allocator, in: Value, req: Value) !Resp {
     try r.headers.append(a, .{ .name = "x-bsv-auth-your-nonce", .value = theirs });
     try r.headers.append(a, .{ .name = "x-bsv-auth-signature", .value = try sk.hex(a, sig) });
 
-    var s = cbor.MapBuilder.init(a);
-    try s.put("kind", cbor.string("session"));
-    try s.put("peer", .{ .bytes = peer });
-    try s.put("sessionNonce", cbor.string(ours));
-    try s.put("peerNonce", cbor.string(theirs));
-    try s.put("created", cbor.int(Value.intOf(in.get("now")) orelse 0));
-    var e = cbor.MapBuilder.init(a);
-    try e.put("event", s.value());
-    try e.put("box", cbor.string(SESSIONS_BOX));
-    const list = try a.alloc(Value, 1);
-    list[0] = e.value();
-    r.admit = .{ .array = list };
-    return r;
-}
-
-// ---------------------------------------------------------------- the one write: a session, kept
-
-fn step(a: Allocator, in: Value) !void {
-    const args = in.get("args") orelse return sk.report("no args");
-    const ev = Value.cidOf(args.get("event")) orelse return sk.report("the front door is stepped only on `:sessions` events");
-    const rec = try sk.get(a, ev);
-    const new = sessionOf(rec) orelse return sk.report("not a session record");
-    const at = Value.intOf(in.get("at")) orelse 0;
+    const now = Value.intOf(in.get("now")) orelse 0;
     const ttl = ttlOf(in);
-    var list: std.ArrayList(Value) = .empty;
-    if (try sk.head(a, SESSIONS_HEAD)) |root| {
-        const r = try sk.get(a, root);
-        if (r.get("sessions")) |ss| if (ss == .array) for (ss.array) |x| {
-            const c = Value.cidOf(x.get("session")) orelse continue;
-            const s = sessionOf(try sk.get(a, c)) orelse continue;
-            if (s.created + ttl < at) continue; // expired: dropped
-            if (eql(u8, s.ours, new.ours)) return; // already kept
-            try list.append(a, x);
-        };
+    var changes: std.ArrayList(Value) = .empty;
+    var live: std.ArrayList(Session) = .empty;
+    for (held) |x| {
+        if (x.created + ttl < now) try changes.append(a, try change(a, x.ours, null)) else try live.append(a, x);
     }
-    var e = cbor.MapBuilder.init(a);
-    try e.put("nonce", cbor.string(new.ours));
-    try e.put("session", cbor.cidv(ev));
-    try list.append(a, e.value());
-    std.mem.sort(Value, list.items, {}, struct {
-        fn lt(_: void, x: Value, y: Value) bool {
-            return std.mem.order(u8, Value.str(x.get("nonce")) orelse "", Value.str(y.get("nonce")) orelse "") == .lt;
-        }
-    }.lt);
-    var root = cbor.MapBuilder.init(a);
-    try root.put("kind", cbor.string("sessions"));
-    try root.put("sessions", .{ .array = list.items });
-    try sk.advance(SESSIONS_HEAD, try sk.put(a, root.value()));
+    if (live.items.len >= MAX_SESSIONS) {
+        std.mem.sort(Session, live.items, {}, struct {
+            fn lt(_: void, x: Session, y: Session) bool {
+                return x.created < y.created;
+            }
+        }.lt);
+        for (live.items[0 .. live.items.len - MAX_SESSIONS + 1]) |x| try changes.append(a, try change(a, x.ours, null));
+    }
+    var s = cbor.MapBuilder.init(a);
+    try s.put("peer", .{ .bytes = peer });
+    try s.put("peerNonce", cbor.string(theirs));
+    try s.put("created", cbor.int(now));
+    try changes.append(a, try change(a, ours, try cbor.encode(a, s.value())));
+    r.scratch = .{ .array = changes.items };
+    return r;
 }

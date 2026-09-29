@@ -39,7 +39,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`, stopped when idle), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`) | `~/.skein/logs/host.log` |
+| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox, raw BRC-33 on BRC-104 sessions | as run |
@@ -55,8 +55,9 @@ router's oracle signs for them.
 ## The router: a reverse proxy (#40)
 
 The router picks the instance a request is for and forwards it; it holds no
-auth state and no mail. Routing comes before authentication, because a
-BRC-104 handshake does not name its recipient: the URL is the recipient.
+mail, and of auth only each running kernel's in-memory session table, which
+it never reads. Routing comes before authentication, because a BRC-104
+handshake does not name its recipient: the URL is the recipient.
 
 - **By host name**: `http://<handle>.localhost:8100/…` (the `Host` header;
   `SKEIN_INSTANCE_ORIGIN` sets another template, default
@@ -69,10 +70,10 @@ BRC-104 handshake does not name its recipient: the URL is the recipient.
   and its handshake goes under the prefix (`src/client/raw.ts`, `RawBox`).
 
 A request for an instance is one kernel `call` of its front door
-(`programs/frontdoor`): BRC-103/104 against the session records in the
-instance's state, the routes table, the handler, the signed answer. The
-entries it returns (a message, a handshake's session, an acknowledgement)
-are admitted; a read — a poll, a lookup, the explorer — writes nothing. Its
+(`programs/frontdoor`): BRC-103/104 against the instance's in-memory session
+table, the routes table, the handler, the signed answer. The entries it
+returns (a message, an acknowledgement) are admitted; a handshake and a read
+— a poll, a lookup, the explorer — write nothing. Its
 fuel is charged to the **fuel ledger** (host.db `fuel_ledger`, by instance,
 caller and route; `skein-host ledger [handle]`).
 
@@ -118,11 +119,18 @@ Files:
 - `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
 - `~/.skein/host.db` — the instances (identity → store; `kind` agent or mailbox, a mailbox's `owner`) and the fuel ledger (`skein-host list`, `skein-host mailboxes`, `skein-host ledger`).
 
-Sessions: the handshake writes one session record into the instance (a
-`:sessions` entry, kept by the front door under head `sessions`); every
-later request is verified against it, and writes nothing. Sessions expire by
-the instance's `defaults.sessionTtlMs` (a day); an expired one is a plain 401,
-and the stock client shakes hands again. **Switching a live stack**: stores
+Sessions are not state (#40): a handshake writes nothing. The session lives
+in memory with the instance's kernel process (the router holds the table
+beside the process and passes it to the front door, which alone reads it);
+every later request is verified against it, and writes nothing. Sessions
+expire by the instance's `defaults.sessionTtlMs` (a day) from the in-memory
+record's stamp; an unknown or expired one is a plain 401, and the stock
+client shakes hands again by itself. A restarted router or kernel starts
+with no sessions: each client's next request costs one extra round trip.
+Instances are not stopped when idle (`SKEIN_IDLE_MS` default 0: never);
+they will be once resource contention appears, and the session table would
+be cached out then. `SKEIN_IDLE_MS=<ms>` turns the idle stop on (a stopped
+instance's clients re-handshake). **Switching a live stack**: stores
 from before #40 (log format 2) are refused; they need a new genesis
 (`skein-host add <h> --derive` with a new `--store`).
 

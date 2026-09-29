@@ -15,7 +15,7 @@
 //            the message its body's `replyTo` names, else by subscription on
 //            (sender, box).
 //   event    a record from a feed (#29: a header, a proof, a status) or a front
-//            door's write (`:sessions`, a mailbox acknowledgement), routed by
+//            door's write (a mailbox acknowledgement, `:ack`), routed by
 //            its `subject` or by box
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},

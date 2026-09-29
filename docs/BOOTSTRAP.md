@@ -24,7 +24,7 @@ gets the **stock system in code** through the same writer
 hydration of an empty store calls `boot` with this source. A **mailbox
 instance** (#40, `skein-host add <h> --mailbox --owner <key>`) is code genesis
 too, with only the kernel's `frontdoor` and `messagebox` programs,
-`MAILBOX_SUBSCRIPTIONS` (`:sessions` → frontdoor, `:ack` → messagebox, every
+`MAILBOX_SUBSCRIPTIONS` (`:ack` → messagebox, every
 message from anyone in any box → messagebox), the stock routes and reads, and
 no peers or names.
 

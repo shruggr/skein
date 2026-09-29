@@ -143,10 +143,11 @@ Replay writes the same chain.
   (`STOCK_SUBSCRIPTIONS`, src/host/genesis.ts): the owner's `run`,
   `objects`, `head`, `chat`, `subscribe` and `peers` (→ `resolve`) boxes;
   `chat` from anyone; `register` from anyone (→ `resolve`: a handle claim);
-  and the reserved boxes the host admits into, `:sessions` (→ `frontdoor`: a
-  handshake's session) and `:ack` (→ `messagebox`: a reader's pointer). A
-  mailbox instance's seed is `:sessions`, `:ack` and every message from anyone
-  in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`).
+  and the reserved box the host admits into, `:ack` (→ `messagebox`: a
+  reader's pointer). A mailbox instance's seed is `:ack` and every message
+  from anyone in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`). Sessions
+  are not state: the front door keeps them in memory, never in the log
+  (MESSAGES.md).
 - The chain changes only by an explicit act: a program's step calls the
   `subscribe` import (the handler must be a program record in the store, a
   wasm program's module too), and the change is written when that step ends
@@ -414,7 +415,7 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, json?,
   the identity that message was sent to), else by subscription on (sender,
   box).
 - **`event`** in a box: a record from a feed the host holds (#29: a header,
-  a proof, a status) or a front door's own write (`:sessions`, `:ack`, an
+  a proof, a status) or a front door's own write (`:ack`, an
   overlay's `submit`), routed by its `subject` or by box.
 - **`wake`**: a sleeper's deadline.
 - **`genesis`**: who the instance is, its programs, seed subscriptions,

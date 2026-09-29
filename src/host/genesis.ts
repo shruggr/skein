@@ -8,7 +8,7 @@
 //             feeds?: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}],
 //             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}]}
 //            (`feeds`: what the router holds for the instance, feeds.ts; `routes`/`reads`: the
-//            front door's, #40; `:sessions` → the front door keeps its sessions; `:ack` → the
+//            front door's, #40 — its sessions are not state: never in the log; `:ack` → the
 //            messagebox moves a reader's pointer; `defaults.ownerMessagebox`: the owner's
 //            messagebox URL — the one peer a genesis names; `defaults.resolveOrigin`: where
 //            the instance's own domain is looked up (a dev host))
@@ -30,7 +30,7 @@ import { now as clockNow } from "./entry.ts";
 import type { Kernel } from "./kernel.ts";
 import type { FeedSpec } from "./feeds.ts";
 
-/** Session expiry (#33 part 2): the instance's own policy, judged by entry stamps (a day). */
+/** Session expiry (#33 part 2, #40): the instance's own policy, judged against the in-memory session's stamp (a day). */
 export const SESSION_DEFAULTS: Record<string, string> = { sessionTtlMs: "86400000" };
 
 export const keyBytes = (hex: string): Uint8Array => {
@@ -86,8 +86,8 @@ export interface SubscriptionSpec { sender?: string; box?: string; handler: stri
 /**
  * The stock seed: the owner's boxes, chat from anyone, the peer table's
  * boxes (the admin's `peers`, anyone's `register` claim: resolve), and the
- * reserved boxes the host admits into — `:sessions` (the front door keeps a
- * handshake's session) and `:ack` (the messagebox moves a reader's pointer).
+ * reserved box the host admits into — `:ack` (the messagebox moves a reader's
+ * pointer). The front door's sessions are not state (in memory, never admitted).
  */
 export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { sender: "$owner", box: "run", handler: "run-handler" },
@@ -98,18 +98,16 @@ export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { sender: "$owner", box: "peers", handler: "resolve" },
   { box: "chat", handler: "loop" },
   { box: "register", handler: "resolve" },
-  { box: ":sessions", handler: "frontdoor" },
   { box: ":ack", handler: "messagebox" },
 ];
 
 /**
- * A mailbox instance's seed (#40): the front door's sessions, the
+ * A mailbox instance's seed (#40): the
  * messagebox's acknowledgements, and every message from anyone in any box to
  * the messagebox (kept for the owner; a mailbox exists only where such a
  * subscription does).
  */
 export const MAILBOX_SUBSCRIPTIONS: SubscriptionSpec[] = [
-  { box: ":sessions", handler: "frontdoor" },
   { box: ":ack", handler: "messagebox" },
   { handler: "messagebox" },
 ];

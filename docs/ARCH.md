@@ -131,15 +131,23 @@ function** (no entry, no writes).
   comes before authentication, because a handshake does not name its
   recipient — and forwards the request as one kernel `call` of the instance's
   **front door** (`programs/frontdoor`), which runs BRC-103/104 against the
-  session records in the instance's state, routes by its routes table
+  instance's session table, routes by its routes table
   (`etc/routes.json`), checks its reads table (`etc/reads.json`), calls the
-  handler and signs the answer. The router has no auth state and keeps no
-  mail. The stock AuthFetch (one session per origin, handshake at
-  `<origin>/.well-known/auth`) is served by the host-name form.
+  handler and signs the answer. The router keeps no mail. The stock AuthFetch
+  (one session per origin, handshake at `<origin>/.well-known/auth`) is
+  served by the host-name form.
+- **Sessions are not state.** The session table lives in memory with the
+  instance's kernel process (`Kernel.scratch`, an opaque key → bytes map the
+  router passes in each front-door call and updates from its answer; only the
+  front door reads it) and never in the log: a message's entry carries the
+  sender key, the 104 signature and both nonces, so replay needs no session.
+  A new process starts with an empty table; a client's next request gets a
+  401 and the stock client shakes hands again (one round trip).
+  `MESSAGES.md`, "Sessions are not state".
 - **Writes and reads.** A handler that writes returns entries for the router
-  to admit (a message, an acknowledgement, a session); a read returns an
-  answer and nothing else — ten thousand polls write no entry and no byte.
-  `MESSAGES.md`, "The persistence rule".
+  to admit (a message, an acknowledgement); a read returns an answer and
+  nothing else — ten thousand polls write no entry and no byte, and a
+  handshake writes nothing either. `MESSAGES.md`, "The persistence rule".
 - **Mailbox instances**: an identity outside the host gets an instance of its
   own for its mail (`skein-host add <h> --mailbox --owner <key>`, or a signed
   `POST /account/register {username, identityKey, signature}`).
@@ -164,7 +172,10 @@ function** (no entry, no writes).
 - **Hydration**: an instance is a kernel the router can load
   (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
   length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
-  demand and stops it when it has been idle `SKEIN_IDLE_MS`; recovery after an
+  demand and, by default, never stops it: instances are not stopped until
+  resource contention appears (then the in-memory session table would be
+  cached out). `SKEIN_IDLE_MS` > 0 stops one idle that long, dropping its
+  sessions (its clients re-handshake); recovery after an
   environment failure happens at hydrate time from the log (a thread whose
   step was cut off runs again; a deterministic error is recorded and never
   retried).

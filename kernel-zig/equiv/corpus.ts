@@ -1,7 +1,8 @@
 // A generated corpus for the replay equivalence: instance stores in format 3
 // (issue #40), written by the Zig kernel as the router drives it (each
 // instance an HTTP server — its front door — messages admitted as `mail`
-// entries, sessions and acknowledgements as events, delivery over http from
+// entries, acknowledgements as events (sessions are in memory, never in the
+// log), delivery over http from
 // the VM, wakes by the waker), on a script clock. It exercises the shell
 // under run-handler (writes, cwd, failures, sleeps and their wakes), the
 // script runtimes, objects/head/subscribe handlers, the loop with bash and

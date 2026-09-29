@@ -1,11 +1,18 @@
 // The host's side of an instance's front door (#40): an HTTP request becomes
 // one kernel `call` of the front door program (fn "http"); what it answers is
 // the HTTP response, and the entries it returns are admitted through the one
-// call in that writes. Nothing else of a request reaches the instance: the
-// front door verifies and signs (BRC-103/104) inside the VM, and a read — a
-// poll — writes nothing at all. `then` is a second call, made once the
-// admitted entries are processed (an overlay submit's answer, which a step
-// computes).
+// call in that writes. Nothing else of a request reaches the instance's log:
+// the front door verifies and signs (BRC-103/104) inside the VM, a read — a
+// poll — writes nothing at all, and neither does a handshake. `then` is a
+// second call, made once the admitted entries are processed (an overlay
+// submit's answer, which a step computes).
+//
+// Sessions are not state: the front door's session table is the kernel
+// process's `scratch` (kernel.ts), passed in each call's argument and changed
+// by the answer's `scratch` list. This side never reads an entry of it; only
+// the front door understands BRC-104. A new kernel process starts with an
+// empty table, so after a restart a client's first request gets a 401 and the
+// stock client shakes hands again (one round trip).
 
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
@@ -34,8 +41,25 @@ export interface FrontAnswer {
   body: Uint8Array;
   admit?: AdmitSpec[];
   then?: { program: CID; fn: string; arg: Uint8Array };
+  /** Changes to the kernel's scratch table (applied by `callFrontDoor`): no value drops the key. */
+  scratch?: ScratchChange[];
   /** Fuel the call used (the ledger's), and which op it was. */
   fuel: number;
+}
+
+export interface ScratchChange { key: string; value?: Uint8Array }
+
+/** The scratch table's hard bound (the front door keeps its own, lower): past it the oldest key goes. */
+export const SCRATCH_MAX = 4096;
+
+/** Apply a front door answer's scratch changes to the kernel's table, in order. */
+export function applyScratch(table: Map<string, Uint8Array>, changes: ScratchChange[] | undefined): void {
+  for (const c of changes ?? []) {
+    if (typeof c?.key !== "string") continue;
+    table.delete(c.key);
+    if (c.value instanceof Uint8Array) table.set(c.key, c.value);
+  }
+  for (const k of table.keys()) { if (table.size <= SCRATCH_MAX) break; table.delete(k); }
 }
 
 /** Lower-cased header names, one value each (joined with ", "). */
@@ -47,14 +71,21 @@ export function headerMap(h: Record<string, string | string[] | undefined> | Hea
   return out;
 }
 
-/** One request through the front door: a kernel call. Fails only if the call itself fails (the front door's own error). */
+/**
+ * One request through the front door: a kernel call with the kernel's scratch
+ * table beside the request; the answer's scratch changes are applied before
+ * this returns (so a handshake's session serves the very next request). Fails
+ * only if the call itself fails (the front door's own error).
+ */
 export async function callFrontDoor(k: Kernel, req: FrontRequest, o: { now?: number; program?: CID | string } = {}): Promise<FrontAnswer> {
-  const a: CallAnswer = await k.invoke(o.program ?? "frontdoor", "http", dagCbor.encode(clean(req)), { now: o.now });
+  const arg = { ...clean(req), scratch: Object.fromEntries(k.scratch) };
+  const a: CallAnswer = await k.invoke(o.program ?? "frontdoor", "http", dagCbor.encode(arg), { now: o.now });
   if (!a.ok) {
     return { status: 500, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify({ status: "error", code: "ERR_FRONT_DOOR", description: a.error })), fuel: a.fuel };
   }
-  const r = dagCbor.decode(a.result) as { status: number; headers?: Record<string, string>; body?: Uint8Array; admit?: AdmitSpec[]; then?: FrontAnswer["then"] };
-  return { status: r.status, headers: r.headers ?? {}, body: r.body ?? new Uint8Array(), ...(r.admit ? { admit: r.admit } : {}), ...(r.then ? { then: r.then } : {}), fuel: a.fuel };
+  const r = dagCbor.decode(a.result) as { status: number; headers?: Record<string, string>; body?: Uint8Array; admit?: AdmitSpec[]; then?: FrontAnswer["then"]; scratch?: ScratchChange[] };
+  if (!k.gone) applyScratch(k.scratch, r.scratch);
+  return { status: r.status, headers: r.headers ?? {}, body: r.body ?? new Uint8Array(), ...(r.admit ? { admit: r.admit } : {}), ...(r.then ? { then: r.then } : {}), ...(r.scratch ? { scratch: r.scratch } : {}), fuel: a.fuel };
 }
 
 /** Admit what the front door returned: put each entry's records, then the entry (in order). */
