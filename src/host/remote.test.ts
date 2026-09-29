@@ -54,6 +54,7 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
   assert.equal(r.replyTo.toString(), sent.id.toString());
   assert.equal(new TextDecoder().decode(r.stdout), "remote\n");
   assert.ok(wire.some((w) => w.startsWith(`POST ${url}/.well-known/auth`)), `a handshake over the wire (${wire})`);
+  assert.ok(a.lines.some((l) => l.startsWith("[alpha] deliver results for ") && l.endsWith(`→ ${url}/sendMessage (remote): 200 delivered`)), "the delivery's log line: remote");
   assert.ok(wire.some((w) => w === `POST ${url}/sendMessage`), `the delivery over the wire (${wire})`);
 
   // Removed: the table is empty again.

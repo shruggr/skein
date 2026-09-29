@@ -127,6 +127,36 @@ export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
   }
 }
 
+/**
+ * The warning for an agent whose genesis names no owner messagebox
+ * (`defaults.ownerMessagebox`): its sends to the owner — every answer to him —
+ * fail, since nothing else tells it where his mailbox is. Undefined if it names one.
+ */
+export function noOwnerMessagebox(genesis: Record<string, unknown> | null | undefined): string | undefined {
+  const d = genesis?.defaults as Record<string, unknown> | undefined;
+  if (typeof d?.ownerMessagebox === "string" && d.ownerMessagebox) return undefined;
+  return "WARNING: its genesis names no owner messagebox (defaults.ownerMessagebox): nothing it sends the owner (its answers) can be delivered. " +
+    "Create the owner's mailbox instance (skein-host add <name> --mailbox --owner <key>) or set SKEIN_OWNER_MESSAGEBOX, then re-genesis it (a new store)";
+}
+
+/** A sendMessage request's box and recipient, for the delivery log line ("" if the body is neither CBOR nor JSON). */
+function describeDelivery(req: HttpRequest): string {
+  const b = req.body ?? new Uint8Array();
+  let m: { messageBox?: unknown; recipient?: unknown } | undefined;
+  try { m = (dagCbor.decode(b) as { message?: typeof m }).message; } catch {
+    try { m = (JSON.parse(new TextDecoder().decode(b)) as { message?: typeof m }).message; } catch { /* neither */ }
+  }
+  if (!m) return "";
+  const to = m.recipient instanceof Uint8Array ? Buffer.from(m.recipient).toString("hex") : typeof m.recipient === "string" ? m.recipient : "";
+  return `${String(m.messageBox ?? "?")}${to ? ` for ${short(to)}` : ""}`;
+}
+
+/** An error answer's description (JSON {description | error}), else its first 200 bytes. */
+function errorOf(body: Uint8Array): string {
+  const t = new TextDecoder().decode(body.subarray(0, 2000));
+  try { const j = JSON.parse(t) as { description?: unknown; error?: unknown }; return String(j.description ?? j.error ?? t.slice(0, 200)); } catch { return t.slice(0, 200); }
+}
+
 export class Router {
   readonly o: RouterOptions;
   readonly feeds: Feeds;
@@ -246,7 +276,7 @@ export class Router {
     const kernel = new Kernel({
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       log: (line) => this.say(handle, line),
-      http: (req) => this.http(req),
+      http: (req) => this.http(req, handle),
       sleepers: (s) => this.sleepersOf(handle, s),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
@@ -266,6 +296,7 @@ export class Router {
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done
       if (!row.identity) this.o.db.add(row.handle, { identity });
+      if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
     } catch (e) {
       await kernel.stop(1000);
@@ -443,15 +474,31 @@ export class Router {
     return undefined;
   }
 
-  /** A program's HTTP request (the kernel's `http`): this host's own URLs in process, the rest as configured. */
-  async http(req: HttpRequest): Promise<HttpResponse> {
-    if (this.isLocal(req.url)) {
-      const r = await this.dispatch({ method: req.method, url: req.url, headers: headerMap(req.headers ?? {}), body: req.body ?? new Uint8Array() });
-      return { status: r.status, headers: r.headers, body: r.body };
+  /**
+   * A program's HTTP request (the kernel's `http`): this host's own URLs in
+   * process, the rest as configured. A delivery (`POST …/sendMessage`, from
+   * instance `from`) is logged in one line: where it went, how, and the result.
+   */
+  async http(req: HttpRequest, from?: string): Promise<HttpResponse> {
+    const local = this.isLocal(req.url);
+    const delivery = req.method === "POST" && /\/sendMessage$/.test(new URL(req.url, "http://x").pathname);
+    const said = (what: string) => { if (delivery) this.say(from ?? "router", `deliver${((d) => d ? ` ${d}` : "")(describeDelivery(req))} → ${req.url} (${local ? "local" : "remote"}): ${what}`); };
+    try {
+      let r: HttpResponse;
+      if (local) {
+        const d = await this.dispatch({ method: req.method, url: req.url, headers: headerMap(req.headers ?? {}), body: req.body ?? new Uint8Array() });
+        r = { status: d.status, headers: d.headers, body: d.body };
+      } else {
+        const f = this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined);
+        if (!f) throw new Error(`this host answers no http beyond its own (${req.url})`);
+        r = await f(req);
+      }
+      said(r.status === 200 ? "200 delivered" : `HTTP ${r.status} ${errorOf(r.body)}`.trimEnd());
+      return r;
+    } catch (e) {
+      said(`failed: ${(e as Error).message}`);
+      throw e;
     }
-    const f = this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined);
-    if (!f) throw new Error(`this host answers no http beyond its own (${req.url})`);
-    return await f(req);
   }
 
   /** One request, whoever made it: a socket's, or an instance's own http. */

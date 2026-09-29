@@ -90,9 +90,20 @@
 //	the shell at rest                          keep the tool result; run the next call, or
 //	                                           emit `infer` again when none is left
 //	a send fails (the messagebox's error:      a `message` → an error tool result, run the
-//	  delivery is inside the step, #40)        next call; the `infer` → an error, answered as
-//	                                           an inference error; the answer → an error turn,
-//	                                           and the thread ends (no reply can come)
+//	  delivery is inside the step, #40)        next call (a transient one is tried again
+//	                                           first: below); the `infer` → an error, answered
+//	                                           as an inference error; the answer → an error
+//	                                           turn, and the thread ends (no reply can come)
+//	woken (a retry's deadline came)            run the pending `message` call again
+//
+// Retries: a `message` whose delivery fails with a transient error (the
+// messagebox's "transient: …": no answer, 5xx, 408, 425, 429 — or the
+// resolve's) is tried again after a while: the step keeps a note beside the
+// turns, {kind: "retry", of: <entry>, call, to, attempt, error}, and rests on
+// a deadline (the kernel's `deadline`, deadline.go) `defaults.sendRetryMs` ahead (default 30 s);
+// the wake runs the call again. After `defaults.sendAttempts` attempts
+// (default 3) it is an error tool result for the model, as a permanent
+// failure is at once.
 package main
 
 import (
@@ -113,6 +124,12 @@ const system = "You are working with David through skein. Use the bash tool to r
 const defaultModel = "ripper/qwen38"
 
 const outputCap = 16 << 10
+
+// A transient `message` failure: this many attempts in all, this far apart (defaults.sendAttempts, defaults.sendRetryMs).
+const (
+	sendAttempts = 3
+	sendRetryMs  = 30_000
+)
 
 type args struct {
 	Message  skein.CID `cbor:"message"`
@@ -345,6 +362,23 @@ type loop struct {
 	last string
 	// the pages presented in this thread: their CIDs and block ids
 	presents []presented
+	// the retry notes kept: which call, and how many turns the conversation had then
+	retries []retryMark
+}
+
+type retryMark struct {
+	call  string
+	turns int
+}
+
+// retryNote is the record kept when a `message` delivery failed transiently and is tried again.
+type retryNote struct {
+	Kind    string    `cbor:"kind"`
+	Of      skein.CID `cbor:"of"`
+	Call    string    `cbor:"call"`
+	To      string    `cbor:"to"`
+	Attempt int       `cbor:"attempt"`
+	Error   string    `cbor:"error"`
 }
 
 type presented struct {
@@ -405,6 +439,8 @@ func run() error {
 					return fmt.Errorf("present: %w", err)
 				}
 				l.presents = append(l.presents, presented{cid: c, blocks: blockIDs(p.Blocks)})
+			case "retry":
+				l.retries = append(l.retries, retryMark{call: r.Call, turns: len(l.conv)})
 			}
 		}
 	}
@@ -417,6 +453,9 @@ func run() error {
 		return l.chat(step.Reply.Message, step.Reply.Body)
 	case len(step.Resolved) > 0:
 		return l.toolDone(step.Resolved[0])
+	case step.Woke:
+		// A retry's deadline: the pending `message` call again.
+		return l.next()
 	default:
 		return l.chat(l.a.Message, l.a.Body)
 	}
@@ -628,20 +667,29 @@ func (l *loop) toolDone(res skein.Resolved) error {
 // if the last answer called tools, else answer with its content.
 func (l *loop) next() error {
 	for _, call := range l.pending() {
-		if err := l.started(call); err != nil {
-			return err
+		attempt := l.attempt(call.ID)
+		if attempt == 1 {
+			if err := l.started(call); err != nil {
+				return err
+			}
 		}
 		if call.Function.Name == "message" {
 			to, h, d, text, msg := messageArgs(call)
 			if msg == "" {
 				key, err := skein.Resolve(l.step, h, d)
 				if err == nil {
-					sent, err := l.message(key, h, d, text)
-					if err == nil {
+					var sent skein.CID
+					if sent, err = l.message(key, h, d, text); err == nil {
 						return skein.Await(sent)
 					}
 				}
+				if skein.Transient(err) && attempt < l.setting("sendAttempts", sendAttempts) {
+					return l.retry(call, to, attempt, err)
+				}
 				msg = "could not deliver to " + to + ": " + err.Error()
+				if attempt > 1 {
+					msg += fmt.Sprintf(" (%d attempts)", attempt)
+				}
 			}
 			if err := l.result(call, turn{Of: l.step.Entry, To: to, Error: msg}); err != nil {
 				return err
@@ -679,6 +727,43 @@ func (l *loop) next() error {
 		text = last.Content
 	}
 	return l.answer(text)
+}
+
+// attempt: which attempt at tool call `id` of the latest assistant turn this is (1 + its retry notes since).
+func (l *loop) attempt(id string) int {
+	last := -1
+	for i, r := range l.conv {
+		if r.Role == "assistant" {
+			last = i
+		}
+	}
+	n := 1
+	for _, m := range l.retries {
+		if m.call == id && m.turns > last {
+			n++
+		}
+	}
+	return n
+}
+
+// setting: a positive integer from the genesis defaults, else def.
+func (l *loop) setting(name string, def int) int {
+	if v, err := strconv.Atoi(l.step.Defaults[name]); err == nil && v > 0 {
+		return v
+	}
+	return def
+}
+
+// retry: a `message` delivery failed transiently: keep a note of it and rest
+// until the retry's deadline; the wake runs the call again (next).
+func (l *loop) retry(call toolCall, to string, attempt int, cause error) error {
+	if _, err := l.put("retry", retryNote{Kind: "retry", Of: l.step.Entry, Call: call.ID, To: to, Attempt: attempt, Error: cause.Error()}); err != nil {
+		return err
+	}
+	l.retries = append(l.retries, retryMark{call: call.ID, turns: len(l.conv)})
+	wait := l.setting("sendRetryMs", sendRetryMs)
+	fmt.Fprintf(os.Stderr, "loop: message to %s: attempt %d failed (%v); again in %d ms\n", to, attempt, cause, wait)
+	return deadline(l.step.At + int64(wait))
 }
 
 // messageArgs: a `message` call's arguments — the handle as "@handle@domain"

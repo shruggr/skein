@@ -124,9 +124,9 @@ A new instance's genesis (written by the router at its first hydration) is
 the owner's boxes, `chat` from anyone, and `:mail` → messagebox.
 
 ```
-bin/skein-host list                         # handle, status, identity, wallet (legacy), store, tree
+bin/skein-host list                         # handle, kind, status, identity, front-door key, wallet (legacy) | owner, store, tree
 bin/skein-host identity [handle]            # the router's BRC-104 identity, or an instance's
-bin/skein-host mailboxes                    # handle, identity, keeping instance
+bin/skein-host mailboxes                    # handle, owner, front-door key, status, store
 bin/skein-host run                          # the router; SKEIN_ROUTER_PORT, SKEIN_IDLE_MS, SKEIN_MAILBOX_HOST, SKEIN_MASTER_KEY
 bin/skein-host subscribe martha add --sender <key> run run-handler   # a `subscribe` message as the owner; no new genesis
 bin/skein-host disable kurt                 # also: add <handle> [--domain --derive --store --tree], enable, remove

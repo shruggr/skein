@@ -7,8 +7,35 @@ no funds.
 
 ```
 bin/skein-host add martha                   # a row: identity derived from ~/.skein/master.key (made on first use), no wallet process
-scripts/host/up.sh                          # the client wallets, their grants, the router on :8100, accounts (idempotent)
+scripts/host/up.sh                          # wallets, mailbox instances, the router on :8100, grants — in that order (idempotent)
 ```
+
+### Bring-up order
+
+An agent's genesis is written at its first hydration and names the owner's
+messagebox (`defaults.ownerMessagebox`) — fixed for the store's life. If the
+owner has no mailbox instance then, nothing the agent sends him (its
+answers) can ever be delivered, and only a new store (re-genesis) fixes it.
+So `up.sh` goes:
+
+1. **The client wallets** (`wallets.sh owner infer`): `owner.identity`,
+   `infer.identity`.
+2. **The mailbox instances** of the owner (`david`) and of the inference peer
+   (`infer`): `skein-host add <h> --mailbox --owner <key>`, unless the key has
+   one already (whatever its handle). `~/.skein/mailbox.url` names the
+   owner's. No registration (`register.ts`) is needed for keys this machine
+   knows: the rows are what a registration would make.
+3. **The router** (`skein-host run`, if nothing listens on :8100). It
+   hydrates every enabled row, so the agents' geneses happen here, naming the
+   owner's mailbox instance (the router's default for
+   `SKEIN_OWNER_MESSAGEBOX`; `run` prints which at start, and a WARNING if
+   there is none).
+4. **The grants** (`grants.sh`), toward every row's front-door key from
+   `skein-host list`, now that every row exists.
+
+An agent whose genesis names no owner messagebox is logged at every
+hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
+`host.log`) and `skein-host deploy` says the same.
 
 | process | address | what | log |
 |---|---|---|---|
@@ -61,14 +88,24 @@ The router's own endpoints:
 
 The instances' outbound http (a messagebox delivering, a resolve) comes back
 through the router: a URL of this host's is answered in process (the same
-path, no socket), any other goes out (`SKEIN_HTTP=fetch`).
+path, no socket), any other goes out (`SKEIN_HTTP=fetch`). Every delivery
+(a `POST …/sendMessage`) is one line in `host.log`, so a lost reply shows
+where it went and what came back:
+
+```
+[martha] deliver chat for 8f98ef7c → http://david.localhost:8100/sendMessage (local): 200 delivered
+[martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): HTTP 503 down for a moment
+[martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): failed: fetch failed
+```
 
 **Mailbox instances.** A person or peer outside the host gets a mailbox: an
 instance of its own with only the front door and the messagebox, keeping
 every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
 --mailbox --owner <key>` makes one; so does a signed registration
-(`register.ts`, what `up.sh` does for `david` and `infer`, and the front
-end's Register). `skein-host mailboxes` lists them (whose, and where). The
+(`register.ts`: the front end's Register, for a key this machine does not
+know). `up.sh` makes `david`'s and `infer`'s with `add`. `skein-host mailboxes` lists them (whose, the key their front door signs
+sessions with, and where); `skein-host list` prints that key for every row
+(its fifth column), which is what `grants.sh` grants toward. The
 owner's is where every instance delivers what it sends him: a new genesis
 names it (`defaults.ownerMessagebox`: `SKEIN_OWNER_MESSAGEBOX`, else the
 owner's mailbox instance here), the one peer a genesis names.

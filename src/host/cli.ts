@@ -4,9 +4,9 @@
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host add <handle> --mailbox --owner <hex>   a mailbox instance (#40) for an identity outside the host
 //   skein-host knows <handle> [a,b | --all | --none]
-//   skein-host list
+//   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree
 //   skein-host identity <handle>      an instance's identity key (from the master secret)
-//   skein-host mailboxes              the mailbox instances: whose mailbox each is, and where
+//   skein-host mailboxes              the mailbox instances: handle, whose (owner), front-door key, status, store
 //   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
@@ -77,7 +77,7 @@ import { masterKey, Oracle } from "./oracle.ts";
 import { subscribeBody } from "../client/client.ts";
 import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
 import { Supervisor, type Supervised } from "./supervisor.ts";
-import { Router, type RouterOptions } from "./router.ts";
+import { noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { RawBox } from "../client/raw.ts";
 import type { Outbox } from "./deploy.ts";
@@ -97,9 +97,9 @@ const USAGE = `usage:
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex>         a mailbox instance for an identity outside the host (#40)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
-  skein-host list
+  skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree
   skein-host identity <handle>                            an instance's identity key
-  skein-host mailboxes                                    the mailbox instances: whose mailbox, and where
+  skein-host mailboxes                                    the mailbox instances: handle, owner, front-door key, status, store
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host enable|disable|remove <handle>
   skein-host run                                          the router on :8100 (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
@@ -170,15 +170,19 @@ export async function main(argv: string[], env: Env): Promise<number> {
         env.out(new Oracle(masterKey(env.vars, home)).identity(handle));
         return 0;
       }
-      case "mailboxes":
-        for (const r of db.list().filter((x) => x.kind === "mailbox")) env.out([`${r.handle}@${r.domain}`, r.owner ?? "-", r.status, r.store].join("\t"));
+      case "mailboxes": {
+        const door = frontDoorKeys(env.vars, home);
+        for (const r of db.list().filter((x) => x.kind === "mailbox")) env.out([`${r.handle}@${r.domain}`, r.owner ?? "-", door(r), r.status, r.store].join("\t"));
         return 0;
+      }
       case "ledger":
         for (const l of db.ledger(rest[0])) env.out([l.instance, l.caller || "-", l.op, String(l.calls), String(l.fuel), l.updated_at].join("\t"));
         return 0;
-      case "list":
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-"].join("\t"));
+      case "list": {
+        const door = frontDoorKeys(env.vars, home);
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-"].join("\t"));
         return 0;
+      }
       case "enable": case "disable": case "remove": {
         const [handle] = rest;
         if (!handle) { env.err(USAGE); return 2; }
@@ -211,6 +215,19 @@ export async function main(argv: string[], env: Env): Promise<number> {
 }
 
 const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+/**
+ * The key each row's front door signs its BRC-104 sessions with (#40): the
+ * oracle's, derived from the master secret with key ID = the handle — for an
+ * agent and a mailbox instance alike, and before the row was ever hydrated.
+ * The master secret is only read here, never made: with none, "-".
+ */
+function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => string {
+  const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
+  if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
+  const oracle = new Oracle(masterKey(vars, home));
+  return (row) => oracle.identity(row.handle);
+}
 
 function knowsCmd(db: HostDb, rest: string[], env: Env): number {
   const { values: v, positionals: [handle, list, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { all: { type: "boolean" }, none: { type: "boolean" } } });
@@ -332,6 +349,18 @@ async function ownerOf(env: Env, cmd: string): Promise<{ wallet: WalletInterface
   return owner;
 }
 
+/** An agent whose store's genesis names no owner messagebox: the warning (router.ts noOwnerMessagebox); else undefined. */
+async function ownerMessageboxWarning(row: InstanceRow, store: Store | undefined): Promise<string | undefined> {
+  if (row.kind === "mailbox" || !store) return undefined;
+  try {
+    for await (const { entry } of store.log.entries(0)) {
+      const g = (entry as { genesis?: CID }).genesis;
+      return g ? noOwnerMessagebox(await store.get(g) as Record<string, unknown>) : undefined;
+    }
+  } catch { /* a store this build cannot read: the router says so at hydration */ }
+  return undefined;
+}
+
 /** A row's store to read while something else may be writing it: read-only, if it exists. */
 function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promise<void> } {
   const given = env.store?.(row);
@@ -373,6 +402,8 @@ async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
       const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box(row), store: s.blocks, files });
       db.add(row.handle, { tree: r.root, source: dir });
       env.out(deployedLine(row, r));
+      const w = await ownerMessageboxWarning(row, s.blocks);
+      if (w) env.err(`${row.handle}: ${w}`);
     } catch (e) {
       failed++;
       env.err(`${row.handle}: ${(e as Error).message}`);
@@ -577,6 +608,9 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
   const messagebox = mserver ? (mserver.address() as { port: number }).port : undefined;
   if (messagebox !== undefined) env.out(`skein-host: router at http://127.0.0.1:${messagebox} · an instance at ${router.originOf("<handle>")} (or /@<handle>)`);
+  const omb = router.ownerMessagebox();
+  if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
+  else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);
   await router.start();
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
   const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);
