@@ -1,4 +1,4 @@
-// The resolve program (#40): Zig 0.15.2, wasm32-wasi, over the kernel's own
+// The resolve program (#40): Zig 0.16.0, wasm32-wasi, over the kernel's own
 // dag-cbor and CIDs (kernel-zig/src) and the programs' shared lib (programs/lib).
 //
 //   zig build        → zig-out/bin/resolve.wasm (scripts/build-programs.sh copies it to wasm/)

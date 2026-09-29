@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 for p in run-handler objects-handler head-handler subscribe-handler loop wire-probe; do
   (cd programs && GOOS=wasip1 GOARCH=wasm go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o "../wasm/$p.wasm" "./$p")
 done
-# The wallet (issue #29): Zig 0.15.2 (mise.toml), over bsvz (scripts/fetch-bsvz.sh).
+# The wallet (issue #29): Zig 0.16.0 (mise.toml), over bsvz (scripts/fetch-bsvz.sh).
 [ -d .build/bsvz/.git ] || scripts/fetch-bsvz.sh
 (cd wallet-zig && zig build program)
 cp wallet-zig/zig-out/bin/wallet.wasm wasm/wallet.wasm

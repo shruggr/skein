@@ -17,7 +17,7 @@ waker, the feeds and the fuel ledger are the router's.
 
 ## Build
 
-Zig 0.15.2 is pinned by the repo's `mise.toml` (`mise install`, then prefix
+Zig 0.16.0 is pinned by the repo's `mise.toml` (`mise install`, then prefix
 commands with `mise exec --` or activate mise).
 
 - **wasmtime**: the C API release, not vendored. Download
@@ -358,8 +358,8 @@ The wallet (`../wallet-zig`) is the example: `zig build component` gives
    the `.o`. In Zig, `@cImport(@cInclude("program.h"))`
    (`wallet-zig/src/skein_wit.zig`).
 3. **Keep wasi-libc out** if the program must draw the same random bytes as
-   its preview1 build. Linking wasi-libc switches Zig's `std.crypto.random`
-   to `arc4random`. `wallet-zig/src/cabi.zig` provides the few libc
+   its preview1 build. Linking wasi-libc switches Zig's random (`std.Io`'s
+   `randomSecure`) to `arc4random`. `wallet-zig/src/cabi.zig` provides the few libc
    functions `program.c` needs.
 4. **Make the component.**
    `wasm-tools component new core.wasm --adapt wasi_snapshot_preview1=<adapter> -o out.wasm`.

@@ -17,7 +17,7 @@ HTTP calls over standard `wasi:http` instead (#15).
 
 ## Pieces
 
-- `wallet-zig/` — Zig 0.15.2 (pinned in `mise.toml`), over **bsvz** (pinned
+- `wallet-zig/` — Zig 0.16.0 (pinned in `mise.toml`), over **bsvz** (pinned
   and patched by `scripts/fetch-bsvz.sh`). The library (`src/`) and the
   handler program (`src/program.zig`, wasm32-wasi → `wasm/wallet.wasm`,
   module `MODULES.wallet`, program record `WALLET` in
@@ -34,13 +34,28 @@ HTTP calls over standard `wasi:http` instead (#15).
   bsvz supplies the primitives: transaction and BUMP parsing and merging,
   sighash preimages, the script interpreter, BRC-42/43 key derivation, hashes.
 
+### The bsvz pin: Chronicle rules (#53)
+
+`scripts/fetch-bsvz.sh` pins bsvz at the head of the `chronicle` branch of
+shruggr/bsvz (8e1c956, opldotdev/bsvz PR #2, still open; once merged the pin
+moves to the merged opldotdev commit). That branch carries the Zig 0.16
+migration and Chronicle (SV Node 1.2.0, mainnet height 943,816): OP_2MUL /
+OP_2DIV, OP_VER / OP_VERIF / OP_VERNOTIF, OP_SUBSTR / OP_LEFT / OP_RIGHT /
+OP_LSHIFTNUM / OP_RSHIFTNUM and 32 MiB script numbers, **on by default**:
+`ExecutionFlags{}` is post-Chronicle mainnet, and `postGenesisBsv()` /
+`legacyReference()` are the opt-outs. wallet-zig passes no flags, so SPV
+(`src/spv.zig`) and the overlay (`src/overlay.zig`) verify with Chronicle
+rules. `wallet-zig/vectors/chronicle.json` (Rúnar AMM pool spends, from the
+amm-poc fixtures) is the check: each pool input verifies by default, fails
+with `UnknownOpcode` under `postGenesisBsv()` and fails under
+`legacyReference()`.
+
 ### bsvz on wasm32-wasi
 
 One hunk (`wallet-zig/patches/bsvz.patch`): `Preimage.parse` sliced with a
-`u64` (a compile error on 32-bit targets). With it, bsvz's 306 unit tests
-pass under wasm32-wasi (Node's WASI), and its Go script-interpreter corpus
-runs 132 of 135: two fail natively too (bsvz's pinned expectations vs the
-local go-sdk corpus), one opens a directory Node's WASI sandbox refuses.
+`u64` (a compile error on 32-bit targets); it applies unchanged to the
+Chronicle pin. wallet-zig's tests and vectors pass under wasm32-wasi
+(`zig build test-wasm`, Node's WASI).
 `bsvz.broadcast` (HTTP) does not build for WASI and is never imported. bsvz's
 own `Beef` keeps transactions in a hash map and serializes them in txid
 order, which breaks BRC-96's parents-first rule; wallet-zig has its own BEEF

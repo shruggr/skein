@@ -1,6 +1,6 @@
 // p2p-demo (#51): a small test program for libp2p — a box handler that
 // publishes and runs a stream round trip, and front-door handlers for a
-// topic and a protocol. Zig 0.15.2, wasm32-wasi, over the kernel's dag-cbor
+// topic and a protocol. Zig 0.16.0, wasm32-wasi, over the kernel's dag-cbor
 // (kernel-zig/src) and the programs' shared lib (programs/lib).
 //
 //   zig build        → zig-out/bin/p2p-demo.wasm (build.sh copies it to kernel-zig/test/p2p/, committed)

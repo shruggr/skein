@@ -1,5 +1,5 @@
 // fetch (issue #15): GET a URL over wasi:http, the body to stdout — a WASI 0.2
-// component, Zig 0.15.2. Built as the wallet's component build is (wallet-zig/
+// component, Zig 0.16.0. Built as the wallet's component build is (wallet-zig/
 // build.zig, kernel-zig/README.md "Building a component handler"): a
 // wasm32-wasi core module with wit-bindgen's C bindings for world
 // skein:kernel/program (../../wit/bindings/c) and no libc

@@ -63,7 +63,7 @@ anything outside `src/runtime`, or uses `fetch`, `Date.now`, `Math.random`,
 
 ## Running it
 
-Needs Node 26 (`node:sqlite`, type stripping), Zig 0.15.2 (`mise`) for the
+Needs Node 26 (`node:sqlite`, type stripping), Zig 0.16.0 (`mise`) for the
 kernel, and the dev host (`scripts/host/README.md`).
 
 The instances run on the Zig kernel (`kernel-zig/`) behind the **router**
