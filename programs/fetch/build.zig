@@ -17,8 +17,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const wasi = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
     const opt: std.builtin.OptimizeMode = .ReleaseSafe;
-    const home = std.process.getEnvVarOwned(b.allocator, "HOME") catch "/root";
-    const env_adapter = std.process.getEnvVarOwned(b.allocator, "SKEIN_WASI_ADAPTER") catch null;
+    const home = b.graph.environ_map.get("HOME") orelse "/root";
+    const env_adapter = b.graph.environ_map.get("SKEIN_WASI_ADAPTER");
     const adapter = b.option([]const u8, "wasi-adapter", "the preview1 command adapter (wasmtime v49.0.1)") orelse env_adapter orelse
         b.fmt("{s}/.local/wasi-adapter-v49.0.1/wasi_snapshot_preview1.command.wasm", .{home});
     const wasm_tools = b.option([]const u8, "wasm-tools", "wasm-tools (1.259.0)") orelse "wasm-tools";

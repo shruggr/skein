@@ -66,7 +66,7 @@ const Found = struct { key: []const u8, url: []const u8 };
 fn originOf(a: Allocator, in: Value, domain: []const u8) ![]const u8 {
     const self: Value = in.get("self") orelse .null;
     if (eql(u8, Value.str(self.get("domain")) orelse "", domain)) {
-        if (in.get("defaults")) |d| if (Value.str(d.get("resolveOrigin"))) |o| if (o.len > 0) return std.mem.trimRight(u8, o, "/");
+        if (in.get("defaults")) |d| if (Value.str(d.get("resolveOrigin"))) |o| if (o.len > 0) return std.mem.trimEnd(u8, o, "/");
     }
     return std.fmt.allocPrint(a, "https://{s}", .{domain});
 }

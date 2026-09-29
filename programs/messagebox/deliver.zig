@@ -102,7 +102,7 @@ fn pathOf(url: []const u8) []const u8 {
 }
 
 fn trimSlash(s: []const u8) []const u8 {
-    return std.mem.trimRight(u8, s, "/");
+    return std.mem.trimEnd(u8, s, "/");
 }
 
 fn transient(status: i128) bool {
@@ -173,7 +173,7 @@ const Sent = struct { r: Value, proof: Value };
 /// One signed request on the session; the answer's signature checked.
 fn request(a: Allocator, peer: Peer, s: Session, me: []const u8, endpoint: []const u8, body: []const u8) !Sent {
     var rid: [32]u8 = undefined;
-    std.posix.getrandom(&rid) catch return error.Random;
+    sk.io().randomSecure(&rid) catch return error.Random;
     const rid64 = try brc.encode64(a, &rid);
     const nonce = try brc.random64(a);
     const path = try std.fmt.allocPrint(a, "{s}{s}", .{ trimSlash(pathOf(peer.url)), endpoint });

@@ -17,13 +17,18 @@ comptime {
     _ = @import("cabi");
 }
 
-pub fn main() u8 {
+/// The program's Io: one single-threaded WASI process, no concurrency.
+fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+pub fn main(init: std.process.Init.Minimal) u8 {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.wasm_allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    run(a) catch |e| {
+    run(a, init.args) catch |e| {
         const msg = std.fmt.allocPrint(a, "p2p: {s}{s}\n", .{ @errorName(e), last }) catch "p2p: error\n";
-        std.fs.File.stderr().writeAll(msg) catch {};
+        std.Io.File.stderr().writeStreamingAll(io(), msg) catch {};
         return 1;
     };
     return 0;
@@ -45,11 +50,11 @@ fn l(x: []const u8) c.program_list_u8_t {
 }
 
 fn say(a: std.mem.Allocator, comptime f: []const u8, args: anytype) !void {
-    try std.fs.File.stdout().writeAll(try std.fmt.allocPrint(a, f, args));
+    try std.Io.File.stdout().writeStreamingAll(io(), try std.fmt.allocPrint(a, f, args));
 }
 
-fn run(a: std.mem.Allocator) !void {
-    const args = try std.process.argsAlloc(a);
+fn run(a: std.mem.Allocator, argv: std.process.Args) !void {
+    const args = try argv.toSlice(a);
     if (args.len < 3) return error.Usage;
     const op = args[1];
     var err: c.program_string_t = undefined;

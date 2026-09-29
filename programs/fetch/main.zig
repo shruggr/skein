@@ -18,26 +18,31 @@ comptime {
     _ = @import("cabi");
 }
 
-pub fn main() u8 {
+/// The program's Io: one single-threaded WASI process, no concurrency.
+fn io() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+pub fn main(init: std.process.Init.Minimal) u8 {
     var arena_state = std.heap.ArenaAllocator.init(std.heap.wasm_allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    run(a) catch |e| {
+    run(a, init.args) catch |e| {
         const msg = std.fmt.allocPrint(a, "fetch: {s}{s}{s}\n", .{ @errorName(e), if (wasi_http.last_error.len > 0) ": " else "", wasi_http.last_error }) catch "fetch: error\n";
-        std.fs.File.stderr().writeAll(msg) catch {};
+        std.Io.File.stderr().writeStreamingAll(io(), msg) catch {};
         return 1;
     };
     return 0;
 }
 
-fn run(a: std.mem.Allocator) !void {
-    const args = try std.process.argsAlloc(a);
+fn run(a: std.mem.Allocator, argv: std.process.Args) !void {
+    const args = try argv.toSlice(a);
     const url = if (args.len > 1) args[1] else try urlFromInput(a);
     const r = try wasi_http.request(a, "GET", url, &.{}, null);
-    try std.fs.File.stdout().writeAll(r.body);
+    try std.Io.File.stdout().writeStreamingAll(io(), r.body);
     if (r.status < 200 or r.status >= 300) {
         const msg = try std.fmt.allocPrint(a, "fetch: {s}: HTTP {d}\n", .{ url, r.status });
-        try std.fs.File.stderr().writeAll(msg);
+        try std.Io.File.stderr().writeStreamingAll(io(), msg);
         return error.HttpStatus;
     }
 }

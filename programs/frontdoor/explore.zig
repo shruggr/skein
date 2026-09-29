@@ -162,7 +162,7 @@ fn index(st: Value, name: []const u8) ?[]const u8 {
 pub fn explore(a: Allocator, in: Value, req: Value) !Answer {
     const route = Value.str(req.get("route")) orelse "/explore";
     const query = Value.str(req.get("query")) orelse "";
-    const rest = std.mem.trimRight(u8, if (std.mem.startsWith(u8, route, "/explore")) route["/explore".len..] else route, "/");
+    const rest = std.mem.trimEnd(u8, if (std.mem.startsWith(u8, route, "/explore")) route["/explore".len..] else route, "/");
     const state = Value.cidOf(in.get("state")) orelse return json(a, .null);
     const st = try sk.get(a, state);
 

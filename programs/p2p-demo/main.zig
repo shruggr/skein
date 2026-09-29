@@ -27,7 +27,7 @@ pub fn main() u8 {
 }
 
 fn out(s: []const u8) !void {
-    try std.fs.File.stdout().writeAll(s);
+    try std.Io.File.stdout().writeStreamingAll(sk.io(), s);
 }
 
 fn run(a: Allocator) !void {
