@@ -32,6 +32,17 @@ So `up.sh` goes:
    there is none).
 4. **The grants** (`grants.sh`), toward every row's front-door key from
    `skein-host list`, now that every row exists.
+5. **The address books** (#40). Into every enabled agent, through its
+   `peers` box as the owner (`skein-host peers <agent> add …`): the owner's
+   key and mailbox instance origin (`http://david.localhost:8100`, handle
+   `SKEIN_OWNER_HANDLE`) and the inference peer's (`http://infer.localhost:8100`,
+   `SKEIN_INFER_HANDLE`). Then the roster step, `skein-host roster --deploy`,
+   writes the other agents' keys and origins into each (and redeploys any
+   changed ROSTER.md). The inference peer's own address book, every agent's
+   key → origin, is written to `~/.skein/infer-peers.json` (bin/skein-infer
+   reads it, again whenever it changes). An add identical to what the store
+   has is not sent, so this is idempotent. Run `up.sh` again after adding an
+   agent.
 
 An agent whose genesis names no owner messagebox is logged at every
 hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
@@ -42,7 +53,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 | router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
-| inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox, raw BRC-33 on BRC-104 sessions | as run |
+| inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
 
 Gone since the router (#33), scripts kept and marked legacy: the `1sat serve`
 messagebox (`messagebox.sh`, `messagebox-migrate.mjs`), the instance wallet
@@ -98,6 +109,30 @@ where it went and what came back:
 [martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): HTTP 503 down for a moment
 [martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): failed: fetch failed
 ```
+
+### The address book: `skein-host peers`
+
+Where an agent delivers to a key — its answers, its `message` tool — is its
+address book (head `peers`: key → mailbox URL, handle optional;
+docs/MESSAGES.md, "The address book"). It is configuration: the admin writes
+it through the agent's `peers` box as the owner, like `subscribe`.
+
+```
+bin/skein-host peers martha add <key> <mailbox-url> [--handle bob@example.com]
+bin/skein-host peers martha remove <key>
+bin/skein-host peers martha list        # key, mailbox URL, handle@domain, source (admin | resolve)
+```
+
+Nothing registers itself: the core sends no claims and the stock genesis
+takes none. A key outside the host — a person using the bopen page, say —
+gets answers from an agent only once the admin adds its key and mailbox URL
+here (or an application wires its own `register` box: docs/BOOTSTRAP.md).
+Until then its chats are still admitted (the key authenticates, the
+subscription decides), and the agent's answer fails once, logged on the
+step's line in host.log: `stderr: loop: could not deliver the answer: … no
+route to <key>: not in the address book`. `up.sh` writes the owner, the
+inference peer and every other agent; `deploy` and `roster --deploy` write
+the other agents.
 
 **Mailbox instances.** A person or peer outside the host gets a mailbox: an
 instance of its own with only the front door and the messagebox, keeping

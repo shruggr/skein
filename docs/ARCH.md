@@ -96,11 +96,18 @@ network. Peers include:
   instances").
 - **other instances** — peers like any other, on this host or another.
 
-Who an instance can reach is its **peer table** (head `peers`), written only
-by its own programs: a BRC-169 resolve (the resolve program), the owner as
-admin (box `peers`), a claim a peer sent (box `register`), checked by a
-resolve. The host never seeds it; the one peer a genesis names is the owner
-(`etc/config.json` `owner.messagebox`).
+Who an instance can reach is its **address book** (head `peers`: key →
+mailbox URL, handle optional), written only by its own programs: a BRC-169
+resolve (the resolve program), or the owner as admin (box `peers`:
+configuration, `skein-host peers`; up.sh and the roster step write the
+owner, the inference peer and the other agents into every agent). The host
+never seeds it; the one peer a genesis names is the owner (`etc/config.json`
+`owner.messagebox`). Receiving is separate: the key authenticates, the
+subscriptions decide. Nothing registers itself — no claims in the core; a
+registration flow (a `register` box wired to the resolve program's claim
+handler, or to a program with its own rules) is application wiring
+(MESSAGES.md, "The address book"). A key in no address book is "no route":
+the send fails once, permanently.
 
 A peer may be a thin proxy that receives messages and runs things on a real
 host; what makes that acceptable is that its result is signed by the peer's

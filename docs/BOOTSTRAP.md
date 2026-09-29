@@ -66,8 +66,9 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
   where the instance delivers what it sends its owner. Unset, the host's
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
-  fills it. It is the only peer a genesis names: the peer table
-  (head `peers`) is written only by the instance's own programs.
+  fills it. It is the only peer a genesis names: the address book
+  (head `peers`) is written only by the instance's own programs (its resolve,
+  or the admin through the `peers` box: `skein-host peers`).
 - **`libp2p`** (#51) becomes the genesis's `libp2p: {topics, protocols,
   listen?}`: the router's libp2p host runs a node for the instance (its own
   peer key, derived from the master secret, key ID `libp2p:<handle>`),
@@ -107,6 +108,17 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
 (`config.json`, `subscriptions.json`, `routes.json`, `reads.json`).
 Booting from it unchanged gives the same programs and subscriptions as code
 genesis, plus the tree.
+
+The stock `etc/subscriptions.json` has no `register` box (#40): registration —
+a sender entering itself in the address book — is **application wiring**, not
+core. An application that wants it adds its own line, with its own rules on
+who may call it: e.g. `{"box": "register", "handler": "resolve"}` (anyone; the
+resolve program's claim handler records `{handle, domain}` only if the handle
+resolves to the sender), or `{"sender": "<key>", "box": "register", "handler":
+"<its own program>"}`. Without one, the admin configures the address book
+(`skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]`), and a
+sender in it is answered; any other sender on an open box is still admitted,
+and an answer to it fails with "no route".
 
 ## Packets
 

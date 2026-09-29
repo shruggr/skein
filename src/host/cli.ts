@@ -13,6 +13,7 @@
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
 //   skein-host roster [--for <handle> | --deploy]
 //   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
+//   skein-host peers <handle> add <key> <mailbox-url> [--handle h@d] | remove <key> | list
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
@@ -34,7 +35,14 @@
 // instance's store) with the new one. `subscribe` changes an instance's
 // subscriptions (#3) by a `subscribe` message as the owner, as `deploy` sends
 // (a new instance's genesis carries only the seed: the owner's boxes and
-// `chat` from anyone). `run` is the router (#40: a reverse proxy — each
+// `chat` from anyone). `peers` writes an instance's address book (#40: key →
+// messagebox URL, handle optional; where it delivers to a key) by messages to
+// its `peers` box as the owner, the admin's configuration; `list` reads it
+// from the store. `deploy` and `roster --deploy` also write every other
+// enabled agent's key and origin into each row's address book that way (the
+// roster is a configuration act; ROSTER.md carries the names for the model).
+// Nothing registers itself anywhere: a key in no address book is "no route".
+// `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
 // started on demand and stopped when idle, the waker, the oracle, the fuel
@@ -53,7 +61,7 @@
 //   SKEIN_EXPLORE_BASE_PORT  row i's explorer (skein-explore) listens on base + i (i: its place among the enabled rows);
 //                         default 4610; "off" starts none
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
-// `deploy` and `subscribe` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
+// `deploy`, `subscribe` and `peers` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
 // (default http://127.0.0.1:8100) /@<handle>, as the owner — SKEIN_OWNER (checked against the wallet):
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
@@ -68,7 +76,7 @@ import { Kernel } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { short } from "../runtime/log.ts";
+import { genesisOf, short } from "../runtime/log.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
@@ -76,7 +84,7 @@ import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { masterKey, Oracle } from "./oracle.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { subscribeBody } from "../client/client.ts";
-import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
+import { addressBook, DEFAULT_ONLY, deploy, deployFiles, subscribeRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
 import { Supervisor, type Supervised } from "./supervisor.ts";
 import { noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
@@ -110,6 +118,9 @@ const USAGE = `usage:
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed
   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
+  skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]   an address-book entry: where the agent delivers to <key>
+  skein-host peers <handle> remove <key>
+  skein-host peers <handle> list                          its address book: key, mailbox URL, handle, source
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
@@ -205,6 +216,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await rosterCmd(db, rest, env);
       case "subscribe":
         return await subscribeCmd(db, rest, env);
+      case "peers":
+        return await peersCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -276,6 +289,67 @@ async function subscribeCmd(db: HostDb, rest: string[], env: Env): Promise<numbe
 }
 
 /**
+ * An instance's origin here (router.ts originOf): its front door, its
+ * messagebox — SKEIN_INSTANCE_ORIGIN (default http://{handle}.localhost:{port})
+ * on SKEIN_ROUTER_PORT (default 8100).
+ */
+export function originOf(vars: Env["vars"], handle: string): string {
+  return (vars.SKEIN_INSTANCE_ORIGIN || "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", vars.SKEIN_ROUTER_PORT || "8100");
+}
+
+/** The other enabled agents, as `row`'s address book should have them: key, origin, handle. */
+function agentAddresses(row: InstanceRow, rows: InstanceRow[], vars: Env["vars"]): Array<{ op: "add" } & AddressEntry> {
+  return rows.filter((r) => r.handle !== row.handle && r.kind !== "mailbox" && r.identity).map((r) => ({ op: "add" as const, key: r.identity!, url: originOf(vars, r.handle), handle: r.handle, domain: r.domain }));
+}
+
+/** Write the other agents into `row`'s address book (unchanged entries are not sent); a line saying what was sent, if anything. */
+async function syncAgents(row: InstanceRow, rows: InstanceRow[], owner: { wallet: WalletInterface; box(row: InstanceRow): Outbox }, store: Store | undefined, env: Env): Promise<void> {
+  const want = agentAddresses(row, rows, env.vars);
+  if (!want.length) return;
+  // A store of the frozen TypeScript runtime (a format-1 genesis) has no address book (no resolve program).
+  if (store && (await store.log.tip()) && (await genesisOf(store).then(() => true, () => false))) return;
+  const r = await writeAddresses({ row, owner: owner.wallet, box: owner.box(row), store }, want);
+  const sent = want.filter((_, i) => r[i] === "sent").map((w) => w.handle);
+  if (sent.length) env.out(`${row.handle}: address book: ${sent.join(", ")} written`);
+}
+
+async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [handle, op, key, url, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { handle: { type: "string" } } });
+  const shape = op === "list" ? !key : op === "remove" ? !!key && !url : op === "add" ? !!key && !!url : false;
+  if (!handle || more.length || !shape || (v.handle !== undefined && op !== "add")) { env.err(USAGE); return 2; }
+  const row = db.get(handle);
+  if (!row) { env.err(`skein-host peers: no instance ${handle}`); return 1; }
+  if (row.kind === "mailbox") { env.err(`skein-host peers: ${handle} is a mailbox instance: it keeps mail, it sends nothing`); return 1; }
+  const s = openRow(row, env);
+  try {
+    if (op === "list") {
+      for (const e of await addressBook(s.blocks)) env.out([e.key, e.url, e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
+      return 0;
+    }
+    if (!/^0[23][0-9a-f]{64}$/.test(key!)) { env.err(`skein-host peers: ${key} is not an identity key (hex)`); return 2; }
+    if (op === "add" && !/^https?:\/\/[^/]/.test(url!)) { env.err(`skein-host peers: ${url} is not an http(s) URL`); return 2; }
+    let named: { handle?: string; domain?: string } = {};
+    if (v.handle !== undefined) {
+      const at = v.handle.replace(/^@/, "").lastIndexOf("@");
+      const h = v.handle.replace(/^@/, "");
+      named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h, domain: row.domain };
+      if (!named.handle || !named.domain) { env.err(`skein-host peers: --handle ${v.handle}: want handle@domain`); return 2; }
+    }
+    const owner = await ownerOf(env, "skein-host peers");
+    if (typeof owner === "number") return owner;
+    const change = op === "add" ? { op: "add" as const, key: key!, url: url!, ...named } : { op: "remove" as const, key: key! };
+    const [r] = await writeAddresses({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, [change]);
+    env.out(`${row.handle}: peers ${op} ${short(key!)}${op === "add" ? ` → ${url}${named.handle ? ` (@${named.handle}@${named.domain})` : ""}` : ""}: ${r === "sent" ? "sent" : "unchanged (the address book has it so already)"}`);
+    return 0;
+  } catch (e) {
+    env.err(`${row.handle}: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await s.close?.();
+  }
+}
+
+/**
  * IDENTITY.md's fields per row, for ROSTER.md: from `pending` (the directory
  * about to be deployed into that row), else the row's deployed tree in its
  * store, else (not admitted yet) its `source` directory; else empty.
@@ -323,9 +397,12 @@ async function rosterCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
   const fields = identities(env);
   let failed = 0;
   for (const row of rows) {
-    if (!row.tree) { env.out(`${row.handle}: never deployed; skipped`); continue; }
+    if (row.kind === "mailbox") continue;
     const s = openRow(row, env);
     try {
+      // The address book first (the other agents' keys and origins): it needs no tree.
+      await syncAgents(row, rows, owner, s.blocks, env);
+      if (!row.tree) { env.out(`${row.handle}: never deployed; ROSTER.md skipped`); continue; }
       if (!s.blocks) throw new Error(`no store at ${row.store}: deploy the directory instead`);
       const r = await deployFiles({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks, files: { "ROSTER.md": (await rosterFor(row, rows, fields)) ?? null } });
       db.add(row.handle, { tree: r.root });
@@ -411,6 +488,7 @@ async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
     const s = openRow(row, env);
     try {
       const files = { "ROSTER.md": (await rosterFor(row, rows, fields)) ?? null };
+      await syncAgents(row, rows, owner, s.blocks, env);
       const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box(row), store: s.blocks, files });
       db.add(row.handle, { tree: r.root, source: dir });
       env.out(deployedLine(row, r));
