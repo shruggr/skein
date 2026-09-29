@@ -825,6 +825,7 @@ pub const Runtime = struct {
             .http = hHttp,
             .deadline = hDeadline,
             .call = hCall,
+            .edges = hEdges,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
@@ -1012,6 +1013,14 @@ pub const Runtime = struct {
         const r = cbor.decode(st.a, request) catch return imp.failWith("http: the request is not dag-cbor");
         if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
         return attest(st, imp, "http", .{ .bytes = request }, .{ .http = request });
+    }
+    /// The edges into a record (#42): the index, plus the links of the bitcoin blocks this step kept so far.
+    fn hEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        return program.edgesRead(st.a, st.rt.store, to, rel, st.kept.items) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => imp.failFmt("edges: {s}", .{@errorName(err)}),
+        };
     }
     fn hDeadline(imp: *program.Imports, until: i64) program.Err!void {
         const st = stepOf(imp);
@@ -1245,6 +1254,7 @@ pub const Runtime = struct {
         .http = cHttp,
         .deadline = cDeadline,
         .call = cCall,
+        .edges = cEdges,
     };
 
     fn callOf(imp: *program.Imports) *CallState {
@@ -1298,6 +1308,14 @@ pub const Runtime = struct {
     }
     fn cDeadline(imp: *program.Imports, _: i64) program.Err!void {
         return readOnly(imp, "deadline");
+    }
+    /// The edges into a record (#42), as the index holds them (a call keeps nothing).
+    fn cEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
+        const cs = callOf(imp);
+        return program.edgesRead(cs.a, cs.rt.store, to, rel, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => imp.failFmt("edges: {s}", .{@errorName(err)}),
+        };
     }
     fn cHead(imp: *program.Imports, name: []const u8) program.Err!?[]const u8 {
         const cs = callOf(imp);

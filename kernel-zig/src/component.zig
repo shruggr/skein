@@ -193,6 +193,7 @@ const F = enum(u32) {
     sk_http,
     sk_deadline,
     sk_call,
+    sk_edges,
 };
 
 const Def = struct { name: []const u8, f: F };
@@ -377,6 +378,7 @@ const interfaces = [_]Iface{
         .{ .name = "http", .f = .sk_http },
         .{ .name = "deadline", .f = .sk_deadline },
         .{ .name = "call", .f = .sk_call },
+        .{ .name = "edges", .f = .sk_edges },
     } },
 };
 
@@ -1061,7 +1063,7 @@ const Session = struct {
             },
 
             // ---- skein:kernel/skein: program.Host, as the preview1 imports call it
-            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_http, .sk_deadline, .sk_call => return s.skein(f, a),
+            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_http, .sk_deadline, .sk_call, .sk_edges => return s.skein(f, a),
 
             // ---- wasi:http (#15): the recorded-call path of skein.http
             else => return s.httpCall(f, a),
@@ -1568,6 +1570,11 @@ const Session = struct {
                 const prog = try program.checkCid(imp, try listBytes(A, &a[0]));
                 const func = try A.dupe(u8, str(&a[1]));
                 return vOk(vBytes(try h.call(imp, prog, func, try listBytes(A, &a[2]))));
+            },
+            .sk_edges => {
+                const to = try program.checkCid(imp, try listBytes(A, &a[0]));
+                const rel: ?[]const u8 = if (a[1].of.option) |o| try A.dupe(u8, str(o)) else null;
+                return vOk(vBytes(try h.edges(imp, to, rel)));
             },
             else => unreachable,
         }

@@ -15,6 +15,15 @@
 //   deadline(until_ms) → 0         a step that ends waiting rests until then at most
 //   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
 //                                  (input kind "call"), its stdout the result
+//   edges(to, len, rel, rel_len, out, cap) → n   (#42) the edges into `to` (a binary CID)
+//                                  from the kernel's index, `rel` only if rel_len > 0:
+//                                  dag-cbor [{from, seq, rel, locator}] in key order
+//                                  (from, seq, ord) — who spent txid:vout is `spends`
+//                                  into the tx's CID with locator = vout. A read: a pure
+//                                  function of the log, plus the links of the bitcoin
+//                                  blocks this step kept so far (exactly the edges its
+//                                  update will add); other kept records' refs appear
+//                                  from the next step on.
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
@@ -24,6 +33,9 @@ const wasi = @import("wasi.zig");
 const runner = @import("runner.zig");
 const vfsm = @import("vfs.zig");
 const tree = @import("tree.zig");
+const storem = @import("store.zig");
+const bitcoin = @import("bitcoin.zig");
+const Value = cbor.Value;
 
 /// Host answers. Failed: the message is in `imp.last_error` (set with imp.failWith).
 /// Fatal: ends the run (a diverged replay, a missing witness).
@@ -55,7 +67,57 @@ pub const Host = struct {
     /// head moves and records are the step's); from a kernel `call` it reads
     /// only (no entry, no writes, nothing recorded).
     call: *const fn (imp: *Imports, prog: []const u8, func: []const u8, arg: []const u8) Err![]const u8,
+    /// The edges into `to` (#42): dag-cbor [{from, seq, rel, locator}] (edgesRead).
+    edges: *const fn (imp: *Imports, to: []const u8, rel: ?[]const u8) Err![]const u8 = noEdges,
 };
+
+fn noEdges(imp: *Imports, _: []const u8, _: ?[]const u8) Err![]const u8 {
+    return imp.failWith("edges: this host keeps no index");
+}
+
+/// The answer of `edges` (#42): the index's edges into `to` (with `rel`
+/// only, if given), plus those of the bitcoin blocks in `kept` (the step's
+/// keeps so far, not yet in the index: from the block at seq 0, as the
+/// update will write them), without duplicates, in key order (from, seq,
+/// ord), as dag-cbor [{from, seq, rel, locator}].
+pub fn edgesRead(a: std.mem.Allocator, s: storem.Store, to: []const u8, rel: ?[]const u8, kept: []const []const u8) ![]u8 {
+    var rows = std.array_list.Managed(storem.Edge).init(a);
+    try rows.appendSlice(try s.edges(a, to, rel));
+    for (kept, 0..) |k, i| {
+        if (!bitcoin.isBitcoin(k)) continue;
+        var dup = false;
+        for (kept[0..i]) |x| dup = dup or std.mem.eql(u8, x, k);
+        if (dup) continue;
+        const b = (try s.bytes(a, k)) orelse continue;
+        for (try bitcoin.linksOf(a, k, b), 0..) |l, ord| {
+            if (!std.mem.eql(u8, l.to, to)) continue;
+            if (rel) |want| if (!std.mem.eql(u8, want, l.rel)) continue;
+            var have = false;
+            for (rows.items) |r| have = have or (r.seq == 0 and r.ord == @as(i64, @intCast(ord)) and std.mem.eql(u8, r.from, k));
+            if (have) continue;
+            try rows.append(.{ .from = try a.dupe(u8, k), .seq = 0, .ord = @intCast(ord), .rel = try a.dupe(u8, l.rel), .locator = if (l.locator) |n| cbor.int(n) else null });
+        }
+    }
+    std.mem.sort(storem.Edge, rows.items, {}, struct {
+        fn lt(_: void, x: storem.Edge, y: storem.Edge) bool {
+            return switch (std.mem.order(u8, x.from, y.from)) {
+                .lt => true,
+                .gt => false,
+                .eq => x.seq < y.seq or (x.seq == y.seq and x.ord < y.ord),
+            };
+        }
+    }.lt);
+    const out = try a.alloc(Value, rows.items.len);
+    for (rows.items, out) |r, *o| {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("from", .{ .cid = r.from });
+        try m.put("seq", cbor.int(r.seq));
+        try m.put("rel", cbor.string(r.rel));
+        try m.put("locator", r.locator orelse .null);
+        o.* = m.value();
+    }
+    return cbor.encode(a, .{ .array = out });
+}
 
 pub const Imports = struct {
     host: *const Host,
@@ -155,6 +217,11 @@ pub const Imports = struct {
                 const func = try imp.strAt(p, a[2], a[3]);
                 const arg = try imp.alloc.dupe(u8, p.slice(a[4], a[5]) catch return error.OutOfMemory);
                 return imp.out(p, try h.call(imp, prog, func, arg), a[6], a[7]);
+            },
+            .edges => {
+                const to = try imp.alloc.dupe(u8, try imp.cidAt(p, a[0], a[1]));
+                const rel: ?[]const u8 = if (a[3] > 0) try imp.strAt(p, a[2], a[3]) else null;
+                return imp.out(p, try h.edges(imp, to, rel), a[4], a[5]);
             },
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
