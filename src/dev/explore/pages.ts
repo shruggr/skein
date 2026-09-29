@@ -5,6 +5,7 @@
 import type { CID } from "multiformats/cid";
 import { decode, encode, isCID } from "../../runtime/cid.ts";
 import { headTree, type HeadUpdate } from "../../runtime/heads.ts";
+import { bitcoinView } from "../../runtime/index-store.ts";
 import type { SubscriptionUpdate } from "../../runtime/subscriptions.ts";
 import { short, stampMs } from "../../runtime/log.ts";
 import { RAW } from "../../runtime/programs.ts";
@@ -408,6 +409,11 @@ export async function recordPage(w: World, cid: CID, path = ""): Promise<string>
   const bytes = await w.store.bytes(cid);
   const title = `<h1 class="cid">${esc(cid.toString())}</h1>`;
   if (cid.code === GIT_RAW) return layout(short(cid), `${title}${await gitView(w, cid, bytes, path)}`);
+  const btc = cid.code !== DAG_CBOR ? bitcoinView(cid, bytes) : undefined;
+  if (btc) {
+    // Bitcoin blocks (#29): a header, a transaction, a merkle node — its links (a sparse tree's child may not be held).
+    return layout(short(cid), `${title}${kv([["codec", btc.codec], ["size", `${bytes.length} bytes`], ...btc.fields.map(([k, v]): [string, string] => [k, typeof v === "string" ? esc(v) : link(w, v)])])}<pre>${hex(bytes)}</pre>`);
+  }
   if (cid.code !== DAG_CBOR) {
     const wasm = bytes.length >= 4 && Buffer.from(bytes.subarray(0, 4)).equals(Buffer.from([0, 0x61, 0x73, 0x6d]));
     return layout(short(cid), `${title}${kv([

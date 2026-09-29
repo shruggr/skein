@@ -527,7 +527,14 @@ by reachability. Instances talk to each other only by messages.
 ## What is stored
 
 Inputs (the message log), the records programs append (threads, nodes,
-emissions), and trees at the points something references them. Intermediate
+emissions), and trees at the points something references them. Blocks are
+not only dag-cbor: git objects (`git-raw`), wasm modules (`raw`), and bitcoin
+data under their own hashes — a transaction (`bitcoin-tx`, CID = txid), a
+header (`bitcoin-block`, CID = block hash) and a merkle node (`bitcoin-merkle`,
+64 bytes left ‖ right, CID = its merkle hash, #29): a header's merkle root
+names its root node and each node its children, so a block's transaction
+tree is a DAG in the store, held sparsely (the paths to a wallet's own
+transactions), and a merkle proof is a walk down it (docs/WALLET.md "Proofs"). Intermediate
 trees and command output are recomputable and may be kept as cache or
 dropped; nothing depends on them. Pruning is a capacity decision, never a
 correctness one.

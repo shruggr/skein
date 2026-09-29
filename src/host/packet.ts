@@ -47,6 +47,8 @@ import { vcdiffDecode } from "./vcdiff.ts";
 export const PACKET_KIND = "skein-packet";
 export const BITCOIN_TX = 0xb1;
 export const BITCOIN_BLOCK = 0xb0;
+/** A 64-byte merkle node (#29, kernel-zig/src/cid.zig): its CID is its merkle hash. */
+export const BITCOIN_MERKLE = 0xb3;
 const SHA1 = 0x11, SHA2_256 = 0x12, DBL_SHA2_256 = 0x56;
 const OP_FALSE = 0x00, OP_RETURN = 0x6a;
 
@@ -79,7 +81,7 @@ export function hashMatches(cid: CID, bytes: Uint8Array): boolean {
   switch (cid.multihash.code) {
     case SHA1: return cid.code === GIT_RAW && d.equals(sha1(bytes));
     case SHA2_256: return (cid.code === RAW || cid.code === DAG_CBOR) && d.equals(sha256(bytes));
-    case DBL_SHA2_256: return (cid.code === BITCOIN_TX || (cid.code === BITCOIN_BLOCK && bytes.length === 80)) && d.equals(sha256(sha256(bytes)));
+    case DBL_SHA2_256: return (cid.code === BITCOIN_TX || (cid.code === BITCOIN_BLOCK && bytes.length === 80) || (cid.code === BITCOIN_MERKLE && bytes.length === 64)) && d.equals(sha256(sha256(bytes)));
     default: return false;
   }
 }
@@ -96,8 +98,17 @@ function asBlock(cid: CID, payload: Uint8Array): Uint8Array | undefined {
 
 // ---------------------------------------------------------------- links (completeness)
 
-/** The CIDs a block links to: dag-cbor links, git tree entries; none for blobs, raw, bitcoin. */
-export function linksOf(cid: CID, bytes: Uint8Array): Array<{ cid: CID; tree?: boolean }> {
+const merkleCid = (h: Uint8Array) => CID.createV1(BITCOIN_MERKLE, Digest.create(DBL_SHA2_256, Uint8Array.from(h)));
+
+/**
+ * The CIDs a block links to: dag-cbor links, git tree entries; a header its
+ * merkle root's node and a merkle node its children (#29) — `optional`: the
+ * tree is sparse (only the paths to held transactions), so a child that is
+ * not held is not missing; none for blobs, raw, transactions.
+ */
+export function linksOf(cid: CID, bytes: Uint8Array): Array<{ cid: CID; tree?: boolean; optional?: boolean }> {
+  if (cid.code === BITCOIN_BLOCK && bytes.length === 80) return [{ cid: merkleCid(bytes.subarray(36, 68)), optional: true }];
+  if (cid.code === BITCOIN_MERKLE && bytes.length === 64) return [{ cid: merkleCid(bytes.subarray(0, 32)), optional: true }, { cid: merkleCid(bytes.subarray(32, 64)), optional: true }];
   if (cid.code === DAG_CBOR) {
     const out: Array<{ cid: CID }> = [];
     const walk = (v: unknown): void => {
@@ -122,14 +133,14 @@ export async function closure(scope: CID, get: (cid: CID) => Promise<Uint8Array 
   const blocks: Array<{ cid: CID; bytes: Uint8Array }> = [];
   const missing: string[] = [];
   const seen = new Set<string>();
-  const visit = async (cid: CID, path: string): Promise<Uint8Array | undefined> => {
+  const visit = async (cid: CID, path: string, optional = false): Promise<Uint8Array | undefined> => {
     const k = cid.toString();
     if (seen.has(k)) return undefined;
     seen.add(k);
     const bytes = await get(cid);
-    if (!bytes) { missing.push(`${path || "/"} (${k})`); return undefined; }
+    if (!bytes) { if (!optional) missing.push(`${path || "/"} (${k})`); return undefined; }
     blocks.push({ cid, bytes });
-    for (const l of linksOf(cid, bytes)) await visit(l.cid, cid.code === GIT_RAW ? `${path}/${nameIn(bytes, cid, l.cid)}` : `${path}→${short(l.cid)}`);
+    for (const l of linksOf(cid, bytes)) await visit(l.cid, cid.code === GIT_RAW ? `${path}/${nameIn(bytes, cid, l.cid)}` : `${path}→${short(l.cid)}`, l.optional);
     return bytes;
   };
   const root = await visit(scope, "");

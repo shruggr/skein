@@ -52,7 +52,7 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 |---|---|---|---|
 | header | `bitcoin-block` (0xb0, dbl-sha2-256) | the 80 bytes | CID = block hash; height is the `headers` map's key |
 | transaction | `bitcoin-tx` (0xb1, dbl-sha2-256) | the standard serialization | CID = txid |
-| `proof` | dag-cbor | `txid` (hex), `height`, `path` (BRC-74 bytes) | links a txid to the header at `height` |
+| merkle node | `bitcoin-merkle` (0xb3, dbl-sha2-256) | 64 bytes: left hash ‖ right hash | CID = the node's merkle hash (#29, below) |
 | `action` | dag-cbor | `txid`, `tx` (link), `description`, `labels`, `noSend?` | a transaction that is ours |
 | `output` | dag-cbor | `txid`, `vout`, `tx` (link), `basket`, `protocol`, protocol fields | satoshis and script come from the tx |
 | `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (outpoints), `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
@@ -79,7 +79,7 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `headers` | height (u32 BE) → header | the best chain |
 | `heights` | block hash → height | the best chain, backwards (fork points) |
 | `txs` | txid → transaction | every transaction we hold (ours and their ancestry) |
-| `proofs` | txid → `proof` | proof by txid |
+| `proofs` | txid → header (bitcoin-block link) | the block whose merkle tree holds the transaction |
 | `actions` | txid → `action` | our transactions |
 | `outputs` | txid ‖ vout (u32 BE) → `output` | output by outpoint |
 | `awaiting` | txid → `broadcast` | transactions awaiting a status |
@@ -99,13 +99,48 @@ docs/OVERLAY.md): one chain and one settlement for a wallet and an overlay
 in one instance. A wallet-only instance has them empty.
 
 **Status and spendability are computed, never stored.** `rejected` means a
-`settlement` record for the txid is in `rejected`; else `proven` means we
-hold a proof whose root is the merkle root of our best-chain header at its
-height; anything else is `unproven` (a reorg that drops the block turns it
-back, with nothing to update). Spendable means ours (an `output`) and not
+`settlement` record for the txid is in `rejected`; else `proven` means the
+block `proofs` names for it (its merkle path checked against that header when
+it arrived) is on our best chain; anything else is `unproven` (a reorg that
+drops the block turns it back, with nothing to update). Spendable means ours (an `output`) and not
 consumed (no transaction we hold, other than a rejected one, spends it). The
 ARC status in a `broadcast` record is provisional information, except a
 rejection (below).
+
+### Proofs: the merkle tree as IPLD nodes (#29)
+
+A merkle node is 64 bytes, left hash ‖ right hash, and its hash is the
+dbl-sha256 of those bytes; as a `bitcoin-merkle` block (0xb3, dbl-sha2-256;
+kernel-zig/src/cid.zig) **its CID is its merkle hash**. The header's merkle
+root names the root node; each node names its two children — nodes, or at the
+bottom transactions (bitcoin-tx CIDs: the txids). The tree is **sparse**: we
+hold only the nodes on the paths to our transactions; the other children are
+hashes we cannot dereference. Verification is the DAG itself: a node's hash
+is the hash of its children.
+
+- **Receiving a merkle path** (a BUMP, BRC-74: a `proof` / `status` entry,
+  ARC's answer, a BEEF's BUMPs at internalize or submit) checks the path's
+  root against our header at its height, then `putblock`s every node the
+  path reveals — each pair of siblings it gives (a `duplicate` sibling is the
+  left one again) makes a node, whose hash is the parent one level up —
+  hash-checked, nothing rewritten (wallet-zig/src/merkle.zig `reveal`). A
+  path that also gives a node at a position with another hash than its
+  children make is refused (`ConflictingNode`); one whose root is not our
+  header's is refused (`RootMismatch`) and puts nothing. `proofs[txid]` then
+  names the header (a bitcoin-block link); `proofHeights` keeps its height
+  (what a reorg re-settles). The per-transaction path records are gone.
+- **Merging is free.** Nodes are shared by every transaction of the block:
+  two BUMPs of one block give one set of node blocks, deduplicated by CID,
+  whatever order they arrive in.
+- **A proof is rebuilt on demand** (`Wallet.proofFor` → `merkle.pathFor`):
+  from the header's merkle root, one node per level down to the transaction
+  (a child we hold is a node, the txid is the leaf), each level's sibling
+  emitted, the offset read off the left/right turns — the minimal BUMP for
+  that transaction. `beefOf` / `atomicBeef` / `beefOfMany` embed these,
+  merged per block.
+- **An orphaned header** behaves as before: the proof names a block no longer
+  on our best chain, so the transaction is `unproven` (settlement reverts);
+  the nodes stay, and a new path against the new block adds its own.
 
 **Derived maps are maintained, not rebuilt (#41).** Each write that changes
 a fact updates the few index keys that fact touches, at write time; `save`
@@ -379,8 +414,11 @@ node wallet-zig/vectors/gen-ts/run.mjs        # TS cross-check of the vectors
 (cd wallet-zig/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
 ```
 
-Vector counts (`zig build test`): tx 39 (fees 429), BEEF 27, merkle 24,
-headers 46, BRC-29 24, wire 7, signing 10, plus 5 wallet scenarios (3 of
+Vector counts (`zig build test`): tx 39 (fees 429), BEEF 27, merkle 43 (the
+vector paths' nodes stored and every leaf's BUMP rebuilt from them; three
+transactions of one block proven by separate BUMPs in all six orders: one
+node set, each BUMP rebuilt byte for byte), headers 46, BRC-29 24, wire 7,
+signing 10, plus 6 wallet scenarios and the index cost check (#41) (3 of
 them settlement: each transition, bubbling, double spend, abandonment); the TS
 cross-check: 458. The wasm build is reproducible.
 
