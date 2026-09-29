@@ -613,7 +613,7 @@ finished, which sleep until when, which await a reply to this message, what
 points at this record, what tree does this head name — are answered by
 **persistent maps kept as records in the store**, not by database tables.
 Each query shape is its own map, keyed so that the question is a lookup, a
-range or a prefix: `log` (n → entry), `unique` (message CID → entry),
+range or a prefix: `log` (n → entry), `unique` (message CID, or a libp2p `p2p` event record's CID → entry),
 `chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
 and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
 (record ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`

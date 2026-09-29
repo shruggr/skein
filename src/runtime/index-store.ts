@@ -259,7 +259,11 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
   let tip: CID | null = null;
   for await (const { cid, entry } of store.log.entries()) {
     pairs.log.push([be64(entry.n), cid]);
-    const u = entry.envelope ?? entry.outcome?.emit;
+    // The record an entry is unique by (index.zig `uniqueOf`): its mail record (format 3, #40), a
+    // libp2p `p2p` event record (#51, #42: a redelivered message is refused), or format 2's envelope / emit.
+    const x = entry as LogEntry & { mail?: CID; event?: CID };
+    let u = x.mail ?? x.envelope ?? x.outcome?.emit;
+    if (!u && x.event && ((await store.get(x.event).catch(() => undefined)) as { kind?: unknown } | undefined)?.kind === "p2p") u = x.event;
     if (u) pairs.unique.push([u.bytes, cid]);
     tip = cid;
   }

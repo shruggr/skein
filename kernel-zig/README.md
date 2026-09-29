@@ -406,7 +406,7 @@ other record, one per query shape (`index.zig`):
 | map | key → value | answers |
 |---|---|---|
 | `log` | n → entry | `logFrom(n)` (a range), genesis |
-| `unique` | message (its mail record's CID) → entry | `byEnvelope` (the name kept), duplicate admission |
+| `unique` | message (its mail record's CID), or a libp2p `p2p` event record's CID (#42/#51: a redelivery is refused) → entry | `byEnvelope` (the name kept), duplicate admission |
 | `chains` | origin → {tip, seq, kind} | `chainTip`, `chainAppend` |
 | `updates` | origin ‖ seq → update | `chainUpdates` (a prefix) |
 | `threads` | at ‖ origin | every thread (the witness) |
