@@ -93,8 +93,8 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `byBasket` | len ‖ basket ‖ 0 (spendable) \| 1 (spent) ‖ outpoint → null | derived: our outputs by basket + spendable |
 | `unproven` | txid → null | derived, sparse: the settlement index — held transactions neither proven nor rejected |
 
-The same record also carries an overlay's maps (#36: `admitted`, `consumed`,
-`applied` and the derived `spentAdmitted`, `byTopic`, `byScript`;
+The same record also carries an overlay's maps (#36: `admitted`,
+`applied` and the derived `byTopic`, `byScript`;
 docs/OVERLAY.md): one chain and one settlement for a wallet and an overlay
 in one instance. A wallet-only instance has them empty.
 
