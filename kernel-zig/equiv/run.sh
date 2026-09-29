@@ -78,6 +78,9 @@ echo "== bootstrap (#4): a system tree from a directory and from a packet, chatt
 echo "== wasi:http (#15): the fetch component through the router, its call recorded; replayed with no host to ask"
 "${node[@]}" "$kz/equiv/fetch.ts" || status=1
 
+echo "== libp2p (#51): two routers — publish, validate, admit, reject, a stream round trip; replayed natively and in the browser; a live call refused in the browser"
+"${node[@]}" "$kz/equiv/libp2p.ts" || status=1
+
 echo "== overlay services (#36): programs/overlay built and tested; submit/lookup through the router with the stock SDK clients; replayed"
 (cd "$kz/../programs/overlay" && mise exec -- zig build && mise exec -- zig build test) || { echo "FAIL programs/overlay build or tests"; status=1; }
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1

@@ -39,7 +39,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`) | `~/.skein/logs/host.log` |
+| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox, raw BRC-33 on BRC-104 sessions | as run |
@@ -141,6 +141,27 @@ backoff, at most 1000 items queued per instance) and takes ARC's callbacks
 at `POST http://127.0.0.1:8100/callback/<handle>` (with `Authorization:
 Bearer <token>` when a token is set), admitting `header` / `status` entries
 into the box (default `chain`).
+
+libp2p (#51): an instance whose `etc/config.json` declares `libp2p:
+{topics?, protocols?, listen?}` gets a libp2p node in the router process,
+with its own peer key (a child of `~/.skein/master.key`, key ID
+`libp2p:<handle>`). `skein-host list` prints every row's peer ID (last
+column) and `skein-host identity <handle> --peer` prints one; it is the
+identity multihash of the compressed secp256k1 key, so the key reads out of
+it. Topic messages and stream frames reach the instance through its front
+door (docs/MESSAGES.md, "libp2p"); the validator and stream calls' fuel is in
+`skein-host ledger` (caller: the peer ID, op: `libp2p:<topic | protocol>`).
+The host-wide settings, from the environment or `~/.skein/host.env` (only the
+`SKEIN_LIBP2P_*` lines are read from it):
+
+| variable | default | |
+|---|---|---|
+| `SKEIN_LIBP2P_LISTEN` | `/ip4/127.0.0.1/tcp/0,/ip4/127.0.0.1/tcp/0/ws` | multiaddrs every node listens on (comma-separated). A fixed port can serve one node only: give per-instance ports in its config's `libp2p.listen`. Plain WS on loopback is for dev; browsers need WSS (below) |
+| `SKEIN_LIBP2P_TLS_CERT`, `SKEIN_LIBP2P_TLS_KEY` | unset | PEM files: the WebSocket listener serves TLS (listen on `/ip4/0.0.0.0/tcp/<port>/tls/ws`), so browsers can dial it |
+| `SKEIN_LIBP2P_BOOTSTRAP` | none | multiaddrs with `/p2p/<peer ID>`: dialled at start and redialled every 30 s while not connected |
+| `SKEIN_LIBP2P_DHT` | `off` | `off`, `client` or `server` (Kademlia, `/ipfs/kad/1.0.0`). On: each topic name is a rendezvous — the node provides the CID v1 raw sha2-256 of the name and dials the providers it finds, every 30 s (go-p2p-message-bus's scheme). Private and loopback addresses are kept in the DHT only when every listen and bootstrap address is private (dev) |
+| `SKEIN_LIBP2P_RELAYS` | none | circuit relays (multiaddrs with `/p2p/<id>`): each node also listens at `<relay>/p2p-circuit` |
+| `SKEIN_LIBP2P_MDNS` | `off` | `on`: mDNS discovery on the LAN; discovered peers are dialled |
 
 The sections below describe the pre-router layout (the `1sat serve`
 messagebox, a wallet-api per instance, host-signed entries, BRC-169

@@ -37,7 +37,9 @@ bin/<name>.json          optional: the program record's {inputs, services, descr
                          (default: the handler inputs {envelope, body, box, sender}, no services)
 etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
                                    feeds: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}]  (the router holds them, #33),
-                                   owner: {messagebox: url}}  (#40: the owner's messagebox, the one peer a genesis names)
+                                   owner: {messagebox: url},  (#40: the owner's messagebox, the one peer a genesis names)
+                                   libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]}}
+                                   (#51: the router's libp2p host runs a node for the instance)
 etc/subscriptions.json   required: [{sender?: key, box?, handler}]
 etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op}]; default the stock routes
 etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads
@@ -66,6 +68,19 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
   fills it. It is the only peer a genesis names: the peer table
   (head `peers`) is written only by the instance's own programs.
+- **`libp2p`** (#51) becomes the genesis's `libp2p: {topics, protocols,
+  listen?}`: the router's libp2p host runs a node for the instance (its own
+  peer key, derived from the master secret, key ID `libp2p:<handle>`),
+  subscribes `topics` and serves `protocols`. Each topic message and stream
+  frame is a front-door call routed by `libp2p:<topic>` /
+  `libp2p:<protocol>` (docs/MESSAGES.md, "libp2p"): a topic's route comes
+  from `etc/routes.json` (`{path: "libp2p:<topic>", program, fn}`); a
+  protocol names its handler here — a program (fn `libp2p`) or `{program,
+  fn}` — which becomes its route unless `etc/routes.json` has one. `listen`
+  is this node's addresses over the host's `SKEIN_LIBP2P_LISTEN` (a fixed port
+  belongs to one node). No `libp2p`: no node, and the `libp2p` import is
+  refused. The host-wide settings (listen, bootstrap, DHT, relays, mDNS) are
+  the router's, not the tree's (scripts/host/README.md).
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
   plus the kernel's `shell`. The shell is the VM's own program: its modules

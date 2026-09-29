@@ -55,7 +55,8 @@ Inside the runtime:
 - the **scheduler**: consumes the message log in order, routes by
   subscription (the subscriptions chain), steps programs;
 - **programs**: WASI modules stepped by the scheduler, with imports only for
-  the virtual filesystem, the store by CID, heads, the wallet, `http`, and
+  the virtual filesystem, the store by CID, heads, the wallet, `http`,
+  `libp2p` (#51: publish, dial, send, receive, close — recorded like `http`), and
   `call` (another program's function, in the VM); nothing emits: a program
   that sends a message calls the messagebox program, which delivers over
   `http`;
@@ -121,9 +122,20 @@ through gib. The runtime never writes to a disk.
 ## The router (issues #33, #40)
 
 The host is a **router**: a reverse proxy in front of instances that are HTTP
-servers. The kernel's surface is small: out go `wallet` (the signing oracle)
-and `http`; in come **admit an entry and run the step**, and **call a
-function** (no entry, no writes).
+servers. The kernel's surface is small: out go `wallet` (the signing oracle),
+`http` and `libp2p` (#51); in come **admit an entry and run the step**, and
+**call a function** (no entry, no writes).
+
+The router's components, each the sockets for one kind of traffic, none of
+them judging anything (the instance does, through its front door):
+
+- the **HTTP proxy** — instances' origins, the front door `call` per request,
+  the kernels' outbound `http` (below);
+- the **feeds** — SSE headers and ARC callbacks, admitted as plain entries
+  (below);
+- the **libp2p host** (#43, #51; `src/host/p2p.ts`) — one js-libp2p node per
+  instance that declares `libp2p` in its config, inside the router process
+  (below).
 
 - **Transport** ends at the instance: each has an origin of its own,
   `http://<handle>.localhost:<port>` (or `/@<handle>` on the router's own
@@ -169,6 +181,38 @@ function** (no entry, no writes).
   entry (`Router.admitEvent`) through a bounded per-instance queue; SSE
   reconnects with backoff. It judges nothing: the instance's chain tracker
   validates.
+- **The libp2p host** (#43, #51; `src/host/p2p.ts`): the runtime has no
+  network, so libp2p is the router's too. One node per instance whose genesis
+  carries `libp2p` (from `etc/config.json`: `topics`, `protocols`, `listen`),
+  started at hydration, all in the router process, each with its **own peer
+  key**: a secp256k1 child of the master secret (`[2, "skein instance"]`, key
+  ID `libp2p:<handle>`, self — never a wallet root); the peer ID is the
+  identity multihash of the compressed key, so the key reads out of the peer
+  ID and `skein-host list` / `identity --peer` print it for every row.
+  GossipSub with StrictSign, noise + yamux, TCP and WebSocket listeners (WSS
+  with a certificate; plain WS on loopback for dev), Kademlia DHT `off |
+  client | server` with topic-name rendezvous (provide and find the CID v1 raw
+  sha2-256 of the topic name, as go-p2p-message-bus does), mDNS, bootstrap
+  peers kept connected, circuit relays — host-wide from `SKEIN_LIBP2P_*`
+  (scripts/host/README.md).
+  - **Inbound through the front door.** Each GossipSub message on a
+    subscribed topic is judged by GossipSub's async topic validator, which
+    makes one front-door `call` (fn `libp2p`) tagged `{transport: "libp2p",
+    topic, from, seqno, signature, body}` and waits on it; the front door
+    verifies the signature, routes by `libp2p:<topic>`, and its handler
+    answers accept | reject | ignore. The verdict is GossipSub's (accept:
+    admit + forward; reject: drop, the delivering peer penalised; ignore:
+    drop). Accept returns one `p2p` entry, admitted before the verdict goes
+    back (docs/MESSAGES.md, "libp2p"). Reject and ignore write nothing.
+    Inbound streams: per protocol, the router reads length-prefixed frames,
+    calls the front door the same way (`libp2p:<protocol>`, no signature:
+    the stream is Noise's) and writes the handler's answer back. The calls'
+    fuel goes to the ledger (caller: the peer ID; op: the route source).
+  - **Outbound, the kernel's `libp2p` import**: publish, dial, send, receive,
+    close, answered here and recorded by the kernel on the step's update. A
+    `receive` with no frame waiting answers `{pending}` and the thread rests;
+    the frame's arrival makes the router admit the thread's wake at once
+    (docs/VM.md, "libp2p").
 - **Hydration**: an instance is a kernel the router can load
   (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
   length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
