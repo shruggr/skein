@@ -18,7 +18,7 @@
 // subject) proves it; a rejected broadcast gives
 // the inputs back; a draft (signAndProcess: false) is signed by signAction.
 // Then settlement (#37, settlementScenario): a rejection bubbling from A to
-// the B that spends it, settlement messages to the owner's `settlement` box,
+// the B that spends it (settlement is state to read: nothing is delivered),
 // B's thread learning it as a new input, and a reorg re-broadcasting.
 //
 // Issue #34, when the wallet's component build is there
@@ -149,10 +149,7 @@ const router = new Router({
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 await router.listen(0);
-// The owner's mailbox instance (#40), before the instance's genesis names it: where settlement messages go.
-router.addMailbox("david", ownerId);
 const toWallet = new RawBox(owner, `http://127.0.0.1:${router.port}/@wallettest`);
-const ownersBox = new RawBox(owner, `http://127.0.0.1:${router.port}/@david`);
 
 async function sendTo(identity: string, b: string, body: unknown): Promise<void> {
   await toWallet.send(identity, b, body);
@@ -226,18 +223,17 @@ async function resultWhere(what: string, pred: (r: Result, state: string, thread
  * spends A's change, then ARC's status for A says DOUBLE_SPEND_ATTEMPTED (a
  * plain entry routed by its subject to A's awaiting thread). A and B are
  * rejected (the bubbling: B spends A), their outputs vanish, the input A
- * consumed is spendable again, and the owner — who opted in with `watch` —
- * gets one settlement message per transaction in its `settlement` box. B's
+ * consumed is spendable again. Settlement is state to read: nothing is
+ * sent to anyone; whoever cares reads it when it next acts. B's
  * own thread is not replayed: at its deadline it finds B rejected, a new
  * input, and finishes. The results name the transactions as `mentions`.
  */
-async function settlementScenario(identity: string, someone: Uint8Array, base: string, reorg: { h102: Uint8Array; spend: string }): Promise<Record<string, unknown>> {
+async function settlementScenario(identity: string, someone: Uint8Array, reorg: { h102: Uint8Array; spend: string }): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
   const ownedWhere = async (body: Record<string, unknown>) => {
     await sendTo(identity, "wallet", body);
     return resultWhere(String(body.op), (r) => r.op === body.op);
   };
-  out.watch = (await ownedWhere({ op: "watch" })).result.settlement;
   const total0 = (await ownedWhere({ op: "list" })).result.total;
 
   const a = await ownedWhere({ op: "createAction", description: "A", outputs: [{ lockingScript: someone, satoshis: 1_000 }] });
@@ -251,19 +247,10 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
   const r = await resultWhere("A's status entry", (res) => res.op === "callback" && res.txid === txA && res.event === "status");
   out.rejected = {
     sameThread: r.thread.equals(a.thread), outcome: r.result.outcome, state: r.state,
-    settlement: (r.result.settlement as Array<Record<string, unknown>>)?.map((c) => [c.txid === txA ? "A" : c.txid === txB ? "B" : "?", c.status, c.reason, c.cause === undefined ? null : c.cause === txA ? "A" : "?"]),
-    sent: r.result.sent,
   };
   const list = await ownedWhere({ op: "list", includeSpent: true });
   out.inputsFreed = list.result.total === total0;
   out.noOutputsOfAB = !(list.result.outputs as Array<Record<string, unknown>>).some((o) => o.txid === txA || o.txid === txB);
-
-  // The owner's settlement box (its mailbox instance): the instance delivered them over http, one per transaction.
-  void base;
-  const msgs = await until("two settlement messages", async () => { const x = await ownersBox.list("settlement"); return x.length >= 2 ? x : undefined; });
-  const bodies = msgs.map((m) => m.value as Record<string, unknown>);
-  out.messages = bodies.map((m) => [m.kind, m.txid === txA ? "A" : m.txid === txB ? "B" : "?", m.status, m.reason]).sort();
-  out.messageSender = msgs.every((m) => m.sender === identity);
 
   // B's thread was not replayed: its deadline wakes it, it finds B rejected, and finishes.
   const bw = await resultWhere("B's deadline", (res, _s, t) => t.equals(b.thread) && res.op === "callback", 15_000);
@@ -279,7 +266,7 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
   out.explorer = page.status === 200 && page.body.includes("bitcoin-tx") && page.body.includes("vin 0") && page.body.includes("← spends") && page.body.includes(txCid(txB).toString());
 
   // A reorg: a heavier branch from 102 drops block 103, where our first spend was proven. It is
-  // unproven again, broadcast again like a fresh one, awaited; the owner is told.
+  // unproven again, broadcast again like a fresh one, awaited.
   const posts = arc.posts.length;
   const alt103 = mine(reorg.h102, sha256d(Buffer.from("alt 103")), 1_790_000_000 + 103 * 600 + 1);
   const alt104 = mine(sha256d(alt103), sha256d(Buffer.from("alt 104")), 1_790_000_000 + 104 * 600);
@@ -289,9 +276,6 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
     reposted: arc.posts.length === posts + 1 && Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]).id("hex") === reorg.spend,
     state: h.state, awaited: (h.result.awaited as string[] | undefined)?.includes(reorg.spend),
   };
-  const m3 = await until("the reorg's settlement message", async () => { const x = await ownersBox.list("settlement"); return x.length >= 3 ? x : undefined; });
-  const last = m3.map((m) => m.value as Record<string, unknown>);
-  out.reorgMessage = last.some((m) => m.txid === reorg.spend && m.status === "unproven" && m.reason === "reorg");
   return out;
 }
 
@@ -388,7 +372,7 @@ try {
   const signed = Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]);
   report.draft = { hasReference: CID.asCID(draft.reference) !== null, notPostedAsDraft: draft.posts === arc.posts.length - 1, awaiting: r.result.awaiting, scriptsVerify: await signed.verify("scripts only"), txid: r.result.txid === signed.id("hex") };
 
-  report.settlement = await settlementScenario(identity, new Uint8Array(someone), `http://127.0.0.1:${router.port}`, { h102: prev, spend: spendTxid });
+  report.settlement = await settlementScenario(identity, new Uint8Array(someone), { h102: prev, spend: spendTxid });
 
   report.ok = true;
 } catch (e) {
@@ -427,16 +411,15 @@ const d = (report.draft ?? {}) as Record<string, unknown>;
 check(d.hasReference === true && d.notPostedAsDraft === true && d.awaiting === true && d.scriptsVerify === true && d.txid === true, `a draft (signAndProcess: false), then signAction: signed, broadcast, awaiting (${JSON.stringify(d)})`);
 
 const st = (report.settlement ?? {}) as Record<string, unknown>;
-check(st.watch === true && eq(st.awaiting, ["waiting", "waiting"]) && st.bSpendsA === true, `settlement (#37): the owner watches; A, then B spending A's change, both broadcast and awaited (${JSON.stringify([st.watch, st.awaiting, st.bSpendsA])})`);
-check(eq(st.rejected, { sameThread: true, outcome: "rejected", state: "finished", settlement: [["A", "rejected", "DOUBLE_SPEND_ATTEMPTED", null], ["B", "rejected", "input-rejected", "A"]], sent: 2 }), `a DOUBLE_SPEND status entry for A reaches A's thread: A rejected, bubbled to B (spends) (${JSON.stringify(st.rejected)})`);
+check(eq(st.awaiting, ["waiting", "waiting"]) && st.bSpendsA === true, `settlement (#37): A, then B spending A's change, both broadcast and awaited (${JSON.stringify([st.awaiting, st.bSpendsA])})`);
+check(eq(st.rejected, { sameThread: true, outcome: "rejected", state: "finished" }), `a DOUBLE_SPEND status entry for A reaches A's thread: A rejected (${JSON.stringify(st.rejected)})`);
 check(st.inputsFreed === true && st.noOutputsOfAB === true, `the rejected outputs vanish; the input A consumed is spendable again (${JSON.stringify([st.inputsFreed, st.noOutputsOfAB])})`);
-check(eq(st.messages, [["settlement", "A", "rejected", "DOUBLE_SPEND_ATTEMPTED"], ["settlement", "B", "rejected", "input-rejected"]]) && st.messageSender === true, `the owner's settlement box: one message per rejected transaction, delivered by the instance (${JSON.stringify(st.messages)})`);
-check(eq(st.bThread, { outcome: "rejected", state: "finished" }), `B's thread is not replayed: at its deadline it finds B rejected and finishes (${JSON.stringify(st.bThread)})`);
+check(eq(st.bThread, { outcome: "rejected", state: "finished" }), `the rejection bubbled to B (spends A): B's thread is not replayed, at its deadline it reads B rejected and finishes (${JSON.stringify(st.bThread)})`);
 check(st.mentions === true, "the results name the transactions as `mentions` edges (which never propagate)");
 check(st.spendsEdge === true, "#42: B's input is a `spends` edge into A, from B's own kept block, locator = the vout it spends");
 check(st.explorer === true, "#42: the explorer's record page for A shows it decoded (bitcoin-tx, its inputs) and ← spends from B");
 check(eq(report.edges, { sameRoot: true, bitcoin: [true, false, false] }), `#42: the TS reader derives the kernel's edges map (same root), with spends edges from the kept transactions and no prev / merkleroot edges from the kept headers (${JSON.stringify(report.edges)})`);
-check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }) && st.reorgMessage === true, `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited; the owner is told (${JSON.stringify([st.reorg, st.reorgMessage])})`);
+check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }), `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited (${JSON.stringify(st.reorg)})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
 process.stdout.write(r.stdout);
