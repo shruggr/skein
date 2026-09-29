@@ -529,12 +529,27 @@ by reachability. Instances talk to each other only by messages.
 Inputs (the message log), the records programs append (threads, nodes,
 emissions), and trees at the points something references them. Blocks are
 not only dag-cbor: git objects (`git-raw`), wasm modules (`raw`), and bitcoin
-data under their own hashes — a transaction (`bitcoin-tx`, CID = txid), a
-header (`bitcoin-block`, CID = block hash) and a merkle node (`bitcoin-merkle`,
-64 bytes left ‖ right, CID = its merkle hash, #29): a header's merkle root
-names its root node and each node its children, so a block's transaction
-tree is a DAG in the store, held sparsely (the paths to a wallet's own
-transactions), and a merkle proof is a walk down it (docs/WALLET.md "Proofs"). Intermediate
+data under their own hashes (dbl-sha2-256), decoded the IPLD way (#42,
+`kernel-zig/src/bitcoin.zig`, after IPLD's bitcoin codecs, with bitcoind's
+field names) — typed nodes with links:
+
+| codec | bytes | node |
+|---|---|---|
+| `bitcoin-block` (0xb0), CID = block hash | an 80-byte header | `{version, previousblockhash → link(bitcoin-block) \| null (genesis), merkleroot → link(bitcoin-tx), time, bits, nonce}` |
+| `bitcoin-tx` (0xb1), CID = txid | a transaction | `{version, vin: [{txid → link(bitcoin-tx), vout, script, sequence} \| {coinbase, sequence}], vout: [{value, script}], locktime}` |
+| `bitcoin-tx` (0xb1), CID = merkle hash | exactly 64 bytes, left ‖ right | a merkle node `[left → link, right → link]` |
+
+`putblock` takes the raw bytes and checks their hash; the decode is how the
+kernel reads them. The 64-byte case is IPLD's convention: a merkle node
+lives under `bitcoin-tx` (the tree's leaves are transactions), told apart by
+its length. A 64-byte transaction would be ambiguous; it is malformed by
+consensus-adjacent convention (Core refuses them, CVE-2017-12842), so 64
+bytes always reads as a node. The header's merkle root names the root node
+and each node its children, so a block's transaction tree is a DAG in the
+store, held sparsely (the paths to a wallet's own transactions), and a
+merkle proof is a walk down it (docs/WALLET.md "Proofs"); a transaction's
+inputs link what they spend, so the ancestry is a DAG too. Links to blocks
+not held point at absent CIDs (sparse, and fine). Intermediate
 trees and command output are recomputable and may be kept as cache or
 dropped; nothing depends on them. Pruning is a capacity decision, never a
 correctness one.
@@ -577,7 +592,8 @@ intermediate trees; the log and what live chains reach are not.
 ### Edges and their relation kinds
 
 The `edges` map is who points at what: target ‖ from ‖ seq ‖ ord →
-`[rel, locator?]`, from a chain (a thread or node) at an update. The kernel
+`[rel, locator?]`, from a chain (a thread or node) at an update, or from a
+kept bitcoin block (seq 0). The kernel
 derives them (index.zig, as sqlite.ts did) from:
 
 | source | rel |
@@ -588,8 +604,27 @@ derives them (index.zig, as sqlite.ts did) from:
 | an update's `resolution` | `resolves` |
 | an update's `emit` of type `launched` | `launched` |
 | each record the step **kept** (`keep`) with `refs: [{to, rel, locator?}]` (#37) | the ref's own |
+| each **bitcoin block** the step kept (#42): its links, from the block itself at seq 0 | `spends` (an input, locator = the vout), `prev` / `merkleroot` (a header), `child` (a merkle node, locator 0 / 1) |
 
-The last is how a program says what a record it keeps stands on, with the
+A kept bitcoin block's edges are keyed `to ‖ block CID ‖ 0 ‖ ord`, like an
+origin's own: they do not depend on which thread kept it or when, so a
+block kept again adds nothing. The trigger is **keep**, not `putblock`: a
+bare put leaves no trace in the chains, and the edges map is a function of
+the chains (a rebuild from the log comes to the same root). The wallet keeps
+every bitcoin block it holds (headers, transactions, merkle nodes), so "who
+spent txid:vout" is a prefix scan on the transaction's CID and a locator
+filter — its `spends` edges replaced the wallet's `spenders` map (one entry
+per input of every held transaction, as before), and the explorer walks the
+graph: header → merkle root → nodes → transactions → what they spend.
+
+Programs read the edges with the **`edges`** call: `edges(to, rel?)` →
+dag-cbor `[{from, seq, rel, locator}]` in key order (from, seq, ord). It is a
+read, answered from the index (a pure function of the log) plus the links
+of the bitcoin blocks the step kept so far — exactly the edges its update
+will add; other kept records' `refs` appear from the next step. A kernel
+`call` reads the index only.
+
+The kept-record `refs` are how a program says what a record it keeps stands on, with the
 **relation kind** that decides whether a transaction's rejection (#37,
 docs/WALLET.md "Settlement") matters to it:
 
@@ -601,8 +636,9 @@ docs/WALLET.md "Settlement") matters to it:
 | `mentions` | merely names it (a message, a turn, a wallet result) | no |
 
 Propagation happens in **derived state**, never in threads: the wallet
-recomputes its maps from the records that remain (its own `dependents`
-map carries the same kinds), and an overlay's admitted outputs will be
+recomputes its maps from the records that remain (a transaction's spenders
+through its `spends` edges; its own `dependents` map carries the other
+kinds, for records no thread keeps), and an overlay's admitted outputs will be
 recomputed the same way (#36: a rejected transaction's admittances vanish,
 a rejected spend frees what it consumed; docs/OVERLAY.md). A **thread** whose history took the
 transaction as input is never replayed — the log never un-happens anything.

@@ -140,21 +140,37 @@ recorded wallet answer.
 What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md);
 the TS runtime has none of it.
 
-- **Bitcoin codecs** (`cid.zig`): `putblock` accepts `bitcoin-tx` (0xb1),
-  `bitcoin-block` (0xb0, 80 bytes) and `bitcoin-merkle` (0xb3, 64 bytes) with
-  `dbl-sha2-256` (0x56), hash-checked, so a transaction's CID is its txid, a
-  header's its block hash and a merkle node's its merkle hash (the digest in
-  internal byte order); `get` returns the bytes as stored. A merkle node (#29)
-  is left hash ‖ right hash: the header's merkle root names the root node,
-  each node its two children (nodes, or at the bottom transactions), so a
-  block's transaction tree is a DAG in the store — sparse, holding only the
-  paths a wallet needs (docs/WALLET.md "Proofs"). **The code 0xb3 is ours,
-  not the multicodec table's**: the table has 0xb2 as
-  `bitcoin-witness-commitment` and no merkle-node code (IPLD's own bitcoin
-  codecs put 64-byte merkle nodes under `bitcoin-tx`, told apart by length);
-  0xb3 is the next unassigned code in the bitcoin range, chosen so a node's
-  kind is in its CID. Should the table assign a code, this one changes with
-  it (src/runtime/index-store.ts and src/host/packet.ts name it too).
+- **Bitcoin codecs** (`cid.zig`, `bitcoin.zig`, #42): `putblock` accepts
+  `bitcoin-tx` (0xb1) and `bitcoin-block` (0xb0, 80 bytes) with
+  `dbl-sha2-256` (0x56), raw bytes, hash-checked, so a transaction's CID is
+  its txid, a header's its block hash and a merkle node's its merkle hash
+  (the digest in internal byte order); `get` returns the bytes as stored.
+  The kernel **decodes them the IPLD way** (after IPLD's bitcoin codecs,
+  bitcoind's field names): a header → `{version, previousblockhash → link,
+  merkleroot → link, time, bits, nonce}`; a transaction → `{version, vin:
+  [{txid → link, vout, script, sequence} | {coinbase, sequence}], vout:
+  [{value, script}], locktime}`; **exactly 64 bytes under `bitcoin-tx` is a
+  merkle node** `[left → link, right → link]` (IPLD's convention; a 64-byte
+  transaction is malformed by convention, so the length decides). The
+  header's merkle root names the root node, each node its two children
+  (nodes, or at the bottom transactions), so a block's transaction tree is a
+  DAG in the store — sparse, holding only the paths a wallet needs
+  (docs/WALLET.md "Proofs"). (The unregistered 0xb3 `bitcoin-merkle` of
+  #29 is gone.)
+- **Edges from kept bitcoin blocks** (`index.zig`, #42): a bitcoin block a
+  step keeps adds its links to the `edges` map, from the block itself at
+  seq 0 — each input `spends` (locator = its vout, an integer), a header
+  `prev` / `merkleroot`, a merkle node `child` (locator 0 / 1). Keep is the
+  trigger, not `putblock`: the map stays a function of the chains, and a
+  block kept again (by any thread) adds nothing.
+- **`edges(to, to_len, rel, rel_len, out, cap)`** (WIT `edges: func(to:
+  cid, rel: option<string>) -> result<list<u8>, string>`): the edges into
+  `to`, `rel` only if given, as dag-cbor `[{from, seq, rel, locator}]` in key
+  order (from, seq, ord) — who spent txid:vout is the `spends` edges into
+  the transaction's CID with that locator. A read: the index (a function of
+  the log) plus the links of the bitcoin blocks the step kept so far (the
+  edges its update will add); a kernel `call` reads the index only. The
+  wallet's `spenders` map folded into it.
 - **Plain entries** (`log.zig`, `scheduler.zig` `processEvent`):
   `{kind: "log", n, prev, time, box, event}` — the `event` kind of the one
   format-3 entry encoding (genesis | mail | wake | event+box; none signed). The router admits one per event from a feed
