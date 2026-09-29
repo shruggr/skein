@@ -34,6 +34,7 @@ test("router: the stock client by host name, our client by path prefix; the answ
   assert.equal(r.exitCode, 0);
   assert.match(Buffer.from(r.stdout["/"].bytes, "base64").toString(), /^hello\n/);
   assert.equal(results[0]!.sender, alpha, "the sender is the session's identity: alpha's");
+  assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver results for ") && l.endsWith(`→ ${h.origin("david")}/sendMessage (local): 200 delivered`)), "the delivery's log line: where, how, the result");
   await dav.acknowledgeMessage({ messageIds: results.map((m) => m.messageId), host: h.origin("david") });
   await h.router.settled();
   assert.deepEqual(await dav.listMessagesLite({ messageBox: "results", host: h.origin("david") }), [], "acknowledged: the reader's pointer moved");

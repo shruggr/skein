@@ -136,6 +136,7 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
     return (await mine.list("chat")).find((m) => (m.value as { text?: string }).text === "done");
   }, 60_000);
   assert.equal(final.sender, alpha);
+  assert.ok(h.lines.some((l) => l.startsWith("[alpha] deliver chat for ") && l.endsWith(`→ ${h.origin("beta")}/sendMessage (local): HTTP 503 down for a moment`)), "a failed delivery's log line says why");
   assert.deepEqual(statuses, [503, 503, 200, 400], "c1: two transient failures, then delivered on the third attempt; c2: one permanent failure, no retry");
   const tools = (i: number) => (asked[i]!.messages as Json[]).filter((m) => m.role === "tool") as Array<{ content: string }>;
   assert.equal(tools(2).at(-1)!.content, "pong from beta", "the retried message's result is beta's reply");

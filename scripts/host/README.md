@@ -88,7 +88,15 @@ The router's own endpoints:
 
 The instances' outbound http (a messagebox delivering, a resolve) comes back
 through the router: a URL of this host's is answered in process (the same
-path, no socket), any other goes out (`SKEIN_HTTP=fetch`).
+path, no socket), any other goes out (`SKEIN_HTTP=fetch`). Every delivery
+(a `POST …/sendMessage`) is one line in `host.log`, so a lost reply shows
+where it went and what came back:
+
+```
+[martha] deliver chat for 8f98ef7c → http://david.localhost:8100/sendMessage (local): 200 delivered
+[martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): HTTP 503 down for a moment
+[martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): failed: fetch failed
+```
 
 **Mailbox instances.** A person or peer outside the host gets a mailbox: an
 instance of its own with only the front door and the messagebox, keeping
