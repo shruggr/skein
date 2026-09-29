@@ -237,14 +237,18 @@ cross-origin isolated). Easel (#16) builds on this.
 An instance can be a BRC-22/24 overlay node, served by its own front door:
 its `etc/routes.json` names the overlay engine's route handlers (`POST
 /submit`, `POST /lookup`, overlay-express's listing and documentation
-routes, all open). A submit is the one write: the handler checks the BEEF
-against the held headers as a read and returns the `submit` entry to admit
-(the `overlay` program, stepped, launches the topic managers and records their
-judgements); the answer is a `then` call reading the STEAK back. A lookup is
-a read: an in-VM call of the lookup service's program. What topics admit is
-kept as index maps in the same state record as the wallet's (wallet-zig
-`overlay.zig`), so a transaction's settlement (#37) is one thing for both: a
-rejection makes its admittances vanish. See `docs/OVERLAY.md`.
+routes, all open). A submit is the one write (#50): the handler decodes the
+BEEF once into records in its call's overlay, checks it against the held
+headers and calls the topic managers on the transaction's CID, all as a
+read. Only if a topic takes it does it return the `submit` entry to admit.
+The `overlay` program, stepped on that entry, holds the records, records the
+judgements and calls the lookup services' hooks. The answer is a `then` call
+reading the STEAK back. A lookup is a read: an in-VM call of the lookup
+service's program, which answers from its own maps (head `ls:<service>`),
+written only through its hooks. What topics admit is kept as index maps in
+the same state record as the wallet's (wallet-zig `overlay.zig`), so a
+transaction's settlement (#37) is one thing for both: a rejection makes its
+admittances vanish, and the services are told. See `docs/OVERLAY.md`.
 
 ## Processes on David's machines, today
 

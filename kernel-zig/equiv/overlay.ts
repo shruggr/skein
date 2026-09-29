@@ -4,8 +4,11 @@
 // origin) to the stock @bsv/sdk overlay clients: an instance booted from a
 // system tree (#4) whose bin/ holds the front door, the overlay engine, the
 // tm_demo topic and the ls_demo lookup (programs/overlay), its config naming
-// them. A submit is the one write (an entry admitted, then its STEAK read
-// back); a lookup, a dupe and a refused BEEF write nothing. Headers are fed as plain
+// them (#50: ls_demo listening to tm_demo, keeping its own index through its
+// hooks). A submit is the one write (decoded once and judged in the front
+// door's call; an entry admitted, then its STEAK read back); a lookup, a dupe,
+// a refused BEEF and a submission no topic takes write nothing — the last
+// leaves the store file byte-identical. Headers are fed as plain
 // `header` entries (a regtest chain from its genesis, the funding mined at
 // height 1); a token transaction is broadcast with TopicBroadcaster (POST
 // /submit, SHIP's wire form) and found with LookupResolver (POST /lookup,
@@ -23,7 +26,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,7 +62,7 @@ const handler = { event: "cid", box: "string" };
 writeFileSync(join(sys, "bin/overlay.json"), JSON.stringify({ inputs: handler, description: "The overlay engine: BRC-22 submit, BRC-24 lookup, the chain feed." }));
 writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, description: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP.\n\nEvery such output is admitted; the tokens a transaction spends are retained when it admits one." }));
 writeFileSync(join(sys, "bin/lookup-demo.json"), JSON.stringify({ inputs: {}, description: "Demo token lookup: {topic}, {scriptHash, topic?}, {txid, outputIndex, topic}." }));
-writeFileSync(join(sys, "etc/config.json"), JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: "lookup-demo" }) } }));
+writeFileSync(join(sys, "etc/config.json"), JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) } }));
 writeFileSync(join(sys, "etc/subscriptions.json"), JSON.stringify([{ box: "submit", handler: "overlay" }, { box: "chain", handler: "overlay" }]));
 // The overlay-express wire contract as front-door routes: open, as overlay-express is.
 const route = (path: string, fn: string) => ({ path, program: "overlay", fn, auth: "none" });
@@ -181,6 +184,23 @@ try {
   const logLen = async () => { const k = (await router.hydrate("overlay")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
   const before = await logLen();
 
+  // #50: a submission no topic takes (T1's change paid on, no token, no previous coin) is decoded and judged in
+  // the front door's call and refused there: no entry, and the store — the SQLite file and its WAL — is byte for
+  // byte what it was. (Not held, so u1 below may still spend the same output.)
+  const storeBytes = () => createHash("sha256").update(readFileSync(db)).update(existsSync(`${db}-wal`) ? readFileSync(`${db}-wal`) : new Uint8Array()).digest("hex");
+  const plain = new Transaction();
+  plain.addInput({ sourceTransaction: t1, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
+  plain.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 48_000 });
+  await plain.sign();
+  await router.settled();
+  const bytesBefore = storeBytes();
+  const refusedSubmit = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(plain.toBEEF()) });
+  const refusedMessage = String(((await refusedSubmit.json()) as { message?: string }).message ?? "");
+  await router.settled();
+  report.refusedSubmit = [refusedSubmit.status, refusedMessage.split(":")[0], storeBytes() === bytesBefore];
+  // The lookup service's own storage: its head, moved only by its hooks.
+  report.lsHead = (await (await router.hydrate("overlay")).kernel.call("head", "ls:ls_demo")) != null;
+
   // T2 spends the token into a new one (X-Topics as a JSON array, Atomic BEEF): the old one is retained.
   const r2 = await fetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": JSON.stringify(["tm_demo"]) }, body: new Uint8Array(t2.toAtomicBEEF()) });
   report.submit2 = await r2.json();
@@ -294,6 +314,8 @@ check(eq(report.lookup1, [["t1", 0, true]]), `LookupResolver → POST /lookup (a
 check(eq(report.byScript, [["t1", 0]]), `a lookup by script hash (${JSON.stringify(report.byScript)})`);
 check(eq(report.lookupJson, { type: "output-list", outputs: [["t1", 0]] }), `the JSON answer form (${JSON.stringify(report.lookupJson)})`);
 check(eq(report.dupe, { tm_demo: { outputsToAdmit: [], coinsToRetain: [], coinsRemoved: [] } }), `a resubmission is a dupe; an unserved topic is left out (${JSON.stringify(report.dupe)})`);
+check(eq(report.refusedSubmit, [400, "NotAdmitted", true]), `#50: a submission no topic takes is refused in the front door's call: no entry, the store file byte-identical (${JSON.stringify(report.refusedSubmit)})`);
+check(report.lsHead === true, `#50: ls_demo keeps its own storage under the head ls:ls_demo, and answers the lookups from it`);
 check(eq(report.submit2, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [0], coinsRemoved: [] } }), `the spend: a new token admitted, the old retained (${JSON.stringify(report.submit2)})`);
 check(eq(report.lookup2, [["t2", 0, true]]) && eq(report.withSpent, [["t1", 0], ["t2", 0]]), `the live set moves to the new token; the old one stays for history (${JSON.stringify([report.lookup2, report.withSpent])})`);
 check(eq(report.afterReject, [["t1", 0, true]]), `a status entry rejects the spend: its admittance vanishes, the consumed token is restored (${JSON.stringify(report.afterReject)})`);

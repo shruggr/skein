@@ -100,9 +100,12 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `unproven` | txid → null | derived, sparse: the settlement index — held transactions neither proven nor rejected |
 
 The same record also carries an overlay's maps (#36: `admitted`,
-`applied` and the derived `byTopic`, `byScript`;
-docs/OVERLAY.md): one chain and one settlement for a wallet and an overlay
-in one instance. A wallet-only instance has them empty.
+`applied` and the derived `byTopic`; docs/OVERLAY.md): one chain and one
+settlement for a wallet and an overlay in one instance. A wallet-only
+instance has them empty. Query indexes are not here: each lookup service
+keeps its own under its own head (#50). A rejection that removes a topic's
+judgement is noted (`Wallet.unapplied`), and the wallet program calls that
+topic's lookup services' `rejected` hook in the same step.
 
 **Who spends what is not a map of the wallet's** (#42): it is the kernel's
 `spends` edges. The spenders of txid:vout are the edges into the

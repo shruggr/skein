@@ -340,6 +340,14 @@ function over the current state and return a value. It writes nothing.
   lookup, the explorer — is answered from state with no entry and no byte
   written. A request that must write returns the entries for the host to
   admit (docs/MESSAGES.md, docs/ARCH.md).
+- **The overlay's submit uses the call's overlay as a scratch store**
+  (#50, docs/OVERLAY.md): the handler decodes the BEEF once into
+  `bitcoin-tx` blocks and merkle nodes with `putblock`, checks SPV and runs
+  the topic managers (in-VM calls) over them through `get`, and returns an
+  entry only if a topic takes the transaction. A refused submission leaves
+  the store byte-identical. The entry carries the decoded records, and the
+  step that processes it keeps them and calls the lookup services' hooks,
+  which move their own heads (`ls:<service>`).
 
 ### Fuel: every step is metered
 
