@@ -1,8 +1,11 @@
 //! Delivery over http (#40): the messagebox program sends a message itself,
-//! as a BRC-103/104 client of the recipient's messagebox — the peer table
+//! as a BRC-103/104 client of the recipient's messagebox — the address book
 //! gives the URL (the head `peers`: records the instance's own programs wrote:
-//! a resolve, the admin, a claim; or the owner's from the genesis,
-//! `defaults.ownerMessagebox`), a session per peer is kept as a small record
+//! its resolve, or the admin through the `peers` box; or the owner's from the
+//! genesis, `defaults.ownerMessagebox`). A key in none of them and no handle
+//! to resolve is "no route": a permanent failure. Sending never tells the
+//! peer who we are (no claim, no registration: that is application wiring,
+//! #40). A session per peer is kept as a small record
 //! (head `outbound`), and the BRC-33 `sendMessage` is a recorded `http` call:
 //! request and response on the step's update, so replay never touches the
 //! network. Called from a step (the loop's `message` tool, its infer and its
@@ -218,28 +221,6 @@ fn request(a: Allocator, peer: Peer, s: Session, me: []const u8, endpoint: []con
     return .{ .r = r, .proof = p.value() };
 }
 
-/// On a new session, tell the peer who we are: a claim {handle, domain} in its
-/// `register` box, which its resolve program checks by resolving it (so it can
-/// answer us). A peer that takes no claims (a mailbox instance) refuses it, and
-/// that is all.
-fn claim(a: Allocator, in: Value, peer: Peer, s: Session, me: []const u8) !void {
-    const self = in.get("self") orelse return;
-    const handle = Value.str(self.get("handle")) orelse return;
-    const domain = Value.str(self.get("domain")) orelse return;
-    var c = cbor.MapBuilder.init(a);
-    try c.put("handle", cbor.string(handle));
-    try c.put("domain", cbor.string(domain));
-    var m = cbor.MapBuilder.init(a);
-    try m.put("recipient", .{ .bytes = peer.key });
-    try m.put("messageBox", cbor.string("register"));
-    try m.put("body", .{ .bytes = try cbor.encode(a, c.value()) });
-    var outer = cbor.MapBuilder.init(a);
-    try outer.put("message", m.value());
-    _ = request(a, peer, s, me, "/sendMessage", try cbor.encode(a, outer.value())) catch |err| {
-        if (err != error.Reported) return err;
-    };
-}
-
 pub fn send(a: Allocator, in: Value, arg: Value) !Value {
     const to = Value.bytesOf(arg.get("to")) orelse return sk.report("send wants {to, box, body, handle?, domain?}");
     if (!sk.isKey(to)) return sk.report("send: `to` is not an identity key");
@@ -252,7 +233,7 @@ pub fn send(a: Allocator, in: Value, arg: Value) !Value {
 
     const peer = (try peerOf(a, in, to)) orelse blk: {
         // First contact: a handle to resolve (the resolve program writes the peer record).
-        const handle = Value.str(arg.get("handle")) orelse return sk.report(try std.fmt.allocPrint(a, "no peer record for {s}: resolve its handle first", .{try sk.hex(a, to)}));
+        const handle = Value.str(arg.get("handle")) orelse return sk.report(try std.fmt.allocPrint(a, "no route to {s}: not in the address book (the admin adds it to the `peers` box), and no handle to resolve", .{try sk.hex(a, to)}));
         const resolver = sk.program(in, "resolve") orelse return sk.report("no peer record, and no resolve program");
         var q = cbor.MapBuilder.init(a);
         try q.put("handle", cbor.string(handle));
@@ -278,13 +259,11 @@ pub fn send(a: Allocator, in: Value, arg: Value) !Value {
         session = s;
     } else {
         session = try handshake(a, me, peer, at);
-        try claim(a, in, peer, session, me);
     }
     var sent = try request(a, peer, session, me, "/sendMessage", body);
     if ((Value.intOf(sent.r.get("status")) orelse 0) == 401) {
         // The recipient forgot the session (expired, restarted): shake hands again, once.
         session = try handshake(a, me, peer, at);
-        try claim(a, in, peer, session, me);
         sent = try request(a, peer, session, me, "/sendMessage", body);
     }
     const status = Value.intOf(sent.r.get("status")) orelse 0;

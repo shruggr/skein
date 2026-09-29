@@ -96,7 +96,8 @@ try {
     raw: {
       inbox: new RawBox(iw, `${base}/@infer`),
       outbox: (url) => new RawBox(iw, url),
-      resolve: async (h, d) => await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=${h}@${d}`)).json() as { identityKey: string; messagebox: string },
+      // Its address book (#40), configured: every row's key at its origin.
+      addressOf: (k) => { const r = db.list().find((x) => x.identity === k && x.kind !== "mailbox") ?? db.mailboxOf(k); return r && router.originOf(r.handle); },
     } });
   await sendTo(zig, "zigtest", "chat", { text: "What is here?", tree: root });
   const [a] = await until("the chat answer", async () => { await peer.poll(); const x = await inbox("chat"); return x.length ? x : undefined; });

@@ -934,7 +934,9 @@ pub const Runtime = struct {
             try w.writeAll(" · awaits ");
             for (st.awaits.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
         }
-        if (errored) try w.print(" · {s}", .{stderr_text});
+        // What the program wrote on stderr: the error, or a note of a step that
+        // went on (e.g. the loop's undeliverable answer, #40) — once, here.
+        if (errored) try w.print(" · {s}", .{stderr_text}) else if (stderr_text.len > 0) try w.print(" · stderr: {s}", .{stderr_text});
         rt.say("{s}", .{line.items});
 
         return .{ .launched = st.launched.items, .rested = !waiting };

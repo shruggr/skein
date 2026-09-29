@@ -1,12 +1,14 @@
 // The loop over #40's delivery, end to end with the real Zig kernel: a chat
 // to alpha; alpha's `infer` goes over http to the inference peer's mailbox
-// instance (its peer record from its own resolve, first contact); the peer
-// learns where alpha is from alpha's claim and answers into alpha's
-// `completions`; the model calls `message` to @beta@localhost — alpha resolves
-// beta, delivers the chat to beta's front door in process (no socket), beta's
-// loop answers alpha (beta knows alpha from alpha's claim, checked by a
-// resolve); alpha's turn ends with its answer in the owner's mailbox. The
-// peer tables hold only what the instances' own programs wrote.
+// instance (its address-book entry from its own resolve, first contact); the
+// peer answers into alpha's `completions` at the messagebox its own address
+// book names for alpha; the model calls `message` to @beta@localhost — alpha
+// resolves beta, delivers the chat to beta's front door in process (no
+// socket), beta's loop answers alpha (alpha is in beta's address book: the
+// admin put it there through beta's `peers` box); alpha's turn ends with its
+// answer in the owner's mailbox. Nothing registers itself: no claim is ever
+// sent. A stranger (in no address book) may still chat an agent on its open
+// `chat` box: admitted and answered, the answer fails once with "no route".
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,6 +23,19 @@ import { KERNEL_BIN } from "./kernel.ts";
 import { testHost, until } from "./testhost.ts";
 
 type Json = Record<string, unknown>;
+
+/** Every box a message is delivered to over the router's http (sendMessage), in order, from now on. */
+function watchBoxes(h: Awaited<ReturnType<typeof testHost>>): string[] {
+  const seen: string[] = [];
+  const dispatch = h.router.dispatch.bind(h.router);
+  h.router.dispatch = async (req) => {
+    if (req.method === "POST" && req.url.endsWith("/sendMessage")) {
+      try { seen.push(String((dagCbor.decode(req.body) as { message?: { messageBox?: string } }).message?.messageBox)); } catch { /* JSON: the stock client */ try { seen.push(String(JSON.parse(new TextDecoder().decode(req.body)).message?.messageBox)); } catch { /* neither */ } }
+    }
+    return await dispatch(req);
+  };
+  return seen;
+}
 const answer = (message: Json) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 1, completion_tokens: 1 }, model: "q" }), { status: 200 });
 const messageCall = (id: string, to: string, text: string) => ({ id, type: "function", function: { name: "message", arguments: JSON.stringify({ to, text }) } });
 
@@ -32,6 +47,9 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
   const alpha = h.agent("alpha");
   const beta = h.agent("beta");
   await h.router.start();
+  const boxes = watchBoxes(h);
+  // The admin's configuration: alpha in beta's address book (the owner, through beta's `peers` box).
+  await new RawBox(h.owner, `${h.base}/@beta`).send(beta, "peers", { op: "add", key: alpha, url: h.origin("alpha"), handle: "alpha", domain: "localhost" });
 
   const asked: Json[] = [];
   const script = [
@@ -46,10 +64,8 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
     raw: {
       inbox: new RawBox(w, `${h.base}/@infer`),
       outbox: (url) => new RawBox(w, url),
-      resolve: async (handle, domain) => {
-        const r = await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=${handle}@${domain}`);
-        return await r.json() as { identityKey: string; messagebox: string };
-      },
+      // Its address book (#40), configured by its admin: every agent's key at its origin.
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
     },
   });
 
@@ -75,9 +91,46 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
   };
   const ap = await peersOf("alpha"), bp = await peersOf("beta");
   const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
-  assert.deepEqual(ap.map((p) => [hex(p.key), p.source]).sort(), [[beta, "claim"], [inferId, "resolve"]].sort(), "alpha: infer by its own resolve; beta resolved first, then beta's claim (checked by a resolve) replaced it");
-  assert.deepEqual(bp.map((p) => [hex(p.key), p.source]).sort(), [[alpha, "claim"], [inferId, "resolve"]].sort(), "beta: alpha from alpha's claim (checked by a resolve), infer by its own resolve");
-  assert.equal(peer.peers.get(alpha), h.origin("alpha"), "the inference peer learned alpha's messagebox from alpha's claim");
+  assert.deepEqual(ap.map((p) => [hex(p.key), p.source]).sort(), [[beta, "resolve"], [inferId, "resolve"]].sort(), "alpha: infer and beta by its own resolve");
+  assert.deepEqual(bp.map((p) => [hex(p.key), p.source]).sort(), [[alpha, "admin"], [inferId, "resolve"]].sort(), "beta: alpha from the admin's `peers` message, infer by its own resolve");
+  assert.ok(!boxes.includes("register"), `no claim was ever sent (boxes delivered to: ${[...new Set(boxes)].join(", ")})`);
+  assert.ok(boxes.includes("chat") && boxes.includes("infer") && boxes.includes("completions"));
+});
+
+test("the loop: a stranger (in no address book) chats an agent on its open box: admitted, inferred, and the answer fails once with \"no route\" (no retry)", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
+  const h = await testHost(t, { infer: inferId, genesis: { defaults: { sendRetryMs: "100" } } });
+  h.mailbox("david", h.ownerId);
+  h.mailbox("infer", inferId);
+  const alpha = h.agent("alpha");
+  await h.router.start();
+  const boxes = watchBoxes(h);
+
+  const asked: Json[] = [];
+  const f = (async (_u: string, init: { body: string }) => { asked.push(JSON.parse(init.body)); return answer({ content: "hello, stranger" }); }) as unknown as typeof fetch;
+  const w = ephemeralWallet(inferKey);
+  const peer = new InferPeer({
+    wallet: w, providers: { ripper: { baseUrl: "http://ripper.test/v1" } }, fetch: f, log: (l) => h.lines.push(`[infer] ${l}`),
+    raw: {
+      inbox: new RawBox(w, `${h.base}/@infer`),
+      outbox: (url) => new RawBox(w, url),
+      // Its address book (#40), configured by its admin: every agent's key at its origin.
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
+    },
+  });
+
+  const strangerKey = PrivateKey.fromRandom(), stranger = strangerKey.toPublicKey().toString();
+  await new RawBox(ephemeralWallet(strangerKey), `${h.base}/@alpha`).send(alpha, "chat", { text: "hi" });
+  const noRoute = () => h.lines.filter((l) => l.startsWith("[alpha] ") && l.includes("no route"));
+  await until("alpha's undeliverable answer", async () => { await peer.poll(); return noRoute().length ? true : undefined; }, 60_000);
+  // Some time for a retry storm to show, if there were one.
+  for (let i = 0; i < 10; i++) { await peer.poll(); await h.router.settled(); await new Promise((r) => setTimeout(r, 50)); }
+  assert.equal(asked.length, 1, "the stranger's chat was admitted and inferred on, once");
+  const lines = noRoute();
+  assert.equal(lines.length, 1, `logged once:\n${lines.join("\n")}`);
+  assert.match(lines[0]!, new RegExp(`could not deliver the answer: .*no route to ${stranger}: not in the address book`));
+  assert.equal(boxes.filter((b) => b === "chat").length, 1, "the only chat delivered is the stranger's own: no answer went out");
+  assert.equal((await new RawBox(h.owner, `${h.base}/@david`).list("chat")).length, 0, "nothing reached the owner");
 });
 
 test("the loop: a `message` whose delivery fails transiently is tried again on a deadline (two 503s, then delivered); a permanent failure is an error result at once", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
@@ -89,7 +142,9 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
   h.agent("beta");
   await h.router.start();
 
-  // beta's messagebox as a flaky remote: of the chats sent to it (not the claims), the first two answer 503, the fourth 400.
+  // alpha in beta's address book (the admin's), so beta can answer it.
+  await new RawBox(h.owner, `${h.base}/@beta`).send(h.db.get("beta")!.identity!, "peers", { op: "add", key: alpha, url: h.origin("alpha") });
+  // beta's messagebox as a flaky remote: of the chats sent to it, the first two answer 503, the fourth 400.
   const statuses: number[] = [];
   const dispatch = h.router.dispatch.bind(h.router);
   h.router.dispatch = async (req) => {
@@ -122,10 +177,8 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
     raw: {
       inbox: new RawBox(w, `${h.base}/@infer`),
       outbox: (url) => new RawBox(w, url),
-      resolve: async (handle, domain) => {
-        const r = await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=${handle}@${domain}`);
-        return await r.json() as { identityKey: string; messagebox: string };
-      },
+      // Its address book (#40), configured by its admin: every agent's key at its origin.
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox"); return r && h.origin(r.handle); },
     },
   });
 

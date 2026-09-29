@@ -29,10 +29,11 @@
 // own origin, and it speaks raw BRC-33 on BRC-104 sessions — it lists its
 // `infer` box there (a request's id is its messageId: the record the instance
 // keeps; the sender is the session's identity), and answers in the sender's
-// `completions` at the sender's own messagebox. Where that is it learns from
-// the sender's claim (`register` box: {handle, domain}, sent when the
-// sender's messagebox opens a session with it), checked by a BRC-169 resolve:
-// the claim is recorded only if the handle resolves to the sender. The
+// `completions` at the sender's own messagebox. Where that is comes from its
+// address book (key → messagebox URL), which its admin configures
+// (skein-infer: SKEIN_INFER_PEERS; scripts/host/up.sh writes every agent's
+// there). Nobody registers with it: a request from a key not in the address
+// book has nowhere to go, and is dropped with one line saying so. The
 // envelope transport (`box`) is the one the frozen TypeScript runtime speaks.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -46,14 +47,14 @@ import { encode } from "../runtime/cid.ts";
 import type { Listed, MessageBox } from "../host/messagebox.ts";
 import type { Listed as RawListed } from "../client/raw.ts";
 
-/** The raw transport (#40): its own mailbox, a session per peer messagebox, BRC-169 lookups. */
+/** The raw transport (#40): its own mailbox, a session per peer messagebox, its address book. */
 export interface RawTransport {
   /** Its mailbox instance (a RawBox). */
   inbox: { list(box: string): Promise<RawListed[]>; ack(ids: string[]): Promise<void> };
   /** A session with the messagebox at `url` (a RawBox). */
   outbox(url: string): { send(recipient: string, box: string, body: unknown): Promise<unknown> };
-  /** BRC-169: handle@domain → its identity key and messagebox URL. */
-  resolve(handle: string, domain: string): Promise<{ identityKey: string; messagebox: string }>;
+  /** Its address book (#40): the messagebox URL of the sender `key`, configured by its admin; undefined: no route. */
+  addressOf(key: string): string | undefined;
 }
 
 export interface Provider { baseUrl: string; apiKey?: string }
@@ -203,9 +204,6 @@ export class InferPeer {
     await this.polling;
   }
 
-  /** Who has claimed which messagebox (#40: a claim checked by a resolve), by identity key. */
-  readonly peers = new Map<string, string>();
-
   /** Collect the `infer` box once: answer each request, acknowledge it. Returns how many were answered. */
   async poll(): Promise<number> {
     if (this.o.raw) return this.pollRaw(this.o.raw);
@@ -222,27 +220,13 @@ export class InferPeer {
     return n;
   }
 
-  /** The raw transport (#40): claims first (who is where), then requests. */
+  /** The raw transport (#40): each request answered at the messagebox the address book names for its sender. */
   private async pollRaw(raw: RawTransport): Promise<number> {
-    for (const m of await raw.inbox.list("register")) {
-      try {
-        const v = m.value as { handle?: unknown; domain?: unknown; sender?: { handle?: unknown; domain?: unknown } };
-        const c = v.sender && typeof v.sender === "object" ? v.sender : v;
-        if (typeof c.handle !== "string" || typeof c.domain !== "string") throw new Error("a claim is {handle, domain}");
-        const r = await raw.resolve(c.handle, c.domain);
-        if (r.identityKey !== m.sender) throw new Error(`@${c.handle}@${c.domain} resolves to ${short(r.identityKey)}, not the sender`);
-        this.peers.set(m.sender, r.messagebox);
-        this.say(`claim: ${short(m.sender)} is @${c.handle}@${c.domain} at ${r.messagebox}`);
-      } catch (e) {
-        this.say(`claim ${m.messageId}: ${(e as Error).message}`);
-      }
-      await raw.inbox.ack([m.messageId]);
-    }
     let n = 0;
     for (const m of await raw.inbox.list("infer")) {
-      const url = this.peers.get(m.sender);
+      const url = raw.addressOf(m.sender);
       if (!url) {
-        this.say(`infer ${short(m.messageId)} from ${short(m.sender)}: no claim from the sender, nowhere to answer; dropped`);
+        this.say(`infer ${short(m.messageId)} from ${short(m.sender)}: no route: ${m.sender} is not in the address book; dropped`);
         await raw.inbox.ack([m.messageId]);
         continue;
       }
