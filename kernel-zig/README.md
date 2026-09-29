@@ -140,10 +140,21 @@ recorded wallet answer.
 What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md);
 the TS runtime has none of it.
 
-- **Bitcoin codecs** (`cid.zig`): `putblock` accepts `bitcoin-tx` (0xb1) and
-  `bitcoin-block` (0xb0, 80 bytes) with `dbl-sha2-256` (0x56), hash-checked,
-  so a transaction's CID is its txid and a header's its block hash (the
-  digest in internal byte order); `get` returns the bytes as stored.
+- **Bitcoin codecs** (`cid.zig`): `putblock` accepts `bitcoin-tx` (0xb1),
+  `bitcoin-block` (0xb0, 80 bytes) and `bitcoin-merkle` (0xb3, 64 bytes) with
+  `dbl-sha2-256` (0x56), hash-checked, so a transaction's CID is its txid, a
+  header's its block hash and a merkle node's its merkle hash (the digest in
+  internal byte order); `get` returns the bytes as stored. A merkle node (#29)
+  is left hash ‖ right hash: the header's merkle root names the root node,
+  each node its two children (nodes, or at the bottom transactions), so a
+  block's transaction tree is a DAG in the store — sparse, holding only the
+  paths a wallet needs (docs/WALLET.md "Proofs"). **The code 0xb3 is ours,
+  not the multicodec table's**: the table has 0xb2 as
+  `bitcoin-witness-commitment` and no merkle-node code (IPLD's own bitcoin
+  codecs put 64-byte merkle nodes under `bitcoin-tx`, told apart by length);
+  0xb3 is the next unassigned code in the bitcoin range, chosen so a node's
+  kind is in its CID. Should the table assign a code, this one changes with
+  it (src/runtime/index-store.ts and src/host/packet.ts name it too).
 - **Plain entries** (`log.zig`, `scheduler.zig` `processEvent`):
   `{kind: "log", n, prev, time, box, event}` — the `event` kind of the one
   format-3 entry encoding (genesis | mail | wake | event+box; none signed). The router admits one per event from a feed

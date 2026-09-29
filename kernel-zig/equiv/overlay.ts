@@ -12,8 +12,12 @@
 // the aggregated octet-stream form) — its BEEF verifies against the headers;
 // the token is spent into a new one (the old retained for history); then a
 // `status` entry rejects the spend and the first token is live again. The
-// listings and documentation routes answer from the program records. The
-// store then replays to itself exactly (equiv/replays.ts).
+// listings and documentation routes answer from the program records. Then
+// merkle proofs as IPLD nodes (#29): three tokens mined in one block, proven
+// by separate BUMPs in status entries (out of order); the lookup answers carry
+// BUMPs rebuilt from the stored nodes, which @bsv/sdk verifies (one token
+// alone: byte for byte the BUMP it was sent). The store then replays to
+// itself exactly (equiv/replays.ts).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
 
@@ -201,6 +205,68 @@ try {
   await look({ topic: "tm_demo" });
   await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
   report.readsWrite = [before, await logLen()];
+
+  // Merkle proofs as IPLD nodes (#29): three tokens mined in one block (4: a coinbase, u1, u2, u3), each
+  // proven by its own BUMP in a status entry (out of order). The overlay keeps the tree's nodes, not the
+  // paths; a lookup's BEEF carries each token's BUMP rebuilt from them, verified here by @bsv/sdk.
+  const us: Transaction[] = [];
+  let from = t1, vout = 1, sats = 49_000;
+  for (let i = 0; i < 3; i++) {
+    const u = new Transaction();
+    u.addInput({ sourceTransaction: from, sourceOutputIndex: vout, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
+    u.addOutput({ lockingScript: tokenScript(alice), satoshis: 1 });
+    sats -= 100;
+    u.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: sats });
+    await u.sign();
+    const s = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(u.toAtomicBEEF()) });
+    if (s.status !== 200) throw new Error(`submit u${i + 1}: ${s.status} ${await s.text()}`);
+    us.push(u);
+    from = u; vout = 1;
+  }
+  const leaves = ["cc".repeat(32), ...us.map((u) => u.id("hex"))];
+  const n01 = sha256d(Buffer.concat([internal(leaves[0]), internal(leaves[1])]));
+  const n23 = sha256d(Buffer.concat([internal(leaves[2]), internal(leaves[3])]));
+  const h4 = mine(prev, sha256d(Buffer.concat([n01, n23])), 1_790_000_000 + 4 * 600);
+  headers.push(h4);
+  roots.set(4, Buffer.from(h4.subarray(36, 68)).reverse().toString("hex"));
+  await router.admitEvent("overlay", "chain", { kind: "header", raw: h4 });
+  const disp = (b: Uint8Array) => Buffer.from(b).reverse().toString("hex");
+  const bumpOf = (i: number) => new MerklePath(4, [
+    [i ^ 1, i].sort().map((o) => o === i ? { offset: o, hash: leaves[o], txid: true } : { offset: o, hash: leaves[o] }),
+    [{ offset: (i >> 1) ^ 1, hash: disp((i >> 1) ^ 1 ? n23 : n01) }],
+  ]);
+  const sent = new Map<string, string>();
+  for (const i of [3, 1, 2]) {
+    const bump = bumpOf(i);
+    sent.set(leaves[i], bump.toHex());
+    await router.admitEvent("overlay", "chain", { kind: "status", subject: txCid(leaves[i]), txid: leaves[i], txStatus: "MINED", merklePath: new Uint8Array(bump.toBinary()) });
+  }
+  await router.settled();
+  const answers = await resolver.query({ service: "ls_demo", query: { topic: "tm_demo" } }) as { outputs: Array<{ beef: number[]; outputIndex: number }> };
+  const proofs: Array<[number, boolean, boolean]> = [];
+  for (const o of answers.outputs) {
+    const tx = Transaction.fromBEEF(o.beef);
+    const i = leaves.indexOf(tx.id("hex"));
+    if (i < 1) continue;
+    let ok = false;
+    try { ok = await tx.verify(tracker); } catch { ok = false; }
+    // One aggregated answer: the rebuilt BUMPs of block 4 arrive merged (one per block, as BEEF does). Each
+    // token is a txid-flagged leaf of it, and its path computes the header's root.
+    const mp = tx.merklePath;
+    const leaf = mp?.path[0].some((l) => l.hash === leaves[i] && l.txid === true) ?? false;
+    proofs.push([i, leaf && mp!.blockHeight === 4 && mp!.computeRoot(leaves[i]) === roots.get(4), ok]);
+  }
+  report.merkle = proofs.sort((x, y) => x[0] - y[0]);
+  // One token asked for alone: its answer carries its BUMP alone — rebuilt from the nodes, byte for byte the one sent.
+  const alone: Array<[number, boolean, boolean]> = [];
+  for (const i of [1, 2, 3]) {
+    const a = await resolver.query({ service: "ls_demo", query: { txid: leaves[i], outputIndex: 0, topic: "tm_demo" } }) as { outputs: Array<{ beef: number[] }> };
+    const tx = a.outputs.length === 1 ? Transaction.fromBEEF(a.outputs[0].beef) : undefined;
+    let ok = false;
+    try { ok = !!tx && await tx.verify(tracker); } catch { ok = false; }
+    alone.push([i, tx?.merklePath?.toHex() === sent.get(leaves[i]), ok]);
+  }
+  report.merkleAlone = alone;
   report.ok = true;
 } catch (e) {
   report.error = (e as Error).stack ?? String(e);
@@ -227,6 +293,9 @@ check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdo
   // Between the two counts: T2's submit (one entry), the status entry (one); the rest — lookups, a dupe, refusals, listings — none.
   check(a === b! + 2, `only the writes write: 2 entries over one submit and one status entry, none for the lookups, dupes, refusals, listings (${b} → ${a})`);
 }
+
+check(eq(report.merkle, [[1, true, true], [2, true, true], [3, true, true]]), `three tokens of one block, proven by separate BUMPs (out of order): each lookup answer carries the BUMPs rebuilt from the stored merkle nodes (merged per block), each leaf computing the header root, verified by @bsv/sdk (${JSON.stringify(report.merkle)})`);
+check(eq(report.merkleAlone, [[1, true, true], [2, true, true], [3, true, true]]), `each token alone: its BUMP rebuilt from the tree is byte for byte the one its status entry carried, verified by @bsv/sdk (${JSON.stringify(report.merkleAlone)})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
 process.stdout.write(r.stdout);
