@@ -195,7 +195,8 @@ try {
   await router.settled();
   const bytesBefore = storeBytes();
   const refusedSubmit = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(plain.toBEEF()) });
-  const refusedMessage = String(((await refusedSubmit.json()) as { message?: string }).message ?? "");
+  const refusedSteak = (await refusedSubmit.json()) as Record<string, { outputsToAdmit?: unknown[] }>;
+  const refusedMessage = refusedSteak.tm_demo && Array.isArray(refusedSteak.tm_demo.outputsToAdmit) && refusedSteak.tm_demo.outputsToAdmit.length === 0 ? "empty-steak" : JSON.stringify(refusedSteak);
   await router.settled();
   report.refusedSubmit = [refusedSubmit.status, refusedMessage.split(":")[0], storeBytes() === bytesBefore];
   // The lookup service's own storage: its head, moved only by its hooks.
@@ -212,7 +213,8 @@ try {
   await router.settled();
   report.afterReject = (await look({ topic: "tm_demo" })).map((o) => [name(o.txid), o.outputIndex, o.verifies]);
   const again = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t2.toAtomicBEEF()) });
-  report.resubmitRejected = [again.status, ((await again.json()) as { message?: string }).message];
+  const againSteak = (await again.json()) as Record<string, { outputsToAdmit?: unknown[] }>;
+  report.resubmitRejected = [again.status, againSteak.tm_demo && againSteak.tm_demo.outputsToAdmit?.length === 0 ? "empty-steak" : JSON.stringify(againSteak)];
 
   // Refusals, listings, documentation.
   const bad = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array([1, 2, 3]) });
@@ -314,12 +316,12 @@ check(eq(report.lookup1, [["t1", 0, true]]), `LookupResolver → POST /lookup (a
 check(eq(report.byScript, [["t1", 0]]), `a lookup by script hash (${JSON.stringify(report.byScript)})`);
 check(eq(report.lookupJson, { type: "output-list", outputs: [["t1", 0]] }), `the JSON answer form (${JSON.stringify(report.lookupJson)})`);
 check(eq(report.dupe, { tm_demo: { outputsToAdmit: [], coinsToRetain: [], coinsRemoved: [] } }), `a resubmission is a dupe; an unserved topic is left out (${JSON.stringify(report.dupe)})`);
-check(eq(report.refusedSubmit, [400, "NotAdmitted", true]), `#50: a submission no topic takes is refused in the front door's call: no entry, the store file byte-identical (${JSON.stringify(report.refusedSubmit)})`);
+check(eq(report.refusedSubmit, [200, "empty-steak", true]), `#50: a submission no topic takes answers 200 with the empty STEAK (BRC-22) in the front door's call: no entry, the store file byte-identical (${JSON.stringify(report.refusedSubmit)})`);
 check(report.lsHead === true, `#50: ls_demo keeps its own storage under the head ls:ls_demo, and answers the lookups from it`);
 check(eq(report.submit2, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [0], coinsRemoved: [] } }), `the spend: a new token admitted, the old retained (${JSON.stringify(report.submit2)})`);
 check(eq(report.lookup2, [["t2", 0, true]]) && eq(report.withSpent, [["t1", 0], ["t2", 0]]), `the live set moves to the new token; the old one stays for history (${JSON.stringify([report.lookup2, report.withSpent])})`);
 check(eq(report.afterReject, [["t1", 0, true]]), `a status entry rejects the spend: its admittance vanishes, the consumed token is restored (${JSON.stringify(report.afterReject)})`);
-check(Array.isArray(report.resubmitRejected) && report.resubmitRejected[0] === 400 && report.resubmitRejected[1] === "TransactionRejected", `a rejected transaction is refused on resubmission (${JSON.stringify(report.resubmitRejected)})`);
+check(Array.isArray(report.resubmitRejected) && report.resubmitRejected[0] === 200 && report.resubmitRejected[1] === "empty-steak", `a rejected transaction admits nothing on resubmission (200, empty STEAK) (${JSON.stringify(report.resubmitRejected)})`);
 check(Array.isArray(report.badBeef) && report.badBeef[0] === 400 && report.unknownService === 400, `refusals: a bad BEEF, an unknown service (${JSON.stringify([report.badBeef, report.unknownService])})`);
 check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the program records (${JSON.stringify([report.topics, report.lookups])})`);
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
