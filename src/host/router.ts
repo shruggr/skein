@@ -64,7 +64,7 @@ export interface RouterOptions {
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** Answers programs' HTTP to URLs that are not this host's (#15, #40); default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
-  /** Stop a kernel this long after its last call (ms); 0: never. Default 5 minutes. */
+  /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears, and a stop drops its in-memory sessions). */
   idleMs?: number;
   /** Where a new mailbox instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
@@ -180,7 +180,7 @@ export class Router {
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
     });
-    const idle = o.idleMs ?? 300_000;
+    const idle = o.idleMs ?? 0;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
     this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
   }

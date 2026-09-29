@@ -14,10 +14,10 @@ An instance keeps **messages** and nothing else from the outside:
 - a message that arrived is one log entry (a `mail` record);
 - a read — a poll, a listing, a lookup, an explorer page — writes nothing:
   no entry, no byte;
-- verifying a signed request writes nothing (a session is looked up, not
-  touched);
-- a handshake writes one record (the session), and an acknowledgement one
-  entry (the reader's pointer moves);
+- authentication writes nothing: a handshake and the verification of a signed
+  request only touch the in-memory session table (sessions are not state,
+  below);
+- an acknowledgement is one entry (the reader's pointer moves);
 - what the instance sends is part of the step that sends it (a recorded
   `http` call and the record it put), not an entry.
 
@@ -31,8 +31,9 @@ Each instance is an HTTP server at an origin of its own. Its **front door**
 (`programs/frontdoor`, Zig) is the program that answers: the host calls it —
 a kernel `call` of fn `http` with the raw request — and returns what it
 answers as the HTTP response. The router (`src/host/router.ts`) is a reverse
-proxy: it picks the instance by URL and forwards; it holds no auth state and
-no mail.
+proxy: it picks the instance by URL and forwards; it holds no mail, and of
+auth only each running kernel's session table, which it passes to the front
+door and never reads.
 
 ```
 http://<handle>.localhost:<port>/…     the instance's origin (the Host header)
@@ -41,22 +42,39 @@ http://<host>:<port>/@<handle>/…       the same instance, a dev form: the rout
 
 **Auth is by key.** The front door runs BRC-103/104 itself: the handshake at
 `/.well-known/auth` and the verification of every general message, against the
-session records in the instance's state. The caller is the identity key the
-session proved; there is no account, no handle check, no envelope. Answers
-are signed on the session through the instance's oracle (the kernel's
-`wallet`, recorded only when a step makes it; a call's is not recorded).
+instance's session table (below). The caller is the identity key the session
+proved; there is no account, no handle check, no envelope. Answers are signed
+on the session through the instance's oracle (the kernel's `wallet`, recorded
+only when a step makes it; a call's is not recorded).
 
-- **Sessions.** A handshake returns one event for the host to admit, `{kind:
-  "session", peer, sessionNonce (ours), peerNonce, created}` in the reserved
-  box `:sessions`; the front door, stepped on it, keeps sessions under the head
-  `sessions` (`{kind: "sessions", sessions: [{nonce, session}]}`, sorted by
-  nonce). A request's session is found by its `yourNonce` among those and the
-  `:sessions` events admitted but not yet processed (the call's `pending`), so
-  the request right after a handshake is served. Expiry:
-  `defaults.sessionTtlMs` (a day) from `created`; an unknown or expired session
-  gets a plain 401, and the stock client shakes hands again. A replayed request
-  verifies (remembering nonces would be a write per request); a replayed write
-  is the same mail record, which the kernel admits once.
+- **Sessions are not state.** Replay never needs a session: each logged
+  message carries the sender key, the 104 signature and both nonces, so its
+  authorship verifies from the entry alone. A session only serves the next
+  request, which is network work, so it lives in memory and never in the log:
+  a handshake writes nothing, and neither does a verified request.
+  - **Where.** The table belongs to the instance's kernel process: the host
+    keeps it beside the process (`Kernel.scratch`, `src/host/kernel.ts`), an
+    opaque key → bytes map it never reads. `callFrontDoor` passes it in the
+    front door's call argument (`scratch`) and applies the changes the answer
+    lists (`scratch: [{key, value?}]`, no value: drop) before it answers the
+    client, so the request right after a handshake is served. Only the front
+    door understands an entry: key = our session nonce, value (dag-cbor)
+    `{peer, peerNonce, created}`. A new kernel process (a restart, a crash, an
+    idle stop) starts with an empty table.
+  - **Lookup and expiry.** A request's session is found by its `yourNonce`.
+    Expiry: `defaults.sessionTtlMs` (a day) from the in-memory record's
+    `created` (the router's clock at the handshake). An unknown or expired
+    session gets a plain 401, and the stock client shakes hands again by
+    itself; the cost of a restart is that one round trip per client.
+  - **Bounds and replay.** A handshake drops the expired sessions and, past
+    1024, the oldest (the host caps the table at 4096 keys besides). A
+    replayed initialRequest (the peer and initial nonce of a session held) is
+    refused. A replayed signed request verifies (its nonce is not
+    remembered: a replayed read reads again); a replayed write is the same
+    mail record, which the kernel admits once.
+  - **Later.** With many instances per host the table can be cached out when
+    an instance is stopped; for now instances are not stopped until resource
+    contention appears (the router's idle stop is off by default).
 - **Routes** (the genesis's `routes`, from `etc/routes.json`): `[{path |
   prefix, program: <cid>, fn, auth?: "none", read?: <op>}]`, exact paths first,
   then the longest prefix. `auth` defaults to BRC-104; `"none"` is for open
@@ -113,7 +131,7 @@ format is refused (`kernel-zig/src/log.zig` has the shapes).
   first match wins; the handler gets `{message, body, box, sender}`. No
   subscription: recorded, nothing runs.
 - **Events** are the host's feeds (#29: headers, proofs, statuses) and the
-  front door's writes (`:sessions`, `:ack`), routed by box or `subject`.
+  front door's writes (`:ack`), routed by box or `subject`.
 - **Wakes** are a sleeper's deadline, one entry each.
 
 ## The messagebox
@@ -150,9 +168,9 @@ exists**: a message the messagebox is not subscribed to keep is refused
 
 An identity outside the host — David's wallet, the inference peer, a browser
 tab — gets its mail kept by a **mailbox instance**: an instance with only the
-front door and the messagebox, whose genesis subscribes `:sessions` →
-frontdoor, `:ack` → messagebox, and everything from anyone in any box →
-messagebox, for its owner. It has an identity of its own (its oracle's key;
+front door and the messagebox, whose genesis subscribes `:ack` → messagebox
+and everything from anyone in any box → messagebox, for its owner. Its
+sessions are in memory like any instance's. It has an identity of its own (its oracle's key;
 the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
 - `skein-host add <handle> --mailbox --owner <key>` makes one; `skein-host
