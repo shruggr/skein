@@ -190,7 +190,7 @@ pub fn brc78Decode(bytes: []const u8) Brc78Error!Brc78 {
     };
 }
 
-/// The BRC-78 error text the TS runtime reports (envelope.ts brc78Decode).
+/// The BRC-78 error text, as src/runtime/envelope.ts brc78Decode reports it.
 pub fn brc78Message(alloc: std.mem.Allocator, bytes: []const u8, err: Brc78Error) ![]u8 {
     return switch (err) {
         error.TooShort => alloc.dupe(u8, "BRC-78: too short"),

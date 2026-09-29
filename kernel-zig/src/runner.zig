@@ -64,7 +64,7 @@ pub const Runner = struct {
 
     pub const LoadError = error{ NotInStore, BadHash, Compile, OutOfMemory, Store };
 
-    /// A module from the store by CID, compiled once. `msg` gets the TS runtime's message on failure.
+    /// A module from the store by CID, compiled once. `msg` gets the message on failure.
     pub fn load(r: *Runner, s: Store, a: std.mem.Allocator, cid: []const u8, msg: *[]const u8) LoadError!*Compiled {
         const k = cidm.format(a, cid) catch return error.OutOfMemory;
         if (r.cache.get(k)) |c| return c;

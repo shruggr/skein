@@ -1,18 +1,17 @@
-// The scheduler: the log consumer (src/runtime/scheduler.ts, ported line by
-// line; the comments there are the design record). Entries come in finished
+// The scheduler: the log consumer (first a line-by-line port of the TypeScript
+// scheduler, deleted in #55; docs/VM.md is the design record). Entries come in finished
 // and signed through `admit`; the runtime checks them and consumes them in
 // order: genesis → the seed subscriptions; a message (`mail`, #40) → a reply
 // to the thread awaiting the message it answers, else route by subscription
 // and launch the handler; wake → a sleeping thread; event → the thread
 // awaiting its subject, else a sender-less subscription on its box.
 //
-// One difference of mechanism, none of result: a shell thread that sleeps is
-// not parked mid-instance (there is no JSPI here). The run is abandoned at the
-// sleep, having written its `waiting` update, and when the wake entry comes the
-// thread is re-executed from its origin — which the TS runtime already does
-// after a restart, verifying every update it recomputes against its chain —
-// and carries on past the sleep under the wake entry. Same updates, same
-// CIDs; a sleeping shell costs a re-execution per wake.
+// A shell thread that sleeps is not parked mid-instance (there is no JSPI
+// here). The run is abandoned at the sleep, having written its `waiting`
+// update, and when the wake entry comes the thread is re-executed from its
+// origin — verifying every update it recomputes against its chain — and
+// carries on past the sleep under the wake entry. Same updates, same CIDs; a
+// sleeping shell costs a re-execution per wake.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");

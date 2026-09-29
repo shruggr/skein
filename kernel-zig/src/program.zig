@@ -1,12 +1,12 @@
-// The `skein` import namespace for handler programs (src/runtime/wasi/skein-imports.ts)
-// and running one step of a program (src/runtime/program.ts).
+// The `skein` import namespace for handler programs and running one step of a
+// program (docs/VM.md; first ported from the TypeScript runtime, deleted in #55).
 //
 // ABI: pointers and lengths are i32, CIDs binary. An import returning bytes
 // is f(…, out, cap) → n: n >= 0 is the full length, written only if n <= cap;
 // the result is held for take(out, cap). n < 0 is an error; error(out, cap)
 // returns its message.
 //
-// Here only (not in the TS runtime), for the wallet (#29):
+// Added for the wallet (#29):
 //   http(req, len, out, cap) → n   a dag-cbor request {method, url, headers?, body?}
 //                                  → the response {status, headers, body}, answered
 //                                  by the host and recorded (op "http"); kept for

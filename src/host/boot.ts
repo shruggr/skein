@@ -32,7 +32,7 @@ import { encode, parse as parseCid } from "../runtime/cid.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
-import { now as clockNow } from "./entry.ts";
+import { now as clockNow } from "./clock.ts";
 import { codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 

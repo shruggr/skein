@@ -46,7 +46,7 @@ import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { Feeds, feedsOf, type FeedSpec } from "./feeds.ts";
-import { now as clockNow } from "./entry.ts";
+import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { admitAll, callFrontDoor, headerMap, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyHex, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";

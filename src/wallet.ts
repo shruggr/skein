@@ -1,8 +1,7 @@
 // Connecting to a BRC-100 wallet: the runtime's second edge (docs/ARCH.md).
 // This file is outside src/runtime because a remote wallet is reached over
-// HTTP; the runtime receives the connected WalletInterface from main.ts and
-// derives identities with src/runtime/identity.ts. Peers and skein-dev use it
-// too.
+// HTTP; identities under it are derived with src/runtime/identity.ts. The
+// host, the client, the peers and skein-dev use it.
 
 import { HTTPWalletJSON, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
 

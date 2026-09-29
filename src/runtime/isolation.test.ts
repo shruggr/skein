@@ -1,9 +1,9 @@
-// The runtime has no disk, network, process table, clock or randomness
-// (docs/ARCH.md), and no messagebox client and no private key: the providers
-// that deliver its inputs (src/host) hold those. This scans every non-test
-// source file under src/runtime for imports and identifiers that would give it
-// one, and fails on any hit. There are no exceptions: the kernel configuration
-// (src/host/main.ts) and the providers live outside src/runtime.
+// The formats and the store reader under src/runtime read no network,
+// process table, clock or randomness and hold no key (docs/ARCH.md): they
+// are the seed of a JavaScript runtime (#55), which gets those only through
+// its host. This scans every non-test source file under src/runtime for
+// imports and identifiers that would give it one, and fails on any hit.
+// The node host (src/host) and the peers are where those live.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -30,7 +30,7 @@ import { parse as parseCid } from "../runtime/cid.ts";
 import { DEFAULTS, nextEntry, type EntryBody } from "../runtime/log.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { now as clockNow } from "./entry.ts";
+import { now as clockNow } from "./clock.ts";
 import type { Kernel } from "./kernel.ts";
 import type { FeedSpec } from "./feeds.ts";
 

@@ -1,14 +1,14 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-dev`: the developer's tools. OUTSIDE the machine: this process reads
-// the disk and opens the runtime's store file directly, which the runtime
+// the disk and opens an instance's store file directly, which the kernel
 // itself never lets anything do.
 //
 //   - bootstrap: `install` puts the pinned wasm modules into the store file
 //     (they exceed a message; docs/OPEN.md). Trees and commands come from the
 //     client (bin/skein) through the messagebox.
-//   - inspection: `log`, `ls`, `show`, `refs`, `rebuild` read the store.
-//   - verification: `replay` re-derives everything from the log alone, with
-//     no wallet, and compares it against the live store.
+//   - inspection: `log`, `ls`, `show`, `refs` read the store.
+//
+// Replay is the kernel's: `skein-kernel replay <source.db> <out.db>`.
 
 import { readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
@@ -17,14 +17,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
-import { copyLog, readLog } from "../runtime/log.ts";
-import { memoryStore } from "../runtime/memory.ts";
-import { FILES, MODULES, moduleFile, rawCid } from "../runtime/programs.ts";
-import { Runtime, witnessFrom } from "../runtime/scheduler.ts";
+import { readLog } from "../runtime/log.ts";
+import { FILES, MODULES, rawCid } from "../runtime/programs.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
-import type { HeadOrigin } from "../runtime/heads.ts";
-import type { Store } from "../runtime/store.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
 
 const skeinHome = () => process.env.SKEIN_HOME || join(homedir(), ".skein");
@@ -63,7 +59,6 @@ function parseArgs(argv: string[], flags: Record<string, FlagKind>): Parsed {
   return out;
 }
 
-const str = (v: unknown) => (typeof v === "string" ? v : undefined);
 const short = (c: CID | string) => c.toString().slice(-12);
 const text = (b: unknown) => (b instanceof Uint8Array ? Buffer.from(b).toString("utf8") : String(b ?? ""));
 
@@ -78,9 +73,9 @@ function jsonify(v: unknown): unknown {
 /** Put the shell's wasm modules into the store under their pinned CIDs. */
 export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Promise<string[]> {
   const out: string[] = [];
-  const all = [...Object.entries(MODULES).map(([n, c]) => [moduleFile(n), c] as const), ...Object.entries(FILES)];
+  const all = [...Object.entries(MODULES).map(([n, c]) => [`${n}.wasm`, c] as const), ...Object.entries(FILES)];
   for (const [file, cid] of all) {
-    const name = file.replace(/^v1\//, "").replace(/\.wasm$/, "");
+    const name = file.replace(/\.wasm$/, "");
     if (await store.has(cid)) continue;
     const bytes = await readFile(join(WASM_DIR, file));
     if (!rawCid(bytes).equals(cid)) throw new Error(`wasm/${file} does not match the pinned ${fmt(cid)} (rebuilt? update src/runtime/programs.ts)`);
@@ -88,49 +83,6 @@ export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Pro
     out.push(`${name} ${fmt(cid)}`);
   }
   return out;
-}
-
-/**
- * Replay `source`'s log alone, with no wallet, into a fresh in-memory store
- * (the runtime's replay path: Runtime + witnessFrom, scheduler.ts), then
- * compare it against `source`: the state hash (the log's tip entry), every
- * thread chain tip, every head tip. Returns 0 if identical, 1 otherwise.
- */
-export async function replay(source: Store, env: Env): Promise<number> {
-  const fresh = memoryStore();
-  await install(fresh);
-  await copyLog(source, fresh);
-
-  const rt = new Runtime({ store: fresh, witness: await witnessFrom(source) });
-  await rt.start();
-  await rt.idle();
-  await rt.stop();
-
-  let ok = true;
-  const want = await source.log.tip();
-  const got = await fresh.log.tip();
-  const stateOk = !!want && !!got && want.equals(got);
-  if (!stateOk) ok = false;
-  env.out(`state   ${got ? fmt(got) : "(empty)"}${stateOk ? " == " : " != "}${want ? fmt(want) : "(empty)"}`);
-
-  async function diff(kind: "thread" | "head", label: (c: CID) => Promise<string>): Promise<[number, number]> {
-    let n = 0, matched = 0;
-    for await (const origin of source.edges.query({ kind })) {
-      n++;
-      const wantTip = await source.chains.tip(origin);
-      const gotTip = await fresh.chains.tip(origin).catch(() => undefined);
-      if (gotTip?.equals(wantTip)) { matched++; continue; }
-      ok = false;
-      env.err(`${kind} ${await label(origin)}: tip ${gotTip ? fmt(gotTip) : "(missing)"} != ${fmt(wantTip)}`);
-    }
-    return [matched, n];
-  }
-
-  const [threadsOk, threads] = await diff("thread", async (c) => short(c));
-  const [headsOk, heads] = await diff("head", async (c) => (await source.get<HeadOrigin>(c)).name);
-
-  env.out(`threads ${threadsOk}/${threads} match · heads ${headsOk}/${heads} match`);
-  return ok ? 0 : 1;
 }
 
 export async function resolveCid(store: Pick<SqliteStore, "findByPrefix">, s: string): Promise<CID> {
@@ -154,8 +106,8 @@ async function withStore<T>(fn: (s: SqliteStore) => Promise<T>, path?: string): 
 const COMMANDS: Record<string, Command> = {
   install: {
     usage: `skein-dev install
-  Put the pinned wasm modules (the shell's brush and coreutils, the handler
-  programs) into the store file under their CIDs: the bootstrap side door
+  Put the pinned wasm modules (the shell's brush, coreutils and tools, the
+  wallet) into the store file under their CIDs: the bootstrap side door
   (docs/OPEN.md); objects bigger than a message cannot arrive any other way yet.`,
     flags: {},
     async run(_a, env) {
@@ -243,36 +195,15 @@ const COMMANDS: Record<string, Command> = {
     },
   },
 
-  rebuild: {
-    usage: `skein-dev rebuild   drop and rebuild the index (tips, edges) from the records; the log is kept`,
-    flags: {},
-    async run(_a, env) {
-      await withStore((store) => store.edges.rebuild());
-      env.out("index rebuilt");
-      return 0;
-    },
-  },
-
-  replay: {
-    usage: `skein-dev replay [--db <path>]
-  Replay the log alone, with no wallet, into a fresh in-memory store (the
-  runtime's replay path) and compare it against the live store: state hash,
-  every thread chain tip, every head tip. Exits non-zero on any difference.`,
-    flags: { db: "string" },
-    async run(a, env) {
-      return withStore((store) => replay(store, env), str(a.opts.db));
-    },
-  },
 };
 
 const HELP = `skein-dev — developer tools, outside the machine
 
   skein-dev install                        put the pinned wasm modules into the store file (bootstrap)
-  skein-dev log | ls | show <cid> | refs <cid> | rebuild
-  skein-dev replay [--db <path>]           re-derive the store from the log alone and compare
+  skein-dev log | ls | show <cid> | refs <cid>
 
 Trees and commands come from the client (bin/skein import / run) through the
-messagebox. Env: SKEIN_HOME (~/.skein), SKEIN_DB ($SKEIN_HOME/runtime.db).`;
+instance's front door. Replay: skein-kernel replay <source.db> <out.db>. Env: SKEIN_HOME (~/.skein), SKEIN_DB ($SKEIN_HOME/runtime.db).`;
 
 export async function main(argv: string[]): Promise<number> {
   const env: Env = {

@@ -182,7 +182,7 @@ export function isGenesis(x: unknown): x is Genesis {
  * What a handler emits: an outbound message to `to` in `box`. `envelope` is the
  * complete BRC-169 envelope (signed metadata and BRC-78 content), which the
  * program sealed through the instance wallet; `body` is its plaintext content,
- * a record. The runtime checks the envelope (scheduler.ts) before accepting it.
+ * a record. The kernel checks the envelope before accepting it.
  */
 export type Emit = { kind: "emit"; to: Identity; box: string; body: CID; envelope: Record<string, unknown> & { content: string } };
 
@@ -197,8 +197,8 @@ export function isEmit(x: unknown): x is Emit {
  * update (`calls`); on replay the answer is served from here, not the wallet.
  *   op "wallet": request = a BRC-100 wire request frame, result = the result frame
  *   op "resolve": request = "handle@domain" (UTF-8), result = the host resolver's whole
- *                answer as dag-cbor (a Resolution, scheduler.ts: identityKey — "" if it did not
- *                resolve — and the resolution endpoint's response, how it was got, what was checked)
+ *                answer as dag-cbor (identityKey — "" if it did not resolve — and the
+ *                resolution endpoint's response, how it was got, what was checked)
  */
 export type Attested = {
   kind: "attested";
@@ -214,6 +214,15 @@ export function isAttested(x: unknown): x is Attested {
   return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
     && (x.op === "wallet" || x.op === "resolve") && x.result instanceof Uint8Array;
 }
+
+/**
+ * Wallet wire calls a program may make (BRC-100 call codes): key derivation
+ * and crypto only — no actions, no certificates (the kernel's scheduler.zig
+ * `wallet_calls`). By code, for showing an attested `wallet` request.
+ */
+export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
+  [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],
+]);
 
 // ---------------------------------------------------------------- helpers
 

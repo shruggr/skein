@@ -5,15 +5,16 @@
 // (kernel-zig/src/mst.zig, index.zig; kernel-zig/README.md "The index").
 //
 // - `openStoreFile(path)`: the right reader for a store file — this one when
-//   the file has the state pointer, else sqlite.ts's (the TS runtime's
-//   format). The explorer and skein-dev open files through it.
+//   the file has the state pointer, else sqlite.ts's (a store of blocks the
+//   tools write, or a file from before #30). The explorer, skein-dev and
+//   skein-host open files through it.
 // - `indexStore(db)`: the `Store` interface over the maps, read only (blocks
 //   may be added: they are a key→bytes map). The pointer is read on every
 //   call, so a reader beside a live kernel follows it.
-// - `buildIndex(store)`: the same maps built here from any Store's chains and
-//   log, canonically — the state record CID the kernel reaches for the same
-//   log (equiv/replays.ts checks it). `writeIndexFile` writes a store file in
-//   the new format from one in the old (tests, conversions).
+// - `derive(store)` + `buildTree`: the same maps built here from any Store's
+//   chains and log, canonically — each the root the kernel keeps for the same
+//   log (index-store.test.ts and equiv/overlay.ts check it against stores the
+//   kernel wrote).
 //
 // Keys: numbers 8-byte big-endian with the sign bit flipped; binary CIDs;
 // strings uvarint-length-prefixed. The derivation is sqlite.ts's.
@@ -244,11 +245,6 @@ export function readState(get: (cid: CID) => Uint8Array | undefined, cid: CID): 
   return { cid, log: (v.log as CID | null) ?? null, cursor: Number(v.cursor ?? 0), roots };
 }
 
-function stateRecord(log: CID | null, cursor: number, roots: Record<MapName, CID | null>) {
-  const index = Object.fromEntries(MAPS.filter((m) => m !== "heads").map((m) => [m, roots[m]]));
-  return encode({ kind: STATE_KIND, log, cursor, heads: roots.heads, index });
-}
-
 // ---------------------------------------------------------------- building (the derivation)
 
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v) && !isCID(v);
@@ -315,45 +311,6 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
   return { pairs, log: tip, cursor: await store.live.cursor.get() };
 }
 
-/** The index for a store's chains and log: the state record and every block of it. */
-export async function buildIndex(store: Store): Promise<{ state: CID; blocks: Array<{ cid: CID; bytes: Uint8Array }> }> {
-  const d = await derive(store);
-  const blocks: Array<{ cid: CID; bytes: Uint8Array }> = [];
-  const roots = {} as Record<MapName, CID | null>;
-  for (const m of MAPS) {
-    const t = buildTree(d.pairs[m]);
-    roots[m] = t.root;
-    blocks.push(...t.blocks);
-  }
-  const s = stateRecord(d.log, d.cursor, roots);
-  blocks.push(s);
-  return { state: s.cid, blocks };
-}
-
-const DDL = `
-CREATE TABLE IF NOT EXISTS blocks (cid BLOB PRIMARY KEY, bytes BLOB NOT NULL) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS pointers (name TEXT PRIMARY KEY, cid BLOB NOT NULL) WITHOUT ROWID;
-`;
-
-/** Write `to` as a store file in the new format holding `from`'s blocks and its index. Returns the state CID. */
-export async function writeIndexFile(from: string, to: string): Promise<CID> {
-  const src = openStore(from, { readOnly: true });
-  const built = await buildIndex(src);
-  await src.close();
-  const raw = new DatabaseSync(from, { readOnly: true });
-  const db = new DatabaseSync(to);
-  db.exec(DDL);
-  const put = db.prepare("INSERT OR IGNORE INTO blocks (cid, bytes) VALUES (?, ?)");
-  db.exec("BEGIN");
-  for (const r of raw.prepare("SELECT cid, bytes FROM blocks").iterate()) put.run(r.cid as Uint8Array, r.bytes as Uint8Array);
-  for (const b of built.blocks) put.run(b.cid.bytes, b.bytes);
-  db.prepare("INSERT OR REPLACE INTO pointers (name, cid) VALUES ('state', ?)").run(built.state.bytes);
-  db.exec("COMMIT");
-  db.close();
-  raw.close();
-  return built.state;
-}
-
 // ---------------------------------------------------------------- reading (the Store)
 
 /** Does this SQLite file carry the state pointer (the format of #30)? */
@@ -367,7 +324,7 @@ export function hasStatePointer(path: string): boolean {
 
 /**
  * A store file, whichever format it is in: the new format (#30) through the
- * index, read only (blocks may be added unless `readOnly`); the TS runtime's
+ * index, read only (blocks may be added unless `readOnly`); any other
  * through sqlite.ts.
  */
 export function openStoreFile(path: string, o: { readOnly?: boolean } = {}): SqliteStore {

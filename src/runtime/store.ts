@@ -1,6 +1,9 @@
 // The store interface. Five layers: blocks, chains, the input log, edges, live.
-// Everything above this (scheduler, programs, dev inspection) calls only this.
-// The first implementation is one SQLite file via node:sqlite (sqlite.ts).
+// Everything that reads a store here (the explorer, skein-dev, skein-host)
+// calls only this. Two implementations over one SQLite file (node:sqlite):
+// the kernel's format through its index (index-store.ts), and the tables of
+// sqlite.ts (a store of blocks the tests and tools write, and files from
+// before the index of #30).
 
 import type { CID } from "multiformats/cid";
 import type { Block, Ref, ThreadState, Ms } from "./types.ts";

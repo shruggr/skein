@@ -1,9 +1,8 @@
 // BRC-169 §7.2 envelopes: the shape and the checks that need no wallet —
 // the signed part, contentHash, RFC 8785 canonical form, BRC-78 framing, the
-// signature against sender.identityKey. The runtime checks what a program
-// emits with these (scheduler.ts); src/envelope.ts adds the wallet operations
-// (sign, encrypt, open) for the client and the providers. See src/envelope.ts
-// for the wire format.
+// signature against sender.identityKey. src/envelope.ts adds the wallet
+// operations (sign, encrypt, open) for the client and the peers. See
+// src/envelope.ts for the wire format.
 
 import { createHash } from "node:crypto";
 import type { WalletProtocol } from "@bsv/sdk";
