@@ -1,0 +1,496 @@
+[
+ {
+  "cmd": "ls",
+  "exitCode": 0,
+  "stdout": "YS50eHQKbGluawpzdWIK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat a.txt",
+  "exitCode": 0,
+  "stdout": "b25lCnR3bwp0aHJlZQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat link",
+  "exitCode": 0,
+  "stdout": "b25lCnR3bwp0aHJlZQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat sub/deep/c.txt",
+  "exitCode": 0,
+  "stdout": "c2VhCg==",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "mv a.txt b.txt",
+  "exitCode": 0,
+  "stdout": "",
+  "stderr": "",
+  "tree": "baf4bcffnysgmeo56io5sdiqljxe6f34r2wgbb3i"
+ },
+ {
+  "cmd": "echo hi > new.txt",
+  "exitCode": 0,
+  "stdout": "",
+  "stderr": "",
+  "tree": "baf4bcfbhxesmqd247esdsvhvzf4jeosfsrjzhiq"
+ },
+ {
+  "cmd": "mkdir d && cp a.txt d/ && ls d",
+  "exitCode": 0,
+  "stdout": "YS50eHQK",
+  "stderr": "",
+  "tree": "baf4bcfdsi4bd7j5a3ayzpbvukvnrkag75mz37oy"
+ },
+ {
+  "cmd": "echo x >> a.txt && rm link && ln -s sub/b.txt l2",
+  "exitCode": 0,
+  "stdout": "",
+  "stderr": "",
+  "tree": "baf4bcfbpdlnujolwgdecld6ozilc6d3rmq5z7ly"
+ },
+ {
+  "cmd": "cat a.txt | wc -l",
+  "exitCode": 0,
+  "stdout": "Mwo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "printf '%s\\n' c b a b | sort | uniq | tr a-z A-Z",
+  "exitCode": 0,
+  "stdout": "QQpCCkMK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "x=$(head -1 a.txt); echo \"got $x\"",
+  "exitCode": 0,
+  "stdout": "Z290IG9uZQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "seq 1 4 | while read n; do echo $((n*n)); done",
+  "exitCode": 0,
+  "stdout": "MQo0CjkKMTYK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat <<EOF\nhello $USER\nEOF",
+  "exitCode": 0,
+  "stdout": "aGVsbG8gc2tlaW4K",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "yes | head -2; echo ${PIPESTATUS[@]}",
+  "exitCode": 0,
+  "stdout": "eQp5CjAgMAo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "exit 3",
+  "exitCode": 3,
+  "stdout": "",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "false",
+  "exitCode": 1,
+  "stdout": "",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat nope",
+  "exitCode": 1,
+  "stdout": "",
+  "stderr": "Y2F0OiBub3BlOiBObyBzdWNoIGZpbGUgb3IgZGlyZWN0b3J5Cg==",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "nosuchcommand",
+  "exitCode": 127,
+  "stdout": "",
+  "stderr": "ZXJyb3I6IGNvbW1hbmQgbm90IGZvdW5kOiBub3N1Y2hjb21tYW5kCg==",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "false | true; echo $?",
+  "exitCode": 0,
+  "stdout": "MAo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "set -o pipefail; false | true; echo $?",
+  "exitCode": 0,
+  "stdout": "MQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "date; echo $RANDOM $RANDOM; ls -la; head -c 16 /dev/stdin | od -c; sleep 1; date +%s > t; mktemp -u XXXXXX",
+  "exitCode": 0,
+  "stdout": "VGh1IEphbiAgMSAwMDowMDowMCBVVEMgMTk3MAoyNzg0MiAxMzgxOAp0b3RhbCAxOQpkci14ci14ci14IDEgc29tZWJvZHkgc29tZWdyb3VwICAwIEphbiAgMSAwMDowMCAuCmRyLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgIDAgSmFuICAxIDAwOjAwIC4uCi1yLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgMTQgSmFuICAxIDAwOjAwIGEudHh0CmxyLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgIDUgSmFuICAxIDAwOjAwIGxpbmsgLT4gYS50eHQKZHIteHIteHIteCAxIHNvbWVib2R5IHNvbWVncm91cCAgMCBKYW4gIDEgMDA6MDAgc3ViCjAwMDAwMDAgICAwICAgMSAgIDIgICAzICAgNCAgIDUgICA2ICAgNyAgIDggICA5ICAgYSAgIGIgICBjICAgZCAgIGUgICBmCjAwMDAwMjAKUEl3d3MzCg==",
+  "stderr": "",
+  "tree": "baf4bcfeivaj34nwcx2nnjce2lpe7myj6m4iu72i"
+ },
+ {
+  "cmd": "date -u +%FT%T",
+  "exitCode": 0,
+  "stdout": "MjAyNi0wOS0yNVQxMjowMDowMAo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "echo $RANDOM",
+  "exitCode": 0,
+  "stdout": "Mjc5MjUK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "echo $RANDOM",
+  "exitCode": 0,
+  "stdout": "Mjc4NDIK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat /etc/passwd",
+  "exitCode": 1,
+  "stdout": "",
+  "stderr": "Y2F0OiAvZXRjL3Bhc3N3ZDogTm8gc3VjaCBmaWxlIG9yIGRpcmVjdG9yeQo=",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cd /; cd ..; cd ..; ls",
+  "exitCode": 0,
+  "stdout": "YS50eHQKbGluawpzdWIK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "ls ../../..",
+  "exitCode": 0,
+  "stdout": "YS50eHQKbGluawpzdWIK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "echo gone > /dev/null; ls /dev 2>&1; echo $?",
+  "exitCode": 0,
+  "stdout": "bHM6IGNhbm5vdCBhY2Nlc3MgJy9kZXYnOiBObyBzdWNoIGZpbGUgb3IgZGlyZWN0b3J5CjIK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "pwd; ls; cat ../a.txt | head -1; /bin/true 2>/dev/null; echo $FOO",
+  "exitCode": 0,
+  "stdout": "L3N1YgpiLnR4dApkZWVwCm9uZQpiYXIK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "ls",
+  "error": "cwd is not a directory in the tree: /nope"
+ },
+ {
+  "cmd": "printf '#!/bin/sh\\necho script $1\\n' > s.sh && bash s.sh one && ./s.sh two && sh -c 'echo nested'",
+  "exitCode": 0,
+  "stdout": "c2NyaXB0IG9uZQpzY3JpcHQgdHdvCm5lc3RlZAo=",
+  "stderr": "",
+  "tree": "baf4bcfcm7ek6774pmlurn4guauzb6l7lh4v3eli"
+ },
+ {
+  "cmd": "cp big.bin copy.bin && cat big.bin | cat > piped.bin && wc -c < big.bin && md5sum big.bin copy.bin piped.bin | cut -c1-32 | uniq | wc -l",
+  "exitCode": 0,
+  "stdout": "MjA5NzE1MgoxCg==",
+  "stderr": "",
+  "tree": "baf4bcfgp26t54lxhrd2okaoyb3bi765funcaiaa"
+ },
+ {
+  "cmd": "ls -lai; ls -la sub sub/deep",
+  "exitCode": 0,
+  "stdout": "dG90YWwgMTkKZHIteHIteHIteCAxIHNvbWVib2R5IHNvbWVncm91cCAgMCBKYW4gIDEgMDA6MDAgLgpkci14ci14ci14IDEgc29tZWJvZHkgc29tZWdyb3VwICAwIEphbiAgMSAwMDowMCAuLgotci14ci14ci14IDEgc29tZWJvZHkgc29tZWdyb3VwIDE0IEphbiAgMSAwMDowMCBhLnR4dApsci14ci14ci14IDEgc29tZWJvZHkgc29tZWdyb3VwICA1IEphbiAgMSAwMDowMCBsaW5rIC0+IGEudHh0CmRyLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgIDAgSmFuICAxIDAwOjAwIHN1YgpzdWI6CnRvdGFsIDQKZHIteHIteHIteCAxIHNvbWVib2R5IHNvbWVncm91cCAwIEphbiAgMSAwMDowMCAuCmRyLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgMCBKYW4gIDEgMDA6MDAgLi4KLXIteHIteHIteCAxIHNvbWVib2R5IHNvbWVncm91cCA0IEphbiAgMSAwMDowMCBiLnR4dApkci14ci14ci14IDEgc29tZWJvZHkgc29tZWdyb3VwIDAgSmFuICAxIDAwOjAwIGRlZXAKCnN1Yi9kZWVwOgp0b3RhbCA0CmRyLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgMCBKYW4gIDEgMDA6MDAgLgpkci14ci14ci14IDEgc29tZWJvZHkgc29tZWdyb3VwIDAgSmFuICAxIDAwOjAwIC4uCi1yLXhyLXhyLXggMSBzb21lYm9keSBzb21lZ3JvdXAgNCBKYW4gIDEgMDA6MDAgYy50eHQK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "ls -R; wc a.txt sub/b.txt; realpath link sub/../sub/deep; readlink -f link; basename sub/b.txt .txt",
+  "exitCode": 0,
+  "stdout": "LjoKYS50eHQKbGluawpzdWIKCi4vc3ViOgpiLnR4dApkZWVwCgouL3N1Yi9kZWVwOgpjLnR4dAogMyAgMyAxNCBhLnR4dAogMSAgMSAgNCBzdWIvYi50eHQKIDQgIDQgMTggdG90YWwKL2EudHh0Ci9zdWIvZGVlcAovYS50eHQKYgo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cp -r sub sub3 && ls -R sub3 && rm -r sub && ls && touch sub3/deep/new && ls sub3/deep",
+  "exitCode": 0,
+  "stdout": "c3ViMzoKYi50eHQKZGVlcAoKc3ViMy9kZWVwOgpjLnR4dAphLnR4dApsaW5rCnN1YjMKYy50eHQKbmV3Cg==",
+  "stderr": "",
+  "tree": "baf4bcfbce6hezsl6ugosa2i6oyhxbbgr3akrobi"
+ },
+ {
+  "cmd": "ln a.txt hard && ls -i hard a.txt && echo more >> hard && cat a.txt hard",
+  "exitCode": 0,
+  "stdout": "YS50eHQKaGFyZApvbmUKdHdvCnRocmVlCm9uZQp0d28KdGhyZWUKbW9yZQo=",
+  "stderr": "",
+  "tree": "baf4bcfcnb7gwqmgr3xsua6uqilzc6b4wz33p2uq"
+ },
+ {
+  "cmd": "type ls cat; command -v sort; type nosuch; echo $?",
+  "exitCode": 0,
+  "stdout": "bHMgaXMgbHMKY2F0IGlzIGNhdApzb3J0CjEK",
+  "stderr": "dHlwZTogbm9zdWNoOiBub3QgZm91bmQK",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "./a.txt; echo $?; ./nope; echo $?",
+  "exitCode": 0,
+  "stdout": "MTI2CjEyNwo=",
+  "stderr": "Li9hLnR4dDogY2Fubm90IGV4ZWN1dGU6IG9ubHkgIyEgc2NyaXB0cyBydW4gZnJvbSB0aGUgdHJlZQplcnJvcjogY29tbWFuZCBub3QgZm91bmQ6IC4vbm9wZQo=",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "rmdir sub; echo $?; mkdir x && rmdir x && ls",
+  "exitCode": 0,
+  "stdout": "MQphLnR4dApsaW5rCnN1Ygo=",
+  "stderr": "cm1kaXI6IGZhaWxlZCB0byByZW1vdmUgJ3N1Yic6IERpcmVjdG9yeSBub3QgZW1wdHkK",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "touch z && truncate -s 5 z && od -c z && truncate -s 2 z && od -c z",
+  "exitCode": 0,
+  "stdout": "MDAwMDAwMCAgXDAgIFwwICBcMCAgXDAgIFwwCjAwMDAwMDUKMDAwMDAwMCAgXDAgIFwwCjAwMDAwMDIK",
+  "stderr": "",
+  "tree": "baf4bcfaz3wpdvhbqq6eud6tdvtqk7nq473lu7ia"
+ },
+ {
+  "cmd": "sort -r a.txt > r.txt; cat r.txt; sort -r a.txt > a.txt; cat a.txt; wc -c a.txt",
+  "exitCode": 0,
+  "stdout": "dHdvCnRocmVlCm9uZQowIGEudHh0Cg==",
+  "stderr": "",
+  "tree": "baf4bcfgri7wlf7m5gjsvio3vc2rerr4qmzpj7ra"
+ },
+ {
+  "cmd": "dd if=a.txt bs=1 skip=2 count=3 2>/dev/null; echo; tail -n1 a.txt; tail -c 4 a.txt",
+  "exitCode": 0,
+  "stdout": "CnRocmVlCnJlZQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "mv sub sub2 && ls sub2/deep && mv sub2 sub2/deep; echo $?; mkdir e && mv e sub2/deep && ls -R sub2",
+  "exitCode": 0,
+  "stdout": "Yy50eHQKMQpzdWIyOgpiLnR4dApkZWVwCgpzdWIyL2RlZXA6CmMudHh0CmUKCnN1YjIvZGVlcC9lOgo=",
+  "stderr": "bXY6IGNhbm5vdCBtb3ZlICdzdWIyJyB0byBhIHN1YmRpcmVjdG9yeSBvZiBpdHNlbGYsICdzdWIyL2RlZXAvc3ViMicK",
+  "tree": "baf4bcfbrbjvirxa2ykypsornfuggx6tqdukjnqi"
+ },
+ {
+  "cmd": "ln -s nowhere dangling && cat dangling; echo $?; echo made > dangling; cat nowhere; readlink dangling",
+  "exitCode": 0,
+  "stdout": "MQptYWRlCm5vd2hlcmUK",
+  "stderr": "Y2F0OiBkYW5nbGluZzogTm8gc3VjaCBmaWxlIG9yIGRpcmVjdG9yeQo=",
+  "tree": "baf4bcfbcshfsfknhne4qpwd5a3flz7g3t2w327i"
+ },
+ {
+  "cmd": "printf 'a\\0b' | od -An -c; echo -n abc | md5sum; seq 1000 | tail -1",
+  "exitCode": 0,
+  "stdout": "ICAgYSAgXDAgICBiCjkwMDE1MDk4M2NkMjRmYjBkNjk2M2Y3ZDI4ZTE3ZjcyICAtCjEwMDAK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "for i in 1 2 3; do echo $i > f$i; done; cat f*; ls | wc -l",
+  "exitCode": 0,
+  "stdout": "MQoyCjMKNgo=",
+  "stderr": "",
+  "tree": "baf4bcfe2hh2nry5wdlug5dexq6fjelarf2smd6y"
+ },
+ {
+  "cmd": "echo $(echo $(echo nested)); (cd sub && pwd); pwd",
+  "exitCode": 0,
+  "stdout": "bmVzdGVkCi9zdWIKLwo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "ls /; cat /dev/null; echo ok > /dev/stdout; echo err > /dev/stderr",
+  "exitCode": 0,
+  "stdout": "YS50eHQKbGluawpzdWIKb2sK",
+  "stderr": "Y2F0OiAvZGV2L251bGw6IHVua25vd24gZmlsZXR5cGU6IEZpbGVUeXBlIHsgaXNfZmlsZTogZmFsc2UsIGlzX2RpcjogZmFsc2UsIGlzX3N5bWxpbms6IGZhbHNlLCAuLiB9CmVycgo=",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "cat; wc -c < /dev/stdin",
+  "exitCode": 0,
+  "stdout": "cGlwZWQgaW4KMAo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "printenv | sort; export X=1; printenv X",
+  "exitCode": 0,
+  "stdout": "SE9NRT0vCkxBTkc9Qy5VVEYtOApQQVRIPS91c3IvbG9jYWwvYmluOi91c3IvYmluOi9iaW4KUFdEPS8KU0hMVkw9MQpVU0VSPXNrZWluCl89cHJpbnRlbnYKMQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "echo $((RANDOM % 100)) $SRANDOM; shuf -n2 -e a b c d; mktemp; ls tmp* 2>/dev/null; ls",
+  "exitCode": 0,
+  "stdout": "NDIgMTgxMTE5Mzg3NgphCmIKYS50eHQKbGluawpzdWIK",
+  "stderr": "bWt0ZW1wOiBmYWlsZWQgdG8gY3JlYXRlIGZpbGUgdmlhIHRlbXBsYXRlICcvdG1wL3RtcC5YWFhYWFhYWFhYJzogTm8gc3VjaCBmaWxlIG9yIGRpcmVjdG9yeQo=",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "test -x a.txt && echo exec; test -d sub && echo dir; [ -e nope ] || echo none; cut -c1-2 a.txt | paste -sd,",
+  "exitCode": 0,
+  "stdout": "ZXhlYwpkaXIKbm9uZQpvbix0dyx0aAo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "mkdir -p src && printf '// TODO: fix\\nconst x = 1;\\n' > src/a.go && printf 'package p\\n// TODO later\\n' > src/sub.go && printf 'FOO bar\\n' > readme.md && printf 'nothing here\\n' > other.md && grep -rn TODO src/",
+  "exitCode": 0,
+  "stdout": "c3JjL2EuZ286MTovLyBUT0RPOiBmaXgKc3JjL3N1Yi5nbzoyOi8vIFRPRE8gbGF0ZXIK",
+  "stderr": "",
+  "tree": "baf4bcffdxsy5esiobqde67ivpaziex7ik6rxzra"
+ },
+ {
+  "cmd": "printf 'FOO bar\\n' > readme.md && printf 'nothing here\\n' > other.md && grep -il foo *.md",
+  "exitCode": 0,
+  "stdout": "cmVhZG1lLm1kCg==",
+  "stderr": "",
+  "tree": "baf4bcfce6kslzvlx3xnx57tqo6qbk7s2k3utlyq"
+ },
+ {
+  "cmd": "mkdir -p src && printf 'x\\n' > src/a.go && printf 'x\\n' > src/sub.go && find . -name '*.go' | xargs wc -l",
+  "exitCode": 0,
+  "stdout": "MSAuL3NyYy9hLmdvCjEgLi9zcmMvc3ViLmdvCjIgdG90YWwK",
+  "stderr": "",
+  "tree": "baf4bcffvlgnsxzrs355kxo6nn55zsu3kbpupv7a"
+ },
+ {
+  "cmd": "which cat; which nosuchcmd; echo $?",
+  "exitCode": 0,
+  "stdout": "Y2F0CjEK",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "printf 'x\\nfoo x bar\\nx x x\\n' > f && sed -i 's/x/y/' f && cat f",
+  "exitCode": 0,
+  "stdout": "eQpmb28geSBiYXIKeSB4IHgK",
+  "stderr": "",
+  "tree": "baf4bcfbycpnzlsfrx3nwa7h5mwiadv3wifvm56a"
+ },
+ {
+  "cmd": "printf 'one\\ntwo\\nthree\\nfour\\n' > f && sed -n '2,4p' f",
+  "exitCode": 0,
+  "stdout": "dHdvCnRocmVlCmZvdXIK",
+  "stderr": "",
+  "tree": "baf4bcffegdtz5iyu4jk74cbarqrhzapp5wleedq"
+ },
+ {
+  "cmd": "printf 'a b\\nc d\\n' > f && awk '{print $2}' f",
+  "exitCode": 0,
+  "stdout": "YgpkCg==",
+  "stderr": "",
+  "tree": "baf4bcfagvvtjoqja73oimpppufk32g6htqxygcy"
+ },
+ {
+  "cmd": "printf 'a\\nb\\nc\\n' > x.txt && printf 'a\\nB\\nc\\n' > y.txt && diff x.txt y.txt",
+  "exitCode": 1,
+  "stdout": "MmMyCjwgYgotLS0KPiBCCg==",
+  "stderr": "",
+  "tree": "baf4bcfc23wby7flwgj6clywvnls6sqwwydvbpbq"
+ },
+ {
+  "cmd": "printf 'same\\n' > x.txt && cp x.txt y.txt && cmp x.txt y.txt; echo $?",
+  "exitCode": 0,
+  "stdout": "MAo=",
+  "stderr": "",
+  "tree": "baf4bcfft6ct3atgxyr4ky7j2oztb7wig6liy2fq"
+ },
+ {
+  "cmd": "echo '{\"name\":\"widget\",\"id\":3}' > file.json && jq .name file.json",
+  "exitCode": 0,
+  "stdout": "IndpZGdldCIK",
+  "stderr": "",
+  "tree": "baf4bcffqynqi5eyb3nv7jppe2tc7g6mj2qzz2ri"
+ },
+ {
+  "cmd": "echo '[{\"id\":\"a\"},{\"id\":\"b\"}]' > list.json && jq -r '.[] | .id' list.json",
+  "exitCode": 0,
+  "stdout": "YQpiCg==",
+  "stderr": "",
+  "tree": "baf4bcfeaq3zktwltcncxfbbrf6y7vrqxrjohaka"
+ },
+ {
+  "cmd": "mkdir -p src && printf 'TODO: a\\nkeep\\n' > src/one.txt && printf 'nothing\\nTODO: b\\n' > src/two.txt && grep -rl TODO src/ | xargs wc -l | sed -n '1,2p' | awk '{print $2, $1}'",
+  "exitCode": 0,
+  "stdout": "c3JjL29uZS50eHQgMgpzcmMvdHdvLnR4dCAyCg==",
+  "stderr": "",
+  "tree": "baf4bcfaeie7ns2qntmvehqmcvbx5uclk43qpshq"
+ },
+ {
+  "cmd": "echo IyEvdXNyL2Jpbi9lbnYgbm9kZQpjb25zdCBmcyA9IHJlcXVpcmUoJ2ZzJyk7IGNvbnN0IHBhdGggPSByZXF1aXJlKCdwYXRoJyk7CmNvbnN0IGlucHV0ID0gZnMucmVhZEZpbGVTeW5jKDAsICd1dGY4Jyk7CmZzLm1rZGlyU3luYygnb3V0JywgeyByZWN1cnNpdmU6IHRydWUgfSk7CmZzLndyaXRlRmlsZVN5bmMoJ291dC9qcy50eHQnLCBmcy5yZWFkRmlsZVN5bmMocGF0aC5qb2luKF9fZGlybmFtZSwgJ2EudHh0JyksICd1dGY4JykudG9VcHBlckNhc2UoKSk7CmNvbnNvbGUubG9nKCdqcycsIHByb2Nlc3MuYXJndi5zbGljZSgyKSwgaW5wdXQudHJpbSgpLCB7IG46IDEgfSk7IGNvbnNvbGUuZXJyb3IoJ3RvIGVycicpOwpwcm9jZXNzLmV4aXRDb2RlID0gMzsK | base64 -d > t.js && ./t.js a b <<< piped; echo \"exit=$?\"; node t.js c; echo \"exit=$?\"; cat out/js.txt",
+  "exitCode": 0,
+  "stdout": "anMgWyAnYScsICdiJyBdIHBpcGVkIHsgbjogMSB9CmV4aXQ9MwpqcyBbICdjJyBdICB7IG46IDEgfQpleGl0PTMKT05FClRXTwpUSFJFRQo=",
+  "stderr": "dG8gZXJyCnRvIGVycgo=",
+  "tree": "baf4bcfdudox6ovrgohy7a534g7gmc4z25qv53ya"
+ },
+ {
+  "cmd": "echo IyEvdXNyL2Jpbi9lbnYgcHl0aG9uMwppbXBvcnQgc3lzLCBvcywganNvbiwgcGF0aGxpYgpkYXRhID0gcGF0aGxpYi5QYXRoKCdhLnR4dCcpLnJlYWRfdGV4dCgpCm9zLm1ha2VkaXJzKCdvdXQnLCBleGlzdF9vaz1UcnVlKQpqc29uLmR1bXAoeydsaW5lcyc6IGRhdGEuc3BsaXRsaW5lcygpLCAnYXJndic6IHN5cy5hcmd2WzE6XSwgJ3N0ZGluJzogc3lzLnN0ZGluLnJlYWQoKX0sIG9wZW4oJ291dC9weS5qc29uJywgJ3cnKSwgc29ydF9rZXlzPVRydWUpCnByaW50KCdweScsIHN5cy5hcmd2WzE6XSk7IHByaW50KCd0byBlcnInLCBmaWxlPXN5cy5zdGRlcnIpCnN5cy5leGl0KDUpCg== | base64 -d > t.py && echo in | ./t.py a b; echo \"exit=$?\"; python t.py c < /dev/null; echo \"exit=$?\"; cat out/py.json",
+  "exitCode": 0,
+  "stdout": "cHkgWydhJywgJ2InXQpleGl0PTUKcHkgWydjJ10KZXhpdD01CnsiYXJndiI6IFsiYyJdLCAibGluZXMiOiBbIm9uZSIsICJ0d28iLCAidGhyZWUiXSwgInN0ZGluIjogIiJ9",
+  "stderr": "dG8gZXJyCnRvIGVycgo=",
+  "tree": "baf4bcfhnhg5i5ce3qgw2ctq3kv24liqq37ieedy"
+ },
+ {
+  "cmd": "qjs -e 'import(\"qjs:std\").then((std) => { console.log(scriptArgs, std.getenv(\"HOME\")); std.exit(4) })'; echo \"exit=$?\"; qjs -e 'throw new Error(\"boom\")'; echo \"exit=$?\"",
+  "exitCode": 0,
+  "stdout": "W10gLwpleGl0PTQKZXhpdD0xCg==",
+  "stderr": "RXJyb3I6IGJvb20KICAgIGF0IDxhbm9ueW1vdXM+ICg8Y21kbGluZT46MToxMSkKCg==",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "echo aW1wb3J0IHRpbWUsIHJhbmRvbSwgb3MsIHV1aWQsIGRhdGV0aW1lCnByaW50KHRpbWUudGltZSgpLCB0aW1lLm1vbm90b25pYygpLCBkYXRldGltZS5kYXRldGltZS5ub3coKS5pc29mb3JtYXQoKSkKcHJpbnQocmFuZG9tLnJhbmRvbSgpLCBvcy51cmFuZG9tKDQpLmhleCgpLCBoYXNoKCdza2VpbicpLCB1dWlkLnV1aWQ0KCkpCg== | base64 -d > e.py && python3 e.py; node -e 'console.log(Date.now(), new Date().toISOString(), Math.random())'",
+  "exitCode": 0,
+  "stdout": "MTcwMDAwMDAwMC4wIDE3MDAwMDAwMDAuMCAyMDIzLTExLTE0VDIyOjEzOjIwCjAuMTI3NTk5MzI1OTcwNDAwMTMgNWZjZDlhMzcgMjA2MDk1MzU1MCBjMDI4ZjczNy02ZmRkLTQzNWMtYjg5Zi0wYzQ4MmZmMWRlYWYKMTcwMDAwMDAwMDAwMCAyMDIzLTExLTE0VDIyOjEzOjIwLjAwMFogMC4wNDc4MDgxODE4MDc1NDQ0MjUK",
+  "stderr": "",
+  "tree": "baf4bcfdx3pdqyi5p3atrqaenltrdwk6qne7runq"
+ },
+ {
+  "cmd": "node -e 'setTimeout((x) => console.log(\"later\", x, Date.now()), 1500, 1); console.log(\"now\", Date.now())'; python3 -c 'import time; time.sleep(2); print(time.time())'",
+  "exitCode": 0,
+  "stdout": "bm93IDAKbGF0ZXIgMSAxNTAwCjMuNQo=",
+  "stderr": "",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "python3 -c 'import sys; print(sys.prefix, sys.path[1:3])'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")'; echo \"exit=$?\"; ls /opt; echo \"exit=$?\"",
+  "exitCode": 0,
+  "stdout": "L29wdC9za2Vpbi9weXRob24gWycvb3B0L3NrZWluL3B5dGhvbi9saWIvcHl0aG9uMzE0LnppcCcsICcvb3B0L3NrZWluL3B5dGhvbi9saWIvcHl0aG9uMy4xNCddCmV4aXQ9MQpleGl0PTIK",
+  "stderr": "VHJhY2ViYWNrIChtb3N0IHJlY2VudCBjYWxsIGxhc3QpOgogIEZpbGUgIjxzdHJpbmc+IiwgbGluZSAxLCBpbiA8bW9kdWxlPgogICAgb3BlbigiL29wdC9za2Vpbi9weXRob24vbGliL3B5dGhvbjMxNC56aXAiLCAiYWIiKQogICAgfn5+fl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXl5eXgpPU0Vycm9yOiBbRXJybm8gNjldIFJlYWQtb25seSBmaWxlIHN5c3RlbTogJy9vcHQvc2tlaW4vcHl0aG9uL2xpYi9weXRob24zMTQuemlwJwpsczogY2Fubm90IGFjY2VzcyAnL29wdCc6IE5vIHN1Y2ggZmlsZSBvciBkaXJlY3RvcnkK",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ },
+ {
+  "cmd": "node -e 'require(\"child_process\")'; echo \"exit=$?\"; python3 -c 'import subprocess; subprocess.run([\"ls\"])' 2>&1 | tail -1",
+  "exitCode": 0,
+  "stdout": "ZXhpdD0xCk9TRXJyb3I6IFtFcnJubyA1OF0gd2FzaSBkb2VzIG5vdCBzdXBwb3J0IHByb2Nlc3Nlcy4K",
+  "stderr": "RXJyb3I6IENhbm5vdCBmaW5kIG1vZHVsZSAnY2hpbGRfcHJvY2Vzcyc6IHNrZWluJ3Mgbm9kZSBzaGltIChRdWlja0pTLW5nKSBwcm92aWRlcyBvbmx5IGZzLCBmcy9wcm9taXNlcywgcGF0aCBhbmQgcHJvY2VzcywgcGx1cyByZWxhdGl2ZSAuanMvLmNqcy8uanNvbiBmaWxlcwogICAgYXQgbWlzc2luZyAoc2tlaW46bm9kZTozNDg6NDYpCiAgICBhdCByZXEgKHNrZWluOm5vZGU6MzY1OjU0KQogICAgYXQgPGFub255bW91cz4gKDxjbWRsaW5lPjoxOjEpCgo=",
+  "tree": "baf4bcfcocys7ea4s7btnttrz3uvor5i5lpraqnq"
+ }
+]
