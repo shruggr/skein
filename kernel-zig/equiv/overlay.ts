@@ -49,7 +49,7 @@ mkdirSync(join(sys, "bin"), { recursive: true });
 mkdirSync(join(sys, "etc"), { recursive: true });
 for (const p of ["overlay", "topic-demo", "lookup-demo"]) copyFileSync(join(overlayBin, `${p}.wasm`), join(sys, `bin/${p}.wasm`));
 copyFileSync(join(here, "../../wasm/frontdoor.wasm"), join(sys, "bin/frontdoor.wasm"));
-writeFileSync(join(sys, "bin/frontdoor.json"), JSON.stringify({ inputs: { event: "cid?", box: "string?" }, description: "The front door." }));
+writeFileSync(join(sys, "bin/frontdoor.json"), JSON.stringify({ inputs: {}, description: "The front door." }));
 const handler = { event: "cid", box: "string" };
 writeFileSync(join(sys, "bin/overlay.json"), JSON.stringify({ inputs: handler, description: "The overlay engine: BRC-22 submit, BRC-24 lookup, the chain feed." }));
 writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, description: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP.\n\nEvery such output is admitted; the tokens a transaction spends are retained when it admits one." }));

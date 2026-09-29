@@ -71,6 +71,14 @@ export class Kernel {
   gone = false;
   sleepers: Sleeper[] = [];
   onSleep?: (thread: CID, until: Ms) => void;
+  /**
+   * The front door's scratch table (#40, "sessions are not state"): the
+   * instance's BRC-104 sessions, in memory for as long as this process runs
+   * and never in the log. Opaque here (key → bytes, only the front door reads
+   * them); a new process starts with an empty table, and a client whose
+   * session is gone gets a 401 and shakes hands again.
+   */
+  readonly scratch = new Map<string, Uint8Array>();
 
   constructor(o: KernelOptions) {
     this.o = o;
@@ -90,6 +98,7 @@ export class Kernel {
     this.proc.stdin!.on("error", () => {}); // EPIPE once it is gone
     this.done = new Promise((resolve) => this.proc.once("close", (code, signal) => {
       this.gone = true;
+      this.scratch.clear();
       for (const w of this.waiting.values()) w.reject(new Error(`kernel ${o.handle}: exited (${signal ?? code})`));
       this.waiting.clear();
       o.exited?.(code, signal);

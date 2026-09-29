@@ -30,7 +30,7 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
     const r = await f.fetch(`${h.origin("alpha")}${path}`, { method: "GET" });
     return { status: r.status, v: await r.json() as Obj };
   };
-  // The first request shakes hands (a new session: the one auth write); from then on nothing is written.
+  // The first request shakes hands (a session in memory: no write); nothing is written.
   const top = await get("/explore");
   assert.equal(top.status, 200);
   await h.router.settled();
@@ -38,9 +38,9 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
   assert.ok(link(top.v.state) && link(top.v.log), "the state and the log tip");
   assert.ok(Object.keys(top.v.heads as Obj).length > 0, `the heads (${Object.keys(top.v.heads as Obj)})`);
 
-  const log = await get("/explore/log?limit=3");
+  const log = await get("/explore/log?limit=2");
   const entries = log.v.entries as Array<{ n: number; entry: unknown; record: Obj }>;
-  assert.equal(entries.length, 3);
+  assert.equal(entries.length, 2, "the genesis and the chat (a handshake writes nothing)");
   assert.equal(entries[0]!.n, n0 - 1, "newest first");
   const older = await get(`/explore/log?before=1`);
   assert.deepEqual((older.v.entries as Array<{ n: number; record: Obj }>).map((e) => [e.n, "genesis" in e.record]), [[0, true]], "before=1: the genesis");
@@ -65,9 +65,10 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
   assert.equal(await h.entries("alpha"), n0, "explore wrote no entry");
   assert.equal(h.storeSize("alpha"), s0, "explore wrote no byte");
 
-  // Not the owner: refused by the read rule (403), signed by the instance all the same; its handshake is its one write.
+  // Not the owner: refused by the read rule (403), signed by the instance all the same; its handshake writes nothing.
   const stranger = await get("/explore", new AuthFetch(ephemeralWallet(PrivateKey.fromRandom())));
   assert.equal(stranger.status, 403);
   await h.router.settled();
-  assert.equal(await h.entries("alpha"), n0 + 1, "the stranger's handshake: one session entry, nothing else");
+  assert.equal(await h.entries("alpha"), n0, "the stranger's handshake: no entry");
+  assert.equal(h.storeSize("alpha"), s0, "the stranger's handshake: no byte");
 });

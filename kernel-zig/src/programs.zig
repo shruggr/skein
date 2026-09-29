@@ -22,7 +22,7 @@ pub const modules = [_]Module{
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreiehhusheqk3oguayz43gbtwdqdx6fcpatiuztzomuglrj7ksm266m" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreia4gjhjv5wea2ahu3sknay6wehzrjuxqcaz3s5i6laxpgvvg3wq64" },
+    .{ .name = "frontdoor", .cid = "bafkreid43xkimq5d5qbw6t5ibis57xiyf7neiel4s4xeyvw36v2fty2tba" },
     // The peer table's writer (#40): BRC-169 resolve, the admin's `peers`, `register` claims (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreicxsp4aoppj6xvfmdgh5lh7g4dxmajv7zepyykaovrrixujvnv63y" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
@@ -116,7 +116,7 @@ const handlers = [_]Handler{
     .{ .name = "loop", .services = &.{"infer"}, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs. Everything it sends goes through the messagebox's `send` (#40)." },
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
     .{ .name = "resolve", .services = &.{}, .description = "The peer table (#40, head `peers`): `resolve` {handle, domain} looks a BRC-169 handle up (recorded http) and writes its record; the `peers` box (the admin) adds or removes one; the `register` box takes a claim {handle, domain} and records it if it resolves to the sender." },
-    .{ .name = "frontdoor", .services = &.{}, .inputs = &call_inputs, .description = "The front door: called with each HTTP request (fn http); runs BRC-103/104 against the session records, routes by the routes table, invokes the handler, signs the answer; stepped on `:sessions` to keep a handshake's session (head `sessions`)." },
+    .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door: called with each HTTP request (fn http); runs BRC-103/104 against the instance's session table (held in memory by the host, passed in and changed by the answer; never in the log), routes by the routes table, invokes the handler, signs the answer. Never stepped." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
