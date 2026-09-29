@@ -196,7 +196,12 @@ send {to: <key>, box, body: <dag-cbor bytes>, handle?, domain?}  →  {id: <cid>
   reply's `replyTo` names a record this instance holds and can `await`.
 - **Failure** is the call's error, in the step: `transient: …` for no answer,
   5xx, 408, 425, 429 (`skein.Transient`; the caller may try again later),
-  anything else permanent. There is no outcome entry.
+  anything else permanent. There is no outcome entry. The loop's `message`
+  tool tries a transient failure again: it keeps a `retry` note beside the
+  turns and rests on a deadline `defaults.sendRetryMs` ahead (default
+  30 000), and the wake runs the call again; after `defaults.sendAttempts`
+  attempts in all (default 3) the failure is the tool's error result, as a
+  permanent one is at once. (Its `infer` and its answer are not retried.)
 - **Local delivery.** The kernels' `http` goes through the router
   (`Router.http`): a URL of the host's own is dispatched in process through
   the same front-door path, no socket; any other goes out (`SKEIN_HTTP=fetch`,
