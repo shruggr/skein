@@ -1,4 +1,4 @@
-// The wasm shell (src/runtime/shell.ts): brush running uutils coreutils and the
+// The wasm shell (first a port of the TypeScript shell, deleted in #55): brush running uutils coreutils and the
 // toolset, all over a copy-on-write view of a git-shaped tree. brush asks the
 // host to run external commands through skein.spawn; each runs to completion
 // as a fresh instance sharing the filesystem view.

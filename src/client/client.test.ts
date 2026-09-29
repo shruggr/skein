@@ -7,10 +7,10 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
+import { encode } from "../runtime/cid.ts";
 import { blobCid, gitSha } from "../runtime/tree.ts";
 import { chunk, decodeBundle, BUNDLE_LIMIT, type Rec } from "./bundle.ts";
 import { SkeinClient, hashDir, handlerCid, subscribeBody } from "./client.ts";
-import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import { parseCli } from "./cli.ts";
 import type { ClientConfig } from "./config.ts";
 import { KERNEL_BIN } from "../host/kernel.ts";
@@ -123,11 +123,14 @@ test("bin/skein on a host (#40): run to the instance's front door, the result re
   assert.deepEqual(await client.inbox(), [], "acknowledged");
 });
 
-test("subscribe body: a handler by built-in name or by CID; sender only when given", () => {
-  assert.ok(handlerCid("loop").equals(PROGRAM_CIDS.loop));
-  assert.ok(handlerCid(PROGRAM_CIDS["run-handler"].toString()).equals(PROGRAM_CIDS["run-handler"]));
-  assert.throws(() => handlerCid("nope"), /not a program name/);
-  const b = subscribeBody({ op: "add", box: "chat", handler: "loop" });
+test("subscribe body: a handler by CID, or by a name the genesis's programs give; sender only when given", () => {
+  const loop = encode({ kind: "program", name: "loop" }).cid, other = encode({ kind: "program", name: "other" }).cid;
+  const programs = { loop };
+  assert.ok(handlerCid("loop", programs).equals(loop));
+  assert.ok(handlerCid(other.toString()).equals(other));
+  assert.throws(() => handlerCid("nope", programs), /not a CID or a program name \(loop\)/);
+  assert.throws(() => handlerCid("loop"), /needs the instance's genesis/);
+  const b = subscribeBody({ op: "add", box: "chat", handler: "loop" }, programs);
   assert.deepEqual(Object.keys(b), ["op", "box", "handler"]);
-  assert.equal(subscribeBody({ op: "remove", sender: "02ab", box: "chat", handler: "loop" }).sender, "02ab");
+  assert.equal(subscribeBody({ op: "remove", sender: "02ab", box: "chat", handler: loop.toString() }).sender, "02ab");
 });

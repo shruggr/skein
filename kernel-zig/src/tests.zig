@@ -1,5 +1,5 @@
 // `zig build test`: the unit tests of every module, plus the fixtures the
-// TypeScript reference made (test/fixtures.json, test/fixtures.ts).
+// TypeScript formats made (test/fixtures.json, test/fixtures.ts).
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -121,15 +121,6 @@ test "entropy stream and the fixed CIDs" {
     const programs = @import("programs.zig");
     const c = f.object.get("cids").?.object;
     try std.testing.expectEqualStrings(c.get("shell").?.string, try cidm.format(a, try programs.programCid(a, "shell")));
-    var it = c.get("programs").?.object.iterator();
-    // The handler programs are format-2 builds here (issue #33); the fixtures'
-    // are the frozen TS runtime's (wasm/v1): only the shell's record compares.
-    while (it.next()) |kv| {
-        const v1 = for ([_][]const u8{ "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop" }) |h| {
-            if (std.mem.eql(u8, h, kv.key_ptr.*)) break true;
-        } else false;
-        if (!v1) try std.testing.expectEqualStrings(kv.value_ptr.string, try cidm.format(a, try programs.programCid(a, kv.key_ptr.*)));
-    }
     try std.testing.expectEqualStrings(c.get("headMain").?.string, try cidm.format(a, try @import("heads.zig").headOrigin(a, "main")));
     try std.testing.expectEqualStrings(c.get("subscriptions").?.string, try cidm.format(a, try @import("subscriptions.zig").origin(a)));
     try std.testing.expectEqualStrings(c.get("emptyTree").?.string, try cidm.format(a, (try @import("tree.zig").hashTree(a, &.{})).cid));

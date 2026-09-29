@@ -13,7 +13,6 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
-import { PROGRAM_CIDS } from "../runtime/programs.ts";
 import type { TreeBlocks } from "../runtime/tree.ts";
 import { chunk, type Rec } from "./bundle.ts";
 import type { ClientConfig } from "./config.ts";
@@ -28,16 +27,23 @@ export const INBOX = [BOX.results, BOX.chat] as const;
 /** A subscription change as the `subscribe` box takes it. */
 export interface SubscribeArgs { op: "add" | "remove"; sender?: string; box: string; handler: string }
 
-/** A handler: a built-in program's name (run-handler, loop, …) or a program record's CID. */
-export function handlerCid(s: string): CID {
-  const named = (PROGRAM_CIDS as Record<string, CID>)[s];
+/**
+ * A handler: a program record's CID, or the name of one in `programs` (an
+ * instance's genesis `programs`: name → record CID, as skein-host reads it
+ * from the store; the client has no store, so it takes CIDs).
+ */
+export function handlerCid(s: string, programs: Record<string, CID> = {}): CID {
+  const named = programs[s];
   if (named) return named;
-  try { return CID.parse(s); } catch { throw new Error(`handler ${JSON.stringify(s)}: not a program name (${Object.keys(PROGRAM_CIDS).join(", ")}) or a CID`); }
+  try { return CID.parse(s); } catch {
+    const names = Object.keys(programs);
+    throw new Error(`handler ${JSON.stringify(s)}: not a CID${names.length ? ` or a program name (${names.join(", ")})` : " (a program by name needs the instance's genesis: skein-host subscribe)"}`);
+  }
 }
 
-/** The `subscribe` body: {op, sender?, box, handler}. */
-export function subscribeBody(a: SubscribeArgs): Record<string, unknown> {
-  return { op: a.op, ...(a.sender ? { sender: a.sender } : {}), box: a.box, handler: handlerCid(a.handler) };
+/** The `subscribe` body: {op, sender?, box, handler}; a handler named from `programs` (handlerCid). */
+export function subscribeBody(a: SubscribeArgs, programs: Record<string, CID> = {}): Record<string, unknown> {
+  return { op: a.op, ...(a.sender ? { sender: a.sender } : {}), box: a.box, handler: handlerCid(a.handler, programs) };
 }
 
 /** A directory as git objects held in memory: [root, records]. `opts.ignore` as scan's. */

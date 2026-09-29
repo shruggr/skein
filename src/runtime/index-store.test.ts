@@ -1,28 +1,23 @@
 // The store format of issue #30 read from TypeScript (index-store.ts): the
-// Merkle search tree (canonical, ordered), and a whole instance — written by
-// the TS runtime, converted to the new format — read back through the index:
-// every Store question, every explorer page and the skein-dev commands answer
-// as they do over the TS runtime's own file.
+// Merkle search tree (canonical, ordered), and a whole instance written by
+// the Zig kernel through a router (testhost.ts chatWorld) read back through
+// the index: the maps derived here are the kernel's, root for root; the Store
+// questions answer; skein-dev reads the file; writes are refused.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateKey } from "@bsv/sdk";
-import { encode } from "./cid.ts";
-import { InferPeer } from "../peers/infer.ts";
-import { ensureGenesis } from "../host/entry.ts";
-import { stampMs } from "./log.ts";
-import { openStore, type SqliteStore } from "./sqlite.ts";
-import { buildTree, cat, compare, be64, hasStatePointer, openStoreFile, Trees, writeIndexFile } from "./index-store.ts";
-import { bundlesOf, installWasm, instance, send, T0 } from "../testkit.ts";
-import { ephemeralWallet } from "../wallet.ts";
-import { render } from "../dev/explore/server.ts";
-import { load } from "../dev/explore/view.ts";
-import { replay } from "../dev/cli.ts";
+import type { CID } from "multiformats/cid";
+import { KERNEL_BIN } from "../host/kernel.ts";
+import { chatWorld } from "../host/testhost.ts";
+import { collect } from "../testkit.ts";
+import { fmt } from "./cid.ts";
+import { buildTree, cat, compare, be64, derive, MAPS, openStoreFile, Trees } from "./index-store.ts";
 
 test("mst: lookups, ordered ranges and prefixes; one tree per set whatever the order", () => {
   const pairs: Array<[Uint8Array, unknown]> = [];
@@ -46,121 +41,67 @@ test("mst: lookups, ordered ranges and prefixes; one tree per set whatever the o
   assert.equal(buildTree([]).root, null);
 });
 
-type Json = Record<string, unknown>;
-const answer = (message: Json) => ({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" });
-const toolCall = (id: string, cmd: string) => ({ id, type: "function", function: { name: "bash", arguments: JSON.stringify({ cmd }) } });
+type IndexStore = ReturnType<typeof openStoreFile> & { state(): { cid: CID; log: CID | null; cursor: number; roots: Record<string, CID | null> } };
 
-/** An instance on a SQLite file (the TS runtime's format): a directory imported, a chat turn with a bash call. */
-async function instanceFile(dir: string): Promise<{ path: string; chat: ReturnType<typeof encode>["cid"] }> {
-  const path = join(dir, "ts.db");
+test("index store: a store the kernel wrote — every map derived here is the kernel's; the Store answers; skein-dev reads it; writes refused", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const dir = await fs.mkdtemp(join(tmpdir(), "skein-index-store-"));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.mkdir(join(dir, "tree/src"), { recursive: true });
   await fs.writeFile(join(dir, "tree/src/a.txt"), "alpha\n");
   await fs.writeFile(join(dir, "tree/README"), "hello\n");
-  const store = openStore(path);
-  const instanceKey = PrivateKey.fromRandom(), ownerKey = PrivateKey.fromRandom(), hostKey = PrivateKey.fromRandom(), inferKey = PrivateKey.fromRandom();
-  await installWasm(store);
-  await ensureGenesis(store, ephemeralWallet(instanceKey), ephemeralWallet(hostKey), { owner: ownerKey.toPublicKey().toString(), peers: { infer: inferKey.toPublicKey().toString() } }, T0);
-  const i = await instance({ store, instanceKey, ownerKey, hostKey });
-  const answers = [answer({ content: "", tool_calls: [toolCall("call-1", "ls | head -3")] }), answer({ content: "README and **src**." })];
-  const peer = new InferPeer({
-    wallet: ephemeralWallet(inferKey), box: i.hub.as(inferKey.toPublicKey().toString()), log: () => {},
-    providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } }, now: () => stampMs(i.clock.now()),
-    fetch: (async () => new Response(JSON.stringify(answers.shift()), { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
-  });
-  const settle = async () => { await i.delivery.poll(); await i.rt.idle(); };
-  const { bundles } = await bundlesOf(join(dir, "tree"));
-  for (const b of bundles) await send(i, "objects", b);
-  await settle();
-  const { signedPart } = await import("../envelope.ts");
-  const chat = encode(signedPart(await send(i, "chat", { text: "What is here?" }))).cid;
-  await settle();
-  await peer.poll(); await settle();
-  await peer.poll(); await settle();
-  await i.rt.stop();
-  await store.close();
-  return { path, chat };
-}
+  const w = await chatWorld(t, join(dir, "tree"));
 
-async function collect<T>(it: AsyncIterable<T>): Promise<string[]> {
-  const out: string[] = [];
-  for await (const x of it) out.push(String(x));
-  return out;
-}
+  const ix = openStoreFile(w.store, { readOnly: true }) as IndexStore;
+  t.after(() => ix.close());
+  assert.ok("state" in ix, "a file with the state pointer gets the index reader");
+  const blocksOnly = openStoreFile(join(dir, "blocks.db"));
+  assert.ok(!("state" in blocksOnly), "any other file gets sqlite.ts's");
+  await blocksOnly.close();
 
-test("index store: the Store, every explorer page and skein-dev answer as over the TS runtime's file", async (t) => {
-  const dir = await fs.mkdtemp(join(tmpdir(), "skein-index-store-"));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
-  const { path, chat } = await instanceFile(dir);
-  const newPath = join(dir, "new.db");
-  await writeIndexFile(path, newPath);
-  assert.ok(hasStatePointer(newPath) && !hasStatePointer(path));
-
-  const old = openStoreFile(path, { readOnly: true });
-  const ix = openStoreFile(newPath, { readOnly: true });
-  t.after(async () => { await old.close(); await ix.close(); });
-  assert.ok("state" in ix && !("state" in old), "each file gets its own reader");
+  // The derivation (index.zig's, done here): the same root for every map.
+  const st = ix.state();
+  const d = await derive(ix);
+  for (const m of MAPS) assert.equal(String(buildTree(d.pairs[m]).root), String(st.roots[m]), `map ${m}`);
 
   // The Store questions.
-  const same = async (what: string, f: (s: SqliteStore) => Promise<unknown>) => assert.deepEqual(JSON.stringify(await f(ix)), JSON.stringify(await f(old)), what);
-  await same("log", async (s) => (await collect((async function* () { for await (const e of s.log.entries()) yield e.cid; })())));
-  await same("log from 3", async (s) => (await collect((async function* () { for await (const e of s.log.entries(3)) yield e.cid; })())));
-  await same("tip", (s) => s.log.tip());
-  await same("cursor", (s) => s.live.cursor.get());
-  const entry = await old.log.byEnvelope(chat);
-  assert.ok(entry);
-  await same("byEnvelope", (s) => s.log.byEnvelope(chat));
-  for (const f of [{}, { kind: "thread" as const }, { kind: "head" as const }, { kind: "thread" as const, orderBy: "tipAt" as const }, { kind: "thread" as const, state: ["waiting" as const] }, { kind: "thread" as const, parentless: true, limit: 2 }]) {
-    await same(`query ${JSON.stringify(f)}`, (s) => collect(s.edges.query(f)));
-  }
-  await same("resting", (s) => collect(s.live.resting()));
-  await same("due", (s) => collect(s.live.due(Number.MAX_SAFE_INTEGER)));
-  const threads = await collect(old.edges.query({ kind: "thread" }));
-  assert.ok(threads.length >= 3);
+  const log = await collect(ix.log.entries());
+  assert.equal(log.length, 5, "the genesis, the import, the chat and the inference answers");
+  assert.ok(log[0]!.entry.genesis, "entry 0 is the genesis");
+  assert.equal(fmt((await ix.log.tip())!), fmt(st.log!));
+  assert.equal(fmt(log.at(-1)!.cid), fmt(st.log!));
+  assert.equal(await ix.live.cursor.get(), log.length, "every entry processed");
+  assert.deepEqual((await collect(ix.log.entries(3))).map((e) => fmt(e.cid)), log.slice(3).map((e) => fmt(e.cid)));
+  const threads = await collect(ix.edges.query({ kind: "thread" }));
+  assert.equal(threads.length, 3, "objects-handler, loop, shell");
+  const waiting = await collect(ix.edges.query({ kind: "thread", state: ["waiting"] }));
+  assert.equal(waiting.length, 1, "the loop awaits the owner's reply");
+  assert.equal((await collect(ix.live.resting())).length, 1);
   for (const th of threads) {
-    const c = (await old.findByPrefix(th))[0];
-    await same(`history ${th}`, (s) => collect(s.chains.history(c)));
-    await same(`tip ${th}`, (s) => s.chains.tip(c));
-    await same(`refsFrom ${th}`, (s) => s.edges.refsFrom(c));
-    await same(`refsTo ${th}`, (s) => s.edges.refsTo(c));
-    await same(`waitersOn ${th}`, (s) => collect(s.live.waitersOn(c)));
-    const last = (await collect(old.chains.history(c))).at(-1)!;
-    await same(`originOf ${th}`, async (s) => s.chains.originOf((await old.findByPrefix(th))[0]).then(async (o) => [o, await s.chains.originOf(await import("./cid.ts").then((m) => m.parse(last)))]));
+    const history = await collect(ix.chains.history(th));
+    assert.ok(history[0]!.equals(th) && history.at(-1)!.equals(await ix.chains.tip(th)), "a chain runs from its origin to its tip");
+    assert.ok((await ix.chains.originOf(history.at(-1)!)).equals(th));
   }
-  await same("awaiting", async (s) => {
-    const out: string[][] = [];
-    for (const th of threads) {
-      const tip = (await old.get(await old.chains.tip((await old.findByPrefix(th))[0]))) as unknown as Json;
-      for (const e of (tip.awaits as ReturnType<typeof encode>["cid"][] | undefined) ?? []) out.push(await collect(s.live.awaiting(e)));
-    }
-    return out;
-  });
-  await same("findByPrefix", async (s) => (await s.findByPrefix("")).map(String).sort());
-  await assert.rejects(ix.chains.append((await ix.findByPrefix(""))[0], { at: 1 }), /readonly/);
+  const loop = waiting[0]!;
+  const shell = (await ix.edges.refsTo(loop)).find((r) => r.rel === "launched-by" && threads.some((th) => th.equals(r.from)));
+  assert.ok(shell, "the shell's thread was launched by the loop");
+  assert.ok((await ix.edges.refsFrom(loop)).some((r) => r.rel === "depends-on" && shell.from.equals(r.to)), "the loop depended on it");
+  assert.ok((await ix.findByPrefix("")).length > 0);
+  await assert.rejects(ix.chains.append(threads[0]!, { at: 1 }), /readonly/);
 
-  // Every explorer page.
-  const w = await load(old);
-  const pages = ["/", "/log", "/log?before=3", "/s", "/threads", "/threads?program=shell", "/threads?state=waiting", "/h/main", "/nope", `/e/${entry}`, "/e/0"];
-  for (const th of w.threads) pages.push(`/t/${th.cid}`, `/t/${th.cid}?frag=1`, `/t/${th.cid}?tip=1`, `/r/${th.cid}`, `/t/${th.cid.toString().slice(-10)}`);
-  for (const { cid } of w.log) pages.push(`/e/${cid}`, `/r/${cid}`);
-  for (const th of w.threads) for (const { cid } of th.updates) pages.push(`/r/${cid}`);
-  for (const p of pages) {
-    const a = await render(old, new URL(p, "http://x")), b = await render(ix, new URL(p, "http://x"));
-    assert.equal(b.status, a.status, `${p}: status`);
-    assert.equal(b.body, a.body, `${p}: body`);
-  }
-  assert.equal((await render(ix, new URL("/", "http://x"))).status, 200);
-
-  // skein-dev over the file, and its replay against the index store.
-  const outs: string[] = [];
-  assert.equal(await replay(ix, { out: (l) => outs.push(l), err: (l) => outs.push(`! ${l}`), write: () => {} }), 0, outs.join("\n"));
+  // skein-dev over the file.
   const bin = fileURLToPath(new URL("../../bin/skein-dev", import.meta.url));
-  const dev = (db: string, ...args: string[]) => spawnSync(bin, args, { env: { ...process.env, SKEIN_DB: db }, encoding: "utf8" });
-  for (const args of [["log"], ["ls"], ["show", threads[0].slice(-12)], ["refs", threads[0].slice(-12)], ["replay"]]) {
-    const a = dev(path, ...args), b = dev(newPath, ...args);
-    assert.equal(b.status, 0, `skein-dev ${args.join(" ")}: ${b.stderr}`);
-    assert.equal(b.stdout, a.stdout, `skein-dev ${args.join(" ")}`);
-  }
-  const rb = dev(newPath, "rebuild");
-  assert.notEqual(rb.status, 0);
-  assert.match(rb.stderr, /Zig kernel/);
+  const dev = (...args: string[]) => spawnSync(bin, args, { env: { ...process.env, SKEIN_DB: w.store }, encoding: "utf8" });
+  const l = dev("log");
+  assert.equal(l.status, 0, l.stderr);
+  assert.match(l.stdout, new RegExp(`^state ${fmt(st.log!)} · processed 5/5$`, "m"));
+  const ls = dev("ls");
+  assert.equal(ls.status, 0, ls.stderr);
+  assert.equal(ls.stdout.trim().split("\n").length, 3);
+  const show = dev("show", fmt(loop).slice(-12));
+  assert.equal(show.status, 0, show.stderr);
+  assert.match(show.stdout, /"kind": "thread"/);
+  const refs = dev("refs", fmt(loop).slice(-12));
+  assert.equal(refs.status, 0, refs.stderr);
+  assert.match(refs.stdout, /launched/);
+  assert.equal(dev("replay").status, 2, "no replay here: it is the kernel's (skein-kernel replay)");
 });

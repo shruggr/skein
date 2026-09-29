@@ -1,20 +1,11 @@
-// `skein-host run` as a supervisor (#23, "a process per instance"): each
-// instance is its own OS process — `bin/skein-runtime` (main.ts, the same
-// kernel configuration a single instance runs), one per enabled host.db row,
-// with the row in its environment. Nothing is shared in-process between
-// instances; host.db (which each child reads, read-only, for its resolver),
-// the host wallet and the messagebox are the only common things, and each is
-// reached over its own interface.
-//
-// The supervisor starts every child, prefixes each line it writes with
-// `[handle]`, restarts a child that exits (after a backoff: base, doubling to
-// max; a child that ran at least `stableMs` starts again at base), and stops
-// them all with SIGTERM (SIGKILL after `killAfterMs`). A child is `ready` once
-// it prints `skein runtime <identity> …`: the supervisor records that
-// identity in the row if the row has none, and starts the row's explorer
-// (`bin/skein-explore <port>` over the row's store, read-only), supervised
-// the same way. Children talk to it over an IPC channel only so that they
-// stop when it is gone (main.ts: `disconnect`).
+// The child processes `skein-host run` keeps beside the router: one
+// `bin/skein-explore <port>` per enabled row, over the row's store, read-only
+// (the kernels are the router's, router.ts). The supervisor starts every
+// child, prefixes each line it writes with its name (`[martha explore]`),
+// restarts a child that exits (after a backoff: base, doubling to max; a
+// child that ran at least `stableMs` starts again at base), and stops them
+// all with SIGTERM (SIGKILL after `killAfterMs`). Children talk to it over an
+// IPC channel only so that they stop when it is gone.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -47,9 +38,6 @@ export class Supervised {
   proc?: ChildProcess;
   /** Times it was started again after exiting. */
   restarts = 0;
-  /** Its `skein runtime <identity>` line was seen since it last started. */
-  ready = false;
-  identity?: string;
   lastExit?: { code: number | null; signal: string | null };
   private startedAt = 0;
   private delay: number;
@@ -76,14 +64,12 @@ export class Supervised {
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     });
     this.proc = p;
-    this.ready = false;
     this.startedAt = Date.now();
     const tag = `[${this.spec.name}]`;
     createInterface({ input: p.stdout! }).on("line", (l) => { this.o.out(`${tag} ${l}`); this.line(l); });
     createInterface({ input: p.stderr! }).on("line", (l) => this.o.err(`${tag} ${l}`));
     p.on("error", (e) => this.o.err(`${tag} ${e.message}`)); // could not spawn: "close" follows
     this.exited = new Promise((resolve) => p.once("close", (code, signal) => {
-      this.ready = false;
       this.lastExit = { code, signal };
       resolve();
       if (this.stopping) return;
@@ -96,8 +82,6 @@ export class Supervised {
   }
 
   private line(l: string): void {
-    const m = /^skein runtime (0[23][0-9a-f]{64}) /.exec(l);
-    if (m) { this.ready = true; this.identity = m[1]; }
     this.onLine?.(l, this);
   }
 

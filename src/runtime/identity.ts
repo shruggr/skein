@@ -1,7 +1,6 @@
-// Identities under the connected wallet. The runtime sees the wallet only as
-// `KeyWallet` (BRC-100's getPublicKey + createSignature); how it is connected
-// (a remote wallet-api over HTTP, an in-process wallet) is src/wallet.ts,
-// outside the machine, handed in by main.ts.
+// Identities under a wallet, seen only as `KeyWallet` (BRC-100's
+// getPublicKey + createSignature); how it is connected (a remote wallet-api
+// over HTTP, an in-process wallet) is src/wallet.ts.
 
 import { createHash } from "node:crypto";
 import { PrivateKey, PublicKey, Signature, type WalletInterface, type WalletProtocol } from "@bsv/sdk";

@@ -1,7 +1,7 @@
 // Fixtures for the Zig kernel's unit tests (src/tests.zig), made by the
-// TypeScript reference itself: dag-cbor encodings and CIDs, the canonical
+// TypeScript formats (src/runtime): dag-cbor encodings and CIDs, the canonical
 // form of non-canonical input, "anyone" signatures (log entries, envelopes),
-// JCS, the entropy stream. Regenerate with
+// JCS, the entropy stream, the shell's program record. Regenerate with
 //   node --experimental-strip-types --no-warnings kernel-zig/test/fixtures.ts > kernel-zig/test/fixtures.json
 // (the keys are fixed, so the output is stable).
 
@@ -13,11 +13,11 @@ import { canonical, jcs, verify } from "../../src/runtime/envelope.ts";
 import { sign } from "../../src/envelope.ts";
 import { signAnyone, verifyAnyone } from "../../src/runtime/identity.ts";
 import { entryBytes, LOG_KEY_ID, LOG_PROTOCOL } from "../../src/runtime/log.ts";
-import { PROGRAMS, PROGRAM_CIDS, MODULES } from "../../src/runtime/programs.ts";
+import { MODULES, SHELL_CID, SHELL_PROGRAM, WALLET } from "../../src/runtime/programs.ts";
 import { headOrigin } from "../../src/runtime/heads.ts";
 import { subscriptionsOrigin } from "../../src/runtime/subscriptions.ts";
 import { entropy } from "../../src/runtime/syscalls.ts";
-import { EMPTY_TREE } from "../../src/runtime/shell.ts";
+import { EMPTY_TREE } from "../../src/runtime/tree.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
@@ -27,7 +27,7 @@ const values: unknown[] = [
   "", "a", "héllo ☃ 𝄞", new Uint8Array([0, 1, 2, 255]), [1, [2, [3]]], {},
   { b: 1, a: 2, aa: 3, "": 4, "é": 5, z: { y: [null, "x"] } },
   { kind: "log", prev: null, n: 0, time: [1_790_000_000, 250_000_000], genesis: MODULES.brush, sig: new Uint8Array([48, 1]) },
-  ...Object.values(PROGRAMS),
+  SHELL_PROGRAM, WALLET,
 ];
 
 const cbor = values.map((v) => { const { cid, bytes } = encode(v); return { hex: hex(bytes), cid: cid.toString() }; });
@@ -58,7 +58,7 @@ const reject = [
 const hostKey = new PrivateKey(0x1234567n.toString(16), 16);
 const host = ephemeralWallet(hostKey);
 const hostId = (await host.getPublicKey({ identityKey: true })).publicKey;
-const entry = { kind: "log" as const, prev: null, n: 0, time: [1_790_000_000, 250_000_000] as [number, number], genesis: PROGRAM_CIDS.shell };
+const entry = { kind: "log" as const, prev: null, n: 0, time: [1_790_000_000, 250_000_000] as [number, number], genesis: SHELL_CID };
 const eb = entryBytes(entry as never);
 const esig = await signAnyone(host, LOG_PROTOCOL, LOG_KEY_ID, eb);
 const signatures = [
@@ -68,21 +68,20 @@ const signatures = [
 
 const inst = ephemeralWallet(new PrivateKey(0x7654321n.toString(16), 16));
 const rcpt = (await ephemeralWallet(new PrivateKey(0x99n.toString(16), 16)).getPublicKey({ identityKey: true })).publicKey;
-const body = encode({ text: "hi", replyTo: PROGRAM_CIDS.loop }).bytes;
+const body = encode({ text: "hi", replyTo: SHELL_CID }).bytes;
 const signed = await sign(inst, { recipient: { identityKey: rcpt, handle: "david", domain: "localhost" }, sender: { handle: "skein", domain: "localhost" }, body, created: "2026-09-27T12:00:00.000Z" });
 const envelope = { signed: hex(encode(signed).bytes), jcs: canonical(signed), ok: verify(signed) };
 
 const jcsCases = [{ b: [1, 2.5, "x\n\u0001\"\\"], a: null, "é": true, "\u{1D11E}": 1, "": 2 }].map((v) => ({ hex: hex(encode(v).bytes), jcs: jcs(v) }));
 
 const e1 = CID.parse("bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
-const ent = { entry: e1.toString(), thread: PROGRAM_CIDS.loop.toString(), bytes: hex(entropy(e1, PROGRAM_CIDS.loop)(100)) };
+const ent = { entry: e1.toString(), thread: SHELL_CID.toString(), bytes: hex(entropy(e1, SHELL_CID)(100)) };
 
 const cids = {
-  shell: PROGRAM_CIDS.shell.toString(),
+  shell: SHELL_CID.toString(),
   headMain: headOrigin("main").toString(),
   subscriptions: subscriptionsOrigin().toString(),
   emptyTree: EMPTY_TREE.toString(),
-  programs: Object.fromEntries(Object.entries(PROGRAM_CIDS).map(([k, v]) => [k, v.toString()])),
 };
 
 process.stdout.write(JSON.stringify({ cbor, normalize, reject, signatures, envelope, jcs: jcsCases, entropy: ent, cids }, null, 1) + "\n");

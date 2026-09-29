@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# The Zig kernel's checks: unit tests, the shell cases against the TS shell
-# (stdout/stderr/exit/tree carry no fuel), git in the VM, and replay
+# The Zig kernel's checks: unit tests, the shell cases against the results
+# recorded from the TS shell (equiv/shell-expected.json, issue #55;
+# stdout/stderr/exit/tree carry no fuel), git in the VM, and replay
 # exactness Zig against Zig (issue #5: from fuel on the Zig kernel is its own
 # reference) over a generated corpus (format 2, issue #33: written by the Zig
 # kernel as the router drives it) and over the stores `serve` writes.

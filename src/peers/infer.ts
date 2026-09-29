@@ -34,7 +34,8 @@
 // (skein-infer: SKEIN_INFER_PEERS; scripts/host/up.sh writes every agent's
 // there). Nobody registers with it: a request from a key not in the address
 // book has nowhere to go, and is dropped with one line saying so. The
-// envelope transport (`box`) is the one the frozen TypeScript runtime speaks.
+// envelope transport (`box`): BRC-169 envelopes (§7.2, JSON) over any BRC-33
+// messagebox, one listed message per request.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -44,7 +45,7 @@ import { CID } from "multiformats/cid";
 import { isoTime, open, seal, type Envelope } from "../envelope.ts";
 import { asEnvelope, inspect, isCborEnvelope, openCbor, sealCbor, wrapCbor, type AnyEnvelope } from "../envelope-cbor.ts";
 import { encode } from "../runtime/cid.ts";
-import type { Listed, MessageBox } from "../host/messagebox.ts";
+import type { Listed, MessageBox } from "../host/brc231.ts";
 import type { Listed as RawListed } from "../client/raw.ts";
 
 /** The raw transport (#40): its own mailbox, a session per peer messagebox, its address book. */
@@ -160,7 +161,7 @@ export class NodeGraph {
 
 export interface InferOptions {
   wallet: WalletInterface;
-  /** The envelope transport (the frozen TypeScript runtime's). */
+  /** The envelope transport: BRC-169 envelopes over a BRC-33 messagebox. */
   box?: MessageBox;
   /** The raw transport (#40). */
   raw?: RawTransport;

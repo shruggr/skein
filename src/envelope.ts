@@ -1,6 +1,6 @@
 // BRC-169 §7.2 envelopes, as skein sends and receives them (docs/MESSAGES.md).
 // The wallet operations (sign, encrypt, seal, open) for the client (src/client),
-// the peers and the messagebox provider (src/host/messagebox.ts), over the
+// the peers and the host, over the
 // pure part in src/runtime/envelope.ts (re-exported here). Outside
 // src/runtime: `seal` draws a random BRC-78 key id and reads the clock for
 // `created`, which the machine never does — an instance's own envelopes are

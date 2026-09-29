@@ -1,7 +1,7 @@
 // wasi_snapshot_preview1 over a Vfs, for one process (one wasm instance),
 // plus the `skein` imports the patched brush uses (cmd_exists, pipe, spawn)
-// and, for handler programs, the skein syscalls (program.zig). A port of
-// src/runtime/wasi/host.ts; host-go/wasi.go was the first port and proved the
+// and, for handler programs, the skein syscalls (program.zig). A port of the
+// TypeScript WASI host (deleted in #55); host-go/wasi.go was the first port and proved the
 // method. Nothing here touches the host: the filesystem is the tree, stdio are
 // in-memory pipes, clock/random/sleep/spawn come from the run.
 const std = @import("std");

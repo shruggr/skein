@@ -4,7 +4,7 @@
 // log by n, chains, thread states, sleepers, awaits, edges, heads — is blocks
 // like any other record; nothing about it is a schema.
 //
-// A file the TypeScript runtime (or the kernel before #30) wrote has the log
+// A file the kernel before #30 (or the deleted TypeScript runtime) wrote has the log
 // in `entries` and the index in `chains`/`updates`/`edges`. Opened here, it
 // is imported: the maps are built from those rows (the log from `entries`,
 // every chain from its origin and updates, all derived as the incremental
@@ -297,7 +297,7 @@ pub const SqliteStore = struct {
     }
 
     fn stale(path: []const u8) error{StaleIndex} {
-        std.log.err("{s}: an older store whose index needs a rebuild (skein-dev rebuild)", .{path});
+        std.log.err("{s}: an older store whose tables' index is stale (from before #30): nothing rebuilds it", .{path});
         return error.StaleIndex;
     }
 

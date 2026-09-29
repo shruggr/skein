@@ -1,13 +1,12 @@
 {
   "name": "skein",
   "version": "0.0.1",
-  "description": "A deterministic WASI machine over a content-addressed graph: the runtime, its peers, and dev tools.",
+  "description": "A deterministic WASI machine over a content-addressed graph: the node host, the client, its peers, and dev tools (the kernel is kernel-zig).",
   "type": "module",
   "bin": {
     "skein": "./bin/skein",
     "skein-dev": "./bin/skein-dev",
     "skein-explore": "./bin/skein-explore",
-    "skein-runtime": "./bin/skein-runtime",
     "skein-host": "./bin/skein-host",
     "skein-infer": "./bin/skein-infer"
   },

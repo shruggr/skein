@@ -49,7 +49,7 @@ fn sayf(comptime fmt: []const u8, args: anytype) void {
 
 fn die(comptime fmt: []const u8, args: anytype) noreturn {
     var buf: [4096]u8 = undefined;
-    const s = std.fmt.bufPrint(&buf, "skein-runtime: " ++ fmt ++ "\n", args) catch "skein-runtime: error\n";
+    const s = std.fmt.bufPrint(&buf, "skein-kernel serve: " ++ fmt ++ "\n", args) catch "skein-kernel serve: error\n";
     std.Io.File.stderr().writeStreamingAll(io, s) catch {};
     std.process.exit(1);
 }

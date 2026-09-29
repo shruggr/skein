@@ -76,6 +76,9 @@ export function hashTree(entries: Entry[]): { cid: CID; object: Uint8Array } {
   return { cid: sha1Cid(createHash("sha1").update(object).digest()), object };
 }
 
+/** The empty tree: what a run with no tree starts from (the kernel's tree.zig hashTree(&.{})). */
+export const EMPTY_TREE = hashTree([]).cid;
+
 // ---------------------------------------------------------------- reading
 
 function body(object: Uint8Array, type: "blob" | "tree", cid?: CID): Buffer {

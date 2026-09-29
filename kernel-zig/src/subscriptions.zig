@@ -1,4 +1,4 @@
-// Subscriptions (src/runtime/subscriptions.ts): the routing table as one chain,
+// Subscriptions (docs/VM.md; src/runtime/subscriptions.ts reads the chain): the routing table as one chain,
 // origin {kind: "subscriptions"}, one update per change {op, sender?, box,
 // handler, thread?, input, at}; the rules are the updates folded in order.
 // The sender is an identity key's 33 bytes (format 2, #33).

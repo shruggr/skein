@@ -1,5 +1,5 @@
-// A mutable, copy-on-write view of a git-shaped tree (src/runtime/wasi/vfs.ts,
-// host-go/vfs.go). Nodes load lazily from the store; a node keeps its CID
+// A mutable, copy-on-write view of a git-shaped tree (ported from the
+// TypeScript vfs, deleted in #55, and host-go/vfs.go). Nodes load lazily from the store; a node keeps its CID
 // until something under it changes, so commit() re-hashes only the changed
 // spine. Inode numbers are handed out in load order, as the Node host does.
 const std = @import("std");

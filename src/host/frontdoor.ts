@@ -18,7 +18,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { now as clockNow } from "./entry.ts";
+import { now as clockNow } from "./clock.ts";
 import { admit2 } from "./genesis.ts";
 import type { CallAnswer, Kernel } from "./kernel.ts";
 

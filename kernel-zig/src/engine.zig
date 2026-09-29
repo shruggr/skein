@@ -66,8 +66,8 @@ pub const Trap = enum {
     out_of_fuel,
     other,
 
-    /// What V8 says for the same trap (a RuntimeError's message), which the
-    /// TypeScript runtime writes as "<argv0>: trapped: <message>".
+    /// What V8 says for the same trap (a RuntimeError's message), written
+    /// as "<argv0>: trapped: <message>" (as the TypeScript shell did).
     /// Stack overflow is not a RuntimeError under V8 but a RangeError. Checked
     /// against Node 26 with hand-built modules (README, "What is not the same").
     pub fn v8Message(t: Trap) []const u8 {

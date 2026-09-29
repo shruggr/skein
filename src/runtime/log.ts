@@ -13,28 +13,23 @@
 //             | "failed", reason?}    refusal, or transient errors past its retry bound
 //     sig }
 //
-// The tip entry's CID is the instance's **state hash**. An entry is the host's
-// statement — "message n arrived at t", "wake at t", "emit e was delivered
-// (or failed) at t" — so `sig` is the host's
-// signature (the host wallet, not the instance's) over the entry's dag-cbor
-// without `sig`: protocol [2, "skein log"], key "1", counterparty anyone, so
-// anyone holding the genesis's `host` can check every stamp and every kick
-// (verifyEntry). It is made once, by the provider that delivers the entry
-// (src/host: the messagebox delivery for admissions and outcomes, the tick for wakes),
-// through the host wallet; the runtime admits the finished entry
-// (Runtime.admit) and verifies it. Replay copies the entry and verifies it,
-// never re-signs.
+// The tip entry's CID is the instance's **state hash**. In this format (1)
+// an entry is the host's statement — "message n arrived at t", "wake at t",
+// "emit e was delivered (or failed) at t" — so `sig` is the host's signature
+// over the entry's dag-cbor without `sig`: protocol [2, "skein log"], key "1",
+// counterparty anyone, so anyone holding the genesis's `host` can check every
+// stamp (verifyEntry). The kernel writes format 3 (issues #33, #40;
+// kernel-zig/src/log.zig): the same chain with no `sig` (no host key) and mail
+// entries; src/host/genesis.ts builds them over nextEntry.
 //
 // `time` is the host's clock at admission, never before the previous entry's.
-// Nothing in src/runtime reads a clock; everything inside derives time from
-// these stamps (syscalls.ts).
+// Everything inside the machine derives time from these stamps (syscalls.ts).
 
 import type { WalletProtocol } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "./cid.ts";
-import { rootIdentity, verifyAnyone, type KeyWallet } from "./identity.ts";
-import { isGenesis, type Genesis, type Identity, type Subscription } from "./records.ts";
-import { PROGRAM_CIDS } from "./programs.ts";
+import { verifyAnyone } from "./identity.ts";
+import { isGenesis, type Genesis, type Identity } from "./records.ts";
 import type { LogEntry, Outcome, Store } from "./store.ts";
 import { maxStamp, type Stamp } from "./syscalls.ts";
 import type { Ms } from "./types.ts";
@@ -77,8 +72,8 @@ export type EntryBody = { genesis: CID } | { envelope: CID; box: string; body: C
 
 /**
  * The next entry, unsigned: extending the tip, stamped `time` (raised to the
- * tip's stamp if earlier). What a provider signs; the store refuses an entry
- * that no longer extends its tip.
+ * tip's stamp if earlier). The store refuses an entry that no longer extends
+ * its tip.
  */
 export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Promise<Omit<LogEntry, "sig">> {
   const tipCid = await store.log.tip();
@@ -86,65 +81,15 @@ export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Pro
   return { kind: "log" as const, prev: tipCid ?? null, n: tip ? tip.n + 1 : 0, time: tip ? maxStamp(time, tip.time) : time, ...body };
 }
 
-export interface InstanceConfig {
-  /** The identity the instance acts for; the default subscriptions route its `run`, `objects`, `head`, `chat` and `subscribe` boxes. */
-  owner: Identity;
-  handle?: string;  // default "skein"
-  domain?: string;  // default "localhost"
-  /** The seed of the subscriptions chain (subscriptions.ts): its first updates, in order. Every rule names a box. Default: defaultSubscriptions(owner). */
-  subscriptions?: Subscription[];
-  /** Peers by role: `infer` is the inference peer the loop asks. */
-  peers?: Record<string, Identity>;
-  /** Default: {model: "ripper/qwen38", thinking: "off", fuelPerStep: "1000000000000"}. */
-  defaults?: Record<string, string>;
-  /** Handles for the owner and peers, by identity: what the programs' outbound envelopes name them. */
-  names?: Record<Identity, { handle: string; domain: string }>;
-  /** Reply-only boxes the delivery provider collects, beyond the subscribed ones. Default: ["completions"] (answers to `infer`). Other parties' replies to the loop arrive in `chat`, which the subscriptions route. */
-  collect?: string[];
-}
-
 /**
  * `fuelPerStep` (issue #5): the one limit on a step's fuel (wasm instructions)
  * in the Zig kernel, which records every step's fuel on its update; a step
  * that runs out ends `errored`, "fuel exhausted". 10^12, generous until
- * something hits it. The TS runtime does not meter.
+ * something hits it.
  */
 export const FUEL_PER_STEP = "1000000000000";
 
 export const DEFAULTS: Record<string, string> = { model: "ripper/qwen38", thinking: "off", fuelPerStep: FUEL_PER_STEP };
-
-/** The owner's boxes: (owner, run) → run-handler, (owner, objects) → objects-handler, (owner, head) → head-handler, (owner, chat) → loop, (owner, subscribe) → subscribe-handler. */
-export function defaultSubscriptions(owner: Identity): Subscription[] {
-  return [
-    { match: { sender: owner, box: "run" }, handler: PROGRAM_CIDS["run-handler"] },
-    { match: { sender: owner, box: "objects" }, handler: PROGRAM_CIDS["objects-handler"] },
-    { match: { sender: owner, box: "head" }, handler: PROGRAM_CIDS["head-handler"] },
-    { match: { sender: owner, box: "chat" }, handler: PROGRAM_CIDS.loop },
-    { match: { sender: owner, box: "subscribe" }, handler: PROGRAM_CIDS["subscribe-handler"] },
-  ];
-}
-
-/** `chat` from anyone → loop: no sender, so it matches every sender (records.ts `matches`); after the owner's, first match wins. */
-export const OPEN_CHAT: Subscription = { match: { box: "chat" }, handler: PROGRAM_CIDS.loop };
-
-/** The genesis record for a config: the instance identity is the instance wallet's, `host` the host wallet's. */
-export async function genesisFor(wallet: KeyWallet, host: KeyWallet, c: InstanceConfig): Promise<Genesis> {
-  for (const s of c.subscriptions ?? []) if (!s.match.box) throw new TypeError("genesis: every seed subscription names a box");
-  return {
-    kind: "genesis",
-    identity: await rootIdentity(wallet),
-    handle: c.handle ?? "skein",
-    domain: c.domain ?? "localhost",
-    owner: c.owner,
-    host: await rootIdentity(host),
-    programs: { ...PROGRAM_CIDS },
-    subscriptions: c.subscriptions ?? defaultSubscriptions(c.owner),
-    ...(c.peers && Object.keys(c.peers).length ? { peers: c.peers } : {}),
-    defaults: c.defaults ?? DEFAULTS,
-    ...(c.names && Object.keys(c.names).length ? { names: c.names } : {}),
-    collect: c.collect ?? ["completions"],
-  };
-}
 
 /** The log as records, in order. */
 export async function readLog(store: Store): Promise<Array<{ cid: CID; entry: LogEntry }>> {
@@ -161,22 +106,6 @@ export async function genesisOf(store: Store): Promise<Genesis> {
     return g;
   }
   throw new Error("log: empty");
-}
-
-/**
- * Copy a log into another store — its entries exactly as signed, and the
- * records they name (genesis, programs, envelopes, bodies) — verifying every
- * signature. What replay feeds a fresh runtime. No wallet, no keys.
- */
-export async function copyLog(from: Store, to: Store): Promise<void> {
-  const g = await genesisOf(from);
-  for (const p of Object.values(g.programs)) await to.putBlock(p, await from.bytes(p));
-  for await (const { cid, entry } of from.log.entries()) {
-    if (!verifyEntry(entry, g.host)) throw new Error(`log: entry #${entry.n} (${short(cid)}) has a bad signature`);
-    for (const c of [entry.genesis, entry.envelope, entry.body]) if (c) await to.putBlock(c, await from.bytes(c));
-    const copied = await to.log.append(entry);
-    if (!copied.equals(cid)) throw new Error(`log: entry #${entry.n} copied to a different CID`);
-  }
 }
 
 /** Short form for log lines. */

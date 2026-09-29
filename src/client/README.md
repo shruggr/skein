@@ -20,7 +20,7 @@ skein whoami
 skein import <dir>                                   # tree objects -> box objects; prints the tree CID
 skein run [--tree <cid>] [--cwd p] [--env K=V]... -- '<cmd>'   # no --tree: the instance's `main` head
 skein head <name> <cid>                              # box head: "<name> is now <cid>"
-skein subscribe add|remove [--sender <key>] <box> <handler>   # box subscribe; handler: a built-in name (loop, run-handler, …) or a program CID
+skein subscribe add|remove [--sender <key>] <box> <handler>   # box subscribe; handler: a program record CID (skein-host subscribe also takes a name the genesis gives)
 skein inbox [--wait] [--timeout s] [--no-ack] [--json]
 skein chat "<text>" [--tree <cid>] [--model ripper/qwen38] [--new] [--wait] [--timeout s]
 skein talk [--tree <cid>] [--model m] [--new] [--timeout s]

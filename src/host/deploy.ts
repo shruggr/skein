@@ -23,7 +23,7 @@ import { hashDir, recordBundles } from "../client/client.ts";
 import { defaultIgnore } from "../dev/scan.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { rootIdentity } from "../runtime/identity.ts";
-import { genesisOf, short } from "../runtime/log.ts";
+import { short } from "../runtime/log.ts";
 import type { Store } from "../runtime/store.ts";
 import { hashBlob, hashTree, readTree, type TreeBlocks } from "../runtime/tree.ts";
 import type { WalletInterface } from "../wallet.ts";
@@ -187,11 +187,11 @@ async function checked(o: { row: InstanceRow; owner: WalletInterface; store?: St
   const me = await rootIdentity(o.owner);
   const store = o.store && (await o.store.log.tip()) ? o.store : undefined;
   if (store) {
-    // A format-1 genesis (hex, host-signed) or a format-2 one (bytes; read through index-store's display as hex).
-    const g = await genesisOf(store).catch(async () => {
+    // The kernel's genesis keeps keys as bytes; index-store's reader shows them as hex.
+    const g = await (async () => {
       for await (const { entry } of store.log.entries()) if (entry.genesis) return await store.get<{ kind: string; owner: string; identity: string }>(entry.genesis);
       throw new Error(`${row.handle}: its store's log has no genesis`);
-    });
+    })();
     if (g.owner !== me) throw new Error(`${row.handle}: the owner wallet is ${short(me)}, but the instance's genesis owner is ${short(g.owner)}: it would not admit these`);
     if (g.identity !== row.identity) throw new Error(`${row.handle}: the store's identity ${short(g.identity)} is not the row's ${short(row.identity)}`);
   }

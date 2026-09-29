@@ -21,16 +21,17 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 ## Layout
 
 ```
-src/runtime/     the machine — no disk, network, clock, randomness, messagebox or private key
-  scheduler.ts     the log consumer: admit, route by subscription, step programs and the shell, recorded calls, replay
-  log.ts           the input log: host-signed entries (genesis | envelope | wake | outcome), verified at admission
-  program.ts       one step of a handler program; wasi/skein-imports.ts is its `skein` import namespace
-  programs.ts      the program records (shell, run-handler, objects-handler, head-handler, subscribe-handler, loop) and pinned module CIDs
+src/runtime/     the formats and the store reader, in TypeScript — no machine (the kernel is kernel-zig);
+                 no network, clock, randomness, messagebox or private key; the seed of a JS runtime (#55)
+  cid.ts records.ts types.ts   dag-cbor blocks and CIDs; record kinds (genesis, program, subscription, message, emit, attested)
+  log.ts           log entries (genesis | envelope | wake | outcome), their signed bytes, the genesis a log starts with
   heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
-  subscriptions.ts the routing table: one chain per instance, seeded by the genesis, changed by `subscribe`
-  shell.ts wasi/   the wasm shell (brush + uutils coreutils) and the WASI host
-  syscalls.ts      pure time (entry stamp + 1 ns per read), sleep, random (keyed by entry CID)
-  store.ts sqlite.ts memory.ts cid.ts records.ts types.ts tree.ts identity.ts
+  subscriptions.ts the routing table's chain, read (the kernel writes it)
+  tree.ts          git-shaped trees and blobs (git-raw/sha1 CIDs)
+  identity.ts envelope.ts bitcoin.ts   BRC-42/43 identities and "anyone" signatures; BRC-169 §7.2 checks; the bitcoin IPLD codecs
+  syscalls.ts      log-entry stamps and the entropy stream (keyed by entry CID)
+  programs.ts      the pinned shell modules, the wallet, the shell's program record (the kernel's pins are kernel-zig/src/programs.zig)
+  store.ts         the Store interface; index-store.ts reads the kernel's store file (#30), sqlite.ts a plain one
 src/host/        the host, outside the machine
   router.ts        `skein-host run` (#33): the BRC-33 messagebox (auth.ts: BRC-104), hydrate/idle-stop kernels, the waker, delivery and outcomes
   kernel.ts        one `skein-kernel serve` process: frames on stdin/stdout; answers its wallet (the oracle) and resolve calls
@@ -39,26 +40,25 @@ src/host/        the host, outside the machine
   vmmail.ts mail.ts  mail for hosted identities, kept by an instance's messagebox program
   brc231.ts        a BRC-231 (dag-cbor) messagebox client
   cli.ts           `skein-host`: the management database (instances.ts, host.db), the router, deploy, roster
-  host.ts          the resolver (rows, BRC-169, paymail); startInstance (the frozen TS runtime)
   supervisor.ts    the explorers' supervisor
-  messagebox.ts tick.ts entry.ts main.ts   the frozen TS runtime's providers (format 1: host-signed entries)
 kernel-zig/      the kernel (Zig): store, log, scheduler, WASI, programs through wasmtime; `skein-kernel serve|replay|shell|dump|fuel`
 src/envelope.ts  BRC-169 §7.2 (JSON) envelopes: sign/seal/open through a wallet (shared with the client); the pure part (canonical form, contentHash, BRC-78 framing, verify) is src/runtime/envelope.ts
 src/envelope-cbor.ts  BRC-169 §7.3 (dag-cbor) envelopes: seal, verify, open; either form from a BRC-33 body
 src/client/      David's client (`bin/skein`): import, run, chat, inbox
 src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-infer`, the inference peer)
-src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs|rebuild`
+src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs` (replay is `skein-kernel replay`)
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
 programs/        the stock programs, all Zig (#54): run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop), messagebox, frontdoor, resolve, wire-probe (a test); lib/ (the `skein` imports and the helpers over them)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
-wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (and src/runtime/programs.ts, whose handler builds are wasm/v1/)
+wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (the shell's and the wallet's also in src/runtime/programs.ts)
 ```
 
 `src/runtime/isolation.test.ts` fails if anything under `src/runtime` imports
 `node:fs`, `child_process`, `http(s)`, `net`…, `@bsv/message-box-client` or
 anything outside `src/runtime`, or uses `fetch`, `Date.now`, `Math.random`,
-`randomBytes`, timers, `process.env` or a private key — with no exceptions.
+`randomBytes`, timers, `process.env` or a private key — with no exceptions:
+the formats stay usable by a runtime that gets those only through its host.
 
 ## Running it
 
@@ -91,10 +91,6 @@ bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers wi
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
 npm test
 ```
-
-`bin/skein-runtime` (`src/host/main.ts`) is the frozen TypeScript runtime as a
-standalone process (format 1: host-signed entries, its own handler builds in
-`wasm/v1/`); nothing in the dev stack runs it any more.
 
 ### The host: `skein-host`
 

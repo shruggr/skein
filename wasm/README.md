@@ -1,9 +1,9 @@
 # wasm/
 
-The programs the wasm shell (`src/runtime/shell.ts`) runs: brush + uutils
+The programs the wasm shell (`kernel-zig/src/shell.zig`) runs: brush + uutils
 coreutils, the toolset of issue #13 (search/edit/structured-data
-commands beyond coreutils, registered in `Modules.extra`), git (issue
-#2, also in `Modules.extra`), and the script runtimes of issue #25
+commands beyond coreutils, registered in `tool_names`, kernel-zig/src/programs.zig), git (issue
+#2, also in `tool_names`), and the script runtimes of issue #25
 (`qjs`/`node`, `python`/`python3`; see "Script runtimes" below). All WASI
 preview1 modules (`wasm32-wasip1`), built with Rust 1.98.1 (git and qjs: C,
 wasi-sdk 34; python: a pinned upstream build) and stripped of symbols.
@@ -346,11 +346,6 @@ lacks (`pwd.h`, `grp.h`, `netdb.h`, `syslog.h`, `termios.h`, `sys/wait.h`).
   should work; untested.) **Pager**: never started (no tty).
 - `rebase`, `cherry-pick`, `revert`, `am` and `stash` as a verb were not
   tested (merge does exercise `stash create`).
-- Under the TypeScript runtime (frozen), git runs too, because it is in
-  the shell program's module list and both runtimes must agree on that
-  list. There is no synthetic object directory there, though: a loose
-  object is an ordinary file, i.e. a zlib blob of the object, stored a
-  second time.
 
 ## Script runtimes (issue #25)
 
@@ -412,7 +407,7 @@ every `.py` file, packed **stored** (the build has no `zlib`, so
 `zipimport` could not inflate) with fixed timestamps, sorted. It is a raw
 block like the modules (`FILES` in `src/runtime/programs.ts`,
 `skein-dev install` puts it in the store). The shell mounts it read-only
-for python processes only (`Modules.support`, a second WASI preopen) at
+for python processes only (`supported` in programs.zig, a second WASI preopen) at
 `/opt/skein/python/lib/python314.zip`, with `PYTHONHOME=/opt/skein/python`
 and `PYTHONDONTWRITEBYTECODE=1` as environment defaults (the caller's env
 wins). The mount is not in the tree, never committed, and other programs

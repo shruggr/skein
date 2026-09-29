@@ -8,7 +8,7 @@
 //   skein import <dir>
 //   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
 //   skein head <name> <tree-cid>
-//   skein subscribe add|remove [--sender <identity-key>] <box> <handler-name-or-cid>
+//   skein subscribe add|remove [--sender <identity-key>] <box> <handler-cid>
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
 //   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
 //   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
@@ -35,7 +35,7 @@ export const USAGE = `usage:
   skein import <dir>
   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
   skein head <name> <tree-cid>
-  skein subscribe add|remove [--sender <identity-key>] <box> <handler-name-or-cid>
+  skein subscribe add|remove [--sender <identity-key>] <box> <handler-cid>
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]`;

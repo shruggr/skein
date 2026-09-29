@@ -1,8 +1,7 @@
 // `skein-kernel dump <store.db>`: a store's derived state as JSON, read
 // through the index (issue #30) — the store's own state record, or, for a
 // file in the format before #30, the maps imported from its tables in memory.
-// equiv/replays.ts compares it with the same questions asked of the
-// TypeScript runtime's tables. CIDs in their base32 text form.
+// CIDs in their base32 text form.
 //
 //   {state, roots: {map: cid|null}, cursor, log,
 //    entries: [[n, cid, unique|null]], chains: [[origin, tip, seq, kind|null]],

@@ -9,9 +9,9 @@ outside as the per-instance **signing oracle** (a ProtoWallet, #18), and
 **wallet state**, which lives inside as records. Nothing in the VM holds a
 key: every key operation is a call to the oracle.
 
-The wallet runs on the **Zig kernel only**: its transactions and headers are
-`bitcoin-tx` / `bitcoin-block` blocks (the TS kernel's `putblock` refuses
-them) and it uses the kernel's `http` and `deadline` imports
+The wallet runs on the Zig kernel: its transactions and headers are
+`bitcoin-tx` / `bitcoin-block` blocks, and it uses the kernel's `http` and
+`deadline` imports
 (kernel-zig/README.md, "For the wallet") — its component build makes the
 HTTP calls over standard `wasi:http` instead (#15).
 
@@ -469,9 +469,6 @@ cross-check: 458. The wasm build is reproducible.
 
 ## Open
 
-- The TS kernel does not run the wallet (frozen: no bitcoin codecs, no
-  `http`/`deadline`); `src/runtime/wallet-program.test.ts` is replaced by
-  `kernel-zig/equiv/wallet.ts`.
 - The plain-entry shape and the unsigned admission predate #33's entry
   reshape (format 2); the router's side is #33.
 - Certificates, labels as their own index, relinquish, caller-supplied

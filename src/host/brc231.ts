@@ -1,13 +1,22 @@
 // A BRC-231 messagebox client: the BRC-33 calls in dag-cbor over BRC-104
 // (AuthFetch), identity keys and bodies as bytes. The router answers a CBOR
-// request in CBOR (router.ts). Implements the provider's MessageBox
-// (messagebox.ts): `list` gives each body as its bytes; `send` takes a §7.3
+// request in CBOR (router.ts). Implements MessageBox, the BRC-33 calls as one
+// identity: `list` gives each body as its bytes; `send` takes a §7.3
 // envelope (sent as its dag-cbor bytes) or bytes.
 
 import { AuthFetch, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { isCborEnvelope } from "../envelope-cbor.ts";
-import type { Listed, MessageBox } from "./messagebox.ts";
+
+/** One listed message: BRC-33 fields as the messagebox reports them. */
+export interface Listed { messageId: string; sender?: string; body: unknown; created_at?: string }
+
+/** The part of a BRC-33 messagebox a peer uses, as one identity. */
+export interface MessageBox {
+  list(box: string): Promise<Listed[]>;
+  ack(ids: string[]): Promise<void>;
+  send(m: { recipient: string; box: string; body: object }): Promise<void>;
+}
 
 /**
  * Over `wallet`'s own BRC-104 session, or an existing AuthFetch's (a

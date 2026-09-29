@@ -1,4 +1,4 @@
-// Messages, v2 records and the index over them, on both stores.
+// Messages, v2 records and the index over them, on sqlite.ts's store.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CID, encode, fmt } from "./cid.ts";
-import { memoryStore } from "./memory.ts";
 import { isGenesis, program, signMessage, type Genesis, type Message } from "./records.ts";
 import { openStore } from "./sqlite.ts";
 import { Rejected, type Filter, type Store } from "./store.ts";
@@ -15,7 +14,7 @@ import { collect } from "../testkit.ts";
 import type { ThreadOrigin } from "./types.ts";
 import { ephemeralWallet, rootIdentity, signerFor, type Signer } from "../wallet.ts";
 
-const stores: Array<[string, () => Store]> = [["memory", memoryStore], ["sqlite", () => openStore(":memory:")]];
+const stores: Array<[string, () => Store]> = [["sqlite", () => openStore(":memory:")]];
 const strs = (cs: CID[]) => cs.map(fmt);
 
 async function actors() {
@@ -101,8 +100,8 @@ for (const [name, open] of stores) {
     assert.deepEqual(await q({ kind: "thread", program: shell }), strs([t1]));
     assert.deepEqual(await q({ kind: "thread", program: other }), strs([t2]));
     assert.deepEqual(await q({ kind: "thread", parentless: false }), strs([t1]));
-    const launch = name === "sqlite" ? await s.edges.refsFrom(t1) : await s.edges.refsFrom(line); // the stores index it facing opposite ways
-    assert.deepEqual(launch.map((r) => [String(r.to), r.rel]), name === "sqlite" ? [[fmt(line), "launched-by"]] : [[fmt(t1), "launched"]]);
+    const launch = await s.edges.refsFrom(t1);
+    assert.deepEqual(launch.map((r) => [String(r.to), r.rel]), [[fmt(line), "launched-by"]]);
 
     await s.chains.append(t1, { at: 9, state: "waiting", waitingFrom: david.identity });
     await s.chains.append(t3, { at: 9, state: "waiting", waitingFrom: david.identity, waitingOn: [t2] });

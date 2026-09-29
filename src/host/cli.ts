@@ -76,7 +76,7 @@ import { Kernel } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { genesisOf, short } from "../runtime/log.ts";
+import { short } from "../runtime/log.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
@@ -277,7 +277,7 @@ async function subscribeCmd(db: HostDb, rest: string[], env: Env): Promise<numbe
   if (typeof owner === "number") return owner;
   const s = openRow(row, env);
   try {
-    await subscribeRow({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, subscribeBody({ op, sender: v.sender, box: box!, handler }));
+    await subscribeRow({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, subscribeBody({ op, sender: v.sender, box: box!, handler }, await genesisPrograms(s.blocks)));
     env.out(`${row.handle}: subscribe ${op} (${v.sender ? short(v.sender) : "anyone"}, ${box}) → ${handler} sent`);
     return 0;
   } catch (e) {
@@ -306,8 +306,6 @@ function agentAddresses(row: InstanceRow, rows: InstanceRow[], vars: Env["vars"]
 async function syncAgents(row: InstanceRow, rows: InstanceRow[], owner: { wallet: WalletInterface; box(row: InstanceRow): Outbox }, store: Store | undefined, env: Env): Promise<void> {
   const want = agentAddresses(row, rows, env.vars);
   if (!want.length) return;
-  // A store of the frozen TypeScript runtime (a format-1 genesis) has no address book (no resolve program).
-  if (store && (await store.log.tip()) && (await genesisOf(store).then(() => true, () => false))) return;
   const r = await writeAddresses({ row, owner: owner.wallet, box: owner.box(row), store }, want);
   const sent = want.filter((_, i) => r[i] === "sent").map((w) => w.handle);
   if (sent.length) env.out(`${row.handle}: address book: ${sent.join(", ")} written`);
@@ -448,6 +446,17 @@ async function ownerMessageboxWarning(row: InstanceRow, store: Store | undefined
     }
   } catch { /* a store this build cannot read: the router says so at hydration */ }
   return undefined;
+}
+
+/** The programs a store's genesis names (name → program record CID): what `subscribe` resolves a handler name against. */
+async function genesisPrograms(store: Store | undefined): Promise<Record<string, CID>> {
+  if (!store) return {};
+  for await (const { entry } of store.log.entries(0)) {
+    const g = (entry as { genesis?: CID }).genesis;
+    const programs = g ? (await store.get(g) as Record<string, unknown>).programs : undefined;
+    return programs && typeof programs === "object" ? programs as Record<string, CID> : {};
+  }
+  return {};
 }
 
 /** A row's store to read while something else may be writing it: read-only, if it exists. */
