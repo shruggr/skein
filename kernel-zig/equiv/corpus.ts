@@ -340,11 +340,12 @@ const mailboxes: string[] = [];
 }
 
 // ---------------------------------------------------------------- fuel: a low fuelPerStep (issue #5)
-// The objects handler (~3.3M) fits in 4·10^6 and run-handler (~8M over its two
-// steps: the shell launched, then the result delivered over http) runs out:
-// errored, "fuel exhausted".
+// The Zig handlers (#54) are small: the objects handler (~0.1M) and run-handler's
+// first step (~0.12M, the shell launched) fit in 10^6; the shell's `ls` (~2.6M)
+// runs out: errored, "fuel exhausted" — and run-handler's second step, the
+// error delivered over http (~1.07M), runs out too.
 {
-  const h = await host({ defaults: { ...DEFAULTS, fuelPerStep: "4000000" } });
+  const h = await host({ defaults: { ...DEFAULTS, fuelPerStep: "1000000" } });
   const i = await h.add("gen-fuel");
   const dir = await fixture({ "a.txt": "a\n" });
   const { root, bundles } = await bundlesOf(dir);
