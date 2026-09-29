@@ -284,6 +284,15 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
+    /// A program's libp2p request (#51) and the thread making it: the router's libp2p host answers.
+    fn pLibp2p(p: *anyopaque, a: std.mem.Allocator, req: []const u8, thread: []const u8) anyerror![]u8 {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("request", .{ .bytes = req });
+        try m.put("thread", cbor.cidv(thread));
+        const r = try ctx(p).request(a, "libp2p", m.value());
+        return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+    }
+
     fn pOnSleep(p: *anyopaque, _: []const u8, _: i64) void {
         const s = ctx(p);
         var arena = std.heap.ArenaAllocator.init(s.gpa);
@@ -340,6 +349,7 @@ pub fn main(gpa: std.mem.Allocator) !void {
         .ctx = &server,
         .wallet = Server.pWallet,
         .http = Server.pHttp,
+        .libp2p = Server.pLibp2p,
         .on_sleep = Server.pOnSleep,
         .say = Server.pSay,
     });

@@ -131,8 +131,10 @@ format is refused (`kernel-zig/src/log.zig` has the shapes).
   first match wins; the handler gets `{message, body, box, sender}`. No
   subscription: recorded, nothing runs.
 - **Events** are the host's feeds (#29: headers, proofs, statuses) and the
-  front door's writes (`:ack`), routed by box or `subject`.
-- **Wakes** are a sleeper's deadline, one entry each.
+  front door's writes (`:ack`; #51: an accepted libp2p message, `p2p` in
+  `libp2p:<topic>`, below), routed by box or `subject`.
+- **Wakes** are a sleeper's deadline, one entry each — or, for a thread
+  resting on a libp2p `receive`, the arrival of a frame on its stream (#51).
 
 ## The messagebox
 
@@ -264,6 +266,57 @@ writes, fuel-limited (`defaults.callFuelLimit`) and charged. A call needs no
 determinism: nothing it does is recorded, because nothing it does is kept.
 From a step, an in-VM `call` is part of the step (its recorded calls and head
 moves are the step's). `docs/VM.md`, "Calls".
+
+## libp2p (#51)
+
+The same front door, another transport. The router's libp2p host
+(docs/ARCH.md) makes one kernel `call` of the front door, fn **`libp2p`**,
+for each GossipSub message on a subscribed topic (inside GossipSub's async
+validator, so forwarding waits on it) and for each frame read from an inbound
+stream on a served protocol:
+
+```
+call   {transport: "libp2p", topic | protocol, from: bytes (the peer ID's multihash),
+        seqno?: bytes(8), signature?: bytes, body: bytes}
+answer {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
+```
+
+- **Routing.** The routes table gains `libp2p:` sources: `{path:
+  "libp2p:<topic>", program, fn}` for a topic, `libp2p:<protocol>` for a
+  stream protocol (from `etc/routes.json`; a protocol's handler named in
+  `etc/config.json` `libp2p.protocols` becomes its route). No route: `ignore`.
+- **Verify before admit.** For a topic message the front door checks, from
+  the call alone, that `from` is a secp256k1 peer ID (identity multihash of the
+  key's protobuf) and that `signature` is its ECDSA signature (DER, sha2-256)
+  over `"libp2p-pubsub:"` ‖ protobuf `{1: from, 2: body, 3: seqno, 4: topic}`
+  — GossipSub's StrictSign. A bad one is `reject`, and no handler runs. Then
+  the handler (the route's program and fn, an in-VM call) gets the call plus
+  `key` (the 33-byte key out of `from`) and judges from state: `{verdict}`. A
+  handler that fails is `ignore` (cannot evaluate: no penalty for the
+  forwarder).
+- **The entry.** Accept returns exactly one entry to admit:
+
+  ```
+  {event: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}, box: "libp2p:<topic>"}
+  ```
+
+  It re-verifies from the log alone, with no router: the publisher's key is
+  in `from`, and the signature covers topic, seqno, from and body — the same
+  guarantee as a mail record's sender, 104 signature and nonces. It routes as
+  any event: the thread awaiting its `subject` (none here), else a sender-less
+  subscription on `libp2p:<topic>`; with none it is recorded and nothing
+  runs. **Reject and ignore write nothing** — no entry, no byte.
+- **Streams.** A frame is not signed (the stream is authenticated by Noise;
+  `from` is the remote peer). The handler answers `{body?, admit?, close?,
+  verdict?}`: `body` is written back on the stream as one frame, `admit`
+  (entries, as an HTTP route handler returns them) is admitted, `close` or
+  `reject` ends the stream.
+- **Fuel.** Each of these calls is charged to the fuel ledger: caller the
+  peer ID (base58), op the route source (`libp2p:<topic>`).
+
+Outbound (publish, dial, send, receive, close) is the kernel's `libp2p`
+import, recorded on the step's update like `http` (docs/VM.md, "libp2p").
+Messagebox delivery stays HTTP.
 
 ## Fuel
 

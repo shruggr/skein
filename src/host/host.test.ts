@@ -4,6 +4,7 @@
 // a messagebox hub and the host wallet and nothing else.
 
 import { Oracle } from "./oracle.ts";
+import { keyOfPeerId, peerIdOf } from "./p2p.ts";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -85,7 +86,14 @@ test("skein-host: add / list / disable / enable / remove through the CLI, store 
   assert.equal(await cli("disable", "martha"), 0);
   out.length = 0;
   assert.equal(await cli("list"), 0);
-  assert.deepEqual(out, [["martha@localhost", "agent", "disabled", derived, derived, "http://127.0.0.1:3401", join(home, "instances/martha/runtime.db"), "bafytree"].join("\t")]);
+  const peer = peerIdOf(new Oracle(PrivateKey.fromHex(master)).peerKey("martha")).toString();
+  assert.deepEqual(out, [["martha@localhost", "agent", "disabled", derived, derived, "http://127.0.0.1:3401", join(home, "instances/martha/runtime.db"), "bafytree", peer].join("\t")]);
+  assert.match(peer, /^16Uiu2/, "a secp256k1 peer ID (#51)");
+  assert.equal(keyOfPeerId(peer), new Oracle(PrivateKey.fromHex(master)).peerKey("martha").toPublicKey().toString(), "the peer key reads out of the peer ID");
+  assert.notEqual(keyOfPeerId(peer), derived, "the peer key is not the instance's root");
+  out.length = 0;
+  assert.equal(await cli("identity", "martha", "--peer"), 0);
+  assert.deepEqual(out, [peer], "identity --peer prints the peer ID");
   assert.equal(await cli("enable", "martha"), 0);
   assert.equal(await cli("add", "martha", "--identity", `02${"a".repeat(64)}`), 0);
   assert.equal(await cli("add", "martha", "--tree", "bafy2"), 0);

@@ -296,6 +296,47 @@ with a message). A preview1 program behaves the same on both engines — the
 same imports answered by the same kernel code, the same fuel — so a log
 written in the browser replays natively and the other way round.
 
+### libp2p: one import, answered by the router and recorded (#51)
+
+The runtime has no network; libp2p is the router's (docs/ARCH.md, "The
+libp2p host"). Outbound, a step has one import, **`libp2p`**: preview1
+`skein.libp2p(req, len, out, cap) → n` with a dag-cbor request, and in the
+WIT the typed interface `skein:kernel/libp2p` (`publish`, `dial`, `send`,
+`receive`, `close`), which the component host turns into the same request.
+One recorded shape for both ABIs:
+
+```
+{op: "publish", topic, body}         → {seqno: bytes(8), recipients}     GossipSub, signed with the instance's peer key
+{op: "dial", peer, protocol}         → {stream}                           peer: a peer ID, or a multiaddr with /p2p/<id>
+{op: "send", stream, body}           → {}                                 one length-prefixed frame (unsigned varint)
+{op: "receive", stream}              → {body} | {pending: true} | {closed: true}
+{op: "close", stream}                → {}
+any of them                          → {error}                            the call's failure (-1 / the WIT error)
+```
+
+- **Recorded like `http`.** Each call is an attested record on the step's
+  update (op `libp2p`, the request bytes, the router's answer) — an
+  `{error}` answer too, so a failed dial fails the same way on replay.
+  Replay serves the recorded answer and never touches the network; a request
+  that differs from the recorded one is a divergence.
+- **`receive` rests.** A frame not yet there answers `{pending}`: the program
+  sets a `deadline` (its timeout) and ends the step, and the thread rests. When
+  a frame arrives on the stream the router admits a **wake** for the thread at
+  once, before its deadline. The kernel steps a sleeper early only when its tip
+  update's last recorded call is a `libp2p` receive answered `{pending}` (a
+  function of the log: replay decides the same); any other early wake runs
+  nothing. The woken step calls `receive` again and gets the frame (recorded).
+  The stream id is the router's (unique across its restarts); after a restart
+  the stream is gone and `receive` answers `{error}`.
+- **Where it is refused.** In a kernel `call` (a call sends nothing: only a
+  step does), and in the browser build ("libp2p: unsupported in the browser"),
+  where nothing is recorded and the step sees the error; a store with
+  recorded libp2p calls replays in the browser as natively.
+- Published messages are signed by GossipSub with the instance's **peer key**
+  (a child of the master secret, key ID `libp2p:<handle>`), never a wallet
+  key. Inbound messages and stream frames are not an import: they reach the
+  instance through its front door (docs/MESSAGES.md, "libp2p").
+
 ### Calls: reading the state without an entry (#40)
 
 Beside the one call in that writes — **admit** an entry, and the steps it

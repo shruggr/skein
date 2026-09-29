@@ -147,6 +147,9 @@ export fn skein_open(store: u32) i32 {
         .ctx = @ptrCast(s),
         .wallet = pWallet,
         .http = pHttp,
+        // #51: no libp2p host in a tab yet. A request with no recorded answer is refused (nothing recorded);
+        // a replay's recorded answers are served as natively.
+        .libp2p_refusal = "libp2p: unsupported in the browser (this build has no libp2p host)",
         .on_sleep = pOnSleep,
         .say = pSay,
     }) catch |err| return fail(@errorName(err));
@@ -410,6 +413,13 @@ fn copyLog(a: std.mem.Allocator, src: storem.Store, dst: storem.Store) !void {
         const b = (try src.bytes(a, h)) orelse continue;
         try dst.putBlock(h, b);
     }
+    // Route handlers not among the programs (replay.zig: #40's routes, #51's libp2p: sources).
+    if (g.get("routes")) |rs| if (rs == .array) for (rs.array) |r| {
+        const h = Value.cidOf(r.get("program")) orelse continue;
+        if (try dst.has(h)) continue;
+        const b = (try src.bytes(a, h)) orelse continue;
+        try dst.putBlock(h, b);
+    };
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) return error.BadSignature;

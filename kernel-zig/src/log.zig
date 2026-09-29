@@ -171,7 +171,7 @@ pub fn isAttested(x: ?Value) bool {
     if (Value.cidOf(a.get("thread")) == null) return false;
     if (!Value.isNumber(a.get("step")) or !Value.isNumber(a.get("i"))) return false;
     const op = Value.str(a.get("op")) orelse return false;
-    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "http")) return false;
+    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "http") and !std.mem.eql(u8, op, "libp2p")) return false;
     return Value.bytesOf(a.get("result")) != null;
 }
 

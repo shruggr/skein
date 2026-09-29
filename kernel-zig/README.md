@@ -196,6 +196,15 @@ the TS runtime has none of it.
   (#15, "Components" → "wasi:http"), which reaches this same host function
   with the same request shape; the preview1 import stays for preview1
   programs (the wallet's pin).
+- **`libp2p(req, len, out, cap)`** (#51): a dag-cbor request `{op: publish |
+  dial | send | receive | close, …}` → its result, answered by the router's
+  libp2p host (`serve`: the router's `libp2p` frame, `{request, thread}`) and
+  attested (op `libp2p`; an `{error}` answer too, as the call's failure).
+  `receive` may answer `{pending}`: the step sets a deadline and rests, and a
+  wake before the deadline steps it only if its tip's last recorded call is
+  that pending receive (`restsOnStream`). Components call the typed
+  `skein:kernel/libp2p`, which becomes the same request. Refused in a kernel
+  `call`, and in the browser build (`libp2p_refusal`, nothing recorded).
 
 ## For the bootstrap loader (issue #4)
 

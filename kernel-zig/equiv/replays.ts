@@ -108,7 +108,10 @@ function isZigStore(db: string): boolean {
   try {
     const t = d.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pointers'").get();
     if (!t) return false;
-    return !!d.prepare("SELECT 1 FROM pointers WHERE name = 'state'").get() && run(["fuel", db]).status === 0 && dump(db).updates.some((u) => u[3] !== null);
+    if (!d.prepare("SELECT 1 FROM pointers WHERE name = 'state'").get() || run(["fuel", db]).status !== 0) return false;
+    // A step with fuel; or no thread at all (#51: entries nothing is subscribed to — recorded, nothing ran).
+    const x = dump(db);
+    return x.updates.some((u) => u[3] !== null) || !x.chains.some((c) => c[3] === "thread");
   } finally { d.close(); }
 }
 
@@ -184,8 +187,9 @@ for (const source of sources) {
   }
   const n = d1.entries.length;
   const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines; fuel ${d1.fuel.total}`;
-  // A store with only its genesis ran no step (a mailbox nothing was delivered to: a handshake writes nothing, #40).
-  if (ending === 0 && n > 1) diffs.push("no update records fuel");
+  // A store with no thread ran no step: only its genesis (a mailbox nothing was delivered to: a handshake writes
+  // nothing, #40), or entries nothing is subscribed to (#51: accepted libp2p messages, recorded, nothing runs).
+  if (ending === 0 && threadChains.size > 0) diffs.push("no update records fuel");
   if (diffs.length) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts})\n  ${diffs.join("\n  ")}\n`);

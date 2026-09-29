@@ -6,7 +6,9 @@
 // instance's identity key is that child's public key; provisioning an
 // instance is picking an id. The router answers the kernel's `wallet` import
 // from it in process (kernel.ts), and authenticates its own transport (BRC-104)
-// as a second child, [2, "skein router"] / "messagebox".
+// as a second child, [2, "skein router"] / "messagebox". Its libp2p host (#51)
+// signs as a third per instance: [2, "skein instance"], key ID
+// `libp2p:<handle>`, self (peerKey).
 //
 // Custody (dev): the secret is a file, `$SKEIN_HOME/master.key` (64 hex
 // digits, mode 0600), made on first use; `SKEIN_MASTER_KEY` (hex) overrides
@@ -46,6 +48,15 @@ export class Oracle {
   /** An instance's root key: BRC-42 child of the master, key ID = the instance id. */
   instanceKey(id: string): PrivateKey {
     return this.deriver.derivePrivateKey(INSTANCE_PROTOCOL, id, "self");
+  }
+
+  /**
+   * An instance's libp2p peer key (#51): a BRC-42 child of the master, key ID
+   * `libp2p:<handle>` — never the instance's root. Its peer ID is the identity
+   * multihash of the compressed key (p2p.ts peerIdOf).
+   */
+  peerKey(id: string): PrivateKey {
+    return this.deriver.derivePrivateKey(INSTANCE_PROTOCOL, `libp2p:${id}`, "self");
   }
 
   /** The instance's identity key (hex): what `skein-host add` records. */

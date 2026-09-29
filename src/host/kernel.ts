@@ -6,7 +6,8 @@
 //                        admit (the one call in that writes) · call (#40: a program's function over the
 //                        state, no entry, no writes: the front door's) · idle · start · running
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle) ·
-//                        http (a program's request: the messagebox's delivery, a resolve, a wallet's ARC)
+//                        http (a program's request: the messagebox's delivery, a resolve, a wallet's ARC) ·
+//                        libp2p (#51: {request, thread}: publish/dial/send/receive/close, the libp2p host's)
 //   the kernel tells     sleepers (its sleeping threads and their deadlines) · onSleep · stop
 //
 // `Kernel` offers `store` (get/put/log), `admit`, `invoke` (the call),
@@ -21,6 +22,7 @@ import { decode, encode } from "../runtime/cid.ts";
 import type { LogEntry } from "../runtime/log.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
+import type { P2PRequest, P2PResult } from "./p2p.ts";
 
 const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 /** The kernel binary: $SKEIN_KERNEL_BIN, else kernel-zig's release build. */
@@ -46,6 +48,8 @@ export interface KernelOptions {
   wallet?: WalletInterface;
   /** Answers programs' HTTP (the preview1 `http` import, #29, and wasi:http, #15 — one shape): a request {method, url, headers?, body?, options?} → {status, headers, body}. Absent: refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
+  /** Answers programs' `libp2p` import (#51): a request {op, …} → its result ({error} on failure), recorded by the kernel. Absent: refused. */
+  libp2p?(req: P2PRequest, thread?: CID): Promise<P2PResult>;
   /** The kernel's sleepers changed (earliest first). */
   sleepers?(s: Sleeper[]): void;
   /** Log lines (the kernel's stderr and this side's notes). */
@@ -161,6 +165,13 @@ export class Kernel {
           // A program's http request (#29, pre-#15), recorded by the kernel with its answer.
           if (!this.o.http) throw new Error("this host answers no http");
           const res = await this.o.http(decode<HttpRequest>(f.v as Uint8Array));
+          return answer(encode(res).bytes);
+        }
+        case "libp2p": {
+          // A program's libp2p request (#51) and the thread making it (not recorded; the router needs it to wake a `receive`).
+          if (!this.o.libp2p) throw new Error("this host answers no libp2p");
+          const v = f.v as { request: Uint8Array; thread?: CID | null };
+          const res = await this.o.libp2p(decode<P2PRequest>(v.request), v.thread ?? undefined);
           return answer(encode(res).bytes);
         }
         case "sleepers":

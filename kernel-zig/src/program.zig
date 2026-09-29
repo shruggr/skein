@@ -12,6 +12,13 @@
 //                                  by the host and recorded (op "http"); kept for
 //                                  preview1 programs — a component's standard
 //                                  wasi:http becomes this same request (http.zig)
+//   libp2p(req, len, out, cap) → n (#51) a dag-cbor request {op, …} → its result:
+//                                  publish {topic, body} → {seqno, recipients};
+//                                  dial {peer, protocol} → {stream}; send {stream,
+//                                  body} → {}; receive {stream} → {body} | {pending}
+//                                  | {closed}; close {stream} → {}. Answered by the
+//                                  host's libp2p host and recorded (op "libp2p");
+//                                  {error} is a failure (n < 0), recorded as well
 //   deadline(until_ms) → 0         a step that ends waiting rests until then at most
 //   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
 //                                  (input kind "call"), its stdout the result
@@ -61,6 +68,11 @@ pub const Host = struct {
     http: *const fn (imp: *Imports, request: []const u8) Err![]const u8,
     /// If this step ends waiting, rest no later than `until` (ms): a wake entry then steps it.
     deadline: *const fn (imp: *Imports, until: i64) Err!void,
+    /// One libp2p request (#51, dag-cbor {op: "publish" | "dial" | "send" |
+    /// "receive" | "close", …}) → its result (dag-cbor), answered by the host's
+    /// libp2p host and recorded like `http`; a result {error} is the call's
+    /// failure (recorded: replay fails the same way).
+    libp2p: *const fn (imp: *Imports, request: []const u8) Err![]const u8 = noLibp2p,
     /// An in-VM call (#40): run `prog` (a program record) as a function — its
     /// entry with `input()` = {kind: "call", fn, arg, …} — and return what it
     /// wrote to stdout. From a step it is part of the step (its recorded calls,
@@ -73,6 +85,10 @@ pub const Host = struct {
 
 fn noEdges(imp: *Imports, _: []const u8, _: ?[]const u8) Err![]const u8 {
     return imp.failWith("edges: this host keeps no index");
+}
+
+fn noLibp2p(imp: *Imports, _: []const u8) Err![]const u8 {
+    return imp.failWith("libp2p: this host answers no libp2p");
 }
 
 /// The answer of `edges` (#42): the index's edges into `to` (with `rel`
@@ -208,6 +224,7 @@ pub const Imports = struct {
             },
             .wallet => return imp.out(p, try h.wallet(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
             .http => return imp.out(p, try h.http(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
+            .libp2p => return imp.out(p, try h.libp2p(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
             .deadline => {
                 try h.deadline(imp, a[0]);
                 return 0;
