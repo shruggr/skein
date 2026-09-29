@@ -86,7 +86,7 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `headers` | height (u32 BE) → header | the best chain |
 | `heights` | block hash → height | the best chain, backwards (fork points) |
 | `txs` | txid → transaction | every transaction we hold (ours and their ancestry) |
-| `proofs` | txid → header (bitcoin-block link) | the block whose merkle tree holds the transaction |
+| `proofs` | txid → `{block, depth, position}` | the block whose merkle tree holds the transaction (`block`, a bitcoin-block link) and where in it: the tree's `depth` and the leaf's `position` (its BUMP offset, a dag-cbor uint: BSV blocks may hold billions of transactions) |
 | `actions` | txid → `action` | our transactions |
 | `outputs` | txid ‖ vout (u32 BE) → `output` | output by outpoint |
 | `awaiting` | txid → `broadcast` | transactions awaiting a status |
@@ -147,17 +147,26 @@ is the hash of its children.
   path that also gives a node at a position with another hash than its
   children make is refused (`ConflictingNode`); one whose root is not our
   header's is refused (`RootMismatch`) and puts nothing. `proofs[txid]` then
-  names the header (a bitcoin-block link); `proofHeights` keeps its height
-  (what a reorg re-settles). The per-transaction path records are gone.
+  names the header (a bitcoin-block link) and the transaction's position in
+  the tree — the BUMP's height as `depth` and the txid's leaf offset as
+  `position` (#42, decided 2026-09-30), written once when the proof arrives
+  (a submission's decoded proofs carry them in the submit entry, #50);
+  `proofHeights` keeps its height (what a reorg re-settles). The
+  per-transaction path records are gone.
 - **Merging is free.** Nodes are shared by every transaction of the block:
   two BUMPs of one block give one set of node blocks, deduplicated by CID,
   whatever order they arrive in.
 - **A proof is rebuilt on demand** (`Wallet.proofFor` → `merkle.pathFor`):
-  from the header's merkle root, one node per level down to the transaction
-  (a child we hold is a node, the txid is the leaf), each level's sibling
-  emitted, the offset read off the left/right turns — the minimal BUMP for
-  that transaction. `beefOf` / `atomicBeef` / `beefOfMany` embed these,
-  merged per block.
+  from the header's merkle root, one node read per level down to the
+  transaction, turning left or right by the position's bits (most
+  significant first) — no search, no branching: `depth` reads. The siblings
+  read on the way are the BUMP (a right sibling equal to the left is BRC-74's
+  `duplicate`): the minimal one for that transaction. A descent that meets a
+  node we do not hold, or ends elsewhere than the txid, proves nothing.
+  `beefOf` / `atomicBeef` / `beefOfMany` embed these, merged per block.
+  (The position is not optional: a store written before it — `proofs[txid]`
+  a bare header link — reads as `BadIndex`; such state is re-genesised, not
+  migrated.)
 - **An orphaned header** behaves as before: the proof names a block no longer
   on our best chain, so the transaction is `unproven` (settlement reverts);
   the nodes stay, and a new path against the new block adds its own.
