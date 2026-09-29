@@ -15,6 +15,7 @@ test {
     _ = syscalls;
     _ = @import("tree.zig");
     _ = @import("mst.zig");
+    _ = @import("bitcoin.zig");
     _ = @import("index_test.zig");
     _ = @import("objects.zig");
     _ = @import("fuel_test.zig");

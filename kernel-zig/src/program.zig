@@ -15,7 +15,7 @@
 //   deadline(until_ms) → 0         a step that ends waiting rests until then at most
 //   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
 //                                  (input kind "call"), its stdout the result
-// putblock also takes bitcoin-tx / bitcoin-block / bitcoin-merkle (dbl-sha2-256) CIDs, and
+// putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
 const cbor = @import("cbor.zig");

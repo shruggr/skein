@@ -19,10 +19,10 @@
 // strings uvarint-length-prefixed. The derivation is sqlite.ts's.
 
 import { createHash } from "node:crypto";
-import * as Digest from "multiformats/hashes/digest";
 import { DatabaseSync } from "node:sqlite";
 import { CID, decode, encode, fmt, fromBytes, isCID } from "./cid.ts";
 import { keptEdges, openStore, originEdges, toRef, updateEdges, type SqliteStore } from "./sqlite.ts";
+import { BITCOIN_BLOCK, decodeBitcoin, displayHash } from "./bitcoin.ts";
 import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
@@ -64,31 +64,33 @@ export function display(v: unknown): unknown {
 // ---------------------------------------------------------------- bitcoin blocks, for display
 
 /**
- * The Zig kernel's bitcoin codecs (kernel-zig/src/cid.zig), all dbl-sha2-256
- * with the hash in internal byte order: bitcoin-block (an 80-byte header, its
- * CID the block hash), bitcoin-tx (a transaction, its CID the txid) and
- * bitcoin-merkle (#29: a 64-byte merkle node left ‖ right, its CID its merkle
- * hash). A header links its merkle root's node; a node links its two
- * children — nodes, or at the bottom transactions; the tree is sparse, so a
- * child may not be held.
+ * The Zig kernel's bitcoin codecs decoded the IPLD way (#42, bitcoin.ts,
+ * kernel-zig/src/bitcoin.zig): a header (bitcoin-block) links the previous
+ * header and its merkle root; a 64-byte bitcoin-tx is a merkle node linking
+ * its two children (nodes, or at the bottom transactions); a transaction's
+ * inputs link what they spend. The tree and the ancestry are sparse, so a
+ * link's target may not be held. The fields are the decoded node's.
  */
-export const BITCOIN_BLOCK = 0xb0, BITCOIN_TX = 0xb1, BITCOIN_MERKLE = 0xb3, DBL_SHA2_256 = 0x56;
-const hashCid = (code: number, h: Uint8Array) => CID.createV1(code, Digest.create(DBL_SHA2_256, Uint8Array.from(h)));
-const displayHash = (h: Uint8Array) => Buffer.from(h).reverse().toString("hex");
+export { BITCOIN_BLOCK, BITCOIN_TX, DBL_SHA2_256 } from "./bitcoin.ts";
 
 export function bitcoinView(cid: CID, bytes: Uint8Array): { codec: string; fields: Array<[string, string | CID]> } | undefined {
-  if (cid.multihash.code !== DBL_SHA2_256) return undefined;
+  const v = decodeBitcoin(cid, bytes) as Obj | CID[] | undefined;
+  if (v === undefined) return undefined;
   const id = displayHash(cid.multihash.digest);
-  if (cid.code === BITCOIN_MERKLE && bytes.length === 64) {
-    const l = bytes.subarray(0, 32), r = bytes.subarray(32, 64);
-    return { codec: "bitcoin-merkle", fields: [["hash", id], ["left", hashCid(BITCOIN_MERKLE, l)], ["right", Buffer.from(l).equals(Buffer.from(r)) ? "duplicate of left" : hashCid(BITCOIN_MERKLE, r)], ["left (as a txid)", displayHash(l)], ["right (as a txid)", displayHash(r)]] };
+  if (Array.isArray(v)) {
+    const [l, r] = v;
+    return { codec: "bitcoin-tx (merkle node)", fields: [["hash", id], ["left", l], ["right", l.equals(r) ? "duplicate of left" : r], ["left (as a txid)", displayHash(l.multihash.digest)], ["right (as a txid)", displayHash(r.multihash.digest)]] };
   }
-  if (cid.code === BITCOIN_BLOCK && bytes.length === 80) {
-    const root = bytes.subarray(36, 68);
-    return { codec: "bitcoin-block", fields: [["block hash", id], ["previous", hashCid(BITCOIN_BLOCK, bytes.subarray(4, 36))], ["merkle root", hashCid(BITCOIN_MERKLE, root)], ["time", String(new DataView(bytes.buffer, bytes.byteOffset).getUint32(68, true))]] };
+  if (cid.code === BITCOIN_BLOCK) {
+    return { codec: "bitcoin-block", fields: [["block hash", id], ["version", String(v.version)], ["previousblockhash", isCID(v.previousblockhash) ? v.previousblockhash : "none (genesis)"], ["merkleroot", v.merkleroot as CID], ["time", String(v.time)], ["bits", (v.bits as number).toString(16)], ["nonce", String(v.nonce)]] };
   }
-  if (cid.code === BITCOIN_TX) return { codec: "bitcoin-tx", fields: [["txid", id]] };
-  return undefined;
+  const fields: Array<[string, string | CID]> = [["txid", id], ["version", String(v.version)], ["locktime", String(v.locktime)]];
+  (v.vin as Obj[]).forEach((x, i) => {
+    if (isCID(x.txid)) fields.push([`vin ${i}`, x.txid], [`vin ${i} spends`, `${displayHash(x.txid.multihash.digest)}:${x.vout}`]);
+    else fields.push([`vin ${i}`, "coinbase"]);
+  });
+  (v.vout as Obj[]).forEach((o, i) => fields.push([`vout ${i}`, `${o.value} sat · ${(o.script as Uint8Array).length}-byte script`]));
+  return { codec: "bitcoin-tx", fields };
 }
 
 // ---------------------------------------------------------------- keys
