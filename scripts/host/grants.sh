@@ -15,10 +15,11 @@ here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 skein="${SKEIN_HOME:-$HOME/.skein}"
 export SKEIN_HOME="$skein"
-# every enabled instance, agents and mailbox instances alike (#40: list prints handle, kind, state, identity, …)
-mapfile -t instances < <("$root/bin/skein-host" list | awk -F'\t' '$3 == "enabled" && $4 ~ /^0[23]/ { print $4 }')
-# mailbox instances' own front-door keys (#40): SKEIN_MAILBOX_KEYS=hex,hex until skein-host prints them
-IFS=, read -r -a mailboxes <<< "${SKEIN_MAILBOX_KEYS:-}"
+# every enabled instance, agents and mailbox instances alike: the key its front
+# door signs BRC-104 sessions with (#40: `list` prints handle, kind, status,
+# identity, front-door key, …; the key is derived from the master secret, so a
+# mailbox instance has one before it was ever hydrated)
+mapfile -t instances < <("$root/bin/skein-host" list | awk -F'\t' '$3 == "enabled" && $5 ~ /^0[23]/ { print $5 }')
 q() { "$@" 2>&1 | grep -e granted -e revoked -e Error || true; }
 
 # Owner (David) wallet, origin skein-client — HOME=~/.skein/owner-home.
@@ -28,7 +29,7 @@ o grant skein-client --protocol "identity key retrieval" --level 1
 o grant skein-client --protocol "skein register" --level 2 --counterparty anyone             # the signed mailbox registration (#40)
 o grant skein-client --protocol "messagebox" --level 1                                       # message-box-client messageId HMAC
 o grant skein-client --protocol "server hmac" --level 2 --counterparty self                  # BRC-104 nonces
-for i in "${instances[@]}" "${mailboxes[@]}"; do
+for i in "${instances[@]}"; do
   o grant skein-client --protocol "auth message signature" --level 2 --counterparty "$i"     # BRC-104 with each instance / mailbox instance
   o grant skein-client --protocol "message encryption" --level 2 --counterparty "$i"
 done
@@ -39,8 +40,8 @@ f grant skein-infer --protocol "identity key retrieval" --level 1
 f grant skein-infer --protocol "server hmac" --level 2 --counterparty self
 f grant skein-infer --protocol "messagebox" --level 1
 f grant skein-infer --protocol "skein register" --level 2 --counterparty anyone
-for i in "${instances[@]}" "${mailboxes[@]}"; do
+for i in "${instances[@]}"; do
   f grant skein-infer --protocol "auth message signature" --level 2 --counterparty "$i"
   f grant skein-infer --protocol "message encryption" --level 2 --counterparty "$i"
 done
-echo "grants: owner and infer toward ${#instances[@]} instance(s)"
+echo "grants: owner and infer toward ${#instances[@]} instance(s) (agents and mailbox instances)"

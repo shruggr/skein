@@ -4,9 +4,9 @@
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host add <handle> --mailbox --owner <hex>   a mailbox instance (#40) for an identity outside the host
 //   skein-host knows <handle> [a,b | --all | --none]
-//   skein-host list
+//   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree
 //   skein-host identity <handle>      an instance's identity key (from the master secret)
-//   skein-host mailboxes              the mailbox instances: whose mailbox each is, and where
+//   skein-host mailboxes              the mailbox instances: handle, whose (owner), front-door key, status, store
 //   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
@@ -97,9 +97,9 @@ const USAGE = `usage:
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex>         a mailbox instance for an identity outside the host (#40)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
-  skein-host list
+  skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree
   skein-host identity <handle>                            an instance's identity key
-  skein-host mailboxes                                    the mailbox instances: whose mailbox, and where
+  skein-host mailboxes                                    the mailbox instances: handle, owner, front-door key, status, store
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host enable|disable|remove <handle>
   skein-host run                                          the router on :8100 (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
@@ -170,15 +170,19 @@ export async function main(argv: string[], env: Env): Promise<number> {
         env.out(new Oracle(masterKey(env.vars, home)).identity(handle));
         return 0;
       }
-      case "mailboxes":
-        for (const r of db.list().filter((x) => x.kind === "mailbox")) env.out([`${r.handle}@${r.domain}`, r.owner ?? "-", r.status, r.store].join("\t"));
+      case "mailboxes": {
+        const door = frontDoorKeys(env.vars, home);
+        for (const r of db.list().filter((x) => x.kind === "mailbox")) env.out([`${r.handle}@${r.domain}`, r.owner ?? "-", door(r), r.status, r.store].join("\t"));
         return 0;
+      }
       case "ledger":
         for (const l of db.ledger(rest[0])) env.out([l.instance, l.caller || "-", l.op, String(l.calls), String(l.fuel), l.updated_at].join("\t"));
         return 0;
-      case "list":
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-"].join("\t"));
+      case "list": {
+        const door = frontDoorKeys(env.vars, home);
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-"].join("\t"));
         return 0;
+      }
       case "enable": case "disable": case "remove": {
         const [handle] = rest;
         if (!handle) { env.err(USAGE); return 2; }
@@ -211,6 +215,19 @@ export async function main(argv: string[], env: Env): Promise<number> {
 }
 
 const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+
+/**
+ * The key each row's front door signs its BRC-104 sessions with (#40): the
+ * oracle's, derived from the master secret with key ID = the handle — for an
+ * agent and a mailbox instance alike, and before the row was ever hydrated.
+ * The master secret is only read here, never made: with none, "-".
+ */
+function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => string {
+  const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
+  if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
+  const oracle = new Oracle(masterKey(vars, home));
+  return (row) => oracle.identity(row.handle);
+}
 
 function knowsCmd(db: HostDb, rest: string[], env: Env): number {
   const { values: v, positionals: [handle, list, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { all: { type: "boolean" }, none: { type: "boolean" } } });

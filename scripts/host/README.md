@@ -68,7 +68,9 @@ instance of its own with only the front door and the messagebox, keeping
 every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
 --mailbox --owner <key>` makes one; so does a signed registration
 (`register.ts`, what `up.sh` does for `david` and `infer`, and the front
-end's Register). `skein-host mailboxes` lists them (whose, and where). The
+end's Register). `skein-host mailboxes` lists them (whose, the key their front door signs
+sessions with, and where); `skein-host list` prints that key for every row
+(its fifth column), which is what `grants.sh` grants toward. The
 owner's is where every instance delivers what it sends him: a new genesis
 names it (`defaults.ownerMessagebox`: `SKEIN_OWNER_MESSAGEBOX`, else the
 owner's mailbox instance here), the one peer a genesis names.
