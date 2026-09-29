@@ -94,7 +94,6 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `rejected` | txid → `settlement` | transactions that will never be mined |
 | `proofHeights` | height (u32 BE) ‖ txid → null | proofs by block height: what a reorg reverts |
 | `drafts` | draft CID → null \| `settlement` | signable drafts; a link once rejected |
-| `watchers` | identity key (33 bytes) → null | who is sent settlement messages |
 | `spent` | outpoint → spending txid | derived: the first (lowest txid) spender we hold that is not rejected |
 | `byBasket` | len ‖ basket ‖ 0 (spendable) \| 1 (spent) ‖ outpoint → null | derived: our outputs by basket + spendable |
 | `unproven` | txid → null | derived, sparse: the settlement index — held transactions neither proven nor rejected |
@@ -215,9 +214,18 @@ provisional until it settles.
 | unproven → rejected | still awaited `walletAbandonMs` after its broadcast (the `since` of its `broadcast` record), at a deadline wake | reason `abandoned` |
 | unproven → rejected | a transaction it depends on is rejected | reason `input-rejected`, `cause` the root txid |
 
-A proven transaction is never rejected. In this build a rejection is
-terminal: a proof arriving later for a rejected transaction is kept as a
-record, the status stays `rejected`.
+A proven transaction is never rejected. A rejection is terminal: a proof
+arriving later for a rejected transaction is kept as a record, the status
+stays `rejected`.
+
+**Settlement is state to read, not an event to deliver** (decided
+2026-09-30). The step that learns of a rejection (a `status` entry, a
+competing proof, the abandonment deadline) writes the settlement record,
+walks what depended on it and updates the maintained indexes; anyone who
+asks afterwards gets the corrected answer. Nothing is sent to anyone: a
+thread that mentioned the transaction reads its state the next time it
+acts, another instance that received it learns from its own feed and runs
+the same step, a page reads when it renders.
 
 A rejection is recorded as `{kind: "settlement", txid, status: "rejected",
 reason, cause?, at}` (the step's time), named by `rejected`; status stays
@@ -256,14 +264,8 @@ CID (the broadcast's awaiting-callback thread, or any program that
 `await`ed it) receives the `status` entry as a new input, routed by its
 `subject`; a wallet thread whose transaction was rejected by another step
 finds it rejected at its next deadline and finishes. Records that merely
-`mentions` a transaction change nothing. A program that wants to follow the
-settlement of transactions it kept opts in: `{op: "watch"}` to the wallet
-box (from the identity that should hear), and the wallet sends every change
-of a transaction of ours — `{kind: "settlement", txid, status: proven |
-unproven | rejected, reason, cause?}` — as a message to each watcher's
-`settlement` box (a §7.3 envelope sealed through the oracle; a subscription
-on that box routes it to the program). `{op: "watch", settlement: false}`
-opts out.
+`mentions` a transaction change nothing; whoever holds one reads its
+settlement when it next acts.
 
 The wallet's own result records name the transactions they are about as
 `refs: [{to: <tx CID>, rel: "mentions"}]`; the kernel makes those edges
@@ -411,7 +413,6 @@ error ends the step `errored`; no head moves.
 | `{op: "createAction", description, outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?, arc?, outcome?, awaiting?}` |
 | `{op: "signAction", reference}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
-| `{op: "watch", settlement?}` | the sender opts in (default true) or out of settlement messages → `{settlement}` |
 
 | plain entry / callback | result |
 |---|---|
@@ -419,9 +420,8 @@ error ends the step `errored`; no head moves.
 | `proof` / `status` (args.event) | `{event, txid, outcome: proven \| pending \| rejected}` |
 | a callback (input.event / input.woke) | `op: "callback"`: `{txid, outcome, event? \| arc?, awaiting?, awaited?}` |
 
-Any result may also carry `settlement` (this step's changes, as sent to
-watchers), `sent` (messages emitted), `reverted` (after a reorg) and `refs`
-(the transactions it names, rel `mentions`).
+Any result may also carry `reverted` (after a reorg) and `refs` (the
+transactions it names, rel `mentions`).
 
 `outputs` of `internalize` are BRC-100's: `{outputIndex, protocol: "wallet
 payment", paymentRemittance: {derivationPrefix, derivationSuffix,

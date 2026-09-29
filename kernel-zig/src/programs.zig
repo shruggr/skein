@@ -18,7 +18,7 @@ pub const modules = [_]Module{
     .{ .name = "subscribe-handler", .cid = "bafkreiaotl4zkhkuxe2yykptlkhc23imyawimbt5vhuxqxjamov5k2e7di" },
     .{ .name = "loop", .cid = "bafkreidg25u5fpsjpaw2ueknexdtfls5vqk4heafx7yohn2a25t4pz3k7e" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreid7cinhcz4667y5zcvysilmnsxkp22xss5cbn5uldrzv55vnxh6dm" },
+    .{ .name = "wallet", .cid = "bafkreielnk7gblrqulkncoe7gsvq3pc7e23guwqbhbwmup2hqxmpjnqjzu" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreihin6mnmscg2r7crlawfedwlkdz6fnfcfdd2fgzpv4ere25pjamwq" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).

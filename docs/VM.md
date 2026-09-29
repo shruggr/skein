@@ -705,10 +705,8 @@ The rejection reaches it as a new input: a `status` entry for the
 transaction's CID goes to the thread awaiting that subject, which continues
 from where it stands (the fork-and-continue of #12, naming a different
 parent); what it believed before stays as its history. For a thread that
-only `mentions` the transaction nothing happens automatically; a program
-that wants to know subscribes: the wallet's `watch` op opts an identity in
-to `{kind: "settlement", txid, status, reason}` messages in its `settlement`
-box, which a subscription on that box routes to the program.
+only `mentions` the transaction nothing happens: settlement is state to
+read, not an event to deliver — the thread reads it the next time it acts.
 
 ## Checkpoints
 
