@@ -48,7 +48,8 @@ import { HostDb } from "../../src/host/instances.ts";
 import type { HttpRequest, HttpResponse } from "../../src/host/kernel.ts";
 import { Router } from "../../src/host/router.ts";
 import { decode } from "../../src/runtime/cid.ts";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
+import { render } from "../../src/dev/explore/server.ts";
 import { encode } from "../../src/runtime/cid.ts";
 import { MODULES, rawCid, WALLET as WALLET_P1 } from "../../src/runtime/programs.ts";
 import type { ThreadUpdate } from "../../src/runtime/types.ts";
@@ -269,6 +270,13 @@ async function settlementScenario(identity: string, someone: Uint8Array, base: s
   out.bThread = { outcome: bw.result.outcome, state: bw.state };
   // The results mention the transactions (kernel edges with rel `mentions`).
   out.mentions = (await view.edges.refsTo(txCid(txA))).some((x) => x.rel === "mentions");
+  // #42: B's input is a `spends` edge into A — from B itself (a kept bitcoin-tx block), its locator A's vout.
+  const intoA = await view.edges.refsTo(txCid(txA));
+  const bSpends = intoA.filter((x) => x.rel === "spends" && x.from.equals(txCid(txB)));
+  out.spendsEdge = bSpends.length === 1 && bSpends[0]!.locator === String(Transaction.fromHex(Buffer.from(await view.bytes(txCid(txB))).toString("hex")).inputs[0]!.sourceOutputIndex);
+  // The explorer's record page shows the graph: A decoded, its inputs' links, and ← spends from B.
+  const page = await render(view, new URL(`/r/${txCid(txA)}`, "http://x"));
+  out.explorer = page.status === 200 && page.body.includes("bitcoin-tx") && page.body.includes("vin 0") && page.body.includes("← spends") && page.body.includes(txCid(txB).toString());
 
   // A reorg: a heavier branch from 102 drops block 103, where our first spend was proven. It is
   // unproven again, broadcast again like a fresh one, awaited; the owner is told.
@@ -388,6 +396,15 @@ try {
 }
 await router.stop();
 hostDb.close();
+// #42: the TS reader derives the kernel's edges map key for key (a kept bitcoin block's links included).
+{
+  const v2 = openStoreFile(db, { readOnly: true });
+  const d = await derive(v2);
+  const rels = new Map<string, number>();
+  for (const [, v] of d.pairs.edges) { const rel = (v as [string])[0]; rels.set(rel, (rels.get(rel) ?? 0) + 1); }
+  report.edges = { sameRoot: String(buildTree(d.pairs.edges).root) === String((v2 as unknown as { state(): { roots: { edges: CID } } }).state().roots.edges), bitcoin: ["spends", "prev", "merkleroot"].map((r) => (rels.get(r) ?? 0) > 0) }; // one-transaction blocks here: no merkle nodes (overlay.ts has them)
+  await v2.close();
+}
 for (const r of sse) r.end();
 sseServer.close();
 
@@ -416,6 +433,9 @@ check(st.inputsFreed === true && st.noOutputsOfAB === true, `the rejected output
 check(eq(st.messages, [["settlement", "A", "rejected", "DOUBLE_SPEND_ATTEMPTED"], ["settlement", "B", "rejected", "input-rejected"]]) && st.messageSender === true, `the owner's settlement box: one message per rejected transaction, delivered by the instance (${JSON.stringify(st.messages)})`);
 check(eq(st.bThread, { outcome: "rejected", state: "finished" }), `B's thread is not replayed: at its deadline it finds B rejected and finishes (${JSON.stringify(st.bThread)})`);
 check(st.mentions === true, "the results name the transactions as `mentions` edges (which never propagate)");
+check(st.spendsEdge === true, "#42: B's input is a `spends` edge into A, from B's own kept block, locator = the vout it spends");
+check(st.explorer === true, "#42: the explorer's record page for A shows it decoded (bitcoin-tx, its inputs) and ← spends from B");
+check(eq(report.edges, { sameRoot: true, bitcoin: [true, true, true] }), `#42: the TS reader derives the kernel's edges map (same root), with spends / prev / merkleroot edges from the kept blocks (${JSON.stringify(report.edges)})`);
 check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }) && st.reorgMessage === true, `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited; the owner is told (${JSON.stringify([st.reorg, st.reorgMessage])})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });

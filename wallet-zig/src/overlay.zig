@@ -2,7 +2,7 @@
 //! and the same settlement as the wallet. An overlay is the transaction graph
 //! the wallet holds, judged and indexed differently: a submitted transaction
 //! (BRC-22) is SPV-checked against the chain the wallet tracks and held like
-//! any other (`txs`, `proofs`, `spenders`, a `spends` relation per input);
+//! any other (`txs`, `proofs`, kept: a `spends` edge per input, #42);
 //! what a topic's program decided is recorded here as index maps in the
 //! wallet's own state record (wallet.zig `map_names`), so one instance can be
 //! a wallet and an overlay at once and a transaction's settlement (#37) is one
@@ -107,8 +107,7 @@ pub fn verify(w: *Wallet, bytes: []const u8) !Submission {
     if (try w.map("rejected").has(&subject)) return error.TransactionRejected;
     for (tx.inputs) |in| {
         const op = store_mod.outpointKey(in.previous_outpoint.txid.bytes, in.previous_outpoint.index);
-        for (try w.map("spenders").prefixed(&op)) |kv| {
-            const other: [32]u8 = kv.key[36..68].*;
+        for (try w.spendersOf(op)) |other| {
             if (std.mem.eql(u8, &other, &subject)) continue;
             if ((try w.status(other)) == .proven) return error.DoubleSpend;
         }
@@ -140,9 +139,7 @@ pub fn previousCoins(w: *Wallet, topic: []const u8, tx: Transaction) ![]u32 {
 
 /// Whether a transaction we hold other than `tx`, not rejected, spends `op`.
 fn spentByOther(w: *Wallet, op: [36]u8, tx: [32]u8) !bool {
-    for (try w.map("spenders").prefixed(&op)) |kv| {
-        if (kv.key.len != 68) return error.BadIndex;
-        const sp: [32]u8 = kv.key[36..68].*;
+    for (try w.spendersOf(op)) |sp| {
         if (std.mem.eql(u8, &sp, &tx)) continue;
         if (!(try w.map("rejected").has(&sp))) return true;
     }
@@ -174,7 +171,7 @@ pub fn spender(w: *Wallet, topic: []const u8, txid: [32]u8, vout: u32) !?struct 
 }
 
 /// Hold the submission's transactions (and the proofs its BUMPs carry) like
-/// any other we hold: blocks, `txs`, `spenders`, `spends` relations. → the
+/// any other we hold: blocks (kept: `spends` edges, #42), `txs`. → the
 /// subject's CID.
 pub fn hold(w: *Wallet, sub: Submission) ![]const u8 {
     var subject_cid: []const u8 = "";

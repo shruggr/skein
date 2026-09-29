@@ -50,9 +50,9 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 
 | record | block | fields | notes |
 |---|---|---|---|
-| header | `bitcoin-block` (0xb0, dbl-sha2-256) | the 80 bytes | CID = block hash; height is the `headers` map's key |
-| transaction | `bitcoin-tx` (0xb1, dbl-sha2-256) | the standard serialization | CID = txid |
-| merkle node | `bitcoin-merkle` (0xb3, dbl-sha2-256) | 64 bytes: left hash ‖ right hash | CID = the node's merkle hash (#29, below) |
+| header | `bitcoin-block` (0xb0, dbl-sha2-256) | the 80 bytes | CID = block hash; height is the `headers` map's key; decoded with links to the previous header and the merkle root (#42, docs/VM.md) |
+| transaction | `bitcoin-tx` (0xb1, dbl-sha2-256) | the standard serialization | CID = txid; decoded with each input a link to the transaction it spends |
+| merkle node | `bitcoin-tx` (0xb1, dbl-sha2-256), exactly 64 bytes | left hash ‖ right hash | CID = the node's merkle hash (#29, below; IPLD's convention, #42) |
 | `action` | dag-cbor | `txid`, `tx` (link), `description`, `labels`, `noSend?` | a transaction that is ours |
 | `output` | dag-cbor | `txid`, `vout`, `tx` (link), `basket`, `protocol`, protocol fields | satoshis and script come from the tx |
 | `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (outpoints), `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
@@ -60,6 +60,13 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 | `settlement` | dag-cbor | `txid`, `status: "rejected"`, `reason`, `cause?` (the root txid), `at` | a transaction that will never be mined (#37) |
 | `wallet-state` | dag-cbor | `network`, `maps: {name: root \| null}` | what the head `wallet` names |
 | `wallet-result` | dag-cbor | `op`, per-op fields, `state` | a step's answer, kept in its thread |
+
+Every bitcoin block the wallet holds is **kept** by the step that puts it,
+so its links are edges in the kernel's index (#42, docs/VM.md "Edges"):
+each input of each transaction a `spends` edge (locator = the vout), each
+header `prev` / `merkleroot`, each node `child` 0 / 1. The wallet reads
+them with the `edges` call. The result record stays the last thing a step
+keeps (a resting thread finds what it awaits there).
 
 Output `protocol`s: `"wallet payment"` (a BRC-29 payment to us: basket
 `default`, `derivationPrefix`, `derivationSuffix`, `senderIdentityKey`),
@@ -83,8 +90,7 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `actions` | txid → `action` | our transactions |
 | `outputs` | txid ‖ vout (u32 BE) → `output` | output by outpoint |
 | `awaiting` | txid → `broadcast` | transactions awaiting a status |
-| `spenders` | outpoint ‖ spending txid → null | every input of every transaction we hold |
-| `dependents` | txid ‖ tag ‖ id → rel (text) | what depends on a transaction, and how (see Settlement) |
+| `dependents` | txid ‖ tag ‖ id → rel (text) | what depends on a transaction, and how (see Settlement) — but spending it |
 | `rejected` | txid → `settlement` | transactions that will never be mined |
 | `proofHeights` | height (u32 BE) ‖ txid → null | proofs by block height: what a reorg reverts |
 | `drafts` | draft CID → null \| `settlement` | signable drafts; a link once rejected |
@@ -98,6 +104,16 @@ The same record also carries an overlay's maps (#36: `admitted`,
 docs/OVERLAY.md): one chain and one settlement for a wallet and an overlay
 in one instance. A wallet-only instance has them empty.
 
+**Who spends what is not a map of the wallet's** (#42): it is the kernel's
+`spends` edges. The spenders of txid:vout are the edges into the
+transaction's CID with rel `spends` and locator = vout, from each kept
+spending transaction, restricted to the ones the state holds (`txs`), lowest
+txid first (`Wallet.spendersOf`). It is the same set the former `spenders`
+map held (one per input of every held transaction, ancestry included); a
+cross-check against it held on every scenario before the map was removed.
+Within a step, the edges of the blocks the step kept so far are already
+visible.
+
 **Status and spendability are computed, never stored.** `rejected` means a
 `settlement` record for the txid is in `rejected`; else `proven` means the
 block `proofs` names for it (its merkle path checked against that header when
@@ -110,8 +126,9 @@ rejection (below).
 ### Proofs: the merkle tree as IPLD nodes (#29)
 
 A merkle node is 64 bytes, left hash ‖ right hash, and its hash is the
-dbl-sha256 of those bytes; as a `bitcoin-merkle` block (0xb3, dbl-sha2-256;
-kernel-zig/src/cid.zig) **its CID is its merkle hash**. The header's merkle
+dbl-sha256 of those bytes; as a 64-byte `bitcoin-tx` block (dbl-sha2-256;
+IPLD's convention, #42: the kernel decodes it as `[left, right]`,
+kernel-zig/src/bitcoin.zig) **its CID is its merkle hash**. The header's merkle
 root names the root node; each node names its two children — nodes, or at the
 bottom transactions (bitcoin-tx CIDs: the txids). The tree is **sparse**: we
 hold only the nodes on the paths to our transactions; the other children are
@@ -150,7 +167,7 @@ recompute (same contents, same root). The rules:
 
 | fact | where | index keys touched |
 |---|---|---|
-| a `spends` edge (a transaction held: `putTx`) | each input's outpoint | `spent[op]` = the first spender in `spenders[op…]` not rejected; if that turned `op` spent/unspent, its `byBasket` key moves (0 ↔ 1) |
+| a `spends` edge (a transaction held and kept: `putTx`) | each input's outpoint | `spent[op]` = the first spender of `op` (its `spends` edges) not rejected; if that turned `op` spent/unspent, its `byBasket` key moves (0 ↔ 1) |
 | a transaction held | its txid | into `unproven` (unless already proven or rejected) |
 | an output record written / replaced (`putOutput`) | its outpoint | its `byBasket` key under its basket and spent state (the old key dropped on a replace) |
 | a proof stored (`putProof`) | its txid | leaves `unproven` when the proof holds on our chain |
@@ -163,9 +180,9 @@ that undoes the proof puts it back), a rejected one is in `rejected`; so it
 stays the size of the in-flight set, not of the history. The old dense
 `bySettlement` / `byStatus` (every transaction by status) are gone — nothing
 queried them, and status stays computed per txid. Cost: adding one
-transaction of ours (tx, action, one output) writes ~21 blocks in total —
+transaction of ours (tx, action, one output) writes ~20 blocks in total (21 before `spenders` folded into the kernel's edges, #42) —
 index nodes, records and the state record — against a wallet of 10k outputs
-(16 at 100 outputs); with the rebuild at every save it was 335, growing with
+(15 at 100 outputs); with the rebuild at every save it was 335, growing with
 the store.
 
 ## Settlement (#37)
@@ -201,7 +218,7 @@ output record by outpoint, `d` a draft by CID, `r` any other record by CID):
 
 | rel | written for | propagates |
 |---|---|---|
-| `spends` | every input of every transaction we hold (a BEEF's ancestry, ours, a competing spend) → the transaction it consumes | yes |
+| `spends` | every input of every transaction we hold (a BEEF's ancestry, ours, a competing spend) → the transaction it consumes: **not** in `dependents` but the kernel's edges (#42, above) | yes |
 | `derives-from` | our action, each output record, each draft's inputs → the transaction | yes |
 | `admits` | an overlay's admitted output (tag `m`) or judgement (tag `p`) → its transaction (#36, docs/OVERLAY.md): removed on rejection | yes |
 | `mentions` | a record that merely names the transaction | no |
@@ -209,10 +226,11 @@ output record by outpoint, `d` a draft by CID, `r` any other record by CID):
 **Bubbling** (`Wallet.reject`): the rejected txid is queued; for each
 transaction taken from the queue (skipped if already rejected or proven): a
 settlement record, drop it from `awaiting`, then walk its `dependents` in key
-order following only propagating relations — a `t` dependent (a spend) is
-queued (transitively rejected, `input-rejected`), an `o` output record is
+order following only propagating relations — an `o` output record is
 removed from `outputs` (the output vanishes), a `d` draft is marked rejected
-(signAction refuses it: `DraftRejected`). Then the derived keys the
+(signAction refuses it: `DraftRejected`) — and then its `spends` edges: each
+held transaction that spends it, in txid order, is queued (transitively
+rejected, `input-rejected`). Then the derived keys the
 rejections touch are updated (above): the inputs the rejected transactions
 consumed are spendable again unless another held transaction spends them. Breadth first
 in key order, from records only: the same rejection on the same state gives

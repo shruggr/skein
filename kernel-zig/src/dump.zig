@@ -193,7 +193,8 @@ pub fn main(gpa: std.mem.Allocator, path: []const u8) !u8 {
         try w.raw(",");
         try w.str(Value.str(kv.value.array[0]));
         try w.raw(",");
-        try w.str(Value.str(kv.value.array[1]));
+        // A locator is text (a record's refs) or a number (a bitcoin block's vout / child, #42).
+        if (Value.intOf(kv.value.array[1])) |n| try w.int(@intCast(n)) else try w.str(Value.str(kv.value.array[1]));
         try w.raw("]");
     }
     try w.raw("],\"heads\":[");

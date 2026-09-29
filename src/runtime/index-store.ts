@@ -19,10 +19,10 @@
 // strings uvarint-length-prefixed. The derivation is sqlite.ts's.
 
 import { createHash } from "node:crypto";
-import * as Digest from "multiformats/hashes/digest";
 import { DatabaseSync } from "node:sqlite";
 import { CID, decode, encode, fmt, fromBytes, isCID } from "./cid.ts";
 import { keptEdges, openStore, originEdges, toRef, updateEdges, type SqliteStore } from "./sqlite.ts";
+import { BITCOIN_BLOCK, bitcoinLinks, decodeBitcoin, displayHash, isBitcoin } from "./bitcoin.ts";
 import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
@@ -64,31 +64,33 @@ export function display(v: unknown): unknown {
 // ---------------------------------------------------------------- bitcoin blocks, for display
 
 /**
- * The Zig kernel's bitcoin codecs (kernel-zig/src/cid.zig), all dbl-sha2-256
- * with the hash in internal byte order: bitcoin-block (an 80-byte header, its
- * CID the block hash), bitcoin-tx (a transaction, its CID the txid) and
- * bitcoin-merkle (#29: a 64-byte merkle node left ‖ right, its CID its merkle
- * hash). A header links its merkle root's node; a node links its two
- * children — nodes, or at the bottom transactions; the tree is sparse, so a
- * child may not be held.
+ * The Zig kernel's bitcoin codecs decoded the IPLD way (#42, bitcoin.ts,
+ * kernel-zig/src/bitcoin.zig): a header (bitcoin-block) links the previous
+ * header and its merkle root; a 64-byte bitcoin-tx is a merkle node linking
+ * its two children (nodes, or at the bottom transactions); a transaction's
+ * inputs link what they spend. The tree and the ancestry are sparse, so a
+ * link's target may not be held. The fields are the decoded node's.
  */
-export const BITCOIN_BLOCK = 0xb0, BITCOIN_TX = 0xb1, BITCOIN_MERKLE = 0xb3, DBL_SHA2_256 = 0x56;
-const hashCid = (code: number, h: Uint8Array) => CID.createV1(code, Digest.create(DBL_SHA2_256, Uint8Array.from(h)));
-const displayHash = (h: Uint8Array) => Buffer.from(h).reverse().toString("hex");
+export { BITCOIN_BLOCK, BITCOIN_TX, DBL_SHA2_256 } from "./bitcoin.ts";
 
 export function bitcoinView(cid: CID, bytes: Uint8Array): { codec: string; fields: Array<[string, string | CID]> } | undefined {
-  if (cid.multihash.code !== DBL_SHA2_256) return undefined;
+  const v = decodeBitcoin(cid, bytes) as Obj | CID[] | undefined;
+  if (v === undefined) return undefined;
   const id = displayHash(cid.multihash.digest);
-  if (cid.code === BITCOIN_MERKLE && bytes.length === 64) {
-    const l = bytes.subarray(0, 32), r = bytes.subarray(32, 64);
-    return { codec: "bitcoin-merkle", fields: [["hash", id], ["left", hashCid(BITCOIN_MERKLE, l)], ["right", Buffer.from(l).equals(Buffer.from(r)) ? "duplicate of left" : hashCid(BITCOIN_MERKLE, r)], ["left (as a txid)", displayHash(l)], ["right (as a txid)", displayHash(r)]] };
+  if (Array.isArray(v)) {
+    const [l, r] = v;
+    return { codec: "bitcoin-tx (merkle node)", fields: [["hash", id], ["left", l], ["right", l.equals(r) ? "duplicate of left" : r], ["left (as a txid)", displayHash(l.multihash.digest)], ["right (as a txid)", displayHash(r.multihash.digest)]] };
   }
-  if (cid.code === BITCOIN_BLOCK && bytes.length === 80) {
-    const root = bytes.subarray(36, 68);
-    return { codec: "bitcoin-block", fields: [["block hash", id], ["previous", hashCid(BITCOIN_BLOCK, bytes.subarray(4, 36))], ["merkle root", hashCid(BITCOIN_MERKLE, root)], ["time", String(new DataView(bytes.buffer, bytes.byteOffset).getUint32(68, true))]] };
+  if (cid.code === BITCOIN_BLOCK) {
+    return { codec: "bitcoin-block", fields: [["block hash", id], ["version", String(v.version)], ["previousblockhash", isCID(v.previousblockhash) ? v.previousblockhash : "none (genesis)"], ["merkleroot", v.merkleroot as CID], ["time", String(v.time)], ["bits", (v.bits as number).toString(16)], ["nonce", String(v.nonce)]] };
   }
-  if (cid.code === BITCOIN_TX) return { codec: "bitcoin-tx", fields: [["txid", id]] };
-  return undefined;
+  const fields: Array<[string, string | CID]> = [["txid", id], ["version", String(v.version)], ["locktime", String(v.locktime)]];
+  (v.vin as Obj[]).forEach((x, i) => {
+    if (isCID(x.txid)) fields.push([`vin ${i}`, x.txid], [`vin ${i} spends`, `${displayHash(x.txid.multihash.digest)}:${x.vout}`]);
+    else fields.push([`vin ${i}`, "coinbase"]);
+  });
+  (v.vout as Obj[]).forEach((o, i) => fields.push([`vout ${i}`, `${o.value} sat · ${(o.script as Uint8Array).length}-byte script`]));
+  return { codec: "bitcoin-tx", fields };
 }
 
 // ---------------------------------------------------------------- keys
@@ -280,8 +282,22 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
     for (const [i, c] of ups.entries()) {
       pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
       const u = (await store.get(c)) as unknown as Obj;
-      const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) ? store.get(k).catch(() => undefined) : undefined)));
+      const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
+      const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) && !isBitcoin(k) ? store.get(k).catch(() => undefined) : undefined)));
       edges(i + 1, [...updateEdges(u), ...keptEdges(kept)]);
+      // A kept bitcoin block's links (#42): from the block itself at seq 0.
+      for (const k of keptCids) {
+        if (!isBitcoin(k)) continue;
+        const b = await store.bytes(k).catch(() => undefined);
+        if (!b) continue;
+        bitcoinLinks(k, b).forEach((l, ord) => {
+          const key = cat(strKey(fmt(l.to)), k.bytes, be64(0), be64(ord));
+          const ks = Buffer.from(key).toString("hex");
+          if (seenEdge.has(ks)) return;
+          seenEdge.add(ks);
+          pairs.edges.push([key, [l.rel, l.locator]]);
+        });
+      }
     }
     const t = ups.length ? (await store.get(tipCid)) as unknown as Obj : undefined;
     if (kind === "thread") {
@@ -460,6 +476,11 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): Sq
 
     edges: {
       async refsFrom(cid) {
+        // A bitcoin block's own links (#42): what an input spends, a header's previous header and root, a node's children.
+        if (isBitcoin(cid)) {
+          const b = get(cid);
+          return b ? bitcoinLinks(cid, b).map((l) => toRef(l.to, l.rel, l.locator === null ? null : String(l.locator))) : [];
+        }
         const row = chain(cid);
         if (!row) return [];
         const rows: Array<{ pos: number; to: string; rel: string; locator: string | null }> = [];
@@ -483,10 +504,11 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): Sq
         for (const [k, v] of trees.prefixed(root("edges"), p)) {
           const rest = k.subarray(p.length);
           const from = fromBytes(rest.subarray(0, cidLen(rest)));
-          const [rel, locator] = v as [string, string | null];
+          const [rel, loc] = v as [string, string | number | null];
+          const locator = typeof loc === "number" ? String(loc) : loc; // a bitcoin block's vout / child (#42)
           const g = JSON.stringify([fmt(from), rel, locator]);
           if (groups.has(g)) continue;
-          const o = block<Obj>(from);
+          const o = isBitcoin(from) ? {} as Obj : block<Obj>(from); // a kept bitcoin block points from itself
           groups.set(g, { from, rel, locator, at: typeof o.at === "number" ? o.at : null });
         }
         return [...groups.values()]

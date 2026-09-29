@@ -17,10 +17,13 @@
 //! Settlement (#37): every transaction we hold is `proven` (a merkle proof
 //! against our best chain), `unproven`, or `rejected` (a `settlement` record
 //! says so: ARC rejected it, a competing spend was proven, it was never
-//! mined in time, or something it depends on was rejected). The relations
-//! between records are kept as they are written, in `dependents`, each with
-//! its kind: `spends`, `derives-from`, `admits` (#36) propagate a
-//! rejection; `mentions` does not. A rejection walks them and recomputes
+//! mined in time, or something it depends on was rejected). What spends a
+//! transaction is the kernel's `spends` edges (#42: every transaction held is
+//! a kept bitcoin-tx block, each input an edge to the transaction it
+//! consumes, locator = vout; read with the `edges` import). The other
+//! relations between records are kept as they are written, in `dependents`,
+//! each with its kind: `derives-from`, `admits` (#36) propagate a rejection,
+//! as `spends` does; `mentions` does not. A rejection walks them and recomputes
 //! what was derived (the outputs vanish, drafts and dependent transactions
 //! are rejected in turn, the inputs they consumed are spendable again).
 const std = @import("std");
@@ -59,8 +62,9 @@ pub const Oracle = struct {
 ///   awaiting  txid → broadcast record                       transactions awaiting a status callback
 ///   spent     txid ‖ vout → spending txid (bytes)            derived: the first spender we hold that is not rejected
 ///   byBasket  len ‖ basket ‖ 0|1 ‖ outpoint → null          derived: our outputs, 0 spendable, 1 spent
-///   spenders  txid ‖ vout ‖ spending txid → null             every input of every transaction we hold
-///   dependents  txid ‖ tag ‖ id → rel (text)                what depends on a transaction, and how (Rel, Tag)
+///   dependents  txid ‖ tag ‖ id → rel (text)                what depends on a transaction, and how (Rel, Tag),
+///                                                           but spending it: that is the kernel's `spends`
+///                                                           edges into its CID (#42, `spendersOf`)
 ///   rejected  txid → settlement record                      transactions that will never be mined
 ///   proofHeights  height (u32 BE) ‖ txid → null             proofs by block height (what a reorg reverts)
 ///   drafts    draft CID → null | settlement record          signable drafts (rejected with an input)
@@ -74,7 +78,7 @@ pub const Oracle = struct {
 ///   applied   len ‖ topic ‖ txid → applied record             a topic's judgement of a tx (dupes; retention)
 ///   byTopic   len ‖ topic ‖ 0|1 ‖ outpoint → null             derived: 0 unspent, 1 spent (admitted ⋈ `spent`)
 ///   byScript  sha256(script) ‖ len ‖ topic ‖ 0|1 ‖ outpoint → null   derived: by locking script hash
-pub const map_names = [_][]const u8{ "headers", "heights", "txs", "proofs", "actions", "outputs", "awaiting", "spent", "byBasket", "spenders", "dependents", "rejected", "proofHeights", "drafts", "watchers", "unproven", "admitted", "applied", "byTopic", "byScript" };
+pub const map_names = [_][]const u8{ "headers", "heights", "txs", "proofs", "actions", "outputs", "awaiting", "spent", "byBasket", "dependents", "rejected", "proofHeights", "drafts", "watchers", "unproven", "admitted", "applied", "byTopic", "byScript" };
 
 pub const Status = enum { proven, unproven, rejected };
 
@@ -242,20 +246,15 @@ pub const Wallet = struct {
         return try self.store.get(self.arena, c);
     }
 
-    /// A transaction, held: its block, and each input as a `spends` relation
-    /// to the transaction it consumes (held or not) and in `spenders`.
+    /// A transaction, held: its block, kept — so each input is a `spends`
+    /// edge in the kernel's index to the transaction it consumes (held or
+    /// not; #42) — and what that changes in `spent`.
     pub fn putTx(self: *Wallet, txid: [32]u8, raw: []const u8) ![]const u8 {
         if (try self.map("txs").link(&txid)) |c| return c;
         const cid = try self.store.putBitcoin(self.arena, .tx, raw);
         try self.map("txs").putLink(&txid, cid);
         const tx = try bsvz.transaction.Transaction.parse(self.arena, raw);
-        for (tx.inputs) |in| {
-            const src = in.previous_outpoint.txid.bytes;
-            const op = store_mod.outpointKey(src, in.previous_outpoint.index);
-            try self.map("spenders").add(&(op ++ txid));
-            try self.relate(src, .tx, &txid, .spends);
-            try self.refreshSpent(op);
-        }
+        for (tx.inputs) |in| try self.refreshSpent(store_mod.outpointKey(in.previous_outpoint.txid.bytes, in.previous_outpoint.index));
         try self.resettle(txid);
         return cid;
     }
@@ -263,14 +262,12 @@ pub const Wallet = struct {
     // ------------------------------------------------------------ derived maps, maintained (#41)
 
     /// `spent[op]`: the first (lowest txid) spender of `op` we hold that is
-    /// not rejected, or none. Recomputed from `spenders` (the few spenders of
-    /// one outpoint) whenever a spender is added or rejected; when that turns
+    /// not rejected, or none. Recomputed from the `spends` edges (the few
+    /// spenders of one outpoint) whenever a spender is added or rejected; when that turns
     /// the outpoint spent or unspent, its `byBasket` key moves.
     fn refreshSpent(self: *Wallet, op: [36]u8) !void {
         var first: ?[32]u8 = null;
-        for (try self.map("spenders").prefixed(&op)) |kv| {
-            if (kv.key.len != 68) return error.BadIndex;
-            const sp: [32]u8 = kv.key[36..68].*;
+        for (try self.spendersOf(op)) |sp| {
             if (try self.map("rejected").has(&sp)) continue;
             first = sp;
             break;
@@ -320,6 +317,30 @@ pub const Wallet = struct {
         }
     }
 
+    /// The transactions we hold that spend `op`, lowest txid first: the
+    /// kernel's `spends` edges into its transaction with locator = its vout
+    /// (#42: every input of every transaction held, which the wallet keeps).
+    pub fn spendersOf(self: *Wallet, op: [36]u8) ![][32]u8 {
+        var held: std.ArrayList([32]u8) = .empty;
+        for (try self.store.spendersOf(self.arena, op[0..32].*, std.mem.readInt(u32, op[32..36], .big))) |sp| {
+            if (try self.map("txs").has(&sp)) try held.append(self.arena, sp);
+        }
+        return held.items;
+    }
+
+    /// The transactions we hold that spend any output of `txid`, lowest txid
+    /// first (its `spends` edges, whatever the vout).
+    pub fn spendersOfTx(self: *Wallet, txid: [32]u8) ![][32]u8 {
+        var out: std.ArrayList([32]u8) = .empty;
+        for (try self.store.edges(self.arena, &store_mod.hashCid(.tx, txid), "spends")) |e| {
+            const h = store_mod.bitcoinHash(e.from) orelse continue;
+            if (out.items.len > 0 and std.mem.eql(u8, &out.items[out.items.len - 1], &h)) continue; // one per spender (edges come in `from` order)
+            if (!(try self.map("txs").has(&h))) continue;
+            try out.append(self.arena, h);
+        }
+        return out.items;
+    }
+
     /// A relation from a dependent record to the transaction it names (`dependents`).
     pub fn relate(self: *Wallet, to: [32]u8, tag: Tag, id: []const u8, rel: Rel) !void {
         const key = try std.mem.concat(self.arena, u8, &.{ &to, &.{@intFromEnum(tag)}, id });
@@ -343,7 +364,7 @@ pub const Wallet = struct {
     }
 
     /// A merkle path proving `txid` (#29, merkle.zig): the nodes it reveals
-    /// are put as bitcoin-merkle blocks (shared with every other path of the
+    /// are put as 64-byte bitcoin-tx blocks (shared with every other path of the
     /// block; nothing rewritten), and `proofs` names the block's header. The
     /// path's root must be our best-chain header's at its height.
     pub fn putProof(self: *Wallet, txid: [32]u8, p: merkle.MerklePath) !void {
@@ -408,8 +429,9 @@ pub const Wallet = struct {
 
     /// Reject a transaction and bubble: record a settlement record for it,
     /// then walk what depends on it through `dependents`, following only the
-    /// relations that propagate — a transaction that spends it is rejected in
-    /// turn (transitively, breadth first in key order: deterministic), an
+    /// relations that propagate, and through its `spends` edges (#42) — a
+    /// transaction that spends it is rejected in turn (transitively, breadth
+    /// first: its dependents in key order, then its spenders in txid order; deterministic), an
     /// output record of it vanishes, a draft built on it is rejected; a
     /// `mentions` is left alone. What is derived from the remaining records
     /// is updated here, for the keys the rejections touch: each rejected
@@ -460,6 +482,8 @@ pub const Wallet = struct {
                     .action, .record => {}, // an action's status is computed; a record is only reported
                 }
             }
+            // What spends it: the `spends` edges into it (#42), in txid order.
+            for (try self.spendersOfTx(t)) |s| try queue.append(a, s);
         }
         // What the rejected transactions consumed: spendable again unless another spender stands.
         for (out.items) |t| {
@@ -478,8 +502,7 @@ pub const Wallet = struct {
         const tx = try bsvz.transaction.Transaction.parse(self.arena, raw);
         for (tx.inputs) |in| {
             const op = store_mod.outpointKey(in.previous_outpoint.txid.bytes, in.previous_outpoint.index);
-            for (try self.map("spenders").prefixed(&op)) |kv| {
-                const other: [32]u8 = kv.key[36..68].*;
+            for (try self.spendersOf(op)) |other| {
                 if (std.mem.eql(u8, &other, &txid)) continue;
                 _ = try self.reject(other, "double-spent");
             }
@@ -493,8 +516,7 @@ pub const Wallet = struct {
         const tx = try bsvz.transaction.Transaction.parse(self.arena, raw);
         for (tx.inputs) |in| {
             const op = store_mod.outpointKey(in.previous_outpoint.txid.bytes, in.previous_outpoint.index);
-            for (try self.map("spenders").prefixed(&op)) |kv| {
-                const other: [32]u8 = kv.key[36..68].*;
+            for (try self.spendersOf(op)) |other| {
                 if (std.mem.eql(u8, &other, &txid)) continue;
                 if ((try self.status(other)) == .proven) {
                     _ = try self.reject(txid, "double-spent");

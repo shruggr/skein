@@ -411,8 +411,11 @@ export async function recordPage(w: World, cid: CID, path = ""): Promise<string>
   if (cid.code === GIT_RAW) return layout(short(cid), `${title}${await gitView(w, cid, bytes, path)}`);
   const btc = cid.code !== DAG_CBOR ? bitcoinView(cid, bytes) : undefined;
   if (btc) {
-    // Bitcoin blocks (#29): a header, a transaction, a merkle node — its links (a sparse tree's child may not be held).
-    return layout(short(cid), `${title}${kv([["codec", btc.codec], ["size", `${bytes.length} bytes`], ...btc.fields.map(([k, v]): [string, string] => [k, typeof v === "string" ? esc(v) : link(w, v)])])}<pre>${hex(bytes)}</pre>`);
+    // Bitcoin blocks (#42): a header, a transaction, a merkle node, decoded — its links (a sparse tree's child
+    // or an ancestor may not be held), and the edges into it: who spends it, the next header, the parent node.
+    const to = await w.store.edges.refsTo(cid).catch(() => [] as Array<Ref & { from: CID }>);
+    const into = to.length ? `<h2>refs</h2><ul class="plain small">${to.map((r) => `<li>← ${esc(r.rel)} ${link(w, r.from)}${r.locator ? ` <code>${esc(r.locator)}</code>` : ""}</li>`).join("")}</ul>` : "";
+    return layout(short(cid), `${title}${kv([["codec", btc.codec], ["size", `${bytes.length} bytes`], ...btc.fields.map(([k, v]): [string, string] => [k, typeof v === "string" ? esc(v) : link(w, v)])])}${into}<pre>${hex(bytes)}</pre>`);
   }
   if (cid.code !== DAG_CBOR) {
     const wasm = bytes.length >= 4 && Buffer.from(bytes.subarray(0, 4)).equals(Buffer.from([0, 0x61, 0x73, 0x6d]));

@@ -43,12 +43,11 @@ import { decode, encode } from "../runtime/cid.ts";
 import { GIT_RAW, hashTree, parseTree, sha1Cid, type Entry, type EntryMode } from "../runtime/tree.ts";
 import { BIN, DAG_CBOR, gitBody, MemBlocks, RAW, type Objects } from "./boot.ts";
 import { vcdiffDecode } from "./vcdiff.ts";
+import { bitcoinLinks, isBitcoin } from "../runtime/bitcoin.ts";
 
 export const PACKET_KIND = "skein-packet";
 export const BITCOIN_TX = 0xb1;
 export const BITCOIN_BLOCK = 0xb0;
-/** A 64-byte merkle node (#29, kernel-zig/src/cid.zig): its CID is its merkle hash. */
-export const BITCOIN_MERKLE = 0xb3;
 const SHA1 = 0x11, SHA2_256 = 0x12, DBL_SHA2_256 = 0x56;
 const OP_FALSE = 0x00, OP_RETURN = 0x6a;
 
@@ -81,7 +80,7 @@ export function hashMatches(cid: CID, bytes: Uint8Array): boolean {
   switch (cid.multihash.code) {
     case SHA1: return cid.code === GIT_RAW && d.equals(sha1(bytes));
     case SHA2_256: return (cid.code === RAW || cid.code === DAG_CBOR) && d.equals(sha256(bytes));
-    case DBL_SHA2_256: return (cid.code === BITCOIN_TX || (cid.code === BITCOIN_BLOCK && bytes.length === 80) || (cid.code === BITCOIN_MERKLE && bytes.length === 64)) && d.equals(sha256(sha256(bytes)));
+    case DBL_SHA2_256: return (cid.code === BITCOIN_TX || (cid.code === BITCOIN_BLOCK && bytes.length === 80)) && d.equals(sha256(sha256(bytes)));
     default: return false;
   }
 }
@@ -98,17 +97,17 @@ function asBlock(cid: CID, payload: Uint8Array): Uint8Array | undefined {
 
 // ---------------------------------------------------------------- links (completeness)
 
-const merkleCid = (h: Uint8Array) => CID.createV1(BITCOIN_MERKLE, Digest.create(DBL_SHA2_256, Uint8Array.from(h)));
-
 /**
- * The CIDs a block links to: dag-cbor links, git tree entries; a header its
- * merkle root's node and a merkle node its children (#29) — `optional`: the
- * tree is sparse (only the paths to held transactions), so a child that is
- * not held is not missing; none for blobs, raw, transactions.
+ * The CIDs a block links to: dag-cbor links, git tree entries, and a bitcoin
+ * block's typed links (#42, bitcoin.ts): a header its previous header and
+ * its merkle root, a merkle node (64-byte bitcoin-tx) its children, a
+ * transaction what its inputs spend — all `optional`: the tree and the
+ * ancestry are sparse (only the paths to held transactions, only the
+ * ancestors held), so a target that is not held is not missing. None for
+ * blobs and raw.
  */
 export function linksOf(cid: CID, bytes: Uint8Array): Array<{ cid: CID; tree?: boolean; optional?: boolean }> {
-  if (cid.code === BITCOIN_BLOCK && bytes.length === 80) return [{ cid: merkleCid(bytes.subarray(36, 68)), optional: true }];
-  if (cid.code === BITCOIN_MERKLE && bytes.length === 64) return [{ cid: merkleCid(bytes.subarray(0, 32)), optional: true }, { cid: merkleCid(bytes.subarray(32, 64)), optional: true }];
+  if (isBitcoin(cid)) return bitcoinLinks(cid, bytes).map((l) => ({ cid: l.to, optional: true }));
   if (cid.code === DAG_CBOR) {
     const out: Array<{ cid: CID }> = [];
     const walk = (v: unknown): void => {

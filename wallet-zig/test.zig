@@ -199,11 +199,11 @@ test "vectors: BRC-74 merkle paths and roots against mainnet headers (go-sdk)" {
 
 // ---------------------------------------------------------------- the merkle tree as IPLD nodes (#29)
 
-/// The bitcoin-merkle blocks a MemStore holds, as sorted hex CIDs.
+/// The merkle nodes a MemStore holds (64-byte bitcoin-tx blocks, #42), as sorted hex CIDs.
 fn merkleBlocks(a: std.mem.Allocator, ms: *lib.store.MemStore) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
-    var it = ms.blocks.keyIterator();
-    while (it.next()) |k| if (k.len == 37 and k.*[1] == 0xb3) try out.append(a, try hexOf(a, k.*));
+    var it = ms.blocks.iterator();
+    while (it.next()) |e| if (e.key_ptr.len == 37 and e.key_ptr.*[1] == 0xb1 and e.value_ptr.len == 64) try out.append(a, try hexOf(a, e.key_ptr.*));
     std.mem.sort([]const u8, out.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.order(u8, x, y) == .lt;
@@ -1001,12 +1001,15 @@ test "settlement: a rejection bubbles through spends and drafts; inputs freed; m
     _ = try w.save();
     const d = try w.createAction(.{ .description = "D", .sign_and_process = false, .outputs = &.{.{ .satoshis = 100, .locking_script = &payee }} }, signer.signer(), "ZA==", "MQ==", 100);
     const before = try w.save();
-    // The relations as written: B spends A; A's action and outputs derive from A; D from B.
-    var spends_a = false;
-    for (try w.dependentsOf(ca.txid)) |dep| {
-        if (dep.tag == .tx and std.mem.eql(u8, dep.id, &cb.txid)) spends_a = dep.rel == .spends;
-    }
-    try std.testing.expect(spends_a);
+    // The relations as written: B spends A (a `spends` edge, #42: B kept, its input
+    // an edge into A's CID with locator = A's change vout); A's action and outputs derive from A; D from B.
+    const spenders_a = try w.spendersOfTx(ca.txid);
+    try std.testing.expectEqual(@as(usize, 1), spenders_a.len);
+    try std.testing.expectEqualSlices(u8, &cb.txid, &spenders_a[0]);
+    const e = try s.edges(a, &lib.store.hashCid(.tx, ca.txid), "spends");
+    try std.testing.expectEqual(@as(usize, 1), e.len);
+    try std.testing.expectEqualSlices(u8, &lib.store.hashCid(.tx, cb.txid), e[0].from);
+    for (try w.dependentsOf(ca.txid)) |dep| try std.testing.expect(dep.rel != .spends); // no longer a dependents entry
     try std.testing.expectEqual(@as(usize, 1), (try w.listOutputs("default", false)).len); // B's change only
     try std.testing.expectEqual(@as(usize, 1), (try w.listOutputs("tokens", false)).len);
     // Something that merely mentions A (another transaction, and a record naming it).
@@ -1308,11 +1311,20 @@ const CountingStore = struct {
     inner: lib.store.Store,
     puts: usize = 0,
     fn store(self: *CountingStore) lib.store.Store {
-        return .{ .ptr = self, .getFn = get, .putFn = put, .putBlockFn = putBlock };
+        return .{ .ptr = self, .getFn = get, .putFn = put, .putBlockFn = putBlock, .keepFn = keep, .edgesFn = edges };
     }
     fn get(ptr: *anyopaque, arena: std.mem.Allocator, cid: []const u8) anyerror![]const u8 {
         const self: *CountingStore = @ptrCast(@alignCast(ptr));
         return self.inner.get(arena, cid);
+    }
+    // Keeping writes no block (the kernel's edges are its index, not the wallet's).
+    fn keep(ptr: *anyopaque, cid: []const u8) anyerror!void {
+        const self: *CountingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.keep(cid);
+    }
+    fn edges(ptr: *anyopaque, arena: std.mem.Allocator, to: []const u8, rel: ?[]const u8) anyerror![]const lib.store.Edge {
+        const self: *CountingStore = @ptrCast(@alignCast(ptr));
+        return self.inner.edges(arena, to, rel);
     }
     fn put(ptr: *anyopaque, arena: std.mem.Allocator, bytes: []const u8) anyerror![]const u8 {
         const self: *CountingStore = @ptrCast(@alignCast(ptr));

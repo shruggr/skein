@@ -206,3 +206,75 @@ test "index: a kept record's refs are edges with the record's own rel (#37)" {
     try ix2.importChain(t, ups, (try s.chainTip(a, t)).?, @intCast(ups.len));
     try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
 }
+
+fn hexBytes(a: std.mem.Allocator, s: []const u8) ![]u8 {
+    const out = try a.alloc(u8, s.len / 2);
+    _ = try std.fmt.hexToBytes(out, s);
+    return out;
+}
+
+test "index: a kept bitcoin block's links are edges from the block (#42); edgesTo answers who spent txid:vout" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = Mem.init(gpa);
+    defer mem.deinit();
+    const ix = try index.Index.init(gpa, mem.backend(), false);
+    defer ix.deinit();
+    const s = ix.store();
+    const bitcoin = @import("bitcoin.zig");
+
+    // Mainnet block 170's header and its one spend (f4184fc5 spends 0437cd7f:0).
+    const header = try hexBytes(a, "0100000055bd840a78798ad0da853f68974f3d183e2bd1db6a842c1feecf222a00000000ff104ccb05421ab93e63f8c3ce5c2c2e9dbb37de2764b3a3175c8166562cac7d51b96a49ffff001d283e9e70");
+    const tx = try hexBytes(a, "0100000001c997a5e56e104102fa209c6a852dd90660a20b2d9c352423edce25857fcd3704000000004847304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901ffffffff0200ca9a3b00000000434104ae1a62fe09c5f51b13905f07f06b99a2f7159b2225f374cd378d71302fa28414e7aab37397f554a7df5f142c21c1b7303b8a0626f1baded5c72a704f7e6cd84cac00286bee0000000043410411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3ac00000000");
+    const hc = try cidm.ofBitcoin(a, cidm.BITCOIN_BLOCK, header);
+    const tc = try cidm.ofBitcoin(a, cidm.BITCOIN_TX, tx);
+    try s.putBlock(hc, header);
+    try s.putBlock(tc, tx);
+    // A block put but not kept indexes nothing.
+    try std.testing.expectEqual(@as(usize, 0), (try ix.all(a, .edges)).len);
+
+    // Two threads keep the transaction (the second adds nothing); the first keeps the header too.
+    const t1 = try s.chainOpen(a, try thread(a, 10, "one"));
+    const t2 = try s.chainOpen(a, try thread(a, 20, "two"));
+    for ([_][]const u8{ t1, t2 }, 0..) |t, i| {
+        var u = cbor.MapBuilder.init(a);
+        try u.put("state", cbor.string("finished"));
+        try u.put("at", cbor.int(30 + @as(i64, @intCast(i))));
+        try u.put("kept", try cbor.cidArray(a, if (i == 0) &.{ tc, hc } else &.{tc}));
+        _ = try s.chainAppend(a, t, u.value());
+    }
+    try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .edges)).len);
+
+    // Who spent 0437cd7f:0 — a prefix scan on the target, the locator the vout.
+    const spent = Value.cidOf((try bitcoin.decode(a, cidm.BITCOIN_TX, tx)).get("vin").?.array[0].get("txid")).?;
+    const hits = try s.edges(a, spent, "spends");
+    try std.testing.expectEqual(@as(usize, 1), hits.len);
+    try std.testing.expectEqualSlices(u8, tc, hits[0].from);
+    try std.testing.expectEqual(@as(i64, 0), hits[0].seq);
+    try std.testing.expectEqual(@as(i128, 0), Value.intOf(hits[0].locator).?);
+    try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, spent, "mentions")).len);
+    // The header: its previous header and its merkle root.
+    const hv = try bitcoin.decode(a, cidm.BITCOIN_BLOCK, header);
+    const prev = try s.edges(a, Value.cidOf(hv.get("previousblockhash")).?, null);
+    try std.testing.expectEqual(@as(usize, 1), prev.len);
+    try std.testing.expectEqualStrings("prev", prev[0].rel);
+    try std.testing.expectEqualSlices(u8, hc, prev[0].from);
+    const root = try s.edges(a, Value.cidOf(hv.get("merkleroot")).?, "merkleroot");
+    try std.testing.expectEqual(@as(usize, 1), root.len);
+
+    // The rebuild path derives the same edges.
+    const want = try ix.stateCid(a);
+    var mem2 = Mem.init(gpa);
+    defer mem2.deinit();
+    var it = mem.blocks.iterator();
+    while (it.next()) |e| try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
+    const ix2 = try index.Index.init(gpa, mem2.backend(), false);
+    defer ix2.deinit();
+    for ([_][]const u8{ t1, t2 }) |t| {
+        const ups = (try s.chainUpdates(a, t)).?;
+        try ix2.importChain(t, ups, (try s.chainTip(a, t)).?, @intCast(ups.len));
+    }
+    try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
+}
