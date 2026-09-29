@@ -213,7 +213,7 @@ fn hexBytes(a: std.mem.Allocator, s: []const u8) ![]u8 {
     return out;
 }
 
-test "index: a kept bitcoin block's links are edges from the block (#42); edgesTo answers who spent txid:vout" {
+test "index: a kept bitcoin transaction's inputs are edges from the block (#42); a header none; edgesTo answers who spent txid:vout" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -245,7 +245,7 @@ test "index: a kept bitcoin block's links are edges from the block (#42); edgesT
         try u.put("kept", try cbor.cidArray(a, if (i == 0) &.{ tc, hc } else &.{tc}));
         _ = try s.chainAppend(a, t, u.value());
     }
-    try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .edges)).len);
+    try std.testing.expectEqual(@as(usize, 1), (try ix.all(a, .edges)).len);
 
     // Who spent 0437cd7f:0 — a prefix scan on the target, the locator the vout.
     const spent = Value.cidOf((try bitcoin.decode(a, cidm.BITCOIN_TX, tx)).get("vin").?.array[0].get("txid")).?;
@@ -255,14 +255,11 @@ test "index: a kept bitcoin block's links are edges from the block (#42); edgesT
     try std.testing.expectEqual(@as(i64, 0), hits[0].seq);
     try std.testing.expectEqual(@as(i128, 0), Value.intOf(hits[0].locator).?);
     try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, spent, "mentions")).len);
-    // The header: its previous header and its merkle root.
+    // The header, kept, contributes no edges (#42 decided 2026-09-30): not
+    // to its previous header, not to its merkle root.
     const hv = try bitcoin.decode(a, cidm.BITCOIN_BLOCK, header);
-    const prev = try s.edges(a, Value.cidOf(hv.get("previousblockhash")).?, null);
-    try std.testing.expectEqual(@as(usize, 1), prev.len);
-    try std.testing.expectEqualStrings("prev", prev[0].rel);
-    try std.testing.expectEqualSlices(u8, hc, prev[0].from);
-    const root = try s.edges(a, Value.cidOf(hv.get("merkleroot")).?, "merkleroot");
-    try std.testing.expectEqual(@as(usize, 1), root.len);
+    try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, Value.cidOf(hv.get("previousblockhash")).?, null)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, Value.cidOf(hv.get("merkleroot")).?, null)).len);
 
     // The rebuild path derives the same edges.
     const want = try ix.stateCid(a);

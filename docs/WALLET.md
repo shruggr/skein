@@ -61,11 +61,11 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 | `wallet-state` | dag-cbor | `network`, `maps: {name: root \| null}` | what the head `wallet` names |
 | `wallet-result` | dag-cbor | `op`, per-op fields, `state` | a step's answer, kept in its thread |
 
-Every bitcoin block the wallet holds is **kept** by the step that puts it,
-so its links are edges in the kernel's index (#42, docs/VM.md "Edges"):
-each input of each transaction a `spends` edge (locator = the vout), each
-header `prev` / `merkleroot`, each node `child` 0 / 1. The wallet reads
-them with the `edges` call. The result record stays the last thing a step
+Every bitcoin block the wallet holds is **kept** by the step that puts it
+(#42, docs/VM.md "Edges"): each input of each transaction is a `spends`
+edge in the kernel's index (locator = the vout); headers and merkle nodes
+contribute no edges (decided 2026-09-30) — a proof is read down from the
+root. The wallet reads the edges with the `edges` call. The result record stays the last thing a step
 keeps (a resting thread finds what it awaits there).
 
 Output `protocol`s: `"wallet payment"` (a BRC-29 payment to us: basket

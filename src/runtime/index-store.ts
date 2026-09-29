@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { CID, decode, encode, fmt, fromBytes, isCID } from "./cid.ts";
 import { keptEdges, openStore, originEdges, toRef, updateEdges, type SqliteStore } from "./sqlite.ts";
-import { BITCOIN_BLOCK, bitcoinLinks, decodeBitcoin, displayHash, isBitcoin } from "./bitcoin.ts";
+import { BITCOIN_BLOCK, bitcoinEdges, bitcoinLinks, decodeBitcoin, displayHash, isBitcoin } from "./bitcoin.ts";
 import { NotFound, type Filter, type LogEntry, type Store } from "./store.ts";
 import type { Block, Ref } from "./types.ts";
 
@@ -285,12 +285,12 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
       const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) && !isBitcoin(k) ? store.get(k).catch(() => undefined) : undefined)));
       edges(i + 1, [...updateEdges(u), ...keptEdges(kept)]);
-      // A kept bitcoin block's links (#42): from the block itself at seq 0.
+      // A kept bitcoin transaction's inputs (#42): from the block itself at seq 0; headers and merkle nodes none.
       for (const k of keptCids) {
         if (!isBitcoin(k)) continue;
         const b = await store.bytes(k).catch(() => undefined);
         if (!b) continue;
-        bitcoinLinks(k, b).forEach((l, ord) => {
+        bitcoinEdges(k, b).forEach((l, ord) => {
           const key = cat(strKey(fmt(l.to)), k.bytes, be64(0), be64(ord));
           const ks = Buffer.from(key).toString("hex");
           if (seenEdge.has(ks)) return;

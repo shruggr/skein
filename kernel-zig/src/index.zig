@@ -30,10 +30,9 @@
 //   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
 //                                                              an update's own, then its kept records' `refs`;
-//                                                              and a kept bitcoin block's links, from the block
-//                                                              at seq 0 (#42, bitcoin.zig): inputs `spends`
-//                                                              (locator = vout), headers `prev`/`merkleroot`,
-//                                                              merkle nodes `child` (locator 0/1))
+//                                                              and a kept bitcoin transaction's inputs, from the
+//                                                              block at seq 0 (#42, bitcoin.zig): `spends`
+//                                                              (locator = vout); headers and merkle nodes: none)
 //   heads     name                       → tree CID            (named heads)
 //
 // Every map is a function of the chains and the log (the derivation is
@@ -419,11 +418,12 @@ pub const Index = struct {
         }
     }
 
-    /// The links of a kept bitcoin block (#42, bitcoin.zig) as edge rows:
-    /// from the block itself at seq 0 (like an origin's own), so a block kept
-    /// again, by any thread, adds nothing. Not a bitcoin block, or malformed: none.
+    /// The edges of a kept bitcoin block (#42, bitcoin.zig `edgesOf`: a
+    /// transaction's inputs only) as edge rows: from the block itself at seq 0
+    /// (like an origin's own), so a block kept again, by any thread, adds
+    /// nothing. A header, a merkle node, not a bitcoin block, or malformed: none.
     pub fn bitcoinEdges(a: std.mem.Allocator, c: []const u8, bytes: []const u8) ![]EdgeRow {
-        const ls = try bitcoin.linksOf(a, c, bytes);
+        const ls = try bitcoin.edgesOf(a, c, bytes);
         const out = try a.alloc(EdgeRow, ls.len);
         for (ls, out) |l, *r| r.* = .{
             .to = try cidm.format(a, l.to),

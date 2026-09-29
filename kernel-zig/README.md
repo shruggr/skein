@@ -157,19 +157,22 @@ the TS runtime has none of it.
   DAG in the store — sparse, holding only the paths a wallet needs
   (docs/WALLET.md "Proofs"). (The unregistered 0xb3 `bitcoin-merkle` of
   #29 is gone.)
-- **Edges from kept bitcoin blocks** (`index.zig`, #42): a bitcoin block a
-  step keeps adds its links to the `edges` map, from the block itself at
-  seq 0 — each input `spends` (locator = its vout, an integer), a header
-  `prev` / `merkleroot`, a merkle node `child` (locator 0 / 1). Keep is the
-  trigger, not `putblock`: the map stays a function of the chains, and a
-  block kept again (by any thread) adds nothing.
+- **Edges from kept bitcoin transactions** (`index.zig`, `bitcoin.zig`
+  `edgesOf`, #42): a transaction a step keeps adds its inputs to the `edges`
+  map, from the block itself at seq 0 — each input `spends` (locator = its
+  vout, an integer). Kept headers and merkle nodes add **no edges** (decided
+  2026-09-30: nothing asks the reverse questions; a proof reads down from
+  the root); their forward links (`bitcoin.zig` `links`) stay what the
+  explorer and packets follow. Keep is the trigger, not `putblock`: the map
+  stays a function of the chains, and a block kept again (by any thread)
+  adds nothing.
 - **`edges(to, to_len, rel, rel_len, out, cap)`** (WIT `edges: func(to:
   cid, rel: option<string>) -> result<list<u8>, string>`): the edges into
   `to`, `rel` only if given, as dag-cbor `[{from, seq, rel, locator}]` in key
   order (from, seq, ord) — who spent txid:vout is the `spends` edges into
   the transaction's CID with that locator. A read: the index (a function of
-  the log) plus the links of the bitcoin blocks the step kept so far (the
-  edges its update will add); a kernel `call` reads the index only. The
+  the log) plus the inputs of the bitcoin transactions the step kept so far
+  (the edges its update will add); a kernel `call` reads the index only. The
   wallet's `spenders` map folded into it.
 - **Plain entries** (`log.zig`, `scheduler.zig` `processEvent`):
   `{kind: "log", n, prev, time, box, event}` — the `event` kind of the one

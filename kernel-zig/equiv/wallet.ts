@@ -396,7 +396,7 @@ try {
 }
 await router.stop();
 hostDb.close();
-// #42: the TS reader derives the kernel's edges map key for key (a kept bitcoin block's links included).
+// #42: the TS reader derives the kernel's edges map key for key (a kept transaction's inputs included; kept headers contribute none, decided 2026-09-30).
 {
   const v2 = openStoreFile(db, { readOnly: true });
   const d = await derive(v2);
@@ -435,7 +435,7 @@ check(eq(st.bThread, { outcome: "rejected", state: "finished" }), `B's thread is
 check(st.mentions === true, "the results name the transactions as `mentions` edges (which never propagate)");
 check(st.spendsEdge === true, "#42: B's input is a `spends` edge into A, from B's own kept block, locator = the vout it spends");
 check(st.explorer === true, "#42: the explorer's record page for A shows it decoded (bitcoin-tx, its inputs) and ← spends from B");
-check(eq(report.edges, { sameRoot: true, bitcoin: [true, true, true] }), `#42: the TS reader derives the kernel's edges map (same root), with spends / prev / merkleroot edges from the kept blocks (${JSON.stringify(report.edges)})`);
+check(eq(report.edges, { sameRoot: true, bitcoin: [true, false, false] }), `#42: the TS reader derives the kernel's edges map (same root), with spends edges from the kept transactions and no prev / merkleroot edges from the kept headers (${JSON.stringify(report.edges)})`);
 check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }) && st.reorgMessage === true, `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited; the owner is told (${JSON.stringify([st.reorg, st.reorgMessage])})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });

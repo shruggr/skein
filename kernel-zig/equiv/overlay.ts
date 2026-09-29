@@ -250,6 +250,8 @@ try {
   report.leaves = leaves;
   const n01 = sha256d(Buffer.concat([internal(leaves[0]), internal(leaves[1])]));
   const n23 = sha256d(Buffer.concat([internal(leaves[2]), internal(leaves[3])]));
+  report.nodes = [n01, n23].map((n) => Buffer.from(n).reverse().toString("hex"));
+  report.root = Buffer.from(sha256d(Buffer.concat([n01, n23]))).reverse().toString("hex");
   const h4 = mine(prev, sha256d(Buffer.concat([n01, n23])), 1_790_000_000 + 4 * 600);
   headers.push(h4);
   roots.set(4, Buffer.from(h4.subarray(36, 68)).reverse().toString("hex"));
@@ -297,15 +299,22 @@ try {
 }
 await router.stop();
 hostDb.close();
-// #42: the merkle nodes the BUMPs revealed are kept 64-byte bitcoin-tx blocks: each token is a `child`
-// edge of a node (locator 0/1); the TS reader derives the kernel's edges map key for key.
+// #42 (decided 2026-09-30): the merkle nodes the BUMPs revealed are kept 64-byte bitcoin-tx blocks that
+// contribute no edges (nor does the header): no token is a `child` edge target, and no edge in the map is
+// `child` / `prev` / `merkleroot`. The nodes still link forward: the root's two children, n23's two
+// tokens. The TS reader derives the kernel's edges map key for key.
 if (report.ok === true) {
   const v = openStoreFile(db, { readOnly: true });
   const d = await derive(v);
   const children: boolean[] = [];
   const leaves = report.leaves as string[];
-  for (const i of [1, 2, 3]) children.push((await v.edges.refsTo(txCid(leaves[i]!))).some((x) => x.rel === "child" && (x.locator === "0" || x.locator === "1")));
-  report.edges = { sameRoot: String(buildTree(d.pairs.edges).root) === String((v as unknown as { state(): { roots: { edges: CID } } }).state().roots.edges), children };
+  const [n01, n23] = report.nodes as string[];
+  for (const i of [1, 2, 3]) children.push((await v.edges.refsTo(txCid(leaves[i]!))).some((x) => x.rel === "child"));
+  const fwd = async (c: string) => (await v.edges.refsFrom(txCid(c))).map((x) => [x.rel, x.locator, String(x.to)].join(" "));
+  const forward = eq(await fwd(report.root as string), [["child", "0", String(txCid(n01))].join(" "), ["child", "1", String(txCid(n23))].join(" ")])
+    && eq(await fwd(n23), [["child", "0", String(txCid(leaves[2]!))].join(" "), ["child", "1", String(txCid(leaves[3]!))].join(" ")]);
+  const noNodeEdges = d.pairs.edges.every(([, x]) => !["child", "prev", "merkleroot"].includes((x as [string])[0]));
+  report.edges = { sameRoot: String(buildTree(d.pairs.edges).root) === String((v as unknown as { state(): { roots: { edges: CID } } }).state().roots.edges), children, noNodeEdges, forward };
   await v.close();
 }
 
@@ -333,7 +342,7 @@ check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdo
 
 check(eq(report.merkle, [[1, true, true], [2, true, true], [3, true, true]]), `three tokens of one block, proven by separate BUMPs (out of order): each lookup answer carries the BUMPs rebuilt from the stored merkle nodes (merged per block), each leaf computing the header root, verified by @bsv/sdk (${JSON.stringify(report.merkle)})`);
 check(eq(report.merkleAlone, [[1, true, true], [2, true, true], [3, true, true]]), `each token alone: its BUMP rebuilt from the tree is byte for byte the one its status entry carried, verified by @bsv/sdk (${JSON.stringify(report.merkleAlone)})`);
-check(eq(report.edges, { sameRoot: true, children: [true, true, true] }), `#42: each token is a \`child\` edge of a kept merkle node (64-byte bitcoin-tx); the TS reader derives the kernel's edges map, same root (${JSON.stringify(report.edges)})`);
+check(eq(report.edges, { sameRoot: true, children: [false, false, false], noNodeEdges: true, forward: true }), `#42: kept merkle nodes and headers contribute no edges (no token is a \`child\` edge target), the nodes still link forward to their children; the TS reader derives the kernel's edges map, same root (${JSON.stringify(report.edges)})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
 process.stdout.write(r.stdout);
