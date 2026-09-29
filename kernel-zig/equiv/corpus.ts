@@ -6,7 +6,7 @@
 // the VM, wakes by the waker), on a script clock. It exercises the shell
 // under run-handler (writes, cwd, failures, sleeps and their wakes), the
 // script runtimes, objects/head/subscribe handlers, the loop with bash and
-// message tools, replies, resolves and claims, delivery failures, inference
+// message tools, replies, resolves (no claims, #40), delivery failures, inference
 // errors, two agents talking, the owner's mailbox instance, and a low
 // fuelPerStep. The owner speaks raw BRC-33 (src/client/raw.ts); the
 // inference peer answers from its own mailbox instance.
@@ -140,7 +140,8 @@ function inferPeer(h: Awaited<ReturnType<typeof host>>, k: PrivateKey, answers: 
     raw: {
       inbox: new RawBox(w, `${h.base}/@infer`),
       outbox: (url) => { let b = outs.get(url); if (!b) { b = new RawBox(w, url); outs.set(url, b); } return b; },
-      resolve: async (handle, domain) => await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=${handle}@${domain}`)).json() as { identityKey: string; messagebox: string },
+      // Its address book (#40), configured: every row's key at its origin.
+      addressOf: (k) => { const r = h.db.list().find((x) => x.identity === k && x.kind !== "mailbox") ?? h.db.mailboxOf(k); return r && h.router.originOf(r.handle); },
     },
   });
 }
@@ -281,7 +282,7 @@ const mailboxes: string[] = [];
   made.push("gen-chat");
 }
 
-// ---------------------------------------------------------------- two agents talking (raw BRC-33 between them); resolves, claims; delivery failures
+// ---------------------------------------------------------------- two agents talking (raw BRC-33 between them); resolves (each learns the other by its own resolve); delivery failures
 {
   const inferKey = key();
   const h = await host({ infer: inferKey });
@@ -324,6 +325,18 @@ const mailboxes: string[] = [];
   await h.send(i, "chat", { text: "hello" });
   await h.done();
   made.push("gen-refused");
+}
+{
+  // A stranger in no address book chats the agent's open box (#40): admitted and inferred; the answer has no route.
+  const inferKey = key();
+  const h = await host({ infer: inferKey });
+  const peer = inferPeer(h, inferKey, [answer({ content: "Hello, stranger." })]);
+  const i = await h.add("gen-stranger");
+  const sk = key();
+  await h.send(i, "chat", { text: "hi" }, ephemeralWallet(sk), sk.toPublicKey().toString());
+  for (let n = 0; n < 4; n++) { await peer.poll(); await h.settle(); }
+  await h.done();
+  made.push("gen-stranger");
 }
 
 // ---------------------------------------------------------------- fuel: a low fuelPerStep (issue #5)

@@ -7,8 +7,9 @@
 // inference peer (its messagebox program delivers over http — fetch from the
 // page — on a BRC-104 session), resolves the agent (its resolve program, a
 // BRC-169 lookup), delivers a chat to it; the agent's loop answers into the
-// page identity's mailbox instance, which the page polls and admits into the
-// browser instance; the thread resumes and answers the page (into the same
+// page identity's mailbox instance (the admin put its key and URL in the
+// agent's address book: nothing registers itself, #40), which the page polls
+// and admits into the browser instance; the thread resumes and answers the page (into the same
 // mailbox, shown).
 // Then the store the browser wrote (its records, read back from IndexedDB) is
 // replayed by the native kernel and must reach the same state.
@@ -61,7 +62,8 @@ const router = new Router({
 });
 await router.listen(0);
 const base = `http://127.0.0.1:${router.port}`;
-// The inference peer's mailbox instance; the owner's (the agent answers the page, its opener, by its claim).
+// The inference peer's mailbox instance. The agent answers the page (its opener) at the page identity's
+// mailbox instance: the admin wrote that into the agent's address book (#40: no claims).
 keys.set("infer", key());
 router.addMailbox("infer", inferId);
 db.add("infer", { identity: keys.get("infer")!.toPublicKey().toString() });
@@ -70,6 +72,8 @@ keys.set("agent", key());
 db.add("agent", { store: join(home, "agent.db"), identity: keys.get("agent")!.toPublicKey().toString() });
 await router.hydrate("agent");
 const agentId = keys.get("agent")!.toPublicKey().toString();
+await new RawBox(ephemeralWallet(ownerKey), `${base}/@agent`).send(agentId, "peers", { op: "add", key: pageId, url: router.originOf("page"), handle: "page", domain: "localhost" });
+await router.settled();
 const iw = ephemeralWallet(inferKey);
 // The conversation, in the order the requests reach the peer: the page's instance, the agent, the page's instance.
 const peer = new InferPeer({
@@ -77,7 +81,8 @@ const peer = new InferPeer({
   raw: {
     inbox: new RawBox(iw, `${base}/@infer`),
     outbox: (url) => new RawBox(iw, url),
-    resolve: async (h, d) => await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=${h}@${d}`)).json() as { identityKey: string; messagebox: string },
+    // Its address book (#40), configured: an agent at its origin, an identity with a mailbox instance there.
+    addressOf: (k) => { const r = db.list().find((x) => x.identity === k && x.kind !== "mailbox") ?? db.mailboxOf(k); return r && router.originOf(r.handle); },
   },
   fetch: scripted([
     answer({ content: "", tool_calls: [messageCall("m1", "@agent@localhost", "What does the blue one cost?")] }),

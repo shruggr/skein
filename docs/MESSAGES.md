@@ -197,21 +197,22 @@ client of the recipient's messagebox.
 send {to: <key>, box, body: <dag-cbor bytes>, handle?, domain?}  →  {id: <cid>}
 ```
 
-- **Where.** The peer table (head `peers`, below) gives the recipient's URL;
-  for the owner, the genesis's `defaults.ownerMessagebox`; else, with a handle,
-  the resolve program on first contact.
+- **Where.** The address book (head `peers`, below) gives the recipient's
+  URL; for the owner, the genesis's `defaults.ownerMessagebox`; else, with a
+  handle, the resolve program on first contact. A key in none of them, with no
+  handle to resolve, is **no route**: a permanent failure (`no route to <key>:
+  not in the address book …`).
 - **The session.** One outbound session per peer, kept as a small record
   (head `outbound`: `{peer, url, ours, theirs, server, created}`). `server` is
   the identity that answered the handshake — the recipient's own, or a mailbox
   instance's for a mailbox kept for someone (the URL names whose mailbox; the
-  session proves who answers). After every handshake the instance sends a
-  **claim** `{handle, domain}` in the peer's `register` box, so the peer can
-  resolve it and answer; a peer that takes no claims (a mailbox instance)
-  refuses it, and that is all.
+  session proves who answers). Sending never tells the peer who we are: no
+  claim, no registration (#40). Whether the peer can answer is its own
+  address book's business.
 - **The request** is a recorded `http` POST of `/sendMessage` as BRC-231
   CBOR: request and response are on the step's update, so replay never touches
   the network. The answer's signature is verified; a 401 means the session is
-  gone: shake hands again (and claim) and send once more.
+  gone: shake hands again and send once more.
 - **The id.** `send` puts the same mail record the recipient keeps (sender
   this instance, the session proof included) and answers with its CID, so a
   reply's `replyTo` names a record this instance holds and can `await`.
@@ -222,26 +223,46 @@ send {to: <key>, box, body: <dag-cbor bytes>, handle?, domain?}  →  {id: <cid>
   turns and rests on a deadline `defaults.sendRetryMs` ahead (default
   30 000), and the wake runs the call again; after `defaults.sendAttempts`
   attempts in all (default 3) the failure is the tool's error result, as a
-  permanent one is at once. (Its `infer` and its answer are not retried.)
+  permanent one is at once. (Its `infer` and its answer are not retried: an
+  answer that cannot be delivered — no route, say — is an error turn, the
+  thread ends, and the step's log line carries it once, `stderr: loop: could
+  not deliver the answer: …`.)
 - **Local delivery.** The kernels' `http` goes through the router
   (`Router.http`): a URL of the host's own is dispatched in process through
   the same front-door path, no socket; any other goes out (`SKEIN_HTTP=fetch`,
   or the router's `http` option).
 
-## The peer table
+## The address book
 
-Who an instance can reach is the head `peers`: `{kind: "peers", peers: [{key,
-peer}]}`, each `{kind: "peer", key, url, handle?, domain?, since, source}`. It
-is written **only by the instance's own programs** — the host never seeds it:
+Sending to anyone needs their mailbox URL, and optionally their handle
+(display, resolution): that is the **address book**, key → `{mailbox,
+handle?}`. Receiving needs none of it: the key authenticates (the front
+door's BRC-104), the subscription decides. The two are independent — a
+sender on an open box (`chat` from anyone) is admitted whether or not the
+instance can answer it.
+
+The address book is the head `peers`: `{kind: "peers", peers: [{key, peer}]}`,
+each `{kind: "peer", key, url, handle?, domain?, since, source}`. It is
+written **only by the instance's own programs** — the host never seeds it:
 
 - the **resolve** program (`programs/resolve`): called from a step (`resolve
   {handle, domain, key?}`), it looks the handle up and writes the record
   (source `resolve`);
 - the box **`peers`** (the owner, as admin): `{op: "add", key, url, handle?,
-  domain?}` | `{op: "remove", key}` (source `admin`);
-- the box **`register`** (anyone): a claim `{handle, domain}`, resolved and
-  written only if it resolves to the sender (the session proved the key; only
-  a resolve proves the host).
+  domain?}` | `{op: "remove", key}` (source `admin`). This is configuration:
+  `skein-host peers <agent> add <key> <mailbox-url> [--handle h@d]` /
+  `remove <key>` / `list`; `scripts/host/up.sh` writes the owner and the
+  inference peer into every agent this way, and the roster step (`skein-host
+  deploy`, `roster --deploy`) the other agents.
+
+**Registration is application wiring, not core.** Nothing in the core
+registers itself or takes claims: the messagebox's `send` never posts one, and
+the stock genesis has no `register` box. An application that wants senders to
+enter themselves subscribes a box of its own in its `etc/subscriptions.json`
+— e.g. `{"box": "register", "handler": "resolve"}`: the resolve program's
+claim handler takes `{handle, domain}` (or a BRC-169 envelope's sender),
+resolves it, and writes the record only if it resolves to the sender (source
+`claim`) — or a program of its own with its own rules on who may.
 
 The owner is the one peer a genesis names: `etc/config.json` `owner:
 {messagebox}` (or the host's `ownerMessagebox`, its mailbox instance on the
@@ -349,7 +370,7 @@ The loop (`programs/loop`) gives the model a `message` tool beside `bash`:
 message {to: "@handle@domain", text}
 ```
 
-- **Addressing.** The loop finds the handle in its peer table, else calls the
+- **Addressing.** The loop finds the handle in its address book, else calls the
   resolve program (`skein.Resolve`), which writes the peer record with the
   step. A handle that does not resolve is an error result.
 - **Who the loop sends to, and what it replies to.** Every chat the loop sends
@@ -423,9 +444,11 @@ OpenAI-compatible endpoint) is not. Requests go in the peer's `infer` box (its
 mailbox instance), replies come back in the instance's `completions` box with
 `replyTo` = the request's id, as for any reply. Both bodies are dag-cbor
 records. The peer reads its mailbox instance with raw BRC-33
-(`SKEIN_MAILBOX_URL`) and learns where to answer a sender from the sender's
-claim (a BRC-169 lookup of `{handle, domain}` on the host,
-`SKEIN_HOST_URL`).
+(`SKEIN_MAILBOX_URL`) and answers a sender at the messagebox its own address
+book names for it (`SKEIN_INFER_PEERS`, default `~/.skein/infer-peers.json`:
+`{"<key hex>": "<messagebox URL>"}`, which `scripts/host/up.sh` writes for
+every agent; read again when it changes). A request from a key not in it has
+nowhere to go: dropped, with one line.
 
 **Nodes.** A node is one of the loop's `turn` records exactly as the instance
 keeps it, so its CID is the same on both sides. Every turn names the turn

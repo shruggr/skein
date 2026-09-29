@@ -939,7 +939,10 @@ func (l *loop) answer(text string) error {
 	}
 	sent, err := skein.Send(l.step, l.a.Sender, "chat", chatBody{Text: text, Tree: l.tree(), Thread: l.step.Thread, ReplyTo: replyTo}, "", "")
 	if err != nil {
-		// The reply this turn would rest on cannot come: note it, and the thread ends.
+		// The reply this turn would rest on cannot come: note it (the error
+		// turn, and one line on stderr: the step's log line), and the thread
+		// ends — nothing is tried again.
+		fmt.Fprintf(os.Stderr, "loop: could not deliver the answer: %v\n", err)
 		return l.fail(l.step.Entry, "could not deliver the answer: "+err.Error())
 	}
 	return skein.Await(sent)

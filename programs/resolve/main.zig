@@ -1,4 +1,4 @@
-//! resolve (#40): the instance's peer table, written only by its own
+//! resolve (#40): the instance's address book (its peer table), written only by its own
 //! programs. BRC-169 is discovery: a handle → the identity key and the
 //! messagebox URL the handle's domain publishes, looked up as recorded `http`
 //! calls (replay reads them back). The table is the head `peers`:
@@ -13,10 +13,12 @@
 //!     `key`: the identity the caller expects — another answer is refused.
 //! Stepped (messages routed here by subscriptions):
 //!   box `peers` (the owner, the admin): {op: "add", key, url, handle?, domain?} | {op: "remove", key}
-//!   box `register` (anyone): a claim {handle, domain} — or a BRC-169
-//!     envelope, whose sender's handle and domain are the claim. The claim is
-//!     resolved; the record is written only if it resolves to the sender (the
-//!     session proved the key; only a resolve proves the host).
+//!   box `register`, only where an application wires it (#40: the stock
+//!     genesis does not; its etc/subscriptions.json then says who may): a
+//!     claim {handle, domain} — or a BRC-169 envelope, whose sender's handle
+//!     and domain are the claim. The claim is resolved; the record is written
+//!     only if it resolves to the sender (the session proved the key; only a
+//!     resolve proves the host). Nothing in the core sends claims.
 //!
 //! Where a domain is looked up: `https://<domain>`, except the instance's own
 //! domain when the genesis sets `defaults.resolveOrigin` (a dev host). The

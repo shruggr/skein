@@ -142,12 +142,12 @@ Replay writes the same chain.
   `thread`); nothing reads them for routing afterwards. By default
   (`STOCK_SUBSCRIPTIONS`, src/host/genesis.ts): the owner's `run`,
   `objects`, `head`, `chat`, `subscribe` and `peers` (→ `resolve`) boxes;
-  `chat` from anyone; `register` from anyone (→ `resolve`: a handle claim);
-  and the reserved box the host admits into, `:ack` (→ `messagebox`: a
-  reader's pointer). A mailbox instance's seed is `:ack` and every message
+  `chat` from anyone; and the reserved box the host admits into, `:ack`
+  (→ `messagebox`: a reader's pointer). A mailbox instance's seed is `:ack` and every message
   from anyone in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`). Sessions
   are not state: the front door keeps them in memory, never in the log
-  (MESSAGES.md).
+  (MESSAGES.md). No `register` box: registration is application wiring
+  (an application's own etc/subscriptions.json, BOOTSTRAP.md).
 - The chain changes only by an explicit act: a program's step calls the
   `subscribe` import (the handler must be a program record in the store, a
   wasm program's module too), and the change is written when that step ends
@@ -473,8 +473,8 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, json?,
 Nothing a front door merely reads or verifies is an entry. A message leaves
 an instance by the instance's own program: its messagebox's `send` (a BRC-104
 client, over recorded `http`) to the recipient's messagebox URL, which its
-peer table names (written only by its own programs: `resolve`'s BRC-169
-lookup, the owner's `peers` box, a verified `register` claim) or, for the
+address book names (written only by its own programs: `resolve`'s BRC-169
+lookup, or the owner's `peers` box — the admin's configuration) or, for the
 owner, the genesis's `defaults.ownerMessagebox`. A store in an older format
 is refused (start a new store).
 

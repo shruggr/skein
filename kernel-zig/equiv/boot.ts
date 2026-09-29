@@ -93,7 +93,8 @@ async function talk(r: Router, handles: string[]): Promise<void> {
     raw: {
       inbox: new RawBox(iw, `${base}/@infer`),
       outbox: (url) => new RawBox(iw, url),
-      resolve: async (h, d) => await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=${h}@${d}`)).json() as { identityKey: string; messagebox: string },
+      // Its address book (#40), configured: every row's key at its origin.
+      addressOf: (k) => { const x = r.o.db.list().find((y) => y.identity === k && y.kind !== "mailbox") ?? r.o.db.mailboxOf(k); return x && r.originOf(x.handle); },
     } });
   const mine = new RawBox(owner, `${base}/@david`);
   const box = { ack: (ids: string[]) => mine.ack(ids) };

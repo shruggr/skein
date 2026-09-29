@@ -16,14 +16,14 @@ pub const modules = [_]Module{
     .{ .name = "objects-handler", .cid = "bafkreiht7bb4iry6hg6tcr4j73rtunxuxh3kgjizsdqpvjrfvaxx2idtyy" },
     .{ .name = "head-handler", .cid = "bafkreibc5a5u375bxqpq6oo6r3tzfv23qku3jnjtejwh6dxgk2kwljs32m" },
     .{ .name = "subscribe-handler", .cid = "bafkreiaotl4zkhkuxe2yykptlkhc23imyawimbt5vhuxqxjamov5k2e7di" },
-    .{ .name = "loop", .cid = "bafkreihf3wwfzvgd5p3oqf7wixvxo2esmcigqxyf6culaa3xxruyro4sb4" },
+    .{ .name = "loop", .cid = "bafkreidg25u5fpsjpaw2ueknexdtfls5vqk4heafx7yohn2a25t4pz3k7e" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreid7cinhcz4667y5zcvysilmnsxkp22xss5cbn5uldrzv55vnxh6dm" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreiehhusheqk3oguayz43gbtwdqdx6fcpatiuztzomuglrj7ksm266m" },
+    .{ .name = "messagebox", .cid = "bafkreihin6mnmscg2r7crlawfedwlkdz6fnfcfdd2fgzpv4ere25pjamwq" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreieih562zr4qr46iy7otrqekda7dutqy7th3fh457s5ect6eqdq25i" },
-    // The peer table's writer (#40): BRC-169 resolve, the admin's `peers`, `register` claims (programs/resolve).
+    // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreicxsp4aoppj6xvfmdgh5lh7g4dxmajv7zepyykaovrrixujvnv63y" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
@@ -115,7 +115,7 @@ const handlers = [_]Handler{
     .{ .name = "subscribe-handler", .services = &.{}, .description = "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store)." },
     .{ .name = "loop", .services = &.{"infer"}, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs. Everything it sends goes through the messagebox's `send` (#40)." },
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
-    .{ .name = "resolve", .services = &.{}, .description = "The peer table (#40, head `peers`): `resolve` {handle, domain} looks a BRC-169 handle up (recorded http) and writes its record; the `peers` box (the admin) adds or removes one; the `register` box takes a claim {handle, domain} and records it if it resolves to the sender." },
+    .{ .name = "resolve", .services = &.{}, .description = "The peer table (#40, head `peers`): `resolve` {handle, domain} looks a BRC-169 handle up (recorded http) and writes its record; the `peers` box (the admin) adds or removes one; a `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender." },
     .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door: called with each HTTP request (fn http); runs BRC-103/104 against the instance's session table (held in memory by the host, passed in and changed by the answer; never in the log), routes by the routes table, invokes the handler, signs the answer. Never stepped." },
 };
 

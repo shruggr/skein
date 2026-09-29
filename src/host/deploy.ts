@@ -131,6 +131,55 @@ export async function subscribeRow(o: { row: InstanceRow; owner: WalletInterface
   await o.box.send(o.row.identity!, "subscribe", dagCbor.encode(body));
 }
 
+/**
+ * An address-book entry (#40): where to deliver to a key — its messagebox URL,
+ * and optionally its handle (display, resolution). The instance keeps them
+ * under the head `peers` (programs/resolve); `source` says who wrote one
+ * (`admin`: the `peers` box; `resolve`: its own BRC-169 lookup).
+ */
+export interface AddressEntry { key: string; url: string; handle?: string; domain?: string; source?: string }
+
+const hexKey = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "";
+
+/** The row's address book as its store holds it now (empty with no store or no entries). */
+export async function addressBook(store: Store | undefined): Promise<AddressEntry[]> {
+  if (!store || !(await store.log.tip())) return [];
+  const root = await headTree(store, "peers");
+  if (!root) return [];
+  const t = await store.get(root) as unknown as { peers?: Array<{ key: unknown; peer: CID }> };
+  const out: AddressEntry[] = [];
+  for (const e of t.peers ?? []) {
+    const p = await store.get(e.peer) as unknown as { key: unknown; url?: string; handle?: string | null; domain?: string | null; source?: string };
+    out.push({ key: hexKey(p.key ?? e.key), url: p.url ?? "", ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
+  }
+  return out;
+}
+
+/**
+ * Write the row's address book as the owner (#40): one message to its `peers`
+ * box per change — {op: "add", key, url, handle?, domain?} or {op: "remove",
+ * key} — the admin's configuration, admitted and applied by the instance's
+ * resolve program. An add identical to the entry the store already has, or a
+ * remove of a key it does not have, is not sent. Returns what was sent.
+ */
+export async function writeAddresses(o: { row: InstanceRow; owner: WalletInterface; box: Outbox; store?: Store }, changes: Array<({ op: "add" } & AddressEntry) | { op: "remove"; key: string }>): Promise<Array<"sent" | "unchanged">> {
+  const store = await checked(o);
+  const book = await addressBook(store);
+  const out: Array<"sent" | "unchanged"> = [];
+  for (const c of changes) {
+    if (!/^0[23][0-9a-f]{64}$/.test(c.key)) throw new Error(`${c.key}: not an identity key (hex)`);
+    const have = book.find((e) => e.key === c.key);
+    const same = c.op === "remove" ? !have : have?.url === c.url && have.handle === c.handle && have.domain === c.domain;
+    if (same) { out.push("unchanged"); continue; }
+    const body = c.op === "remove"
+      ? { op: "remove", key: Uint8Array.from(Buffer.from(c.key, "hex")) }
+      : { op: "add", key: Uint8Array.from(Buffer.from(c.key, "hex")), url: c.url, ...(c.handle ? { handle: c.handle } : {}), ...(c.domain ? { domain: c.domain } : {}) };
+    await o.box.send(o.row.identity!, "peers", dagCbor.encode(body));
+    out.push("sent");
+  }
+  return out;
+}
+
 /** The genesis checks; the store if it has a log. */
 async function checked(o: { row: InstanceRow; owner: WalletInterface; store?: Store }): Promise<Store | undefined> {
   const { row } = o;

@@ -24,15 +24,25 @@
 #      the agents' geneses happen here, the owner's mailbox already there)
 #   4. the grants, toward every row's front-door key (`skein-host list`), now
 #      that every row exists
+#   5. the address books (#40): where each agent delivers to a key. Into every
+#      enabled agent, through its `peers` box as the owner (`skein-host peers`):
+#      the owner's key and mailbox instance, the inference peer's key and its
+#      mailbox instance; then the roster step (`skein-host roster --deploy`)
+#      writes the other agents' keys and origins. The inference peer's own
+#      address book (every agent's key and origin) is the file
+#      ~/.skein/infer-peers.json, which bin/skein-infer reads.
 #
-# Nothing is registered: the mailbox rows of step 2 are what a registration
-# (register.ts, POST /account/register) would make; that is for identities
-# whose keys this machine does not know (the front end's Register). The
-# owner's mailbox URL goes to ~/.skein/mailbox.url (the client's). The
-# inference peer itself is bin/skein-infer
-# (SKEIN_MAILBOX_URL=http://127.0.0.1:8100/@infer). Agents are rows:
-# `skein-host add <handle>` (identity derived), then `skein-host deploy
-# <handle> <dir>`. See README.md.
+# Nothing is registered, and nothing registers itself: the mailbox rows of
+# step 2 are what a registration (register.ts, POST /account/register) would
+# make — that is for identities whose keys this machine does not know (the
+# front end's Register) — and an identity outside the host reaches an agent's
+# answers only once the admin puts its key and mailbox URL in that agent's
+# address book (`skein-host peers <agent> add <key> <url>`). The owner's
+# mailbox URL goes to ~/.skein/mailbox.url (the client's). The inference peer
+# itself is bin/skein-infer (SKEIN_MAILBOX_URL=http://127.0.0.1:8100/@infer).
+# Agents are rows: `skein-host add <handle>` (identity derived), then
+# `skein-host deploy <handle> <dir>`; run this again after adding one (its
+# address book, and everyone else's). See README.md.
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -77,3 +87,28 @@ fi
 
 # 4. The grants, toward every row (agents and mailbox instances), all of which exist now.
 "$here/grants.sh"
+
+# 5. The address books. An instance's origin, as the router publishes it (SKEIN_INSTANCE_ORIGIN).
+origin() { local t="${SKEIN_INSTANCE_ORIGIN:-http://{handle\}.localhost:{port\}}"; t="${t//\{handle\}/$1}"; echo "${t//\{port\}/$port}"; }
+mapfile -t agents < <(host list | awk -F'\t' '$2 == "agent" && $3 == "enabled" { split($1, h, "@"); print h[1] "\t" $4 }')
+for a in "${agents[@]}"; do
+  h="${a%%$'\t'*}"
+  host peers "$h" add "$owner" "$(origin "$mine")" --handle "${SKEIN_OWNER_HANDLE:-david@localhost}"
+  host peers "$h" add "$infer" "$(origin "$theirs")" --handle "${SKEIN_INFER_HANDLE:-infer@localhost}"
+done
+# The other agents (and ROSTER.md for the deployed ones): the roster step.
+if [ "${#agents[@]}" -gt 1 ]; then host roster --deploy || echo "roster --deploy failed (above); the agents may not know each other yet" >&2; fi
+# The inference peer's address book: every agent's key at its origin.
+{
+  echo "{"
+  i=0
+  for a in "${agents[@]}"; do
+    h="${a%%$'\t'*}"; k="${a#*$'\t'}"
+    [ $i -gt 0 ] && echo ","
+    printf '  "%s": "%s"' "$k" "$(origin "$h")"
+    i=$((i + 1))
+  done
+  echo ""
+  echo "}"
+} > "$skein/infer-peers.json.tmp" && mv "$skein/infer-peers.json.tmp" "$skein/infer-peers.json"
+echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer knows them ($skein/infer-peers.json)"

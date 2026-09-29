@@ -91,10 +91,15 @@ export interface Genesis2Config {
 export interface SubscriptionSpec { sender?: string; box?: string; handler: string }
 
 /**
- * The stock seed: the owner's boxes, chat from anyone, the peer table's
- * boxes (the admin's `peers`, anyone's `register` claim: resolve), and the
- * reserved box the host admits into — `:ack` (the messagebox moves a reader's
- * pointer). The front door's sessions are not state (in memory, never admitted).
+ * The stock seed: the owner's boxes, chat from anyone, the address book's box
+ * (the admin's `peers`: resolve), and the reserved box the host admits into —
+ * `:ack` (the messagebox moves a reader's pointer). The front door's sessions
+ * are not state (in memory, never admitted). No `register` box (#40):
+ * registration is application wiring — an application that wants senders to
+ * enter themselves in the address book subscribes its own box (e.g.
+ * `{box: "register", handler: "resolve"}`, the resolve program's claim
+ * handler, or a program of its own with its own rules) in its
+ * etc/subscriptions.json.
  */
 export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { sender: "$owner", box: "run", handler: "run-handler" },
@@ -104,7 +109,6 @@ export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { sender: "$owner", box: "subscribe", handler: "subscribe-handler" },
   { sender: "$owner", box: "peers", handler: "resolve" },
   { box: "chat", handler: "loop" },
-  { box: "register", handler: "resolve" },
   { box: ":ack", handler: "messagebox" },
 ];
 

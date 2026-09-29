@@ -39,7 +39,7 @@ import { msStamp, type Stamp } from "../../src/runtime/syscalls.ts";
 type Reply = { ok?: unknown; error?: string | null; rejected?: string | null };
 
 /** The boxes the page collects from its mailbox besides the ones the subscriptions route. */
-const COLLECT = ["chat", "turn", "results", "completions", "register"];
+const COLLECT = ["chat", "turn", "results", "completions"];
 
 export interface HostOptions {
   wallet: WalletInterface;
