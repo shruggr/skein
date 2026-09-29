@@ -21,7 +21,9 @@
 // uvarint-length-prefixed):
 //
 //   log       n                          → entry CID           (log.ts entries by n)
-//   unique    message CID                → entry CID           (a message's entry: admitted once, #40)
+//   unique    message CID                → entry CID           (a message's entry: admitted once, #40; and a
+//                                                              libp2p `p2p` event record's: a redelivered
+//                                                              GossipSub message is refused, #51/#42)
 //   chains    origin                     → {tip, seq, kind?}   (every chain's tip)
 //   updates   origin ‖ seq               → update CID          (a chain's history)
 //   threads   at ‖ origin                → null                (thread chains, by origin.at)
@@ -30,10 +32,9 @@
 //   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
 //                                                              an update's own, then its kept records' `refs`;
-//                                                              and a kept bitcoin block's links, from the block
-//                                                              at seq 0 (#42, bitcoin.zig): inputs `spends`
-//                                                              (locator = vout), headers `prev`/`merkleroot`,
-//                                                              merkle nodes `child` (locator 0/1))
+//                                                              and a kept bitcoin transaction's inputs, from the
+//                                                              block at seq 0 (#42, bitcoin.zig): `spends`
+//                                                              (locator = vout); headers and merkle nodes: none)
 //   heads     name                       → tree CID            (named heads)
 //
 // Every map is a function of the chains and the log (the derivation is
@@ -419,11 +420,12 @@ pub const Index = struct {
         }
     }
 
-    /// The links of a kept bitcoin block (#42, bitcoin.zig) as edge rows:
-    /// from the block itself at seq 0 (like an origin's own), so a block kept
-    /// again, by any thread, adds nothing. Not a bitcoin block, or malformed: none.
+    /// The edges of a kept bitcoin block (#42, bitcoin.zig `edgesOf`: a
+    /// transaction's inputs only) as edge rows: from the block itself at seq 0
+    /// (like an origin's own), so a block kept again, by any thread, adds
+    /// nothing. A header, a merkle node, not a bitcoin block, or malformed: none.
     pub fn bitcoinEdges(a: std.mem.Allocator, c: []const u8, bytes: []const u8) ![]EdgeRow {
-        const ls = try bitcoin.linksOf(a, c, bytes);
+        const ls = try bitcoin.edgesOf(a, c, bytes);
         const out = try a.alloc(EdgeRow, ls.len);
         for (ls, out) |l, *r| r.* = .{
             .to = try cidm.format(a, l.to),
@@ -720,12 +722,28 @@ pub const Index = struct {
         return out;
     }
 
+    /// The record an entry is unique by: its mail record (#40), or a libp2p
+    /// `p2p` event record (#51, #42 decided 2026-09-30: the record is
+    /// content-addressed — topic, from, seqno, signature, body — so a
+    /// redelivered GossipSub message is the same record). Other events
+    /// (feeds: a header, a status) may recur, and are not unique.
+    fn uniqueOf(ix: *Index, a: std.mem.Allocator, entry: Value) !?[]const u8 {
+        if (Value.cidOf(entry.get("mail"))) |m| return m;
+        const ev = Value.cidOf(entry.get("event")) orelse return null;
+        const b = (try ix.backend.vt.get(ix.backend.ctx, a, ev)) orelse return null;
+        const rec = cbor.decode(a, b) catch return null;
+        const kind = Value.str(rec.get("kind")) orelse return null;
+        return if (std.mem.eql(u8, kind, "p2p")) ev else null;
+    }
+
     fn logAppendFn(ctx: *anyopaque, a: std.mem.Allocator, entry: Value) anyerror!storem.AppendResult {
         const ix = self(ctx);
-        // A message is admitted once (#40: its record's CID is its id; a replayed request is the same record).
-        const mail = Value.cidOf(entry.get("mail"));
+        // A message is admitted once (#40: its record's CID is its id; a replayed request is the same
+        // record), and so is a libp2p message (its `p2p` event record): refused here, nothing written.
+        const mail = try ix.uniqueOf(a, entry);
         if (mail) |e| if (try logByUniqueFn(ctx, a, e) != null) {
-            return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "log: message {s} is already admitted", .{try cidm.format(a, e)}) } };
+            const what = if (entry.get("mail") != null) "message" else "libp2p message";
+            return .{ .rejected = .{ .reason = .duplicate_envelope, .message = try std.fmt.allocPrint(a, "log: {s} {s} is already admitted", .{ what, try cidm.format(a, e) }) } };
         };
         const n = Value.intOf(entry.get("n")) orelse -1;
         var ok_prev: bool = undefined;

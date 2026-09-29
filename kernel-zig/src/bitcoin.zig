@@ -22,12 +22,17 @@
 // IPLD's reference decoder tries a transaction first; we take the length
 // alone, which never differs for a well-formed transaction.
 //
-// Links go into the kernel's edges index (index.zig) when a thread keeps the
-// block, from the block itself (its CID, seq 0, ord = the link's position):
+// Forward links (`links`, what packets and readers follow):
 //   a transaction's inputs   → to the spent txid, rel `spends`, locator = vout
 //                              (a coinbase input links nothing)
 //   a header                 → previous header, rel `prev`; merkle root, rel `merkleroot`
 //   a merkle node            → left, right: rel `child`, locator 0 / 1
+//
+// Edges (`edgesOf`, #42 decided 2026-09-30): only a transaction's inputs go
+// into the kernel's edges index (index.zig) when a thread keeps the block,
+// from the block itself (its CID, seq 0, ord = the input's position among
+// the non-coinbase inputs). Headers and merkle nodes contribute none: nothing
+// asks the reverse questions, and a proof reads downward from the root.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -196,6 +201,14 @@ pub fn linksOf(a: std.mem.Allocator, c: []const u8, b: []const u8) ![]Link {
     };
 }
 
+/// The edges a kept bitcoin block contributes (see the header): a
+/// transaction's `spends` links; none for a header, a merkle node, a block
+/// that is not bitcoin, or one that does not decode.
+pub fn edgesOf(a: std.mem.Allocator, c: []const u8, b: []const u8) ![]Link {
+    if (!isBitcoin(c) or cidm.codecOf(c) != cidm.BITCOIN_TX or b.len == MERKLE_NODE_SIZE) return &.{};
+    return linksOf(a, c, b);
+}
+
 // ---------------------------------------------------------------- tests
 
 fn hex(a: std.mem.Allocator, s: []const u8) ![]u8 {
@@ -239,6 +252,8 @@ test "bitcoin-block: mainnet block 170's header, typed, with its links" {
     try std.testing.expect((try decode(a, cidm.BITCOIN_BLOCK, g)).get("previousblockhash").? == .null);
     try std.testing.expectEqual(@as(usize, 1), (try links(a, cidm.BITCOIN_BLOCK, g)).len);
     try std.testing.expectError(error.Malformed, decode(a, cidm.BITCOIN_BLOCK, b[0..79]));
+    // A header contributes no edges.
+    try std.testing.expectEqual(@as(usize, 0), (try edgesOf(a, c, b)).len);
 }
 
 test "bitcoin-tx: block 170's spend (inputs link what they spend) and the genesis coinbase (links nothing)" {
@@ -269,6 +284,7 @@ test "bitcoin-tx: block 170's spend (inputs link what they spend) and the genesi
     try std.testing.expectEqualStrings("spends", ls[0].rel);
     try std.testing.expectEqual(@as(?i64, 0), ls[0].locator);
     try std.testing.expectEqualSlices(u8, spent, ls[0].to);
+    try std.testing.expectEqual(@as(usize, 1), (try edgesOf(a, c, b)).len);
     // The node encodes as dag-cbor (links as tag 42).
     _ = try cbor.encode(a, v);
 
@@ -305,4 +321,6 @@ test "bitcoin-tx, 64 bytes: a merkle node [left, right] (block 170's root over i
     try std.testing.expectEqual(@as(?i64, 0), ls[0].locator);
     try std.testing.expectEqual(@as(?i64, 1), ls[1].locator);
     try std.testing.expectEqual(cidm.BITCOIN_TX, cidm.codecOf(ls[1].to));
+    // A merkle node contributes no edges.
+    try std.testing.expectEqual(@as(usize, 0), (try edgesOf(a, c, node)).len);
 }

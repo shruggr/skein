@@ -122,7 +122,8 @@ format is refused (`kernel-zig/src/log.zig` has the shapes).
   names never starts with `:` (reserved for the host's own boxes).
 - **A message's id is the CID of its mail record.** Sender and recipient
   compute it alike; a reply names it in its body's `replyTo`. A second
-  admission of the same record is refused (the kernel's `unique` map).
+  admission of the same record is refused (the kernel's `unique` map; so is
+  a libp2p `p2p` event record's, below).
 - **Routing** (`scheduler.zig` processMail), for a message to this instance:
   a body with a `replyTo` CID resumes the thread awaiting that record, if the
   record is a message this instance sent to the replying sender; otherwise
@@ -306,6 +307,14 @@ answer {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?
   any event: the thread awaiting its `subject` (none here), else a sender-less
   subscription on `libp2p:<topic>`; with none it is recorded and nothing
   runs. **Reject and ignore write nothing** — no entry, no byte.
+- **A redelivered message writes nothing either** (#42, decided
+  2026-09-30). The event record is content-addressed (topic, from, seqno,
+  signature, body), so GossipSub delivering the same message again — after
+  its seen-cache expired, or from another peer — makes the same record, and
+  the kernel's `unique` map (which already keeps a mail record to one
+  admission) refuses a second entry for a `p2p` event record at admit: no
+  entry, no byte. The router answers GossipSub `ignore` (no forward, no
+  penalty). Other events (a feed's header or status) are not unique.
 - **Streams.** A frame is not signed (the stream is authenticated by Noise;
   `from` is the remote peer). The handler answers `{body?, admit?, close?,
   verdict?}`: `body` is written back on the stream as one frame, `admit`

@@ -297,10 +297,12 @@ export class Router {
       try {
         await admitAll(l.kernel, r.admit, () => this.now());
       } catch (e) {
-        if (!(e instanceof Rejected && e.reason === "duplicate-envelope")) {
-          this.say(handle, `${source}: admit: ${(e as Error).message}`);
-          return { verdict: "ignore", reason: (e as Error).message };
-        }
+        // A redelivered message (#42/#51: its `p2p` event record already admitted — the kernel's
+        // `unique` index refuses it, nothing written) is ignore toward GossipSub: no penalty, no forward.
+        const dup = e instanceof Rejected && e.reason === "duplicate-envelope";
+        if (!dup) this.say(handle, `${source}: admit: ${(e as Error).message}`);
+        else if (process.env.SKEIN_LIBP2P_VERBOSE) this.say(handle, `${source} from ${from}: ignore (already admitted)`);
+        return { verdict: "ignore", reason: dup ? "already admitted" : (e as Error).message };
       }
       this.settle(l);
     }

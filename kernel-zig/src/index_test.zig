@@ -213,7 +213,7 @@ fn hexBytes(a: std.mem.Allocator, s: []const u8) ![]u8 {
     return out;
 }
 
-test "index: a kept bitcoin block's links are edges from the block (#42); edgesTo answers who spent txid:vout" {
+test "index: a kept bitcoin transaction's inputs are edges from the block (#42); a header none; edgesTo answers who spent txid:vout" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -245,7 +245,7 @@ test "index: a kept bitcoin block's links are edges from the block (#42); edgesT
         try u.put("kept", try cbor.cidArray(a, if (i == 0) &.{ tc, hc } else &.{tc}));
         _ = try s.chainAppend(a, t, u.value());
     }
-    try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .edges)).len);
+    try std.testing.expectEqual(@as(usize, 1), (try ix.all(a, .edges)).len);
 
     // Who spent 0437cd7f:0 — a prefix scan on the target, the locator the vout.
     const spent = Value.cidOf((try bitcoin.decode(a, cidm.BITCOIN_TX, tx)).get("vin").?.array[0].get("txid")).?;
@@ -255,14 +255,11 @@ test "index: a kept bitcoin block's links are edges from the block (#42); edgesT
     try std.testing.expectEqual(@as(i64, 0), hits[0].seq);
     try std.testing.expectEqual(@as(i128, 0), Value.intOf(hits[0].locator).?);
     try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, spent, "mentions")).len);
-    // The header: its previous header and its merkle root.
+    // The header, kept, contributes no edges (#42 decided 2026-09-30): not
+    // to its previous header, not to its merkle root.
     const hv = try bitcoin.decode(a, cidm.BITCOIN_BLOCK, header);
-    const prev = try s.edges(a, Value.cidOf(hv.get("previousblockhash")).?, null);
-    try std.testing.expectEqual(@as(usize, 1), prev.len);
-    try std.testing.expectEqualStrings("prev", prev[0].rel);
-    try std.testing.expectEqualSlices(u8, hc, prev[0].from);
-    const root = try s.edges(a, Value.cidOf(hv.get("merkleroot")).?, "merkleroot");
-    try std.testing.expectEqual(@as(usize, 1), root.len);
+    try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, Value.cidOf(hv.get("previousblockhash")).?, null)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try s.edges(a, Value.cidOf(hv.get("merkleroot")).?, null)).len);
 
     // The rebuild path derives the same edges.
     const want = try ix.stateCid(a);
@@ -277,4 +274,57 @@ test "index: a kept bitcoin block's links are edges from the block (#42); edgesT
         try ix2.importChain(t, ups, (try s.chainTip(a, t)).?, @intCast(ups.len));
     }
     try std.testing.expectEqualSlices(u8, want, try ix2.stateCid(a));
+}
+
+fn appendEvent(a: std.mem.Allocator, s: anytype, prev: *Value, n: *i64, event: []const u8, box: []const u8) !@import("store.zig").AppendResult {
+    var e = cbor.MapBuilder.init(a);
+    try e.put("kind", cbor.string("log"));
+    try e.put("prev", prev.*);
+    try e.put("n", cbor.int(n.*));
+    try e.put("time", .{ .array = try a.dupe(Value, &.{ cbor.int(1), cbor.int(n.*) }) });
+    try e.put("event", .{ .cid = event });
+    try e.put("box", cbor.string(box));
+    const r = try s.logAppend(a, e.value());
+    if (r == .ok) {
+        prev.* = .{ .cid = r.ok };
+        n.* += 1;
+    }
+    return r;
+}
+
+test "index: a libp2p `p2p` event record is admitted once (#42/#51): a redelivery is refused, nothing written; other events recur" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var mem = Mem.init(gpa);
+    defer mem.deinit();
+    const ix = try index.Index.init(gpa, mem.backend(), false);
+    defer ix.deinit();
+    const s = ix.store();
+
+    var ev = cbor.MapBuilder.init(a);
+    try ev.put("kind", cbor.string("p2p"));
+    try ev.put("topic", cbor.string("t"));
+    try ev.put("body", .{ .bytes = "hello" });
+    const p2p = try cbor.block(a, ev.value());
+    try s.putBlock(p2p.cid, p2p.bytes);
+    var hv = cbor.MapBuilder.init(a);
+    try hv.put("kind", cbor.string("header"));
+    const hdr = try cbor.block(a, hv.value());
+    try s.putBlock(hdr.cid, hdr.bytes);
+
+    var prev: Value = .null;
+    var n: i64 = 0;
+    try std.testing.expect((try appendEvent(a, s, &prev, &n, p2p.cid, "libp2p:t")) == .ok);
+    const puts = mem.puts;
+    const again = try appendEvent(a, s, &prev, &n, p2p.cid, "libp2p:t");
+    try std.testing.expect(again == .rejected);
+    try std.testing.expectEqualStrings("duplicate-envelope", again.rejected.reason.text());
+    try std.testing.expectEqual(puts, mem.puts); // nothing written
+    try std.testing.expectEqual(@as(usize, 1), (try ix.all(a, .log)).len);
+    // A feed's event may recur: not unique.
+    try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
+    try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
+    try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .log)).len);
 }

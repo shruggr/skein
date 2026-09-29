@@ -17,6 +17,9 @@
 //              by the async topic validator, which makes one front-door call
 //              (`inbound`) and returns its verdict to GossipSub (accept: admit +
 //              forward; reject: drop + penalise the delivering peer; ignore: drop).
+//              A redelivered message already admitted (its `p2p` event record is
+//              in the kernel's `unique` map) is refused at admit, nothing written:
+//              ignore.
 //              With the DHT on, each topic name is a rendezvous: provide the
 //              CID v1 raw sha2-256 of the name and dial the providers found
 //              (go-libp2p's RoutingDiscovery, as go-p2p-message-bus uses it).

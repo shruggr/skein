@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { CID } from "multiformats/cid";
-import { BITCOIN_BLOCK, BITCOIN_TX, bitcoinLinks, decodeBitcoin, displayHash, hashCid } from "./bitcoin.ts";
+import { BITCOIN_BLOCK, BITCOIN_TX, bitcoinEdges, bitcoinLinks, decodeBitcoin, displayHash, hashCid } from "./bitcoin.ts";
 
 const dbl = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
 const hex = (s: string) => Uint8Array.from(Buffer.from(s, "hex"));
@@ -29,6 +29,7 @@ test("bitcoin-block: block 170's header decodes with prev and merkleroot links",
     ["prev", "000000002a22cfee1f2c846adbd12b3e183d4f97683f85dad08a79780a84bd55", null],
     ["merkleroot", "7dac2c5666815c17a3b36427de37bb9d2e2c5ccec3f8633eb91a4205cb4c10ff", null],
   ]);
+  assert.deepEqual(bitcoinEdges(c, b), [], "a header contributes no edges");
 });
 
 test("bitcoin-tx: inputs link what they spend (locator = vout); 64 bytes is a merkle node", () => {
@@ -41,6 +42,7 @@ test("bitcoin-tx: inputs link what they spend (locator = vout); 64 bytes is a me
   assert.deepEqual(v.vout.map((o) => o.value), [1_000_000_000, 4_000_000_000]);
   assert.deepEqual(bitcoinLinks(c, b).map((l) => [l.rel, id(l.to), l.locator]), [["spends", "0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9", 0]]);
   assert.deepEqual(bitcoinLinks(c, b.subarray(0, b.length - 1)), [], "a malformed transaction links nothing");
+  assert.deepEqual(bitcoinEdges(c, b), bitcoinLinks(c, b), "a transaction's edges are its inputs");
 
   const node = Uint8Array.from([...hex("b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082").reverse(), ...hex("f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16").reverse()]);
   const nc = cidOf(BITCOIN_TX, node);
@@ -48,4 +50,5 @@ test("bitcoin-tx: inputs link what they spend (locator = vout); 64 bytes is a me
   const pair = decodeBitcoin(nc, node) as CID[];
   assert.deepEqual(pair.map(id), ["b1fea52486ce0c62bb442b530a3f0132b826c74e473d1f2c220bfa78111c5082", "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"]);
   assert.deepEqual(bitcoinLinks(nc, node).map((l) => [l.rel, l.locator]), [["child", 0], ["child", 1]]);
+  assert.deepEqual(bitcoinEdges(nc, node), [], "a merkle node contributes no edges");
 });

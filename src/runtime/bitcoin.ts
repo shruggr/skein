@@ -13,9 +13,12 @@
 //     (IPLD's convention: a 64-byte transaction is malformed by convention, so
 //     64 bytes always reads as a node)
 //
-// Links (the edges a kept block contributes, index.zig): inputs → the spent
-// txid, rel `spends`, locator = vout (a coinbase input links nothing);
-// header → `prev`, `merkleroot`; merkle node → `child`, locator 0 / 1.
+// Forward links (`bitcoinLinks`, what packets and the explorer follow):
+// inputs → the spent txid, rel `spends`, locator = vout (a coinbase input
+// links nothing); header → `prev`, `merkleroot`; merkle node → `child`,
+// locator 0 / 1. Edges (`bitcoinEdges`, what a kept block contributes to the
+// index, index.zig; #42 decided 2026-09-30): a transaction's inputs only —
+// headers and merkle nodes contribute none.
 
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
@@ -107,6 +110,12 @@ export function bitcoinLinks(cid: CID, b: Uint8Array): BitcoinLink[] {
   try {
     return parseTx(b).inputs.filter((x) => !isCoinbase(x)).map((x) => ({ to: hashCid(BITCOIN_TX, x.prev), rel: "spends", locator: x.vout }));
   } catch { return []; }
+}
+
+/** The edges a kept bitcoin block contributes (kernel-zig/src/bitcoin.zig `edgesOf`): a transaction's `spends` links; none for a header or a merkle node. */
+export function bitcoinEdges(cid: CID, b: Uint8Array): BitcoinLink[] {
+  if (!isBitcoin(cid) || cid.code !== BITCOIN_TX || b.length === 64) return [];
+  return bitcoinLinks(cid, b);
 }
 
 /** What a bitcoin block is, for display. */

@@ -613,7 +613,7 @@ finished, which sleep until when, which await a reply to this message, what
 points at this record, what tree does this head name — are answered by
 **persistent maps kept as records in the store**, not by database tables.
 Each query shape is its own map, keyed so that the question is a lookup, a
-range or a prefix: `log` (n → entry), `unique` (message CID → entry),
+range or a prefix: `log` (n → entry), `unique` (message CID, or a libp2p `p2p` event record's CID → entry),
 `chains` (origin → tip, seq), `updates` (origin ‖ seq → update), `threads`
 and `resting` (at ‖ origin), `sleepers` (until ‖ origin), `awaits`
 (record ‖ at ‖ origin), `edges` (target ‖ from ‖ seq ‖ ord → rel), `heads`
@@ -643,7 +643,7 @@ intermediate trees; the log and what live chains reach are not.
 
 The `edges` map is who points at what: target ‖ from ‖ seq ‖ ord →
 `[rel, locator?]`, from a chain (a thread or node) at an update, or from a
-kept bitcoin block (seq 0). The kernel
+kept bitcoin transaction (seq 0). The kernel
 derives them (index.zig, as sqlite.ts did) from:
 
 | source | rel |
@@ -654,9 +654,17 @@ derives them (index.zig, as sqlite.ts did) from:
 | an update's `resolution` | `resolves` |
 | an update's `emit` of type `launched` | `launched` |
 | each record the step **kept** (`keep`) with `refs: [{to, rel, locator?}]` (#37) | the ref's own |
-| each **bitcoin block** the step kept (#42): its links, from the block itself at seq 0 | `spends` (an input, locator = the vout), `prev` / `merkleroot` (a header), `child` (a merkle node, locator 0 / 1) |
+| each **bitcoin transaction** the step kept (#42): its inputs, from the block itself at seq 0 | `spends` (an input, locator = the vout) |
 
-A kept bitcoin block's edges are keyed `to ‖ block CID ‖ 0 ‖ ord`, like an
+**Only transaction inputs are edges** (#42, decided 2026-09-30). A kept
+header or merkle node contributes none: they stay records with forward links
+(a header's `previousblockhash` and `merkleroot`, a node's two children, as
+decoded), but nothing asks the reverse questions ("which header follows",
+"which node has this child"), and at chain scale they would cost ~200 bytes
+per header and ~4 KB per proven transaction for nothing. A proof is read
+downward from the block's root (docs/WALLET.md "Proofs").
+
+A kept transaction's edges are keyed `to ‖ block CID ‖ 0 ‖ ord`, like an
 origin's own: they do not depend on which thread kept it or when, so a
 block kept again adds nothing. The trigger is **keep**, not `putblock`: a
 bare put leaves no trace in the chains, and the edges map is a function of
@@ -664,8 +672,9 @@ the chains (a rebuild from the log comes to the same root). The wallet keeps
 every bitcoin block it holds (headers, transactions, merkle nodes), so "who
 spent txid:vout" is a prefix scan on the transaction's CID and a locator
 filter — its `spends` edges replaced the wallet's `spenders` map (one entry
-per input of every held transaction, as before), and the explorer walks the
-graph: header → merkle root → nodes → transactions → what they spend.
+per input of every held transaction, as before). The explorer walks the
+graph by forward links, not edges: header → merkle root → nodes →
+transactions → what they spend (as do packets, src/host/packet.ts).
 
 Programs read the edges with the **`edges`** call: `edges(to, rel?)` →
 dag-cbor `[{from, seq, rel, locator}]` in key order (from, seq, ord). It is a

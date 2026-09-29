@@ -27,9 +27,9 @@
 //                                  dag-cbor [{from, seq, rel, locator}] in key order
 //                                  (from, seq, ord) — who spent txid:vout is `spends`
 //                                  into the tx's CID with locator = vout. A read: a pure
-//                                  function of the log, plus the links of the bitcoin
-//                                  blocks this step kept so far (exactly the edges its
-//                                  update will add); other kept records' refs appear
+//                                  function of the log, plus the inputs of the bitcoin
+//                                  transactions this step kept so far (exactly the edges
+//                                  its update will add); other kept records' refs appear
 //                                  from the next step on.
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
@@ -105,7 +105,7 @@ pub fn edgesRead(a: std.mem.Allocator, s: storem.Store, to: []const u8, rel: ?[]
         for (kept[0..i]) |x| dup = dup or std.mem.eql(u8, x, k);
         if (dup) continue;
         const b = (try s.bytes(a, k)) orelse continue;
-        for (try bitcoin.linksOf(a, k, b), 0..) |l, ord| {
+        for (try bitcoin.edgesOf(a, k, b), 0..) |l, ord| {
             if (!std.mem.eql(u8, l.to, to)) continue;
             if (rel) |want| if (!std.mem.eql(u8, want, l.rel)) continue;
             var have = false;

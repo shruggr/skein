@@ -5,7 +5,8 @@
 // door verifies the GossipSub signature, its route handler judges, and an
 // accepted message is one `p2p` entry carrying from/seqno/topic/signature and
 // the body — re-verified here from the entry alone. A rejected (or ignored)
-// message writes nothing: beta's store byte-identical. A stream round trip
+// message writes nothing: beta's store byte-identical; so does a redelivered
+// accepted one (the kernel's `unique` index refuses its entry). A stream round trip
 // alpha → beta → alpha, the `receive` resting and woken by the frame. The
 // validator and stream calls' fuel in beta's ledger. Then both stores replayed
 // with no router and no network: identical.
@@ -181,6 +182,20 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.ok(Buffer.from(after[0]!).equals(Buffer.from(before[0]!)) && Buffer.from(after[1]!).equals(Buffer.from(before[1]!)), "beta's store (and its WAL) byte-identical");
   assert.equal((await p2pEntries()).length, 1);
 
+  // ------------------------------------------------ a redelivered message writes nothing (#42/#51)
+  // GossipSub delivers "hello" again (after its seen-cache expired, say): the same call, so the front
+  // door accepts it into the same `p2p` event record, and the kernel's `unique` index refuses the entry
+  // at admit. The router answers ignore (no forward, no penalty); one entry; the store byte-identical.
+  const again = bytes();
+  const redelivered = await B.r.p2pInbound("beta", { transport: "libp2p", topic: TOPIC, from: ev.from, seqno: ev.seqno, signature: ev.signature, body: ev.body });
+  await B.r.settled();
+  assert.equal(redelivered.verdict, "ignore", `a redelivery is ignore toward GossipSub (${JSON.stringify(redelivered)})`);
+  assert.equal(redelivered.reason, "already admitted");
+  assert.equal((await lb.kernel.store.log.tip())!.toString(), tipBefore, "no entry for the redelivery");
+  assert.equal((await p2pEntries()).length, 1, "one entry for the message");
+  const afterAgain = bytes();
+  assert.ok(Buffer.from(afterAgain[0]!).equals(Buffer.from(again[0]!)) && Buffer.from(afterAgain[1]!).equals(Buffer.from(again[1]!)), "beta's store (and its WAL) byte-identical after the redelivery");
+
   // ------------------------------------------------ a stream round trip, receive resting and woken
   await send({ op: "echo", peer: idB, protocol: PROTOCOL, text: "ping" });
   await until(() => lines.some((l) => l.startsWith("[alpha]") && /p2p-demo step \d → finished/.test(l) && !/step 1 → finished · 1 attested/.test(l)), "the echo thread finishes");
@@ -196,7 +211,7 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   const ledger = B.db.ledger("beta");
   const topicRow = ledger.find((x) => x.op === `libp2p:${TOPIC}`);
   const streamRow = ledger.find((x) => x.op === `libp2p:${PROTOCOL}`);
-  assert.ok(topicRow && topicRow.caller === idA && topicRow.calls === 3 && topicRow.fuel > 0, `validator calls charged: ${JSON.stringify(topicRow)}`);
+  assert.ok(topicRow && topicRow.caller === idA && topicRow.calls === 4 && topicRow.fuel > 0, `validator calls charged (three delivered, one redelivered): ${JSON.stringify(topicRow)}`);
   assert.ok(streamRow && streamRow.caller === idA && streamRow.calls >= 1 && streamRow.fuel > 0, `stream calls charged: ${JSON.stringify(streamRow)}`);
 
   // alpha's updates: the recorded calls, and the reply on stdout.
