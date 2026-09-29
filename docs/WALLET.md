@@ -89,10 +89,9 @@ order), its root in the state record. Keys are bytes, ordered bytewise.
 | `proofHeights` | height (u32 BE) ‖ txid → null | proofs by block height: what a reorg reverts |
 | `drafts` | draft CID → null \| `settlement` | signable drafts; a link once rejected |
 | `watchers` | identity key (33 bytes) → null | who is sent settlement messages |
-| `spent` | outpoint → spending txid | derived: consumed by a transaction we hold that is not rejected |
-| `byBasket` | len ‖ basket ‖ 0 (spendable) \| 1 (spent) ‖ outpoint → null | derived: outputs by basket + spendable |
-| `byStatus` | 0 (proven) \| 1 (unproven) \| 2 (rejected) ‖ txid → null | derived: our actions by status |
-| `bySettlement` | 0 \| 1 \| 2 ‖ txid → null | derived: every transaction we hold by status |
+| `spent` | outpoint → spending txid | derived: the first (lowest txid) spender we hold that is not rejected |
+| `byBasket` | len ‖ basket ‖ 0 (spendable) \| 1 (spent) ‖ outpoint → null | derived: our outputs by basket + spendable |
+| `unproven` | txid → null | derived, sparse: the settlement index — held transactions neither proven nor rejected |
 
 The same record also carries an overlay's maps (#36: `admitted`, `consumed`,
 `applied` and the derived `spentAdmitted`, `byTopic`, `byScript`;
@@ -105,10 +104,34 @@ hold a proof whose root is the merkle root of our best-chain header at its
 height; anything else is `unproven` (a reorg that drops the block turns it
 back, with nothing to update). Spendable means ours (an `output`) and not
 consumed (no transaction we hold, other than a rejected one, spends it). The
-derived maps are rebuilt from the primary ones on every save: a function of
-the records and the best chain that anyone can recompute (same contents,
-same root). The ARC status in a `broadcast` record is provisional
-information, except a rejection (below).
+ARC status in a `broadcast` record is provisional information, except a
+rejection (below).
+
+**Derived maps are maintained, not rebuilt (#41).** Each write that changes
+a fact updates the few index keys that fact touches, at write time; `save`
+only flushes the new nodes and writes the maps' roots into the state record.
+They remain a function of the records and the best chain that anyone can
+recompute (same contents, same root). The rules:
+
+| fact | where | index keys touched |
+|---|---|---|
+| a `spends` edge (a transaction held: `putTx`) | each input's outpoint | `spent[op]` = the first spender in `spenders[op…]` not rejected; if that turned `op` spent/unspent, its `byBasket` key moves (0 ↔ 1) |
+| a transaction held | its txid | into `unproven` (unless already proven or rejected) |
+| an output record written / replaced (`putOutput`) | its outpoint | its `byBasket` key under its basket and spent state (the old key dropped on a replace) |
+| a proof stored (`putProof`) | its txid | leaves `unproven` when the proof holds on our chain |
+| headers added from height h (extension or reorg) | each txid in `proofHeights` ≥ h | into or out of `unproven`, by whether its proof holds now |
+| a rejection (`reject`, each transaction it bubbles to) | the txid, its inputs, its outputs | leaves `unproven`; each input's `spent` is recomputed (freed unless another spender stands) and its `byBasket` key moves; each removed output record's `byBasket` key goes; the overlay's keys (docs/OVERLAY.md) |
+
+**Sparse where the query allows.** `unproven` is the settlement index: it
+holds only what is still unsettled. A proven transaction leaves it (a reorg
+that undoes the proof puts it back), a rejected one is in `rejected`; so it
+stays the size of the in-flight set, not of the history. The old dense
+`bySettlement` / `byStatus` (every transaction by status) are gone — nothing
+queried them, and status stays computed per txid. Cost: adding one
+transaction of ours (tx, action, one output) writes ~21 blocks in total —
+index nodes, records and the state record — against a wallet of 10k outputs
+(16 at 100 outputs); with the rebuild at every save it was 335, growing with
+the store.
 
 ## Settlement (#37)
 
@@ -154,9 +177,9 @@ settlement record, drop it from `awaiting`, then walk its `dependents` in key
 order following only propagating relations — a `t` dependent (a spend) is
 queued (transitively rejected, `input-rejected`), an `o` output record is
 removed from `outputs` (the output vanishes), a `d` draft is marked rejected
-(signAction refuses it: `DraftRejected`). Then `save` recomputes the derived
-maps from what remains: the inputs the rejected transactions consumed are
-spendable again unless another held transaction spends them. Breadth first
+(signAction refuses it: `DraftRejected`). Then the derived keys the
+rejections touch are updated (above): the inputs the rejected transactions
+consumed are spendable again unless another held transaction spends them. Breadth first
 in key order, from records only: the same rejection on the same state gives
 the same state record. This is the "replay of the affected subgraph" — as
 recomputation of derived state, recorded as one update on the wallet's head

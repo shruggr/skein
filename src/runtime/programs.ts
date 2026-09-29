@@ -32,7 +32,7 @@ export const MODULES = {
   "subscribe-handler": CID.parse("bafkreiclc5brxmakpcaky4asqz4a5sjxuftiir5zfrj7h7lyeabkktmz2e"),
   "loop": CID.parse("bafkreihi2lx7lj54qaw4lopithify5x5gm7tcdomfig3bjijoqzj5sj2ty"),
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (wallet-zig/, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreid2kaqltmak2eayvteju5gopb7z5eww2mk5ciiysfbgvp6ptum3aa"),
+  "wallet": CID.parse("bafkreibyhz5xxww3pvbvyni2comhpp2ofcy7urpr5enihvlvi6ugoxxiaa"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs
   // beyond brush/coreutils (Modules.extra in shell.ts). find/xargs are two
   // binaries from one build (uutils/findutils); diff and cmp are two names
