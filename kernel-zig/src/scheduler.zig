@@ -109,6 +109,12 @@ pub const Peers = struct {
     /// One HTTP request (dag-cbor {method, url, headers?, body?}) → the response
     /// (dag-cbor {status, headers, body}): a program's `http` import (#29, pre-#15).
     http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8) anyerror![]u8 = null,
+    /// One libp2p request (#51, dag-cbor {op, …}) → its result (dag-cbor), from
+    /// `thread` (the host wakes it when a frame arrives for a pending `receive`).
+    libp2p: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8, thread: []const u8) anyerror![]u8 = null,
+    /// Why this host has no libp2p at all (the browser build): a request with
+    /// no recorded answer fails with it, and nothing is recorded.
+    libp2p_refusal: ?[]const u8 = null,
     /// A thread started sleeping (the tick's cue).
     on_sleep: ?*const fn (ctx: *anyopaque, thread: []const u8, until: i64) void = null,
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
@@ -412,7 +418,8 @@ pub const Runtime = struct {
             for (rt.sleepers.items, 0..) |s, i| if (std.mem.eql(u8, s.origin, wk)) {
                 idx = i;
             };
-            if (idx == null or rt.sleepers.items[idx.?].deadline > time.ns()) {
+            // Early is fine for a thread resting on a libp2p stream (#51): the router wakes it when a frame arrives.
+            if (idx == null or (rt.sleepers.items[idx.?].deadline > time.ns() and !rt.restsOnStream(a, wk))) {
                 rt.say("#{d} wake {s}: not sleeping or not due; nothing runs", .{ n, short(a, wk) });
                 return;
             }
@@ -426,6 +433,26 @@ pub const Runtime = struct {
         if (Value.cidOf(e.get("event"))) |ev| return rt.processEvent(a, n, .{ .cid = entry, .e = e }, ev, at);
 
         if (Value.cidOf(e.get("mail"))) |mc| return rt.processMail(a, n, .{ .cid = entry, .e = e }, mc, at);
+    }
+
+    /// Whether a thread rests on a libp2p stream (#51): it is waiting, and the
+    /// last call its last step recorded is a `libp2p` receive answered
+    /// {pending}. A wake before its deadline steps such a thread (the router
+    /// admits one when a frame arrives on the stream); any other early wake
+    /// runs nothing. A function of the log: replay decides the same.
+    fn restsOnStream(rt: *Runtime, a: std.mem.Allocator, origin: []const u8) bool {
+        const tip = (rt.tipOf(a, origin) catch return false) orelse return false;
+        if (!stateIs(tip, "waiting")) return false;
+        const calls = tip.get("calls") orelse return false;
+        if (calls != .array or calls.array.len == 0) return false;
+        const last = Value.cidOf(calls.array[calls.array.len - 1]) orelse return false;
+        const rec = rt.store.getOpt(a, last);
+        if (!logm.isAttested(rec)) return false;
+        if (!std.mem.eql(u8, Value.str(rec.?.get("op")) orelse "", "libp2p")) return false;
+        const req = cbor.decode(a, Value.bytesOf(rec.?.get("request")) orelse return false) catch return false;
+        if (!std.mem.eql(u8, Value.str(req.get("op")) orelse "", "receive")) return false;
+        const res = cbor.decode(a, Value.bytesOf(rec.?.get("result")) orelse return false) catch return false;
+        return res == .map and res.get("pending") != null;
     }
 
     /// A message (#40): a reply to a message this instance sent — the thread
@@ -823,6 +850,7 @@ pub const Runtime = struct {
             .subscribe = hSubscribe,
             .wallet = hWallet,
             .http = hHttp,
+            .libp2p = hLibp2p,
             .deadline = hDeadline,
             .call = hCall,
             .edges = hEdges,
@@ -1014,6 +1042,14 @@ pub const Runtime = struct {
         if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
         return attest(st, imp, "http", .{ .bytes = request }, .{ .http = request });
     }
+    /// The `libp2p` import (#51): recorded like `http` (request + result on the
+    /// update; replay serves the recorded result, a differing request is a
+    /// divergence). A result {error} is recorded too, and is the call's failure.
+    fn hLibp2p(imp: *program.Imports, request: []const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        try checkLibp2p(imp, st.a, request);
+        return libp2pAnswer(imp, st.a, try attest(st, imp, "libp2p", .{ .bytes = request }, .{ .libp2p = request }));
+    }
     /// The edges into a record (#42): the index, plus the links of the bitcoin blocks this step kept so far.
     fn hEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
         const st = stepOf(imp);
@@ -1042,7 +1078,24 @@ pub const Runtime = struct {
         };
     }
 
-    const Perform = union(enum) { wallet: []const u8, http: []const u8 };
+    const Perform = union(enum) { wallet: []const u8, http: []const u8, libp2p: []const u8 };
+
+    const libp2p_ops = [_][]const u8{ "publish", "dial", "send", "receive", "close" };
+
+    /// A libp2p request's shape: dag-cbor {op, …} with a known op.
+    fn checkLibp2p(imp: *program.Imports, a: std.mem.Allocator, request: []const u8) program.Err!void {
+        const r = cbor.decode(a, request) catch return imp.failWith("libp2p: the request is not dag-cbor");
+        const op = (if (r == .map) Value.str(r.get("op")) else null) orelse return imp.failWith("libp2p: want {op: publish | dial | send | receive | close, …}");
+        for (libp2p_ops) |o| if (std.mem.eql(u8, o, op)) return;
+        return imp.failFmt("libp2p: unknown op {s}", .{try json.quoted(a, op)});
+    }
+
+    /// A libp2p result as the program gets it: {error} is the call's failure.
+    fn libp2pAnswer(imp: *program.Imports, a: std.mem.Allocator, result: []const u8) program.Err![]const u8 {
+        const v = cbor.decode(a, result) catch return imp.failWith("libp2p: the host's answer is not dag-cbor");
+        if (v == .map) if (Value.str(v.get("error"))) |e| return imp.failFmt("libp2p: {s}", .{e});
+        return result;
+    }
 
     /// An attested call's answer, recorded: the witness's (replay), else the peer's.
     fn attest(st: *StepState, imp: *program.Imports, op: []const u8, request: Value, perform: Perform) program.Err![]const u8 {
@@ -1070,6 +1123,14 @@ pub const Runtime = struct {
                 .http => |q| {
                     const f = rt.peers.http orelse return imp.failWith("http: this host answers no http");
                     result = f(rt.peers.ctx, a, q) catch |err| return imp.failFmt("http: {s}", .{@errorName(err)});
+                },
+                .libp2p => |q| {
+                    if (rt.peers.libp2p_refusal) |m| return imp.failWith(m);
+                    const f = rt.peers.libp2p orelse return imp.failWith("libp2p: this host answers no libp2p");
+                    result = f(rt.peers.ctx, a, q, st.origin) catch |err| return if (err == error.PeerGone)
+                        imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (libp2p): the router is gone", .{ short(a, st.origin), st.n, i }))
+                    else
+                        imp.failFmt("libp2p: {s}", .{@errorName(err)});
                 },
             }
         } else {
@@ -1252,6 +1313,7 @@ pub const Runtime = struct {
         .subscribe = cSubscribe,
         .wallet = cWallet,
         .http = cHttp,
+        .libp2p = cLibp2p,
         .deadline = cDeadline,
         .call = cCall,
         .edges = cEdges,
@@ -1340,6 +1402,11 @@ pub const Runtime = struct {
         if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
         const f = cs.rt.peers.http orelse return imp.failWith("http: this host answers no http");
         return f(cs.rt.peers.ctx, cs.a, request) catch |err| imp.failFmt("http: {s}", .{@errorName(err)});
+    }
+    /// libp2p (#51) is a step's: a kernel call sends nothing (a stream a thread
+    /// dials, a message it publishes, is recorded on its update).
+    fn cLibp2p(imp: *program.Imports, _: []const u8) program.Err![]const u8 {
+        return imp.failWith("libp2p: a kernel call sends nothing (publish, dial, send from a step)");
     }
     /// A call within a call: the same world (records put, fuel, clock), its own fn and arg.
     fn cCall(imp: *program.Imports, prog: []const u8, func: []const u8, arg: []const u8) program.Err![]const u8 {

@@ -213,6 +213,7 @@ pub const Fn = enum {
     subscribe,
     wallet,
     http,
+    libp2p,
     deadline,
     call,
     edges,

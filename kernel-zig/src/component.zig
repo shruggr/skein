@@ -29,6 +29,8 @@ const E = vfsm.E;
 
 pub const WASI_VERSION = "0.2.12";
 pub const SKEIN_INTERFACE = "skein:kernel/skein@0.1.0";
+/// #51: the typed libp2p calls; each becomes program.Host.libp2p's dag-cbor request (the preview1 shape).
+pub const LIBP2P_INTERFACE = "skein:kernel/libp2p@0.1.0";
 
 /// A component binary (layer 1) rather than a core module (version 1).
 pub fn isComponent(bytes: []const u8) bool {
@@ -194,6 +196,12 @@ const F = enum(u32) {
     sk_deadline,
     sk_call,
     sk_edges,
+    // skein:kernel/libp2p (#51)
+    lp_publish,
+    lp_dial,
+    lp_send,
+    lp_receive,
+    lp_close,
 };
 
 const Def = struct { name: []const u8, f: F };
@@ -379,6 +387,13 @@ const interfaces = [_]Iface{
         .{ .name = "deadline", .f = .sk_deadline },
         .{ .name = "call", .f = .sk_call },
         .{ .name = "edges", .f = .sk_edges },
+    } },
+    .{ .name = LIBP2P_INTERFACE, .funcs = &.{
+        .{ .name = "publish", .f = .lp_publish },
+        .{ .name = "dial", .f = .lp_dial },
+        .{ .name = "send", .f = .lp_send },
+        .{ .name = "receive", .f = .lp_receive },
+        .{ .name = "close", .f = .lp_close },
     } },
 };
 
@@ -1064,6 +1079,8 @@ const Session = struct {
 
             // ---- skein:kernel/skein: program.Host, as the preview1 imports call it
             .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_http, .sk_deadline, .sk_call, .sk_edges => return s.skein(f, a),
+            // ---- skein:kernel/libp2p (#51): the same recorded request as preview1's skein.libp2p
+            .lp_publish, .lp_dial, .lp_send, .lp_receive, .lp_close => return s.skein(f, a),
 
             // ---- wasi:http (#15): the recorded-call path of skein.http
             else => return s.httpCall(f, a),
@@ -1576,7 +1593,59 @@ const Session = struct {
                 const rel: ?[]const u8 = if (a[1].of.option) |o| try A.dupe(u8, str(o)) else null;
                 return vOk(vBytes(try h.edges(imp, to, rel)));
             },
+            .lp_publish, .lp_dial, .lp_send, .lp_receive, .lp_close => return s.libp2pCall(imp, f, a),
             else => unreachable,
+        }
+    }
+
+    /// skein:kernel/libp2p (#51): the typed call as the dag-cbor request
+    /// preview1's `skein.libp2p` takes, through program.Host.libp2p (recorded:
+    /// the same record for both ABIs), and the result lifted.
+    fn libp2pCall(s: *Session, imp: *program.Imports, f: F, a: []Val) program.Err!Val {
+        const A = s.alloc;
+        const cbor = @import("cbor.zig");
+        var m = cbor.MapBuilder.init(A);
+        switch (f) {
+            .lp_publish => {
+                try m.put("op", cbor.string("publish"));
+                try m.put("topic", cbor.string(try A.dupe(u8, str(&a[0]))));
+                try m.put("body", .{ .bytes = try listBytes(A, &a[1]) });
+            },
+            .lp_dial => {
+                try m.put("op", cbor.string("dial"));
+                try m.put("peer", cbor.string(try A.dupe(u8, str(&a[0]))));
+                try m.put("protocol", cbor.string(try A.dupe(u8, str(&a[1]))));
+            },
+            .lp_send => {
+                try m.put("op", cbor.string("send"));
+                try m.put("stream", cbor.int(a[0].of.u64));
+                try m.put("body", .{ .bytes = try listBytes(A, &a[1]) });
+            },
+            .lp_receive, .lp_close => {
+                try m.put("op", cbor.string(if (f == .lp_receive) "receive" else "close"));
+                try m.put("stream", cbor.int(a[0].of.u64));
+            },
+            else => unreachable,
+        }
+        const req = cbor.encode(A, m.value()) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else imp.failWith("libp2p: bad request");
+        const answer = try imp.host.libp2p(imp, req);
+        const r = cbor.decode(A, answer) catch return imp.failWith("libp2p: the host's answer is not dag-cbor");
+        switch (f) {
+            .lp_publish => {
+                const seq = cbor.Value.bytesOf(r.get("seqno")) orelse return imp.failWith("libp2p: publish: no seqno");
+                if (seq.len != 8) return imp.failWith("libp2p: publish: the seqno is not 8 bytes");
+                return vOk(u64v(std.mem.readInt(u64, seq[0..8], .big)));
+            },
+            .lp_dial => {
+                const id = cbor.Value.intOf(r.get("stream")) orelse return imp.failWith("libp2p: dial: no stream");
+                return vOk(u64v(@intCast(id)));
+            },
+            .lp_receive => {
+                if (cbor.Value.bytesOf(r.get("body"))) |b| return vOk(variant("frame", vBytes(b)));
+                if (r.get("closed") != null) return vOk(variant("closed", null));
+                return vOk(variant("pending", null));
+            },
+            else => return vOk(null),
         }
     }
 };

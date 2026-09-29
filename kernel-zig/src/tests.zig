@@ -22,6 +22,7 @@ test {
     _ = @import("component_test.zig");
     _ = @import("http.zig");
     _ = @import("http_test.zig");
+    _ = @import("libp2p_test.zig");
     _ = @import("wasm_fuel.zig");
     _ = @import("wasm_fuel_test.zig");
 }

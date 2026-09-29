@@ -89,6 +89,14 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         const b = (try src.bytes(a, h)) orelse continue;
         try dst.putBlock(h, b);
     }
+    // Route handlers the genesis names that are not among its programs (#40's routes; #51's libp2p: sources):
+    // only calls run them, never a step, but they are the system's, as the source holds them.
+    if (g.get("routes")) |rs| if (rs == .array) for (rs.array) |r| {
+        const h = Value.cidOf(r.get("program")) orelse continue;
+        if (try dst.has(h)) continue;
+        const b = (try src.bytes(a, h)) orelse continue;
+        try dst.putBlock(h, b);
+    };
     // The system tree the genesis booted from (issue #4): pre-filled, not carried by any entry.
     if (Value.cidOf(g.get("tree"))) |t| try copyTree(a, src, dst, t);
     for (try src.logFrom(a, 0)) |c| {
