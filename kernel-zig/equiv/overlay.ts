@@ -20,7 +20,8 @@
 // by separate BUMPs in status entries (out of order); the lookup answers carry
 // BUMPs rebuilt from the stored nodes, which @bsv/sdk verifies (one token
 // alone: byte for byte the BUMP it was sent). The store then replays to
-// itself exactly (equiv/replays.ts).
+// itself exactly (equiv/replays.ts). Chronicle (#53): a Rúnar AMM pool spend
+// (its pool input executes OP_2MUL) verifies in the front door's call.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
 
@@ -293,6 +294,45 @@ try {
     alone.push([i, tx?.merklePath?.toHex() === sent.get(leaves[i]), ok]);
   }
   report.merkleAlone = alone;
+
+  // Chronicle script rules (#53): a Rúnar AMM pool spend (wallet-zig/vectors/chronicle.json, from the amm-poc
+  // fixtures), whose pool input executes OP_2MUL. Its funding and token deploy are mined in block 5 (a coinbase,
+  // fund, token deploy, a filler); the BEEF carries the pool deploy and the sats-in swap unproven, so the front
+  // door's call verifies every input's script, the pool's included. No topic here takes it: 200 with the empty
+  // STEAK is a verified submission (before Chronicle bsvz refused OP_2MUL: 400 ScriptFailed). The same swap with
+  // its funding signature broken is refused (400 ScriptFailed): the scripts are run.
+  const chron = JSON.parse(readFileSync(join(here, "../../wallet-zig/vectors/chronicle.json"), "utf8")) as { txs: Record<string, string> };
+  const cFund = Transaction.fromHex(chron.txs.fund!);
+  const cToken = Transaction.fromHex(chron.txs.token_deploy!);
+  const cPool = Transaction.fromHex(chron.txs.pool_deploy!);
+  const leaves5 = ["dd".repeat(32), cFund.id("hex"), cToken.id("hex"), "ee".repeat(32)];
+  const m01 = sha256d(Buffer.concat([internal(leaves5[0]!), internal(leaves5[1]!)]));
+  const m23 = sha256d(Buffer.concat([internal(leaves5[2]!), internal(leaves5[3]!)]));
+  const h5 = mine(sha256d(h4), sha256d(Buffer.concat([m01, m23])), 1_790_000_000 + 5 * 600);
+  headers.push(h5);
+  roots.set(5, Buffer.from(h5.subarray(36, 68)).reverse().toString("hex"));
+  await router.admitEvent("overlay", "chain", { kind: "header", raw: h5 });
+  await router.settled();
+  const bump5 = (i: number) => new MerklePath(5, [
+    [i ^ 1, i].sort().map((o) => o === i ? { offset: o, hash: leaves5[o]!, txid: true } : { offset: o, hash: leaves5[o]! }),
+    [{ offset: (i >> 1) ^ 1, hash: disp((i >> 1) ^ 1 ? m23 : m01) }],
+  ]);
+  cFund.merklePath = bump5(1);
+  cToken.merklePath = bump5(2);
+  const link = (t: Transaction) => { for (const inp of t.inputs) inp.sourceTransaction = [cFund, cToken, cPool].find((s) => s.id("hex") === inp.sourceTXID); };
+  link(cPool);
+  const swapOf = (hex: string) => { const t = Transaction.fromHex(hex); link(t); return t; };
+  const swap = swapOf(chron.txs.swap_bsv_in!);
+  const poolSpent = swap.inputs[0]!.sourceTXID === cPool.id("hex");
+  const cs = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(swap.toBEEF()) });
+  const csSteak = (await cs.json()) as Record<string, { outputsToAdmit?: unknown[] }>;
+  report.chronicle = [poolSpent, cs.status, csSteak.tm_demo && csSteak.tm_demo.outputsToAdmit?.length === 0 ? "empty-steak" : JSON.stringify(csSteak)];
+  const broken = swapOf(chron.txs.swap_bsv_in!);
+  const sig = broken.inputs[1]!.unlockingScript!.toBinary();
+  sig[10] ^= 1;
+  broken.inputs[1]!.unlockingScript = UnlockingScript.fromBinary(sig);
+  const cb2 = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(broken.toBEEF()) });
+  report.chronicleBroken = [cb2.status, ((await cb2.json()) as { message?: string }).message];
   report.ok = true;
 } catch (e) {
   report.error = (e as Error).stack ?? String(e);
@@ -342,6 +382,8 @@ check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdo
 
 check(eq(report.merkle, [[1, true, true], [2, true, true], [3, true, true]]), `three tokens of one block, proven by separate BUMPs (out of order): each lookup answer carries the BUMPs rebuilt from the stored merkle nodes (merged per block), each leaf computing the header root, verified by @bsv/sdk (${JSON.stringify(report.merkle)})`);
 check(eq(report.merkleAlone, [[1, true, true], [2, true, true], [3, true, true]]), `each token alone: its BUMP rebuilt from the tree is byte for byte the one its status entry carried, verified by @bsv/sdk (${JSON.stringify(report.merkleAlone)})`);
+check(eq(report.chronicle, [true, 200, "empty-steak"]), `#53: a Rúnar AMM pool spend (its pool input executes OP_2MUL) verifies under Chronicle rules in the front door's call: 200, the empty STEAK, no topic here taking it (${JSON.stringify(report.chronicle)})`);
+check(Array.isArray(report.chronicleBroken) && report.chronicleBroken[0] === 400 && String(report.chronicleBroken[1]).includes("ScriptFailed"), `#53: the same swap with its funding signature broken is refused, 400 ScriptFailed (${JSON.stringify(report.chronicleBroken)})`);
 check(eq(report.edges, { sameRoot: true, children: [false, false, false], noNodeEdges: true, forward: true }), `#42: kept merkle nodes and headers contribute no edges (no token is a \`child\` edge target), the nodes still link forward to their children; the TS reader derives the kernel's edges map, same root (${JSON.stringify(report.edges)})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
