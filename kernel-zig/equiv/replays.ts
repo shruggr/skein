@@ -184,7 +184,8 @@ for (const source of sources) {
   }
   const n = d1.entries.length;
   const counts = `${n} entries, ${d1.chains.length} chains, ${d1.updates.length} updates (${ending} with fuel, ${running} running${exhausted ? `, ${exhausted} out of fuel` : ""}), ${d1.blocks.length} blocks + ${d1.indexBlocks} index, ${j1.lines.length} lines; fuel ${d1.fuel.total}`;
-  if (ending === 0) diffs.push("no update records fuel");
+  // A store with only its genesis ran no step (a mailbox nothing was delivered to: a handshake writes nothing, #40).
+  if (ending === 0 && n > 1) diffs.push("no update records fuel");
   if (diffs.length) {
     allSame = false;
     process.stdout.write(`${name}: DIFFERENT (${counts})\n  ${diffs.join("\n  ")}\n`);
