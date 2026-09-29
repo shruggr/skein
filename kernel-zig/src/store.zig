@@ -27,6 +27,11 @@ pub const Rejected = enum {
 
 pub const AppendResult = union(enum) { ok: []u8, rejected: struct { reason: Rejected, message: []u8 } };
 
+/// One edge into a record (the `edges` map, index.zig): who points at it —
+/// a chain at an update (`seq`), or a kept bitcoin block (its own CID, seq 0,
+/// #42) — the link's position there (`ord`), its rel and locator.
+pub const Edge = struct { from: []u8, seq: i64, ord: i64, rel: []u8, locator: ?Value };
+
 pub const VTable = struct {
     bytes: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8,
     has: *const fn (ctx: *anyopaque, cid: []const u8) anyerror!bool,
@@ -54,6 +59,8 @@ pub const VTable = struct {
     commit: *const fn (ctx: *anyopaque) anyerror!void,
     /// The committed state record's CID (index.zig), or null before the first commit (#40: a call reads through it).
     state: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
+    /// The edges into `to` (a binary CID), with `rel` only if given, in key order (from, seq, ord).
+    edges: *const fn (ctx: *anyopaque, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) anyerror![]Edge,
 };
 
 pub const Store = struct {
@@ -137,5 +144,8 @@ pub const Store = struct {
     }
     pub fn commit(s: Store) !void {
         return s.vt.commit(s.ctx);
+    }
+    pub fn edges(s: Store, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) ![]Edge {
+        return s.vt.edges(s.ctx, a, to, rel);
     }
 };

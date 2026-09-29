@@ -29,7 +29,11 @@
 //   sleepers  until ‖ origin             → null                (threads waiting with a deadline)
 //   awaits    record ‖ at ‖ origin       → null                (threads awaiting a reply to a message, or an event's subject)
 //   edges     to ‖ from ‖ seq ‖ ord      → [rel, locator?]     (pointers out of chains, by target;
-//                                                              an update's own, then its kept records' `refs`)
+//                                                              an update's own, then its kept records' `refs`;
+//                                                              and a kept bitcoin block's links, from the block
+//                                                              at seq 0 (#42, bitcoin.zig): inputs `spends`
+//                                                              (locator = vout), headers `prev`/`merkleroot`,
+//                                                              merkle nodes `child` (locator 0/1))
 //   heads     name                       → tree CID            (named heads)
 //
 // Every map is a function of the chains and the log (the derivation is
@@ -49,6 +53,7 @@ const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
 const mst = @import("mst.zig");
 const storem = @import("store.zig");
+const bitcoin = @import("bitcoin.zig");
 const Value = cbor.Value;
 
 /// What the index needs of a store: blocks by CID, and one named pointer.
@@ -332,11 +337,11 @@ pub const Index = struct {
 
     // ------------------------------------------------------------ derivation (sqlite.ts)
 
-    const EdgeRow = struct { to: []const u8, rel: []const u8, locator: ?[]const u8 };
+    const EdgeRow = struct { to: []const u8, rel: []const u8, locator: ?Value };
 
     fn edge(a: std.mem.Allocator, out: *std.array_list.Managed(EdgeRow), to: ?Value, rel: []const u8, locator: ?Value) !void {
         const t = to orelse return;
-        const loc: ?[]const u8 = if (locator) |l| (if (l == .string) l.string else null) else null;
+        const loc: ?Value = if (locator) |l| (if (l == .string) l else null) else null;
         switch (t) {
             .cid => |c| try out.append(.{ .to = try cidm.format(a, c), .rel = rel, .locator = loc }),
             .string => |x| try out.append(.{ .to = x, .rel = rel, .locator = loc }),
@@ -409,9 +414,78 @@ pub const Index = struct {
             if (try ix.mapGet(a, .edges, k.items) != null) continue;
             const v = try a.alloc(Value, 2);
             v[0] = cbor.string(e.rel);
-            v[1] = if (e.locator) |l| cbor.string(l) else .null;
+            v[1] = e.locator orelse .null;
             try ix.mapPut(.edges, k.items, .{ .array = v });
         }
+    }
+
+    /// The links of a kept bitcoin block (#42, bitcoin.zig) as edge rows:
+    /// from the block itself at seq 0 (like an origin's own), so a block kept
+    /// again, by any thread, adds nothing. Not a bitcoin block, or malformed: none.
+    pub fn bitcoinEdges(a: std.mem.Allocator, c: []const u8, bytes: []const u8) ![]EdgeRow {
+        const ls = try bitcoin.linksOf(a, c, bytes);
+        const out = try a.alloc(EdgeRow, ls.len);
+        for (ls, out) |l, *r| r.* = .{
+            .to = try cidm.format(a, l.to),
+            .rel = l.rel,
+            .locator = if (l.locator) |n| cbor.int(n) else null,
+        };
+        return out;
+    }
+
+    /// The edges of the bitcoin blocks an update keeps (`kept`).
+    fn writeKeptBitcoin(ix: *Index, a: std.mem.Allocator, u: Value) !void {
+        const kept = u.get("kept") orelse return;
+        if (kept != .array) return;
+        for (kept.array) |k| {
+            const c = Value.cidOf(k) orelse continue;
+            if (!bitcoin.isBitcoin(c)) continue;
+            const bytes = (try ix.backend.vt.get(ix.backend.ctx, a, c)) orelse continue;
+            try ix.writeEdges(a, c, 0, try bitcoinEdges(a, c, bytes));
+        }
+    }
+
+    /// The length of the binary CID at the front of `b` (binary CIDs are prefix-free).
+    fn cidLen(b: []const u8) ?usize {
+        if (b.len >= 34 and b[0] == 0x12 and b[1] == 0x20) return 34;
+        var pos: usize = 0;
+        for (0..3) |_| _ = cidm.readUvarint(b, &pos) catch return null;
+        const n = cidm.readUvarint(b, &pos) catch return null;
+        if (n > b.len - pos) return null;
+        return pos + @as(usize, @intCast(n));
+    }
+
+    /// The edges into `to` (binary), `rel` only if given, in key order.
+    pub fn edgesTo(ix: *Index, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) ![]storem.Edge {
+        const s = ix.scratch();
+        var prefix = std.array_list.Managed(u8).init(s);
+        try strKey(&prefix, try cidm.format(s, to));
+        var out = std.array_list.Managed(storem.Edge).init(a);
+        for (try ix.scanPrefix(s, .edges, prefix.items)) |kv| {
+            const rest = kv.key[prefix.items.len..];
+            const n = cidLen(rest) orelse return error.BadIndex;
+            if (rest.len != n + 16 or kv.value != .array or kv.value.array.len != 2) return error.BadIndex;
+            const r = Value.str(kv.value.array[0]) orelse return error.BadIndex;
+            if (rel) |want| if (!std.mem.eql(u8, want, r)) continue;
+            const loc = kv.value.array[1];
+            try out.append(.{
+                .from = try a.dupe(u8, rest[0..n]),
+                .seq = readBe64(rest[n..][0..8]),
+                .ord = readBe64(rest[n + 8 ..][0..8]),
+                .rel = try a.dupe(u8, r),
+                .locator = switch (loc) {
+                    .null => null,
+                    .int => loc,
+                    .string => |x| .{ .string = try a.dupe(u8, x) },
+                    else => return error.BadIndex,
+                },
+            });
+        }
+        return out.items;
+    }
+
+    fn readBe64(b: *const [8]u8) i64 {
+        return @bitCast(std.mem.readInt(u64, b, .big) ^ (1 << 63));
     }
 
     fn isKind(v: Value, k: []const u8) bool {
@@ -505,6 +579,7 @@ pub const Index = struct {
     fn recordUpdate(ix: *Index, a: std.mem.Allocator, origin: []const u8, seq: i64, cid: []const u8, u: Value) !void {
         try ix.mapPut(.updates, try cat(a, .{ origin, seq }), .{ .cid = cid });
         try ix.writeEdges(a, origin, seq, try ix.updateEdgesWithKept(a, u));
+        try ix.writeKeptBitcoin(a, u);
     }
 
     /// move(): the chain's tip is now `tip` (at `seq`); the maps that follow tips follow.
@@ -570,7 +645,12 @@ pub const Index = struct {
         .cursorSet = cursorSetFn,
         .commit = commitFn,
         .state = stateFn,
+        .edges = edgesFn,
     };
+
+    fn edgesFn(ctx: *anyopaque, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) anyerror![]storem.Edge {
+        return self(ctx).edgesTo(a, to, rel);
+    }
 
     fn stateFn(ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8 {
         const ix = self(ctx);
