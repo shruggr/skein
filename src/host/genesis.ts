@@ -6,7 +6,11 @@
 //             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}],
-//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}]}
+//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}],
+//             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]}}
+//            (`libp2p`, #51: the router's libp2p host runs a node for the instance, subscribes
+//            `topics` and serves `protocols`; each message or frame is a front-door call routed
+//            by its `libp2p:<topic | protocol>` route)
 //            (`feeds`: what the router holds for the instance, feeds.ts; `routes`/`reads`: the
 //            front door's, #40 — its sessions are not state: never in the log; `:ack` → the
 //            messagebox moves a reader's pointer; `defaults.ownerMessagebox`: the owner's
@@ -67,6 +71,9 @@ export interface Genesis2Config {
   reads?: ReadSpec[];
   /** Feeds the router holds for the instance (code genesis; a tree's config names its own). */
   feeds?: FeedSpec[];
+  /** Code genesis (#51): libp2p for the instance (a tree's config names its own), and extra routes after the stock ones. */
+  libp2p?: Libp2pSpec;
+  extraRoutes?: RouteSpec[];
   /** A mailbox instance (#40): only the front door and the messagebox, keeping mail for `owner` from anyone. */
   mailbox?: boolean;
   /** The owner's messagebox URL (#40): the one peer a genesis names (`defaults.ownerMessagebox`). */
@@ -149,6 +156,22 @@ export interface ConfigSpec {
   feeds?: FeedSpec[];
   /** The owner as a peer (#40): its messagebox URL — the one peer a genesis names. */
   owner?: { messagebox?: string };
+  /** libp2p (#51): the topics the router subscribes for the instance, the protocols it serves, the node's own listen addresses. */
+  libp2p?: Libp2pSpec;
+}
+
+/**
+ * libp2p as a system writes it (etc/config.json `libp2p`, #51): `topics` the
+ * router's node subscribes (each message a front-door call; its route
+ * `libp2p:<topic>` comes from etc/routes.json), `protocols` it serves, each
+ * naming its handler — a program (bin/ name or CID; fn "libp2p") or
+ * {program, fn} — which becomes the route `libp2p:<protocol>` (unless
+ * etc/routes.json has one), `listen` this node's addresses over the host's.
+ */
+export interface Libp2pSpec {
+  topics?: string[];
+  protocols?: Record<string, string | { program: string; fn?: string }>;
+  listen?: string[];
 }
 
 /** A system resolved for one instance: what its genesis says besides who it is. */
@@ -165,6 +188,32 @@ export interface System {
   /** The front door's routes and reads (#40). */
   routes: Array<{ path?: string; prefix?: string; program: CID; fn: string; auth?: "none"; read?: string }>;
   reads: Array<{ caller?: Uint8Array; op: string }>;
+  /** libp2p (#51): what the router's libp2p host does for the instance. */
+  libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
+}
+
+/** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those routes.json lacks). */
+export function libp2pIn(spec: Libp2pSpec | undefined, routes: RouteSpec[]): { libp2p?: System["libp2p"]; routes: RouteSpec[] } {
+  if (spec === undefined) return { routes };
+  const bad = (why: string) => new Error(`etc/config.json: libp2p ${why} (want {topics?: [string], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]})`);
+  if (!spec || typeof spec !== "object") throw bad("is not an object");
+  const strs = (v: unknown, what: string): string[] => {
+    if (v === undefined) return [];
+    if (!Array.isArray(v) || v.some((x) => typeof x !== "string" || !x)) throw bad(`${what} is not a list of strings`);
+    return v as string[];
+  };
+  const topics = strs(spec.topics, "topics");
+  const listen = strs(spec.listen, "listen");
+  const ps = spec.protocols ?? {};
+  if (typeof ps !== "object" || Array.isArray(ps)) throw bad("protocols is not an object");
+  const out = [...routes];
+  for (const [protocol, h] of Object.entries(ps)) {
+    const program = typeof h === "string" ? h : h?.program;
+    if (!protocol || typeof program !== "string" || !program) throw bad(`protocols.${protocol} names no program`);
+    const path = `libp2p:${protocol}`;
+    if (!out.some((r) => r.path === path)) out.push({ path, program, fn: (typeof h === "object" && h.fn) || "libp2p" });
+  }
+  return { libp2p: { topics, protocols: Object.keys(ps), ...(listen.length ? { listen } : {}) }, routes: out };
 }
 
 /** Routes and reads resolved for one instance: handler names to program CIDs (a route to a program this system lacks is dropped), `$owner` to its key. */
@@ -213,12 +262,14 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
   const peers = config.peers
     ? Object.fromEntries(Object.entries(config.peers).map(([role, k]) => [role, keyOf(k, c)]))
     : c.infer ? { infer: keyBytes(c.infer) } : undefined;
+  const p2p = libp2pIn(config.libp2p ?? c.libp2p, [...routes, ...(c.extraRoutes ?? [])]);
   return {
     programs, subscriptions, ...(peers ? { peers } : {}),
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
-    ...resolveRoutes(c, programs, routes, reads),
+    ...resolveRoutes(c, programs, p2p.routes, reads),
+    ...(p2p.libp2p ? { libp2p: p2p.libp2p } : {}),
   };
 }
 
@@ -267,6 +318,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     programs: s.programs, subscriptions: s.subscriptions, ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
     ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),
+    ...(s.libp2p ? { libp2p: s.libp2p } : {}),
   };
 }
 

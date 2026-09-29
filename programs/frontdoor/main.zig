@@ -33,6 +33,11 @@
 //! the session table; a message it admits carries the sender key, the 104
 //! signature and both nonces, so its authorship verifies from the log alone.
 //!
+//! Its fn "libp2p" (#51, libp2p.zig) is the same door for libp2p: a GossipSub
+//! message or a stream frame, routed by `libp2p:<topic | protocol>`, the
+//! message's signature verified here, the handler's verdict returned (an
+//! accepted message is one `p2p` event entry to admit).
+//!
 //! Its other function, "explore", is a route handler (explore.zig): the
 //! instance's log, threads, heads and records as JSON, behind a read rule.
 //!
@@ -53,6 +58,7 @@ const cbor = @import("cbor");
 const sk = @import("sk");
 const brc = @import("brc104");
 const explore = @import("explore.zig");
+const p2p = @import("libp2p.zig");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -73,6 +79,8 @@ fn run(a: Allocator) !void {
     const func = Value.str(in.get("fn")) orelse "";
     const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
     if (eql(u8, func, "http")) return sk.answer(a, try http(a, in, arg));
+    // #51: a GossipSub message or an inbound stream frame, routed by `libp2p:<topic | protocol>` (libp2p.zig).
+    if (eql(u8, func, "libp2p")) return sk.answer(a, try p2p.libp2p(a, in, arg));
     if (eql(u8, func, "explore")) {
         const r = try explore.explore(a, in, arg);
         var m = cbor.MapBuilder.init(a);
@@ -81,7 +89,7 @@ fn run(a: Allocator) !void {
         try m.put("body", .{ .bytes = r.body });
         return sk.answer(a, m.value());
     }
-    return sk.report("unknown fn (the front door answers \"http\" and the route handler \"explore\")");
+    return sk.report("unknown fn (the front door answers \"http\" and \"libp2p\", and the route handler \"explore\")");
 }
 
 // ---------------------------------------------------------------- responses

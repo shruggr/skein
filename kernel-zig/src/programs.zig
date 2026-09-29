@@ -22,7 +22,7 @@ pub const modules = [_]Module{
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreiehhusheqk3oguayz43gbtwdqdx6fcpatiuztzomuglrj7ksm266m" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreid43xkimq5d5qbw6t5ibis57xiyf7neiel4s4xeyvw36v2fty2tba" },
+    .{ .name = "frontdoor", .cid = "bafkreieih562zr4qr46iy7otrqekda7dutqy7th3fh457s5ect6eqdq25i" },
     // The peer table's writer (#40): BRC-169 resolve, the admin's `peers`, `register` claims (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreicxsp4aoppj6xvfmdgh5lh7g4dxmajv7zepyykaovrrixujvnv63y" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },

@@ -4,8 +4,8 @@
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host add <handle> --mailbox --owner <hex>   a mailbox instance (#40) for an identity outside the host
 //   skein-host knows <handle> [a,b | --all | --none]
-//   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree
-//   skein-host identity <handle>      an instance's identity key (from the master secret)
+//   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
+//   skein-host identity <handle> [--peer]   an instance's identity key (from the master secret); --peer: its libp2p peer ID
 //   skein-host mailboxes              the mailbox instances: handle, whose (owner), front-door key, status, store
 //   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
 //   skein-host enable|disable|remove <handle>
@@ -74,6 +74,7 @@ import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { masterKey, Oracle } from "./oracle.ts";
+import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { subscribeBody } from "../client/client.ts";
 import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
 import { Supervisor, type Supervised } from "./supervisor.ts";
@@ -97,8 +98,8 @@ const USAGE = `usage:
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex>         a mailbox instance for an identity outside the host (#40)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
-  skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree
-  skein-host identity <handle>                            an instance's identity key
+  skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
+  skein-host identity <handle> [--peer]                   an instance's identity key; --peer: its libp2p peer ID (#51)
   skein-host mailboxes                                    the mailbox instances: handle, owner, front-door key, status, store
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host enable|disable|remove <handle>
@@ -165,9 +166,11 @@ export async function main(argv: string[], env: Env): Promise<number> {
       }
       case "identity": {
         // The oracle's key (oracle.ts) for an instance: the BRC-104 identity its front door answers as.
-        const [handle] = rest;
-        if (!handle) { env.err(USAGE); return 2; }
-        env.out(new Oracle(masterKey(env.vars, home)).identity(handle));
+        const [handle, flag, ...more] = rest;
+        if (!handle || more.length || (flag !== undefined && flag !== "--peer")) { env.err(USAGE); return 2; }
+        const oracle = new Oracle(masterKey(env.vars, home));
+        // The libp2p peer ID (#51): the identity multihash of the peer key, a child of the master with key ID libp2p:<handle>.
+        env.out(flag ? peerIdOf(oracle.peerKey(handle)).toString() : oracle.identity(handle));
         return 0;
       }
       case "mailboxes": {
@@ -180,7 +183,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return 0;
       case "list": {
         const door = frontDoorKeys(env.vars, home);
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-"].join("\t"));
+        const peer = peerIds(env.vars, home);
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-", peer(r)].join("\t"));
         return 0;
       }
       case "enable": case "disable": case "remove": {
@@ -227,6 +231,14 @@ function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => s
   if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
   const oracle = new Oracle(masterKey(vars, home));
   return (row) => oracle.identity(row.handle);
+}
+
+/** Each row's libp2p peer ID (#51): derived from the master secret (key ID libp2p:<handle>), whether or not it runs a node; "-" with no master secret. */
+function peerIds(vars: Env["vars"], home: string): (row: InstanceRow) => string {
+  const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
+  if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
+  const oracle = new Oracle(masterKey(vars, home));
+  return (row) => peerIdOf(oracle.peerKey(row.handle)).toString();
 }
 
 function knowsCmd(db: HostDb, rest: string[], env: Env): number {
@@ -441,9 +453,9 @@ export interface Host {
  * key derived from the router's master secret (key ID = the handle); the
  * router's BRC-104 identity is another child of it.
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle) };
+  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle) };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
@@ -457,6 +469,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, home,
     instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
+    libp2p: hostP2PConfig(v, home),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };
 }
