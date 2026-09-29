@@ -64,3 +64,16 @@ test("router: the stock client by host name, our client by path prefix; the answ
   const ledger = h.db.ledger("david").find((l) => l.caller === h.ownerId && l.op === "/listMessages");
   assert.ok(ledger && ledger.calls >= n && ledger.fuel > 0, "the polls' fuel is on the host's ledger");
 });
+
+test("router: an agent's genesis names the owner's mailbox instance when it exists first; one without it is warned about at hydration", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const h = await testHost(t);
+  h.agent("early"); // genesised before the owner has a mailbox instance
+  await h.router.hydrate("early");
+  assert.ok(h.lines.some((l) => l.startsWith("[early] WARNING: its genesis names no owner messagebox")), `warned (${h.lines.join(" | ")})`);
+  h.mailbox("david", h.ownerId);
+  h.agent("late");
+  const k = (await h.router.hydrate("late")).kernel;
+  const g = await k.genesis() as { defaults: Record<string, string> };
+  assert.equal(g.defaults.ownerMessagebox, h.origin("david"), "the owner's mailbox instance, by default");
+  assert.ok(!h.lines.some((l) => l.startsWith("[late] WARNING")), "no warning for an agent whose genesis names it");
+});

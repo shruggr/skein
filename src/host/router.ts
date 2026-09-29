@@ -127,6 +127,18 @@ export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
   }
 }
 
+/**
+ * The warning for an agent whose genesis names no owner messagebox
+ * (`defaults.ownerMessagebox`): its sends to the owner — every answer to him —
+ * fail, since nothing else tells it where his mailbox is. Undefined if it names one.
+ */
+export function noOwnerMessagebox(genesis: Record<string, unknown> | null | undefined): string | undefined {
+  const d = genesis?.defaults as Record<string, unknown> | undefined;
+  if (typeof d?.ownerMessagebox === "string" && d.ownerMessagebox) return undefined;
+  return "WARNING: its genesis names no owner messagebox (defaults.ownerMessagebox): nothing it sends the owner (its answers) can be delivered. " +
+    "Create the owner's mailbox instance (skein-host add <name> --mailbox --owner <key>) or set SKEIN_OWNER_MESSAGEBOX, then re-genesis it (a new store)";
+}
+
 export class Router {
   readonly o: RouterOptions;
   readonly feeds: Feeds;
@@ -266,6 +278,7 @@ export class Router {
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done
       if (!row.identity) this.o.db.add(row.handle, { identity });
+      if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
     } catch (e) {
       await kernel.stop(1000);

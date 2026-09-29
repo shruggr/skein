@@ -77,7 +77,7 @@ import { masterKey, Oracle } from "./oracle.ts";
 import { subscribeBody } from "../client/client.ts";
 import { DEFAULT_ONLY, deploy, deployFiles, subscribeRow, type Deployed } from "./deploy.ts";
 import { Supervisor, type Supervised } from "./supervisor.ts";
-import { Router, type RouterOptions } from "./router.ts";
+import { noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { RawBox } from "../client/raw.ts";
 import type { Outbox } from "./deploy.ts";
@@ -349,6 +349,18 @@ async function ownerOf(env: Env, cmd: string): Promise<{ wallet: WalletInterface
   return owner;
 }
 
+/** An agent whose store's genesis names no owner messagebox: the warning (router.ts noOwnerMessagebox); else undefined. */
+async function ownerMessageboxWarning(row: InstanceRow, store: Store | undefined): Promise<string | undefined> {
+  if (row.kind === "mailbox" || !store) return undefined;
+  try {
+    for await (const { entry } of store.log.entries(0)) {
+      const g = (entry as { genesis?: CID }).genesis;
+      return g ? noOwnerMessagebox(await store.get(g) as Record<string, unknown>) : undefined;
+    }
+  } catch { /* a store this build cannot read: the router says so at hydration */ }
+  return undefined;
+}
+
 /** A row's store to read while something else may be writing it: read-only, if it exists. */
 function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promise<void> } {
   const given = env.store?.(row);
@@ -390,6 +402,8 @@ async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
       const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box(row), store: s.blocks, files });
       db.add(row.handle, { tree: r.root, source: dir });
       env.out(deployedLine(row, r));
+      const w = await ownerMessageboxWarning(row, s.blocks);
+      if (w) env.err(`${row.handle}: ${w}`);
     } catch (e) {
       failed++;
       env.err(`${row.handle}: ${(e as Error).message}`);
@@ -594,6 +608,9 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
   const messagebox = mserver ? (mserver.address() as { port: number }).port : undefined;
   if (messagebox !== undefined) env.out(`skein-host: router at http://127.0.0.1:${messagebox} · an instance at ${router.originOf("<handle>")} (or /@<handle>)`);
+  const omb = router.ownerMessagebox();
+  if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
+  else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);
   await router.start();
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
   const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);
