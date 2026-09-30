@@ -1,20 +1,17 @@
 // Router-held feeds (#33 part 2, #29's revision): long-lived subscriptions the
 // router keeps on behalf of instances, each of whose items is admitted into
 // the subscribed instance as a plain `event` entry (Router.admitEvent) — the
-// three event records of docs/WALLET.md:
+// event records of docs/WALLET.md:
 //
 //   header {kind: "header", raw: bytes(80)}
 //   status {kind: "status", subject: <tx CID>, txid, txStatus, merklePath?: bytes, blockHeight?, blockHash?}
 //
-// An instance declares its feeds in its config (etc/config.json, `feeds`),
-// which its genesis carries:
+// An instance declares its header feeds in its config (etc/config.json,
+// `feeds`), which its genesis carries:
 //
 //   {kind: "headers", url, box?}          an SSE stream of block headers (ChainTracks-style):
 //                                         each event's data is the header's hex (160 digits), or
 //                                         JSON {header | raw | hex: "<hex>"} (or an array of them)
-//   {kind: "arc-callback", box?, token?}  ARC's status callbacks: POST /callback/<handle> with ARC's
-//                                         callback JSON {txid, txStatus, merklePath?, …}; with a
-//                                         token, only `Authorization: Bearer <token>` is taken
 //
 // `box` defaults to "chain" (the wallet's sender-less subscription). Nothing
 // here judges an item: the instance's own chain tracker validates headers and
@@ -22,13 +19,17 @@
 // reconnects with exponential backoff (and `Last-Event-ID`); each instance's
 // queue of items not yet admitted holds at most `maxQueue` (the oldest go
 // first, logged).
+//
+// The `status` half is the host's broadcaster (#58, arc.ts): one Arcade
+// subscription for the whole host over the same SSE client (SseStream), each
+// status routed to every instance that holds the transaction. The
+// per-instance `arc-callback` feed is gone: a genesis that still declares one
+// has it ignored.
 
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 
-export type FeedSpec =
-  | { kind: "headers"; url: string; box?: string }
-  | { kind: "arc-callback"; box?: string; token?: string };
+export type FeedSpec = { kind: "headers"; url: string; box?: string };
 
 export interface FeedsOptions {
   /** Admit one event record into `handle`'s box (Router.admitEvent). */
@@ -48,7 +49,7 @@ export function txCid(txid: string): CID {
   return CID.createV1(0xb1, Digest.create(0x56, Uint8Array.from(Buffer.from(txid, "hex").reverse())));
 }
 
-/** The feeds a genesis declares (`feeds`), the malformed ones left out. */
+/** The feeds a genesis declares (`feeds`), the malformed ones (and a pre-#58 `arc-callback`) left out. */
 export function feedsOf(g: Record<string, unknown> | null | undefined): FeedSpec[] {
   const fs = g?.feeds;
   if (!Array.isArray(fs)) return [];
@@ -56,7 +57,6 @@ export function feedsOf(g: Record<string, unknown> | null | undefined): FeedSpec
   for (const f of fs as Array<Record<string, unknown>>) {
     const box = typeof f?.box === "string" && f.box ? f.box : undefined;
     if (f?.kind === "headers" && typeof f.url === "string") out.push({ kind: "headers", url: f.url, ...(box ? { box } : {}) });
-    else if (f?.kind === "arc-callback") out.push({ kind: "arc-callback", ...(box ? { box } : {}), ...(typeof f.token === "string" ? { token: f.token } : {}) });
   }
   return out;
 }
@@ -78,7 +78,7 @@ export function headersOf(data: string): Uint8Array[] {
   return list.map(one).filter((x): x is Uint8Array => !!x);
 }
 
-/** ARC's callback JSON as a `status` event record, or why not. */
+/** Arcade's (and ARC's) status JSON — an SSE event's data, a webhook's body — as a `status` event record, or why not. */
 export function statusOf(v: unknown): Record<string, unknown> | string {
   const o = v as Record<string, unknown> | null;
   if (!o || typeof o !== "object") return "not a JSON object";
@@ -95,7 +95,117 @@ export function statusOf(v: unknown): Record<string, unknown> | string {
   return ev;
 }
 
-interface Sse { url: string; subscribers: Map<string, string>; abort: AbortController; lastId?: string; stopped: boolean }
+// ---------------------------------------------------------------- SSE
+
+/** One event of a text/event-stream: its data lines joined, its `id` and `event` fields if it had them. */
+export interface SseEvent { data: string; id?: string; event?: string }
+
+export interface SseOptions {
+  /** Request headers besides Accept and Last-Event-ID. */
+  headers?: Record<string, string>;
+  /** Resume after this event id (a remembered one: the first connection sends it as Last-Event-ID). */
+  lastId?: string;
+  /** Reconnect backoff, ms (default 500 → 30 000, doubling; back to the minimum once an event arrived). */
+  backoff?: { min: number; max: number };
+  fetch?: typeof fetch;
+  log?(line: string): void;
+}
+
+/**
+ * One SSE subscription held open (#33, #58): connects, parses the stream,
+ * hands each event to `onEvent` — awaited before the next one is read and
+ * before its id counts as seen, so a caller that remembers `lastId` after it
+ * never skips an event — and reconnects with backoff, sending the last id
+ * seen as `Last-Event-ID`.
+ */
+export class SseStream {
+  readonly url: string;
+  lastId?: string;
+  private abort = new AbortController();
+  private stopped = false;
+  private readonly o: SseOptions;
+  private readonly onEvent: (ev: SseEvent) => Promise<void> | void;
+  private running?: Promise<void>;
+
+  constructor(url: string, onEvent: (ev: SseEvent) => Promise<void> | void, o: SseOptions = {}) {
+    this.url = url;
+    this.onEvent = onEvent;
+    this.o = o;
+    this.lastId = o.lastId;
+  }
+
+  start(): this { this.running ??= this.connect(); return this; }
+  /** Close the connection; no reconnect. Resolves once the loop has ended (an event being handled finishes first). */
+  async stop(): Promise<void> { this.stopped = true; this.abort.abort(); await this.running; }
+
+  private say(line: string): void { this.o.log?.(line); }
+
+  private async connect(): Promise<void> {
+    const { min, max } = this.o.backoff ?? { min: 500, max: 30_000 };
+    let wait = min;
+    while (!this.stopped) {
+      try {
+        const res = await (this.o.fetch ?? fetch)(this.url, {
+          headers: { ...this.o.headers, accept: "text/event-stream", ...(this.lastId !== undefined ? { "last-event-id": this.lastId } : {}) },
+          signal: this.abort.signal,
+        });
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        this.say(`connected${this.lastId !== undefined ? ` (after event ${this.lastId})` : ""}`);
+        await this.read(res.body, () => { wait = min; });
+        if (this.stopped) return;
+        this.say(`closed; reconnecting in ${wait} ms`);
+      } catch (e) {
+        if (this.stopped) return;
+        this.say(`${(e as Error).message}; reconnecting in ${wait} ms`);
+      }
+      await new Promise<void>((r) => { const t = setTimeout(r, wait); this.abort.signal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
+      wait = Math.min(max, wait * 2);
+    }
+  }
+
+  /** Parse the event stream (text/event-stream): `data:` lines until a blank line make one event; `id:` and `event:` go with it. */
+  private async read(body: ReadableStream<Uint8Array>, onData: () => void): Promise<void> {
+    const dec = new TextDecoder();
+    let buf = "";
+    let data: string[] = [];
+    let id: string | undefined;
+    let event: string | undefined;
+    const reader = body.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buf += dec.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buf.search(/\r\n|\n|\r/)) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + (buf.startsWith("\r\n", nl) ? 2 : 1));
+          if (line === "") {
+            if (data.length) {
+              onData();
+              try { await this.onEvent({ data: data.join("\n"), ...(id !== undefined ? { id } : {}), ...(event !== undefined ? { event } : {}) }); } catch (e) { this.say(`an event not taken: ${(e as Error).message}`); }
+            }
+            if (this.stopped) return;
+            if (id !== undefined) this.lastId = id;
+            data = []; id = undefined; event = undefined;
+            continue;
+          }
+          if (line.startsWith(":")) continue;
+          const c = line.indexOf(":");
+          const field = c < 0 ? line : line.slice(0, c);
+          const v = c < 0 ? "" : line.slice(c + 1).replace(/^ /, "");
+          if (field === "data") data.push(v);
+          else if (field === "id") id = v;
+          else if (field === "event") event = v;
+        }
+      }
+    } finally { reader.releaseLock?.(); }
+  }
+}
+
+// ---------------------------------------------------------------- the header feeds
+
+interface Sse { stream: SseStream; subscribers: Map<string, string> }
 interface Queue { items: Array<{ box: string; event: Record<string, unknown> }>; running: boolean; dropped: number }
 
 export class Feeds {
@@ -115,15 +225,19 @@ export class Feeds {
     this.declared.set(handle, specs);
     for (const [url, s] of this.sse) {
       if (s.subscribers.has(handle) && !specs.some((f) => f.kind === "headers" && f.url === url)) s.subscribers.delete(handle);
-      if (!s.subscribers.size) { s.stopped = true; s.abort.abort(); this.sse.delete(url); }
+      if (!s.subscribers.size) { void s.stream.stop(); this.sse.delete(url); }
     }
     for (const f of specs) {
       if (f.kind !== "headers") continue;
       let s = this.sse.get(f.url);
       if (!s) {
-        s = { url: f.url, subscribers: new Map(), abort: new AbortController(), stopped: false };
+        const subscribers = new Map<string, string>();
+        const stream = new SseStream(f.url, (ev) => this.dispatch(f.url, subscribers, ev.data), {
+          backoff: this.o.backoff, fetch: this.o.fetch, log: (l) => this.say("router", `feed ${f.url}: ${l}`),
+        });
+        s = { stream, subscribers };
         this.sse.set(f.url, s);
-        void this.connect(s);
+        stream.start();
       }
       s.subscribers.set(handle, f.box ?? DEFAULT_BOX);
     }
@@ -134,7 +248,7 @@ export class Feeds {
 
   stop(): void {
     this.stopped = true;
-    for (const s of this.sse.values()) { s.stopped = true; s.abort.abort(); }
+    for (const s of this.sse.values()) void s.stream.stop();
     this.sse.clear();
   }
 
@@ -166,83 +280,9 @@ export class Feeds {
     } finally { q.running = false; }
   }
 
-  // ---------------------------------------------------------------- SSE
-
-  private async connect(s: Sse): Promise<void> {
-    const { min, max } = this.o.backoff ?? { min: 500, max: 30_000 };
-    let wait = min;
-    while (!s.stopped && !this.stopped) {
-      try {
-        const res = await (this.o.fetch ?? fetch)(s.url, {
-          headers: { accept: "text/event-stream", ...(s.lastId !== undefined ? { "last-event-id": s.lastId } : {}) },
-          signal: s.abort.signal,
-        });
-        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-        this.say("router", `feed ${s.url}: connected`);
-        let got = false;
-        await this.read(s, res.body, () => { if (!got) { got = true; wait = min; } });
-        if (s.stopped) return;
-        this.say("router", `feed ${s.url}: closed; reconnecting in ${wait} ms`);
-      } catch (e) {
-        if (s.stopped || this.stopped) return;
-        this.say("router", `feed ${s.url}: ${(e as Error).message}; reconnecting in ${wait} ms`);
-      }
-      await new Promise<void>((r) => { const t = setTimeout(r, wait); s.abort.signal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
-      wait = Math.min(max, wait * 2);
-    }
-  }
-
-  /** Parse the event stream (text/event-stream): `data:` lines until a blank line dispatch one event; `id:` is remembered. */
-  private async read(s: Sse, body: ReadableStream<Uint8Array>, onData: () => void): Promise<void> {
-    const dec = new TextDecoder();
-    let buf = "";
-    let data: string[] = [];
-    let id: string | undefined;
-    const reader = body.getReader();
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) return;
-        buf += dec.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buf.search(/\r\n|\n|\r/)) >= 0) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + (buf.startsWith("\r\n", nl) ? 2 : 1));
-          if (line === "") {
-            if (data.length) { onData(); this.dispatch(s, data.join("\n")); }
-            if (id !== undefined) s.lastId = id;
-            data = []; id = undefined;
-            continue;
-          }
-          if (line.startsWith(":")) continue;
-          const c = line.indexOf(":");
-          const field = c < 0 ? line : line.slice(0, c);
-          const v = c < 0 ? "" : line.slice(c + 1).replace(/^ /, "");
-          if (field === "data") data.push(v);
-          else if (field === "id") id = v;
-        }
-      }
-    } finally { reader.releaseLock?.(); }
-  }
-
-  private dispatch(s: Sse, data: string): void {
+  private dispatch(url: string, subscribers: Map<string, string>, data: string): void {
     const hs = headersOf(data);
-    if (!hs.length) { this.say("router", `feed ${s.url}: an event with no header in it: ignored`); return; }
-    for (const [handle, box] of s.subscribers) for (const raw of hs) this.push(handle, box, { kind: "header", raw });
-  }
-
-  // ---------------------------------------------------------------- webhooks
-
-  /** ARC's callback for `handle` (POST /callback/<handle>). */
-  callback(handle: string, headers: Record<string, string | string[] | undefined>, raw: Uint8Array): { status: number; body: Record<string, unknown> } {
-    const spec = this.of(handle).find((f): f is Extract<FeedSpec, { kind: "arc-callback" }> => f.kind === "arc-callback");
-    if (!spec) return { status: 404, body: { status: "error", code: "ERR_NOT_FOUND", description: `no arc-callback feed for ${handle}` } };
-    if (spec.token && headers.authorization !== `Bearer ${spec.token}`) return { status: 401, body: { status: "error", code: "ERR_UNAUTHORIZED" } };
-    let v: unknown;
-    try { v = JSON.parse(new TextDecoder().decode(raw)); } catch { return { status: 400, body: { status: "error", code: "ERR_BAD_BODY", description: "not JSON" } }; }
-    const ev = statusOf(v);
-    if (typeof ev === "string") return { status: 400, body: { status: "error", code: "ERR_BAD_CALLBACK", description: ev } };
-    this.push(handle, spec.box ?? DEFAULT_BOX, ev);
-    return { status: 200, body: { status: "success" } };
+    if (!hs.length) { this.say("router", `feed ${url}: an event with no header in it: ignored`); return; }
+    for (const [handle, box] of subscribers) for (const raw of hs) this.push(handle, box, { kind: "header", raw });
   }
 }

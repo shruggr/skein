@@ -50,7 +50,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers, ARC callbacks at `/callback/<handle>`), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
+| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58: `/arc/v1/tx` to the host's Arcade, one status subscription), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
@@ -96,7 +96,8 @@ The router's own endpoints:
 | `GET /.well-known/metanet-handles/resolve?handle=<h>@<d>` | `{handle, domain, identityKey, messagebox}`: an agent's own identity and origin; for a mailbox instance, its owner's key and the instance's origin |
 | `GET /bsvalias/id/<handle>@<domain>` | paymail PKI (identity keys by handle) |
 | `POST /account/register {username, identityKey, signature}` | a mailbox instance for that identity: the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username, counterparty anyone, over `register <username>` → `{identityKey, username, handle, messagebox}` (409 if the name is taken) |
-| `POST /callback/<handle>` | ARC's status callback (an `arc-callback` feed) |
+| `POST /arc/v1/tx`, `GET /arc/v1/tx/<txid>` | the broadcaster (#58): a transaction to the host's Arcade, its status; Arcade's answer as is |
+| `POST /arc/callback` | Arcade's webhook (`Authorization: Bearer <SKEIN_ARC_TOKEN>`) |
 
 The instances' outbound http (a messagebox delivering, a resolve) comes back
 through the router: a URL of this host's is answered in process (the same
@@ -170,12 +171,37 @@ from before #40 (log format 2) are refused; they need a new genesis
 (`skein-host add <h> --derive` with a new `--store`).
 
 Feeds: an instance's `etc/config.json` may declare `feeds: [{kind:
-"headers", url, box?}, {kind: "arc-callback", box?, token?}]` (the genesis
-carries them): the router holds the SSE connection (reconnecting with
-backoff, at most 1000 items queued per instance) and takes ARC's callbacks
-at `POST http://127.0.0.1:8100/callback/<handle>` (with `Authorization:
-Bearer <token>` when a token is set), admitting `header` / `status` entries
-into the box (default `chain`).
+"headers", url, box?}]` (the genesis carries them): the router holds one SSE
+connection per URL (reconnecting with backoff, at most 1000 items queued per
+instance), admitting `header` entries into the box (default `chain`). The
+per-instance `arc-callback` feed is gone (#58; a config that declares one is
+refused): transaction statuses come from the broadcaster.
+
+The broadcaster (#58, `src/host/arc.ts`, docs/WALLET.md): one Arcade for
+the whole host. Instances broadcast through the router (`POST
+http://127.0.0.1:8100/arc/v1/tx`, re-ask `GET /arc/v1/tx/<txid>`; a new
+genesis names `http://127.0.0.1:8100/arc` as `defaults.walletArc`), which
+proxies to Arcade under the host's callback token and answers Arcade's
+answer. The router holds one SSE subscription to Arcade's events for the
+token (resumed with `Last-Event-ID` from host.db `stream_cursor`) and takes
+Arcade's webhooks at `POST /arc/callback` (`Authorization: Bearer <token>`);
+each status goes, as a `status` entry in box `chain`, to every instance
+whose state holds the transaction (host.db `status_seen`: each txid +
+status + block hash once). Configured from the environment or
+`~/.skein/host.env` (only the `SKEIN_ARC_*` lines are read from it):
+
+| variable | default | |
+|---|---|---|
+| `SKEIN_ARC_URL` | unset: no broadcaster, and a new genesis names no `walletArc` (nothing broadcasts) | Arcade's API (its `POST /tx`, `GET /tx/:txid`), e.g. `https://arcade.example.com` |
+| `SKEIN_ARC_TOKEN` | required with the URL | the host's one callback token: `X-CallbackToken` on every submission, the scope of the SSE stream, the webhook's bearer. Arcade has no client auth: this token is what ties the host's transactions together |
+| `SKEIN_ARC_EVENTS_URL` | `<SKEIN_ARC_URL>/events` | Arcade's SSE service, which listens on a port of its own (Arcade's default 8082), e.g. `https://arcade.example.com:8082/events` |
+| `SKEIN_ARC_CALLBACK_URL` | unset: SSE only | where Arcade posts webhooks: this router's `/arc/callback` as Arcade reaches it (Arcade wants a public HTTPS URL) |
+
+`skein-host run` prints the broadcaster's line at start (`broadcaster:
+…/arc/v1/tx → Arcade …; statuses from …`, or `no Arcade`), and `host.log`
+has one line per broadcast (`[<handle>] broadcast <txid> → Arcade: HTTP 202
+RECEIVED`) and per status routed (`arcade stream: <txid> MINED (with its
+merkle path) → <handles>`).
 
 libp2p (#51): an instance whose `etc/config.json` declares `libp2p:
 {topics?, protocols?, listen?}` gets a libp2p node in the router process,

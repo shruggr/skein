@@ -358,16 +358,18 @@ Two mechanisms, split by lifetime (#29, "no messagebox for ARC or
 ChainTracks"). Neither is a message: `emit` stays for identities.
 
 **Plain entries** — subscriptions are host wiring: the router holds the SSE
-feeds and webhooks (ChainTracks headers, ARC status callbacks, proofs) and
-admits each event as a plain, unsigned log entry `{kind: "log", n, prev,
-time, box, event}` for every instance whose config wants it; `event` names
-a record the router puts first. The wallet takes three kinds:
+feeds and webhooks (ChainTracks headers; Arcade's statuses, through the
+host's broadcaster, below) and admits each event as a plain, unsigned log
+entry `{kind: "log", n, prev, time, box, event}`; `event` names a record the
+router puts first. Headers go to every instance whose config declares the
+feed (`feeds: [{kind: "headers", url, box?}]`); a status goes to every
+instance that holds its transaction. The wallet takes three kinds:
 
 | record | fields | |
 |---|---|---|
 | `header` | `raw` (80 bytes) | one header; added to the chain (self-validating) |
 | `proof` | `subject` (the tx's CID), `txid` (hex), `path` (BRC-74 bytes) | a merkle proof for a transaction we hold |
-| `status` | `subject`, `txid`, `txStatus` (ARC's), `merklePath?` (BRC-74 bytes), `extraInfo?` | ARC's callback |
+| `status` | `subject`, `txid`, `txStatus` (Arcade's), `merklePath?` (BRC-74 bytes), `blockHeight?`, `blockHash?` | a status from the host's broadcaster (its SSE stream or a webhook) |
 
 The kernel routes a plain entry to the thread whose tip awaits its `subject`
 (a transaction's CID is its txid), else to a subscription with **no sender**
@@ -384,19 +386,55 @@ build** (`zig build component`) makes the same calls over standard
 `wasi:http/outgoing-handler` (#15, `src/wasi_http.zig`), which the kernel
 serializes into the very same request: the recorded calls are identical
 across the two builds (`kernel-zig/equiv/abi.ts`). The wallet speaks ARC's
-native API:
+`/v1/tx` API to `defaults.walletArc`, which is **the host's broadcast
+route** (#58, below) — a new genesis names it when the host has an Arcade:
 
 | call | when | |
 |---|---|---|
-| `POST {walletArc}/v1/tx`, `Content-Type: application/octet-stream`, body = the Atomic BEEF | after `createAction` / `signAction` (not `noSend`, only if genesis `defaults.walletArc` is set) | JSON `{txid, txStatus, merklePath?, extraInfo}`; a 4xx without a `txStatus` is a rejection |
-| `GET {walletArc}/v1/tx/{txid}` | at the deadline | the same JSON |
+| `POST {walletArc}/v1/tx`, `Content-Type: application/octet-stream`, body = the Atomic BEEF | after `createAction` / `signAction` (not `noSend`, only if genesis `defaults.walletArc` is set) | JSON `{txid, txStatus, merklePath?, extraInfo}`; a 4xx without a `txStatus` is a rejection; a 5xx (Arcade's backpressure, Arcade unreachable) is no answer: pending, re-asked at the deadline |
+| `GET {walletArc}/v1/tx/{txid}` | at the deadline | the same JSON; a 404 (ARC never took it: the post failed transiently, or it lost its history) posts the BEEF again (`POST {walletArc}/v1/tx`), whose answer counts |
+
+**The host's broadcaster** (#58, `src/host/arc.ts`): one Arcade
+(bsv-blockchain/arcade) per host, configured on the host
+(`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`; scripts/host/README.md). The route is
+a plain proxy: `POST /arc/v1/tx` sends the transaction to Arcade's `POST
+/tx` in Extended Format (the Atomic BEEF's subject with its inputs'
+sources) under the host's one callback token (`X-CallbackToken`,
+`X-FullStatusUpdates: true`, `X-CallbackUrl` when the host has a public
+webhook URL), and answers exactly what Arcade answered — 202 `RECEIVED`,
+a duplicate's current status, 400 with a `reason`, 503 with `Retry-After`
+— so the recorded answer is a receipt; `GET /arc/v1/tx/{txid}` is Arcade's
+`GET /tx/{txid}` as is. There is no queue on the host: **the wallet's
+`broadcast` record is the queue** (a step writes it, makes the call, awaits
+the tx CID with a deadline; a crash loses nothing, it is all in the log).
+
+Statuses come back over **one SSE subscription per host**: Arcade's
+`/events?callbackToken=<the host token>` carries every transaction
+submitted under the token. The router resumes it with `Last-Event-ID` (the
+last event id it took, in host.db) and reconnects with backoff; Arcade's
+webhooks, when it has a callback URL, take the same path (`POST
+/arc/callback`, the host token as bearer). Each status becomes the `status`
+record above and is admitted into box `chain` of **every instance whose
+state holds the transaction** — not only the one that broadcast it: a
+payee that internalized it, an overlay that admitted it. Who holds it is
+read, never written (the kernel's `has` of the tx CID), and cached: the
+route notes the instance that asked, and a txid's first status after the
+router starts reads every enabled instance (hydrating it), later ones only
+the running instances not yet known. A status already routed (txid +
+`txStatus` + `blockHash`, in host.db) is not routed again. Arcade's
+statuses: `RECEIVED`, `SENT_TO_NETWORK`, `ACCEPTED_BY_NETWORK`,
+`SEEN_ON_NETWORK`, `SEEN_MULTIPLE_NODES`, `MINED` (with the BUMP),
+`IMMUTABLE`, and the terminal `REJECTED` / `DOUBLE_SPEND_ATTEMPTED`; a reorg
+turns `MINED` back to `SEEN_ON_NETWORK` and proves again in the new block.
+The deadline's re-ask stays the backstop for anything the stream missed —
+even an Arcade that lost its history (the 404 posts it again).
 
 **The awaiting-callback thread** is the whole monitor: after a broadcast
 the step notes it in `awaiting`, then `await`s the transaction's CID and
 sets a `deadline` (`defaults.walletRecheckMs`, default 600000), so the thread
 rests `waiting` with `until`. A `status` or `proof` entry for that CID steps
 it (`input.event`); the deadline's wake entry steps it too (`input.woke`),
-and it re-asks ARC over `http`. Each time: a merkle path proves the
+and it re-asks the route over `http` (a 404 posts it again). Each time: a merkle path proves the
 transaction (a header not yet held leaves it pending), a rejection
 (`REJECTED`, `DOUBLE_SPEND_ATTEMPTED`, `INVALID`, `MALFORMED`, or a 4xx)
 rejects it and bubbles (Settlement, above); proven or rejected, it stops
@@ -408,9 +446,9 @@ from one step): the result lists them as `awaited`. A fallback ARC is a differen
 
 Not built: catching up on headers after a gap over `http` (a feed's gap is
 refused as `Unconnected` until the missing headers arrive); fetching a
-missing proof on demand; the router side (holding the SSE feeds and
-webhooks, admitting the entries — #33), and whatever `status` records the
-router makes from ARC's callbacks beyond the shape above.
+missing proof on demand. A status whose merkle path does not match our
+header at its height (Arcade still reporting a block our chain orphaned)
+fails the step (`RootMismatch`) rather than being ignored.
 
 ## The program: the `wallet` box
 
@@ -444,8 +482,9 @@ senderIdentityKey}}` or `{outputIndex, protocol: "basket insertion",
 insertionRemittance: {basket, customInstructions?, tags?}}`.
 
 Config (genesis `defaults`, strings): `walletNetwork` (`main` \| `test` \|
-`regtest`), `walletFeeRate` (sat/kB), `walletArc` (ARC base URL; unset: no
-broadcast), `walletRecheckMs`, `walletAbandonMs` (default 86400000; 0: never).
+`regtest`), `walletFeeRate` (sat/kB), `walletArc` (the ARC-shaped base URL
+the wallet broadcasts to: the host's route `<router origin>/arc` by default
+when the host has an Arcade; unset: no broadcast), `walletRecheckMs`, `walletAbandonMs` (default 86400000; 0: never).
 
 ## Running it
 

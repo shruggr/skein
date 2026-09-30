@@ -36,7 +36,7 @@ bin/<name>.cid           the CID (raw, bafkrei…) of a module the source or the
 bin/<name>.json          optional: the program record's {inputs, services, description}
                          (default: the handler inputs {envelope, body, box, sender}, no services)
 etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
-                                   feeds: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}]  (the router holds them, #33),
+                                   feeds: [{kind: "headers", url, box?}]  (the router holds them, #33; statuses: the host's broadcaster, #58),
                                    owner: {messagebox: url},  (#40: the owner's messagebox, the one peer a genesis names)
                                    libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]}}
                                    (#51: the router's libp2p host runs a node for the instance)

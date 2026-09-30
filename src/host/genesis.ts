@@ -5,7 +5,7 @@
 //   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
-//             feeds?: [{kind: "headers", url, box?} | {kind: "arc-callback", box?, token?}],
+//             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}],
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]}}
 //            (`libp2p`, #51: the router's libp2p host runs a node for the instance, subscribes
@@ -283,8 +283,8 @@ function feedsIn(fs: FeedSpec[] | undefined): { feeds?: FeedSpec[] } {
   if (!Array.isArray(fs)) throw new Error("etc/config.json: feeds is a list");
   for (const f of fs) {
     if (f?.kind === "headers" && typeof f.url === "string" && f.url) continue;
-    if (f?.kind === "arc-callback") continue;
-    throw new Error(`etc/config.json: a feed is {kind: "headers", url, box?} or {kind: "arc-callback", box?, token?}: ${JSON.stringify(f)}`);
+    if ((f as { kind?: unknown })?.kind === "arc-callback") throw new Error("etc/config.json: the arc-callback feed is gone (#58): transaction statuses come from the host's broadcaster (SKEIN_ARC_URL), routed to every instance holding the transaction");
+    throw new Error(`etc/config.json: a feed is {kind: "headers", url, box?}: ${JSON.stringify(f)}`);
   }
   return fs.length ? { feeds: fs } : {};
 }
