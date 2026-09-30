@@ -5,10 +5,12 @@
 // system tree (#4) whose bin/ holds the front door, the overlay engine, the
 // tm_demo topic and the ls_demo lookup (programs/overlay), its config naming
 // them (#50: ls_demo listening to tm_demo, keeping its own index through its
-// hooks). A submit is the one write (decoded once and judged in the front
-// door's call; an entry admitted, then its STEAK read back); a lookup, a dupe,
-// a refused BEEF and a submission no topic takes write nothing — the last
-// leaves the store file byte-identical. Headers are fed as plain
+// hooks). Every request is an entry (#68: appended as received, the front
+// door stepped on it); a submit is the one write (decoded once and judged in
+// the front door's step, the submission's thread launched and waited on, #66,
+// its STEAK read from the state once it finishes); a lookup, a dupe, a
+// refused BEEF and a submission no topic takes move no state — the refusal
+// recorded, the heads where they were. Headers are fed as plain
 // `header` entries (a regtest chain from its genesis, the funding mined at
 // height 1); a token transaction is broadcast with TopicBroadcaster (POST
 // /submit, SHIP's wire form) and found with LookupResolver (POST /lookup,
@@ -27,20 +29,21 @@
 // `libp2p:tm_demo` route (the same `submit` fn), through the router's
 // p2pInbound; its store then holds the same `applied` / `admitted` records
 // (but for each step's own time), `byTopic` map and lookup storage as the
-// POST /submit path produced, and a
-// redelivery of the message writes nothing (the store file byte-identical).
+// POST /submit path produced, and a redelivery of the message is recorded and
+// ignored, nothing else changed.
 // The broadcast gate (#57), against the host's broadcaster (#58) in front of a
 // fake Arcade (src/host/fake-arcade.ts): every unproven submission is posted
 // to Arcade (Extended Format) by the step and admitted only once Arcade takes
 // it — the GossipSub one too (Arcade's duplicate answer); the three tokens'
 // SEEN and MINED statuses (with their merkle paths) come back over Arcade's
-// SSE stream to their awaiting threads, which prove them; a resubmission
-// answers the STEAK from the state; a mined submission (its BEEF proves it)
-// is admitted with no POST; Arcade's 400 rejects one (400, nothing
-// admitted). A third instance, re-asking every 1.5 s, gets Arcade's 503: the
-// client is answered 503 + Retry-After with nothing admitted, a resubmission
-// appends nothing and gets 503 again, and the deadline's re-ask (404: never
-// taken) posts it again — admitted, and the retrying client gets the STEAK.
+// SSE stream to the chain feed, which proves them; a resubmission answers
+// the STEAK from the state; a mined submission (its BEEF proves it) is
+// admitted with no POST; Arcade's 400 rejects one (400, nothing admitted). A
+// third instance, re-asking every 1.5 s, gets Arcade's 503: the client waits
+// on the submission's thread until the router's bound (503 + Retry-After,
+// nothing admitted), a resubmission waits on the same thread (503 again);
+// then Arcade takes it at the next re-ask (404: never taken, posted again),
+// and two clients waiting on the thread both get the STEAK.
 // All three stores replay to themselves exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
@@ -52,6 +55,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPSOverlayBroadcastFacilitator, LookupResolver, MerklePath, P2PKH, PrivateKey, Script, TopicBroadcaster, Transaction, UnlockingScript, Utils, type ChainTracker } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { dirSource } from "../../src/host/boot.ts";
@@ -141,6 +145,8 @@ const arcade = await FakeArcade.start();
 const posted = (txid: string) => arcade.posts.filter((b) => FakeArcade.txOf(b).id("hex") === txid);
 const router = new Router({
   db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
+  // #66: a client waits on its request's thread; the gate's pending broadcast answers 503 + Retry-After at this bound.
+  answerWaitMs: 6000,
   kernel: { command: kernel, env: { SKEIN_HOME: home } },
   arc: { url: arcade.url, token: "the-host-arcade-token", events: arcade.eventsUrl },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
@@ -286,27 +292,33 @@ try {
   const lenAfter = await gossipLen();
   const byHttp = await persisted("overlay");
   const byGossip = await persisted("gossip");
-  // The entries the call appended: the `p2p` event, then the submit event (box `submit`), in that order.
+  // #68: the message is one entry, as received; what the front door's step admitted — the `p2p` event, then
+  // the submit event (box `submit`), in that order — is on its answer, the request thread's last update.
   const gk = (await router.hydrate("gossip")).kernel;
   const boxes: string[] = [];
+  let appended = 0;
   for (let c = await gk.tip(), i = 0; c && i < lenAfter - lenBefore; i++) {
-    const e = await gk.store.get(c) as unknown as { box?: string; event?: CID; prev?: CID };
-    if (e.event) boxes.unshift(`${e.box}:${(await gk.store.get(e.event) as unknown as { kind: string }).kind}`);
+    const e = await gk.store.get(c) as unknown as { request?: CID; prev?: CID };
+    if (e.request) {
+      appended++;
+      const a = await gk.answer(c, 0);
+      if (a.state === "finished") for (const x of (dagCbor.decode(a.answer) as { admit?: Array<{ box: string; event: { kind: string } }> }).admit ?? []) boxes.push(`${x.box}:${x.event.kind}`);
+    }
     c = e.prev;
   }
   const { times: httpTimes, ...httpState } = byHttp;
   const { times: gossipTimes, ...gossipState } = byGossip;
   report.gossip = {
     // #57: the same gate — the gossip instance's step posted it too (Arcade answered its duplicate's status).
-    verdict: g1.verdict, boxes, posts: posted(t1.id("hex")).length, applied: httpState.applied.length, admitted: httpState.admitted.length,
+    verdict: g1.verdict, appended, boxes, posts: posted(t1.id("hex")).length, applied: httpState.applied.length, admitted: httpState.admitted.length,
     same: eq(httpState, gossipState), times: [httpTimes, gossipTimes], ...(eq(httpState, gossipState) ? {} : { httpState, gossipState }),
   };
-  // Redelivered (GossipSub's seen-cache expired, or another peer): nothing written, not a byte.
-  const gossipBytes = () => createHash("sha256").update(readFileSync(gossipDb)).update(existsSync(`${gossipDb}-wal`) ? readFileSync(`${gossipDb}-wal`) : new Uint8Array()).digest("hex");
-  const gb = gossipBytes();
+  // Redelivered (GossipSub's seen-cache expired, or another peer): recorded as received, ignored — the front
+  // door's step sees the message in the `unique` map — and nothing else changed.
+  const g2len = await gossipLen();
   const g2 = await router.p2pInbound("gossip", message);
   await router.settled();
-  report.gossipAgain = [g2.verdict, gossipBytes() === gb];
+  report.gossipAgain = [g2.verdict, g2.reason, (await gossipLen()) - g2len, eq(await persisted("gossip"), byGossip)];
 
   // The stock resolver: aggregated octet-stream answers, BEEF per output.
   const resolver = new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [base] } });
@@ -341,25 +353,32 @@ try {
   // A resubmission is a dupe: nothing new.
   const dupe = await new HTTPSOverlayBroadcastFacilitator(fetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo", "tm_other"] });
   report.dupe = dupe;
-  // Reads write nothing: the lookups above, the dupe; so do the refusals below.
+  // #68: every request is an entry (an access log); only a write moves the state. Counted from here: the
+  // requests the router forwards to the overlay, and the entries.
   const logLen = async () => { const k = (await router.hydrate("overlay")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
+  const fwd = router as unknown as { forward(handle: string, ...rest: unknown[]): Promise<unknown> };
+  const forward0 = fwd.forward.bind(router);
+  let requests = 0;
+  fwd.forward = async (handle, ...rest) => { if (handle === "overlay") requests++; return await forward0(handle, ...rest); };
+  const stateOf = async () => { const k = (await router.hydrate("overlay")).kernel; return [String(await k.call("head", "wallet")), String(await k.call("head", "ls:ls_demo"))]; };
   const before = await logLen();
+  const state0 = await stateOf();
 
   // #50: a submission no topic takes (T1's change paid on, no token, no previous coin) is decoded and judged in
-  // the front door's call and refused there: no entry, and the store — the SQLite file and its WAL — is byte for
-  // byte what it was. (Not held, so u1 below may still spend the same output.)
-  const storeBytes = () => createHash("sha256").update(readFileSync(db)).update(existsSync(`${db}-wal`) ? readFileSync(`${db}-wal`) : new Uint8Array()).digest("hex");
+  // the front door's step and refused there: 200 with the empty STEAK, the request recorded, nothing else
+  // changed — the overlay's state (head `wallet`) and the lookup service's (head `ls:ls_demo`) where they were.
+  // (Not held, so u1 below may still spend the same output.)
   const plain = new Transaction();
   plain.addInput({ sourceTransaction: t1, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
   plain.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 48_000 });
   await plain.sign();
   await router.settled();
-  const bytesBefore = storeBytes();
+  const lenBeforeRefused = await logLen();
   const refusedSubmit = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(plain.toBEEF()) });
   const refusedSteak = (await refusedSubmit.json()) as Record<string, { outputsToAdmit?: unknown[] }>;
   const refusedMessage = refusedSteak.tm_demo && Array.isArray(refusedSteak.tm_demo.outputsToAdmit) && refusedSteak.tm_demo.outputsToAdmit.length === 0 ? "empty-steak" : JSON.stringify(refusedSteak);
   await router.settled();
-  report.refusedSubmit = [refusedSubmit.status, refusedMessage.split(":")[0], storeBytes() === bytesBefore];
+  report.refusedSubmit = [refusedSubmit.status, refusedMessage.split(":")[0], (await logLen()) - lenBeforeRefused, eq(await stateOf(), state0)];
   // The lookup service's own storage: its head, moved only by its hooks.
   report.lsHead = (await (await router.hydrate("overlay")).kernel.call("head", "ls:ls_demo")) != null;
 
@@ -375,6 +394,8 @@ try {
   report.afterReject = (await look({ topic: "tm_demo" })).map((o) => [name(o.txid), o.outputIndex, o.verifies]);
   // #57: the status stepped T2's awaiting thread (admitted, then rejected): no longer awaiting, rejected.
   report.t2Settled = await settledOf("overlay", [t2.id("hex")]);
+  // From here on only reads (a rejected resubmission, refusals, listings, a lookup, a dupe): the state stays.
+  const state1 = await stateOf();
   const again = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t2.toAtomicBEEF()) });
   const againSteak = (await again.json()) as Record<string, { outputsToAdmit?: unknown[] }>;
   report.resubmitRejected = [again.status, againSteak.tm_demo && againSteak.tm_demo.outputsToAdmit?.length === 0 ? "empty-steak" : JSON.stringify(againSteak)];
@@ -390,7 +411,9 @@ try {
   report.doc = [doc.headers.get("content-type"), (await doc.text()).split("\n")[0]];
   await look({ topic: "tm_demo" });
   await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
-  report.readsWrite = [before, await logLen()];
+  await router.settled();
+  report.readsWrite = [before, await logLen(), requests, eq(await stateOf(), state1)];
+  fwd.forward = forward0;
 
   // Merkle proofs as IPLD nodes (#29): three tokens mined in one block (4: a coinbase, u1, u2, u3), each
   // proven by its own BUMP in a status entry (out of order). The overlay keeps the tree's nodes, not the
@@ -538,9 +561,11 @@ try {
     live: (await look({ topic: "tm_demo", txid: x.id("hex"), outputIndex: 0 })).length,
   };
 
-  // #57 (c): Arcade busy (503) on the gate instance (re-asking every 1.5 s): the client is told 503 + Retry-After,
-  // nothing admitted; a resubmission appends nothing and gets 503 again; at the deadline the thread re-asks (404:
-  // Arcade never took it) and posts again — accepted, admitted; the retrying client then gets the STEAK.
+  // #57 (c), #66: Arcade busy (503) on the gate instance (re-asking every 1.5 s): the submission's thread waits,
+  // and so does the client, until the router's bound — 503 + Retry-After, nothing admitted, the thread going on;
+  // a resubmission launches no second submission: it waits on the same thread, and gets 503 again at the bound.
+  // Then Arcade takes it: two clients resubmit at once, the thread's next re-ask (404: never taken) posts it
+  // again — accepted, admitted, the thread finished — and both get the STEAK: the same thread, the same answer.
   const gateBase = router.originOf("gate");
   const g = new Transaction();
   g.addInput({ sourceTransaction: fund, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
@@ -550,31 +575,31 @@ try {
   const gid = g.id("hex");
   const gateLen = async () => { const k = (await router.hydrate("gate")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
   const submitG = () => fetch(`${gateBase}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(g.toBEEF()) });
+  // The gate's submission threads: the overlay engine launched on a submit record.
+  const submissions = async () => {
+    const v = openStoreFile(gateDb, { readOnly: true });
+    try {
+      let n = 0;
+      for await (const th of v.edges.query({ kind: "thread" })) if (((await v.get(th)) as unknown as { args?: { box?: string } }).args?.box === "submit") n++;
+      return n;
+    } finally { await v.close(); }
+  };
   arcade.mode = "busy";
   const g1r = await submitG();
-  const gLen = await gateLen();
   const g2r = await submitG();
-  await router.settled();
-  const gLen2 = await gateLen();
   const busy = {
     first: [g1r.status, g1r.headers.get("retry-after"), ((await g1r.json()) as { status?: string }).status],
-    again: [g2r.status, g2r.headers.get("retry-after")], appended: gLen2 - gLen,
+    again: [g2r.status, g2r.headers.get("retry-after")], submissions: await submissions(),
     state: (await settledOf("gate", [gid]))[0], posts: posted(gid).length,
   };
   arcade.mode = "ok";
-  const retried: number[] = [];
-  const ok = await until("the gate instance's wake to admit it", async () => {
-    const r = await submitG();
-    retried.push(r.status);
-    if (r.status === 200) return await r.json();
-    await r.arrayBuffer();
-    await sleep(400);
-    return undefined;
-  });
+  const both = await Promise.all([submitG(), submitG()]);
+  const ok = await Promise.all(both.map(async (r) => [r.status, await r.json()]));
+  const retried = both.map((r) => r.status);
   const gateResolver = new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [gateBase] } });
   const gLive = await gateResolver.query({ service: "ls_demo", query: { topic: "tm_demo" } }) as { outputs: Array<{ beef: number[]; outputIndex: number }> };
   report.transient = {
-    busy, steak: ok, statuses: [...new Set(retried)], asked: arcade.gets.includes(gid), posts: posted(gid).length,
+    busy, steak: ok, statuses: retried, submissions: await submissions(), asked: arcade.gets.includes(gid), posts: posted(gid).length,
     state: (await settledOf("gate", [gid]))[0], live: gLive.outputs.map((o) => [Transaction.fromBEEF(o.beef).id("hex") === gid, o.outputIndex]),
   };
   report.ok = true;
@@ -608,33 +633,34 @@ check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` 
 check(eq(report.submit1, { status: "success", steak: { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } } }), `TopicBroadcaster → POST /submit: the token admitted (${JSON.stringify(report.submit1)})`);
 check(eq(report.posted1, [true]), `#57: the step posted the token transaction to Arcade through the host's route (Extended Format) before admitting it (${JSON.stringify(report.posted1)})`);
 {
-  const g = report.gossip as { verdict: string; boxes: string[]; applied: number; admitted: number; same: boolean; posts: number } | undefined;
-  check(g?.verdict === "accept" && eq(g.boxes, ["libp2p:tm_demo:p2p", "submit:submit"]) && g.applied === 1 && g.admitted === 1 && g.same, `#57: the same transaction as a GossipSub message on \`libp2p:tm_demo\` (the same submit fn): accept, the \`p2p\` entry then the handler's submit entry appended, and the store holds the same applied / admitted records (but for their step times), byTopic map and lookup storage as POST /submit produced (${JSON.stringify(g)})`);
+  const g = report.gossip as { verdict: string; appended: number; boxes: string[]; applied: number; admitted: number; same: boolean; posts: number } | undefined;
+  check(g?.verdict === "accept" && g.appended === 1 && eq(g.boxes, ["libp2p:tm_demo:p2p", "submit:submit"]) && g.applied === 1 && g.admitted === 1 && g.same, `#57, #68: the same transaction as a GossipSub message on \`libp2p:tm_demo\` (the same submit fn): one entry, the message as received; accept, its step admitting the \`p2p\` event then the handler's submit event; and the store holds the same applied / admitted records (but for their step times), byTopic map and lookup storage as POST /submit produced (${JSON.stringify(g)})`);
   check(g?.posts === 2, `#57: the pubsub submission went through the same broadcast gate: its step posted it too, and was admitted on Arcade's duplicate answer (${JSON.stringify(g?.posts)} posts of it)`);
-  check(eq(report.gossipAgain, ["ignore", true]), `#57: the message redelivered: ignore, nothing written — the store file byte-identical (${JSON.stringify(report.gossipAgain)})`);
+  check(eq(report.gossipAgain, ["ignore", "already admitted", 1, true]), `#57, #68: the message redelivered: recorded as received (one entry), ignored (its record in the \`unique\` map), nothing else changed (${JSON.stringify(report.gossipAgain)})`);
 }
 check(eq(report.lookup1, [["t1", 0, true]]), `LookupResolver → POST /lookup (aggregated): the token, its BEEF verifying against the headers (${JSON.stringify(report.lookup1)})`);
 check(eq(report.byScript, [["t1", 0]]), `a lookup by script hash (${JSON.stringify(report.byScript)})`);
 check(eq(report.lookupJson, { type: "output-list", outputs: [["t1", 0]] }), `the JSON answer form (${JSON.stringify(report.lookupJson)})`);
 check(eq(report.dupe, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } }), `#57: a resubmission appends nothing and answers the STEAK from the state (what was admitted); an unserved topic is left out (${JSON.stringify(report.dupe)})`);
-check(eq(report.refusedSubmit, [200, "empty-steak", true]), `#50: a submission no topic takes answers 200 with the empty STEAK (BRC-22) in the front door's call: no entry, the store file byte-identical (${JSON.stringify(report.refusedSubmit)})`);
+check(eq(report.refusedSubmit, [200, "empty-steak", 1, true]), `#50, #68: a submission no topic takes answers 200 with the empty STEAK (BRC-22) from the front door's step: the refusal recorded (its request, one entry) and nothing else changed — the overlay's and the lookup service's heads where they were (${JSON.stringify(report.refusedSubmit)})`);
 check(report.lsHead === true, `#50: ls_demo keeps its own storage under the head ls:ls_demo, and answers the lookups from it`);
 check(eq(report.submit2, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [0], coinsRemoved: [] } }), `the spend: a new token admitted, the old retained (${JSON.stringify(report.submit2)})`);
 check(eq(report.lookup2, [["t2", 0, true]]) && eq(report.withSpent, [["t1", 0], ["t2", 0]]), `the live set moves to the new token; the old one stays for history (${JSON.stringify([report.lookup2, report.withSpent])})`);
 check(eq(report.afterReject, [["t1", 0, true]]), `a status entry rejects the spend: its admittance vanishes, the consumed token is restored (${JSON.stringify(report.afterReject)})`);
-check(eq(report.t2Settled, [[false, false, true]]), `#57: DOUBLE_SPEND_ATTEMPTED after admission stepped the spend's awaiting thread: rejected, no longer awaiting (${JSON.stringify(report.t2Settled)})`);
+check(eq(report.t2Settled, [[false, false, true]]), `#57: DOUBLE_SPEND_ATTEMPTED after admission, through the chain feed (#66: the submission's thread finished at admission): rejected, no longer awaiting (${JSON.stringify(report.t2Settled)})`);
 check(Array.isArray(report.resubmitRejected) && report.resubmitRejected[0] === 200 && report.resubmitRejected[1] === "empty-steak", `a rejected transaction admits nothing on resubmission (200, empty STEAK) (${JSON.stringify(report.resubmitRejected)})`);
 check(Array.isArray(report.badBeef) && report.badBeef[0] === 400 && report.unknownService === 400, `refusals: a bad BEEF, an unknown service (${JSON.stringify([report.badBeef, report.unknownService])})`);
 check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the program records (${JSON.stringify([report.topics, report.lookups])})`);
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
 {
-  const [b, a] = (report.readsWrite ?? []) as number[];
-  // Between the two counts: T2's submit (one entry), the status entry (one); the rest — lookups, a dupe, refusals, listings — none.
-  check(a === b! + 2, `only the writes write: 2 entries over one submit and one status entry, none for the lookups, dupes, refusals, listings (${b} → ${a})`);
+  const [b, a, n, still] = (report.readsWrite ?? []) as [number, number, number, boolean];
+  // #68: between the two counts, every request the router forwarded is one entry, and the status entry one more;
+  // the reads after the last write — a rejected resubmission, refusals, listings, a lookup, a dupe — moved no state.
+  check(n > 10 && a === b + n + 1 && still === true, `every request is an entry (${n} requests and a status entry: ${b} → ${a}); the reads moved nothing (${still})`);
 }
 
-check(eq(report.awaitingU, { state: [[false, true, false], [false, true, false], [false, true, false]], posts: [1, 1, 1] }), `#57: three unproven tokens, each posted once and admitted on Arcade's 202, each thread awaiting its status (${JSON.stringify(report.awaitingU)})`);
-check(eq(report.settledBySse, [[true, false, false], [true, false, false], [true, false, false]]), `#57: Arcade's SEEN_ON_NETWORK then MINED (with merkle paths) over its SSE stream, routed by the host's broadcaster to each token's awaiting thread: proven, no longer awaiting (${JSON.stringify(report.settledBySse)})`);
+check(eq(report.awaitingU, { state: [[false, true, false], [false, true, false], [false, true, false]], posts: [1, 1, 1] }), `#57: three unproven tokens, each posted once and admitted on Arcade's 202 (each submission's thread finished then, #66), each awaiting its status (${JSON.stringify(report.awaitingU)})`);
+check(eq(report.settledBySse, [[true, false, false], [true, false, false], [true, false, false]]), `#57: Arcade's SEEN_ON_NETWORK then MINED (with merkle paths) over its SSE stream, routed by the host's broadcaster to the instance's chain feed: proven, no longer awaiting (${JSON.stringify(report.settledBySse)})`);
 check(eq(report.merkle, [[1, true, true], [2, true, true], [3, true, true]]), `three tokens of one block, proven by separate BUMPs (out of order): each lookup answer carries the BUMPs rebuilt from the stored merkle nodes (merged per block), each leaf computing the header root, verified by @bsv/sdk (${JSON.stringify(report.merkle)})`);
 check(eq(report.merkleAlone, [[1, true, true], [2, true, true], [3, true, true]]), `each token alone: its BUMP rebuilt from the tree is byte for byte the one its status entry carried, verified by @bsv/sdk (${JSON.stringify(report.merkleAlone)})`);
 check(eq(report.chronicle, [true, 200, "empty-steak"]), `#53: a Rúnar AMM pool spend (its pool input executes OP_2MUL) verifies under Chronicle rules in the front door's call: 200, the empty STEAK, no topic here taking it (${JSON.stringify(report.chronicle)})`);
@@ -645,10 +671,11 @@ check(eq(report.mined, { status: 200, steak: { tm_demo: { outputsToAdmit: [0], c
   check(x?.status === 400 && x.body.status === "error" && x.body.message === "Transaction rejected: REJECTED" && x.posted === 1 && eq(x.state, [false, false, true]) && x.live === 0, `#57: Arcade's 400: the transaction rejected, nothing admitted; the client gets 400 {status: "error", message} (${JSON.stringify(x)})`);
 }
 {
-  const t = report.transient as { busy: { first: unknown[]; again: unknown[]; appended: number; state: boolean[]; posts: number }; steak: unknown; statuses: number[]; asked: boolean; posts: number; state: boolean[]; live: unknown[] } | undefined;
-  check(!!t && eq(t.busy.first, [503, "2", "error"]) && eq(t.busy.state, [false, true, false]) && t.busy.posts === 1, `#57: Arcade's 503: nothing admitted, the client answered 503 with Retry-After (the 1.5 s re-ask, rounded up), the transaction held and awaiting (${JSON.stringify(t?.busy)})`);
-  check(!!t && eq(t.busy.again, [503, "2"]) && t.busy.appended === 0, `#57: a resubmission while pending appends nothing and answers 503 again (${JSON.stringify(t?.busy)})`);
-  check(!!t && eq(t.steak, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } }) && t.asked && t.posts >= 2 && eq(t.state, [false, true, false]) && eq(t.live, [[true, 0]]) && t.statuses.at(-1) === 200, `#57: at the deadline the thread re-asked (404: never taken) and posted again — accepted, admitted, awaiting its status; the retrying client gets the STEAK from the state (${JSON.stringify(t)})`);
+  const t = report.transient as { busy: { first: unknown[]; again: unknown[]; submissions: number; state: boolean[]; posts: number }; steak: unknown[]; statuses: number[]; submissions: number; asked: boolean; posts: number; state: boolean[]; live: unknown[] } | undefined;
+  const steak = { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } };
+  check(!!t && eq(t.busy.first, [503, "5", "error"]) && eq(t.busy.state, [false, true, false]) && t.busy.posts >= 1, `#57, #66: Arcade's 503: nothing admitted; the client waited on the submission's thread (still waiting: re-asking) until the router's bound, 503 + Retry-After; the transaction held and awaiting (${JSON.stringify(t?.busy)})`);
+  check(!!t && eq(t.busy.again, [503, "5"]) && t.busy.submissions === 1, `#66: a resubmission while pending launches no second submission: it waits on the same thread, 503 again at the bound (${JSON.stringify(t?.busy)})`);
+  check(!!t && eq(t.steak, [[200, steak], [200, steak]]) && t.submissions === 1 && t.asked && t.posts >= 2 && eq(t.state, [false, true, false]) && eq(t.live, [[true, 0]]), `#57, #66: Arcade takes it: at its next re-ask (404: never taken) the thread posted it again — accepted, admitted, finished; two clients waiting on it both get the STEAK from the state (${JSON.stringify(t)})`);
 }
 check(eq(report.edges, { sameRoot: true, children: [false, false, false], noNodeEdges: true, forward: true }), `#42: kept merkle nodes and headers contribute no edges (no token is a \`child\` edge target), the nodes still link forward to their children; the TS reader derives the kernel's edges map, same root (${JSON.stringify(report.edges)})`);
 
