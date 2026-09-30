@@ -39,6 +39,19 @@ CREATE TABLE IF NOT EXISTS fuel_ledger (
   fuel              INTEGER NOT NULL DEFAULT 0,
   updated_at        TEXT NOT NULL,
   PRIMARY KEY (instance, caller, op)
+) WITHOUT ROWID;
+-- The broadcaster's subscription (#58): the last event id taken from each SSE stream (Last-Event-ID on resume).
+CREATE TABLE IF NOT EXISTS stream_cursor (
+  stream            TEXT PRIMARY KEY,                 -- the events URL
+  last_id           TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+) WITHOUT ROWID;
+-- The statuses already routed (#58): txid + txStatus + blockHash, so a redelivered one writes nothing.
+CREATE TABLE IF NOT EXISTS status_seen (
+  txid              TEXT NOT NULL,
+  status            TEXT NOT NULL,                    -- txStatus, a space, the block hash ('' if none)
+  at                TEXT NOT NULL,
+  PRIMARY KEY (txid, status)
 ) WITHOUT ROWID;`;
 
 export type Status = "enabled" | "disabled";
@@ -168,6 +181,25 @@ export class HostDb {
   ledger(instance?: string): Ledger[] {
     const q = instance ? this.db.prepare("SELECT * FROM fuel_ledger WHERE instance = ? ORDER BY fuel DESC").all(instance) : this.db.prepare("SELECT * FROM fuel_ledger ORDER BY instance, fuel DESC").all();
     return q.map((r) => ({ ...r }) as unknown as Ledger);
+  }
+
+  /** The last event id taken from an SSE stream (#58), if any. */
+  cursor(stream: string): string | undefined {
+    const r = this.db.prepare("SELECT last_id FROM stream_cursor WHERE stream = ?").get(stream) as { last_id: string } | undefined;
+    return r?.last_id;
+  }
+
+  setCursor(stream: string, id: string, now = new Date()): void {
+    this.db.prepare("INSERT INTO stream_cursor (stream, last_id, updated_at) VALUES (?, ?, ?) ON CONFLICT (stream) DO UPDATE SET last_id = excluded.last_id, updated_at = excluded.updated_at").run(stream, id, now.toISOString());
+  }
+
+  /** Note a status as routed (#58); false if it was already. */
+  markStatus(txid: string, status: string, now = new Date()): boolean {
+    return Number(this.db.prepare("INSERT OR IGNORE INTO status_seen (txid, status, at) VALUES (?, ?, ?)").run(txid, status, now.toISOString()).changes) > 0;
+  }
+
+  hasStatus(txid: string, status: string): boolean {
+    return this.db.prepare("SELECT 1 FROM status_seen WHERE txid = ? AND status = ?").get(txid, status) !== undefined;
   }
 
   /** The enabled row whose identity is `identity`. */

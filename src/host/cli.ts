@@ -61,6 +61,11 @@
 //   SKEIN_EXPLORE_BASE_PORT  row i's explorer (skein-explore) listens on base + i (i: its place among the enabled rows);
 //                         default 4610; "off" starts none
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
+//   SKEIN_ARC_URL         the host's Arcade (#58, arc.ts): the broadcast route /arc/v1/tx, one status subscription,
+//                         a new genesis's walletArc; SKEIN_ARC_TOKEN its one callback token (required with it);
+//                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
+//                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
+//                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
 // `deploy`, `subscribe` and `peers` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
 // (default http://127.0.0.1:8100) /@<handle>, as the owner — SKEIN_OWNER (checked against the wallet):
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
@@ -82,6 +87,7 @@ import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { masterKey, Oracle } from "./oracle.ts";
+import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { subscribeBody } from "../client/client.ts";
 import { addressBook, DEFAULT_ONLY, deploy, deployFiles, subscribeRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
@@ -557,6 +563,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     libp2p: hostP2PConfig(v, home),
+    arc: hostArcConfig(v, home),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };
 }
@@ -711,6 +718,8 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const omb = router.ownerMessagebox();
   if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
   else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);
+  if (router.arc) env.out(`skein-host: broadcaster: ${router.arcRoute()}/v1/tx → Arcade ${router.o.arc!.url}; statuses from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
+  else env.out("skein-host: no Arcade (SKEIN_ARC_URL): nothing broadcasts; a new genesis names no walletArc");
   await router.start();
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
   const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);

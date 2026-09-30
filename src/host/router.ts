@@ -19,7 +19,13 @@
 //   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
 //                                         signature: [2, "skein register"], key ID the username, counterparty
 //                                         anyone, over "register <username>")
-//   POST /callback/<handle>               ARC's status callback (an arc-callback feed), no auth
+//   POST /arc/v1/tx                       the host's broadcaster (#58, arc.ts): a transaction to Arcade, under the
+//   GET  /arc/v1/tx/<txid>                host's callback token, answered with Arcade's answer; its status. An
+//                                         instance's genesis names it as `defaults.walletArc` when the host has an Arcade
+//   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
+//
+// The broadcaster's one SSE subscription (arc.ts) routes each status to every
+// instance whose state holds the transaction (a `has` of its CID, cached).
 //
 // A request for an instance is one kernel `call` of its front door (the raw
 // request in; the answer, signed on the session, out): hydrate on demand,
@@ -45,7 +51,8 @@ import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { Feeds, feedsOf, type FeedSpec } from "./feeds.ts";
+import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
+import { Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { admitAll, callFrontDoor, headerMap, type FrontAnswer } from "./frontdoor.ts";
@@ -71,8 +78,12 @@ export interface RouterOptions {
   fuelPerStep?: string;
   /** A new genesis's extra seed subscriptions and defaults (over DEFAULTS), e.g. the wallet's (#29). */
   genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[] };
-  /** The router-held feeds' limits (feeds.ts). */
+  /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
+  /** The host's Arcade (#58, arc.ts): the broadcast route, the status subscription, a new genesis's `walletArc`. Absent: no broadcaster. */
+  arc?: ArcConfig;
+  /** Tests: how the broadcaster reaches Arcade. */
+  arcFetch?: typeof fetch;
   /** Answers programs' HTTP to URLs that are not this host's (#15, #40); default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears, and a stop drops its in-memory sessions). */
@@ -106,7 +117,7 @@ export interface RouterOptions {
 interface Loaded { row: InstanceRow; kernel: Kernel; identity: string; wallet: WalletInterface }
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
-export interface RouterRequest { method: string; url: string; headers: Record<string, string>; body: Uint8Array }
+export interface RouterRequest { method: string; url: string; headers: Record<string, string>; body: Uint8Array; /** The instance whose `http` this is (none for a socket's). */ from?: string }
 export interface RouterResponse { status: number; headers: Record<string, string>; body: Uint8Array }
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
@@ -177,6 +188,8 @@ function errorOf(body: Uint8Array): string {
 export class Router {
   readonly o: RouterOptions;
   readonly feeds: Feeds;
+  /** The host's broadcaster (#58): present when the host has an Arcade. */
+  readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
   readonly p2p?: P2PHost;
   readonly loaded = new Map<string, Loaded>();
@@ -199,6 +212,14 @@ export class Router {
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
     });
+    if (o.arc) {
+      this.arc = new Broadcaster({
+        arc: o.arc, db: o.db, fetch: o.arcFetch, backoff: o.feeds?.backoff, log: (s, l) => this.say(s, l),
+        admit: (h, box, ev) => this.admitEvent(h, box, ev),
+        instances: () => ({ all: this.o.db.list("enabled").map((r) => r.handle), running: [...this.loaded].filter(([, l]) => !l.kernel.gone).map(([h]) => h) }),
+        holds: async (h, txid) => await (await this.hydrate(h)).kernel.hasBlock(txCid(txid)),
+      });
+    }
     if (o.peerKeyFor) {
       this.p2p = new P2PHost({
         host: o.libp2p ?? { listen: DEFAULT_LISTEN, bootstrap: [], dht: "off", relays: [], mdns: false },
@@ -220,6 +241,8 @@ export class Router {
 
   /** This host's own origin. */
   origin(): string { return (this.o.origin ?? "http://127.0.0.1:{port}").replace("{port}", String(this.port || this.o.port || 0)); }
+  /** The broadcast route (#58), as a genesis's `walletArc` names it: the wallet calls <it>/v1/tx. */
+  arcRoute(): string { return `${this.origin()}${ARC_ROUTE}`; }
   /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
   originOf(handle: string): string {
     return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
@@ -240,6 +263,7 @@ export class Router {
     this.flushLedger();
     for (const s of this.servers) s.close();
     this.feeds.stop();
+    await this.arc?.stop();
     await this.p2p?.stop();
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
@@ -427,14 +451,16 @@ export class Router {
       return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true };
     }
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-    const hostDefaults = { ...this.o.genesis?.defaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
+    // #58: with an Arcade, the wallet broadcasts through the host's route (the configured defaults win).
+    const genesisDefaults = this.arc ? { walletArc: this.arcRoute(), ...this.o.genesis?.defaults } : this.o.genesis?.defaults;
+    const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
     const warn = (l: string) => this.say(row.handle, l);
     const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin() };
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
         identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
+        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
       };
     }
     return {
@@ -577,7 +603,7 @@ export class Router {
     try {
       let r: HttpResponse;
       if (local) {
-        const d = await this.dispatch({ method: req.method, url: req.url, headers: headerMap(req.headers ?? {}), body: req.body ?? new Uint8Array() });
+        const d = await this.dispatch({ method: req.method, url: req.url, headers: headerMap(req.headers ?? {}), body: req.body ?? new Uint8Array(), ...(from ? { from } : {}) });
         r = { status: d.status, headers: d.headers, body: d.body };
       } else {
         const f = this.o.http ?? (process.env.SKEIN_HTTP === "fetch" ? fetchHttp : undefined);
@@ -616,13 +642,22 @@ export class Router {
       const key = this.o.db.identityOf(handle!, domain);
       return key ? json(200, { bsvalias: "1.0", handle: `${handle}@${domain}`, pubkey: key }) : json(404, { error: "not found" });
     }
-    const callback = /^\/callback\/([^/]+)$/.exec(path);
-    if (req.method === "POST" && callback) {
-      const r = this.feeds.callback(decodeURIComponent(callback[1]!), req.headers, req.body);
-      return json(r.status, r.body);
-    }
+    if (path === `${ARC_ROUTE}/callback` || path.startsWith(`${ARC_ROUTE}/v1/tx`)) return await this.arcRequest(req, path);
     if (req.method === "POST" && path === "/account/register") return await this.register(req.body);
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
+  }
+
+  /** The broadcaster's routes (#58, arc.ts); 503 (a transient failure to a wallet) when the host has no Arcade. */
+  private async arcRequest(req: RouterRequest, path: string): Promise<RouterResponse> {
+    const tx = new RegExp(`^${ARC_ROUTE}/v1/tx(?:/([^/]+))?$`).exec(path);
+    if (!this.arc) {
+      if (tx) return json(503, { status: 503, title: "no Arcade", extraInfo: "this host has no Arcade (SKEIN_ARC_URL)" });
+      return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no Arcade" });
+    }
+    if (req.method === "POST" && path === `${ARC_ROUTE}/callback`) return await this.arc.callback(req.headers, req.body);
+    if (req.method === "POST" && tx && tx[1] === undefined) return await this.arc.submit(req.body, req.from);
+    if (req.method === "GET" && tx?.[1] !== undefined) return await this.arc.status(decodeURIComponent(tx[1]), req.from);
+    return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no ${req.method} ${path}` });
   }
 
   /** POST /account/register {username, identityKey, signature}: a mailbox instance for a key its holder signed for. */
@@ -715,6 +750,8 @@ export class Router {
       if (i === 0) this.port = (server.address() as { port: number }).port;
       this.servers.push(server);
     }
+    // The host is up: its one status subscription (#58), resumed where it left off.
+    this.arc?.start();
     return this.servers[0]!;
   }
 }
