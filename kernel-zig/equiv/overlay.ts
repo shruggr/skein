@@ -22,6 +22,13 @@
 // alone: byte for byte the BUMP it was sent). The store then replays to
 // itself exactly (equiv/replays.ts). Chronicle (#53): a Rúnar AMM pool spend
 // (its pool input executes OP_2MUL) verifies in the front door's call.
+// One submit, every transport (#57): a second instance from the same tree gets
+// the same token transaction as a signed GossipSub message on its
+// `libp2p:tm_demo` route (the same `submit` fn), through the router's
+// p2pInbound; its store then holds the same `applied` / `admitted` records
+// (but for each step's own time), `byTopic` map and lookup storage as the
+// POST /submit path produced, and a
+// redelivery of the message writes nothing (the store file byte-identical).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
 
@@ -37,6 +44,7 @@ import * as Digest from "multiformats/hashes/digest";
 import { dirSource } from "../../src/host/boot.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
+import { libp2pKey, peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -71,6 +79,8 @@ writeFileSync(join(sys, "etc/routes.json"), JSON.stringify([
   route("/submit", "submit"), route("/lookup", "lookup"),
   route("/listTopicManagers", "listTopicManagers"), route("/listLookupServiceProviders", "listLookupServiceProviders"),
   route("/getDocumentationForTopicManager", "topicDocumentation"), route("/getDocumentationForLookupServiceProvider", "lookupDocumentation"),
+  // #57: the same submit fn on a GossipSub topic (the message's topic is the overlay topic requested).
+  { path: "libp2p:tm_demo", program: "overlay", fn: "submit" },
 ]));
 writeFileSync(join(sys, "README.md"), "An overlay node: tm_demo and ls_demo.\n");
 
@@ -98,6 +108,9 @@ const txCid = (txid: string) => CID.createV1(0xb1, Digest.create(0x56, internal(
 
 const hostDb = new HostDb(join(home, "host.db"));
 hostDb.add("overlay", { store: db });
+// #57: the same tree again, fed the token transaction by GossipSub instead of POST /submit.
+const gossipDb = join(home, "instances/gossip/runtime.db");
+hostDb.add("gossip", { store: gossipDb });
 const owner = key("2222").toPublicKey().toString();
 const router = new Router({
   db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0,
@@ -108,6 +121,7 @@ const router = new Router({
 try {
   const src = await dirSource(sys);
   await router.bootRow("overlay", { kind: "tree", root: src.root, objects: src.objects });
+  await router.bootRow("gossip", { kind: "tree", root: src.root, objects: src.objects });
   await router.listen(0);
   // The overlay's own origin (the SDK clients take an origin, no path): http://overlay.localhost:<port>.
   const base = router.originOf("overlay");
@@ -128,7 +142,7 @@ try {
     headers.push(mine(prev, h === 1 ? root1 : sha256d(Buffer.from(`filler ${h}`)), 1_790_000_000 + h * 600));
     prev = sha256d(headers.at(-1)!);
   }
-  for (const raw of headers) await router.admitEvent("overlay", "chain", { kind: "header", raw });
+  for (const raw of headers) for (const h of ["overlay", "gossip"]) await router.admitEvent(h, "chain", { kind: "header", raw });
   await router.settled();
   const roots = new Map<number, string>(headers.map((h, i) => [i + 1, Buffer.from(h.subarray(36, 68)).reverse().toString("hex")]));
   const tracker: ChainTracker = { isValidRootForHeight: async (root, height) => roots.get(height) === root, currentHeight: async () => headers.length };
@@ -147,6 +161,88 @@ try {
   const broadcaster = new TopicBroadcaster(["tm_demo"], { networkPreset: "local", facilitator });
   const b1 = await broadcaster.broadcast(t1);
   report.submit1 = { status: b1.status, steak: steaks.at(-1) };
+
+  // #57: the same transaction as a GossipSub message on the second instance's `libp2p:tm_demo` route — signed
+  // by a publisher's peer key (StrictSign), handed to the router's p2pInbound as the libp2p host would. The
+  // front door verifies it, the overlay's submit fn judges it and returns the same submit entry, and the front
+  // door forwards that entry after the message's own `p2p` entry: the step persists what POST /submit did.
+  await router.settled();
+  // What an instance persisted for the token: every record in its `applied` and `admitted` maps (keys and
+  // records, read through the map's tree nodes), the `byTopic` map's root, the lookup service's head. The records
+  // carry their step's time (`at`, `admittedAt`), which is each instance's own: set aside, and shown.
+  const plainOf = (v: unknown): unknown => v instanceof Uint8Array ? Buffer.from(v).toString("hex")
+    : v instanceof CID || (v && typeof v === "object" && (v as { asCID?: unknown }).asCID === v) ? String(v)
+    : Array.isArray(v) ? v.map(plainOf)
+    : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([x, y]) => [x, plainOf(y)])) : v;
+  const persisted = async (h: string) => {
+    const k = (await router.hydrate(h)).kernel;
+    const st = await k.store.get(await k.call("head", "wallet") as CID) as unknown as { maps: Record<string, CID | null> };
+    const times: unknown[] = [];
+    const records = async (root: CID | null): Promise<unknown[]> => {
+      const out: unknown[] = [];
+      const walk = async (c: CID | null): Promise<void> => {
+        if (!c) return;
+        const [left, es] = await k.store.get(c) as unknown as [CID | null, Array<[Uint8Array, CID, CID | null]>];
+        await walk(left);
+        for (const [key, rec, right] of es) {
+          const { at, admittedAt, ...r } = await k.store.get(rec) as unknown as Record<string, unknown>;
+          times.push(at ?? admittedAt);
+          out.push([Buffer.from(key).toString("hex"), plainOf(r)]);
+          await walk(right);
+        }
+      };
+      await walk(root);
+      return out;
+    };
+    const applied = await records(st.maps.applied ?? null);
+    const admitted = await records(st.maps.admitted ?? null);
+    return { applied, admitted, byTopic: String(st.maps.byTopic), lookup: String(await k.call("head", "ls:ls_demo")), times };
+  };
+  const publisher = key("4444");
+  const body = new Uint8Array(t1.toBEEF());
+  const seqno = new Uint8Array(8);
+  new DataView(seqno.buffer).setBigUint64(0, 1n, false);
+  const peer = peerIdOf(publisher).toMultihash().bytes;
+  const pb: number[] = [];
+  const field = (tag: number, b: Uint8Array) => {
+    pb.push(tag);
+    let n = b.length;
+    while (n >= 0x80) { pb.push((n & 0x7f) | 0x80); n >>>= 7; }
+    pb.push(n, ...b);
+  };
+  field(0x0a, peer);
+  field(0x12, body);
+  field(0x1a, seqno);
+  field(0x22, new TextEncoder().encode("tm_demo"));
+  const signature = await libp2pKey(publisher).sign(Uint8Array.from([...new TextEncoder().encode("libp2p-pubsub:"), ...pb]));
+  const message = { transport: "libp2p" as const, topic: "tm_demo", from: peer, seqno, signature, body };
+  const gossipLen = async () => { const k = (await router.hydrate("gossip")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
+  const lenBefore = await gossipLen();
+  const g1 = await router.p2pInbound("gossip", message);
+  await router.settled();
+  const lenAfter = await gossipLen();
+  const byHttp = await persisted("overlay");
+  const byGossip = await persisted("gossip");
+  // The entries the call appended: the `p2p` event, then the submit event (box `submit`), in that order.
+  const gk = (await router.hydrate("gossip")).kernel;
+  const boxes: string[] = [];
+  for (let c = await gk.tip(), i = 0; c && i < lenAfter - lenBefore; i++) {
+    const e = await gk.store.get(c) as unknown as { box?: string; event?: CID; prev?: CID };
+    if (e.event) boxes.unshift(`${e.box}:${(await gk.store.get(e.event) as unknown as { kind: string }).kind}`);
+    c = e.prev;
+  }
+  const { times: httpTimes, ...httpState } = byHttp;
+  const { times: gossipTimes, ...gossipState } = byGossip;
+  report.gossip = {
+    verdict: g1.verdict, boxes, applied: httpState.applied.length, admitted: httpState.admitted.length,
+    same: eq(httpState, gossipState), times: [httpTimes, gossipTimes], ...(eq(httpState, gossipState) ? {} : { httpState, gossipState }),
+  };
+  // Redelivered (GossipSub's seen-cache expired, or another peer): nothing written, not a byte.
+  const gossipBytes = () => createHash("sha256").update(readFileSync(gossipDb)).update(existsSync(`${gossipDb}-wal`) ? readFileSync(`${gossipDb}-wal`) : new Uint8Array()).digest("hex");
+  const gb = gossipBytes();
+  const g2 = await router.p2pInbound("gossip", message);
+  await router.settled();
+  report.gossipAgain = [g2.verdict, gossipBytes() === gb];
 
   // The stock resolver: aggregated octet-stream answers, BEEF per output.
   const resolver = new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [base] } });
@@ -361,6 +457,11 @@ if (report.ok === true) {
 process.stdout.write("== overlay services (#36)\n");
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(eq(report.submit1, { status: "success", steak: { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } } }), `TopicBroadcaster → POST /submit: the token admitted (${JSON.stringify(report.submit1)})`);
+{
+  const g = report.gossip as { verdict: string; boxes: string[]; applied: number; admitted: number; same: boolean } | undefined;
+  check(g?.verdict === "accept" && eq(g.boxes, ["libp2p:tm_demo:p2p", "submit:submit"]) && g.applied === 1 && g.admitted === 1 && g.same, `#57: the same transaction as a GossipSub message on \`libp2p:tm_demo\` (the same submit fn): accept, the \`p2p\` entry then the handler's submit entry appended, and the store holds the same applied / admitted records (but for their step times), byTopic map and lookup storage as POST /submit produced (${JSON.stringify(g)})`);
+  check(eq(report.gossipAgain, ["ignore", true]), `#57: the message redelivered: ignore, nothing written — the store file byte-identical (${JSON.stringify(report.gossipAgain)})`);
+}
 check(eq(report.lookup1, [["t1", 0, true]]), `LookupResolver → POST /lookup (aggregated): the token, its BEEF verifying against the headers (${JSON.stringify(report.lookup1)})`);
 check(eq(report.byScript, [["t1", 0]]), `a lookup by script hash (${JSON.stringify(report.byScript)})`);
 check(eq(report.lookupJson, { type: "output-list", outputs: [["t1", 0]] }), `the JSON answer form (${JSON.stringify(report.lookupJson)})`);
@@ -390,6 +491,10 @@ const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join
 process.stdout.write(r.stdout);
 if (r.status !== 0) process.stdout.write(r.stderr);
 check(r.status === 0 && /identical .*the source store reproduced exactly/.test(r.stdout), "the store replays to itself exactly");
+const rg = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), gossipDb], { encoding: "utf8" });
+process.stdout.write(rg.stdout);
+if (rg.status !== 0) process.stdout.write(rg.stderr);
+check(rg.status === 0 && /identical .*the source store reproduced exactly/.test(rg.stdout), "#57: the gossip instance's store (its `p2p` and submit entries) replays to itself exactly");
 
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `overlay: ${failures} FAILED\n` : "overlay: all ok\n");
