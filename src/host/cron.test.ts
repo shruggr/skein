@@ -8,7 +8,7 @@
 // and hydrated for its next firing; a box nothing subscribes wakes nothing
 // (while it is stopped: a running instance takes every job's event).
 // And `skein-host event`: one plain event admitted now, refused while a
-// router serves the host.
+// router serves the host with no control socket here (control.test.ts: over it).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -222,7 +222,7 @@ test("skein-host event: one plain event admitted now through a router of its own
   assert.equal(await main(["add", "evt", "--boot", dir], env), 0, err.join("\n"));
 
   assert.equal(await main(["event", "evt", "tick", "{\"name\":\"manual\",\"rest\":1}"], env), 1, "a router answers: refused");
-  assert.match(err.at(-1)!, /a router serves this host at http:\/\/127\.0\.0\.1:\d+/);
+  assert.match(err.at(-1)!, /a router serves this host at http:\/\/127\.0\.0\.1:\d+, but no control socket answers/);
   await new Promise<void>((r) => probe.close(() => r()));
 
   assert.equal(await main(["event", "evt", "tick", "{\"name\":\"manual\",\"rest\":1}"], env), 0, err.join("\n"));

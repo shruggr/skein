@@ -53,6 +53,7 @@
 // subscribes that box).
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
 import { ProtoWallet, Utils, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
@@ -76,6 +77,7 @@ import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./ker
 import { DEFAULT_LISTEN, libp2pOf, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig, type P2PRequest, type P2PResult } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { attestExchange } from "./oracle.ts";
+import { closeControl, listenControl } from "./control.ts";
 import * as Digest from "multiformats/hashes/digest";
 import type { PrivateKey } from "@bsv/sdk";
 
@@ -231,6 +233,8 @@ export class Router {
   private closing?: Promise<void>;
   servers: Server[] = [];
   port = 0;
+  /** The control socket (control.ts), while this router listens on one. */
+  private control?: { server: NetServer; path: string };
 
   constructor(o: RouterOptions) {
     this.o = o;
@@ -295,7 +299,7 @@ export class Router {
   /**
    * Stop everything this router started (#61), once: the waker's, the
    * idle reaper's and the ledger's timers (the owed fuel written first), its
-   * servers and their connections, the header feeds' and the broadcaster's
+   * servers and their connections, the control socket (its file removed), the header feeds' and the broadcaster's
    * SSE clients, the libp2p nodes, and every kernel process it spawned — one
    * still hydrating included. Afterwards nothing of it keeps the process
    * alive: `skein-host run`'s shutdown and every one-shot command that builds
@@ -309,6 +313,19 @@ export class Router {
   /** The same as `close()`. */
   stop(): Promise<void> { return this.close(); }
 
+  /**
+   * Listen on the control socket at `path` ($SKEIN_HOME/host.sock for
+   * `skein-host run`; mode 0600, no HTTP route): `skein-host event` sends its
+   * event here while this router runs, and it is admitted through the kernel
+   * this router holds (admitEvent). Removed by `close()`.
+   */
+  async listenControl(path: string): Promise<void> {
+    if (this.stopped) throw new Error("the router is stopping");
+    const server = await listenControl(path, { event: async (h, box, ev) => (await this.admitEvent(h, box, ev)).toString() });
+    this.control = { server, path };
+    this.say("router", `control socket at ${path}`);
+  }
+
   private async shutdown(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.timer);
@@ -317,6 +334,8 @@ export class Router {
     this.flushLedger();
     const closed = this.servers.map((s) => new Promise<void>((r) => { s.close(() => r()); s.closeAllConnections(); }));
     this.servers = [];
+    if (this.control) closed.push(closeControl(this.control.server, this.control.path));
+    this.control = undefined;
     await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {})));

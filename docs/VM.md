@@ -543,7 +543,9 @@ turn is a run of steps. Two changes from v1:
   only if something in it subscribes the job's box. The program takes the
   event as its start signal and carries on with `deadline` wakes; the next
   `every` firing is its retry if its thread died. `skein-host event <handle>
-  <box> [json]` admits one such event by hand.
+  <box> [json]` admits one such event by hand (through the running router's
+  control socket, `$SKEIN_HOME/host.sock`, or with the host down a router of
+  its own).
 
 A transaction is a thread whose state chain is its finality (created,
 broadcast, mined with merkle path, rejected, reorged), each transition an

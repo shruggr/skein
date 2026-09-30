@@ -193,10 +193,15 @@ something in it subscribes the box; otherwise the firing is logged
 bin/skein-host event <handle> <box> ['{"kind":"amm-p2p-timer","job":"heartbeat"}']   # default {kind: "cron", due: now}
 ```
 
-admits one such event now and runs the steps it starts, through a router of
-its own that it closes afterwards. It refuses while a router answers at
-`SKEIN_HOST_URL` / `SKEIN_ROUTER_PORT`: that router's kernel holds the
-instance's store. For a running host, declare the job instead.
+admits one such event now. While `run` is up it goes over the router's
+control socket, `$SKEIN_HOME/host.sock` (a Unix socket, mode 0600, made when
+`run` starts and removed when it stops; no HTTP route leads to it), and the
+running router admits it with the kernel it already holds. With the host
+down it goes through a router of its own, which runs the steps it starts and
+closes. It refuses when a router answers at `SKEIN_HOST_URL` /
+`SKEIN_ROUTER_PORT` but no control socket answers under this `SKEIN_HOME`
+(another home, or a router from before the socket): that router's kernel
+holds the instance's store.
 
 The broadcaster (#58, `src/host/arc.ts`, docs/WALLET.md): one Arcade for
 the whole host. Instances broadcast through the router (`POST

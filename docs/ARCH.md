@@ -252,8 +252,10 @@ them judging anything (the instance does, through its front door):
   from the host's start, `at` once, host.db `cron_fired`; a missed firing made
   up once, no burst), hydrating an idle-stopped instance only when something
   in it subscribes the box. `skein-host event <handle> <box> [json]` admits
-  one by hand, through a router of its own (refused while one serves the
-  host).
+  one by hand: over the running router's control socket
+  (`$SKEIN_HOME/host.sock`, mode 0600, one JSON line each way,
+  `src/host/control.ts`; no HTTP route), else through a router of its own
+  with the host down.
 - **Closing** (#61): `Router.close()` stops everything the router started —
   the waker's, reaper's and ledger's timers (the owed fuel written), its
   servers, the feeds' and the broadcaster's SSE clients, the libp2p nodes and
