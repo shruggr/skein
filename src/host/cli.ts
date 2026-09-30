@@ -45,9 +45,11 @@
 // Nothing registers itself anywhere: a key in no address book is "no route".
 // `event` (#60) admits one plain event into a box of an instance now, as the
 // router's clock admits a job's (cron.ts): the JSON object given (default
-// kind "cron", due now), through a router of its own, closed afterwards —
-// so only while no router serves the host (it refuses if one answers at
-// SKEIN_HOST_URL / SKEIN_ROUTER_PORT: a store has one kernel).
+// kind "cron", due now). A store has one kernel: while `run` is up the event
+// goes over its control socket ($SKEIN_HOME/host.sock, control.ts) and the
+// running router admits it; with the host down, through a router of its own,
+// closed afterwards. A router that answers at SKEIN_HOST_URL /
+// SKEIN_ROUTER_PORT with no control socket here is refused.
 // `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
@@ -93,6 +95,7 @@ import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { masterKey, Oracle } from "./oracle.ts";
+import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { subscribeBody } from "../client/client.ts";
@@ -133,7 +136,7 @@ const USAGE = `usage:
   skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]   an address-book entry: where the agent delivers to <key>
   skein-host peers <handle> remove <key>
   skein-host peers <handle> list                          its address book: key, mailbox URL, handle, source
-  skein-host event <handle> <box> [json]                  admit one plain event now (default {kind: "cron", due: now}); the router must be down
+  skein-host event <handle> <box> [json]                  admit one plain event now (default {kind: "cron", due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
@@ -369,10 +372,13 @@ async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
 /**
  * `skein-host event <handle> <box> [json]` (#60): one plain event admitted
  * into `box` now — the admission a job's firing is (Router.admitEvent, the
- * stamp the router's) — and the steps it starts run, before the router it
- * went through is closed. That router is this command's own, a one-shot's
- * (no jobs, #61's close), so a router serving the host must not be running:
- * its kernel holds the instance's store.
+ * stamp the router's). While `skein-host run` is up, its kernel holds the
+ * instance's store, so the event goes to that router over its control socket
+ * ($SKEIN_HOME/host.sock) and it admits it. Otherwise it goes through a router
+ * of this command's own, a one-shot's (no jobs, #61's close): the steps it
+ * starts run before that router is closed. A router answering for the host on
+ * HTTP with no control socket here (another SKEIN_HOME, or a router from
+ * before the socket) is refused: a second kernel must not write the store.
  */
 async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const [handle, box, json, ...more] = rest;
@@ -385,15 +391,29 @@ async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     try { given = JSON.parse(json); } catch (e) { env.err(`skein-host event: the event is not JSON: ${(e as Error).message}`); return 2; }
   }
   if (!given || typeof given !== "object" || Array.isArray(given)) { env.err("skein-host event: the event is a JSON object"); return 2; }
+  const o = given as Record<string, unknown>;
+  const event = { ...o, kind: o.kind ?? "cron", ...(o.kind === undefined && o.due === undefined ? { due: Date.now() } : {}) };
+  // The running router, over its control socket: it admits with the kernel it holds.
+  const sock = join(homeOf(env.vars), CONTROL_SOCKET);
+  let answer;
+  try {
+    answer = await controlRequest(sock, { op: "event", handle, box, event });
+  } catch (e) {
+    env.err(`skein-host event ${handle}: the router's control socket: ${(e as Error).message}`);
+    return 1;
+  }
+  if (answer) {
+    if (!answer.ok) { env.err(`skein-host event ${handle}: ${answer.error}`); return 1; }
+    env.out(`${handle}: ${String(event.kind)} event admitted into ${box} as ${answer.entry} (by the running router)`);
+    return 0;
+  }
   const running = await routerAt(env.vars);
   if (running) {
-    env.err(`skein-host event: a router serves this host at ${running}: its kernel holds ${handle}'s store, and a second one must not write it. Stop it first (skein-host event is for a host that is down; a running host's jobs come from the genesis, etc/config.json \`jobs\`)`);
+    env.err(`skein-host event: a router serves this host at ${running}, but no control socket answers at ${sock} (another SKEIN_HOME, or a router started before the socket): its kernel holds ${handle}'s store, and a second one must not write it. Run this with the router's SKEIN_HOME, or restart the router`);
     return 1;
   }
   const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
   try {
-    const o = given as Record<string, unknown>;
-    const event = { ...o, kind: o.kind ?? "cron", ...(o.kind === undefined && o.due === undefined ? { due: Date.now() } : {}) };
     const e = await router.admitEvent(handle, box, event);
     await router.settled();
     env.out(`${handle}: ${String(event.kind)} event admitted into ${box} as ${e}`);
@@ -607,11 +627,12 @@ export interface Host {
 /**
  * The oracle (#18, oracle.ts): every instance's wallet is a ProtoWallet over a
  * key derived from the router's master secret (key ID = the handle); the
- * router's BRC-104 identity is another child of it.
+ * router's BRC-104 identity is another child of it, and so is its attest key
+ * (#62), which signs every recorded call it answers.
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "attestKey"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle) };
+  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), attestKey: oracle.attestKey() };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
@@ -776,6 +797,9 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const enabled = db.list("enabled");
   const mport = Number(v.SKEIN_ROUTER_PORT ?? 8100);
   const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
+  // The control socket (#60): `skein-host event` reaches this router's kernels through it.
+  const sock = join(home, CONTROL_SOCKET);
+  await router.listenControl(sock).then(() => env.out(`skein-host: control socket at ${sock}`), (e: Error) => env.err(`skein-host: control socket: ${e.message}`));
   const messagebox = mserver ? (mserver.address() as { port: number }).port : undefined;
   if (messagebox !== undefined) env.out(`skein-host: router at http://127.0.0.1:${messagebox} · an instance at ${router.originOf("<handle>")} (or /@<handle>)`);
   const omb = router.ownerMessagebox();

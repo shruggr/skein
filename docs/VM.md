@@ -269,6 +269,30 @@ a kernel call answered by the host — there is no provider peer and no message.
   suspended: the step waits for the host inside the call.
 - **Replay** reads the response from the record and never touches the
   network. A request that differs from the recorded one is a divergence.
+- **Attested by the host** (#62). The host signs every `http` and `libp2p`
+  exchange it answers, and the kernel keeps the signature in the record:
+
+  ```
+  recorded call  {kind: "attested", thread, step, i, op: "http" | "libp2p" | "wallet",
+                  request: bytes, result: bytes, attest?: {stamp, key, signature}}
+  preimage       dag-cbor {op, instance, request: sha256(request), response: sha256(result), stamp}
+  ```
+
+  `request` and `result` are the bytes as recorded; `instance` is the
+  genesis's `handle`; `stamp` the router's clock (ms) when it answered, the
+  clock that stamps entries; the preimage is encoded canonically (keys
+  length-first). `signature` is ECDSA secp256k1, DER, over sha256(preimage)
+  — what `createSignature` makes over the same data — by the router's
+  **attest key**: the BRC-42 child of its master under
+  `[2, "skein router"]`, key ID `"attest"` (`src/host/oracle.ts`
+  `attestKey`); `key` is its public key, and the genesis names it
+  (`attest: bytes(33)`), so the log alone verifies. The kernel checks an
+  answer's attestation before it records it (a bad or missing one fails the
+  call, nothing recorded) and again at replay, where a bad or missing one is
+  a divergence. A genesis with no `attest` asks for none (a host that does
+  not attest: the browser's). `wallet` answers are signatures already and
+  carry none. The readers check the same: `skein-dev log` and the explorer
+  (`src/runtime/attest.ts`).
 - **The host** (`src/host/router.ts`) answers with its handler (a test's
   stand-in) or, with `SKEIN_HTTP=fetch`, real requests; it applies the
   recorded options (connect + first-byte bound the wait for the head,
@@ -312,8 +336,9 @@ any of them                          → {error}                            the 
 ```
 
 - **Recorded like `http`.** Each call is an attested record on the step's
-  update (op `libp2p`, the request bytes, the router's answer) — an
-  `{error}` answer too, so a failed dial fails the same way on replay.
+  update (op `libp2p`, the request bytes, the router's answer, the router's
+  signature over the exchange, #62) — an `{error}` answer too, so a failed
+  dial fails the same way on replay.
   Replay serves the recorded answer and never touches the network; a request
   that differs from the recorded one is a divergence.
 - **`receive` rests.** A frame not yet there answers `{pending}`: the program
@@ -518,7 +543,9 @@ turn is a run of steps. Two changes from v1:
   only if something in it subscribes the job's box. The program takes the
   event as its start signal and carries on with `deadline` wakes; the next
   `every` firing is its retry if its thread died. `skein-host event <handle>
-  <box> [json]` admits one such event by hand.
+  <box> [json]` admits one such event by hand (through the running router's
+  control socket, `$SKEIN_HOME/host.sock`, or with the host down a router of
+  its own).
 
 A transaction is a thread whose state chain is its finality (created,
 broadcast, mined with merkle path, rejected, reorged), each transition an

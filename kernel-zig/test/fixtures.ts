@@ -1,7 +1,8 @@
 // Fixtures for the Zig kernel's unit tests (src/tests.zig), made by the
 // TypeScript formats (src/runtime): dag-cbor encodings and CIDs, the canonical
 // form of non-canonical input, "anyone" signatures (log entries, envelopes),
-// JCS, the entropy stream, the shell's program record. Regenerate with
+// JCS, the entropy stream, the shell's program record, a host-attested
+// recorded call (#62). Regenerate with
 //   node --experimental-strip-types --no-warnings kernel-zig/test/fixtures.ts > kernel-zig/test/fixtures.json
 // (the keys are fixed, so the output is stable).
 
@@ -19,6 +20,8 @@ import { subscriptionsOrigin } from "../../src/runtime/subscriptions.ts";
 import { entropy } from "../../src/runtime/syscalls.ts";
 import { EMPTY_TREE } from "../../src/runtime/tree.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
+import { attestPreimage, attestProblem } from "../../src/runtime/attest.ts";
+import { Oracle, attestExchange } from "../../src/host/oracle.ts";
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
@@ -84,4 +87,20 @@ const cids = {
   emptyTree: EMPTY_TREE.toString(),
 };
 
-process.stdout.write(JSON.stringify({ cbor, normalize, reject, signatures, envelope, jcs: jcsCases, entropy: ent, cids }, null, 1) + "\n");
+// A host-attested recorded call (#62): the router's attest key (a fixed master), one http exchange.
+const attestKey = new Oracle(new PrivateKey(0xa77e57n.toString(16), 16)).attestKey();
+const exchange = {
+  op: "http", instance: "zigtest",
+  request: encode({ method: "GET", url: "https://files.test/hello.txt" }).bytes,
+  response: encode({ status: 200, headers: { "content-type": "text/plain" }, body: new TextEncoder().encode("hello\n") }).bytes,
+  stamp: 1_790_000_000_250,
+};
+const at = attestExchange(attestKey, exchange);
+const genesisKey = { attest: at.key, handle: exchange.instance };
+if (attestProblem(genesisKey, { op: "http", request: exchange.request, result: exchange.response, attest: at })) throw new Error("the attestation fixture does not verify in TS");
+const attest = {
+  key: hex(at.key), instance: exchange.instance, op: exchange.op, request: hex(exchange.request), response: hex(exchange.response),
+  stamp: at.stamp, signature: hex(at.signature), preimage: hex(attestPreimage(exchange)),
+};
+
+process.stdout.write(JSON.stringify({ cbor, normalize, reject, signatures, envelope, jcs: jcsCases, entropy: ent, cids, attest }, null, 1) + "\n");

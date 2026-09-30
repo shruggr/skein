@@ -42,12 +42,18 @@
 // `libp2p` import answered here (`p2pRequest`); a frame for a thread resting
 // on `receive` admits its wake (`wakeThread`).
 //
+// Every `http` and `libp2p` exchange it answers for a kernel is attested
+// (#62): signed with the router's attest key (oracle.ts), stamped by its
+// clock, recorded by the kernel with the answer; each genesis it writes names
+// the key, so the log alone verifies.
+//
 // The router is the instances' clock too (#60, cron.ts): each genesis's
 // `jobs`, a plain `cron` event admitted into the job's box when it is due
 // (an idle-stopped instance hydrated for one only if something in it
 // subscribes that box).
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
 import { ProtoWallet, Utils, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
@@ -70,6 +76,8 @@ import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
 import { DEFAULT_LISTEN, libp2pOf, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig, type P2PRequest, type P2PResult } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
+import { attestExchange } from "./oracle.ts";
+import { closeControl, listenControl } from "./control.ts";
 import * as Digest from "multiformats/hashes/digest";
 import type { PrivateKey } from "@bsv/sdk";
 
@@ -121,6 +129,12 @@ export interface RouterOptions {
   libp2p?: P2PHostConfig;
   /** An instance's libp2p peer key (oracle.ts peerKey). Absent: no libp2p host; the kernels' `libp2p` is refused. */
   peerKeyFor?(handle: string): PrivateKey;
+  /**
+   * The router's attest key (#62, oracle.ts attestKey): it signs every `http`
+   * and `libp2p` exchange it answers, stamped by the router's clock, and each
+   * new genesis names its public key (`attest`). Absent: nothing is attested.
+   */
+  attestKey?: PrivateKey;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
 }
@@ -219,6 +233,8 @@ export class Router {
   private closing?: Promise<void>;
   servers: Server[] = [];
   port = 0;
+  /** The control socket (control.ts), while this router listens on one. */
+  private control?: { server: NetServer; path: string };
 
   constructor(o: RouterOptions) {
     this.o = o;
@@ -283,7 +299,7 @@ export class Router {
   /**
    * Stop everything this router started (#61), once: the waker's, the
    * idle reaper's and the ledger's timers (the owed fuel written first), its
-   * servers and their connections, the header feeds' and the broadcaster's
+   * servers and their connections, the control socket (its file removed), the header feeds' and the broadcaster's
    * SSE clients, the libp2p nodes, and every kernel process it spawned — one
    * still hydrating included. Afterwards nothing of it keeps the process
    * alive: `skein-host run`'s shutdown and every one-shot command that builds
@@ -297,6 +313,19 @@ export class Router {
   /** The same as `close()`. */
   stop(): Promise<void> { return this.close(); }
 
+  /**
+   * Listen on the control socket at `path` ($SKEIN_HOME/host.sock for
+   * `skein-host run`; mode 0600, no HTTP route): `skein-host event` sends its
+   * event here while this router runs, and it is admitted through the kernel
+   * this router holds (admitEvent). Removed by `close()`.
+   */
+  async listenControl(path: string): Promise<void> {
+    if (this.stopped) throw new Error("the router is stopping");
+    const server = await listenControl(path, { event: async (h, box, ev) => (await this.admitEvent(h, box, ev)).toString() });
+    this.control = { server, path };
+    this.say("router", `control socket at ${path}`);
+  }
+
   private async shutdown(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.timer);
@@ -305,6 +334,8 @@ export class Router {
     this.flushLedger();
     const closed = this.servers.map((s) => new Promise<void>((r) => { s.close(() => r()); s.closeAllConnections(); }));
     this.servers = [];
+    if (this.control) closed.push(closeControl(this.control.server, this.control.path));
+    this.control = undefined;
     await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {})));
@@ -430,6 +461,7 @@ export class Router {
       log: (line) => this.say(handle, line),
       http: (req) => this.http(req, handle),
       libp2p: (req, thread) => this.p2pRequest(handle, req, thread),
+      ...(this.o.attestKey ? { attest: (x) => attestExchange(this.o.attestKey!, { ...x, instance: row.handle, stamp: stampMs(this.now()) }) } : {}),
       sleepers: (s) => this.sleepersOf(handle, s),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
@@ -508,14 +540,14 @@ export class Router {
   genesisConfig(row: Pick<InstanceRow, "handle" | "domain"> & Partial<Pick<InstanceRow, "kind" | "owner">>, identity: string, code = true): Genesis2Config {
     if (row.kind === "mailbox") {
       if (!row.owner) throw new Error(`${row.handle}: a mailbox instance names its owner`);
-      return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true };
+      return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true, ...this.attestFact() };
     }
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
     // #58: with an Arcade, the wallet broadcasts through the host's route (the configured defaults win).
     const genesisDefaults = this.arc ? { walletArc: this.arcRoute(), ...this.o.genesis?.defaults } : this.o.genesis?.defaults;
     const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
     const warn = (l: string) => this.say(row.handle, l);
-    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin() };
+    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), ...this.attestFact() };
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
@@ -532,6 +564,11 @@ export class Router {
       libp2p: this.o.genesis?.libp2p, extraRoutes: this.o.genesis?.routes,
       ...facts,
     };
+  }
+
+  /** The router's attest key for a genesis (#62), when it attests. */
+  private attestFact(): { attest?: string } {
+    return this.o.attestKey ? { attest: this.o.attestKey.toPublicKey().toString() } : {};
   }
 
   /**

@@ -120,6 +120,8 @@ pub fn isGenesis(x: ?Value) bool {
         if (!secp.isKey(Value.bytesOf(g.get(k)) orelse return false)) return false;
     }
     if (g.get("host") != null) return false; // format 1
+    // #62: the host's attest key, which every recorded http/libp2p call is signed with.
+    if (g.get("attest")) |k| if (!secp.isKey(Value.bytesOf(k) orelse return false)) return false;
     if (Value.str(g.get("handle")) == null or Value.str(g.get("domain")) == null) return false;
     if (!isCidMap(g.get("programs"))) return false;
     const subs = g.get("subscriptions") orelse return false;

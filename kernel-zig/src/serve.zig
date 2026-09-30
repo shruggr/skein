@@ -6,8 +6,9 @@
 // The kernel is this process: the store, the log, the scheduler, the
 // programs. Everything outside is the router's: it admits entries (the one
 // call in that writes), makes `call`s (#40: a program's function over the
-// state, the front door's), answers the kernel's `wallet` and `http`
-// requests (the oracle and the network) and keeps its earliest sleeper
+// state, the front door's), answers the kernel's `wallet`, `http` and
+// `libp2p` requests (the oracle and the network; the last two with its
+// attestation of the exchange, #62) and keeps its earliest sleeper
 // deadline (`sleepers`) to wake it. Log lines go to stderr.
 const std = @import("std");
 const envm = @import("env.zig");
@@ -283,19 +284,20 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
-    /// A program's http request (#29, pre-#15): the peer performs it (or refuses).
-    fn pHttp(p: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror![]u8 {
+    /// A program's http request (#29, pre-#15): the peer performs it (or refuses)
+    /// and answers {answer, attest} (#62: the router's attestation of the exchange).
+    fn pHttp(p: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror!scheduler.Answer {
         const r = try ctx(p).request(a, "http", .{ .bytes = req });
-        return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+        return scheduler.Answer.of(r) orelse error.BadAnswer;
     }
 
     /// A program's libp2p request (#51) and the thread making it: the router's libp2p host answers.
-    fn pLibp2p(p: *anyopaque, a: std.mem.Allocator, req: []const u8, thread: []const u8) anyerror![]u8 {
+    fn pLibp2p(p: *anyopaque, a: std.mem.Allocator, req: []const u8, thread: []const u8) anyerror!scheduler.Answer {
         var m = cbor.MapBuilder.init(a);
         try m.put("request", .{ .bytes = req });
         try m.put("thread", cbor.cidv(thread));
         const r = try ctx(p).request(a, "libp2p", m.value());
-        return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+        return scheduler.Answer.of(r) orelse error.BadAnswer;
     }
 
     fn pOnSleep(p: *anyopaque, _: []const u8, _: i64) void {

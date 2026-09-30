@@ -235,8 +235,10 @@ send {to: <key>, box, body: <dag-cbor bytes>, handle?, domain?}  →  {id: <cid>
   address book's business.
 - **The request** is a recorded `http` POST of `/sendMessage` as BRC-231
   CBOR: request and response are on the step's update, so replay never touches
-  the network. The answer's signature is verified; a 401 means the session is
-  gone: shake hands again and send once more.
+  the network, with the host's attestation of the exchange (#62: its signature
+  over both digests and the time it answered; docs/VM.md, "Attested"). The
+  answer's signature is verified; a 401 means the session is gone: shake hands
+  again and send once more.
 - **The id.** `send` puts the same mail record the recipient keeps (sender
   this instance, the session proof included) and answers with its CID, so a
   reply's `replyTo` names a record this instance holds and can `await`.

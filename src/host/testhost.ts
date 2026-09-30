@@ -12,6 +12,7 @@ import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { HostDb } from "./instances.ts";
 import { Router } from "./router.ts";
+import { Oracle } from "./oracle.ts";
 
 export const until = async <T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> => {
   for (const end = Date.now() + ms; Date.now() < end;) {
@@ -35,6 +36,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const router = new Router({
     db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), owner: ownerId, infer: o.infer, home,
     idleMs: o.idleMs ?? 0, http: o.http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
+    // The host attests every recorded call (#62), as `skein-host run` does.
+    attestKey: new Oracle(PrivateKey.fromRandom()).attestKey(),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
   t.after(async () => { await router.stop(); db.close(); });

@@ -252,8 +252,10 @@ them judging anything (the instance does, through its front door):
   from the host's start, `at` once, host.db `cron_fired`; a missed firing made
   up once, no burst), hydrating an idle-stopped instance only when something
   in it subscribes the box. `skein-host event <handle> <box> [json]` admits
-  one by hand, through a router of its own (refused while one serves the
-  host).
+  one by hand: over the running router's control socket
+  (`$SKEIN_HOME/host.sock`, mode 0600, one JSON line each way,
+  `src/host/control.ts`; no HTTP route), else through a router of its own
+  with the host down.
 - **Closing** (#61): `Router.close()` stops everything the router started —
   the waker's, reaper's and ledger's timers (the owed fuel written), its
   servers, the feeds' and the broadcaster's SSE clients, the libp2p nodes and
@@ -272,6 +274,9 @@ them judging anything (the instance does, through its front door):
 - **Format 3** (#40): `{kind: "log", prev, n, time, genesis | mail | wake |
   event+box}`; a message is its mail record, and the record's CID is the
   message's id. `kernel-zig/src/log.zig` has the shapes.
+- **Format 4** (#62): entries as format 3; every recorded `http`/`libp2p`
+  call carries the host's attestation, and the genesis names the host's
+  attest key (`attest`). docs/VM.md ("Attested by the host") has the shape.
 
 ## Bootstrap (issue #4)
 
@@ -358,7 +363,16 @@ delivered to a peer, a fetch, a resolve) — are recorded and replayed. A
 message to a peer (inference, run-on-machine) goes out as an `http` call and
 its answer comes back as a message. Time and random are pure: they derive from the
 stamp the runtime wrote on the current log entry.
-Request/response *is* attestation; peers all look the same from inside. A
+Request/response *is* attestation; peers all look the same from inside.
+Attested means signed by the host (#62): for every `http` and `libp2p`
+call the router signs the exchange — the op, the instance, the digests of
+the request and of the answer, and the time it answered — with its attest
+key (a child of its master secret), and the signature is recorded with the
+answer. The genesis names that key, so a reader of the log alone can check
+that this host relayed each exchange and when; replay refuses a recorded
+call whose attestation is missing or does not verify. It attests provenance
+and time, not that the answer is true. (A `wallet` answer is a signature
+already.) A
 program waiting on an recorded call is an ordinary thread at rest: the
 suspended instance is its transient handle, the scheduler wakes it when the
 reply arrives, and a restart re-executes it from the log. Pipeline stages are

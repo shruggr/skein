@@ -17,6 +17,7 @@ const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
 const json = @import("json.zig");
 const secp = @import("secp.zig");
+const attestm = @import("attest.zig");
 const logm = @import("log.zig");
 const heads = @import("heads.zig");
 const subs = @import("subscriptions.zig");
@@ -100,17 +101,34 @@ pub const Witness = struct {
     }
 };
 
+/// A host's answer to an `http` or `libp2p` call (#62): the response bytes and
+/// the host's attestation of the exchange ({stamp, key, signature}), if it gave one.
+pub const Answer = struct {
+    result: []u8,
+    attest: ?Value = null,
+
+    /// A peer's frame answer: the response bytes alone (a host that does not
+    /// attest: the browser's, a test's), or {answer: bytes, attest}.
+    pub fn of(v: Value) ?Answer {
+        if (Value.bytesOf(v)) |b| return .{ .result = @constCast(b) };
+        if (v != .map) return null;
+        const b = Value.bytesOf(v.get("answer")) orelse return null;
+        const at = v.get("attest");
+        return .{ .result = @constCast(b), .attest = if (at == null or at.? == .null) null else at };
+    }
+};
+
 /// The peers the runtime calls out to (all optional; replay has none but the witness).
 pub const Peers = struct {
     ctx: *anyopaque,
     /// A BRC-100 wire frame to the instance wallet → its result frame.
     wallet: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]u8 = null,
     /// One HTTP request (dag-cbor {method, url, headers?, body?}) → the response
-    /// (dag-cbor {status, headers, body}): a program's `http` import (#29, pre-#15).
-    http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8) anyerror![]u8 = null,
+    /// (dag-cbor {status, headers, body}) and the host's attestation (#62): a program's `http` import (#29, pre-#15).
+    http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8) anyerror!Answer = null,
     /// One libp2p request (#51, dag-cbor {op, …}) → its result (dag-cbor), from
-    /// `thread` (the host wakes it when a frame arrives for a pending `receive`).
-    libp2p: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8, thread: []const u8) anyerror![]u8 = null,
+    /// `thread` (the host wakes it when a frame arrives for a pending `receive`), and the host's attestation (#62).
+    libp2p: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, request: []const u8, thread: []const u8) anyerror!Answer = null,
     /// Why this host has no libp2p at all (the browser build): a request with
     /// no recorded answer fails with it, and nothing is recorded.
     libp2p_refusal: ?[]const u8 = null,
@@ -748,7 +766,7 @@ pub const Runtime = struct {
             }
             const r = rt.stepBody(a, origin, ctx, resolved, reply, &meter, &calls) catch |err| {
                 const exhausted = err == error.FuelExhausted;
-                const msg = if (exhausted) runner.FUEL_EXHAUSTED else if (err == error.Failed or err == error.Fatal) last_error else @errorName(err);
+                const msg = if (exhausted) runner.FUEL_EXHAUSTED else if (err == error.Failed or err == error.Fatal or err == error.Diverged or err == error.NoWitness) last_error else @errorName(err);
                 const label = if (err == error.Diverged) "DIVERGED" else if (err == error.NoWitness) "cannot run" else "failed";
                 rt.say("{s} step {s}: {s}", .{ short(a, origin), label, msg });
                 if (err == error.Diverged or err == error.NoWitness) return;
@@ -1101,11 +1119,15 @@ pub const Runtime = struct {
     }
 
     /// An attested call's answer, recorded: the witness's (replay), else the peer's.
+    /// `http` and `libp2p` carry the host's attestation (#62), checked against
+    /// the genesis's attest key: on replay a bad or missing one is a divergence;
+    /// live, the call fails (nothing recorded).
     fn attest(st: *StepState, imp: *program.Imports, op: []const u8, request: Value, perform: Perform) program.Err![]const u8 {
         const rt = st.rt;
         const a = st.a;
         const i = st.calls.items.len;
         var result: []const u8 = undefined;
+        var host_attest: ?Value = null;
         const w: ?Value = if (rt.witness) |wi| (wi.find(a, st.origin, st.n, i) catch null) else null;
         if (w) |x| {
             const rop = Value.str(x.get("op")) orelse "";
@@ -1115,6 +1137,10 @@ pub const Runtime = struct {
                 return imp.fatalWith(.diverged, try std.fmt.allocPrint(a, "{s} step {d} call {d}: the request differs from the recorded one", .{ short(a, st.origin), st.n, i }));
             }
             result = Value.bytesOf(x.get("result")).?;
+            host_attest = x.get("attest");
+            if (Value.bytesOf(request)) |q| if (attestm.problem(a, rt.genesis, op, q, result, host_attest) catch return error.OutOfMemory) |why| {
+                return imp.fatalWith(.diverged, try std.fmt.allocPrint(a, "{s} step {d} call {d} ({s}): {s}", .{ short(a, st.origin), st.n, i, op, why }));
+            };
         } else if (rt.has_wallet) {
             switch (perform) {
                 // The router gone mid-call is the environment failing, not the step: nothing is
@@ -1125,16 +1151,27 @@ pub const Runtime = struct {
                     imp.failFmt("{s}", .{@errorName(err)}),
                 .http => |q| {
                     const f = rt.peers.http orelse return imp.failWith("http: this host answers no http");
-                    result = f(rt.peers.ctx, a, q) catch |err| return imp.failFmt("http: {s}", .{@errorName(err)});
+                    const ans = f(rt.peers.ctx, a, q) catch |err| return imp.failFmt("http: {s}", .{@errorName(err)});
+                    result = ans.result;
+                    host_attest = ans.attest;
                 },
                 .libp2p => |q| {
                     if (rt.peers.libp2p_refusal) |m| return imp.failWith(m);
                     const f = rt.peers.libp2p orelse return imp.failWith("libp2p: this host answers no libp2p");
-                    result = f(rt.peers.ctx, a, q, st.origin) catch |err| return if (err == error.PeerGone)
+                    const ans = f(rt.peers.ctx, a, q, st.origin) catch |err| return if (err == error.PeerGone)
                         imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (libp2p): the router is gone", .{ short(a, st.origin), st.n, i }))
                     else
                         imp.failFmt("libp2p: {s}", .{@errorName(err)});
+                    result = ans.result;
+                    host_attest = ans.attest;
                 },
+            }
+            // The host's attestation is checked before it is recorded (#62): a log that would not replay is never written.
+            switch (perform) {
+                .http, .libp2p => |q| if (attestm.problem(a, rt.genesis, op, q, result, host_attest) catch return error.OutOfMemory) |why| {
+                    return imp.failFmt("{s}: the host's answer: {s}", .{ op, why });
+                },
+                .wallet => {},
             }
         } else {
             return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} ({s}): no wallet and no recorded answer", .{ short(a, st.origin), st.n, i, op }));
@@ -1147,6 +1184,7 @@ pub const Runtime = struct {
         try rec.put("op", cbor.string(op));
         try rec.put("request", request);
         try rec.put("result", .{ .bytes = result });
+        if (host_attest) |x| try rec.put("attest", x);
         try st.calls.append(rt.store.put(a, rec.value()) catch return imp.failWith("store error"));
         return result;
     }
@@ -1404,7 +1442,8 @@ pub const Runtime = struct {
         const r = cbor.decode(cs.a, request) catch return imp.failWith("http: the request is not dag-cbor");
         if (r != .map or Value.str(r.get("method")) == null or Value.str(r.get("url")) == null) return imp.failWith("http: want {method, url, headers?, body?}");
         const f = cs.rt.peers.http orelse return imp.failWith("http: this host answers no http");
-        return f(cs.rt.peers.ctx, cs.a, request) catch |err| imp.failFmt("http: {s}", .{@errorName(err)});
+        const ans = f(cs.rt.peers.ctx, cs.a, request) catch |err| return imp.failFmt("http: {s}", .{@errorName(err)});
+        return ans.result;
     }
     /// libp2p (#51) is a step's: a kernel call sends nothing (a stream a thread
     /// dials, a message it publishes, is recorded on its update).

@@ -9,6 +9,7 @@ import { PublicKey, Signature } from "@bsv/sdk";
 import { CID, decode, encode, isCID } from "./cid.ts";
 import type { Ms, Ref } from "./types.ts";
 import type { Signer } from "./identity.ts";
+import type { Attestation } from "./attest.ts";
 
 export type * from "./types.ts";
 
@@ -194,25 +195,27 @@ export function isEmit(x: unknown): x is Emit {
 /**
  * An attested call's record: the request a step made across the boundary and
  * the answer, at (thread, step, i). Referenced, in order, from the step's
- * update (`calls`); on replay the answer is served from here, not the wallet.
+ * update (`calls`); on replay the answer is served from here, not the host.
  *   op "wallet": request = a BRC-100 wire request frame, result = the result frame
- *   op "resolve": request = "handle@domain" (UTF-8), result = the host resolver's whole
- *                answer as dag-cbor (identityKey — "" if it did not resolve — and the
- *                resolution endpoint's response, how it was got, what was checked)
+ *   op "http": request = dag-cbor {method, url, headers?, body?, options?}, result = {status, headers, body}
+ *   op "libp2p" (#51): request = dag-cbor {op, …}, result = its result ({error} too)
+ * `http` and `libp2p` carry the host's attestation (#62, attest.ts) when the
+ * genesis names an attest key.
  */
 export type Attested = {
   kind: "attested";
   thread: CID;
   step: number;
   i: number;
-  op: "wallet" | "resolve";
-  request: Uint8Array | CID;
+  op: "wallet" | "http" | "libp2p";
+  request: Uint8Array;
   result: Uint8Array;
+  attest?: Attestation;
 };
 
 export function isAttested(x: unknown): x is Attested {
   return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
-    && (x.op === "wallet" || x.op === "resolve") && x.result instanceof Uint8Array;
+    && (x.op === "wallet" || x.op === "http" || x.op === "libp2p") && x.result instanceof Uint8Array;
 }
 
 /**

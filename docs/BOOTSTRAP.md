@@ -220,7 +220,7 @@ skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpo
 `add --boot/--packet` runs the loader when the row is added, on its new, empty
 store (`Router.bootRow` → `bootStore`: a kernel started, `boot`, stopped). The
 router then hydrates the instance like any other store, and the kernel
-processes the genesis at that first start. The owner is `SKEIN_OWNER`. The
+processes the genesis at that first start. The owner is `SKEIN_OWNER` (`bin/skein-host` fills it from `$SKEIN_HOME/owner.identity`). The
 command is a one-shot (#61): the router it boots through is closed
 (`Router.close()`: its timers, clients, libp2p nodes and kernels) once the
 boot is written, and the process exits 0.

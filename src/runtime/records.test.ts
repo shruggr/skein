@@ -85,7 +85,8 @@ test("emit and attested records: validated", () => {
   assert.ok(isEmit({ kind: "emit", to, box: "results", body: wasm, envelope }));
   assert.ok(!isEmit({ kind: "emit", to, box: "", body: wasm, envelope }));
   assert.ok(!isEmit({ kind: "emit", to, box: "results", body: wasm }), "the program seals: an emit carries its envelope");
-  assert.ok(isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "resolve", request: wasm, result: new Uint8Array(70) }));
+  assert.ok(isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "http", request: new Uint8Array(3), result: new Uint8Array(70) }));
+  assert.ok(!isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "resolve", request: wasm, result: new Uint8Array(70) }), "no resolve op: a resolve is an http call (#40)");
   assert.ok(!isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "seal", request: wasm, result: new Uint8Array(70) }), "no seal calls: the program signs through the wallet");
   assert.ok(!isAttested({ kind: "attested", thread: wasm, step: 1, i: 0, op: "reveal", request: wasm, result: new Uint8Array(70) }), "no reveals any more");
 });

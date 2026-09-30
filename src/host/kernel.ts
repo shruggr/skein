@@ -8,6 +8,8 @@
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle) ·
 //                        http (a program's request: the messagebox's delivery, a resolve, a wallet's ARC) ·
 //                        libp2p (#51: {request, thread}: publish/dial/send/receive/close, the libp2p host's)
+//                        — both answered {answer, attest} when the host attests (#62): its signature
+//                        over the exchange, which the kernel records with the answer
 //   the kernel tells     sleepers (its sleeping threads and their deadlines) · onSleep · stop
 //
 // `Kernel` offers `store` (get/put/log), `admit`, `invoke` (the call),
@@ -22,6 +24,7 @@ import { decode, encode } from "../runtime/cid.ts";
 import type { LogEntry } from "../runtime/log.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
+import type { Attestation } from "../runtime/attest.ts";
 import type { P2PRequest, P2PResult } from "./p2p.ts";
 
 const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -50,6 +53,12 @@ export interface KernelOptions {
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Answers programs' `libp2p` import (#51): a request {op, …} → its result ({error} on failure), recorded by the kernel. Absent: refused. */
   libp2p?(req: P2PRequest, thread?: CID): Promise<P2PResult>;
+  /**
+   * The host's attestation of an `http` or `libp2p` exchange (#62): the
+   * request and response bytes as the kernel records them. Absent: answers go
+   * unattested (a genesis that names an attest key then refuses them).
+   */
+  attest?(x: { op: "http" | "libp2p"; request: Uint8Array; response: Uint8Array }): Attestation;
   /** The kernel's sleepers changed (earliest first). */
   sleepers?(s: Sleeper[]): void;
   /** Log lines (the kernel's stderr and this side's notes). */
@@ -165,14 +174,14 @@ export class Kernel {
           // A program's http request (#29, pre-#15), recorded by the kernel with its answer.
           if (!this.o.http) throw new Error("this host answers no http");
           const res = await this.o.http(decode<HttpRequest>(f.v as Uint8Array));
-          return answer(encode(res).bytes);
+          return answer(this.attested("http", f.v as Uint8Array, encode(res).bytes));
         }
         case "libp2p": {
           // A program's libp2p request (#51) and the thread making it (not recorded; the router needs it to wake a `receive`).
           if (!this.o.libp2p) throw new Error("this host answers no libp2p");
           const v = f.v as { request: Uint8Array; thread?: CID | null };
           const res = await this.o.libp2p(decode<P2PRequest>(v.request), v.thread ?? undefined);
-          return answer(encode(res).bytes);
+          return answer(this.attested("libp2p", v.request, encode(res).bytes));
         }
         case "sleepers":
           this.sleepers = f.v as Sleeper[];
@@ -188,6 +197,11 @@ export class Kernel {
       this.busy--;
       this.last = Date.now();
     }
+  }
+
+  /** An answer as the kernel takes it: the bytes, with the host's attestation when it attests (#62). */
+  private attested(op: "http" | "libp2p", request: Uint8Array, response: Uint8Array): Uint8Array | { answer: Uint8Array; attest: Attestation } {
+    return this.o.attest ? { answer: response, attest: this.o.attest({ op, request, response }) } : response;
   }
 
   // ---------------------------------------------------------------- the runtime surface

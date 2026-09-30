@@ -53,7 +53,8 @@ pub const SqliteStore = struct {
     /// A store to run on, created if missing. A store with a log in an older
     /// format is refused (re-genesis): before fuel metering (issue #5) its
     /// updates carry no fuel; before format 2 (issue #33) its entries are
-    /// host-signed and its keys hex.
+    /// host-signed and its keys hex; before format 4 (issue #62) its recorded
+    /// calls carry no attestation.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !*SqliteStore {
         if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
             if (st.size > 0) {
@@ -62,6 +63,8 @@ pub const SqliteStore = struct {
                 if (probe.predatesFuel()) {
                     if (probe.ix.loaded_format < 1) {
                         std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    } else if (probe.ix.loaded_format == 3) {
+                        std.log.err("{s}: a store written before format 4 (issue #62: recorded calls attested by the host, its key in the genesis): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 2) {
                         std.log.err("{s}: a store written before format 3 (issue #40: messages as mail records, no envelopes or emits): refused (start a new store: re-genesis)", .{path});
                     } else {

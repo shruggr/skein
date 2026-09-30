@@ -79,8 +79,9 @@ const map_count = @typeInfo(Map).@"enum".fields.len;
 
 pub const STATE_KIND = "skein-state";
 /// The store format this kernel writes (see the header): 2 = unsigned entries, keys as bytes (#33);
-/// 3 = messages as `mail` records, no envelopes, emits or outcomes (#40).
-pub const FORMAT: i64 = 3;
+/// 3 = messages as `mail` records, no envelopes, emits or outcomes (#40);
+/// 4 = recorded `http`/`libp2p` calls carry the host's attestation, the genesis its `attest` key (#62).
+pub const FORMAT: i64 = 4;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).

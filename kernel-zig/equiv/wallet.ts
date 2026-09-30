@@ -56,6 +56,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
+import { Oracle } from "../../src/host/oracle.ts";
 import { decode } from "../../src/runtime/cid.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
 import { render } from "../../src/dev/explore/server.ts";
@@ -135,6 +136,7 @@ const make = () => new Router({
   // The signing oracles: ProtoWallets (any other instance has a key of its own).
   db: hostDb, walletFor: (row) => ephemeralWallet(key(row.handle === "wallettest" ? KEYS.instance : row.handle === "payee" ? KEYS.payee : "9999")), home,
   owner: ownerId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
   // The host's Arcade (#58): no walletArc below — a new genesis names the router's route.
   arc: { url: arcade.url, token: ARC_TOKEN, events: arcade.eventsUrl },
   feeds: { backoff: { min: 50, max: 500 } },

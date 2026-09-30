@@ -27,6 +27,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { dirSource } from "../../src/host/boot.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
+import { Oracle } from "../../src/host/oracle.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { bundlesOf } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -54,7 +55,7 @@ const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
 const inferId = key(KEYS.infer).toPublicKey().toString();
 const make = (fuel?: string) => new Router({
-  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home,
+  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
   owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
