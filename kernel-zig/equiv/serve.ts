@@ -7,7 +7,10 @@
 // and (issue #5) a shell that never ends running out of fuel under a low
 // fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
 // python) ending on their own under that limit, the clock being the entry
-// stamp + fuel × 1 ns. Then the stores the Zig kernel wrote are replayed by
+// stamp + fuel × 1 ns, and (issue #60) a job: a system tree's etc/config.json
+// `jobs`, the router the clock, its cron event starting a program
+// (programs/cron-demo) that rests on a deadline and is woken by the waker.
+// Then the stores the Zig kernel wrote are replayed by
 // the Zig kernel twice over (equiv/replays.ts): identical to each other and
 // to the stores themselves, fuel included.
 //
@@ -15,12 +18,13 @@
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs/promises";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrivateKey } from "@bsv/sdk";
 import { RawBox } from "../../src/client/raw.ts";
+import { dirSource } from "../../src/host/boot.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
@@ -45,7 +49,7 @@ const text = (b: unknown) => Buffer.from(b as Uint8Array).toString("utf8");
 
 const db = new HostDb(join(home, "host.db"));
 db.add("zigtest", { store: join(home, "instances/zigtest/runtime.db") });
-const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555"), clocktest: key("6666"), david: key("7777"), infer: key("8888") };
+const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltest: key("5555"), clocktest: key("6666"), crontest: key("9999"), david: key("7777"), infer: key("8888") };
 const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
 const inferId = key(KEYS.infer).toPublicKey().toString();
@@ -152,6 +156,29 @@ try {
   const [w] = await results(1, "results", 60_000);
   waited = { exitCode: w!.body.exitCode as number, stdout: w!.body.stdout ? text(w!.body.stdout) : undefined };
   await box.ack([w!.id]);
+
+  // Jobs (#60): a system tree whose etc/config.json declares an hourly job into `tick`, which
+  // cron-demo (a sender-less subscription) handles. The router fires it once at the instance's
+  // boot: a plain `cron` event, stamped at admission; cron-demo rests 300 ms on a deadline, and
+  // the waker wakes it.
+  const tree = await fs.mkdtemp(join(tmpdir(), "skein-kz-cron-"));
+  await fs.mkdir(join(tree, "bin"));
+  await fs.mkdir(join(tree, "etc"));
+  await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/cron-demo/cron-demo.wasm")));
+  await fs.writeFile(join(tree, "etc/subscriptions.json"), JSON.stringify([{ box: "tick", handler: "cron-demo" }]));
+  await fs.writeFile(join(tree, "etc/config.json"), JSON.stringify({ jobs: [{ box: "tick", every: 3_600_000, name: "beat", body: { rest: 300 } }] }));
+  db.add("crontest", { store: join(home, "instances/crontest/runtime.db") });
+  const src = await dirSource(tree);
+  await router.bootRow("crontest", { kind: "tree", root: src.root, objects: src.objects });
+  await router.hydrate("crontest");
+  const cronLine = (re: RegExp) => lines.some((l) => l.startsWith("[crontest]") && re.test(l));
+  await until("cron-demo woken", async () => cronLine(/cron-demo step 2 → finished/) || undefined, 20_000);
+  check(cronLine(/^\[crontest\] cron: beat → tick as /), "a job from the tree's etc/config.json, carried by its genesis: its cron event admitted at boot");
+  check(cronLine(/cron-demo step 1 → waiting/), "the cron event started cron-demo's thread, which rested on its deadline");
+  check(cronLine(/cron-demo step 2 → finished/), "the waker woke it at the deadline and it finished");
+  const next = router.cron.of("crontest")[0]?.next ?? 0;
+  check(next - Date.now() > 3_500_000, "the job's next firing is an hour on, not a burst");
+  await fs.rm(tree, { recursive: true, force: true });
   await router.stop();
   await fs.rm(dir, { recursive: true, force: true });
 } catch (e) {
@@ -175,9 +202,9 @@ const kr = spawnSync(kernel, ["fuel", clockDb], { encoding: "utf8" });
 const shellFuel = kr.stdout.split("\n").filter((l) => l.endsWith("\tshell")).map((l) => Number(l.split("\t")[0]));
 check(kr.status === 0 && shellFuel.length === 1 && shellFuel[0] >= 100_000_000 && shellFuel[0] < CLOCK_LIMIT, `the shell's step burnt at least the 2 × 50 ms it waited, under the limit (${shellFuel})`);
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb, clockDb], { encoding: "utf8" });
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), join(home, "instances/zigtest/runtime.db"), fuelDb, clockDb, join(home, "instances/crontest/runtime.db")], { encoding: "utf8" });
 process.stdout.write(r.stdout);
-check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 3, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
+check(r.status === 0 && (r.stdout.match(/identical .*the source store reproduced exactly/g) ?? []).length === 4, "the stores the Zig kernel wrote replay to themselves exactly, twice over (Zig against Zig)");
 
 rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `serve: ${failures} FAILED\n` : "serve: all ok\n");

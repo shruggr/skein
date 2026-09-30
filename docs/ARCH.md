@@ -247,6 +247,13 @@ them judging anything (the instance does, through its front door):
 - **The waker** is the router's timer: the kernel reports its sleepers; the
   router keeps each instance's earliest deadline, and when it comes it
   hydrates the instance and admits the wake.
+- **The clock** (#60, `src/host/cron.ts`): the router admits each genesis's
+  `jobs` as plain `cron` events into their boxes when they are due (`every`
+  from the host's start, `at` once, host.db `cron_fired`; a missed firing made
+  up once, no burst), hydrating an idle-stopped instance only when something
+  in it subscribes the box. `skein-host event <handle> <box> [json]` admits
+  one by hand, through a router of its own (refused while one serves the
+  host).
 - **Closing** (#61): `Router.close()` stops everything the router started —
   the waker's, reaper's and ledger's timers (the owed fuel written), its
   servers, the feeds' and the broadcaster's SSE clients, the libp2p nodes and

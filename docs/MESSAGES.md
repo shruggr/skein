@@ -131,9 +131,16 @@ format is refused (`kernel-zig/src/log.zig` has the shapes).
   message with no `replyTo` is routed by subscription on `(sender, box)`,
   first match wins; the handler gets `{message, body, box, sender}`. No
   subscription: recorded, nothing runs.
-- **Events** are the host's feeds (#29: headers, proofs, statuses) and the
-  front door's writes (`:ack`; #51: an accepted libp2p message, `p2p` in
-  `libp2p:<topic>`, below), routed by box or `subject`.
+- **Events** (plain entries: no sender) are the host's feeds (#29: headers,
+  proofs, statuses), the front door's writes (`:ack`; #51: an accepted
+  libp2p message, `p2p` in `libp2p:<topic>`, below), and the router's clock
+  (#60: a job's `{kind: "cron", name?, due, …body}` in the job's box, when it
+  is due; `skein-host event` admits one by hand). An event goes to the thread
+  awaiting its `subject`, else to the first subscription **with no sender**
+  whose box is the entry's (or that names no box); none: recorded, nothing
+  runs. The handler gets `{event, box, subject?}`. A mail message never
+  becomes an event: a program that wants a start signal from the operator
+  takes a job, or its owner's mail in a box it subscribes with `$owner`.
 - **Wakes** are a sleeper's deadline, one entry each — or, for a thread
   resting on a libp2p `receive`, the arrival of a frame on its stream (#51).
 

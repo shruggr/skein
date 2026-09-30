@@ -38,8 +38,11 @@ bin/<name>.json          optional: the program record's {inputs, services, descr
 etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
                                    feeds: [{kind: "headers", url, box?}]  (the router holds them, #33; statuses: the host's broadcaster, #58),
                                    owner: {messagebox: url},  (#40: the owner's messagebox, the one peer a genesis names)
-                                   libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]}}
-                                   (#51: the router's libp2p host runs a node for the instance)
+                                   libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]},
+                                   (#51: the router's libp2p host runs a node for the instance),
+                                   jobs: [{box, body?: {…}, every: ms | at: ms since the epoch, name?}]}
+                                   (#60: the router admits {kind: "cron" unless body names one, name, due, …body}
+                                   as a plain event into box when each is due; docs/VM.md, "Threads, nodes, steps")
 etc/subscriptions.json   required: [{sender?: key, box?, handler}]
 etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op}]; default the stock routes
 etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads

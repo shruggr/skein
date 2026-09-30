@@ -7,7 +7,10 @@
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}],
-//             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]}}
+//             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
+//             jobs?: [{box, body?, every: ms | at: ms, name?}]}
+//            (`jobs`, #60: the router is the clock — cron.ts — admitting a plain
+//            `cron` event into `box` when each is due)
 //            (`libp2p`, #51: the router's libp2p host runs a node for the instance, subscribes
 //            `topics` and serves `protocols`; each message or frame is a front-door call routed
 //            by its `libp2p:<topic | protocol>` route)
@@ -33,6 +36,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import type { Kernel } from "./kernel.ts";
 import type { FeedSpec } from "./feeds.ts";
+import { jobsIn, type JobSpec } from "./cron.ts";
 
 /** Session expiry (#33 part 2, #40): the instance's own policy, judged against the in-memory session's stamp (a day). */
 export const SESSION_DEFAULTS: Record<string, string> = { sessionTtlMs: "86400000" };
@@ -74,6 +78,8 @@ export interface Genesis2Config {
   /** Code genesis (#51): libp2p for the instance (a tree's config names its own), and extra routes after the stock ones. */
   libp2p?: Libp2pSpec;
   extraRoutes?: RouteSpec[];
+  /** Jobs the router fires for the instance (#60; code genesis — a tree's config names its own). */
+  jobs?: JobSpec[];
   /** A mailbox instance (#40): only the front door and the messagebox, keeping mail for `owner` from anyone. */
   mailbox?: boolean;
   /** The owner's messagebox URL (#40): the one peer a genesis names (`defaults.ownerMessagebox`). */
@@ -162,6 +168,8 @@ export interface ConfigSpec {
   owner?: { messagebox?: string };
   /** libp2p (#51): the topics the router subscribes for the instance, the protocols it serves, the node's own listen addresses. */
   libp2p?: Libp2pSpec;
+  /** Periodic and one-time jobs (#60, cron.ts): a plain `cron` event into `box` when each is due. */
+  jobs?: JobSpec[];
 }
 
 /**
@@ -194,6 +202,8 @@ export interface System {
   reads: Array<{ caller?: Uint8Array; op: string }>;
   /** libp2p (#51): what the router's libp2p host does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
+  /** Jobs (#60): the router admits a `cron` event into each one's box when it is due. */
+  jobs?: JobSpec[];
 }
 
 /** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those routes.json lacks). */
@@ -272,6 +282,7 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
+    ...(jobsIn(config.jobs ?? c.jobs)),
     ...resolveRoutes(c, programs, p2p.routes, reads),
     ...(p2p.libp2p ? { libp2p: p2p.libp2p } : {}),
   };
@@ -323,6 +334,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
     ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}),
+    ...(s.jobs ? { jobs: s.jobs } : {}),
   };
 }
 

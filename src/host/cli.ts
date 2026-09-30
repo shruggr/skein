@@ -14,6 +14,7 @@
 //   skein-host roster [--for <handle> | --deploy]
 //   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
 //   skein-host peers <handle> add <key> <mailbox-url> [--handle h@d] | remove <key> | list
+//   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
@@ -42,6 +43,11 @@
 // enabled agent's key and origin into each row's address book that way (the
 // roster is a configuration act; ROSTER.md carries the names for the model).
 // Nothing registers itself anywhere: a key in no address book is "no route".
+// `event` (#60) admits one plain event into a box of an instance now, as the
+// router's clock admits a job's (cron.ts): the JSON object given (default
+// kind "cron", due now), through a router of its own, closed afterwards —
+// so only while no router serves the host (it refuses if one answers at
+// SKEIN_HOST_URL / SKEIN_ROUTER_PORT: a store has one kernel).
 // `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
@@ -127,6 +133,7 @@ const USAGE = `usage:
   skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]   an address-book entry: where the agent delivers to <key>
   skein-host peers <handle> remove <key>
   skein-host peers <handle> list                          its address book: key, mailbox URL, handle, source
+  skein-host event <handle> <box> [json]                  admit one plain event now (default {kind: "cron", due: now}); the router must be down
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
@@ -228,6 +235,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await subscribeCmd(db, rest, env);
       case "peers":
         return await peersCmd(db, rest, env);
+      case "event":
+        return await eventCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -355,6 +364,56 @@ async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   } finally {
     await s.close?.();
   }
+}
+
+/**
+ * `skein-host event <handle> <box> [json]` (#60): one plain event admitted
+ * into `box` now — the admission a job's firing is (Router.admitEvent, the
+ * stamp the router's) — and the steps it starts run, before the router it
+ * went through is closed. That router is this command's own, a one-shot's
+ * (no jobs, #61's close), so a router serving the host must not be running:
+ * its kernel holds the instance's store.
+ */
+async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const [handle, box, json, ...more] = rest;
+  if (!handle || !box || more.length) { env.err(USAGE); return 2; }
+  const row = db.get(handle);
+  if (!row) { env.err(`skein-host event: no instance ${handle}`); return 1; }
+  if (row.status !== "enabled") { env.err(`skein-host event: ${handle} is disabled`); return 1; }
+  let given: unknown = {};
+  if (json !== undefined) {
+    try { given = JSON.parse(json); } catch (e) { env.err(`skein-host event: the event is not JSON: ${(e as Error).message}`); return 2; }
+  }
+  if (!given || typeof given !== "object" || Array.isArray(given)) { env.err("skein-host event: the event is a JSON object"); return 2; }
+  const running = await routerAt(env.vars);
+  if (running) {
+    env.err(`skein-host event: a router serves this host at ${running}: its kernel holds ${handle}'s store, and a second one must not write it. Stop it first (skein-host event is for a host that is down; a running host's jobs come from the genesis, etc/config.json \`jobs\`)`);
+    return 1;
+  }
+  const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
+  try {
+    const o = given as Record<string, unknown>;
+    const event = { ...o, kind: o.kind ?? "cron", ...(o.kind === undefined && o.due === undefined ? { due: Date.now() } : {}) };
+    const e = await router.admitEvent(handle, box, event);
+    await router.settled();
+    env.out(`${handle}: ${String(event.kind)} event admitted into ${box} as ${e}`);
+    return 0;
+  } catch (e) {
+    env.err(`skein-host event ${handle}: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await router.close();
+  }
+}
+
+/** The URL of a router answering for this host (its /manifest.json), if one does. */
+async function routerAt(vars: Env["vars"]): Promise<string | undefined> {
+  const base = (vars.SKEIN_HOST_URL || `http://127.0.0.1:${vars.SKEIN_ROUTER_PORT || 8100}`).replace(/\/+$/, "");
+  try {
+    const r = await fetch(`${base}/manifest.json`, { signal: AbortSignal.timeout(2000) });
+    const m = await r.json() as { metanet?: unknown };
+    return r.ok && m?.metanet ? base : undefined;
+  } catch { return undefined; }
 }
 
 /**
