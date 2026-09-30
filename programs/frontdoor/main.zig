@@ -28,8 +28,12 @@
 //! The reads table (the genesis's `reads`, from etc/reads.json):
 //!   [{caller?: <key>, op}] — no caller: anyone.
 //! A handler gets (dag-cbor) {caller?, method, path, route, query, headers,
-//! body, contentType, session?: {payload, signature, nonce, yourNonce}} and
-//! answers {status, type?, body: bytes, admit?, then?}. A handler never sees
+//! body, contentType, session?: {payload, signature, nonce, yourNonce},
+//! match} — `match` the routes-table entry that matched, whatever else it
+//! carries (#52: the static handler's `root`, `index`) — and answers
+//! {status, type?, body: bytes, headers?: {name: value}, admit?, then?};
+//! its `headers` go out with the answer but for content-type (`type`) and
+//! the x-bsv-* ones (the front door's). A handler never sees
 //! the session table; a message it admits carries the sender key, the 104
 //! signature and both nonces, so its authorship verifies from the log alone.
 //!
@@ -220,17 +224,27 @@ fn invoke(a: Allocator, r: Value, req: Value, caller: ?[]const u8, proof: ?Value
     const ct = brc.headerOf(req.get("headers"), "content-type") orelse "";
     try h.put("contentType", cbor.string(std.mem.trim(u8, ct[0 .. std.mem.indexOfScalar(u8, ct, ';') orelse ct.len], " ")));
     try h.put("session", proof);
+    // #52: the routes-table entry that matched, as the genesis holds it (a handler's own settings: static's root, index).
+    try h.put("match", r);
     const out = sk.callValue(a, prog, func, h.value()) catch |err| {
         if (err == error.ImportFailed) return jsonError(a, 500, "ERR_INTERNAL", sk.lastError());
         return err;
     };
-    return .{
+    var resp = Resp{
         .status = @intCast(Value.intOf(out.get("status")) orelse 200),
         .type = Value.str(out.get("type")) orelse "application/json",
         .body = Value.bytesOf(out.get("body")) orelse "",
         .admit = out.get("admit"),
         .then = out.get("then"),
     };
+    // #52: the handler's own headers (ETag, Location, Allow, …), but for the
+    // content type (its `type`) and the BRC-104 headers (the front door's).
+    if (out.get("headers")) |hs| if (hs == .map) for (hs.map) |x| {
+        const v = Value.str(x.value) orelse continue;
+        if (std.ascii.eqlIgnoreCase(x.key, "content-type") or std.ascii.startsWithIgnoreCase(x.key, "x-bsv-")) continue;
+        try resp.headers.append(a, .{ .name = try std.ascii.allocLowerString(a, x.key), .value = v });
+    };
+    return resp;
 }
 
 // ---------------------------------------------------------------- sessions

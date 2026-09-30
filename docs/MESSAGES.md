@@ -80,7 +80,24 @@ only when a step makes it; a call's is not recorded).
   then the longest prefix. `auth` defaults to BRC-104; `"none"` is for open
   routes (an overlay's submit and lookup). The handler is an in-VM call of
   `program`'s `fn` with `{caller?, method, path, route, query, headers, body,
-  contentType, session?}`; it answers `{status, type?, body, admit?, then?}`.
+  contentType, session?, match}` (`match`: the routes-table entry that
+  matched, with any settings of the handler's own, #52); it answers
+  `{status, type?, body, headers?, admit?, then?}`. Its `headers` go out
+  with the answer, but for `content-type` (its `type`) and the `x-bsv-*`
+  ones (the front door's).
+- **Static files** (#52, `programs/static`): the handler for a site. A route
+  `{prefix | path, program: "static", fn: "get", auth?: "none", root?,
+  index?}` answers `GET`/`HEAD` with the file at `<root>/<path>` in the
+  `main` head's tree — `path` the route past the prefix, percent-decoded;
+  `root` default the tree's top; a path ending in `/` (or an exact route on
+  a directory) its `index`, default `index.html`; a directory without the
+  `/` a 301 to it. `type` comes from the extension (html, css, js, mjs,
+  json, map, svg, png, jpg, gif, webp, ico, txt, md, wasm, woff2, pdf; else
+  `application/octet-stream`). The `ETag` is the blob's CID (git-raw,
+  sha1), and `If-None-Match` naming it is a 304. 404 for a missing file, a
+  non-file (link, submodule), a `..` segment, a NUL or a bad escape (nothing
+  outside the root is served); 405 for another method (`Allow: GET, HEAD`).
+  A read: no entry, nothing written.
 - **Reads** (the genesis's `reads`, from `etc/reads.json`): `[{caller?: <key>,
   op}]`. A route with `read: op` answers only a caller the table allows (no
   caller: anyone); others get 403, signed. The stock reads: the owner may

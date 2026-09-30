@@ -44,7 +44,8 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
                                    (#60: the router admits {kind: "cron" unless body names one, name, due, …body}
                                    as a plain event into box when each is due; docs/VM.md, "Threads, nodes, steps")
 etc/subscriptions.json   required: [{sender?: key, box?, handler}]
-etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op}]; default the stock routes
+etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}]; default the stock routes
+                         (root, index: the static handler's, #52)
 etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
@@ -66,6 +67,17 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
   writes `etc/routes.json` replaces the stock routes whole (include them to
   keep the messagebox); likewise `etc/reads.json`.
+- **Static files** (#52): the kernel installs the `static` module in every
+  store (pinned, `kernel-zig/src/programs.zig`) but no genesis names it; a
+  tree that serves files wires it — `bin/static.cid` (the pinned CID, or
+  its own build as `bin/static.wasm`), optionally `bin/static.json`
+  (`{"inputs": {}, "description": …}`), and a route to it in
+  `etc/routes.json`, e.g. `{"prefix": "/site", "program": "static", "fn":
+  "get", "auth": "none", "root": "www"}` (and, for the site's root,
+  `{"path": "/", …, "root": "www"}`). `root` and `index` are the route's
+  settings, passed to the handler as the entry that matched
+  (docs/MESSAGES.md, "Static files"). The files are the tree's own
+  (`www/…`), served from the `main` head's tree as it stands.
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
   where the instance delivers what it sends its owner. Unset, the host's
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)

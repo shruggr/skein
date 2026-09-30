@@ -49,7 +49,7 @@ src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs` (replay is `skein-kernel replay`)
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        the stock programs, all Zig (#54): run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop), messagebox, frontdoor, resolve, wire-probe (a test); lib/ (the `skein` imports and the helpers over them)
+programs/        the stock programs, all Zig (#54): run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop), messagebox, frontdoor, resolve, static (files from the tree through the routes, #52; installed, wired per tree), wire-probe (a test); lib/ (the `skein` imports and the helpers over them)
 scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
 wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (the shell's and the wallet's also in src/runtime/programs.ts)
 ```

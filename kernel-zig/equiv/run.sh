@@ -86,6 +86,10 @@ echo "== overlay services (#36): programs/overlay built and tested; submit/looku
 (cd "$kz/../programs/overlay" && mise exec -- zig build && mise exec -- zig build test) || { echo "FAIL programs/overlay build or tests"; status=1; }
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
+echo "== static files (#52): programs/static tested; a tree's files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); nothing written; replayed"
+(cd "$kz/../programs/static" && mise exec -- zig build test) || { echo "FAIL programs/static tests"; status=1; }
+"${node[@]}" "$kz/equiv/static.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 

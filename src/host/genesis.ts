@@ -133,9 +133,11 @@ export const MAILBOX_SUBSCRIPTIONS: SubscriptionSpec[] = [
  * A front-door route as a system writes it (etc/routes.json, #40): an exact
  * `path` or a `prefix`, the handler program (a bin/ name or a CID) and its
  * function; `auth: "none"` for an open route; `read` an op the reads table
- * must allow the caller.
+ * must allow the caller. `root` and `index` are the static handler's (#52:
+ * the directory of the tree it serves, a directory's file), passed to the
+ * handler as the route entry that matched.
  */
-export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string }
+export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; root?: string; index?: string }
 /** A read permission as a system writes it (etc/reads.json): a caller (hex or `$owner`; absent: anyone) may call routes marked `read: op`. */
 export interface ReadSpec { caller?: string; op: string }
 
@@ -198,7 +200,7 @@ export interface System {
   tree?: CID;
   feeds?: FeedSpec[];
   /** The front door's routes and reads (#40). */
-  routes: Array<{ path?: string; prefix?: string; program: CID; fn: string; auth?: "none"; read?: string }>;
+  routes: Array<{ path?: string; prefix?: string; program: CID; fn: string; auth?: "none"; read?: string; root?: string; index?: string }>;
   reads: Array<{ caller?: Uint8Array; op: string }>;
   /** libp2p (#51): what the router's libp2p host does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
@@ -239,7 +241,7 @@ export function resolveRoutes(c: Pick<Genesis2Config, "owner" | "infer">, progra
     }
     let program = programs[r.program];
     if (!program) { try { program = parseCid(r.program); } catch { continue; } }
-    out.push({ ...(r.path !== undefined ? { path: r.path } : { prefix: r.prefix! }), program, fn: r.fn, ...(r.auth === "none" ? { auth: "none" as const } : {}), ...(r.read ? { read: r.read } : {}) });
+    out.push({ ...(r.path !== undefined ? { path: r.path } : { prefix: r.prefix! }), program, fn: r.fn, ...(r.auth === "none" ? { auth: "none" as const } : {}), ...(r.read ? { read: r.read } : {}), ...(typeof r.root === "string" ? { root: r.root } : {}), ...(typeof r.index === "string" ? { index: r.index } : {}) });
   }
   const rs: System["reads"] = [];
   for (const r of reads) {
