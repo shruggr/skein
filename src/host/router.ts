@@ -705,8 +705,9 @@ export class Router {
       const t = await l.kernel.invoke(a.then.program, a.then.fn, a.then.arg, { now: stampMs(this.now()) });
       this.charge(handle, caller, `${route} (then)`, t.fuel);
       if (!t.ok) return json(500, { status: "error", code: "ERR_INTERNAL", description: t.error });
-      const r = dagCbor.decode(t.result) as { status?: number; type?: string; body?: Uint8Array };
-      return { status: r.status ?? 200, headers: { "content-type": r.type ?? "application/json" }, body: r.body ?? new Uint8Array() };
+      // Its headers pass through too (#57: a pending overlay submit's 503 carries Retry-After).
+      const r = dagCbor.decode(t.result) as { status?: number; type?: string; headers?: Record<string, string>; body?: Uint8Array };
+      return { status: r.status ?? 200, headers: { ...r.headers, "content-type": r.type ?? "application/json" }, body: r.body ?? new Uint8Array() };
     }
     return { status: a.status, headers: a.headers, body: a.body };
   }
