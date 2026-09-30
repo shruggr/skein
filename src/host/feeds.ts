@@ -246,10 +246,12 @@ export class Feeds {
   /** The declared feeds of `handle`. */
   of(handle: string): FeedSpec[] { return this.declared.get(handle) ?? []; }
 
-  stop(): void {
+  /** Close every connection (no reconnect); resolves once their loops have ended. */
+  async stop(): Promise<void> {
     this.stopped = true;
-    for (const s of this.sse.values()) void s.stream.stop();
+    const streams = [...this.sse.values()].map((s) => s.stream.stop());
     this.sse.clear();
+    await Promise.all(streams);
   }
 
   /** Queue an event for `handle` (bounded), and drain the queue serially. */

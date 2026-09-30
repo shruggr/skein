@@ -247,6 +247,12 @@ them judging anything (the instance does, through its front door):
 - **The waker** is the router's timer: the kernel reports its sleepers; the
   router keeps each instance's earliest deadline, and when it comes it
   hydrates the instance and admits the wake.
+- **Closing** (#61): `Router.close()` stops everything the router started —
+  the waker's, reaper's and ledger's timers (the owed fuel written), its
+  servers, the feeds' and the broadcaster's SSE clients, the libp2p nodes and
+  every kernel it spawned. `skein-host run`'s shutdown ends with it, and so
+  does every one-shot command that builds a router (`add --boot/--packet`),
+  which then exits.
 - **The oracle** (#18): one master secret (`$SKEIN_HOME/master.key`), a
   per-instance root key derived from it with BRC-42/43 (`[2, "skein
   instance"]`, key ID = the handle, self), a ProtoWallet each

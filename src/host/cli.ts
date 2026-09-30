@@ -170,13 +170,17 @@ export async function main(argv: string[], env: Env): Promise<number> {
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
         if (v.boot || v.packet) {
           // The loader (#4): pre-fill the new store and write its genesis from the tree (or restore a checkpoint).
+          // A one-shot (#61): the router it boots through is closed before `add` returns, so the process exits.
+          const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
           try {
             const src = await bootSourceOf(v, r);
-            const b = await new Router({ ...routerOptions(db, env), idleMs: 0 }).bootRow(handle, src);
+            const b = await router.bootRow(handle, src);
             env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
+          } finally {
+            await router.close();
           }
         }
         return 0;
@@ -744,7 +748,7 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
     router, supervisor, explorers, messagebox, server, port: server ? (server.address() as { port: number }).port : undefined,
     async stop() {
       server?.close();
-      await Promise.all([router.stop(), supervisor.stop()]);
+      await Promise.all([router.close(), supervisor.stop()]);
     },
   };
 }

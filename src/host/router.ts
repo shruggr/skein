@@ -203,6 +203,7 @@ export class Router {
   /** The fuel of calls not yet written to the ledger: instance\0caller\0op → {calls, fuel}. */
   private owed = new Map<string, { calls: number; fuel: number }>();
   private stopped = false;
+  private closing?: Promise<void>;
   servers: Server[] = [];
   port = 0;
 
@@ -255,18 +256,37 @@ export class Router {
     }
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stop everything this router started (#61), once: the waker's, the
+   * idle reaper's and the ledger's timers (the owed fuel written first), its
+   * servers and their connections, the header feeds' and the broadcaster's
+   * SSE clients, the libp2p nodes, and every kernel process it spawned — one
+   * still hydrating included. Afterwards nothing of it keeps the process
+   * alive: `skein-host run`'s shutdown and every one-shot command that builds
+   * a router (`add --boot/--packet`) end with it.
+   */
+  close(): Promise<void> {
+    this.closing ??= this.shutdown();
+    return this.closing;
+  }
+
+  /** The same as `close()`. */
+  stop(): Promise<void> { return this.close(); }
+
+  private async shutdown(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.timer);
     clearInterval(this.idleTimer);
     clearInterval(this.ledgerTimer);
     this.flushLedger();
-    for (const s of this.servers) s.close();
-    this.feeds.stop();
-    await this.arc?.stop();
-    await this.p2p?.stop();
+    const closed = this.servers.map((s) => new Promise<void>((r) => { s.close(() => r()); s.closeAllConnections(); }));
+    this.servers = [];
+    await Promise.all([this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
+    // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
+    await Promise.all([...this.loading.values()].map((p) => p.catch(() => {})));
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
+    await Promise.all(closed);
   }
 
   /**
