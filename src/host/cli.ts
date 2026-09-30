@@ -607,11 +607,12 @@ export interface Host {
 /**
  * The oracle (#18, oracle.ts): every instance's wallet is a ProtoWallet over a
  * key derived from the router's master secret (key ID = the handle); the
- * router's BRC-104 identity is another child of it.
+ * router's BRC-104 identity is another child of it, and so is its attest key
+ * (#62), which signs every recorded call it answers.
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "attestKey"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle) };
+  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), attestKey: oracle.attestKey() };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */

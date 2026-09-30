@@ -74,7 +74,7 @@ let router: Router | undefined;
 const routerFor = (h: string, db: HostDb) => {
   const oracle = new Oracle(masterKey({}, h));
   return new Router({
-    db, walletFor: (row) => oracle.wallet(row.handle), home: h, port,
+    db, walletFor: (row) => oracle.wallet(row.handle), attestKey: oracle.attestKey(), home: h, port,
     owner: ownerId, infer: inferId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: h } },
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
   });

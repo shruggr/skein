@@ -26,6 +26,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import type { HttpRequest, HttpResponse } from "../../src/host/kernel.ts";
 import { Router } from "../../src/host/router.ts";
+import { Oracle } from "../../src/host/oracle.ts";
 import { encode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { rawCid } from "../../src/runtime/programs.ts";
@@ -67,7 +68,7 @@ async function network(r: HttpRequest): Promise<HttpResponse> {
 const hostDb = new HostDb(join(home, "host.db"));
 hostDb.add("fetchtest", { store: db });
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(new PrivateKey("1111", 16)), home,
+  db: hostDb, walletFor: () => ephemeralWallet(new PrivateKey("1111", 16)), home, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
   owner: ownerId, idleMs: 0, http: network, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   genesis: { subscriptions: [{ box: "fetch", sender: ownerId, handler: FETCH_CID }] },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },

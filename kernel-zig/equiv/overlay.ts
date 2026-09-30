@@ -60,6 +60,7 @@ import { HostDb } from "../../src/host/instances.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
 import { libp2pKey, peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
+import { Oracle } from "../../src/host/oracle.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -139,7 +140,7 @@ const owner = key("2222").toPublicKey().toString();
 const arcade = await FakeArcade.start();
 const posted = (txid: string) => arcade.posts.filter((b) => FakeArcade.txOf(b).id("hex") === txid);
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0,
+  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
   kernel: { command: kernel, env: { SKEIN_HOME: home } },
   arc: { url: arcade.url, token: "the-host-arcade-token", events: arcade.eventsUrl },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },

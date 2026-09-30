@@ -190,7 +190,7 @@ What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md).
   headers?, body?}` → response `{status, headers, body}`, answered by the host
   (`serve`: the router's `http` frame; `src/host/kernel.ts` answers with the
   router's handler — a test's fake ARC, or `fetch` when `SKEIN_HTTP=fetch` —
-  else refuses) and attested like
+  else refuses) and attested (signed by the router, #62: "Format 4") like
   `wallet` (op `http`): replay reads the answer from the record and
   never touches the network. Components use standard `wasi:http` instead
   (#15, "Components" → "wasi:http"), which reaches this same host function
@@ -199,7 +199,7 @@ What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md).
 - **`libp2p(req, len, out, cap)`** (#51): a dag-cbor request `{op: publish |
   dial | send | receive | close, …}` → its result, answered by the router's
   libp2p host (`serve`: the router's `libp2p` frame, `{request, thread}`) and
-  attested (op `libp2p`; an `{error}` answer too, as the call's failure).
+  attested (op `libp2p`, signed by the router as `http` is, #62; an `{error}` answer too, as the call's failure).
   `receive` may answer `{pending}`: the step sets a deadline and rests, and a
   wake before the deadline steps it only if its tip's last recorded call is
   that pending receive (`restsOnStream`). Components call the typed
@@ -516,10 +516,40 @@ output at most 64 MiB. `http_test.zig` stubs it; `test/call/probe.wasm`
 (`test/call/probe.zig`) is the probe `src/host/call.test.ts` drives. The
 docs: `docs/VM.md`, "Calls".
 
+### Format 4 (issue #62)
+
+The state record's `format` is 4 (`index.FORMAT`); a store in an older format
+is refused for running ("before format 4": start a new store: re-genesis);
+read-only uses (`dump`, `fuel`, `replay` as a source) still open it. Entries
+are format 3's. What changed is the recorded call (`scheduler.zig` `attest`,
+`attest.zig`): an `http` or `libp2p` answer comes from the router as
+`{answer, attest: {stamp, key, signature}}` (a bare answer from a host that
+does not attest: the browser's page, a test's), and the record gains
+`attest`:
+
+```
+{kind: "attested", thread, step, i, op, request: bytes, result: bytes, attest?: {stamp, key: bytes(33), signature: bytes}}
+preimage  dag-cbor {op, instance: <genesis handle>, request: sha256(request), response: sha256(result), stamp}
+```
+
+`signature` is DER ECDSA over sha256(preimage) by the router's attest key
+(`[2, "skein router"]` / `"attest"`, `src/host/oracle.ts`), which the genesis
+names (`attest: bytes(33)`, checked by `log.isGenesis`). When the genesis
+names one, the kernel checks each answer's attestation before recording it (a
+bad or missing one fails the call; nothing is recorded), and replay checks
+each recorded one (`Witness`): a missing one, another key, or a signature that
+does not verify over the recorded bytes is a divergence
+(`<thread> step n call i (http): the attestation does not verify`). A genesis
+without `attest` asks for none. Replay keeps the record's `attest`, so a
+replay reproduces its source exactly. The vector: `test/fixtures.ts` makes an
+attestation with the TypeScript oracle (`attest` in `fixtures.json`), and
+`tests.zig` checks the preimage bytes, the signature, and that a tampered
+response, stamp, op or instance, a missing attestation and another key fail.
+
 ### Format 3 (issue #40)
 
-The state record's `format` is 3 (`index.FORMAT`); a store in an older format
-is refused ("before format 3": start a new store). An entry is `genesis |
+The state record's `format` was 3: a store in an older format is refused
+("before format 3": start a new store). An entry is `genesis |
 mail | wake | event+box` (`log.zig`). There are no envelope, outcome or
 `:auth`/`:mail` entries and no `emit`/`resolve` imports: a message that
 arrived is a **mail record** `{kind: "mail", op: "put", sender, recipient,
@@ -681,10 +711,10 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 
 | check | what | result (2026-09-29, #40) |
 |---|---|---|
-| `zig build test` | format 3's records (mail, genesis routes/reads) and, kept from format 2, §7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures src/runtime's formats make (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI; **wasi:http** (#15: `http.zig`, `http_test.zig`): the recorded-call request shape, and the `fetch` component under a stand-in host | 38/38 |
+| `zig build test` | format 4's host attestations (#62: the preimage and signature of a vector the TypeScript oracle made, tampered and missing ones refused: `attest.zig`, `test/fixtures.ts`); format 3's records (mail, genesis routes/reads) and, kept from format 2, §7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures src/runtime's formats make (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI; **wasi:http** (#15: `http.zig`, `http_test.zig`): the recorded-call request shape, and the `fetch` component under a stand-in host | 47/47 |
 | `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25; `equiv/shell-cases.ts`) through `skein-kernel shell`, against the results recorded from the TypeScript shell before it was deleted (`equiv/shell-expected.json`, #55): stdout, stderr, exit code, tree CID (none of which carries fuel). Then (#34) the same cases with every plain preview1 tool (coreutils, find, diff/cmp, jq, grep, tree, awk, sed, qjs/node, python/python3) made a component with the preview1 adapter, against the modules | 71/71 identical; as components 66/71 identical, the other 5 differing only in a printed exit status above 1 (the adapter's ok/err) |
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
-| `equiv/replays.ts` over `equiv/corpus.ts` | 16 logs: 9 agents (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, two agents, and `gen-fuel`: `fuelPerStep` 4·10^6, where a step runs out) and the 7 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is format 3, written by the Zig kernel as the router drives it (on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering over recorded `http`), so each source is also reproduced exactly by its replay | 16/16 identical, sources reproduced |
+| `equiv/replays.ts` over `equiv/corpus.ts` | 16 logs: 9 agents (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, two agents, and `gen-fuel`: `fuelPerStep` 4·10^6, where a step runs out) and the 7 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is written by the Zig kernel as the router drives it (format 4 since #62: every recorded `http` call attested by the router, verified again by each replay; on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering over recorded `http`), so each source is also reproduced exactly by its replay | 16/16 identical, sources reproduced |
 | `equiv/wallet.ts` | the router drives `serve` with the instance's oracle (a ProtoWallet) and a fake ARC answering the `http` import; the wallet program (#29) subscribed to an owner's box and a sender-less `chain` box — headers from regtest's genesis (an owner's message, then plain `header` event entries admitted by the router), a BRC-29 payment internalized, a spend signed through the oracle and broadcast (the posted BEEF's scripts verify under @bsv/sdk), the thread's deadline woken by the router's waker and ARC re-asked, a plain `status` entry (MINED + path) routed by its `subject` to the awaiting thread, a rejected broadcast dropping its action, a draft signed by `signAction`; then the store replayed Zig against Zig | all ok; the store reproduced exactly |
 | `equiv/boot.ts` (#4) | `skein-host system` → a system tree (one handler as .wasm bytes, a SOUL.md, a config default); `add --boot <dir>` and `add --packet` of a mined ordfs-form packet of it (`--proofs`); a wrong `--scope` refused; both genesis name the tree, `main` is it, programs from bin/; each chatted with (the loop reads SOUL.md from main) and run over main; the wallet's component build (#34) as `bin/wallet.wasm` answering a `list`; `pack --checkpoint` restored on a second host (same master key): `dump` identical, still answering; both booted stores replayed Zig against Zig | all ok; both reproduced exactly |
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains and log lines; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly |

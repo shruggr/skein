@@ -112,7 +112,7 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
     const db = new HostDb(join(home, `${handle}-host.db`));
     db.add(handle, { store: join(home, handle, "runtime.db") });
     const r = new Router({
-      db, walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (h) => oracle.peerKey(h), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
+      db, walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (h) => oracle.peerKey(h), attestKey: oracle.attestKey(), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
       kernel: { command: kernel, env: { SKEIN_HOME: home } },
       libp2p: { listen: [listen], bootstrap: [bootstrap], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
       genesis,

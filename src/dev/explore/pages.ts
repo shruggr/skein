@@ -10,6 +10,7 @@ import type { SubscriptionUpdate } from "../../runtime/subscriptions.ts";
 import { short, stampMs } from "../../runtime/log.ts";
 import { RAW } from "../../runtime/programs.ts";
 import { WALLET_CALLS, type Attested, type Emit } from "../../runtime/records.ts";
+import { ATTESTED_OPS, attestProblem } from "../../runtime/attest.ts";
 import { GIT_RAW, lookup, parseTree, readBlob, readTree } from "../../runtime/tree.ts";
 import type { Ref } from "../../runtime/types.ts";
 import { signedPart, verify } from "../../envelope.ts";
@@ -317,7 +318,8 @@ async function updateCard(w: World, t: Thread, cid: CID, u: Update): Promise<str
     if (su) parts.push(`<div class="small"><a href="/s">subscription</a> ${esc(su.op)} (${su.sender ? key(w, su.sender) : "anyone"}, ${esc(su.box)}) → ${link(w, su.handler, programOf(w, su.handler))} ${link(w, s, "(change)")}</div>`);
   }
   if (calls.length) {
-    parts.push(details(`${calls.length} attested call${calls.length === 1 ? "" : "s"}`, `<ul class="plain small">${calls.map(({ c, a }) => `<li>${link(w, c)} ${a ? `${a.i} ${esc(a.op)} ${a.op === "wallet" && a.request instanceof Uint8Array ? esc(WALLET_CALLS.get(a.request[0]) ?? `call ${a.request[0]}`) : isCID(a.request) ? `emit ${link(w, a.request)}` : ""}` : ""}</li>`).join("")}</ul>`, `calls-${cid}`));
+    const bad = calls.filter(({ a }) => a && hostAttestation(w, a)?.bad).length;
+    parts.push(details(`${calls.length} attested call${calls.length === 1 ? "" : "s"}${bad ? ` · ${bad} DIVERGED` : ""}`, `<ul class="plain small">${calls.map(({ c, a }) => `<li>${link(w, c)} ${a ? `${a.i} ${esc(a.op)} ${a.op === "wallet" && a.request instanceof Uint8Array ? esc(WALLET_CALLS.get(a.request[0]) ?? `call ${a.request[0]}`) : ""} ${hostAttestation(w, a)?.html ?? ""}` : ""}</li>`).join("")}</ul>`, `calls-${cid}`));
   }
   const res = u.result as { exitCode?: number; stdout?: unknown; stderr?: unknown; tree?: CID } | undefined;
   if (res) {
@@ -327,6 +329,19 @@ async function updateCard(w: World, t: Thread, cid: CID, u: Update): Promise<str
     }
   }
   return `<section class="card" id="u-${cid}"><div class="hd"><span>${u.step !== undefined ? `step ${u.step}` : `update ${u.seq}`} ${st(u.state)} · ${time(u.at)} · input ${entryLink(w, u.input)}</span>${link(w, cid)}</div>${parts.join("\n")}</section>`;
+}
+
+/**
+ * A recorded http/libp2p call's attestation against the genesis's attest key
+ * (#62): verified (with the host's stamp), or a divergence — what `skein-kernel
+ * replay` refuses. Nothing for a genesis with no key, or for the wallet.
+ */
+function hostAttestation(w: World, a: Attested): { html: string; bad: boolean } | undefined {
+  const g = w.genesis as { attest?: unknown; handle?: unknown } | undefined;
+  if (!g?.attest || !ATTESTED_OPS.has(a.op)) return undefined;
+  const why = attestProblem(g, a);
+  if (why) return { html: `<span class="bad">DIVERGED: ${esc(why)}</span>`, bad: true };
+  return { html: `<span class="ok">attested by the host at ${time(a.attest!.stamp)}</span>`, bad: false };
 }
 
 /** A kept record: loop turns as the conversation, anything else as JSON. */

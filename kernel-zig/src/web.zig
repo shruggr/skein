@@ -139,7 +139,7 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 3, issue #40): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 4, issue #62: host-attested recorded calls): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));
@@ -175,9 +175,10 @@ fn pWallet(_: *anyopaque, a: std.mem.Allocator, fr: []const u8) anyerror![]u8 {
     return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
 }
 
-fn pHttp(_: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror![]u8 {
+/// The page's http answer: the response bytes (a tab attests nothing), or {answer, attest} (#62).
+fn pHttp(_: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror!scheduler.Answer {
     const r = try request(a, "http", .{ .bytes = req });
-    return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+    return scheduler.Answer.of(r) orelse error.BadAnswer;
 }
 
 fn pOnSleep(_: *anyopaque, _: []const u8, _: i64) void {
