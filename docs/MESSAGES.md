@@ -313,29 +313,37 @@ answer {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?
   over `"libp2p-pubsub:"` ‖ protobuf `{1: from, 2: body, 3: seqno, 4: topic}`
   — GossipSub's StrictSign. A bad one is `reject`, and no handler runs. Then
   the handler (the route's program and fn, an in-VM call) gets the call plus
-  `key` (the 33-byte key out of `from`) and judges from state: `{verdict}`. A
-  handler that fails is `ignore` (cannot evaluate: no penalty for the
-  forwarder).
-- **The entry.** Accept returns exactly one entry to admit:
+  `key` (the 33-byte key out of `from`) and judges from state: `{verdict,
+  admit?}`. A handler that fails is `ignore` (cannot evaluate: no penalty for
+  the forwarder).
+- **The entries.** Accept returns the message's own entry first:
 
   ```
   {event: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}, box: "libp2p:<topic>"}
   ```
 
-  It re-verifies from the log alone, with no router: the publisher's key is
-  in `from`, and the signature covers topic, seqno, from and body — the same
-  guarantee as a mail record's sender, 104 signature and nonces. It routes as
-  any event: the thread awaiting its `subject` (none here), else a sender-less
-  subscription on `libp2p:<topic>`; with none it is recorded and nothing
-  runs. **Reject and ignore write nothing** — no entry, no byte.
+  and then every entry the handler returned in `admit`, unchanged — the same
+  entries the `http` side forwards for the same handler (#57: persistence is
+  not a transport concern; an overlay's `submit` on a `libp2p:<topic>` route
+  persists what `POST /submit` persists). The router appends them in order.
+  The `p2p` entry re-verifies from the log alone, with no router: the
+  publisher's key is in `from`, and the signature covers topic, seqno, from
+  and body — the same guarantee as a mail record's sender, 104 signature and
+  nonces. It routes as any event: the thread awaiting its `subject` (none
+  here), else a sender-less subscription on `libp2p:<topic>`; with none it is
+  recorded and nothing runs. **Reject and ignore write nothing** — no entry,
+  no byte (a handler's `admit` beside a reject or ignore is dropped).
 - **A redelivered message writes nothing either** (#42, decided
   2026-09-30). The event record is content-addressed (topic, from, seqno,
   signature, body), so GossipSub delivering the same message again — after
   its seen-cache expired, or from another peer — makes the same record, and
   the kernel's `unique` map (which already keeps a mail record to one
   admission) refuses a second entry for a `p2p` event record at admit: no
-  entry, no byte. The router answers GossipSub `ignore` (no forward, no
-  penalty). Other events (a feed's header or status) are not unique.
+  entry, no byte. The router stops at that refusal, and the `p2p` entry comes
+  first, so none of the handler's entries is appended either — an answer's
+  entries go in together or not at all. The router answers GossipSub
+  `ignore` (no forward, no penalty). Other events (a feed's header or status)
+  are not unique.
 - **Streams.** A frame is not signed (the stream is authenticated by Noise;
   `from` is the remote peer). The handler answers `{body?, admit?, close?,
   verdict?}`: `body` is written back on the stream as one frame, `admit`

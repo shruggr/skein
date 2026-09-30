@@ -17,13 +17,18 @@
 //! of "libp2p-pubsub:" ‖ protobuf {1: from, 2: body, 3: seqno, 4: topic} —
 //! GossipSub's StrictSign. A bad one is `reject` (the delivering peer is
 //! penalised). The handler then judges it from state and answers
-//! {verdict}; **accept** makes the one entry this call returns:
+//! {verdict, admit?}; **accept** returns, first, the message's own entry:
 //!
 //!   {event: {kind: "p2p", topic, from, seqno, signature, body}, box: "libp2p:<topic>"}
 //!
 //! — everything a reader of the log needs to verify the publisher with no
-//! router (the key is in `from`). Reject and ignore return nothing to admit.
-//! A handler that fails is `ignore` (cannot evaluate: no penalty).
+//! router (the key is in `from`) — and then every entry the handler returned
+//! in `admit`, unchanged (#57: as the `http` side forwards them, so a topic
+//! route persists what the same handler persists over HTTP). The router
+//! appends them in order and stops at the first refusal: a redelivered
+//! message's `p2p` event is refused by the kernel's `unique` index (#42), so
+//! none of the answer's entries is appended. Reject and ignore return nothing
+//! to admit. A handler that fails is `ignore` (cannot evaluate: no penalty).
 //!
 //! A stream frame is not signed (the stream is authenticated by Noise: `from`
 //! is the remote peer); the handler answers {verdict?, body?, admit?, close?}:
@@ -94,8 +99,12 @@ pub fn libp2p(a: Allocator, in: Value, call: Value) !Value {
         var entry = cbor.MapBuilder.init(a);
         try entry.put("event", ev.value());
         try entry.put("box", cbor.string(source));
-        const admit = try a.alloc(Value, 1);
+        // The p2p event first, then the handler's entries unchanged (#57): the router appends in order
+        // and stops at the first refusal, so a redelivered message (its p2p event refused) appends none.
+        const theirs: []const Value = if (out.get("admit")) |ad| (if (ad == .array) ad.array else &.{}) else &.{};
+        const admit = try a.alloc(Value, 1 + theirs.len);
         admit[0] = entry.value();
+        @memcpy(admit[1..], theirs);
         var m = cbor.MapBuilder.init(a);
         try m.put("verdict", cbor.string("accept"));
         try m.put("admit", .{ .array = admit });

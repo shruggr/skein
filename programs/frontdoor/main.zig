@@ -36,7 +36,8 @@
 //! Its fn "libp2p" (#51, libp2p.zig) is the same door for libp2p: a GossipSub
 //! message or a stream frame, routed by `libp2p:<topic | protocol>`, the
 //! message's signature verified here, the handler's verdict returned (an
-//! accepted message is one `p2p` event entry to admit).
+//! accepted message is its `p2p` event entry, then the handler's own `admit`
+//! entries, forwarded as `http` forwards them — #57).
 //!
 //! Its other function, "explore", is a route handler (explore.zig): the
 //! instance's log, threads, heads and records as JSON, behind a read rule.
