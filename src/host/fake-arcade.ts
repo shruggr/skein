@@ -106,7 +106,8 @@ export class FakeArcade {
   emit(txid: string, s: ArcadeStatus): string {
     const t = this.txs.get(txid);
     if (!t) throw new Error(`the fake Arcade never took ${txid}`);
-    Object.assign(t, s);
+    // Its status now (a reorg's SEEN_ON_NETWORK drops the block and the path).
+    this.txs.set(txid, { token: t.token, ...s });
     this.clock += 1_000_000n;
     const e: Logged = { id: String(this.clock), token: t.token, data: { timestamp: new Date().toISOString(), txid, ...s } };
     this.log.push(e);

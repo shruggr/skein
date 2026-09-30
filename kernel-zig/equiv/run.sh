@@ -67,7 +67,7 @@ else
   echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1
 fi
 
-echo "== the wallet in the VM (#29): oracle signing, plain entries, http to a fake ARC, deadline wakes; replayed"
+echo "== the wallet in the VM (#29): oracle signing, plain entries, the host broadcaster (#58) to a fake Arcade, statuses to every holder, deadline wakes, a restart resumed; replayed"
 # Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
 if command -v wasm-tools > /dev/null; then
   (cd "$kz/../wallet-zig" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }

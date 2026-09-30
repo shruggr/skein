@@ -1,25 +1,35 @@
 // The wallet in the VM (issue #29) end to end on the Zig kernel, driven by
 // the router (src/host/router.ts, #33): the instance's signing oracle a
-// ProtoWallet, a fake ARC answering the wallet program's `http` calls, the
-// owner a standard messagebox client, and plain header/status event entries
-// admitted by the router's feeds (#33 part 2: the genesis declares a fake SSE
-// header feed and an ARC callback; feeds.ts). Then the store it wrote is
-// replayed Zig against Zig (equiv/replays.ts): the oracle's and ARC's answers
-// come from the recorded calls, nothing is asked again.
+// ProtoWallet, the owner a standard messagebox client, plain header entries
+// from the router's feeds (#33 part 2: a fake SSE header feed; feeds.ts), and
+// the host's broadcaster (#58, src/host/arc.ts) in front of a fake Arcade
+// (src/host/fake-arcade.ts): the wallet program's `http` goes to the router's
+// /arc route (its genesis's walletArc, the host's default), which proxies to
+// Arcade under the host's token; Arcade's statuses come back over one SSE
+// subscription (and a webhook) and are routed to every instance holding the
+// transaction. Then the stores it wrote are replayed Zig against Zig
+// (equiv/replays.ts): the oracle's and the route's answers come from the
+// recorded calls, nothing is asked again.
 //
 // The chain is regtest from its genesis (defaults.walletNetwork): headers
 // 1..100 in an owner's message, the rest as plain `header` entries from the
-// SSE feed; the
-// owner funds the instance with a BRC-29 payment; the instance pays someone
-// (createAction: signed through the oracle, broadcast to ARC over http), the
-// thread rests awaiting the transaction's CID with a deadline — the router's
-// waker wakes it and it re-asks ARC — until ARC's callback (MINED, with the
-// merkle path: POST /callback/<handle>, a `status` entry routed by its
-// subject) proves it; a rejected broadcast gives
-// the inputs back; a draft (signAndProcess: false) is signed by signAction.
-// Then settlement (#37, settlementScenario): a rejection bubbling from A to
-// the B that spends it (settlement is state to read: nothing is delivered),
-// B's thread learning it as a new input, and a reorg re-broadcasting.
+// SSE feed; the owner funds the instance with a BRC-29 payment; the instance
+// pays a second instance, the payee, with a BRC-29 payment (createAction:
+// signed through the oracle, broadcast through the route: Arcade receives it
+// in Extended Format), the payee internalizes it, and the wallet's thread
+// rests awaiting the transaction's CID with a deadline — the router's waker
+// wakes it and it re-asks through the route — until Arcade's statuses
+// (SEEN_ON_NETWORK on the stream, SEEN_ON_MULTIPLE_NODES by webhook, MINED
+// with the merkle path on the stream) reach both instances: the wallet's
+// thread and the payee's sender-less subscription both prove it. A
+// redelivered status writes nothing. A rejected broadcast gives the inputs
+// back; a draft (signAndProcess: false) is signed by signAction. Then
+// settlement (#37, settlementScenario): a rejection bubbling from A to the B
+// that spends it, B's thread learning it as a new input, and a reorg
+// re-broadcasting. Last, a broadcast Arcade refuses for backpressure (503) is
+// posted again at the deadline (the re-ask's 404), and the host restarts
+// while Arcade moves on: the new router resumes the stream after the last
+// event id it took, and the status it missed reaches the thread.
 //
 // Issue #34, when the wallet's component build is there
 // (wallet-zig/zig-out/bin/wallet.component.wasm from `zig build component`, or
@@ -40,12 +50,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KeyDeriver, MerklePath, P2PKH, PrivateKey, Transaction, UnlockingScript } from "@bsv/sdk";
-import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { RawBox } from "../../src/client/raw.ts";
+import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import type { HttpRequest, HttpResponse } from "../../src/host/kernel.ts";
 import { Router } from "../../src/host/router.ts";
 import { decode } from "../../src/runtime/cid.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
@@ -66,8 +75,9 @@ const WALLET_CID = encode(WALLET).cid;
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-wallet-"));
 const db = join(home, "instances/wallettest/runtime.db");
+const payeeDb = join(home, "instances/payee/runtime.db");
 const key = (h: string) => new PrivateKey(h, 16);
-const KEYS = { instance: "1111", owner: "2222" };
+const KEYS = { instance: "1111", owner: "2222", payee: "3333" };
 const ownerKey = key(KEYS.owner);
 const owner = ephemeralWallet(ownerKey);
 const ownerId = ownerKey.toPublicKey().toString();
@@ -98,28 +108,12 @@ function mine(prev: Uint8Array, merkleRoot: Uint8Array, time: number): Uint8Arra
 /** A transaction's CID: bitcoin-tx (0xb1), dbl-sha2-256 (0x56) over the txid in internal order. */
 const txCid = (txid: string) => CID.createV1(0xb1, Digest.create(0x56, internal(txid)));
 
-// ---------------------------------------------------------------- a fake ARC
+// ---------------------------------------------------------------- a fake Arcade, a fake header feed (SSE)
 
-type Arc = { mode: "seen" | "reject"; posts: Uint8Array[]; gets: string[] };
-const arc: Arc = { mode: "seen", posts: [], gets: [] };
-async function fakeArc(r: HttpRequest): Promise<HttpResponse> {
-  const json = (status: number, v: unknown): HttpResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
-  if (r.method === "POST" && r.url === "https://arc.test/v1/tx") {
-    const beef = r.body!;
-    arc.posts.push(beef);
-    const tx = Transaction.fromAtomicBEEF([...beef]);
-    if (arc.mode === "reject") return json(461, { status: 461, title: "Malformed transaction", txid: tx.id("hex"), extraInfo: "rejected by the test" });
-    return json(200, { txid: tx.id("hex"), txStatus: "SEEN_ON_NETWORK", extraInfo: "", merklePath: "" });
-  }
-  const m = r.url.match(/^https:\/\/arc\.test\/v1\/tx\/([0-9a-f]{64})$/);
-  if (r.method === "GET" && m) {
-    arc.gets.push(m[1]);
-    return json(200, { txid: m[1], txStatus: "SEEN_ON_NETWORK", merklePath: "" });
-  }
-  return json(404, { title: "not found" });
-}
-
-// ---------------------------------------------------------------- a fake header feed (SSE), ARC's callback token
+const arcade = await FakeArcade.start();
+const ARC_TOKEN = "the-host-arcade-token";
+/** The transaction Arcade received last (Extended Format). */
+const lastPosted = () => FakeArcade.txOf(arcade.posts.at(-1)!);
 
 const sse: ServerResponse[] = [];
 const sseServer = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": headers\n\n"); sse.push(res); });
@@ -129,31 +123,33 @@ let sseId = 0;
 /** A header on the feed: its hex as the event's data (the router admits it as a plain `header` entry). */
 const feedHeader = async (raw: Uint8Array) => {
   for (let i = 0; !sse.length && i < 200; i++) await sleep(25);
-  sse.at(-1)!.write(`id: ${++sseId}\ndata: ${Buffer.from(raw).toString("hex")}\n\n`);
+  for (const s of sse) s.write(`id: ${++sseId}\ndata: ${Buffer.from(raw).toString("hex")}\n\n`);
 };
-const ARC_TOKEN = "arc-callback-token";
 
 // ---------------------------------------------------------------- the router, the owner and the results
 
 const hostDb = new HostDb(join(home, "host.db"));
 hostDb.add("wallettest", { store: db });
-const router = new Router({
-  // The signing oracle: a ProtoWallet (the owner's mailbox instance has a key of its own).
-  db: hostDb, walletFor: (row) => ephemeralWallet(key(row.handle === "wallettest" ? KEYS.instance : "9999")), home,
-  owner: ownerId, idleMs: 0, http: fakeArc, kernel: { command: kernel, env: { SKEIN_HOME: home } },
+hostDb.add("payee", { store: payeeDb });
+const make = () => new Router({
+  // The signing oracles: ProtoWallets (any other instance has a key of its own).
+  db: hostDb, walletFor: (row) => ephemeralWallet(key(row.handle === "wallettest" ? KEYS.instance : row.handle === "payee" ? KEYS.payee : "9999")), home,
+  owner: ownerId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  // The host's Arcade (#58): no walletArc below — a new genesis names the router's route.
+  arc: { url: arcade.url, token: ARC_TOKEN, events: arcade.eventsUrl },
+  feeds: { backoff: { min: 50, max: 500 } },
   genesis: {
     subscriptions: [{ box: "wallet", sender: ownerId, handler: WALLET_CID }, { box: "chain", handler: WALLET_CID }],
-    defaults: { walletNetwork: "regtest", walletArc: "https://arc.test", walletRecheckMs: "3000", walletFeeRate: "100" },
-    feeds: [{ kind: "headers", url: SSE_URL }, { kind: "arc-callback", token: ARC_TOKEN }],
+    defaults: { walletNetwork: "regtest", walletRecheckMs: "3000", walletFeeRate: "100" },
+    feeds: [{ kind: "headers", url: SSE_URL }],
   },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
+let router = make();
 await router.listen(0);
-const toWallet = new RawBox(owner, `http://127.0.0.1:${router.port}/@wallettest`);
-
-async function sendTo(identity: string, b: string, body: unknown): Promise<void> {
-  await toWallet.send(identity, b, body);
-}
+const port = router.port;
+const toWallet = new RawBox(owner, `http://127.0.0.1:${port}/@wallettest`);
+const toPayee = new RawBox(owner, `http://127.0.0.1:${port}/@payee`);
 
 async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_000): Promise<T> {
   const t0 = Date.now();
@@ -166,50 +162,30 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_0
 }
 
 type Result = Record<string, unknown> & { op: string };
-// Opened once the kernel has written the store (its state pointer): read through the index, following it live.
-let view!: ReturnType<typeof openStoreFile>;
+type View = ReturnType<typeof openStoreFile>;
+// Opened once the kernels have written the stores (their state pointers): read through the index, following them live.
+let view!: View;
+let payeeView!: View;
 const seen = new Set<string>();
 
-/** The wallet threads' updates, oldest first: [thread, step n, update]. */
-async function updates(): Promise<Array<{ thread: CID; update: ThreadUpdate & { kept?: CID[]; result?: { stdout: Uint8Array; stderr: Uint8Array } } }>> {
+/** The wallet threads' updates in a store, oldest first: [thread, step n, update]. */
+async function updates(v: View = view): Promise<Array<{ thread: CID; update: ThreadUpdate & { kept?: CID[]; result?: { stdout: Uint8Array; stderr: Uint8Array } } }>> {
   const out = [];
-  for (const t of await collect(view.edges.query({ kind: "thread", program: WALLET_CID }))) {
-    for (const u of (await collect(view.chains.history(t))).slice(1)) out.push({ thread: t, update: await view.get(u) as never });
+  for (const t of await collect(v.edges.query({ kind: "thread", program: WALLET_CID }))) {
+    for (const u of (await collect(v.chains.history(t))).slice(1)) out.push({ thread: t, update: await v.get(u) as never });
   }
   return out;
 }
 
-/** The result of the next wallet step to end (finished, waiting or errored) that we have not seen. */
-async function nextResult(what: string): Promise<{ result: Result; state: string; thread: CID; error?: string }> {
+/** The next unseen ended wallet step in a store whose result satisfies `pred` (others stay unseen: deadline wakes interleave). */
+async function resultWhere(what: string, pred: (r: Result, state: string, thread: CID) => boolean, ms = 30_000, v: View = view) {
   return until(what, async () => {
-    for (const { thread, update } of await updates()) {
+    for (const { thread, update } of await updates(v)) {
       const k = `${thread}/${update.step}`;
       if (seen.has(k) || update.state === "running") continue;
-      seen.add(k);
+      if (update.state === "errored") throw new Error(`${what}: a wallet step errored: ${update.error?.message}`);
       const stdout = Buffer.from(update.result?.stdout ?? []).toString().trim();
-      if (update.state === "errored") return { result: { op: "?" }, state: "errored", thread, error: update.error?.message };
-      const cid = CID.decode(Buffer.from(stdout, "hex"));
-      return { result: decode<Result>(await view.bytes(cid)), state: update.state, thread };
-    }
-    return undefined;
-  });
-}
-
-async function owned(identity: string, body: Record<string, unknown>) {
-  await sendTo(identity, "wallet", body);
-  return nextResult(String(body.op));
-}
-
-// ---------------------------------------------------------------- settlement (#37)
-
-/** The next unseen ended wallet step whose result satisfies `pred` (others stay unseen: deadline wakes interleave). */
-async function resultWhere(what: string, pred: (r: Result, state: string, thread: CID) => boolean, ms = 30_000) {
-  return until(what, async () => {
-    for (const { thread, update } of await updates()) {
-      const k = `${thread}/${update.step}`;
-      if (seen.has(k) || update.state === "running" || update.state === "errored") continue;
-      const stdout = Buffer.from(update.result?.stdout ?? []).toString().trim();
-      const result = decode<Result>(await view.bytes(CID.decode(Buffer.from(stdout, "hex"))));
+      const result = decode<Result>(await v.bytes(CID.decode(Buffer.from(stdout, "hex"))));
       if (!pred(result, update.state, thread)) continue;
       seen.add(k);
       return { result, state: update.state, thread };
@@ -217,6 +193,26 @@ async function resultWhere(what: string, pred: (r: Result, state: string, thread
     return undefined;
   }, ms);
 }
+
+/** An owner's message to an instance's `wallet` box, and the step that answers it. */
+async function owned(body: Record<string, unknown>, to = toWallet, v: View = view) {
+  const identity = to === toWallet ? key(KEYS.instance).toPublicKey().toString() : key(KEYS.payee).toPublicKey().toString();
+  await to.send(identity, "wallet", body);
+  return resultWhere(String(body.op), (r) => r.op === body.op, 30_000, v);
+}
+
+/** How many wallet steps a store has (a redelivered status must add none). */
+const steps = async (v: View) => (await updates(v)).length;
+
+/** Arcade's webhook to the router's callback route. */
+const webhook = (auth: string, body: unknown) => fetch(`http://127.0.0.1:${port}/arc/callback`, {
+  method: "POST", headers: { "content-type": "application/json", authorization: auth }, body: JSON.stringify(body),
+});
+
+/** Until the router's broadcaster has dropped `n` redeliveries in all. */
+const duplicates = (n: number) => until(`${n} redeliveries dropped`, async () => (router.arc!.stats.duplicates >= n ? true : undefined));
+
+// ---------------------------------------------------------------- settlement (#37)
 
 /**
  * A rejection after a dependent spend: A pays someone from our change, B
@@ -228,16 +224,12 @@ async function resultWhere(what: string, pred: (r: Result, state: string, thread
  * own thread is not replayed: at its deadline it finds B rejected, a new
  * input, and finishes. The results name the transactions as `mentions`.
  */
-async function settlementScenario(identity: string, someone: Uint8Array, reorg: { h102: Uint8Array; spend: string }): Promise<Record<string, unknown>> {
+async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array; spend: string }): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
-  const ownedWhere = async (body: Record<string, unknown>) => {
-    await sendTo(identity, "wallet", body);
-    return resultWhere(String(body.op), (r) => r.op === body.op);
-  };
-  const total0 = (await ownedWhere({ op: "list" })).result.total;
+  const total0 = (await owned({ op: "list" })).result.total;
 
-  const a = await ownedWhere({ op: "createAction", description: "A", outputs: [{ lockingScript: someone, satoshis: 1_000 }] });
-  const b = await ownedWhere({ op: "createAction", description: "B", outputs: [{ lockingScript: someone, satoshis: 500 }] });
+  const a = await owned({ op: "createAction", description: "A", outputs: [{ lockingScript: someone, satoshis: 1_000 }] });
+  const b = await owned({ op: "createAction", description: "B", outputs: [{ lockingScript: someone, satoshis: 500 }] });
   const txA = a.result.txid as string, txB = b.result.txid as string;
   const bTx = Transaction.fromAtomicBEEF([...(b.result.tx as Uint8Array)]);
   out.bSpendsA = bTx.inputs.some((i) => (i.sourceTXID ?? i.sourceTransaction?.id("hex")) === txA);
@@ -248,7 +240,7 @@ async function settlementScenario(identity: string, someone: Uint8Array, reorg: 
   out.rejected = {
     sameThread: r.thread.equals(a.thread), outcome: r.result.outcome, state: r.state,
   };
-  const list = await ownedWhere({ op: "list", includeSpent: true });
+  const list = await owned({ op: "list", includeSpent: true });
   out.inputsFreed = list.result.total === total0;
   out.noOutputsOfAB = !(list.result.outputs as Array<Record<string, unknown>>).some((o) => o.txid === txA || o.txid === txB);
 
@@ -266,14 +258,17 @@ async function settlementScenario(identity: string, someone: Uint8Array, reorg: 
   out.explorer = page.status === 200 && page.body.includes("bitcoin-tx") && page.body.includes("vin 0") && page.body.includes("← spends") && page.body.includes(txCid(txB).toString());
 
   // A reorg: a heavier branch from 102 drops block 103, where our first spend was proven. It is
-  // unproven again, broadcast again like a fresh one, awaited.
-  const posts = arc.posts.length;
+  // unproven again, broadcast again like a fresh one (Arcade echoes its status), awaited. Arcade
+  // saw the reorg too: the spend is SEEN_ON_NETWORK again, no path (a status already routed once:
+  // the stream's copy is dropped; the re-asks read it).
+  arcade.emit(reorg.spend, { txStatus: "SEEN_ON_NETWORK" });
+  const posts = arcade.posts.length;
   const alt103 = mine(reorg.h102, sha256d(Buffer.from("alt 103")), 1_790_000_000 + 103 * 600 + 1);
   const alt104 = mine(sha256d(alt103), sha256d(Buffer.from("alt 104")), 1_790_000_000 + 104 * 600);
-  const h = await ownedWhere({ op: "headers", headers: [alt103, alt104] });
+  const h = await owned({ op: "headers", headers: [alt103, alt104] });
   out.reorg = {
     replaced: h.result.replaced, reverted: (h.result.reverted as string[] | undefined)?.map((t) => t === reorg.spend ? "spend" : "?"),
-    reposted: arc.posts.length === posts + 1 && Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]).id("hex") === reorg.spend,
+    reposted: arcade.posts.length === posts + 1 && lastPosted().id("hex") === reorg.spend,
     state: h.state, awaited: (h.result.awaited as string[] | undefined)?.includes(reorg.spend),
   };
   return out;
@@ -284,7 +279,13 @@ async function settlementScenario(identity: string, someone: Uint8Array, reorg: 
 try {
   const { kernel: k, identity } = await router.hydrate("wallettest");
   await k.store.put(WALLET as never);
+  const { kernel: pk, identity: payeeId } = await router.hydrate("payee");
+  await pk.store.put(WALLET as never);
   view = openStoreFile(db, { readOnly: true });
+  payeeView = openStoreFile(payeeDb, { readOnly: true });
+  const g = await k.genesis() as { defaults?: Record<string, string> };
+  report.walletArc = g.defaults?.walletArc === router.arcRoute() && router.arcRoute() === `http://127.0.0.1:${port}/arc`;
+
   // The funding: mined alone at 101 (root = its txid), paying the owner.
   const fund = new Transaction();
   fund.addInput({ sourceTXID: "11".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
@@ -299,12 +300,14 @@ try {
     prev = sha256d(headers.at(-1)!);
   }
 
-  // Headers: 1..100 from the owner, 101 and 102 as plain entries from the router's SSE header feed.
-  let r = await owned(identity, { op: "headers", headers: headers.slice(0, 100) });
+  // Headers: 1..100 from the owner (to both instances), 101 and 102 as plain entries from the router's SSE header feed.
+  let r = await owned({ op: "headers", headers: headers.slice(0, 100) });
   report.headers = [r.result.added, r.result.tip];
-  for (const raw of headers.slice(100)) {
+  await owned({ op: "headers", headers: headers.slice(0, 100) }, toPayee, payeeView);
+  for (const [i, raw] of headers.slice(100).entries()) {
     await feedHeader(raw);
-    r = await nextResult("a header entry");
+    r = await resultWhere("a header entry", (res) => res.event === "header" && res.tip === 101 + i);
+    await resultWhere("the payee's header entry", (res) => res.event === "header" && res.tip === 101 + i, 30_000, payeeView);
     report.headerEntry = [r.result.event, r.result.tip];
   }
 
@@ -316,63 +319,134 @@ try {
   pay.addInput({ sourceTransaction: fund, sourceOutputIndex: 0, unlockingScriptTemplate: new P2PKH().unlock(ownerKey), sequence: 0xffffffff });
   pay.addOutput({ lockingScript: new P2PKH().lock(payTo.toHash()), satoshis: 49_800 });
   await pay.sign();
-  r = await owned(identity, {
+  r = await owned({
     op: "internalize", tx: new Uint8Array(pay.toAtomicBEEF()), description: "funding",
     outputs: [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix, derivationSuffix, senderIdentityKey: ownerId } }],
   });
   report.internalize = [r.result.txid === pay.id("hex"), r.result.status];
 
-  // Spend: pay someone 10000; signed by the oracle, broadcast to ARC, the thread awaits.
-  const someone = new P2PKH().lock(key("5555").toPublicKey().toHash()).toBinary();
-  r = await owned(identity, { op: "createAction", description: "pay someone", labels: ["out"], outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 10_000, outputDescription: "to 5555" }] });
+  // Spend: pay the payee instance 10000 (BRC-29 to its key); signed by the oracle, broadcast through the host's route, the thread awaits.
+  const p2 = Buffer.from("payee-prefix").toString("base64"), s2 = Buffer.from("payee-suffix").toString("base64");
+  const payeeScript = new P2PKH().lock(new KeyDeriver(key(KEYS.instance)).derivePublicKey([2, "3241645161d8"], `${p2} ${s2}`, payeeId, false).toHash()).toBinary();
+  r = await owned({ op: "createAction", description: "pay the payee", labels: ["out"], outputs: [{ lockingScript: new Uint8Array(payeeScript), satoshis: 10_000, outputDescription: "to the payee" }] });
   const spendTxid = r.result.txid as string;
-  const posted = Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]);
+  const posted = lastPosted();
   report.create = {
-    state: r.state, awaiting: r.result.awaiting, outcome: r.result.outcome, arc: (r.result.arc as { txStatus?: string })?.txStatus,
-    postedIsTheTx: posted.id("hex") === spendTxid, scriptsVerify: await posted.verify("scripts only"),
+    state: r.state, awaiting: r.result.awaiting, outcome: r.result.outcome, arc: (r.result.arc as { txStatus?: string; status?: number }),
+    postedIsTheTx: posted.id("hex") === spendTxid, extendedFormat: Buffer.from(arcade.posts.at(-1)!).equals(Buffer.from(posted.toEF())),
+    token: arcade.postHeaders.at(-1)!["x-callbacktoken"] === ARC_TOKEN,
+    scriptsVerify: await Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]).verify("scripts only"),
     inputs: posted.inputs.map((i) => i.sourceTXID ?? i.sourceTransaction?.id("hex")), outputs: posted.outputs.map((o) => o.satoshis),
   };
   const spendThread = r.thread;
 
-  // The deadline passes: the tick wakes the thread, it re-asks ARC, and rests again.
-  r = await nextResult("the woken callback");
-  report.woke = { same: r.thread.equals(spendThread), op: r.result.op, outcome: r.result.outcome, state: r.state, gets: arc.gets.length };
+  // The payee receives the payment: the same transaction, held in its own state.
+  const pr = await owned({
+    op: "internalize", tx: r.result.tx, description: "from wallettest",
+    outputs: [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: p2, derivationSuffix: s2, senderIdentityKey: identity } }],
+  }, toPayee, payeeView);
+  report.payeeInternalize = [pr.result.txid === spendTxid, pr.result.status];
 
-  // Mined at 103: the header, then ARC's status (MINED, with the path) as a plain entry for the transaction.
+  // The deadline passes: the tick wakes the thread, it re-asks through the route (Arcade has it: 200), and rests again.
+  r = await resultWhere("the woken callback", (res, _s, t) => t.equals(spendThread) && res.op === "callback" && res.event === undefined);
+  report.woke = { op: r.result.op, outcome: r.result.outcome, state: r.state, arc: (r.result.arc as { status?: number; txStatus?: string }), asked: arcade.gets.includes(spendTxid) };
+
+  // Arcade's statuses on the host's one stream reach both holders: the wallet's awaiting thread, the payee's subscription.
+  arcade.emit(spendTxid, { txStatus: "SEEN_ON_NETWORK" });
+  const seenW = await resultWhere("SEEN_ON_NETWORK at the wallet", (res) => res.op === "callback" && res.event === "status" && res.txid === spendTxid);
+  const seenP = await resultWhere("SEEN_ON_NETWORK at the payee", (res) => res.op === "event" && res.event === "status" && res.txid === spendTxid, 30_000, payeeView);
+  report.seen = { wallet: [seenW.thread.equals(spendThread), seenW.result.outcome, seenW.state], payee: [seenP.result.outcome, seenP.state] };
+
+  // A webhook brings the next one first; the stream's copy of it writes nothing.
+  report.webhookRefused = (await webhook("Bearer wrong", { txid: spendTxid, txStatus: "SEEN_ON_MULTIPLE_NODES" })).status;
+  report.webhook = (await webhook(`Bearer ${ARC_TOKEN}`, { timestamp: new Date().toISOString(), txid: spendTxid, txStatus: "SEEN_ON_MULTIPLE_NODES" })).status;
+  const mW = await resultWhere("SEEN_ON_MULTIPLE_NODES at the wallet", (res) => res.op === "callback" && res.event === "status" && res.txid === spendTxid);
+  const mP = await resultWhere("SEEN_ON_MULTIPLE_NODES at the payee", (res) => res.op === "event" && res.event === "status" && res.txid === spendTxid, 30_000, payeeView);
+  await router.settled();
+  let before = [await steps(view), await steps(payeeView)];
+  arcade.emit(spendTxid, { txStatus: "SEEN_ON_MULTIPLE_NODES" });
+  await duplicates(1);
+  await router.settled();
+  report.multiple = { wallet: mW.result.outcome, payee: mP.result.outcome, streamCopyWroteNothing: JSON.stringify(before) === JSON.stringify([await steps(view), await steps(payeeView)]) };
+
+  // Mined at 103: the header (to both), then MINED with the merkle path on the stream: both prove it.
   const h103 = mine(prev, internal(spendTxid), 1_790_000_000 + 103 * 600);
   await feedHeader(h103);
-  r = await nextResult("header 103");
+  await resultWhere("header 103", (res) => res.event === "header" && res.tip === 103);
+  await resultWhere("the payee's header 103", (res) => res.event === "header" && res.tip === 103, 30_000, payeeView);
   const path = new MerklePath(103, [[{ offset: 0, hash: spendTxid, txid: true }]]);
-  // ARC's callback to the router's webhook: a status entry for the transaction's CID.
-  const cb = (auth: string) => fetch(`http://127.0.0.1:${router.port}/callback/wallettest`, {
-    method: "POST", headers: { "content-type": "application/json", authorization: auth },
-    body: JSON.stringify({ timestamp: new Date().toISOString(), txid: spendTxid, txStatus: "MINED", blockHeight: 103, blockHash: "00".repeat(32), merklePath: path.toHex(), extraInfo: "" }),
-  });
-  report.callbackRefused = (await cb("Bearer wrong")).status;
-  report.callback = (await cb(`Bearer ${ARC_TOKEN}`)).status;
-  r = await nextResult("the MINED status");
-  report.mined = { same: r.thread.equals(spendThread), outcome: r.result.outcome, state: r.state };
+  const block103 = Buffer.from(sha256d(h103)).reverse().toString("hex");
+  arcade.emit(spendTxid, { txStatus: "MINED", blockHash: block103, blockHeight: 103, merklePath: path.toHex() });
+  r = await resultWhere("the MINED status", (res) => res.op === "callback" && res.event === "status" && res.txid === spendTxid && res.outcome !== "pending");
+  const minedP = await resultWhere("the payee's MINED status", (res) => res.op === "event" && res.txid === spendTxid && res.outcome !== "pending", 30_000, payeeView);
+  report.mined = { same: r.thread.equals(spendThread), outcome: r.result.outcome, state: r.state, payee: minedP.result.outcome };
 
-  r = await owned(identity, { op: "list", includeSpent: true });
+  // Arcade retries its webhook: the same MINED again writes nothing.
+  await router.settled();
+  before = [await steps(view), await steps(payeeView)];
+  report.redelivered = (await webhook(`Bearer ${ARC_TOKEN}`, arcade.webhookBody(spendTxid))).status;
+  await duplicates(2);
+  await router.settled();
+  report.redeliveryWroteNothing = JSON.stringify(before) === JSON.stringify([await steps(view), await steps(payeeView)]);
+
+  r = await owned({ op: "list", includeSpent: true });
   report.list = (r.result.outputs as Array<Record<string, unknown>>).map((o) => [o.txid === spendTxid ? "change" : o.txid === pay.id("hex") ? "payment" : "?", o.satoshis, o.spendable, o.status]);
   report.total = r.result.total;
+  r = await owned({ op: "list" }, toPayee, payeeView);
+  report.payeeList = (r.result.outputs as Array<Record<string, unknown>>).map((o) => [o.txid === spendTxid, o.satoshis, o.spendable, o.status]);
 
-  // A rejected broadcast: the action is dropped, its inputs are spendable again.
-  arc.mode = "reject";
-  r = await owned(identity, { op: "createAction", description: "rejected", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 1_000 }] });
+  // A rejected broadcast (Arcade's 400): the action is dropped, its inputs are spendable again.
+  const someone = new P2PKH().lock(key("5555").toPublicKey().toHash()).toBinary();
+  arcade.mode = "reject";
+  r = await owned({ op: "createAction", description: "rejected", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 1_000 }] });
   report.rejected = { outcome: r.result.outcome, state: r.state, awaiting: r.result.awaiting ?? false };
-  arc.mode = "seen";
-  r = await owned(identity, { op: "list" });
+  arcade.mode = "ok";
+  r = await owned({ op: "list" });
   report.afterReject = r.result.total;
 
   // A draft, then signAction.
-  r = await owned(identity, { op: "createAction", description: "draft", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 2_000 }], options: { signAndProcess: false } });
-  const draft = { reference: r.result.reference as CID, txid: r.result.txid, posts: arc.posts.length };
-  r = await owned(identity, { op: "signAction", reference: draft.reference });
-  const signed = Transaction.fromAtomicBEEF([...arc.posts.at(-1)!]);
-  report.draft = { hasReference: CID.asCID(draft.reference) !== null, notPostedAsDraft: draft.posts === arc.posts.length - 1, awaiting: r.result.awaiting, scriptsVerify: await signed.verify("scripts only"), txid: r.result.txid === signed.id("hex") };
+  r = await owned({ op: "createAction", description: "draft", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 2_000 }], options: { signAndProcess: false } });
+  const draft = { reference: r.result.reference as CID, txid: r.result.txid, posts: arcade.posts.length };
+  r = await owned({ op: "signAction", reference: draft.reference });
+  const signed = lastPosted();
+  report.draft = { hasReference: CID.asCID(draft.reference) !== null, notPostedAsDraft: draft.posts === arcade.posts.length - 1, awaiting: r.result.awaiting, scriptsVerify: await Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]).verify("scripts only"), txid: r.result.txid === signed.id("hex") };
 
-  report.settlement = await settlementScenario(identity, new Uint8Array(someone), { h102: prev, spend: spendTxid });
+  report.settlement = await settlementScenario(new Uint8Array(someone), { h102: prev, spend: spendTxid });
+
+  // Backpressure (Arcade's 503): not a rejection; the deadline's re-ask finds Arcade never took it (404) and posts it again.
+  arcade.mode = "busy";
+  const t = await owned({ op: "createAction", description: "transient", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 700 }] });
+  arcade.mode = "ok";
+  const T = t.result.txid as string;
+  const posts = arcade.posts.length;
+  report.transient = { outcome: t.result.outcome, state: t.state, awaiting: t.result.awaiting, arc: (t.result.arc as { status?: number }).status };
+  r = await resultWhere("the transient broadcast's deadline", (res, _s, th) => th.equals(t.thread) && res.op === "callback" && res.event === undefined);
+  report.retried = {
+    outcome: r.result.outcome, state: r.state, arc: (r.result.arc as { status?: number; txStatus?: string }),
+    askedFirst: arcade.gets.includes(T), postedAgain: arcade.posts.length === posts + 1 && lastPosted().id("hex") === T,
+  };
+
+  // The host restarts while Arcade moves on: the new router resumes after the last event id it took.
+  await router.settled();
+  const lastTaken = hostDb.cursor(arcade.eventsUrl);
+  const statusSteps = async () => (await Promise.all((await updates(view)).map(async ({ update }) => {
+    const out = Buffer.from(update.result?.stdout ?? []).toString().trim();
+    if (!out) return 0;
+    const res = decode<Result>(await view.bytes(CID.decode(Buffer.from(out, "hex"))));
+    return res.event === "status" ? 1 : 0;
+  }))).reduce((a: number, b) => a + b, 0);
+  const statusesBefore = await statusSteps();
+  await router.stop();
+  arcade.emit(T, { txStatus: "SEEN_ON_NETWORK" });
+  router = make();
+  await router.listen(port);
+  await router.start();
+  r = await resultWhere("the status missed while down", (res) => res.op === "callback" && res.event === "status" && res.txid === T);
+  await router.settled();
+  report.resumed = {
+    lastEventId: lastTaken !== undefined && arcade.connects.at(-1) === lastTaken, sameThread: r.thread.equals(t.thread), outcome: r.result.outcome, state: r.state,
+    onlyTheMissed: (await statusSteps()) === statusesBefore + 1,
+  };
 
   report.ok = true;
 } catch (e) {
@@ -391,22 +465,29 @@ hostDb.close();
 }
 for (const r of sse) r.end();
 sseServer.close();
+await arcade.close();
 
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
+check(report.walletArc === true, "#58: the genesis names the host's broadcast route as walletArc (the router's /arc), the host's default");
 check(eq(report.headers, [100, 100]), `headers 1..100 from the owner, chained from regtest's genesis (${JSON.stringify(report.headers)})`);
 check(eq(report.headerEntry, ["header", 102]), `plain header entries from the router's SSE feed, routed by a sender-less subscription (${JSON.stringify(report.headerEntry)})`);
 check(eq(report.internalize, [true, "unproven"]), `a BRC-29 payment internalized (${JSON.stringify(report.internalize)})`);
 const c = (report.create ?? {}) as Record<string, unknown> & { outputs?: number[] };
-check(c.state === "waiting" && c.awaiting === true && c.outcome === "pending" && c.arc === "SEEN_ON_NETWORK", `createAction: signed, broadcast over http, the thread awaits its status (${JSON.stringify(c)})`);
-check(c.postedIsTheTx === true && c.scriptsVerify === true, "ARC received the transaction as Atomic BEEF; @bsv/sdk verifies its scripts (signatures from the oracle)");
+check(c.state === "waiting" && c.awaiting === true && c.outcome === "pending" && eq(c.arc, { status: 202, txStatus: "RECEIVED", extraInfo: "" }), `createAction: signed, broadcast through the route, Arcade's 202 RECEIVED recorded as the receipt, the thread awaits its status (${JSON.stringify(c)})`);
+check(c.postedIsTheTx === true && c.extendedFormat === true && c.token === true && c.scriptsVerify === true, "Arcade received the transaction in Extended Format under the host's callback token; @bsv/sdk verifies its scripts (signatures from the oracle)");
 check(eq(c.outputs?.slice(0, 1), [10000]) && c.outputs?.length === 2, `the payment and our change (${JSON.stringify(c.outputs)})`);
-check(eq(report.woke, { same: true, op: "callback", outcome: "pending", state: "waiting", gets: 1 }), `the deadline: the router's waker wakes the thread, it re-asks ARC over http, rests again (${JSON.stringify(report.woke)})`);
-check(report.callbackRefused === 401 && report.callback === 200, `ARC's callback at /callback/<handle>: the wrong token refused, the right one taken (${String(report.callbackRefused)}, ${String(report.callback)})`);
-check(eq(report.mined, { same: true, outcome: "proven", state: "finished" }), `the callback's status entry (MINED + path) for the transaction's CID steps the awaiting thread: proven (${JSON.stringify(report.mined)})`);
+check(eq(report.payeeInternalize, [true, "unproven"]), `the payee instance internalizes the same transaction: it holds it too (${JSON.stringify(report.payeeInternalize)})`);
+check(eq(report.woke, { op: "callback", outcome: "pending", state: "waiting", arc: { status: 200, txStatus: "RECEIVED", extraInfo: "" }, asked: true }), `the deadline: the router's waker wakes the thread, it re-asks through the route (GET), rests again (${JSON.stringify(report.woke)})`);
+check(eq(report.seen, { wallet: [true, "pending", "waiting"], payee: ["pending", "finished"] }), `SEEN_ON_NETWORK on the host's one stream reaches both holders: the wallet's awaiting thread and the payee (${JSON.stringify(report.seen)})`);
+check(report.webhookRefused === 401 && report.webhook === 200, `Arcade's webhook at /arc/callback: the wrong token refused, the host's taken (${String(report.webhookRefused)}, ${String(report.webhook)})`);
+check(eq(report.multiple, { wallet: "pending", payee: "pending", streamCopyWroteNothing: true }), `a webhook's status reaches both holders; the stream's copy of it writes nothing (${JSON.stringify(report.multiple)})`);
+check(eq(report.mined, { same: true, outcome: "proven", state: "finished", payee: "proven" }), `MINED with the BUMP on the stream: the wallet's awaiting thread proves the transaction, and so does the payee (${JSON.stringify(report.mined)})`);
+check(report.redelivered === 200 && report.redeliveryWroteNothing === true, `a redelivered MINED (Arcade's webhook retry) writes nothing (${String(report.redelivered)}, ${String(report.redeliveryWroteNothing)})`);
 check(Array.isArray(report.list) && (report.list as unknown[][]).some((o) => o[0] === "change" && o[2] === true && o[3] === "proven") && (report.list as unknown[][]).some((o) => o[0] === "payment" && o[2] === false), `list: the change spendable and proven, the payment spent (${JSON.stringify(report.list)})`);
-check(eq(report.rejected, { outcome: "rejected", state: "finished", awaiting: false }) && report.afterReject === report.total, `a rejected broadcast drops the action: the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
+check(eq(report.payeeList, [[true, 10000, true, "proven"]]), `the payee's list: the payment spendable and proven (${JSON.stringify(report.payeeList)})`);
+check(eq(report.rejected, { outcome: "rejected", state: "finished", awaiting: false }) && report.afterReject === report.total, `a rejected broadcast (Arcade's 400) drops the action: the balance is back (${JSON.stringify(report.rejected)}, ${report.afterReject} vs ${report.total})`);
 const d = (report.draft ?? {}) as Record<string, unknown>;
 check(d.hasReference === true && d.notPostedAsDraft === true && d.awaiting === true && d.scriptsVerify === true && d.txid === true, `a draft (signAndProcess: false), then signAction: signed, broadcast, awaiting (${JSON.stringify(d)})`);
 
@@ -420,11 +501,15 @@ check(st.spendsEdge === true, "#42: B's input is a `spends` edge into A, from B'
 check(st.explorer === true, "#42: the explorer's record page for A shows it decoded (bitcoin-tx, its inputs) and ← spends from B");
 check(eq(report.edges, { sameRoot: true, bitcoin: [true, false, false] }), `#42: the TS reader derives the kernel's edges map (same root), with spends edges from the kept transactions and no prev / merkleroot edges from the kept headers (${JSON.stringify(report.edges)})`);
 check(eq(st.reorg, { replaced: 1, reverted: ["spend"], reposted: true, state: "waiting", awaited: true }), `a reorg drops block 103: the spend proven there is unproven again, broadcast again, awaited (${JSON.stringify(st.reorg)})`);
+check(eq(report.transient, { outcome: "pending", state: "waiting", awaiting: true, arc: 503 }), `Arcade's 503 (backpressure) is not a rejection: the thread awaits (${JSON.stringify(report.transient)})`);
+const rt = (report.retried ?? {}) as Record<string, unknown>;
+check(rt.outcome === "pending" && rt.state === "waiting" && eq(rt.arc, { status: 202, txStatus: "RECEIVED", extraInfo: "" }) && rt.askedFirst === true && rt.postedAgain === true, `at the deadline the re-ask finds Arcade never took it (404) and posts it again: 202 RECEIVED (${JSON.stringify(rt)})`);
+check(eq(report.resumed, { lastEventId: true, sameThread: true, outcome: "pending", state: "waiting", onlyTheMissed: true }), `a host restart: the stream resumes with Last-Event-ID from host.db, the status missed while down reaches the thread, nothing twice (${JSON.stringify(report.resumed)})`);
 
-const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
+const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db, payeeDb], { encoding: "utf8" });
 process.stdout.write(r.stdout);
 if (r.status !== 0) process.stdout.write(r.stderr);
-check(r.status === 0 && /identical .*the source store reproduced exactly/.test(r.stdout), "the store replays to itself exactly, twice over: oracle and http answers from the recorded calls");
+check(r.status === 0 && /identical .*the source store reproduced exactly/.test(r.stdout), "both stores replay to themselves exactly, twice over: oracle and http answers from the recorded calls");
 
 if (process.env.SKEIN_WALLET_REPORT) writeFileSync(process.env.SKEIN_WALLET_REPORT, JSON.stringify(report));
 
