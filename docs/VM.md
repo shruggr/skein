@@ -142,8 +142,8 @@ Replay writes the same chain.
   `chat` from anyone; and the reserved box the host admits into, `:ack`
   (→ `messagebox`: a reader's pointer). A mailbox instance's seed is `:ack` and every message
   from anyone in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`). Sessions
-  are not state: the front door keeps them in memory, never in the log
-  (MESSAGES.md). No `register` box: registration is application wiring
+  are state, but no box: the front door keeps them under the head
+  `sessions` (#68, MESSAGES.md). No `register` box: registration is application wiring
   (an application's own etc/subscriptions.json, BOOTSTRAP.md).
 - The chain changes only by an explicit act: a program's step calls the
   `subscribe` import (the handler must be a program record in the store, a
@@ -160,8 +160,9 @@ Replay writes the same chain.
 - **Registering a program** is subscribing a box to its CID. Its record (and
   module) must be in the store first: `objects` delivers them.
 - Nothing polls for messages (#40): a message arrives at the instance's front
-  door (a `sendMessage` request) and is admitted as an entry; a box
-  subscribed at runtime takes messages from the next one.
+  door (a `sendMessage` request, appended as an entry, #68) and the front
+  door's step routes it; a box subscribed at runtime takes messages from the
+  next one.
 - A store whose log predates the chain has no chain, so nothing would route:
   the runtime refuses to start it. It needs a new genesis (no migration).
 
@@ -356,8 +357,9 @@ any of them                          → {error}                            the 
   recorded libp2p calls replays in the browser as natively.
 - Published messages are signed by GossipSub with the instance's **peer key**
   (a child of the master secret, key ID `libp2p:<handle>`), never a wallet
-  key. Inbound messages and stream frames are not an import: they reach the
-  instance through its front door (docs/MESSAGES.md, "libp2p").
+  key. Inbound messages and stream frames are not an import: each is a
+  request entry, and the front door is stepped on it (docs/MESSAGES.md,
+  "libp2p").
 
 ### Calls: reading the state without an entry (#40)
 
@@ -378,9 +380,8 @@ function over the current state and return a value. It writes nothing.
   name>, fn, arg, caller?, now?}}` → `{ok, result | error, fuel}`; the
   browser build takes the same frame through `skein_call`.
 - **No entry, no writes.** `get`, `head` and the store read as they stand;
-  `put` and `putblock` keep their records in memory for the call only (so a
-  program can build a record and read it back, or return it for the host to
-  admit), and `keep`, `launch`, `await`, `advance`, `subscribe` and
+  `put` and `putblock` keep their records in the call's write cache only (so
+  a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`, `subscribe` and
   `deadline` are refused. The oracle (`wallet`) and `http` are answered by
   the host and **not recorded**.
 - **No determinism.** Nothing replays a call, so it needs none: its clock is
@@ -398,19 +399,52 @@ function over the current state and return a value. It writes nothing.
   and replay re-runs it with the step. A step sees its own head moves: a
   head a callee advanced reads back as moved in the rest of the step. Calls
   nest to depth 8; an answer is at most 64 MiB.
-- **What calls are for.** The front door (`programs/frontdoor`) is a call:
-  the host hands it each HTTP request (fn `http`), and a read — a poll, a
-  lookup, the explorer — is answered from state with no entry and no byte
-  written. A request that must write returns the entries for the host to
-  admit (docs/MESSAGES.md, docs/ARCH.md).
-- **The overlay's submit uses the call's overlay as a scratch store**
-  (#50, docs/OVERLAY.md): the handler decodes the BEEF once into
-  `bitcoin-tx` blocks and merkle nodes with `putblock`, checks SPV and runs
-  the topic managers (in-VM calls) over them through `get`, and returns an
-  entry only if a topic takes the transaction. A refused submission leaves
-  the store byte-identical. The entry carries the decoded records, and the
-  step that processes it keeps them and calls the lookup services' hooks,
-  which move their own heads (`ls:<service>`).
+- **What calls are for** (#68). Not requests: every request is an entry
+  and the front door is stepped on it ("Requests", below). A kernel call is
+  for host-side reads that are genuinely not requests — the answer of a
+  route that is a read of live state (the explorer: the front door's fn
+  `read`, made by the host after the request's thread ended), and later
+  the broadcaster's questions of an instance (#65). From a step, an in-VM
+  call is how the front door calls a route handler.
+- **The write cache.** The blocks a step puts before its update commits —
+  the overlay's submit decodes the BEEF once into `bitcoin-tx` blocks and
+  merkle nodes with `putblock` and runs SPV and the topic managers over
+  them through `get` (#50, docs/OVERLAY.md) — are a cache in front of the
+  store, not a different kind of execution; a kernel call's puts are the
+  same cache, dropped with the call. When a cache flushes, and what it may
+  forget that nothing reaches, is the store's policy (retention).
+
+### Requests: the front door stepped on the package (#68, #66)
+
+Every package a transport carries in is an entry, as received:
+`{kind: "log", …, request: <record>, transport}` (docs/MESSAGES.md, "The
+log"). Processing it launches the transport's middleware — the genesis's
+`middleware[transport]`, else its front door for `http` and `libp2p`
+(`scheduler.zig` `middlewareOf`; #70's local providers hook in here) — as
+the **request's thread**: origin `{kind: "thread", program: <middleware>,
+args: {request, transport}, launchedBy: <the request record>, input: <the
+entry>, at}`, a function of the entry, so the host can ask after it.
+
+- **Its steps' input** adds the genesis's `routes` and `reads`, and on the
+  first step `seen` (the entry that first admitted this very record, if the
+  `unique` map holds it: a redelivered GossipSub message). They run on
+  `callFuelLimit` (the budget the front door had as a call), not
+  `fuelPerStep`.
+- **Its answer** is its stdout. What it lists in `admit` — `{mail: <mail
+  record>, body}` or `{event: <record>, box}` — the kernel routes after the
+  step, under the entry that drove it, exactly as it would route an entry of
+  that kind; a message, and a libp2p `p2p` event, once (the `unique` map:
+  `markUnique`). A function of the step's update, so replay routes the same.
+- **At rest** (`finished` or `errored`) its last update is the request's
+  answer. The kernel tells the host at once (the serve frame `answer`,
+  kernel-zig/README.md), mid-drain, before what the step routed runs.
+- **Waiting on a thread.** Beside the threads it launched, a step may
+  `await` any thread's origin CID: when that thread comes to rest (finished
+  or errored) every thread awaiting it steps, under the entry that brought it
+  to rest, with `resolved: [{thread, state, result, error}]` (as for
+  launched threads). Awaiting a thread already at rest is refused (its
+  state is there to read). This is how a request waits on work another
+  request started (#66: a resubmission, a poll on the same flow).
 
 ### Fuel: every step is metered
 
@@ -464,35 +498,40 @@ the next segment, its fuel counted from zero. (Before #38: the stamp, then
 
 ## Messages
 
-(Issue #40; `kernel-zig/src/log.zig`, log format 3. The signed-message
+(Issue #40, #68; `kernel-zig/src/log.zig`, log format 5. The signed-message
 design this section once described — every input a signed message, sends as
-outbound messages the host carries out — is superseded.) Messages are state:
-the log is what arrived, and an entry is one of
+outbound messages the host carries out — is superseded.) Skein is a state
+process: the log is every package that arrived, as received, and an entry is one of
 
 ```
-entry  {kind: "log", prev, n, time, genesis | mail | wake | event+box}
+entry  {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}
 mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, json?,
         session?: {payload, signature, nonce, yourNonce}}
 ```
 
+- **`request`**: a package as a transport carried it in (an HTTP request, a
+  GossipSub message, a stream frame), which the front door is stepped on
+  ("Requests", above; the record shapes in docs/MESSAGES.md).
 - **`mail`** is a BRC-33 message that arrived at the front door: its sender
   is the identity of the BRC-104 session it came on (authentication is by
   key; `session` keeps the signed request, so the log verifies with keys
-  alone), its body a record of its own (admitted with the entry:
-  `admit(entry, {body})`). The mail record's CID is the message's id — what
-  the sender computes too, and what a reply's `replyTo` names; a second
-  admit of the same record is refused (the `unique` map). It is routed to
+  alone), its body a record of its own. The node host's messages arrive in
+  requests, and the front door's step routes them; a host may admit one as
+  an entry of its own (`admit(entry, {body})`: the browser's). The mail
+  record's CID is the message's id — what the sender computes too, and what
+  a reply's `replyTo` names; the same record is admitted once (the `unique`
+  map). It is routed to
   the thread awaiting the message its body's `replyTo` names (a reply is from
   the identity that message was sent to), else by subscription on (sender,
   box).
 - **`event`** in a box: a record from a feed the host holds (#29: a header,
-  a proof, a status) or a front door's own write (`:ack`, an
-  overlay's `submit`), routed by its `subject` or by box.
+  a proof, a status), or one a front door's step routes (`:ack`, an
+  accepted libp2p message, a gossiped `submit`), routed by its `subject` or by box.
 - **`wake`**: a sleeper's deadline.
 - **`genesis`**: who the instance is, its programs, seed subscriptions,
   routes and reads.
 
-Nothing a front door merely reads or verifies is an entry. A message leaves
+Every request is an entry, a read's too; what a read moves is nothing. A message leaves
 an instance by the instance's own program: its messagebox's `send` (a BRC-104
 client, over recorded `http`) to the recipient's messagebox URL, which its
 address book names (written only by its own programs: `resolve`'s BRC-169

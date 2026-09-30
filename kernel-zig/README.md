@@ -13,8 +13,9 @@ entries, records, CIDs, derived state and fuel on every replay, and the
 suite checks that Zig against Zig. Since #33 the router
 (`src/host/router.ts`, TypeScript) drives it, over one channel per kernel;
 since #40 the router is only a reverse proxy: each instance is an HTTP server
-(its front door, `programs/frontdoor`, a kernel `call`), and the oracle, the
-waker, the feeds and the fuel ledger are the router's.
+(its front door, `programs/frontdoor`), and the oracle, the waker, the feeds
+and the fuel ledger are the router's; since #68 every request is an entry
+and the front door is stepped on it (format 5).
 
 ## Build
 
@@ -474,8 +475,9 @@ skein-host run (the router, src/host/router.ts) ──spawn on demand──▶ s
 The router speaks to the kernel through `src/host/kernel.ts`: it asks `tip`,
 `get`, `put`, `has`, `putblock`, `restore`, `append`, `genesis`, `programs`
 (the pinned program records, for a new genesis), `head`, `boxes`,
-`byEnvelope`, `admit` (`{entry, body?}`: the one call in that writes),
-`call` (#40: the other call in, below), `idle`, `start`, `running`; the kernel
+`byEnvelope`, `admit` (`{entry, body?}`: the one call in that writes — a
+request as received, #68, a feed's event, a wake), `answer` (#66, below),
+`call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the router answers from the instance's
 ProtoWallet, the oracle) and `http` (answered by the router: a URL of the
 host's own in process, any other by fetch), and tells `sleepers` (the waker's
@@ -490,9 +492,34 @@ deterministic error, which is recorded.
 the host's own URLs) may lead the router to call into the same kernel before
 answering — a delivery to another instance's front door on the same host, or
 this instance's own. While it waits for an answer, `serve` keeps reading
-frames: `call` and `admit` are handled mid-step (an admit is processed when
-the running drain loops again), and answers to other requests are kept until
-asked for.
+frames: `call`, `admit` and `answer` are handled mid-step (an admit is
+processed when the running drain loops again), and answers to other requests
+are kept until asked for. A request appended mid-step is processed after
+that step: two instances whose steps deliver to each other at the same
+moment wait on each other until the host's bound (until #67 makes sending
+a write).
+
+### Requests and `answer` (issues #68, #66)
+
+A request entry (`{request: <record>, transport}`, `log.zig`) launches the
+transport's middleware as the request's thread (`scheduler.zig`
+`processRequest`, `middlewareOf`: the genesis's `middleware[transport]`,
+else its front door for `http` and `libp2p`), origin `{kind: "thread",
+program, args: {request, transport}, launchedBy: <record>, input: <entry>,
+at}` — so `requestThread(entry)` finds it again. Its steps run on
+`callFuelLimit`, read `routes`, `reads` (and, first, `seen`), and what their
+stdout lists in `admit` is routed after the step (`routeAdmits`; a message
+or `p2p` event once: `markUnique`, the `unique` map). A step may `await` a
+thread's origin; `rested()` steps its awaiters with `resolved`.
+
+`answer {entry, wait: ms}` → `{thread, state: "finished", answer: bytes}` |
+`{thread, state: "errored", error}` when the request's thread comes to rest
+for good — at once if it has; else the frame is parked, and the scheduler's
+`on_answer` (called the moment the thread's last update is written, before
+what its step routed runs) replies — or, `wait` ms on, `{thread?, state}` as
+it stands (`waiting`, or `pending`: not processed yet). `serve`'s poll sleeps
+until the earliest parked bound. The host holds a synchronous client on it
+(`src/host/frontdoor.ts`).
 
 ### Calls (issue #40)
 
@@ -502,8 +529,11 @@ current state (`scheduler.zig` `call`): its normal entry, with `input()` =
 `{kind: "call", fn, arg, caller?, now, self: {handle, domain, identity},
 owner, programs, peers, defaults, names, routes, reads, subscriptions,
 pending, state}`; the result is its stdout, a non-zero exit the error (the
-last stderr line). No entry and no writes: `put`/`putblock` go to an
-in-memory overlay for the call, `keep`/`launch`/`await`/`advance`/
+last stderr line). Since #68 no request is a call: calls are host-side
+reads (the front door's fn `read`, the answer of a route that reads live
+state, after its request's thread; the broadcaster's questions later, #65).
+No entry and no writes: `put`/`putblock` go to the call's write cache,
+dropped with it, `keep`/`launch`/`await`/`advance`/
 `subscribe`/`deadline` are refused, `wallet` and `http` are answered by the
 host and not recorded, random is real. Fuel is limited by
 `defaults.callFuelLimit` (default 10^10) and reported. The `call` import
@@ -516,12 +546,23 @@ output at most 64 MiB. `http_test.zig` stubs it; `test/call/probe.wasm`
 (`test/call/probe.zig`) is the probe `src/host/call.test.ts` drives. The
 docs: `docs/VM.md`, "Calls".
 
+### Format 5 (issue #68)
+
+The state record's `format` is 5 (`index.FORMAT`); a store in an older format
+is refused for running ("before format 5": start a new store: re-genesis);
+read-only uses (`dump`, `fuel`, `replay` as a source) still open it. An entry
+may be a `request` (`{request: <record>, transport}`): the package a
+transport carried in, as received (http `{kind: "http", method, path, route,
+query, headers, body}`; libp2p `{kind: "p2p", topic, from, seqno, signature,
+body}` or `{kind: "p2p-frame", protocol, from, body}`), checked at admission
+for its form only. Sessions are records under the head `sessions` (the front
+door's). The `unique` map also holds what request threads routed (a message,
+a `p2p` event), under the entry that drove the step. The recorded calls are
+format 4's.
+
 ### Format 4 (issue #62)
 
-The state record's `format` is 4 (`index.FORMAT`); a store in an older format
-is refused for running ("before format 4": start a new store: re-genesis);
-read-only uses (`dump`, `fuel`, `replay` as a source) still open it. Entries
-are format 3's. What changed is the recorded call (`scheduler.zig` `attest`,
+The state record's `format` was 4. Entries are format 3's. What changed is the recorded call (`scheduler.zig` `attest`,
 `attest.zig`): an `http` or `libp2p` answer comes from the router as
 `{answer, attest: {stamp, key, signature}}` (a bare answer from a host that
 does not attest: the browser's page, a test's), and the record gains

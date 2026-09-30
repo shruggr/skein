@@ -80,13 +80,16 @@ handshake does not name its recipient: the URL is the recipient.
   router strips the prefix for the routes; the client signs the path it sent,
   and its handshake goes under the prefix (`src/client/raw.ts`, `RawBox`).
 
-A request for an instance is one kernel `call` of its front door
-(`programs/frontdoor`): BRC-103/104 against the instance's in-memory session
-table, the routes table, the handler, the signed answer. The entries it
-returns (a message, an acknowledgement) are admitted; a handshake and a read
-— a poll, a lookup, the explorer — write nothing. Its
-fuel is charged to the **fuel ledger** (host.db `fuel_ledger`, by instance,
-caller and route; `skein-host ledger [handle]`).
+A request for an instance is appended as received (#68: a `request` entry)
+and its front door (`programs/frontdoor`) is stepped on it: BRC-103/104
+against the instance's session records, the routes table, the handler, the
+signed answer. The router holds the client until that thread comes to rest
+(#66) — past `SKEIN_ANSWER_WAIT_MS` (default 120000) or at shutdown, 503 +
+Retry-After. Every request is an entry (a poll too: an access log); a read
+moves nothing. A request's fuel is on its thread's updates; the kernel
+calls the router makes (the explorer's reads) are charged to the **fuel
+ledger** (host.db `fuel_ledger`, by instance, caller and route; `skein-host
+ledger [handle]`).
 
 The router's own endpoints:
 
@@ -156,18 +159,15 @@ Files:
 - `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
 - `~/.skein/host.db` — the instances (identity → store; `kind` agent or mailbox, a mailbox's `owner`) and the fuel ledger (`skein-host list`, `skein-host mailboxes`, `skein-host ledger`).
 
-Sessions are not state (#40): a handshake writes nothing. The session lives
-in memory with the instance's kernel process (the router holds the table
-beside the process and passes it to the front door, which alone reads it);
-every later request is verified against it, and writes nothing. Sessions
-expire by the instance's `defaults.sessionTtlMs` (a day) from the in-memory
-record's stamp; an unknown or expired one is a plain 401, and the stock
-client shakes hands again by itself. A restarted router or kernel starts
-with no sessions: each client's next request costs one extra round trip.
-Instances are not stopped when idle (`SKEIN_IDLE_MS` default 0: never);
-they will be once resource contention appears, and the session table would
-be cached out then. `SKEIN_IDLE_MS=<ms>` turns the idle stop on (a stopped
-instance's clients re-handshake). **Switching a live stack**: stores
+Sessions are state (#68): a handshake is a request like any other, and
+the front door's step on it writes the session under the instance's head
+`sessions`; every later request is verified against it. Sessions expire by
+the instance's `defaults.sessionTtlMs` (a day) from the handshake entry's
+time; an unknown or expired one is a plain 401, and the stock client shakes
+hands again by itself. A restarted router or kernel keeps them: clients go
+on without a new handshake. Instances are not stopped when idle
+(`SKEIN_IDLE_MS` default 0: never); `SKEIN_IDLE_MS=<ms>` turns the idle
+stop on. **Switching a live stack**: stores
 from before #40 (log format 2) are refused; they need a new genesis
 (`skein-host add <h> --derive` with a new `--store`).
 

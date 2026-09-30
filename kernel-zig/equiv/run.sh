@@ -79,14 +79,14 @@ echo "== bootstrap (#4): a system tree from a directory and from a packet, chatt
 echo "== wasi:http (#15): the fetch component through the router, its call recorded; replayed with no host to ask"
 "${node[@]}" "$kz/equiv/fetch.ts" || status=1
 
-echo "== libp2p (#51): two routers — publish, validate, admit, reject, a stream round trip; replayed natively and in the browser; a live call refused in the browser"
+echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip; replayed natively and in the browser; a live call refused in the browser"
 "${node[@]}" "$kz/equiv/libp2p.ts" || status=1
 
 echo "== overlay services (#36): programs/overlay built and tested; submit/lookup through the router with the stock SDK clients; replayed"
 (cd "$kz/../programs/overlay" && mise exec -- zig build && mise exec -- zig build test) || { echo "FAIL programs/overlay build or tests"; status=1; }
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
-echo "== static files (#52): programs/static tested; a tree's files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); nothing written; replayed"
+echo "== static files (#52): programs/static tested; a tree's files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); each request an entry, no head moved; replayed"
 (cd "$kz/../programs/static" && mise exec -- zig build test) || { echo "FAIL programs/static tests"; status=1; }
 "${node[@]}" "$kz/equiv/static.ts" || status=1
 

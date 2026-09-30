@@ -1,7 +1,7 @@
-// Format 4 (issue #62: recorded calls attested; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
+// Format 5 (issue #68: requests appended as received; #62: recorded calls attested; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
 // router's side: the genesis a new instance's log starts with, and entries.
 //
-//   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box}   — no `sig`: no host key
+//   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}   — no `sig`: no host key
 //   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs, attest?: bytes(33),
 //             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,

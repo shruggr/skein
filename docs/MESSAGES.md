@@ -5,86 +5,100 @@ How messages enter and leave a skein instance. Settled with David on
 **the instance is an HTTP server; BRC-169 is discovery; BRC-103/104 is the
 network; messages are state.** This replaces the BRC-169 envelopes of the
 core flow, the kernel's `emit` and `resolve` imports, the host's `auth.ts`,
-the router's mailbox keeping, outcome entries and peer seeding.
+the router's mailbox keeping, outcome entries and peer seeding. Revised for
+#68 and #66 (2026-10-01): **skein is a state process** — every package a
+transport carries in is appended as received and the front door is stepped
+on it; sessions are state; a synchronous client waits on the thread.
 
-## The persistence rule
+## The persistence rule (#68: skein is a state process)
 
-An instance keeps **messages** and nothing else from the outside:
+Every package a transport carries in is **appended as received**, and every
+step is recorded. There is no in-memory execution path:
 
-- a message that arrived is one log entry (a `mail` record);
-- a read — a poll, a listing, a lookup, an explorer page — writes nothing:
-  no entry, no byte;
-- authentication writes nothing: a handshake and the verification of a signed
-  request only touch the in-memory session table (sessions are not state,
-  below);
-- an acknowledgement is one entry (the reader's pointer moves);
+- a request — an HTTP request, a GossipSub message, a stream frame — is one
+  log entry (`request`), the package as the transport carried it: headers,
+  signatures and all. The host verifies nothing;
+- the instance's middleware (the front door) is stepped on it, as the
+  request's own thread: it verifies, routes, and answers. A refusal (a bad
+  signature, no session, no route, a read rule) is that step's answer:
+  recorded, and nothing else changes;
+- a read — a poll, a listing, a lookup — costs its entry and moves nothing,
+  as a web server's access log records a GET; growth is a pruning question;
+- a handshake is a request like any other: its step writes the session as a
+  record (sessions are state, below);
+- a message that arrived is a `mail` record the front door's step routes
+  (its id, as before, the record's CID); an acknowledgement moves the
+  reader's pointer;
 - what the instance sends is part of the step that sends it (a recorded
-  `http` call and the record it put), not an entry.
+  `http` call and the record it put), not an entry;
+- the blocks a step puts before it commits are the **write cache** (the
+  decoded BEEF a submit judges, say): a cache in front of the store, not a
+  different kind of execution.
 
-A reader with the log can check every message: the mail record carries the
-BRC-104 signed request that brought it (below), which verifies with the
-instance's key alone.
+A reader with the log can check every message: the request that carried it
+is in the log as received, and the mail record carries the BRC-104 signed
+request (below), which verifies with the instance's key alone.
 
 ## The instance as an HTTP server
 
 Each instance is an HTTP server at an origin of its own. Its **front door**
-(`programs/frontdoor`, Zig) is the program that answers: the host calls it —
-a kernel `call` of fn `http` with the raw request — and returns what it
-answers as the HTTP response. The router (`src/host/router.ts`) is a reverse
-proxy: it picks the instance by URL and forwards; it holds no mail, and of
-auth only each running kernel's session table, which it passes to the front
-door and never reads.
+(`programs/frontdoor`, Zig) is the program that answers: the host appends
+the raw request as a `request` entry and the kernel steps the front door on
+it; the host holds the client's connection until that thread has come to
+rest and returns its answer as the HTTP response (#66, "A synchronous
+client waits on the thread", below). The host (`src/host/router.ts`) is a
+light router: it picks the instance by URL and appends; it holds no mail
+and no sessions, and verifies nothing.
+
+```
+request {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
+entry   {kind: "log", prev, n, time, request: <that record>, transport: "http"}
+```
+
+`path` is what the client sent (what BRC-104 signs), `route` what the routes
+table sees (the host strips `/@<handle>`), header names lower-cased.
 
 ```
 http://<handle>.localhost:<port>/…     the instance's origin (the Host header)
 http://<host>:<port>/@<handle>/…       the same instance, a dev form: the router strips the prefix for the routes
 ```
 
-**Auth is by key.** The front door runs BRC-103/104 itself: the handshake at
-`/.well-known/auth` and the verification of every general message, against the
-instance's session table (below). The caller is the identity key the session
-proved; there is no account, no handle check, no envelope. Answers are signed
-on the session through the instance's oracle (the kernel's `wallet`, recorded
-only when a step makes it; a call's is not recorded).
+**Auth is by key.** The front door runs BRC-103/104 itself, in its step on
+the request: the handshake at `/.well-known/auth` and the verification of
+every general message, against the instance's session table (below). The
+caller is the identity key the session proved; there is no account, no
+handle check, no envelope. Answers are signed on the session through the
+instance's oracle (the kernel's `wallet`, a recorded call of the step).
 
-- **Sessions are not state.** Replay never needs a session: each logged
-  message carries the sender key, the 104 signature and both nonces, so its
-  authorship verifies from the entry alone. A session only serves the next
-  request, which is network work, so it lives in memory and never in the log:
-  a handshake writes nothing, and neither does a verified request.
-  - **Where.** The table belongs to the instance's kernel process: the host
-    keeps it beside the process (`Kernel.scratch`, `src/host/kernel.ts`), an
-    opaque key → bytes map it never reads. `callFrontDoor` passes it in the
-    front door's call argument (`scratch`) and applies the changes the answer
-    lists (`scratch: [{key, value?}]`, no value: drop) before it answers the
-    client, so the request right after a handshake is served. Only the front
-    door understands an entry: key = our session nonce, value (dag-cbor)
-    `{peer, peerNonce, created}`. A new kernel process (a restart, a crash, an
-    idle stop) starts with an empty table.
+- **Sessions are state** (#68). The BRC-103 session table is records the
+  front door reads and writes; a handshake is a request like any other,
+  and its step writes the new session. Sessions survive a restart (a new
+  kernel process, a crash, an idle stop): a client's session is there when
+  the instance comes back. Replay needs no session besides: each logged
+  message carries the sender key, the 104 signature and both nonces.
+  - **Where.** The head `sessions` (`programs/frontdoor/sessions.zig`):
+    `{kind: "sessions", buckets: [<bucket> × 16]}`, each bucket `{kind:
+    "session-bucket", sessions: [{nonce, peer: bytes(33), peerNonce,
+    created}]}`; a session lives in bucket sha256(nonce)[0] mod 16, so a
+    request reads one small record and a handshake rewrites the buckets it
+    changes and the root. `nonce` is ours (what a request's `yourNonce`
+    names); `created` the handshake entry's time.
   - **Lookup and expiry.** A request's session is found by its `yourNonce`.
-    Expiry: `defaults.sessionTtlMs` (a day) from the in-memory record's
-    `created` (the router's clock at the handshake). An unknown or expired
-    session gets a plain 401, and the stock client shakes hands again by
-    itself; the cost of a restart is that one round trip per client.
+    Expiry: `defaults.sessionTtlMs` (a day) from `created`, judged by the
+    request entry's time. An unknown or expired session gets a plain 401,
+    and the stock client shakes hands again by itself.
   - **Bounds and replay.** A handshake drops the expired sessions and, past
-    1024, the oldest (the host caps the table at 4096 keys besides). A
-    replayed initialRequest (the peer and initial nonce of a session held) is
-    refused. A replayed signed request verifies (its nonce is not
-    remembered: a replayed read reads again); a replayed write is the same
-    mail record, which the kernel admits once.
-  - **Later.** With many instances per host the table can be cached out when
-    an instance is stopped; for now instances are not stopped until resource
-    contention appears (the router's idle stop is off by default).
+    1024, the oldest. A replayed initialRequest (the peer and initial nonce
+    of a session held) is refused. A replayed signed request verifies (its
+    nonce is not remembered: a replayed read reads again); a replayed write
+    is the same mail record, which the kernel admits once (the `unique` map).
+    The records are prunable like any others; nothing prunes them yet.
 - **Routes** (the genesis's `routes`, from `etc/routes.json`): `[{path |
   prefix, program: <cid>, fn, auth?: "none", read?: <op>}]`, exact paths first,
   then the longest prefix. `auth` defaults to BRC-104; `"none"` is for open
   routes (an overlay's submit and lookup). The handler is an in-VM call of
-  `program`'s `fn` with `{caller?, method, path, route, query, headers, body,
-  contentType, session?, match}` (`match`: the routes-table entry that
-  matched, with any settings of the handler's own, #52); it answers
-  `{status, type?, body, headers?, admit?, then?}`. Its `headers` go out
-  with the answer, but for `content-type` (its `type`) and the `x-bsv-*`
-  ones (the front door's).
+  `program`'s `fn` in the front door's step; what it receives and returns is
+  the program-facing contract below ("Route handlers").
 - **Static files** (#52, `programs/static`): the handler for a site. A route
   `{prefix | path, program: "static", fn: "get", auth?: "none", root?,
   index?}` answers `GET`/`HEAD` with the file at `<root>/<path>` in the
@@ -97,15 +111,115 @@ only when a step makes it; a call's is not recorded).
   sha1), and `If-None-Match` naming it is a 304. 404 for a missing file, a
   non-file (link, submodule), a `..` segment, a NUL or a bad escape (nothing
   outside the root is served); 405 for another method (`Allow: GET, HEAD`).
-  A read: no entry, nothing written.
+  A read: its request's entry, and no head moves.
 - **Reads** (the genesis's `reads`, from `etc/reads.json`): `[{caller?: <key>,
   op}]`. A route with `read: op` answers only a caller the table allows (no
-  caller: anyone); others get 403, signed. The stock reads: the owner may
-  `explore`.
-- **Writes.** A handler that wants a write returns entries for the host to
-  admit — `{mail: <record>, body}` or `{event: <record>, box}` — and optionally
-  `then: {program, fn, arg}`, a call the host makes once they are processed
-  (an overlay submit's answer, which a step computes).
+  caller: anyone); others get 403, signed — a refusal, recorded on the
+  request's thread. The stock reads: the owner may `explore`.
+
+### Route handlers: the program-facing contract (#68, #66)
+
+A route handler is a program function the front door calls, in-VM, in its
+step on a request, once the request has verified (or, on an `auth: "none"`
+route, at once). Being part of that step, everything the handler does —
+records it puts, records it keeps, threads it launches, records or threads
+it awaits, heads it moves, recorded calls it makes — is the step's, on the
+request's thread, recorded and replayed with it. Its input is the ordinary
+in-VM call input (`kind: "call"`, `fn`, the genesis facts, `now` = the time of
+the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
+(dag-cbor):
+
+```
+{ caller?:     bytes(33)       the identity the BRC-104 session proved (absent on an open route)
+  method, path, route, query,  the request as received (path as the client signed it; route as the table saw it)
+  headers:     {name: value}   names lower-cased, x-bsv-auth-* included
+  body:        bytes
+  contentType: text            the media type alone
+  session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes
+  match:       the routes-table entry that matched (a handler's own settings: static's root, index)
+  request:     <cid>           the request record: the package as received (its entry is `step.entry`)
+  resolved?:   [{thread, state: "finished" | "errored", result?, error?}]   called again: the thread it waited on
+  event?, reply?, woke?        called again: what else woke the request's thread (an awaited subject, a reply, a deadline) }
+```
+
+For libp2p routes the request fields are the message's (`transport:
+"libp2p"`, `topic | protocol`, `from`, `key`: the 33-byte key out of `from`,
+`seqno?`, `signature?`, `body`), below.
+
+It answers (dag-cbor on stdout), one of:
+
+```
+{status, type?, body: bytes, headers?: {name: value}, admit?: [entry]}   the answer, now
+{wait: true, admit?: [entry]}                                            not yet: it launched, or awaits, the thread the answer depends on
+{read: true}                                                             the answer is a read of live state, made after (the explorer)
+```
+
+- **The answer.** `status`, `type` (default `application/json`), `body`,
+  and `headers` (but for `content-type` and `x-bsv-*`, the front door's).
+  The front door signs it on the client's session (BRC-104 response
+  headers) and it is the last update of the request's thread: its
+  `result.stdout` is `{status, headers, body, admit?}`. That is the
+  **answer record** the host reads when the thread comes to rest; nothing
+  else is written for it.
+- **What it writes.** Records it puts and keeps, heads it moves, threads it
+  launches: the step's. Messages and events for the instance to route go in
+  `admit`, as `{mail: <mail record>, body: <body's dag-cbor bytes>}` or
+  `{event: <record>, box}`: the kernel routes each after the step, in
+  order, exactly as it routes the entry of that kind (a message by its
+  `replyTo`, else by subscription on `(sender, box)`; an event by its
+  `subject`, else a sender-less subscription on `box`). A message is
+  admitted once (its record's CID in the `unique` map): the same message
+  again is recorded with its request and routed nowhere. There is no
+  `then`.
+- **Waiting: how it names the thread the client waits on.** A handler whose
+  answer depends on more steps — a broadcast to be accepted, a peer's
+  reply — starts the work as a thread of its own with the `launch` import
+  (the request's thread then waits on it, as any step waits on what it
+  launched), or, when that work is already under way (a resubmission while
+  the first submission is pending), `await`s that thread's origin CID
+  (the kernel refuses to await a thread that has already come to rest:
+  its state is there to read), and answers `{wait: true}`. It may instead
+  `await` a record (a message it sent, a subject) or set a `deadline`, like
+  any step. The request's thread ends its step `waiting`; when what it
+  waits on arrives — the launched or awaited thread comes to rest
+  (`finished` or `errored`), the awaited record's entry, the deadline — the
+  front door is stepped again and calls the handler again with the same
+  request plus `resolved` (or `event`, `reply`, `woke`). It answers from the
+  state as it stands then. That work's own thread ends its steps as any
+  thread does: `waiting` on what it needs (an `await`, a `deadline`), and
+  `finished` when its result is in the state — only `finished` or
+  `errored` answers a waiting client (#66).
+- **A read of live state.** A handler whose answer reads what no step may
+  (the explorer: the log as it stands is not a function of the request's
+  place in it) answers `{read: true}` when called in a step (its input has
+  `step`). The request's thread still verified it and applied the read
+  rule, and ends; the host then makes a kernel `call` of the front door's
+  fn `read`, which calls the handler again — as a call, over the current
+  state — and signs its answer on the session (not recorded).
+- **Replay.** The handler runs again in the request's steps on replay, over
+  the same state at the same place in the log, and must answer the same;
+  its recorded calls (the oracle's signatures, `http`) are served from the
+  log.
+
+### A synchronous client waits on the thread (#66)
+
+The host appends the request and holds the client's connection until the
+request's thread comes to rest for good — `finished` or `errored`, never
+merely `waiting` — then answers with that thread's answer (errored: 500 with
+its message). However many entries the thread takes (a broadcast and its
+status, a peer's reply), the client sees one answer. A second request that
+concerns the same work (a resubmission of the same transaction, a poll on
+the same flow) has its own request thread, which awaits the same work
+thread and answers from the same state: the same answer. Past the host's
+bound (`answerWaitMs`, `SKEIN_ANSWER_WAIT_MS`, default two minutes) the
+client gets 503 + `Retry-After` and the thread goes on; so does a client
+still waiting when the host shuts down. Asynchronous flows are the same
+picture with nobody waiting. The kernel's side: the serve frame `answer
+{entry, wait}` (kernel-zig/README.md, "serve").
+
+A request's thread steps on `callFuelLimit` (the budget the front door had
+as a call, default 10^10), not `fuelPerStep`; a thread it launches steps on
+`fuelPerStep` like any other.
 
 The **stock routes**: the BRC-33 messagebox (`/sendMessage`,
 `/listMessages`, `/acknowledgeMessage`, at the root and under `/messagebox`)
@@ -120,17 +234,26 @@ handshake under the prefix too — `RawBox` (`src/client/raw.ts`) rewrites
 `/.well-known/auth` to `/@<handle>/.well-known/auth` — and signs the path it
 sent, which is what the front door verifies.
 
-## The log, format 3
+## The log, format 5
 
 ```
-entry  {kind: "log", prev, n, time, genesis | mail | wake | event+box}
-mail   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, json?: true,
-        session?: {payload: bytes, signature: bytes, nonce, yourNonce}}
+entry    {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}
+request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
+         libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
+                 {kind: "p2p-frame", protocol, from: bytes, body: bytes}
+mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, json?: true,
+          session?: {payload: bytes, signature: bytes, nonce, yourNonce}}
 ```
 
 Entries are unsigned (#9): the sender signed its request, `prev` fixes the
-order, `time` is the router's clock at admission (#10). A store in an older
-format is refused (`kernel-zig/src/log.zig` has the shapes).
+order, `time` is the router's clock at admission (#10). A `request` names
+the package as received and its transport, whose middleware the kernel
+steps on it (the genesis's front door for `http` and `libp2p`; a genesis may
+name others in `middleware: {<transport>: <program>}`, the hook #70's local
+providers take). A mail entry is what a host that admits a message directly
+writes (the browser's); the node host's messages arrive inside requests. A
+store in an older format is refused for running (`kernel-zig/src/log.zig`
+has the shapes).
 
 - **A message is its mail record.** `sender` is the session's identity,
   `session` the BRC-104 signed request (the payload that carried the body, its
@@ -139,8 +262,9 @@ format is refused (`kernel-zig/src/log.zig` has the shapes).
   names never starts with `:` (reserved for the host's own boxes).
 - **A message's id is the CID of its mail record.** Sender and recipient
   compute it alike; a reply names it in its body's `replyTo`. A second
-  admission of the same record is refused (the kernel's `unique` map; so is
-  a libp2p `p2p` event record's, below).
+  admission of the same record routes nothing (the kernel's `unique` map;
+  so for a libp2p `p2p` event record, below): as an entry of its own it is
+  refused, routed out of a request it is recorded with that request.
 - **Routing** (`scheduler.zig` processMail), for a message to this instance:
   a body with a `replyTo` CID resumes the thread awaiting that record, if the
   record is a message this instance sent to the replying sender; otherwise
@@ -148,9 +272,9 @@ format is refused (`kernel-zig/src/log.zig` has the shapes).
   message with no `replyTo` is routed by subscription on `(sender, box)`,
   first match wins; the handler gets `{message, body, box, sender}`. No
   subscription: recorded, nothing runs.
-- **Events** (plain entries: no sender) are the host's feeds (#29: headers,
-  proofs, statuses), the front door's writes (`:ack`; #51: an accepted
-  libp2p message, `p2p` in `libp2p:<topic>`, below), and the router's clock
+- **Events** (no sender) are the host's feeds (#29: headers, proofs,
+  statuses; plain entries), what a front door's step routes (`:ack`; #51:
+  an accepted libp2p message, `p2p` in `libp2p:<topic>`, below), and the router's clock
   (#60: a job's `{kind: "cron", name?, due, …body}` in the job's box, when it
   is due; `skein-host event` admits one by hand). An event goes to the thread
   awaiting its `subject`, else to the first subscription **with no sender**
@@ -169,19 +293,20 @@ called by the front door's routes. Bodies are JSON read as DAG-JSON
 (`Content-Type: application/cbor`: `recipient` 33 bytes, `body` dag-cbor
 bytes); the answer is in the form asked.
 
-- **sendMessage** → one entry to admit: the mail record put (`sender` the
-  caller) and its body. Accepted when something takes it: for this instance's
+- **sendMessage** → one message to admit (`admit`): the mail record
+  (`sender` the caller) and its body, which the kernel routes after the
+  front door's step. Accepted when something takes it: for this instance's
   own boxes, a subscription on `(sender, box)` or a reply to a message this
   instance sent that sender; for the identity it keeps a mailbox for (its
-  owner), a subscription whose handler is the messagebox. Refused, nothing is
-  written. The answer carries `id` (the record's CID) and `results` echoing
-  the client's `messageId`.
+  owner), a subscription whose handler is the messagebox. Refused, only the
+  request is recorded. The answer carries `id` (the record's CID) and
+  `results` echoing the client's `messageId`.
 - **listMessages** is a read: the caller's list in that box, `{messageId,
   sender, body, …}` with `messageId` the mail record's CID (JSON: the body as
-  DAG-JSON text). Nothing is written.
-- **acknowledgeMessage** → one entry: `{kind: "ack", reader, ids, session}` in
-  `:ack`, which the messagebox, stepped, applies: the reader's pointer moves.
-  The records stay in the log.
+  DAG-JSON text). Its request is the only record.
+- **acknowledgeMessage** → one event to admit: `{kind: "ack", reader, ids,
+  session}` in `:ack`, which the messagebox, stepped, applies: the reader's
+  pointer moves. The records stay in the log.
 
 State: the head `mailbox` names `{kind: "mailbox", lists: [{recipient, box,
 list}]}`, each `{kind: "mail-list", recipient, box, acked, messages: [{id,
@@ -197,7 +322,7 @@ An identity outside the host — David's wallet, the inference peer, a browser
 tab — gets its mail kept by a **mailbox instance**: an instance with only the
 front door and the messagebox, whose genesis subscribes `:ack` → messagebox
 and everything from anyone in any box → messagebox, for its owner. Its
-sessions are in memory like any instance's. It has an identity of its own (its oracle's key;
+sessions are records like any instance's (#68). It has an identity of its own (its oracle's key;
 the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
 - `skein-host add <handle> --mailbox --owner <key>` makes one; `skein-host
@@ -256,7 +381,13 @@ send {to: <key>, box, body: <dag-cbor bytes>, handle?, domain?}  →  {id: <cid>
 - **Local delivery.** The kernels' `http` goes through the router
   (`Router.http`): a URL of the host's own is dispatched in process through
   the same front-door path, no socket; any other goes out (`SKEIN_HTTP=fetch`,
-  or the router's `http` option).
+  or the router's `http` option). Since #68 the recipient appends the
+  request and the sender's step waits until the recipient's request thread
+  answers — which it does at once, before the message it routed runs. Until
+  #67 makes sending a write (emit, end the step waiting), two instances
+  whose steps deliver to each other at the same moment wait on each other
+  until the host's bound (`answerWaitMs`): each delivery then fails
+  transient, and the sender's retry applies.
 
 ## The address book
 
@@ -308,75 +439,81 @@ identityKey, messagebox}`), and the paymail PKI (`/bsvalias/id`).
 
 ## Calls
 
-The front door, a route handler, a listing and a lookup are **kernel calls**:
-a program's function run over the current state, with no entry and no
-writes, fuel-limited (`defaults.callFuelLimit`) and charged. A call needs no
-determinism: nothing it does is recorded, because nothing it does is kept.
-From a step, an in-VM `call` is part of the step (its recorded calls and head
-moves are the step's). `docs/VM.md`, "Calls".
+Route handling is never a kernel call any more (#68): every request is a
+step. The kernel `call` (a program's function over the current state, no
+entry, no writes, fuel-limited by `defaults.callFuelLimit`; docs/VM.md,
+"Calls") stays for **host-side reads that are genuinely not requests**:
+the answer of a route whose handler answered `{read: true}` (the
+explorer's: the front door's fn `read`), and later the broadcaster's
+questions of an instance (#65). A call needs no determinism: nothing it
+does is recorded. Its fuel is charged to the host's ledger. From a step, an
+in-VM `call` is part of the step (its recorded calls and head moves are the
+step's) — that is how the front door calls a route handler.
 
 ## libp2p (#51)
 
 The same front door, another transport. The router's libp2p host
-(docs/ARCH.md) makes one kernel `call` of the front door, fn **`libp2p`**,
-for each GossipSub message on a subscribed topic (inside GossipSub's async
-validator, so forwarding waits on it) and for each frame read from an inbound
-stream on a served protocol:
+(docs/ARCH.md) appends each GossipSub message on a subscribed topic (inside
+GossipSub's async validator, so forwarding waits on it) and each frame read
+from an inbound stream on a served protocol as a `request` entry, transport
+`libp2p`, as received, and waits on the thread the front door is stepped on
+(#66) for its answer:
 
 ```
-call   {transport: "libp2p", topic | protocol, from: bytes (the peer ID's multihash),
-        seqno?: bytes(8), signature?: bytes, body: bytes}
-answer {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
+request {kind: "p2p", topic, from: bytes (the peer ID's multihash), seqno: bytes(8), signature: bytes, body: bytes}
+        {kind: "p2p-frame", protocol, from: bytes, body: bytes}
+answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
 ```
 
 - **Routing.** The routes table gains `libp2p:` sources: `{path:
   "libp2p:<topic>", program, fn}` for a topic, `libp2p:<protocol>` for a
   stream protocol (from `etc/routes.json`; a protocol's handler named in
   `etc/config.json` `libp2p.protocols` becomes its route). No route: `ignore`.
-- **Verify before admit.** For a topic message the front door checks, from
-  the call alone, that `from` is a secp256k1 peer ID (identity multihash of the
-  key's protobuf) and that `signature` is its ECDSA signature (DER, sha2-256)
-  over `"libp2p-pubsub:"` ‖ protobuf `{1: from, 2: body, 3: seqno, 4: topic}`
-  — GossipSub's StrictSign. A bad one is `reject`, and no handler runs. Then
-  the handler (the route's program and fn, an in-VM call) gets the call plus
-  `key` (the 33-byte key out of `from`) and judges from state: `{verdict,
-  admit?}`. A handler that fails is `ignore` (cannot evaluate: no penalty for
-  the forwarder).
-- **The entries.** Accept returns the message's own entry first:
+- **Verify in the step.** For a topic message the front door checks, from
+  the request alone, that `from` is a secp256k1 peer ID (identity multihash of
+  the key's protobuf) and that `signature` is its ECDSA signature (DER,
+  sha2-256) over `"libp2p-pubsub:"` ‖ protobuf `{1: from, 2: body, 3: seqno,
+  4: topic}` — GossipSub's StrictSign. A bad one is `reject`, and no handler
+  runs. Then the handler (the route's program and fn, an in-VM call) gets the
+  request plus `key` (the 33-byte key out of `from`) and `request` (the
+  record's CID), and judges from state: `{verdict, admit?}`. A handler that
+  fails is `ignore` (cannot evaluate: no penalty for the forwarder).
+- **What accept admits.** The message itself first, as an event:
 
   ```
   {event: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}, box: "libp2p:<topic>"}
   ```
 
-  and then every entry the handler returned in `admit`, unchanged — the same
-  entries the `http` side forwards for the same handler (#57: persistence is
-  not a transport concern; an overlay's `submit` on a `libp2p:<topic>` route
-  persists what `POST /submit` persists). The router appends them in order.
-  The `p2p` entry re-verifies from the log alone, with no router: the
-  publisher's key is in `from`, and the signature covers topic, seqno, from
-  and body — the same guarantee as a mail record's sender, 104 signature and
-  nonces. It routes as any event: the thread awaiting its `subject` (none
-  here), else a sender-less subscription on `libp2p:<topic>`; with none it is
-  recorded and nothing runs. **Reject and ignore write nothing** — no entry,
-  no byte (a handler's `admit` beside a reject or ignore is dropped).
-- **A redelivered message writes nothing either** (#42, decided
-  2026-09-30). The event record is content-addressed (topic, from, seqno,
-  signature, body), so GossipSub delivering the same message again — after
-  its seen-cache expired, or from another peer — makes the same record, and
-  the kernel's `unique` map (which already keeps a mail record to one
-  admission) refuses a second entry for a `p2p` event record at admit: no
-  entry, no byte. The router stops at that refusal, and the `p2p` entry comes
-  first, so none of the handler's entries is appended either — an answer's
-  entries go in together or not at all. The router answers GossipSub
-  `ignore` (no forward, no penalty). Other events (a feed's header or status)
-  are not unique.
+  — the request record — and then every entry the handler returned in
+  `admit`, unchanged: the same entries the `http` side routes for the same
+  handler (#57: persistence is not a transport concern; an overlay's
+  `submit` on a `libp2p:<topic>` route persists what `POST /submit`
+  persists). The kernel routes them after the step, in order. The request
+  entry re-verifies from the log alone, with no router: the publisher's key
+  is in `from`, and the signature covers topic, seqno, from and body — the
+  same guarantee as a mail record's sender, 104 signature and nonces. The
+  `p2p` event routes as any event: the thread awaiting its `subject` (none
+  here), else a sender-less subscription on `libp2p:<topic>`; with none
+  nothing runs. **Reject and ignore are recorded refusals**: the request's
+  entry and thread, nothing else (a handler's `admit` beside them is
+  dropped).
+- **A redelivered message** (#42, decided 2026-09-30) is recorded as
+  received and ignored. The record is content-addressed (topic, from,
+  seqno, signature, body), so GossipSub delivering the same message again —
+  after its seen-cache expired, or from another peer — is the same record;
+  its first accept put it in the kernel's `unique` map, and the front
+  door's first step is told (`seen`) and answers `ignore` (no forward, no
+  penalty) with nothing routed. A message ignored or rejected before is
+  judged again on redelivery. Other events (a feed's header or status) are
+  not unique.
 - **Streams.** A frame is not signed (the stream is authenticated by Noise;
   `from` is the remote peer). The handler answers `{body?, admit?, close?,
   verdict?}`: `body` is written back on the stream as one frame, `admit`
-  (entries, as an HTTP route handler returns them) is admitted, `close` or
-  `reject` ends the stream.
-- **Fuel.** Each of these calls is charged to the fuel ledger: caller the
-  peer ID (base58), op the route source (`libp2p:<topic>`).
+  (entries, as an HTTP route handler returns them) is routed, `close` or
+  `reject` ends the stream. A frame's handler may wait on a thread as an
+  HTTP route's may (`{wait: true}`); the frame's answer is written back when
+  the request's thread comes to rest.
+- **Fuel** is each request thread's, on its updates.
 
 Outbound (publish, dial, send, receive, close) is the kernel's `libp2p`
 import, recorded on the step's update like `http` (docs/VM.md, "libp2p").
@@ -384,10 +521,11 @@ Messagebox delivery stays HTTP.
 
 ## Fuel
 
-Every front-door call's fuel is charged to the host's **fuel ledger**
-(host.db `fuel_ledger`: instance, caller, op, calls, fuel), aggregated in
-memory and flushed periodically; `skein-host ledger` prints it. Reads are not
-free, only unrecorded.
+Every request's fuel is on its thread's updates, in the log (#68), like
+every step's: billing is a query over the log. The host's **fuel ledger**
+(host.db `fuel_ledger`: instance, caller, op, calls, fuel; `skein-host
+ledger`) keeps what is not in the log: the kernel calls it makes (a read
+after a request's thread, op `<route> (read)`).
 
 ## Chat between instances
 

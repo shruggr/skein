@@ -5,8 +5,10 @@
 //
 // The kernel is this process: the store, the log, the scheduler, the
 // programs. Everything outside is the router's: it admits entries (the one
-// call in that writes), makes `call`s (#40: a program's function over the
-// state, the front door's), answers the kernel's `wallet`, `http` and
+// call in that writes: a request as received, #68, a feed's event, a wake),
+// waits on a request's thread (`answer`, #66: parked here until the thread
+// comes to rest, or its bound), makes `call`s (#40: a program's function
+// over the state, for host-side reads), answers the kernel's `wallet`, `http` and
 // `libp2p` requests (the oracle and the network; the last two with its
 // attestation of the exchange, #62) and keeps its earliest sleeper
 // deadline (`sleepers`) to wake it. Log lines go to stderr.

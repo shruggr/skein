@@ -27,18 +27,20 @@
 // The broadcaster's one SSE subscription (arc.ts) routes each status to every
 // instance whose state holds the transaction (a `has` of its CID, cached).
 //
-// A request for an instance is one kernel `call` of its front door (the raw
-// request in; the answer, signed on the session, out): hydrate on demand,
-// `admit` the entries the front door returns, and charge the call's fuel to
-// the ledger (caller, op). A read — a poll — writes nothing: no entry, no
-// byte. The instances' outbound http (the messagebox's delivery, a resolve)
-// comes back here through the kernels' `http`: a URL of this host's own is
-// answered in process (the same path, no socket), any other goes out.
+// A request for an instance (#68, #66) is appended as received — one
+// `request` entry, verified by nothing here — and the client's connection
+// held until the thread the kernel steps the front door on comes to rest;
+// its answer, signed on the session inside, is the response (frontdoor.ts).
+// Past `answerWaitMs`, or at shutdown, 503 + Retry-After. Every request is an
+// entry; a read moves nothing. The instances' outbound http (the messagebox's
+// delivery, a resolve) comes back here through the kernels' `http`: a URL of
+// this host's own is answered in process (the same path, no socket), any
+// other goes out.
 //
 // The libp2p host (#51, p2p.ts) is the router's too: one node per instance
 // whose genesis declares `libp2p`, each topic message and stream frame one
-// front-door call (fn "libp2p", `p2pInbound`: the verdict back to GossipSub,
-// an accept's entry admitted first, the fuel charged), and the kernels'
+// request entry (`p2pInbound`: the verdict or the frame's answer read off its
+// thread and handed back to GossipSub or the stream), and the kernels'
 // `libp2p` import answered here (`p2pRequest`); a frame for a thread resting
 // on `receive` admits its wake (`wakeThread`).
 //
@@ -60,7 +62,6 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
-import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";

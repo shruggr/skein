@@ -1,7 +1,9 @@
 // The scheduler: the log consumer (first a line-by-line port of the TypeScript
 // scheduler, deleted in #55; docs/VM.md is the design record). Entries come in finished
 // and signed through `admit`; the runtime checks them and consumes them in
-// order: genesis → the seed subscriptions; a message (`mail`, #40) → a reply
+// order: genesis → the seed subscriptions; a request (#68) → the transport's
+// middleware launched on it as the request's thread (what its steps admit
+// routed as the entries below); a message (`mail`, #40) → a reply
 // to the thread awaiting the message it answers, else route by subscription
 // and launch the handler; wake → a sleeping thread; event → the thread
 // awaiting its subject, else a sender-less subscription on its box.
@@ -45,11 +47,11 @@ pub fn fuelPerStep(g: ?Value) u64 {
     return if (n == 0 or n > engine.UNMETERED) FUEL_PER_STEP else n;
 }
 
-/// Fuel for a kernel `call` (#40) when the genesis's `defaults` do not set
+/// Fuel for a kernel `call` (#40), and per step of a request's thread (#68: the front door and its handler), when the genesis's `defaults` do not set
 /// `callFuelLimit`: 10^10 wasm instructions (a front door answers in far less).
 pub const CALL_FUEL: u64 = 10_000_000_000;
 
-/// The one limit on a call's fuel: the genesis's `defaults.callFuelLimit`, else CALL_FUEL.
+/// The one limit on a call's fuel and on each step of a request's thread: the genesis's `defaults.callFuelLimit`, else CALL_FUEL.
 pub fn callFuelLimit(g: ?Value) u64 {
     const d = (g orelse return CALL_FUEL).get("defaults") orelse return CALL_FUEL;
     const v = Value.str(d.get("callFuelLimit")) orelse return CALL_FUEL;
@@ -950,8 +952,10 @@ pub const Runtime = struct {
             const o = rt.store.getOpt(a, origin) orelse break :blk null;
             break :blk if (isRequestThread(o)) Value.cidOf(o.get("input")) else null;
         };
-        // The step's fuel: one budget for the whole step, read from the genesis at its start.
-        var meter = engine.Meter.init(fuelPerStep(rt.genesis));
+        // The step's fuel: one budget for the whole step, read from the genesis at its start. A
+        // request's thread (#68: the middleware and the handler it calls) keeps the budget the front
+        // door had as a call, `callFuelLimit`; every other step `fuelPerStep`.
+        var meter = engine.Meter.init(if (request_input != null) callFuelLimit(rt.genesis) else fuelPerStep(rt.genesis));
         // The attested calls the step made, kept even when it fails: an
         // errored update lists them, so a replay has their answers.
         var calls = std.array_list.Managed([]const u8).init(a);

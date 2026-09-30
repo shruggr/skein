@@ -4,7 +4,12 @@ The one-page picture, as settled with David on 2026-09-25 and revised by
 issue #40: **the instance is an HTTP server; BRC-169 is discovery;
 BRC-103/104 is the network; messages are state.** Where `VM.md` talks about a
 "host" with services beside the runtime, this note supersedes it: there is no
-such layer.
+such layer. Revised for the boundary rework's first build (#68, #66): skein
+is a **state process** — every package a transport carries in is appended
+as received and the instance's front door is stepped on it; sessions are
+state; a synchronous client waits on the thread. The host is a light router
+that verifies nothing (the tracker, #31, "The boundary rework", has the rest
+of the rework: #70, #67, #65, #69).
 
 ## The runtime is the whole system
 
@@ -24,10 +29,12 @@ Everything else that looks like an input — a model completion, a tree of
 files, a person's line — is a message from another identity, proven by its
 session.
 
-The host's side of these edges is small: it admits the entries a front door
-returns, feeds (headers, proofs, statuses), and wakes; it answers `wallet` and
-`http`; it calls the front door with each HTTP request. `MESSAGES.md` has the
-message path end to end.
+The host's side of these edges is small: it appends every package a
+transport carries in as received (#68: an HTTP request, a GossipSub message,
+a stream frame — the front door is stepped on it inside), feeds (headers,
+proofs, statuses) and wakes; it answers `wallet` and `http`; it holds a
+synchronous client's connection until the request's thread has come to rest
+(#66). It verifies nothing. `MESSAGES.md` has the message path end to end.
 
 Time and randomness are different: they are not another party's statement
 inside a message. When the host admits an input it reads its clock and writes
@@ -59,9 +66,12 @@ Inside the runtime:
   `call` (another program's function, in the VM); nothing emits: a program
   that sends a message calls the messagebox program, which delivers over
   `http`;
+- **requests** (#68): every package a transport carries in is an entry,
+  and the transport's middleware (the front door) is stepped on it as the
+  request's own thread (`docs/VM.md`, "Requests");
 - **calls**: a program's function run over the current state with no entry
-  and no writes — how the host asks the instance anything (the front door is
-  one: `docs/VM.md`, "Calls");
+  and no writes — for host-side reads that are not requests (the answer of a
+  route that reads live state, the explorer's; `docs/VM.md`, "Calls");
 - the **virtual filesystem**: trees from the store, seen through WASI; the
   wasm shell and its tools run over it. It is the only filesystem the runtime
   has.
@@ -129,14 +139,15 @@ through gib. The runtime never writes to a disk.
 
 The host is a **router**: a reverse proxy in front of instances that are HTTP
 servers. The kernel's surface is small: out go `wallet` (the signing oracle),
-`http` and `libp2p` (#51); in come **admit an entry and run the step**, and
-**call a function** (no entry, no writes).
+`http` and `libp2p` (#51); in come **admit an entry and run the step**,
+**answer** (#66: wait on the thread a request entry launched), and **call a
+function** (no entry, no writes: host-side reads).
 
 The router's components, each the sockets for one kind of traffic, none of
 them judging anything (the instance does, through its front door):
 
-- the **HTTP proxy** — instances' origins, the front door `call` per request,
-  the kernels' outbound `http` (below);
+- the **HTTP proxy** — instances' origins, each request appended and waited
+  on, the kernels' outbound `http` (below);
 - the **feeds** — SSE headers and ARC callbacks, admitted as plain entries
   (below);
 - the **libp2p host** (#43, #51; `src/host/p2p.ts`) — one js-libp2p node per
@@ -147,25 +158,23 @@ them judging anything (the instance does, through its front door):
   `http://<handle>.localhost:<port>` (or `/@<handle>` on the router's own
   origin, for our clients). The router picks the instance by the URL — routing
   comes before authentication, because a handshake does not name its
-  recipient — and forwards the request as one kernel `call` of the instance's
-  **front door** (`programs/frontdoor`), which runs BRC-103/104 against the
-  instance's session table, routes by its routes table
-  (`etc/routes.json`), checks its reads table (`etc/reads.json`), calls the
-  handler and signs the answer. The router keeps no mail. The stock AuthFetch
-  (one session per origin, handshake at `<origin>/.well-known/auth`) is
-  served by the host-name form.
-- **Sessions are not state.** The session table lives in memory with the
-  instance's kernel process (`Kernel.scratch`, an opaque key → bytes map the
-  router passes in each front-door call and updates from its answer; only the
-  front door reads it) and never in the log: a message's entry carries the
-  sender key, the 104 signature and both nonces, so replay needs no session.
-  A new process starts with an empty table; a client's next request gets a
-  401 and the stock client shakes hands again (one round trip).
-  `MESSAGES.md`, "Sessions are not state".
-- **Writes and reads.** A handler that writes returns entries for the router
-  to admit (a message, an acknowledgement); a read returns an answer and
-  nothing else — ten thousand polls write no entry and no byte, and a
-  handshake writes nothing either. `MESSAGES.md`, "The persistence rule".
+  recipient — and appends the request as received (#68), a `request` entry;
+  the kernel steps the instance's **front door** (`programs/frontdoor`) on
+  it, which runs BRC-103/104 against the instance's session table, routes
+  by its routes table (`etc/routes.json`), checks its reads table
+  (`etc/reads.json`), calls the handler and signs the answer. The router
+  holds the client's connection until that thread comes to rest (#66) and
+  returns its answer; past `answerWaitMs` (default two minutes) or at
+  shutdown, 503 + Retry-After. The router keeps no mail and no sessions.
+  The stock AuthFetch (one session per origin, handshake at
+  `<origin>/.well-known/auth`) is served by the host-name form.
+- **Sessions are state** (#68): records under the head `sessions`, written
+  by the handshake's step and read by each signed request's; they survive a
+  restart. `MESSAGES.md`, "Sessions are state".
+- **Writes and reads.** Every request is an entry; a handler that writes
+  admits what the kernel routes (a message, an acknowledgement) or starts a
+  thread; a read moves nothing — a poll costs its entry, as an access log
+  records a GET. `MESSAGES.md`, "The persistence rule".
 - **Mailbox instances**: an identity outside the host gets an instance of its
   own for its mail (`skein-host add <h> --mailbox --owner <key>`, or a signed
   `POST /account/register {username, identityKey, signature}`).
@@ -177,8 +186,10 @@ them judging anything (the instance does, through its front door):
   (`/manifest.json`, `/.well-known/metanet-handles/resolve`: `{identityKey,
   messagebox}`) and the paymail PKI; an instance looks others up with its
   resolve program. BRC-169 is discovery only.
-- **The fuel ledger**: every front-door call's fuel is charged to (instance,
-  caller, op) in host.db (`fuel_ledger`; `skein-host ledger`).
+- **The fuel ledger**: a request's fuel is on its thread's updates, in the
+  log (#68); the kernel calls the router makes (a read after a request, the
+  explorer's) are charged to (instance, caller, op) in host.db
+  (`fuel_ledger`; `skein-host ledger`).
 - **Feeds** (`src/host/feeds.ts`): the router holds long-lived subscriptions
   an instance declares in its config (`etc/config.json` `feeds`, carried by
   the genesis) — an SSE header stream (`{kind: "headers", url}`), one
@@ -218,17 +229,17 @@ them judging anything (the instance does, through its front door):
   (scripts/host/README.md).
   - **Inbound through the front door.** Each GossipSub message on a
     subscribed topic is judged by GossipSub's async topic validator, which
-    makes one front-door `call` (fn `libp2p`) tagged `{transport: "libp2p",
-    topic, from, seqno, signature, body}` and waits on it; the front door
-    verifies the signature, routes by `libp2p:<topic>`, and its handler
-    answers accept | reject | ignore. The verdict is GossipSub's (accept:
-    admit + forward; reject: drop, the delivering peer penalised; ignore:
-    drop). Accept returns one `p2p` entry, admitted before the verdict goes
-    back (docs/MESSAGES.md, "libp2p"). Reject and ignore write nothing.
-    Inbound streams: per protocol, the router reads length-prefixed frames,
-    calls the front door the same way (`libp2p:<protocol>`, no signature:
-    the stream is Noise's) and writes the handler's answer back. The calls'
-    fuel goes to the ledger (caller: the peer ID; op: the route source).
+    appends the message as received (#68: a `request` entry, `{kind: "p2p",
+    topic, from, seqno, signature, body}`) and waits on the thread the front
+    door is stepped on (#66); the front door verifies the signature, routes
+    by `libp2p:<topic>`, and its handler answers accept | reject | ignore.
+    The verdict is GossipSub's (accept: forward; reject: drop, the
+    delivering peer penalised; ignore: drop). Accept admits the message as
+    a `p2p` event, routed after the step (docs/MESSAGES.md, "libp2p");
+    reject and ignore are recorded refusals. Inbound streams: per protocol,
+    the router reads length-prefixed frames, appends each the same way
+    (`{kind: "p2p-frame", protocol, from, body}`, no signature: the stream
+    is Noise's) and writes the answer back.
   - **Outbound, the kernel's `libp2p` import**: publish, dial, send, receive,
     close, answered here and recorded by the kernel on the step's update. A
     `receive` with no frame waiting answers `{pending}` and the thread rests;
@@ -238,9 +249,8 @@ them judging anything (the instance does, through its front door):
   (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
   length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
   demand and, by default, never stops it: instances are not stopped until
-  resource contention appears (then the in-memory session table would be
-  cached out). `SKEIN_IDLE_MS` > 0 stops one idle that long, dropping its
-  sessions (its clients re-handshake); recovery after an
+  resource contention appears. `SKEIN_IDLE_MS` > 0 stops one idle that long
+  (its sessions are records: its clients go on); recovery after an
   environment failure happens at hydrate time from the log (a thread whose
   step was cut off runs again; a deterministic error is recorded and never
   retried).
@@ -277,6 +287,11 @@ them judging anything (the instance does, through its front door):
 - **Format 4** (#62): entries as format 3; every recorded `http`/`libp2p`
   call carries the host's attestation, and the genesis names the host's
   attest key (`attest`). docs/VM.md ("Attested by the host") has the shape.
+- **Format 5** (#68): every package a transport carries in is a `request`
+  entry (`{request: <record>, transport}`), the front door stepped on it;
+  sessions are records (head `sessions`); what a request's step admits is
+  routed by the kernel, a message once (the `unique` map). A format-4 store
+  is refused for running (re-genesis). docs/VM.md ("Requests").
 
 ## Bootstrap (issue #4)
 
@@ -320,13 +335,14 @@ cross-origin isolated). Easel (#16) builds on this.
 An instance can be a BRC-22/24 overlay node, served by its own front door:
 its `etc/routes.json` names the overlay engine's route handlers (`POST
 /submit`, `POST /lookup`, overlay-express's listing and documentation
-routes, all open). A submit is the one write (#50): the handler decodes the
-BEEF once into records in its call's overlay, checks it against the held
-headers and calls the topic managers on the transaction's CID, all as a
-read. Only if a topic takes it does it return the `submit` entry to admit.
-The `overlay` program, stepped on that entry, holds the records, records the
-judgements and calls the lookup services' hooks. The answer is a `then` call
-reading the STEAK back. A lookup is a read: an in-VM call of the lookup
+routes, all open). A submit is the one write (#50): the handler, in the
+front door's step on the request, decodes the BEEF once into records in the
+step's write cache, checks it against the held headers and calls the topic
+managers on the transaction's CID. Only if a topic takes it does it launch
+the submission's thread — the `overlay` program on the submit record, which
+holds the records, broadcasts, records the judgements and calls the lookup
+services' hooks — and the request waits on that thread (#66); when it
+finishes the handler answers the STEAK from the state. A lookup is a read: an in-VM call of the lookup
 service's program, which answers from its own maps (head `ls:<service>`),
 written only through its hooks. What topics admit is kept as index maps in
 the same state record as the wallet's (wallet-zig `overlay.zig`), so a
