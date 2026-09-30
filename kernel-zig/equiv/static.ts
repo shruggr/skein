@@ -7,8 +7,8 @@
 // a directory without its `/` redirected, 404 for a missing file, a file
 // outside the root, a prefix that ends mid-segment and every `..` form, 405
 // for a POST, HEAD with no body, and the ETag (the blob's CID) answered 304
-// on If-None-Match. Nothing is written: the store file is byte-identical
-// after every request, and it replays to itself exactly.
+// on If-None-Match. Every request is one entry, recorded (#68), and none
+// moves a head; the store replays to itself exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/static.ts
 
@@ -87,7 +87,9 @@ const router = new Router({
 
 type Got = { status: number; type: string; etag: string; location: string; allow: string; body: string };
 /** A raw request (node:http: the path goes as written, no client-side dot-segment removal). */
+let requests = 0;
 function get(path: string, method = "GET", headers: Record<string, string> = {}): Promise<Got> {
+  requests++;
   const u = new URL(router.originOf("site"));
   return new Promise((resolve, reject) => {
     const req = request({ host: "127.0.0.1", port: u.port, path, method, headers: { host: u.host, ...headers } }, (res) => {
@@ -102,7 +104,9 @@ function get(path: string, method = "GET", headers: Record<string, string> = {})
     req.end();
   });
 }
-const storeBytes = () => createHash("sha256").update(readFileSync(db)).update(existsSync(`${db}-wal`) ? readFileSync(`${db}-wal`) : new Uint8Array()).digest("hex");
+// #68: every request is an entry (the site's access log); none moves a head.
+const entries = async () => { const k = (await router.hydrate("site")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
+const heads = async () => { const k = (await router.hydrate("site")).kernel; return [String(await k.call("head", "main")), String(await k.call("head", "sessions"))]; };
 
 try {
   await router.listen(0);
@@ -110,7 +114,7 @@ try {
   await router.bootRow("site", { kind: "tree", root: src.root, objects: src.objects });
   await get("/site/"); // hydrated
   await router.settled();
-  const before = storeBytes();
+  const n0 = await entries(), r0 = requests, h0 = await heads();
 
   const html = "text/html; charset=utf-8";
   let r = await get("/site");
@@ -162,7 +166,8 @@ try {
   }
 
   await router.settled();
-  check(storeBytes() === before, "nothing written: the store file byte-identical after every request");
+  const n1 = await entries(), h1 = await heads();
+  check(n1 - n0 === requests - r0 && h1.join() === h0.join(), `each request one entry (${requests - r0} requests, ${n1 - n0} entries), and no head moved (main, sessions: ${h1.join(", ")})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

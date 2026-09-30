@@ -424,7 +424,7 @@ fn copyLog(a: std.mem.Allocator, src: storem.Store, dst: storem.Store) !void {
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) return error.BadSignature;
-        for ([_][]const u8{ "genesis", "mail", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
+        for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
             try dst.putBlock(x, b);
         };
