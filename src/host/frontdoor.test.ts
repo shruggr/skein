@@ -1,20 +1,22 @@
-// The front door (#40) at the kernel, no router: the stock AuthFetch shakes
-// hands with the instance, its signed requests verify inside the VM and the
-// answers verify at the client. Sessions are not state: the handshake writes
-// nothing (no entry, no byte) — the session lives in the kernel process's
-// in-memory table — and polls write nothing. A new kernel process (or a
-// dropped table, or an expired session) is a 401, and the stock client shakes
-// hands again by itself.
+// The front door (#68, #66) at the kernel, no router: every request is
+// appended as received and the front door is stepped on it, as the request's
+// own thread; the answer is read off that thread once it has come to rest.
+// The stock AuthFetch shakes hands with the instance — the handshake is a
+// request like any other, and its session is a record (head `sessions`) —
+// its signed requests verify inside the VM and the answers verify at the
+// client. A refusal (401, 404) is recorded and changes nothing else. A poll
+// costs an entry. Sessions survive a new kernel process; an expired one is a
+// 401 and the stock client shakes hands again by itself.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as dagCbor from "@ipld/dag-cbor";
 import { AuthFetch, PrivateKey } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
+import { msStamp } from "../runtime/syscalls.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { rawCid } from "./boot.ts";
 import { frontDoorFetch, type FrontAnswer } from "./frontdoor.ts";
@@ -23,7 +25,7 @@ import { Kernel, KERNEL_BIN } from "./kernel.ts";
 
 const PROBE = new URL("../../kernel-zig/test/call/probe.wasm", import.meta.url);
 
-test("front door: the handshake writes nothing (the session is in memory); signed requests verify both ways; polls write nothing; a restart is a 401 the stock client recovers from", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("front door: every request is an entry and a thread; the handshake writes the session as a record; refusals are recorded and change nothing else; sessions survive a restart; an expired one is a 401 the stock client recovers from", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-front-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const key = PrivateKey.fromRandom(), clientKey = PrivateKey.fromRandom();
@@ -43,70 +45,82 @@ test("front door: the handshake writes nothing (the session is in memory); signe
   await k.idle();
 
   const entries = async () => (await k.store.get((await k.store.log.tip())!) as unknown as { n: number }).n;
-  const size = () => statSync(db).size + (existsSync(`${db}-wal`) ? statSync(`${db}-wal`).size : 0);
-  // The client's transport follows whichever kernel process is current; it counts the answers by status.
-  const statuses: number[] = [];
-  const door: typeof fetch = (input, init) => frontDoorFetch(k, { onAnswer: (a: FrontAnswer) => statuses.push(a.status) })(input, init);
+  const sessions = async () => await k.call("head", "sessions") as CID | null;
+  // The entries' clock: shifted forward to expire a session (never back: the log's stamps only rise).
+  let shift = 0;
+  const now = () => msStamp(Date.now() + shift);
+  // The client's transport follows whichever kernel process is current; it keeps the answers.
+  const answers: FrontAnswer[] = [];
+  const door: typeof fetch = (input, init) => frontDoorFetch(k, { now, onAnswer: (a) => answers.push(a) })(input, init);
   const af = new AuthFetch(ephemeralWallet(clientKey), undefined, undefined, undefined, {}, door);
   const whoami = async () => {
     const r = await af.fetch("http://alpha.test/whoami", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     assert.equal(r.status, 200, await r.clone().text());
     return Buffer.from(await r.arrayBuffer()).toString("hex");
   };
+  const statuses = () => answers.map((a) => a.status);
 
-  const n0 = await entries(), s0 = size();
+  const n0 = await entries();
+  assert.equal(await sessions(), null, "no session yet");
   assert.equal(await whoami(), client, "the handler sees the authenticated caller; the client verified the signed answer");
   await k.idle();
-  assert.equal(await entries(), n0, "the handshake writes no entry");
-  assert.equal(size(), s0, "the handshake writes no byte");
-  assert.equal(k.scratch.size, 1, "the session is in the kernel's in-memory table");
-  const [nonce, rec] = [...k.scratch.entries()][0]!;
-  const s = dagCbor.decode(rec) as { peer: Uint8Array; peerNonce: string; created: number };
-  assert.equal(Buffer.from(s.peer).toString("hex"), client);
-  assert.ok(nonce.length > 0 && s.peerNonce.length > 0 && s.created > 0);
-  const boxes = await k.boxes();
-  assert.ok(!boxes.includes(":sessions"), `no :sessions box (${boxes})`);
-  assert.equal(await k.call("head", "sessions"), null, "no sessions head");
+  assert.deepEqual(statuses(), [200, 200], "the handshake, the request");
+  assert.equal(await entries(), n0 + 2, "the handshake and the request: one entry each");
+  const s1 = await sessions();
+  assert.ok(s1, "the handshake wrote the session table (head `sessions`)");
+  const root = await k.store.get(s1) as unknown as { kind: string; buckets: CID[] };
+  assert.equal(root.kind, "sessions");
+  const held = (await Promise.all(root.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: Array<{ peer: Uint8Array; nonce: string; peerNonce: string; created: number }> }).sessions))).flat();
+  assert.equal(held.length, 1, "one session");
+  assert.equal(Buffer.from(held[0]!.peer).toString("hex"), client);
+  assert.ok(held[0]!.nonce.length > 0 && held[0]!.peerNonce.length > 0 && held[0]!.created > 0);
+  // Each request's answer is on the last update of the thread it launched: the front door on the request.
+  for (const a of answers) {
+    assert.ok(a.entry && a.thread, "the entry and its thread");
+    const o = await k.store.get(a.thread!) as { kind: string; args: { request: CID; transport: string }; input: CID };
+    assert.deepEqual([o.kind, o.args.transport, o.input.toString()], ["thread", "http", a.entry!.toString()]);
+  }
+  const last = answers.at(-1)!;
+  const e = await k.store.get(last.entry!) as { request?: CID; transport?: string };
+  assert.equal(e.transport, "http");
+  const req = await k.store.get(e.request!) as { kind: string; method: string; route: string; headers: Record<string, string> };
+  assert.deepEqual([req.kind, req.method, req.route], ["http", "POST", "/whoami"], "the request as received");
+  assert.ok(req.headers["x-bsv-auth-signature"], "its BRC-104 headers too: the host verified nothing");
 
-  // Unsigned: a plain 401 on an authenticated route; an open route answers without auth.
-  assert.equal((await frontDoorFetch(k)("http://alpha.test/whoami", { method: "POST" })).status, 401);
-  assert.equal((await frontDoorFetch(k)("http://alpha.test/open", { method: "POST" })).status, 200);
-  assert.equal((await frontDoorFetch(k)("http://alpha.test/nowhere", { method: "POST" })).status, 404);
-
-  // Polls: nothing is written.
+  // Unsigned: a plain 401 on an authenticated route, recorded (an entry, a finished thread) and nothing else.
+  answers.length = 0;
+  const n1 = await entries();
+  assert.equal((await door("http://alpha.test/whoami", { method: "POST" })).status, 401);
+  assert.equal((await door("http://alpha.test/open", { method: "POST" })).status, 200, "an open route answers without auth");
+  assert.equal((await door("http://alpha.test/nowhere", { method: "POST" })).status, 404);
   await k.idle();
-  const n1 = await entries(), s1 = size();
-  for (let i = 0; i < 200; i++) await whoami();
-  assert.equal(await entries(), n1, "200 polls: no entry");
-  assert.equal(size(), s1, "200 polls: no byte");
-  assert.equal(k.scratch.size, 1, "polls add no session");
+  assert.equal(await entries(), n1 + 3, "each refusal is an entry");
+  assert.equal((await sessions())!.toString(), s1.toString(), "a refusal moves nothing");
+  assert.ok(answers.every((a) => a.thread), "each answered by its own thread (the refusal recorded on it)");
 
-  // The table dropped: a 401, and the stock client shakes hands again by itself.
-  k.scratch.clear();
-  statuses.length = 0;
-  assert.equal(await whoami(), client);
-  assert.deepEqual(statuses, [401, 200, 200], "401, the handshake, the request again");
-  assert.equal(k.scratch.size, 1);
+  // Polls: an entry each (an access log), and the session table unchanged.
+  const n2 = await entries();
+  for (let i = 0; i < 20; i++) await whoami();
+  await k.idle();
+  assert.equal(await entries(), n2 + 20, "20 polls: 20 entries");
+  assert.equal((await sessions())!.toString(), s1.toString(), "polls add no session");
 
-  // Expiry is judged against the in-memory record's stamp (`sessionTtlMs`, a day).
-  const [n2, r2] = [...k.scratch.entries()][0]!;
-  k.scratch.set(n2, dagCbor.encode({ ...(dagCbor.decode(r2) as object), created: Date.now() - 86_400_001 }));
-  statuses.length = 0;
-  assert.equal(await whoami(), client);
-  assert.deepEqual(statuses, [401, 200, 200], "an expired session: 401, the handshake, the request again");
-  assert.equal(k.scratch.size, 1, "the handshake dropped the expired session");
-
-  // A new kernel process: hydration starts with an empty table; the same client recovers by itself.
+  // Sessions are state: a new kernel process keeps them; the same client's next request is served at once.
   await k.stop();
   k = open();
   await k.start();
   await k.idle();
-  assert.equal(k.scratch.size, 0, "a new process starts with no sessions");
-  const n3 = await entries(), s3 = size();
-  statuses.length = 0;
+  answers.length = 0;
   assert.equal(await whoami(), client);
-  assert.deepEqual(statuses, [401, 200, 200], "after a restart: 401, the handshake, the request again");
+  assert.deepEqual(statuses(), [200], "after a restart: no new handshake");
+
+  // Expiry is judged against the session's `created` (`sessionTtlMs`, a day), by the entry's time.
+  shift = 86_400_001;
+  answers.length = 0;
+  assert.equal(await whoami(), client);
+  assert.deepEqual(statuses(), [401, 200, 200], "an expired session: 401, the handshake, the request again");
   await k.idle();
-  assert.equal(await entries(), n3, "the re-handshake writes no entry");
-  assert.equal(size(), s3, "the re-handshake writes no byte");
+  const root2 = await k.store.get((await sessions())!) as unknown as { buckets: CID[] };
+  const held2 = (await Promise.all(root2.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: unknown[] }).sessions))).flat();
+  assert.equal(held2.length, 1, "the handshake dropped the expired session");
 });

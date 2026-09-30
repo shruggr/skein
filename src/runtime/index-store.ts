@@ -253,14 +253,19 @@ const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !
 export async function derive(store: Store): Promise<{ pairs: Record<MapName, Array<[Uint8Array, unknown]>>; log: CID | null; cursor: number }> {
   const pairs = Object.fromEntries(MAPS.map((m) => [m, []])) as unknown as Record<MapName, Array<[Uint8Array, unknown]>>;
   let tip: CID | null = null;
+  // The unique map, first admission wins: record CID → [entry n, entry].
+  const unique = new Map<string, [number, CID, Uint8Array]>();
+  const mark = (u: CID, n: number, e: CID) => { const k = fmt(u); const had = unique.get(k); if (!had || had[0] > n) unique.set(k, [n, e, u.bytes]); };
+  const nOf = new Map<string, number>();
   for await (const { cid, entry } of store.log.entries()) {
     pairs.log.push([be64(entry.n), cid]);
+    nOf.set(fmt(cid), entry.n);
     // The record an entry is unique by (index.zig `uniqueOf`): its mail record (format 3, #40), a
     // libp2p `p2p` event record (#51, #42: a redelivered message is refused), or format 2's envelope / emit.
     const x = entry as LogEntry & { mail?: CID; event?: CID };
     let u = x.mail ?? x.envelope ?? x.outcome?.emit;
     if (!u && x.event && ((await store.get(x.event).catch(() => undefined)) as { kind?: unknown } | undefined)?.kind === "p2p") u = x.event;
-    if (u) pairs.unique.push([u.bytes, cid]);
+    if (u) mark(u, entry.n, cid);
     tip = cid;
   }
   const seenEdge = new Set<string>();
@@ -282,6 +287,7 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
     for (const [i, c] of ups.entries()) {
       pairs.updates.push([cat(origin.bytes, be64(i + 1)), c]);
       const u = (await store.get(c)) as unknown as Obj;
+      if (kind === "thread" && isRequestThread(o)) for (const r of routed(u)) mark(r, nOf.get(fmt(u.input as CID)) ?? Infinity, u.input as CID);
       const keptCids = (Array.isArray(u.kept) ? u.kept : []).filter(isCID) as CID[];
       const kept = await Promise.all((Array.isArray(u.kept) ? u.kept : []).map((k) => (isCID(k) && !isBitcoin(k) ? store.get(k).catch(() => undefined) : undefined)));
       edges(i + 1, [...updateEdges(u), ...keptEdges(kept)]);
@@ -308,7 +314,35 @@ export async function derive(store: Store): Promise<{ pairs: Record<MapName, Arr
       if (t && Array.isArray(t.awaits)) for (const c of t.awaits) if (isCID(c)) pairs.awaits.push([cat(c.bytes, at, origin.bytes), null]);
     } else if (kind === "head" && t && typeof o.name === "string" && isCID(t.tree)) pairs.heads.push([strKey(o.name), t.tree]);
   }
+  for (const [, e, u] of unique.values()) pairs.unique.push([u, e]);
   return { pairs, log: tip, cursor: await store.live.cursor.get() };
+}
+
+/** A request's thread (#68, scheduler.zig isRequestThread): the middleware launched by the request record it names. */
+function isRequestThread(o: Obj): boolean {
+  const args = o.args as Obj | undefined;
+  return isObj(args) && isCID(args.request) && typeof args.transport === "string" && isCID(o.launchedBy) && (args.request as CID).equals(o.launchedBy as CID);
+}
+
+/**
+ * What a request thread's step routed that is unique (#68, scheduler.zig
+ * routeAdmits): the messages and libp2p `p2p` events its answer's `admit`
+ * lists — marked under the entry that drove the step, unless admitted before.
+ */
+function routed(u: Obj): CID[] {
+  if (u.state === "errored") return [];
+  const out = (u.result as Obj | undefined)?.stdout;
+  if (!(out instanceof Uint8Array)) return [];
+  let v: unknown;
+  try { v = decode(out); } catch { return []; }
+  const admit = isObj(v) && Array.isArray(v.admit) ? v.admit : [];
+  const got: CID[] = [];
+  for (const x of admit) {
+    if (!isObj(x)) continue;
+    if (isObj(x.mail) && x.mail.kind === "mail") got.push(encode(x.mail).cid);
+    else if (isObj(x.event) && x.event.kind === "p2p" && typeof x.box === "string" && x.box.length > 0) got.push(encode(x.event).cid);
+  }
+  return got;
 }
 
 // ---------------------------------------------------------------- reading (the Store)

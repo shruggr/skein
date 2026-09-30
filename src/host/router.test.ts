@@ -3,7 +3,8 @@
 // stock @bsv/message-box-client talks to an agent by host name, our raw
 // BRC-33 client by path prefix; the agent answers into its owner's mailbox —
 // a mailbox instance — over http, short-circuited in process; the owner lists
-// and acknowledges there; ten thousand polls write nothing.
+// and acknowledges there; every request is an entry (#68), a poll moves
+// nothing; sessions are records and survive a killed kernel.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -14,7 +15,7 @@ import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { testHost, until } from "./testhost.ts";
 
-test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's mailbox instance over http; list/ack; 10,000 polls write nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's mailbox instance over http; list/ack; polls are entries that move nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   h.mailbox("david", h.ownerId);
   const alpha = h.agent("alpha");
@@ -53,17 +54,16 @@ test("router: the stock client by host name, our client by path prefix; the answ
   const k = (await h.router.hydrate("alpha")).kernel;
   assert.equal(await k.call("head", "peers"), null, "no peer seeded from the host's rows");
 
-  // Polls: ten thousand listMessages on david's mailbox write no entry and no byte.
+  // Polls (#68: skein is a state process): each listMessages on david's mailbox is an entry — an access
+  // log — and a read: the mailbox itself does not move.
   await h.router.settled();
-  const n0 = await h.entries("david"), s0 = h.storeSize("david");
-  const n = Number(process.env.SKEIN_POLLS ?? 10_000);
+  const kd = (await h.router.hydrate("david")).kernel;
+  const n0 = await h.entries("david"), m0 = await kd.call("head", "mailbox") as CID;
+  const n = Number(process.env.SKEIN_POLLS ?? 100);
   for (let i = 0; i < n; i++) await dav.listMessagesLite({ messageBox: "results", host: h.origin("david") });
   await h.router.settled();
-  assert.equal(await h.entries("david"), n0, `${n} polls: no entry`);
-  assert.equal(h.storeSize("david"), s0, `${n} polls: no byte`);
-  h.router.flushLedger();
-  const ledger = h.db.ledger("david").find((l) => l.caller === h.ownerId && l.op === "/listMessages");
-  assert.ok(ledger && ledger.calls >= n && ledger.fuel > 0, "the polls' fuel is on the host's ledger");
+  assert.equal(await h.entries("david"), n0 + n, `${n} polls: ${n} entries`);
+  assert.ok((await kd.call("head", "mailbox") as CID).equals(m0), `${n} polls: the mailbox unchanged`);
 });
 
 test("router: an agent's genesis names the owner's mailbox instance when it exists first; one without it is warned about at hydration", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
@@ -79,7 +79,7 @@ test("router: an agent's genesis names the owner's mailbox instance when it exis
   assert.ok(!h.lines.some((l) => l.startsWith("[late] WARNING")), "no warning for an agent whose genesis names it");
 });
 
-test("router: sessions are not state — the stock client's handshakes write nothing on a mailbox instance or an agent; a killed kernel is a 401 the client recovers from by itself", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on a mailbox instance and an agent; a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   h.mailbox("david", h.ownerId);
   h.agent("alpha");
@@ -91,46 +91,44 @@ test("router: sessions are not state — the stock client's handshakes write not
   const forward = r.forward.bind(h.router);
   r.forward = async (handle, route, ...rest) => { const a = await forward(handle, route, ...rest); seen.push(`${handle} ${route} ${a.status}`); return a; };
   const n0 = { david: await h.entries("david"), alpha: await h.entries("alpha") };
-  const s0 = { david: h.storeSize("david"), alpha: h.storeSize("alpha") };
 
-  // The first request to each origin shakes hands: nothing is written for it.
+  // The first request to each origin shakes hands: the handshake is an entry, and its session a record.
   const dav = new MessageBoxClient({ host: h.origin("david"), walletClient: h.owner });
   assert.deepEqual(await dav.listMessagesLite({ messageBox: "chat", host: h.origin("david") }), []);
   const al = new MessageBoxClient({ host: h.origin("alpha"), walletClient: h.owner });
   assert.deepEqual(await al.listMessagesLite({ messageBox: "chat", host: h.origin("alpha") }), []);
   await h.router.settled();
   assert.deepEqual(seen, ["david /.well-known/auth 200", "david /listMessages 200", "alpha /.well-known/auth 200", "alpha /listMessages 200"]);
-  assert.equal(await h.entries("david"), n0.david, "the mailbox instance: the handshake is no entry");
-  assert.equal(h.storeSize("david"), s0.david, "the mailbox instance: the handshake is no byte");
-  assert.equal(await h.entries("alpha"), n0.alpha, "the agent: the handshake is no entry");
-  assert.equal(h.storeSize("alpha"), s0.alpha, "the agent: the handshake is no byte");
+  assert.equal(await h.entries("david"), n0.david + 2, "the mailbox instance: the handshake and the listing, an entry each");
+  assert.equal(await h.entries("alpha"), n0.alpha + 2, "the agent: the handshake and the listing, an entry each");
   const kd = (await h.router.hydrate("david")).kernel;
-  assert.equal(kd.scratch.size, 1, "david's session: in its kernel's memory");
-  assert.ok(!(await kd.boxes()).includes(":sessions"), "no :sessions box");
+  const s1 = await kd.call("head", "sessions") as CID | null;
+  assert.ok(s1, "david's session: a record (head `sessions`)");
 
-  // Kill both kernels: the next request hydrates a new process with no sessions; the stock client gets a 401 and shakes hands again by itself.
+  // Kill both kernels: the next request hydrates a new process over the same store; the sessions are there.
   const kill = async (handle: string) => { const k = (await h.router.hydrate(handle)).kernel; k.proc.kill("SIGKILL"); await k.exited(); };
   await kill("david");
   await kill("alpha");
   seen.length = 0;
   const sent = await dav.sendMessage({ recipient: h.ownerId, messageBox: "chat", body: { text: "after the restart" }, skipEncryption: true }, h.origin("david"));
   assert.ok(sent.messageId, "send works after the restart");
-  assert.deepEqual(seen, ["david /sendMessage 401", "david /.well-known/auth 200", "david /sendMessage 200"], "401, the handshake, the send again");
+  assert.deepEqual(seen, ["david /sendMessage 200"], "no 401, no new handshake");
   const listed = await dav.listMessagesLite({ messageBox: "chat", host: h.origin("david") });
   assert.equal(listed.length, 1, "list works after the restart");
   assert.equal(listed[0]!.sender, h.ownerId);
   seen.length = 0;
   assert.deepEqual(await al.listMessagesLite({ messageBox: "chat", host: h.origin("alpha") }), [], "list works on the agent after its restart");
-  assert.deepEqual(seen, ["alpha /listMessages 401", "alpha /.well-known/auth 200", "alpha /listMessages 200"]);
+  assert.deepEqual(seen, ["alpha /listMessages 200"]);
   const kd2 = (await h.router.hydrate("david")).kernel;
   assert.notEqual(kd2, kd, "a new kernel process");
-  assert.equal(kd2.scratch.size, 1, "one new session, in memory");
+  assert.ok((await kd2.call("head", "sessions") as CID).equals(s1), "the same session table");
 
-  // The only entry all that wrote is the message, and it carries its proof: the sender, the 104 signature, both nonces.
+  // The message is routed from its request, and its record carries its proof: the sender, the 104 signature, both nonces.
   await h.router.settled();
-  assert.equal(await h.entries("david"), n0.david + 1, "one entry: the message");
-  const tip = await kd2.store.get((await kd2.store.log.tip())!) as { mail?: CID };
-  const mail = await kd2.store.get(tip.mail!) as unknown as { sender: Uint8Array; session: { signature: Uint8Array; nonce: string; yourNonce: string } };
+  const box = await kd2.call("head", "mailbox") as CID;
+  const lists = (await kd2.store.get(box) as unknown as { lists: Array<{ box: string; list: CID }> }).lists;
+  const chat = await kd2.store.get(lists.find((l) => l.box === "chat")!.list) as unknown as { messages: Array<{ id: CID }> };
+  const mail = await kd2.store.get(chat.messages[0]!.id) as unknown as { sender: Uint8Array; session: { signature: Uint8Array; nonce: string; yourNonce: string } };
   assert.equal(Buffer.from(mail.sender).toString("hex"), h.ownerId);
   assert.ok(mail.session.signature.length > 0 && mail.session.nonce && mail.session.yourNonce, "the 104 signature and both nonces");
 });

@@ -65,13 +65,19 @@ test("index store: a store the kernel wrote — every map derived here is the ke
 
   // The Store questions.
   const log = await collect(ix.log.entries());
-  assert.equal(log.length, 5, "the genesis, the import, the chat and the inference answers");
   assert.ok(log[0]!.entry.genesis, "entry 0 is the genesis");
+  // #68: every package a transport carried in is an entry — the handshakes, the import, the chat, the inference answers.
+  assert.ok(log.slice(1).every((e) => (e.entry as unknown as { transport?: string }).transport === "http"), "every other entry is an HTTP request as received");
+  assert.ok(log.length >= 7, `the handshakes, the import, the chat and the inference answers (${log.length})`);
   assert.equal(fmt((await ix.log.tip())!), fmt(st.log!));
   assert.equal(fmt(log.at(-1)!.cid), fmt(st.log!));
   assert.equal(await ix.live.cursor.get(), log.length, "every entry processed");
   assert.deepEqual((await collect(ix.log.entries(3))).map((e) => fmt(e.cid)), log.slice(3).map((e) => fmt(e.cid)));
-  const threads = await collect(ix.edges.query({ kind: "thread" }));
+  const all = await collect(ix.edges.query({ kind: "thread" }));
+  const isRequest = async (th: CID) => !!((await ix.get(th)) as { args?: { request?: unknown } }).args?.request;
+  const requests = (await Promise.all(all.map(isRequest))).filter(Boolean).length;
+  assert.equal(requests, log.length - 1, "one front-door thread per request");
+  const threads = (await Promise.all(all.map(async (th) => (await isRequest(th) ? undefined : th)))).filter((x): x is CID => !!x);
   assert.equal(threads.length, 3, "objects-handler, loop, shell");
   const waiting = await collect(ix.edges.query({ kind: "thread", state: ["waiting"] }));
   assert.equal(waiting.length, 1, "the loop awaits the owner's reply");
@@ -93,10 +99,10 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   const dev = (...args: string[]) => spawnSync(bin, args, { env: { ...process.env, SKEIN_DB: w.store }, encoding: "utf8" });
   const l = dev("log");
   assert.equal(l.status, 0, l.stderr);
-  assert.match(l.stdout, new RegExp(`^state ${fmt(st.log!)} · processed 5/5$`, "m"));
+  assert.match(l.stdout, new RegExp(`^state ${fmt(st.log!)} · processed ${log.length}/${log.length}$`, "m"));
   const ls = dev("ls");
   assert.equal(ls.status, 0, ls.stderr);
-  assert.equal(ls.stdout.trim().split("\n").length, 3);
+  assert.equal(ls.stdout.trim().split("\n").length, Math.min(20, all.length), "every thread, the requests' too, up to the limit");
   const show = dev("show", fmt(loop).slice(-12));
   assert.equal(show.status, 0, show.stderr);
   assert.match(show.stdout, /"kind": "thread"/);

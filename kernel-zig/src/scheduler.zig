@@ -134,6 +134,11 @@ pub const Peers = struct {
     libp2p_refusal: ?[]const u8 = null,
     /// A thread started sleeping (the tick's cue).
     on_sleep: ?*const fn (ctx: *anyopaque, thread: []const u8, until: i64) void = null,
+    /// A request's thread (#66: the middleware stepped on a request entry)
+    /// came to rest for good — finished or errored — with its answer on its
+    /// last update. Called at once, mid-drain, before what its step routed
+    /// runs: the host holding the client's connection answers it now.
+    on_answer: ?*const fn (ctx: *anyopaque, thread: []const u8, entry: []const u8) void = null,
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
     /// The host's Io (native): a call's real randomness. The browser build has none.
     io: ?std.Io = null,
@@ -322,9 +327,16 @@ pub const Runtime = struct {
     }
 
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !?AdmitResult {
-        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a mail, wake or event entry (format 3, #40)" };
+        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a request, mail, wake or event entry (format 5, #68)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
+        if (Value.cidOf(entry.get("request"))) |rc| {
+            // #68: the package as received; its form only (what it says is the middleware's to judge).
+            const transport = Value.str(entry.get("transport")).?;
+            if (middlewareOf(rt.genesis.?, transport) == null) return .{ .invalid = "admit: no middleware for this transport (the genesis's front door takes \"http\" and \"libp2p\")" };
+            if (!logm.isRequest(transport, rt.store.getOpt(a, rc))) return .{ .invalid = "admit: a request entry names its request record, put first, in its transport's shape (docs/VM.md, \"Requests\")" };
+            return null;
+        }
         if (Value.cidOf(entry.get("event"))) |ev| {
             if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first)" };
             return null;
@@ -449,9 +461,167 @@ pub const Runtime = struct {
             return;
         }
 
-        if (Value.cidOf(e.get("event"))) |ev| return rt.processEvent(a, n, .{ .cid = entry, .e = e }, ev, at);
+        if (Value.cidOf(e.get("event"))) |ev| return rt.processEvent(a, n, .{ .cid = entry, .e = e }, ev, Value.str(e.get("box")).?, at);
 
         if (Value.cidOf(e.get("mail"))) |mc| return rt.processMail(a, n, .{ .cid = entry, .e = e }, mc, at);
+
+        if (Value.cidOf(e.get("request"))) |rc| return rt.processRequest(a, n, .{ .cid = entry, .e = e }, rc, at);
+    }
+
+    // ------------------------------------------------------------ requests (#68, #66)
+
+    /// The middleware a transport's packages are stepped on (#68): the
+    /// genesis's `middleware` table ({transport: <program>}) if it names one,
+    /// else its front door for "http" and "libp2p". This is the hook for #70:
+    /// a local provider's messages ("local": only the message signature to
+    /// check) get a middleware here. No middleware: the entry is refused at
+    /// admission.
+    pub fn middlewareOf(g: Value, transport: []const u8) ?[]const u8 {
+        if (g.get("middleware")) |m| if (m == .map) if (Value.cidOf(m.get(transport))) |c| return c;
+        if (!std.mem.eql(u8, transport, "http") and !std.mem.eql(u8, transport, "libp2p")) return null;
+        const progs = g.get("programs") orelse return null;
+        return Value.cidOf(progs.get("frontdoor"));
+    }
+
+    /// A request thread's origin (#68), from its entry alone: the transport's
+    /// middleware, launched by the request record, with {request, transport}
+    /// as its arguments. So the host can ask after a request by its entry.
+    fn requestOrigin(rt: *Runtime, a: std.mem.Allocator, entry: []const u8, e: Value) !?Value {
+        const g = rt.genesis orelse return null;
+        const rc = Value.cidOf(e.get("request")) orelse return null;
+        const transport = Value.str(e.get("transport")) orelse return null;
+        const mw = middlewareOf(g, transport) orelse return null;
+        var args = cbor.MapBuilder.init(a);
+        try args.put("request", cbor.cidv(rc));
+        try args.put("transport", cbor.string(transport));
+        var origin = cbor.MapBuilder.init(a);
+        try origin.put("kind", cbor.string("thread"));
+        try origin.put("program", cbor.cidv(mw));
+        try origin.put("args", args.value());
+        try origin.put("launchedBy", cbor.cidv(rc));
+        try origin.put("input", cbor.cidv(entry));
+        try origin.put("at", cbor.int(logm.stampOf(e.get("time")).?.ms()));
+        return origin.value();
+    }
+
+    /// Whether a thread is a request's (its origin is requestOrigin's shape):
+    /// its steps read the routes and reads, and what their answer admits is routed.
+    fn isRequestThread(o: Value) bool {
+        const args = o.get("args") orelse return false;
+        if (args != .map) return false;
+        const rc = Value.cidOf(args.get("request")) orelse return false;
+        if (Value.str(args.get("transport")) == null) return false;
+        const by = Value.cidOf(o.get("launchedBy")) orelse return false;
+        return std.mem.eql(u8, rc, by);
+    }
+
+    /// A request (#68): the package as a transport carried it in. Its
+    /// transport's middleware is launched on it as a thread of its own — the
+    /// request's thread, the one a synchronous client waits on (#66) — and its
+    /// first step verifies the package and routes it.
+    fn processRequest(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, rc: []const u8, at: i64) !void {
+        _ = at;
+        const origin = (try rt.requestOrigin(a, ctx.cid, ctx.e)) orelse {
+            rt.say("#{d} request {s}: no middleware for its transport; recorded, nothing runs", .{ n, short(a, rc) });
+            return;
+        };
+        const t = try rt.store.chainOpen(a, origin);
+        rt.say("#{d} {s} request {s} → {s} {s}", .{ n, Value.str(ctx.e.get("transport")).?, short(a, rc), try rt.programName(a, Value.cidOf(origin.get("program")).?), short(a, t) });
+        try rt.run(a, t);
+    }
+
+    /// The thread a request entry launched, if it has been processed (#66: what the host waits on).
+    pub fn requestThread(rt: *Runtime, a: std.mem.Allocator, entry: []const u8) !?[]const u8 {
+        try rt.loadGenesis();
+        const e = (try rt.store.get(a, entry)) orelse return null;
+        const origin = (try rt.requestOrigin(a, entry, e)) orelse return null;
+        const c = try cbor.cidOfValue(a, origin);
+        if ((try rt.store.chainTip(a, c)) == null) return null;
+        return c;
+    }
+
+    pub const RequestAnswer = struct { state: []const u8, stdout: []const u8 = "", err: []const u8 = "" };
+
+    /// A request thread's state and, at rest for good, its answer (#66): the
+    /// last update's stdout (the middleware's answer, dag-cbor) when it
+    /// finished, its error's message when it errored.
+    pub fn answerOf(rt: *Runtime, a: std.mem.Allocator, thread: []const u8) !RequestAnswer {
+        const tip = (try rt.tipOf(a, thread)) orelse return .{ .state = "new" };
+        const state = Value.str(tip.get("state")) orelse "?";
+        if (std.mem.eql(u8, state, "finished")) {
+            const res = tip.get("result") orelse return .{ .state = state };
+            return .{ .state = state, .stdout = Value.bytesOf(res.get("stdout")) orelse "" };
+        }
+        if (std.mem.eql(u8, state, "errored")) {
+            const em = tip.get("error");
+            return .{ .state = state, .err = if (em) |x| Value.str(x.get("message")) orelse "errored" else "errored" };
+        }
+        return .{ .state = state };
+    }
+
+    /// What a request thread's step answered to admit (#68): `admit`, in its
+    /// stdout, routed now as the entries they were before — a message ({mail,
+    /// body}) by reply or subscription, admitted once (the `unique` map); an
+    /// event ({event, box}) by subject or box, a libp2p `p2p` event once. A
+    /// function of the step's update, so replay routes the same.
+    fn routeAdmits(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, stdout: []const u8) !void {
+        const out = cbor.decode(a, stdout) catch return;
+        if (out != .map) return;
+        const list = out.get("admit") orelse return;
+        if (list != .array) return;
+        const n = Value.intOf(ctx.e.get("n")) orelse 0;
+        const at = logm.stampOf(ctx.e.get("time")).?.ms();
+        for (list.array) |x| {
+            if (rt.stopped) return;
+            if (x.get("mail")) |mv| {
+                if (!logm.isMail(mv)) {
+                    rt.say("#{d}: a routed message is not a mail record; dropped", .{n});
+                    continue;
+                }
+                const bc = Value.cidOf(mv.get("body")).?;
+                if (Value.bytesOf(x.get("body"))) |bb| {
+                    const bv = cbor.decode(a, bb) catch {
+                        rt.say("#{d}: a routed message's body is not dag-cbor; dropped", .{n});
+                        continue;
+                    };
+                    const blk = try cbor.block(a, bv);
+                    if (!std.mem.eql(u8, blk.bytes, bb) or !std.mem.eql(u8, blk.cid, bc)) {
+                        rt.say("#{d}: a routed message's body is not the canonical one it names; dropped", .{n});
+                        continue;
+                    }
+                    try rt.store.putBlock(blk.cid, bb);
+                } else if (!(try rt.store.has(bc))) {
+                    rt.say("#{d}: a routed message has no body; dropped", .{n});
+                    continue;
+                }
+                const mc = try rt.store.put(a, mv);
+                if (!(try rt.store.markUnique(mc, ctx.cid))) {
+                    rt.say("#{d} message {s}: already admitted; nothing runs", .{ n, short(a, mc) });
+                    continue;
+                }
+                try rt.processMail(a, n, ctx, mc, at);
+            } else if (x.get("event")) |ev| {
+                const box = Value.str(x.get("box")) orelse "";
+                if (ev != .map or box.len == 0) {
+                    rt.say("#{d}: a routed event wants {{event: <record>, box}}; dropped", .{n});
+                    continue;
+                }
+                const ec = try rt.store.put(a, ev);
+                if (std.mem.eql(u8, Value.str(ev.get("kind")) orelse "", "p2p") and !(try rt.store.markUnique(ec, ctx.cid))) {
+                    rt.say("#{d} libp2p message {s}: already admitted; nothing runs", .{ n, short(a, ec) });
+                    continue;
+                }
+                try rt.processEvent(a, n, ctx, ec, box, at);
+            } else rt.say("#{d}: a routed entry is neither {{mail, body}} nor {{event, box}}; dropped", .{n});
+        }
+    }
+
+    /// Whether `c` is a thread that has come to rest for good (finished or errored).
+    fn threadAtRest(rt: *Runtime, a: std.mem.Allocator, c: []const u8) bool {
+        const o = rt.store.getOpt(a, c) orelse return false;
+        if (!std.mem.eql(u8, Value.str(o.get("kind")) orelse "", "thread")) return false;
+        const tip = (rt.tipOf(a, c) catch return false) orelse return false;
+        return stateIs(tip, "finished") or stateIs(tip, "errored");
     }
 
     /// Whether a thread rests on a libp2p stream (#51): it is waiting, and the
@@ -541,8 +711,7 @@ pub const Runtime = struct {
     /// admits from a feed): the thread whose tip awaits the event's `subject`
     /// (a CID; a transaction's is its txid) steps with it; else a
     /// subscription with no sender on the entry's box launches its handler.
-    fn processEvent(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, ev: []const u8, at: i64) !void {
-        const box = Value.str(ctx.e.get("box")).?;
+    fn processEvent(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, ev: []const u8, box: []const u8, at: i64) !void {
         const rec = rt.store.getOpt(a, ev);
         const kind = if (rec) |r| Value.str(r.get("kind")) orelse "?" else "?";
         const what = try std.fmt.allocPrint(a, "#{d} {s} {s} in {s}", .{ n, kind, short(a, ev), box });
@@ -702,15 +871,37 @@ pub const Runtime = struct {
         try rt.step(a, origin, driver.?, resolved.items, null);
     }
 
-    /// A thread came to rest for good: step the program that launched it, if it now can.
+    /// A thread came to rest for good: step the program that launched it, if
+    /// it now can, and every thread that awaits it (#66: a request's thread
+    /// waiting on the thread its answer depends on — one it did not launch,
+    /// such as a resubmission's on the first submission's).
     fn rested(rt: *Runtime, a: std.mem.Allocator, child: []const u8) anyerror!void {
         const o = try rt.getOrNotFound(a, child);
-        const parent = Value.cidOf(o.get("launchedBy")) orelse return;
-        const p = rt.store.getOpt(a, parent) orelse return;
-        const kind = Value.str(p.get("kind")) orelse return;
-        if (!std.mem.eql(u8, kind, "thread")) return;
-        const tip = try rt.tipOf(a, parent);
-        if (tip != null and stateIs(tip, "waiting") and cidIn(tip.?.get("waitingOn"), child)) try rt.maybeStep(a, parent, tip.?);
+        if (Value.cidOf(o.get("launchedBy"))) |parent| if (rt.store.getOpt(a, parent)) |p| {
+            if (std.mem.eql(u8, Value.str(p.get("kind")) orelse "", "thread")) {
+                const tip = try rt.tipOf(a, parent);
+                if (tip != null and stateIs(tip, "waiting") and cidIn(tip.?.get("waitingOn"), child)) try rt.maybeStep(a, parent, tip.?);
+            }
+        };
+        const awaiters = try rt.store.awaiting(a, child);
+        if (awaiters.len == 0) return;
+        const ct = (try rt.tipOf(a, child)) orelse return;
+        if (!stateIs(ct, "finished") and !stateIs(ct, "errored")) return;
+        var m = cbor.MapBuilder.init(a);
+        try m.put("thread", cbor.cidv(child));
+        try m.put("state", ct.get("state"));
+        try m.put("result", ct.get("result"));
+        try m.put("error", ct.get("error"));
+        const resolved = try a.dupe(Value, &.{m.value()});
+        // The step runs under the entry that brought the awaited thread to rest.
+        const ic = Value.cidOf(ct.get("input")) orelse return error.NotFound;
+        const driver = Ctx{ .cid = ic, .e = try rt.getOrNotFound(a, ic) };
+        for (awaiters) |t| {
+            const tip = rt.tipOf(a, t) catch null orelse continue;
+            if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), child)) continue;
+            rt.say("{s} → {s} (awaits the thread)", .{ short(a, child), short(a, t) });
+            try rt.step(a, t, driver, resolved, null);
+        }
     }
 
     // ------------------------------------------------------------ program steps
@@ -754,6 +945,11 @@ pub const Runtime = struct {
         try rt.stepping.put(key, {});
         var after_launched: []const []const u8 = &.{};
         var after_rested = false;
+        var after_stdout: []const u8 = "";
+        const request_input: ?[]const u8 = blk: {
+            const o = rt.store.getOpt(a, origin) orelse break :blk null;
+            break :blk if (isRequestThread(o)) Value.cidOf(o.get("input")) else null;
+        };
         // The step's fuel: one budget for the whole step, read from the genesis at its start.
         var meter = engine.Meter.init(fuelPerStep(rt.genesis));
         // The attested calls the step made, kept even when it fails: an
@@ -787,12 +983,19 @@ pub const Runtime = struct {
             };
             after_launched = r.launched;
             after_rested = r.rested;
+            after_stdout = r.stdout;
+        }
+        if (request_input) |entry| {
+            // A request's thread at rest (#66): its answer goes out now, before what its step routes runs.
+            if (after_rested and !rt.stopped) if (rt.peers.on_answer) |f| f(rt.peers.ctx, origin, entry);
+            // What the middleware's answer admits, routed under the entry that drove this step (#68).
+            if (after_stdout.len > 0 and !rt.stopped) try rt.routeAdmits(a, ctx, after_stdout);
         }
         for (after_launched) |c| try rt.run(a, c);
         if (after_rested) try rt.rested(a, origin);
     }
 
-    const After = struct { launched: []const []const u8, rested: bool };
+    const After = struct { launched: []const []const u8, rested: bool, stdout: []const u8 = "" };
 
     fn stepBody(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, ctx: Ctx, resolved: ?[]const Value, reply: ?Value, meter: *engine.Meter, calls: *std.array_list.Managed([]const u8)) anyerror!After {
         const o = try rt.getOrNotFound(a, origin);
@@ -826,6 +1029,17 @@ pub const Runtime = struct {
         try input.put("names", g.get("names"));
         if (rt.step_extra) |x| try input.put(x.key, x.value);
         rt.step_extra = null;
+        if (isRequestThread(o)) {
+            // The middleware (#68): the tables it routes by, and — on the request's first step —
+            // whether the request record was admitted before as what it routes (a redelivered
+            // GossipSub message: the `unique` map holds its `p2p` record).
+            try input.put("routes", g.get("routes"));
+            try input.put("reads", g.get("reads"));
+            if (std.mem.eql(u8, tip_cid, origin)) {
+                const rc = Value.cidOf(o.get("args").?.get("request")).?;
+                if (try rt.store.byUnique(a, rc)) |first| try input.put("seen", cbor.cidv(first));
+            }
+        }
 
         var st = StepState{
             .rt = rt,
@@ -958,7 +1172,7 @@ pub const Runtime = struct {
         if (errored) try w.print(" · {s}", .{stderr_text}) else if (stderr_text.len > 0) try w.print(" · stderr: {s}", .{stderr_text});
         rt.say("{s}", .{line.items});
 
-        return .{ .launched = st.launched.items, .rested = !waiting };
+        return .{ .launched = st.launched.items, .rested = !waiting, .stdout = if (errored) "" else out.stdout };
     }
 
     // -------------------------------------------------- the program host (skein imports)
@@ -1021,6 +1235,8 @@ pub const Runtime = struct {
         const st = stepOf(imp);
         if (!(st.rt.store.has(c) catch false)) return imp.failWith("await: not a record in the store (a message this step sent, or an event's subject)");
         if (st.launched.items.len > 0) return imp.failWith("await: this step launched threads; a step waits on threads or on replies, not both");
+        // #66: a thread may be awaited until it comes to rest; after that its state is there to read.
+        if (st.rt.threadAtRest(st.a, c)) return imp.failFmt("await: thread {s} has come to rest; read its state instead", .{fmtCid(st.a, c)});
         for (st.awaits.items) |x| if (std.mem.eql(u8, x, c)) return;
         try st.awaits.append(c);
     }

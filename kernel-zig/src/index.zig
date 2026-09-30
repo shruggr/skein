@@ -80,8 +80,10 @@ const map_count = @typeInfo(Map).@"enum".fields.len;
 pub const STATE_KIND = "skein-state";
 /// The store format this kernel writes (see the header): 2 = unsigned entries, keys as bytes (#33);
 /// 3 = messages as `mail` records, no envelopes, emits or outcomes (#40);
-/// 4 = recorded `http`/`libp2p` calls carry the host's attestation, the genesis its `attest` key (#62).
-pub const FORMAT: i64 = 4;
+/// 4 = recorded `http`/`libp2p` calls carry the host's attestation, the genesis its `attest` key (#62);
+/// 5 = every package a transport carries in is a `request` entry, the middleware stepped on it; sessions
+/// are records (head `sessions`); a message or event a middleware routes is unique by the `unique` map (#68).
+pub const FORMAT: i64 = 5;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).
@@ -640,6 +642,7 @@ pub const Index = struct {
         .logTip = logTipFn,
         .logFrom = logFromFn,
         .logByUnique = logByUniqueFn,
+        .markUnique = markUniqueFn,
         .resting = restingFn,
         .awaiting = awaitingFn,
         .threads = threadsFn,
@@ -727,7 +730,9 @@ pub const Index = struct {
     /// `p2p` event record (#51, #42 decided 2026-09-30: the record is
     /// content-addressed — topic, from, seqno, signature, body — so a
     /// redelivered GossipSub message is the same record). Other events
-    /// (feeds: a header, a status) may recur, and are not unique.
+    /// (feeds: a header, a status) may recur, and are not unique; so may a
+    /// request (#68: every package is appended as received — what a
+    /// middleware routes out of one is marked unique then, markUnique).
     fn uniqueOf(ix: *Index, a: std.mem.Allocator, entry: Value) !?[]const u8 {
         if (Value.cidOf(entry.get("mail"))) |m| return m;
         const ev = Value.cidOf(entry.get("event")) orelse return null;
@@ -794,6 +799,16 @@ pub const Index = struct {
         const ix = self(ctx);
         const v = (try ix.mapGet(ix.scratch(), .unique, cid)) orelse return null;
         return try a.dupe(u8, v.cid);
+    }
+
+    /// A record a middleware routed while `entry` was processed (#68: a
+    /// message, a libp2p `p2p` event) is admitted once: false if it was
+    /// before (by an entry of its own, or routed from another request).
+    fn markUniqueFn(ctx: *anyopaque, cid: []const u8, entry: []const u8) anyerror!bool {
+        const ix = self(ctx);
+        if ((try ix.mapGet(ix.scratch(), .unique, cid)) != null) return false;
+        try ix.mapPut(.unique, cid, .{ .cid = entry });
+        return true;
     }
 
     /// The origin at the end of an `… ‖ origin` key.

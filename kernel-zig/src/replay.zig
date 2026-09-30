@@ -90,7 +90,7 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         try dst.putBlock(h, b);
     }
     // Route handlers the genesis names that are not among its programs (#40's routes; #51's libp2p: sources):
-    // only calls run them, never a step, but they are the system's, as the source holds them.
+    // the middleware's steps call them (#68), so replay needs them as the source holds them.
     if (g.get("routes")) |rs| if (rs == .array) for (rs.array) |r| {
         const h = Value.cidOf(r.get("program")) orelse continue;
         if (try dst.has(h)) continue;
@@ -102,10 +102,10 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) {
-            std.debug.print("log: entry #{d} is not a format-3 entry (issue #40: messages as mail records)\n", .{Value.intOf(e.get("n")) orelse -1});
+            std.debug.print("log: entry #{d} is not a format-5 entry (issue #68: requests; #40: messages as mail records)\n", .{Value.intOf(e.get("n")) orelse -1});
             return error.BadSignature;
         }
-        for ([_][]const u8{ "genesis", "mail", "event" }) |k| if (Value.cidOf(e.get(k))) |x| {
+        for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
             try dst.putBlock(x, b);
         };

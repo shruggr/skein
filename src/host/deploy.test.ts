@@ -28,7 +28,7 @@ import { DEFAULT_ONLY, deploy, deployFiles, onlyIgnore } from "./deploy.ts";
 import { HostDb, type InstanceRow } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { parseIdentity, roster, rosterFor, serveRoster } from "./roster.ts";
-import { testHost, until } from "./testhost.ts";
+import { messagesIn, testHost, until } from "./testhost.ts";
 
 type Json = Record<string, unknown>;
 const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
@@ -111,14 +111,9 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
   return { h, peer, requests, owner, store, env };
 }
 
-/** The boxes of the mail admitted after the genesis, in order. */
+/** The boxes of the messages the instance took in after the genesis (routed from its requests, #68), in order. */
 async function boxes(store: Store): Promise<string[]> {
-  const out: string[] = [];
-  for await (const { entry } of store.log.entries(1)) {
-    const mail = (entry as { mail?: CID }).mail;
-    if (mail) out.push(String((await store.get(mail) as Json).box));
-  }
-  return out;
+  return (await messagesIn(store)).map((m) => String(m.box));
 }
 
 /** The genesis's programs: name → program record CID. */
@@ -165,8 +160,8 @@ test("deploy: the filtered tree through `objects` as the owner sets main; the sa
   const root1 = CID.parse(d1.root);
   assert.deepEqual(await paths(s, root1), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
   assert.deepEqual((await readTree(s, root1)).map((e) => e.name), ["IDENTITY.md", "SOUL.md", "skills"]);
-  assert.deepEqual(await boxes(s), ["objects"], "one bundle, admitted as one mail entry");
-  for await (const { entry } of s.log.entries(1)) assert.equal((await s.get((entry as { mail?: CID }).mail!) as Json).sender, h.ownerId, "sent as the owner");
+  assert.deepEqual(await boxes(s), ["objects"], "one bundle, one message");
+  for (const m of await messagesIn(s)) assert.equal(Buffer.from(m.sender as Uint8Array).toString("hex"), h.ownerId, "sent as the owner");
   row = { ...row, tree: d1.root };
 
   // The same directory: nothing sent.

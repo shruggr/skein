@@ -1,22 +1,35 @@
-// The input log and the record shapes the scheduler checks, in format 3
-// (issue #40; format 2, #33: entries unsigned, identity keys as 33-byte byte
-// strings in every record). Messages are state: an entry is a message that
-// arrived, a wake, or an event the host holds a feed for (or a front door's
-// own write, such as a session). Nothing a front door merely reads or
-// verifies is an entry.
+// The input log and the record shapes the scheduler checks, in format 5
+// (issue #68; format 3, #40; format 2, #33: entries unsigned, identity keys
+// as 33-byte byte strings in every record). Skein is a state process: every
+// package a transport carries in is an entry, appended as received, and the
+// instance's middleware (the front door) is stepped on it; a message the
+// host admits directly, a wake and an event from a feed are the others.
 //
-//   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box}
+//   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box | request+transport}
+//   request  a package as a transport carried it in (#68), unverified: the
+//            host verifies nothing. `transport` names the middleware stepped
+//            on it (the genesis's front door for "http" and "libp2p"; #70
+//            adds "local": scheduler.zig middlewareOf). The record:
+//              http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
+//                      `path` as the client sent it (what BRC-104 signs), `route` what the
+//                      routes table sees (the host strips `/@<handle>`)
+//              libp2p  {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
+//                      a GossipSub message, signature and all — the same record an accepted
+//                      message is routed as (box `libp2p:<topic>`)
+//                      {kind: "p2p-frame", protocol, from: bytes, body: bytes}
+//                      one frame of an inbound stream (unsigned: the stream is Noise's)
 //   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, json?: true,
 //             session?: {payload: bytes, signature: bytes, nonce, yourNonce}}
-//            a BRC-33 message that arrived (#40): the sender is the BRC-104 session's
+//            a BRC-33 message (#40): the sender is the BRC-104 session's
 //            identity, `session` the signed request and its nonces (so the log
 //            verifies with the instance's key alone); its CID is the message's
 //            id — what a reply's `replyTo` names. Routed to the thread awaiting
 //            the message its body's `replyTo` names, else by subscription on
-//            (sender, box).
-//   event    a record from a feed (#29: a header, a proof, a status) or a front
-//            door's write (a mailbox acknowledgement, `:ack`), routed by
-//            its `subject` or by box
+//            (sender, box). Since #68 a message arrives inside a request and
+//            the middleware's step routes it; a host may still admit one as an
+//            entry of its own (the browser's).
+//   event    a record from a feed (#29: a header, a proof, a status), routed
+//            by its `subject` or by box
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
@@ -48,8 +61,9 @@ pub fn isEventEntry(e: Value) bool {
     return isLogEntry(e) and e.get("event") != null;
 }
 
-/// The one entry encoding (format 3, #40): {kind: "log", prev, n, time} and
-/// exactly one of genesis | mail | wake | event (+box). No signature on any of them.
+/// The one entry encoding (format 5, #68): {kind: "log", prev, n, time} and
+/// exactly one of genesis | mail | wake | event (+box) | request (+transport).
+/// No signature on any of them.
 pub fn isLogEntry(e: Value) bool {
     if (e != .map) return false;
     const kind = Value.str(e.get("kind")) orelse return false;
@@ -57,7 +71,7 @@ pub fn isLogEntry(e: Value) bool {
     if (!Value.isNumber(e.get("n"))) return false;
     if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
-    for ([_][]const u8{ "genesis", "mail", "wake", "event" }) |k| {
+    for ([_][]const u8{ "genesis", "mail", "wake", "event", "request" }) |k| {
         if (e.get(k) != null) count += 1;
     }
     if (count != 1) return false;
@@ -69,7 +83,40 @@ pub fn isLogEntry(e: Value) bool {
         if (box.len == 0) return false;
     } else if (e.get("box") != null) return false;
     if (e.get("mail")) |m| if (m != .cid) return false;
+    // A transport goes with a request, and only with it (#68).
+    if (e.get("request")) |r| {
+        if (r != .cid) return false;
+        const t = Value.str(e.get("transport")) orelse return false;
+        if (t.len == 0) return false;
+    } else if (e.get("transport") != null) return false;
     return true;
+}
+
+/// A request record (#68): the package a transport carried in, in the shape
+/// that transport's middleware reads (the header's table). Checked at
+/// admission for its form only; what it says is the middleware's to judge.
+pub fn isRequest(transport: []const u8, x: ?Value) bool {
+    const r = x orelse return false;
+    if (r != .map) return false;
+    const kind = Value.str(r.get("kind")) orelse return false;
+    if (std.mem.eql(u8, transport, "http")) {
+        if (!std.mem.eql(u8, kind, "http")) return false;
+        for ([_][]const u8{ "method", "path", "route", "query" }) |k| if (Value.str(r.get(k)) == null) return false;
+        const h = r.get("headers") orelse return false;
+        if (h != .map) return false;
+        for (h.map) |e| if (e.value != .string) return false;
+        return Value.bytesOf(r.get("body")) != null;
+    }
+    if (std.mem.eql(u8, transport, "libp2p")) {
+        if (Value.bytesOf(r.get("from")) == null or Value.bytesOf(r.get("body")) == null) return false;
+        if (std.mem.eql(u8, kind, "p2p")) {
+            if (Value.str(r.get("topic")) == null) return false;
+            return Value.bytesOf(r.get("seqno")) != null and Value.bytesOf(r.get("signature")) != null;
+        }
+        if (std.mem.eql(u8, kind, "p2p-frame")) return Value.str(r.get("protocol")) != null;
+        return false;
+    }
+    return false;
 }
 
 /// A message record (#40): a BRC-33 message that arrived, its sender the

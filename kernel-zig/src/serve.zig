@@ -71,6 +71,77 @@ const Server = struct {
     running: bool = false,
     /// Answers the peer sent to an outer request while an inner one waited (encoded frames).
     answers: std.AutoHashMap(i64, []u8),
+    /// The host's `answer` requests not yet answered (#66): each waits on a request entry's thread.
+    waiters: std.array_list.Managed(Waiter),
+
+    const Waiter = struct { id: i64, entry: []u8, until: i64 };
+
+    fn nowMs() i64 {
+        return @intCast(std.Io.Clock.real.now(io).toMilliseconds());
+    }
+
+    /// The answer frame for a request's thread: {thread, state, answer?: bytes, error?}.
+    fn answerValue(s: *Server, a: std.mem.Allocator, thread: ?[]const u8) !Value {
+        var m = cbor.MapBuilder.init(a);
+        const t = thread orelse {
+            try m.put("state", cbor.string("pending"));
+            return m.value();
+        };
+        const r = try s.rt.answerOf(a, t);
+        try m.put("thread", cbor.cidv(t));
+        try m.put("state", cbor.string(r.state));
+        if (std.mem.eql(u8, r.state, "finished")) try m.put("answer", .{ .bytes = r.stdout });
+        if (std.mem.eql(u8, r.state, "errored")) try m.put("error", cbor.string(r.err));
+        return m.value();
+    }
+
+    /// A request's thread came to rest (the scheduler's on_answer): answer whoever waits on its entry.
+    fn answered(s: *Server, a: std.mem.Allocator, thread: []const u8, entry: []const u8) void {
+        var i: usize = 0;
+        while (i < s.waiters.items.len) {
+            const w = s.waiters.items[i];
+            if (!std.mem.eql(u8, w.entry, entry)) {
+                i += 1;
+                continue;
+            }
+            _ = s.waiters.orderedRemove(i);
+            defer s.gpa.free(w.entry);
+            const v = s.answerValue(a, thread) catch |err| {
+                s.reply(a, w.id, null, @errorName(err), null);
+                continue;
+            };
+            s.reply(a, w.id, v, null, null);
+        }
+    }
+
+    /// Waiters past their bound: answered with the thread's state as it stands (not at rest).
+    fn expire(s: *Server, a: std.mem.Allocator) void {
+        const now = nowMs();
+        var i: usize = 0;
+        while (i < s.waiters.items.len) {
+            const w = s.waiters.items[i];
+            if (w.until > now) {
+                i += 1;
+                continue;
+            }
+            _ = s.waiters.orderedRemove(i);
+            defer s.gpa.free(w.entry);
+            const t = s.rt.requestThread(a, w.entry) catch null;
+            const v = s.answerValue(a, t) catch |err| {
+                s.reply(a, w.id, null, @errorName(err), null);
+                continue;
+            };
+            s.reply(a, w.id, v, null, null);
+        }
+    }
+
+    /// How long the poll may sleep: until the earliest waiter's bound (-1: none).
+    fn pollTimeout(s: *Server) i32 {
+        if (s.waiters.items.len == 0) return -1;
+        var until = s.waiters.items[0].until;
+        for (s.waiters.items) |w| until = @min(until, w.until);
+        return @intCast(std.math.clamp(until - nowMs(), 0, std.math.maxInt(i32)));
+    }
 
     // ------------------------------------------------------------ frames
 
@@ -231,6 +302,18 @@ const Server = struct {
             if (r.ok) try m.put("result", .{ .bytes = r.result }) else try m.put("error", cbor.string(r.err));
             try m.put("fuel", cbor.int(r.fuel));
             s.reply(a, id, m.value(), null, null);
+        } else if (eq(u8, op, "answer")) {
+            // #66: a synchronous client waits on the thread its request entry launched.
+            // {entry, wait: ms} → {thread, state: "finished", answer: bytes} | {thread, state: "errored", error}
+            //   — when that thread comes to rest for good — or, `wait` ms on, the state as it stands
+            //   ({thread, state: "waiting"}, or {state: "pending"}: the entry not yet processed).
+            const entry = Value.cidOf(v.get("entry")) orelse return error.BadRequest;
+            const wait = Value.intOf(v.get("wait")) orelse 120_000;
+            if (try s.rt.requestThread(a, entry)) |t| {
+                const r = try s.rt.answerOf(a, t);
+                if (eq(u8, r.state, "finished") or eq(u8, r.state, "errored")) return s.reply(a, id, try s.answerValue(a, t), null, null);
+            }
+            try s.waiters.append(.{ .id = id, .entry = try s.gpa.dupe(u8, entry), .until = nowMs() + @as(i64, @intCast(@max(0, wait))) });
         } else if (eq(u8, op, "idle")) {
             try s.idle_waiters.append(id);
             s.afterDrain(a);
@@ -308,6 +391,14 @@ const Server = struct {
         s.notify(arena.allocator(), "onSleep", null);
     }
 
+    /// A request's thread came to rest (#66): its waiters are answered now, mid-drain.
+    fn pOnAnswer(p: *anyopaque, thread: []const u8, entry: []const u8) void {
+        const s = ctx(p);
+        var arena = std.heap.ArenaAllocator.init(s.gpa);
+        defer arena.deinit();
+        s.answered(arena.allocator(), thread, entry);
+    }
+
     fn pSay(_: *anyopaque, line: []const u8) void {
         say(line);
     }
@@ -349,6 +440,7 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         .from_peer = ipc.Reader.init(gpa, std.posix.STDIN_FILENO),
         .idle_waiters = .init(gpa),
         .answers = .init(gpa),
+        .waiters = .init(gpa),
         .handle = handle,
         .domain = domain,
         .db_path = db_path,
@@ -359,6 +451,7 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         .http = Server.pHttp,
         .libp2p = Server.pLibp2p,
         .on_sleep = Server.pOnSleep,
+        .on_answer = Server.pOnAnswer,
         .say = Server.pSay,
         .io = io,
     });
@@ -367,7 +460,12 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
     while (true) {
         fds_buf[0] = .{ .fd = server.from_peer.fd, .events = std.posix.POLL.IN, .revents = 0 };
         fds_buf[1] = .{ .fd = sig_pipe[0], .events = std.posix.POLL.IN, .revents = 0 };
-        _ = try std.posix.poll(&fds_buf, -1);
+        _ = try std.posix.poll(&fds_buf, server.pollTimeout());
+        if (server.waiters.items.len > 0) {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            server.expire(arena.allocator());
+        }
         if (fds_buf[1].revents != 0) {
             var b: [16]u8 = undefined;
             _ = std.posix.read(sig_pipe[0], &b) catch {};

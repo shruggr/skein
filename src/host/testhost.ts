@@ -6,6 +6,9 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
+import type { CID } from "multiformats/cid";
+import type { Store } from "../runtime/store.ts";
 import { dirBundles } from "../client/client.ts";
 import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
@@ -22,6 +25,35 @@ export const until = async <T>(what: string, f: () => Promise<T | undefined> | T
   }
   throw new Error(`timed out: ${what}`);
 };
+
+/**
+ * The messages an instance took in, in log order (#68): a mail entry of its
+ * own (a host that admits one directly), or a message a request's thread
+ * routed — the `admit` of the front door's answer on that thread's updates.
+ */
+export async function messagesIn(store: Store): Promise<Array<Record<string, unknown>>> {
+  const byInput = new Map<string, CID>();
+  for await (const t of store.edges.query({ kind: "thread" })) {
+    const o = await store.get(t) as { args?: { request?: CID }; input?: CID };
+    if (o.args?.request && o.input) byInput.set(o.input.toString(), t);
+  }
+  const out: Array<Record<string, unknown>> = [];
+  for await (const { cid, entry } of store.log.entries(1)) {
+    const mail = (entry as { mail?: CID }).mail;
+    if (mail) { out.push(await store.get(mail) as Record<string, unknown>); continue; }
+    const t = byInput.get(cid.toString());
+    if (!t) continue;
+    for await (const u of store.chains.history(t)) {
+      if (u.equals(t)) continue;
+      const up = await store.get(u) as { result?: { stdout?: Uint8Array } };
+      if (!up.result?.stdout?.length) continue;
+      let a: { admit?: Array<{ mail?: Record<string, unknown> }> };
+      try { a = dagCbor.decode(up.result.stdout) as typeof a; } catch { continue; }
+      for (const x of a.admit ?? []) if (x.mail) out.push(x.mail);
+    }
+  }
+  return out;
+}
 
 /** A host with agents and mailbox instances, each instance's key its own (the oracle's stand-in). */
 export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"] } = {}) {

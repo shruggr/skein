@@ -1,15 +1,16 @@
 // libp2p end to end (#51): two routers on scratch ports, one instance each
 // (alpha on A, beta on B), both subscribed to one topic, loopback TCP, mDNS
 // off, bootstrapping each other. A program in alpha (kernel-zig/test/p2p/
-// p2p-demo.wasm) publishes through the kernel's `libp2p` import; beta's front
-// door verifies the GossipSub signature, its route handler judges, and an
-// accepted message is one `p2p` entry carrying from/seqno/topic/signature and
-// the body — re-verified here from the entry alone. A rejected (or ignored)
-// message writes nothing: beta's store byte-identical; so does a redelivered
-// accepted one (the kernel's `unique` index refuses its entry). A stream round trip
-// alpha → beta → alpha, the `receive` resting and woken by the frame. The
-// validator and stream calls' fuel in beta's ledger. Then both stores replayed
-// with no router and no network: identical.
+// p2p-demo.wasm) publishes through the kernel's `libp2p` import; beta's host
+// appends each message as received (#68), and its front door, stepped on it,
+// verifies the GossipSub signature; its route handler judges. The accepted
+// message's entry carries from/seqno/topic/signature and the body —
+// re-verified here from the entry alone. A rejected (or ignored) message is
+// an entry too, its refusal recorded on its thread, nothing else changed; a
+// redelivered accepted one is ignored (the kernel's `unique` map holds it). A
+// stream round trip alpha → beta → alpha, the `receive` resting and woken by
+// the frame. Each request's fuel on its thread's update. Then both stores
+// replayed with no router and no network: identical.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -96,7 +97,7 @@ async function reverify(ev: { topic: string; from: Uint8Array; seqno: Uint8Array
   return await key.verify(signed, ev.signature);
 }
 
-test("libp2p across two routers: publish → validate → admit (re-verifiable), reject writes nothing, a stream round trip woken by its frame, fuel ledger, replay with no network", { timeout: 180_000 }, async (t) => {
+test("libp2p across two routers: publish → validate → admit (re-verifiable), reject recorded, a stream round trip woken by its frame, fuel on the updates, replay with no network", { timeout: 180_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "skein-p2p-router-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   process.env.SKEIN_EXTRA_MODULES = DEMO_WASM; // the kernels install it (not pinned)
@@ -147,12 +148,29 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
 
   const box = new RawBox(ephemeralWallet(ownerKey), `http://127.0.0.1:${A.r.port}/@alpha`);
   const send = (body: Record<string, unknown>) => box.send(la.identity, "p2p", body);
-  const p2pEntries = async () => (await logOf(lb.kernel)).filter((x) => x.e.box === `libp2p:${TOPIC}`);
+  // Beta's verdicts, as the router hands them back to GossipSub (or the stream): wrapped.
+  const verdicts: Array<{ call: { topic?: string; protocol?: string; body: Uint8Array }; verdict: string; reason?: string }> = [];
+  const inbound = B.r.p2pInbound.bind(B.r);
+  B.r.p2pInbound = async (h, call) => { const a = await inbound(h, call); verdicts.push({ call, verdict: a.verdict, reason: a.reason }); return a; };
+  const accepted = () => verdicts.filter((v) => v.call.topic === TOPIC && v.verdict === "accept");
+  // #68: every message beta was handed is a request entry, the message as received.
+  type P2PRecord = { kind: string; topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array };
+  const topicRequests = async () => {
+    const out: Array<{ cid: CID; rec: P2PRecord }> = [];
+    for (const x of await logOf(lb.kernel)) {
+      const e = x.e as Entry & { request?: CID; transport?: string };
+      if (e.transport !== "libp2p" || !e.request) continue;
+      const rec = await lb.kernel.store.get(e.request) as unknown as P2PRecord;
+      if (rec.kind === "p2p") out.push({ cid: x.cid, rec });
+    }
+    return out;
+  };
 
   // ------------------------------------------------ publish → validate → admit
   await send({ op: "publish", topic: TOPIC, text: "hello" });
-  const [admitted] = await until(async () => { const es = await p2pEntries(); return es.length ? es : undefined; }, "beta admits the message");
-  const ev = await lb.kernel.store.get(admitted!.e.event!) as { kind: string; topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array };
+  await until(() => accepted().length > 0, "beta accepts the message");
+  const [admitted] = await topicRequests();
+  const ev = admitted!.rec;
   assert.equal(ev.kind, "p2p");
   assert.equal(ev.topic, TOPIC);
   assert.equal(new TextDecoder().decode(ev.body), "hello");
@@ -165,36 +183,27 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   // alpha's publish step: one recorded call (checked below, from its update).
   await until(() => lines.some((l) => l.startsWith("[alpha]") && /p2p-demo step 1 → finished · 1 attested/.test(l)), "alpha's publish step");
 
-  // ------------------------------------------------ reject and ignore write nothing
+  // ------------------------------------------------ reject and ignore: recorded, nothing else changed
   await B.r.settled();
-  B.r.flushLedger();
-  const dbB = join(home, "beta", "runtime.db");
-  const bytes = () => [readFileSync(dbB), existsSync(`${dbB}-wal`) ? readFileSync(`${dbB}-wal`) : new Uint8Array()];
-  const before = bytes();
-  const tipBefore = (await lb.kernel.store.log.tip())!.toString();
-  const verdicts = () => lines.filter((l) => l.startsWith("[beta]") && l.includes(`libp2p:${TOPIC} from ${idA}:`));
+  const n0 = (await logOf(lb.kernel)).length;
   await send({ op: "publish", topic: TOPIC, text: "bad message" });
   await send({ op: "publish", topic: TOPIC, text: "skip this" });
-  await until(() => verdicts().some((l) => l.endsWith(": reject")) && verdicts().some((l) => l.endsWith(": ignore")), "beta rejects one and ignores the other");
+  await until(() => verdicts.some((v) => v.verdict === "reject") && verdicts.some((v) => v.verdict === "ignore"), "beta rejects one and ignores the other");
   await B.r.settled();
-  assert.equal((await lb.kernel.store.log.tip())!.toString(), tipBefore, "no entry");
-  const after = bytes();
-  assert.ok(Buffer.from(after[0]!).equals(Buffer.from(before[0]!)) && Buffer.from(after[1]!).equals(Buffer.from(before[1]!)), "beta's store (and its WAL) byte-identical");
-  assert.equal((await p2pEntries()).length, 1);
+  const n1 = (await logOf(lb.kernel)).length;
+  assert.equal(n1, n0 + 2, "each is an entry (the message as received), its refusal recorded on its thread");
+  assert.equal(accepted().length, 1, "only the first accepted");
 
-  // ------------------------------------------------ a redelivered message writes nothing (#42/#51)
-  // GossipSub delivers "hello" again (after its seen-cache expired, say): the same call, so the front
-  // door accepts it into the same `p2p` event record, and the kernel's `unique` index refuses the entry
-  // at admit. The router answers ignore (no forward, no penalty); one entry; the store byte-identical.
-  const again = bytes();
+  // ------------------------------------------------ a redelivered message: recorded, ignored (#42/#51)
+  // GossipSub delivers "hello" again (after its seen-cache expired, say): the same message record, which
+  // the kernel's `unique` map holds from the accept — the front door's step sees it (`seen`) and answers
+  // ignore (no forward, no penalty); nothing runs for it.
   const redelivered = await B.r.p2pInbound("beta", { transport: "libp2p", topic: TOPIC, from: ev.from, seqno: ev.seqno, signature: ev.signature, body: ev.body });
   await B.r.settled();
   assert.equal(redelivered.verdict, "ignore", `a redelivery is ignore toward GossipSub (${JSON.stringify(redelivered)})`);
   assert.equal(redelivered.reason, "already admitted");
-  assert.equal((await lb.kernel.store.log.tip())!.toString(), tipBefore, "no entry for the redelivery");
-  assert.equal((await p2pEntries()).length, 1, "one entry for the message");
-  const afterAgain = bytes();
-  assert.ok(Buffer.from(afterAgain[0]!).equals(Buffer.from(again[0]!)) && Buffer.from(afterAgain[1]!).equals(Buffer.from(again[1]!)), "beta's store (and its WAL) byte-identical after the redelivery");
+  assert.equal((await logOf(lb.kernel)).length, n1 + 1, "one entry: the redelivery as received");
+  assert.equal(accepted().length, 1, "accepted once");
 
   // ------------------------------------------------ a stream round trip, receive resting and woken
   await send({ op: "echo", peer: idB, protocol: PROTOCOL, text: "ping" });
@@ -205,14 +214,28 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.ok(woke, `a frame woke the resting thread (${echoSteps.join(" | ")})`);
   assert.ok(echoThread, "the echo thread took two steps: rest on the stream, then the woken receive");
   assert.ok(lines.some((l) => /p2p-demo step 1 → waiting · 3 attested/.test(l)), "step 1: dial, send, a pending receive → waiting");
+  assert.ok(verdicts.some((v) => v.call.protocol === PROTOCOL), "the frame went through beta's front door");
 
-  // ------------------------------------------------ the fuel ledger
-  B.r.flushLedger();
-  const ledger = B.db.ledger("beta");
-  const topicRow = ledger.find((x) => x.op === `libp2p:${TOPIC}`);
-  const streamRow = ledger.find((x) => x.op === `libp2p:${PROTOCOL}`);
-  assert.ok(topicRow && topicRow.caller === idA && topicRow.calls === 4 && topicRow.fuel > 0, `validator calls charged (three delivered, one redelivered): ${JSON.stringify(topicRow)}`);
-  assert.ok(streamRow && streamRow.caller === idA && streamRow.calls >= 1 && streamRow.fuel > 0, `stream calls charged: ${JSON.stringify(streamRow)}`);
+  // ------------------------------------------------ fuel: on each request thread's updates (#68), not a ledger
+  await B.r.settled();
+  {
+    const { openStoreFile } = await import("../runtime/index-store.ts");
+    const { collect } = await import("../testkit.ts");
+    const view = openStoreFile(join(home, "beta", "runtime.db"), { readOnly: true });
+    try {
+      let requests = 0;
+      for (const th of await collect(view.edges.query({ kind: "thread" }))) {
+        const o = await view.get(th) as { args?: { transport?: string } };
+        if (o.args?.transport !== "libp2p") continue;
+        requests++;
+        const ups = (await collect(view.chains.history(th))).slice(1);
+        const last = await view.get(ups.at(-1)!) as unknown as { state: string; fuel: number };
+        assert.ok(last.state === "finished" && last.fuel > 0, `a libp2p request's thread ends finished, its fuel on its update (${JSON.stringify(last)})`);
+      }
+      assert.ok(requests >= 5, `one thread per message and frame (${requests})`);
+    } finally { view.close?.(); }
+  }
+
 
   // alpha's updates: the recorded calls, and the reply on stdout.
   const readUpdates = async () => {

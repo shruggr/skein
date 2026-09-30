@@ -1,44 +1,51 @@
-//! The front door's libp2p side (#51): fn "libp2p", the call the router makes
-//! for each GossipSub message on a subscribed topic and each frame read from
-//! an inbound stream on a served protocol — the same front door, the same
-//! routes table, another transport.
+//! The front door's libp2p side (#51, #68): the middleware for the libp2p
+//! transport. The host appends each GossipSub message on a subscribed topic
+//! and each frame read from an inbound stream on a served protocol as a
+//! `request` entry, as received, and the front door is stepped on it — the
+//! same routes table, another transport.
 //!
-//! Called: fn "libp2p", arg (dag-cbor)
-//!   {transport: "libp2p", topic | protocol, from: bytes (the peer ID's multihash),
-//!    seqno?: bytes(8), signature?: bytes, body: bytes}
-//! → {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
+//!   request  {kind: "p2p", topic, from: bytes (the peer ID's multihash), seqno: bytes(8), signature: bytes, body: bytes}
+//!            {kind: "p2p-frame", protocol, from: bytes, body: bytes}
+//!   answer   {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
+//!            (or, while a stream frame's handler waits on a thread, {wait: {}, admit?})
 //!
 //! Routing: the route whose `path` is `libp2p:<topic>` (or `libp2p:<protocol>`).
 //! None: ignore (this instance cannot judge it; GossipSub does not penalise).
 //!
 //! A topic message is verified here, before any handler sees it, from the
-//! call alone: `from` must be a secp256k1 peer ID (identity multihash of the
-//! key's protobuf), and `signature` its ECDSA signature (DER, over sha2-256)
-//! of "libp2p-pubsub:" ‖ protobuf {1: from, 2: body, 3: seqno, 4: topic} —
-//! GossipSub's StrictSign. A bad one is `reject` (the delivering peer is
-//! penalised). The handler then judges it from state and answers
-//! {verdict, admit?}; **accept** returns, first, the message's own entry:
+//! request alone: `from` must be a secp256k1 peer ID (identity multihash of
+//! the key's protobuf), and `signature` its ECDSA signature (DER, over
+//! sha2-256) of "libp2p-pubsub:" ‖ protobuf {1: from, 2: body, 3: seqno, 4:
+//! topic} — GossipSub's StrictSign. A bad one is `reject` (the delivering
+//! peer is penalised), a refusal recorded on this thread. A message this
+//! instance accepted before (the kernel tells the step: `seen`, its record
+//! in the `unique` map — #42: GossipSub redelivers after its seen-cache
+//! expires, or from another peer) is `ignore`, and nothing runs. The handler
+//! then judges it from state and answers {verdict, admit?}; **accept**
+//! admits, first, the message itself as an event:
 //!
 //!   {event: {kind: "p2p", topic, from, seqno, signature, body}, box: "libp2p:<topic>"}
 //!
-//! — everything a reader of the log needs to verify the publisher with no
-//! router (the key is in `from`) — and then every entry the handler returned
-//! in `admit`, unchanged (#57: as the `http` side forwards them, so a topic
-//! route persists what the same handler persists over HTTP). The router
-//! appends them in order and stops at the first refusal: a redelivered
-//! message's `p2p` event is refused by the kernel's `unique` index (#42), so
-//! none of the answer's entries is appended. Reject and ignore return nothing
-//! to admit. A handler that fails is `ignore` (cannot evaluate: no penalty).
+//! — the request record, everything a reader of the log needs to verify the
+//! publisher (the key is in `from`) — and then every entry the handler
+//! returned in `admit`, unchanged (#57: as the `http` side routes them, so a
+//! topic route persists what the same handler persists over HTTP). The
+//! kernel routes them after the step. Reject and ignore admit nothing (a
+//! handler's `admit` beside them is dropped). A handler that fails is
+//! `ignore` (cannot evaluate: no penalty).
 //!
 //! A stream frame is not signed (the stream is authenticated by Noise: `from`
 //! is the remote peer); the handler answers {verdict?, body?, admit?, close?}:
-//! `body` is written back on the stream, `admit` (entries, as an HTTP route
-//! handler returns them) admitted, `close` (or reject) ends the stream.
+//! `body` is written back on the stream, `admit` routed, `close` (or reject)
+//! ends the stream. A frame's handler may wait on a thread as an HTTP route's
+//! does ({wait: true}): the frame's answer is written back when it comes to
+//! rest (the handler called again with `resolved`).
 //!
-//! The handler gets the call's input plus `key`: the 33-byte key from `from`.
+//! The handler gets the request plus `key`: the 33-byte key from `from`.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
+const main = @import("main.zig");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -47,21 +54,26 @@ const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 const SIGN_PREFIX = "libp2p-pubsub:";
 
-pub fn libp2p(a: Allocator, in: Value, call: Value) !Value {
-    const topic = Value.str(call.get("topic"));
-    const protocol = Value.str(call.get("protocol"));
-    const name = topic orelse protocol orelse return verdict(a, "reject", "neither a topic nor a protocol");
+/// A step of a libp2p request's thread: the first verifies and routes, a later one calls a waiting frame's handler again.
+pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
+    const kind = Value.str(req.get("kind")) orelse "";
+    const topic: ?[]const u8 = if (eql(u8, kind, "p2p")) Value.str(req.get("topic")) else null;
+    const protocol: ?[]const u8 = if (eql(u8, kind, "p2p-frame")) Value.str(req.get("protocol")) else null;
+    const name = topic orelse protocol orelse return verdict(a, "reject", "neither a topic message nor a stream frame");
     const source = try std.fmt.allocPrint(a, "libp2p:{s}", .{name});
-    const from = Value.bytesOf(call.get("from")) orelse return verdict(a, "reject", "no from");
-    const body = Value.bytesOf(call.get("body")) orelse "";
+    const from = Value.bytesOf(req.get("from")) orelse return verdict(a, "reject", "no from");
+    const body = Value.bytesOf(req.get("body")) orelse "";
     const route = findRoute(in, source) orelse return verdict(a, "ignore", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
     const key = keyOfPeerId(from) orelse return verdict(a, "reject", "from is not a secp256k1 peer ID");
+    const again = Value.cidOf(in.get("tip")) != null;
+    if (again) _ = try main.saved(a, Value.cidOf(in.get("tip")).?);
 
     var seqno: []const u8 = "";
     var signature: []const u8 = "";
     if (topic) |t| {
-        seqno = Value.bytesOf(call.get("seqno")) orelse return verdict(a, "reject", "no seqno");
-        signature = Value.bytesOf(call.get("signature")) orelse return verdict(a, "reject", "no signature");
+        if (in.get("seen") != null) return verdict(a, "ignore", "already admitted");
+        seqno = Value.bytesOf(req.get("seqno")) orelse return verdict(a, "reject", "no seqno");
+        signature = Value.bytesOf(req.get("signature")) orelse return verdict(a, "reject", "no signature");
         if (seqno.len != 8) return verdict(a, "reject", "the seqno is not 8 bytes");
         if (!try verifyMessage(a, from, body, seqno, t, signature, key)) return verdict(a, "reject", "the signature does not verify");
     }
@@ -79,6 +91,8 @@ pub fn libp2p(a: Allocator, in: Value, call: Value) !Value {
         try h.put("signature", .{ .bytes = signature });
     }
     try h.put("body", .{ .bytes = body });
+    try h.put("request", cbor.cidv(rc));
+    for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     const out = sk.callValue(a, prog, func, h.value()) catch |err| {
         if (err == error.ImportFailed) return verdict(a, "ignore", try std.fmt.allocPrint(a, "the handler failed: {s}", .{sk.lastError()}));
         return err;
@@ -86,21 +100,13 @@ pub fn libp2p(a: Allocator, in: Value, call: Value) !Value {
     const said = Value.str(out.get("verdict"));
     const reason = Value.str(out.get("reason"));
 
-    if (topic) |t| {
+    if (topic != null) {
         const v = said orelse "ignore";
         if (!eql(u8, v, "accept")) return verdict(a, if (eql(u8, v, "reject")) "reject" else "ignore", reason);
-        var ev = cbor.MapBuilder.init(a);
-        try ev.put("kind", cbor.string("p2p"));
-        try ev.put("topic", cbor.string(t));
-        try ev.put("from", .{ .bytes = from });
-        try ev.put("seqno", .{ .bytes = seqno });
-        try ev.put("signature", .{ .bytes = signature });
-        try ev.put("body", .{ .bytes = body });
         var entry = cbor.MapBuilder.init(a);
-        try entry.put("event", ev.value());
+        try entry.put("event", req);
         try entry.put("box", cbor.string(source));
-        // The p2p event first, then the handler's entries unchanged (#57): the router appends in order
-        // and stops at the first refusal, so a redelivered message (its p2p event refused) appends none.
+        // The message first, then the handler's entries unchanged (#57): the kernel routes them in order.
         const theirs: []const Value = if (out.get("admit")) |ad| (if (ad == .array) ad.array else &.{}) else &.{};
         const admit = try a.alloc(Value, 1 + theirs.len);
         admit[0] = entry.value();
@@ -111,7 +117,13 @@ pub fn libp2p(a: Allocator, in: Value, call: Value) !Value {
         return m.value();
     }
 
-    // A stream frame: the handler's answer, passed on.
+    // A stream frame: the handler's answer, passed on — or its wait (#66).
+    if (out.get("wait")) |w| if (w == .bool and w.bool) {
+        var m = cbor.MapBuilder.init(a);
+        try m.put("wait", .{ .map = &.{} });
+        if (out.get("admit")) |ad| if (ad == .array) try m.put("admit", ad);
+        return m.value();
+    };
     const v = said orelse "accept";
     var m = cbor.MapBuilder.init(a);
     try m.put("verdict", cbor.string(if (eql(u8, v, "reject")) "reject" else if (eql(u8, v, "ignore")) "ignore" else "accept"));

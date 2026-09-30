@@ -70,7 +70,7 @@ import { openStoreFile } from "../runtime/index-store.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
-import { admitAll, callFrontDoor, headerMap, type FrontAnswer } from "./frontdoor.ts";
+import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyHex, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
@@ -103,8 +103,10 @@ export interface RouterOptions {
   arcFetch?: typeof fetch;
   /** Answers programs' HTTP to URLs that are not this host's (#15, #40); default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
-  /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears, and a stop drops its in-memory sessions). */
+  /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears). */
   idleMs?: number;
+  /** How long a synchronous client waits on its request's thread (#66) before 503 + Retry-After (ms); default SKEIN_ANSWER_WAIT_MS, else two minutes. */
+  answerWaitMs?: number;
   /** Where a new mailbox instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
@@ -231,6 +233,11 @@ export class Router {
   private owed = new Map<string, { calls: number; fuel: number }>();
   private stopped = false;
   private closing?: Promise<void>;
+  /** Settles when the router starts shutting down: every client still waiting on a thread is answered 503 (#66). */
+  private stopping: Promise<void>;
+  private stopNow!: () => void;
+  /** Requests being forwarded (their clients held on a thread). */
+  private inflight = new Set<Promise<RouterResponse>>();
   servers: Server[] = [];
   port = 0;
   /** The control socket (control.ts), while this router listens on one. */
@@ -238,6 +245,7 @@ export class Router {
 
   constructor(o: RouterOptions) {
     this.o = o;
+    this.stopping = new Promise<void>((r) => { this.stopNow = r; });
     this.feeds = new Feeds({
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
@@ -328,6 +336,12 @@ export class Router {
 
   private async shutdown(): Promise<void> {
     this.stopped = true;
+    // Clients waiting on a thread are answered 503 + Retry-After before the servers close (#66).
+    this.stopNow();
+    if (this.inflight.size) {
+      await Promise.all([...this.inflight].map((p) => p.catch(() => {})));
+      await new Promise((r) => setTimeout(r, 50)); // their 503s written before the sockets close
+    }
     clearTimeout(this.timer);
     clearInterval(this.idleTimer);
     clearInterval(this.ledgerTimer);
@@ -376,35 +390,32 @@ export class Router {
   }
 
   /**
-   * An inbound libp2p message or stream frame (#51): one kernel call of the
-   * front door (fn "libp2p") with the tagged input; its fuel charged to the
-   * ledger (caller: the peer ID, op: `libp2p:<topic | protocol>`); the entries
-   * an accept returns admitted before the verdict goes back to GossipSub.
-   * A front door that fails to answer is `ignore` (no penalty).
+   * An inbound libp2p message or stream frame (#51, #68): appended as
+   * received (the message with its signature; the frame), and the verdict
+   * — or the frame's answer — read off the thread the front door is stepped
+   * on, once it comes to rest (#66). The front door verifies, routes, and
+   * admits what an accept carries (the message's `p2p` event first); a
+   * redelivered message it accepted before is `ignore`. Its thread failing,
+   * or not answering within the wait, is `ignore` (no penalty).
    */
   async p2pInbound(handle: string, call: InboundCall): Promise<InboundAnswer> {
     const l = await this.hydrate(handle);
     const source = `libp2p:${call.topic ?? call.protocol ?? "?"}`;
     let from = "";
     try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: the front door rejects it */ }
-    const a = await l.kernel.invoke("frontdoor", "libp2p", dagCbor.encode(call), { now: stampMs(this.now()) });
-    this.charge(handle, from, source, a.fuel);
-    if (!a.ok) { this.say(handle, `${source} from ${from}: the front door failed: ${a.error}`); return { verdict: "ignore", reason: a.error }; }
-    const r = dagCbor.decode(a.result) as { verdict?: string; reason?: string; body?: Uint8Array; close?: boolean; admit?: FrontAnswer["admit"] };
-    const verdict = r.verdict === "accept" || r.verdict === "reject" ? r.verdict : "ignore";
-    if (r.admit?.length) {
-      try {
-        await admitAll(l.kernel, r.admit, () => this.now());
-      } catch (e) {
-        // A redelivered message (#42/#51: its `p2p` event record already admitted — the kernel's
-        // `unique` index refuses it, nothing written) is ignore toward GossipSub: no penalty, no forward.
-        const dup = e instanceof Rejected && e.reason === "duplicate-envelope";
-        if (!dup) this.say(handle, `${source}: admit: ${(e as Error).message}`);
-        else if (process.env.SKEIN_LIBP2P_VERBOSE) this.say(handle, `${source} from ${from}: ignore (already admitted)`);
-        return { verdict: "ignore", reason: dup ? "already admitted" : (e as Error).message };
-      }
-      this.settle(l);
+    const record = call.topic !== undefined
+      ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
+      : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
+    const entry = await appendRequest(l.kernel, "libp2p", record, this.now());
+    const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
+    this.settle(l);
+    if (a.state !== "finished") {
+      const why = a.state === "errored" ? `the front door failed: ${a.error}` : `not answered in time (${a.state})`;
+      this.say(handle, `${source} from ${from}: ${why}`);
+      return { verdict: "ignore", reason: why };
     }
+    const r = dagCbor.decode(a.answer) as { verdict?: string; reason?: string; body?: Uint8Array; close?: boolean };
+    const verdict = r.verdict === "accept" || r.verdict === "reject" ? r.verdict : "ignore";
     if (verdict !== "accept" || process.env.SKEIN_LIBP2P_VERBOSE) this.say(handle, `${source} from ${from}: ${verdict}${r.reason ? ` (${r.reason})` : ""}`);
     return { verdict, ...(r.body instanceof Uint8Array ? { body: r.body } : {}), ...(r.close ? { close: true } : {}), ...(r.reason ? { reason: r.reason } : {}) };
   }
@@ -719,7 +730,11 @@ export class Router {
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
     const t = this.target(url);
-    if (t) return await this.forward(t.handle, t.route, url, req);
+    if (t) {
+      const p = this.forward(t.handle, t.route, url, req);
+      this.inflight.add(p);
+      try { return await p; } finally { this.inflight.delete(p); }
+    }
     const path = url.pathname;
     if (req.method === "GET" && path === "/manifest.json") {
       return json(200, { metanet: { handles: { resolve: `${this.origin()}/.well-known/metanet-handles/resolve` } } });
@@ -777,35 +792,20 @@ export class Router {
     }
   }
 
-  /** A request for an instance: one kernel call of its front door; what it returns admitted; its fuel charged. */
+  /**
+   * A request for an instance (#68, #66): appended as received, and the
+   * client's connection held until the thread it launched comes to rest —
+   * then its answer, signed on the session inside. Past `answerWaitMs`, or
+   * when the router shuts down, 503 + Retry-After (the thread goes on). A
+   * read's call fuel (the explorer's) is charged to the ledger.
+   */
   private async forward(handle: string, route: string, url: URL, req: RouterRequest): Promise<RouterResponse> {
+    if (this.stopped) return unavailable("the host is shutting down");
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    const caller = req.headers["x-bsv-auth-identity-key"] ?? "";
-    const a: FrontAnswer = await callFrontDoor(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: stampMs(this.now()) });
-    this.charge(handle, caller, route, a.fuel);
-    if (a.admit?.length) {
-      try {
-        await admitAll(l.kernel, a.admit, () => this.now());
-      } catch (e) {
-        // A replayed message is already in: the answer stands. Anything else is the host's failure.
-        if (!(e instanceof Rejected && e.reason === "duplicate-envelope")) {
-          this.say(handle, `admit: ${(e as Error).message}`);
-          return json(500, { status: "error", code: "ERR_ADMIT", description: (e as Error).message });
-        }
-      }
-      this.settle(l);
-    }
-    if (a.then) {
-      // An answer a step computes (an overlay's submit): once what was admitted is processed.
-      await l.kernel.idle();
-      const t = await l.kernel.invoke(a.then.program, a.then.fn, a.then.arg, { now: stampMs(this.now()) });
-      this.charge(handle, caller, `${route} (then)`, t.fuel);
-      if (!t.ok) return json(500, { status: "error", code: "ERR_INTERNAL", description: t.error });
-      // Its headers pass through too (#57: a pending overlay submit's 503 carries Retry-After).
-      const r = dagCbor.decode(t.result) as { status?: number; type?: string; headers?: Record<string, string>; body?: Uint8Array };
-      return { status: r.status ?? 200, headers: { ...r.headers, "content-type": r.type ?? "application/json" }, body: r.body ?? new Uint8Array() };
-    }
+    const a: FrontAnswer = await frontDoor(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
+    this.settle(l);
+    if (a.fuel !== undefined) this.charge(handle, req.headers["x-bsv-auth-identity-key"] ?? "", `${route} (read)`, a.fuel);
     return { status: a.status, headers: a.headers, body: a.body };
   }
 

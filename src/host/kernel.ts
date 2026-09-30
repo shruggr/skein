@@ -3,8 +3,10 @@
 // (kernel-zig/src/ipc.zig). This is the kernel's whole surface:
 //
 //   the router asks      tip · get · put · has · putblock · restore · append · genesis · boxes · byEnvelope ·
-//                        admit (the one call in that writes) · call (#40: a program's function over the
-//                        state, no entry, no writes: the front door's) · idle · start · running
+//                        admit (the one call in that writes: a request as received, #68, a feed's event, a
+//                        wake) · answer (#66: wait on the thread a request entry launched; its answer once it
+//                        comes to rest, or its state at the wait's bound) · call (#40: a program's function
+//                        over the state, no entry, no writes: host-side reads only) · idle · start · running
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle) ·
 //                        http (a program's request: the messagebox's delivery, a resolve, a wallet's ARC) ·
 //                        libp2p (#51: {request, thread}: publish/dial/send/receive/close, the libp2p host's)
@@ -12,7 +14,7 @@
 //                        over the exchange, which the kernel records with the answer
 //   the kernel tells     sleepers (its sleeping threads and their deadlines) · onSleep · stop
 //
-// `Kernel` offers `store` (get/put/log), `admit`, `invoke` (the call),
+// `Kernel` offers `store` (get/put/log), `admit`, `answer`, `invoke` (the call),
 // `boxes`, `sleepersDue`/`onSleep`, `idle`. Log lines (stderr) go to `log`.
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -39,6 +41,8 @@ type Frame = Record<string, unknown>;
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; options?: { connectTimeout?: number; firstByteTimeout?: number; betweenBytesTimeout?: number } };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 export interface Sleeper { thread: CID; until: Ms }
+/** A request thread's answer (#66, the `answer` frame): at rest (finished | errored), or not yet at the wait's bound. */
+export type RequestAnswer = { thread?: CID; state: "finished"; answer: Uint8Array } | { thread?: CID; state: "errored"; error: string } | { thread?: CID; state: "waiting" | "running" | "new" | "pending" };
 /** A kernel call's answer (#40): the program's stdout, or its error; the fuel it used either way. */
 export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
@@ -84,14 +88,6 @@ export class Kernel {
   gone = false;
   sleepers: Sleeper[] = [];
   onSleep?: (thread: CID, until: Ms) => void;
-  /**
-   * The front door's scratch table (#40, "sessions are not state"): the
-   * instance's BRC-104 sessions, in memory for as long as this process runs
-   * and never in the log. Opaque here (key → bytes, only the front door reads
-   * them); a new process starts with an empty table, and a client whose
-   * session is gone gets a 401 and shakes hands again.
-   */
-  readonly scratch = new Map<string, Uint8Array>();
 
   constructor(o: KernelOptions) {
     this.o = o;
@@ -111,7 +107,6 @@ export class Kernel {
     this.proc.stdin!.on("error", () => {}); // EPIPE once it is gone
     this.done = new Promise((resolve) => this.proc.once("close", (code, signal) => {
       this.gone = true;
-      this.scratch.clear();
       for (const w of this.waiting.values()) w.reject(new Error(`kernel ${o.handle}: exited (${signal ?? code})`));
       this.waiting.clear();
       o.exited?.(code, signal);
@@ -239,6 +234,17 @@ export class Kernel {
    */
   async invoke(program: CID | string, fn: string, arg: Uint8Array, o: { caller?: Uint8Array; now?: number } = {}): Promise<CallAnswer> {
     return await this.call("call", { program, fn, arg, ...(o.caller ? { caller: o.caller } : {}), now: o.now ?? Date.now() }) as CallAnswer;
+  }
+  /**
+   * A synchronous client's wait (#66): the answer of the thread a request
+   * entry launched (the middleware stepped on it), once that thread has come
+   * to rest for good — finished (`answer`: the middleware's dag-cbor answer)
+   * or errored — or, `waitMs` on, its state as it stands (`waiting`; or
+   * `pending`: the entry not processed yet). The kernel keeps the bound, so
+   * this always settles.
+   */
+  async answer(entry: CID, waitMs: number): Promise<RequestAnswer> {
+    return await this.call("answer", { entry, wait: Math.max(0, Math.floor(waitMs)) }) as RequestAnswer;
   }
   async idle(): Promise<void> { await this.call("idle"); }
   async start(): Promise<void> { await this.call("start"); }
