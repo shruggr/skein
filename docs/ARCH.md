@@ -181,12 +181,27 @@ them judging anything (the instance does, through its front door):
   caller, op) in host.db (`fuel_ledger`; `skein-host ledger`).
 - **Feeds** (`src/host/feeds.ts`): the router holds long-lived subscriptions
   an instance declares in its config (`etc/config.json` `feeds`, carried by
-  the genesis) — an SSE header stream (`{kind: "headers", url}`) and ARC's
-  status callbacks (`{kind: "arc-callback", token?}` at `POST
-  /callback/<handle>`) — and admits each item as a plain `header` / `status`
+  the genesis) — an SSE header stream (`{kind: "headers", url}`), one
+  connection per URL fanned out — and admits each item as a plain `header`
   entry (`Router.admitEvent`) through a bounded per-instance queue; SSE
   reconnects with backoff. It judges nothing: the instance's chain tracker
   validates.
+- **The broadcaster** (#58, `src/host/arc.ts`): one Arcade per host
+  (`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`). Instances broadcast through the
+  router's route — `POST /arc/v1/tx`, `GET /arc/v1/tx/<txid>`, reached by
+  the kernel's recorded `http` (a new genesis names it as
+  `defaults.walletArc`) — a plain proxy to Arcade under the host's one
+  callback token that answers what Arcade answered (unreachable: 503, a
+  transient failure the wallet re-asks at its deadline). No queue on the
+  host: the wallet's `broadcast` record is the queue. The router holds **one
+  SSE subscription** to Arcade for the whole host (the header feeds' SSE
+  client), resumed with `Last-Event-ID` from host.db; Arcade's webhooks
+  (`POST /arc/callback`, the token as bearer) take the same path. Each
+  status is admitted as a `status` entry into **every instance whose state
+  holds the transaction** (read, never written: the kernel's `has` of the
+  tx CID, cached per txid — the asker, a sweep of every enabled instance at
+  a txid's first status, then the running ones), once per txid + status +
+  block hash (host.db).
 - **The libp2p host** (#43, #51; `src/host/p2p.ts`): the runtime has no
   network, so libp2p is the router's too. One node per instance whose genesis
   carries `libp2p` (from `etc/config.json`: `topics`, `protocols`, `listen`),

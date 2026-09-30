@@ -10,7 +10,8 @@
 // inference peer). There is no messagebox host: every identity's mailbox is
 // an instance at its own origin. Beside the rows, the **fuel ledger**: what
 // each caller's calls (#40: the front door's reads, which the log never sees)
-// cost, per instance and op.
+// cost, per instance and op. And the broadcaster's two (#58, arc.ts): the
+// last event id taken from Arcade's stream, and the statuses already routed.
 
 import { DatabaseSync } from "node:sqlite";
 

@@ -21,7 +21,11 @@
 #      the router's default: the owner's mailbox instance) — an agent genesised
 #      earlier can never deliver its answers to him (it needs a new store).
 #   3. the router, if nothing listens on :8100 (it hydrates every enabled row:
-#      the agents' geneses happen here, the owner's mailbox already there)
+#      the agents' geneses happen here, the owner's mailbox already there).
+#      Its broadcaster (#58) is the host's Arcade: SKEIN_ARC_URL and
+#      SKEIN_ARC_TOKEN (and SKEIN_ARC_EVENTS_URL, SKEIN_ARC_CALLBACK_URL) in the
+#      environment or ~/.skein/host.env; without them nothing broadcasts and a
+#      new genesis names no walletArc (README.md, "The broadcaster")
 #   4. the grants, toward every row's front-door key (`skein-host list`), now
 #      that every row exists
 #   5. the address books (#40): where each agent delivers to a key. Into every
