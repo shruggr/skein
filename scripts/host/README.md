@@ -177,6 +177,27 @@ instance), admitting `header` entries into the box (default `chain`). The
 per-instance `arc-callback` feed is gone (#58; a config that declares one is
 refused): transaction statuses come from the broadcaster.
 
+Jobs (#60, `src/host/cron.ts`): an instance's `etc/config.json` may declare
+`jobs: [{box, body?, every: <ms> | at: <ms since the epoch>, name?}]` (the
+genesis carries them). The router is their clock: when one is due it admits
+a plain event `{kind: "cron", name, due, …body}` (the body's own `kind`
+wins) into the job's box, which a sender-less subscription on that box
+handles. An `every` job fires once when `run` starts, then every `every` ms;
+an `at` job once (host.db `cron_fired` remembers it across restarts). A
+firing missed while the host was down is made up once at the next start,
+not as a burst. An idle-stopped instance is hydrated for a job only if
+something in it subscribes the box; otherwise the firing is logged
+(`cron: … not woken`) and skipped. By hand:
+
+```
+bin/skein-host event <handle> <box> ['{"kind":"amm-p2p-timer","job":"heartbeat"}']   # default {kind: "cron", due: now}
+```
+
+admits one such event now and runs the steps it starts, through a router of
+its own that it closes afterwards. It refuses while a router answers at
+`SKEIN_HOST_URL` / `SKEIN_ROUTER_PORT`: that router's kernel holds the
+instance's store. For a running host, declare the job instead.
+
 The broadcaster (#58, `src/host/arc.ts`, docs/WALLET.md): one Arcade for
 the whole host. Instances broadcast through the router (`POST
 http://127.0.0.1:8100/arc/v1/tx`, re-ask `GET /arc/v1/tx/<txid>`; a new
@@ -374,8 +395,9 @@ it runs a supervisor (src/host/supervisor.ts) for one read-only
   `[handle explore]`.
 - **Restarts**: an explorer that exits is started again after 1 s, doubling
   to at most 60 s; one that ran 30 s or more starts again at 1 s.
-- **Stopping**: SIGINT/SIGTERM stops the router and sends every explorer
-  SIGTERM (SIGKILL after 10 s). An explorer whose supervisor is killed stops
+- **Stopping**: SIGINT/SIGTERM closes the router (`Router.close()`, #61:
+  its timers, feeds, broadcaster, libp2p nodes and kernels) and sends every
+  explorer SIGTERM (SIGKILL after 10 s). An explorer whose supervisor is killed stops
   by itself (its IPC channel closes).
 
 **Ports** (127.0.0.1):

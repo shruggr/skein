@@ -503,7 +503,22 @@ turn is a run of steps. Two changes from v1:
   message from that identity* (the `await` import on the message it sent). The subscription table is what makes David's
   messages resolve waiting threads while a stranger's are routed to a
   handler program or refused. Cron is a time attestation that a subscription
-  routes to whatever waits for it.
+  routes to whatever waits for it (#60). Concretely: an instance's genesis
+  carries its **jobs** (`etc/config.json` `jobs: [{box, body?, every: <ms> |
+  at: <ms since the epoch>, name?}]`), and the router is the clock
+  (`src/host/cron.ts`): when a job is due it admits a plain **event** entry
+  into the job's box, `{event: {...body, kind: "cron" (unless the body names
+  one), name, due}, box}`. It is sender-less, so it is routed by a
+  subscription with no sender on that box (or to the thread awaiting its
+  `subject`, if the body names one); the entry's stamp, the router's clock at
+  admission, is the attestation, and `due` says which firing it is. An
+  `every` job fires once at the host's start, then every `every` ms; an `at`
+  job once. A firing missed while the host was down is made up once at the
+  next start, never as a burst. An idle-stopped instance is hydrated for a job
+  only if something in it subscribes the job's box. The program takes the
+  event as its start signal and carries on with `deadline` wakes; the next
+  `every` firing is its retry if its thread died. `skein-host event <handle>
+  <box> [json]` admits one such event by hand.
 
 A transaction is a thread whose state chain is its finality (created,
 broadcast, mined with merkle path, rejected, reorged), each transition an

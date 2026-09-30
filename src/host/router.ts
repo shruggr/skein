@@ -41,6 +41,11 @@
 // an accept's entry admitted first, the fuel charged), and the kernels'
 // `libp2p` import answered here (`p2pRequest`); a frame for a thread resting
 // on `receive` admits its wake (`wakeThread`).
+//
+// The router is the instances' clock too (#60, cron.ts): each genesis's
+// `jobs`, a plain `cron` event admitted into the job's box when it is due
+// (an idle-stopped instance hydrated for one only if something in it
+// subscribes that box).
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -53,6 +58,10 @@ import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
+import { Cron, jobsOf, type JobSpec } from "./cron.ts";
+import { currentSubscriptions } from "../runtime/subscriptions.ts";
+import { openStoreFile } from "../runtime/index-store.ts";
+import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { admitAll, callFrontDoor, headerMap, type FrontAnswer } from "./frontdoor.ts";
@@ -77,7 +86,7 @@ export interface RouterOptions {
   inferHandle?: Named;
   fuelPerStep?: string;
   /** A new genesis's extra seed subscriptions and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[] };
+  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[]; jobs?: JobSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** The host's Arcade (#58, arc.ts): the broadcast route, the status subscription, a new genesis's `walletArc`. Absent: no broadcaster. */
@@ -100,8 +109,10 @@ export interface RouterOptions {
   ownerMessagebox?: string;
   /** How often the fuel ledger is written (ms); default 5000. */
   ledgerMs?: number;
-  /** Tests: the clock entries are stamped with. */
+  /** Tests: the clock entries are stamped with (and jobs fall due by: cron.ts). */
   now?: () => Stamp;
+  /** The instances' jobs (#60, cron.ts): false — this router fires none (a one-shot command's router is no clock). Default true. */
+  cron?: boolean;
   /** Lines, by source: an instance's handle, or "router". */
   log?(source: string, line: string): void;
   /** Kernel process settings. */
@@ -188,6 +199,8 @@ function errorOf(body: Uint8Array): string {
 export class Router {
   readonly o: RouterOptions;
   readonly feeds: Feeds;
+  /** The instances' jobs (#60). */
+  readonly cron: Cron;
   /** The host's broadcaster (#58): present when the host has an Arcade. */
   readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
@@ -203,6 +216,7 @@ export class Router {
   /** The fuel of calls not yet written to the ledger: instance\0caller\0op → {calls, fuel}. */
   private owed = new Map<string, { calls: number; fuel: number }>();
   private stopped = false;
+  private closing?: Promise<void>;
   servers: Server[] = [];
   port = 0;
 
@@ -211,6 +225,17 @@ export class Router {
     this.feeds = new Feeds({
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
+    });
+    this.cron = new Cron({
+      now: () => stampMs(this.now()), admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
+      state: (h) => {
+        const row = this.o.db.get(h);
+        if (!row || row.status !== "enabled") return "gone";
+        const l = this.loaded.get(h);
+        return (l && !l.kernel.gone) || this.loading.has(h) ? "running" : "stopped";
+      },
+      subscribed: (h, box) => this.subscribes(h, box),
+      fired: { has: (h, k) => this.o.db.jobFired(h, k), mark: (h, k, due) => this.o.db.markJobFired(h, k, due) },
     });
     if (o.arc) {
       this.arc = new Broadcaster({
@@ -255,18 +280,37 @@ export class Router {
     }
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Stop everything this router started (#61), once: the waker's, the
+   * idle reaper's and the ledger's timers (the owed fuel written first), its
+   * servers and their connections, the header feeds' and the broadcaster's
+   * SSE clients, the libp2p nodes, and every kernel process it spawned — one
+   * still hydrating included. Afterwards nothing of it keeps the process
+   * alive: `skein-host run`'s shutdown and every one-shot command that builds
+   * a router (`add --boot/--packet`) end with it.
+   */
+  close(): Promise<void> {
+    this.closing ??= this.shutdown();
+    return this.closing;
+  }
+
+  /** The same as `close()`. */
+  stop(): Promise<void> { return this.close(); }
+
+  private async shutdown(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.timer);
     clearInterval(this.idleTimer);
     clearInterval(this.ledgerTimer);
     this.flushLedger();
-    for (const s of this.servers) s.close();
-    this.feeds.stop();
-    await this.arc?.stop();
-    await this.p2p?.stop();
+    const closed = this.servers.map((s) => new Promise<void>((r) => { s.close(() => r()); s.closeAllConnections(); }));
+    this.servers = [];
+    await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
+    // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
+    await Promise.all([...this.loading.values()].map((p) => p.catch(() => {})));
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
+    await Promise.all(closed);
   }
 
   /**
@@ -407,6 +451,7 @@ export class Router {
       if (!row.identity) this.o.db.add(row.handle, { identity });
       if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
+      if (this.o.cron !== false) this.cron.declare(handle, jobsOf(g as Record<string, unknown>));
       const p2p = libp2pOf(g as Record<string, unknown>);
       if (this.p2p && p2p) {
         // Its node, before anything it runs can publish or dial; a failure to start it is logged, not fatal.
@@ -420,6 +465,21 @@ export class Router {
     this.loaded.set(handle, l);
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
+  }
+
+  /**
+   * Whether a stopped instance's subscriptions route a sender-less event in
+   * `box` to a handler (the kernel's rule for a plain entry no thread awaits):
+   * read from its store file, read-only, with no kernel.
+   */
+  async subscribes(handle: string, box: string): Promise<boolean> {
+    const row = this.o.db.get(handle);
+    if (!row || !existsSync(row.store)) return false;
+    const s = openStoreFile(row.store, { readOnly: true });
+    try {
+      const rules = await currentSubscriptions(s);
+      return !!rules?.some((r) => r.match.sender == null && (r.match.box == null || r.match.box === box));
+    } finally { s.close(); }
   }
 
   /**
@@ -460,7 +520,7 @@ export class Router {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
         identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
+        feeds: this.o.genesis?.feeds, jobs: this.o.genesis?.jobs, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
       };
     }
     return {
@@ -468,7 +528,7 @@ export class Router {
       // Code genesis takes DEFAULTS under the host's.
       defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
       subscriptions: this.o.genesis?.subscriptions,
-      feeds: this.o.genesis?.feeds,
+      feeds: this.o.genesis?.feeds, jobs: this.o.genesis?.jobs,
       libp2p: this.o.genesis?.libp2p, extraRoutes: this.o.genesis?.routes,
       ...facts,
     };

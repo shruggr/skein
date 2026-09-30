@@ -12,6 +12,7 @@
 // each caller's calls (#40: the front door's reads, which the log never sees)
 // cost, per instance and op. And the broadcaster's two (#58, arc.ts): the
 // last event id taken from Arcade's stream, and the statuses already routed.
+// And the router clock's one (#60, cron.ts): the one-time jobs that fired.
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -53,6 +54,14 @@ CREATE TABLE IF NOT EXISTS status_seen (
   status            TEXT NOT NULL,                    -- txStatus, a space, the block hash ('' if none)
   at                TEXT NOT NULL,
   PRIMARY KEY (txid, status)
+) WITHOUT ROWID;
+-- The one-time jobs that fired (#60, cron.ts): an instance's at-job, by its key (a hash of its spec), fires once.
+CREATE TABLE IF NOT EXISTS cron_fired (
+  instance          TEXT NOT NULL,
+  job               TEXT NOT NULL,                    -- cron.ts jobKey
+  due               INTEGER NOT NULL,                 -- the job's at (ms)
+  at                TEXT NOT NULL,                    -- when it fired
+  PRIMARY KEY (instance, job)
 ) WITHOUT ROWID;`;
 
 export type Status = "enabled" | "disabled";
@@ -201,6 +210,15 @@ export class HostDb {
 
   hasStatus(txid: string, status: string): boolean {
     return this.db.prepare("SELECT 1 FROM status_seen WHERE txid = ? AND status = ?").get(txid, status) !== undefined;
+  }
+
+  /** Whether an instance's one-time job (#60, cron.ts jobKey) has fired. */
+  jobFired(instance: string, job: string): boolean {
+    return this.db.prepare("SELECT 1 FROM cron_fired WHERE instance = ? AND job = ?").get(instance, job) !== undefined;
+  }
+
+  markJobFired(instance: string, job: string, due: number, now = new Date()): void {
+    this.db.prepare("INSERT OR IGNORE INTO cron_fired (instance, job, due, at) VALUES (?, ?, ?, ?)").run(instance, job, due, now.toISOString());
   }
 
   /** The enabled row whose identity is `identity`. */
