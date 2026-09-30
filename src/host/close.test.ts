@@ -32,7 +32,13 @@ async function scratch(t: { after(f: () => unknown): void }) {
 }
 
 /** Timers, child processes and sockets: what would keep a process alive. */
-const live = () => process.getActiveResourcesInfo().filter((r) => /Timeout|Immediate|Process|TCP|Pipe/.test(r));
+const live = () => process.getActiveResourcesInfo().filter((r) => /Timeout|Immediate|Process|TCP|Pipe/.test(r)).sort();
+/** What is live now that was not before — once libuv has run the close callbacks of what was just closed (a process handle goes a tick after its "close" event). */
+async function leftover(before: string[]): Promise<string[]> {
+  const extra = () => { const b = [...before]; return live().filter((r) => { const i = b.indexOf(r); if (i < 0) return true; b.splice(i, 1); return false; }); };
+  for (const end = Date.now() + 2000; Date.now() < end && extra().length;) await new Promise((r) => setTimeout(r, 20));
+  return extra();
+}
 
 test("add --boot: the process exits by itself, 0, once the boot is written", { skip, timeout: 120_000 }, async (t) => {
   const s = await scratch(t);
@@ -54,8 +60,7 @@ test("add --boot in process: resolves, and leaves no timer, kernel process or so
   const before = live();
   assert.equal(await main(["add", "inproc", "--boot", s.system], s.env), 0, s.err.join("\n"));
   assert.ok(s.out.some((l) => /^inproc: booted from /.test(l)), s.out.join("\n"));
-  await new Promise((r) => setImmediate(r));
-  assert.deepEqual(live(), before, "what the router started is closed");
+  assert.deepEqual(await leftover(before), [], "what the router started is closed");
 });
 
 test("router.close(): the kernels it hydrated, its servers and timers — once, however often it is called", { skip, timeout: 120_000 }, async (t) => {
@@ -73,7 +78,6 @@ test("router.close(): the kernels it hydrated, its servers and timers — once, 
   await Promise.all([r.close(), r.close(), r.stop()]);
   assert.ok(k.gone, "the kernel process is gone");
   assert.equal(r.loaded.size, 0);
-  await new Promise((res) => setImmediate(res));
-  assert.deepEqual(live(), before, "nothing of the router is live");
+  assert.deepEqual(await leftover(before), [], "nothing of the router is live");
   await assert.rejects(r.hydrate("m"), /the router is stopping/);
 });
