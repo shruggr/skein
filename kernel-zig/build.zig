@@ -6,6 +6,9 @@
 // ~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api. The static
 // libwasmtime.a is linked, so the binary needs nothing of it at run time.
 // SQLite: the system libsqlite3 (JSON1 is built in since 3.38).
+// The codecs (cid, cbor, mst, secp) are the SDK's (../sdk, the skein-sdk
+// submodule, a path dependency in build.zig.zon; with -Dwallet=false, so the
+// kernel never fetches bsvz).
 //
 // The browser build (issue #35): `zig build web`, or any wasm target
 // (`zig build -Dtarget=wasm32-freestanding`) → zig-out/web/skein-kernel.wasm,
@@ -19,6 +22,7 @@ pub fn build(b: *std.Build) void {
 
     const web_target = if (target.result.cpu.arch.isWasm()) target else b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
     const web = webKernel(b, web_target, optimize);
+    sdkImports(b, web.artifact.root_module, web_target, optimize);
     b.step("web", "the browser build: zig-out/web/skein-kernel.wasm").dependOn(&web.step);
     if (target.result.cpu.arch.isWasm()) {
         b.getInstallStep().dependOn(&web.step);
@@ -37,6 +41,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     link(b, mod, wt);
+    sdkImports(b, mod, target, optimize);
 
     const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod });
     b.installArtifact(exe);
@@ -52,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     link(b, tmod, wt);
+    sdkImports(b, tmod, target, optimize);
     const tests = b.addTest(.{ .root_module = tmod });
     const trun = b.addRunArtifact(tests);
     trun.setCwd(b.path("."));
@@ -73,6 +79,12 @@ fn webKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // The kernel's own stack (its shadow stack in linear memory): deep enough for the scheduler's recursion.
     exe.stack_size = 8 << 20;
     return b.addInstallArtifact(exe, .{ .dest_dir = .{ .override = .{ .custom = "web" } } });
+}
+
+/// The SDK's codecs, as the modules the kernel imports by name.
+fn sdkImports(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) void {
+    const sdk = b.dependency("skein_sdk", .{ .target = target, .optimize = optimize, .wallet = false });
+    for ([_][]const u8{ "cid", "cbor", "mst", "secp" }) |name| m.addImport(name, sdk.module(name));
 }
 
 fn link(b: *std.Build, m: *std.Build.Module, wt: []const u8) void {

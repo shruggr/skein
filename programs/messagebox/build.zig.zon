@@ -1,0 +1,15 @@
+.{
+    .name = .skein_messagebox,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xf3fafef0057cc875,
+    .dependencies = .{
+        .skein_sdk = .{ .path = "../../sdk" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "deliver.zig",
+        "main.zig",
+    },
+}

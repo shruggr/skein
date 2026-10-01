@@ -9,7 +9,7 @@ const engine = @import("engine.zig");
 // Components run on wasmtime's component API; the browser build runs preview1 modules only (issue #35).
 const component = if (engine.web) @import("component_web.zig") else @import("component.zig");
 const wasi = @import("wasi.zig");
-const cidm = @import("cid.zig");
+const cidm = @import("cid");
 const vfsm = @import("vfs.zig");
 const program = @import("program.zig");
 const Store = @import("store.zig").Store;

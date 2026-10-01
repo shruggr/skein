@@ -1,0 +1,14 @@
+.{
+    .name = .skein_test_cron_demo,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x40847127dd18a190,
+    .dependencies = .{
+        .skein_sdk = .{ .path = "../../../sdk" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+    },
+}

@@ -4,7 +4,7 @@
 // result {exitCode, stdout, stderr (base64), tree} or {error}.
 const std = @import("std");
 const envm = @import("env.zig");
-const cidm = @import("cid.zig");
+const cidm = @import("cid");
 const shell = @import("shell.zig");
 const programs = @import("programs.zig");
 const runner = @import("runner.zig");

@@ -372,7 +372,7 @@ services' hooks — and the request waits on that thread (#66); when it
 finishes the handler answers the STEAK from the state. A lookup is a read: an in-VM call of the lookup
 service's program, which answers from its own maps (head `ls:<service>`),
 written only through its hooks. What topics admit is kept as index maps in
-the same state record as the wallet's (wallet-zig `overlay.zig`), so a
+the same state record as the wallet's (the SDK's wallet library, `sdk/wallet/src/overlay.zig`), so a
 transaction's settlement (#37) is one thing for both: a rejection makes its
 admittances vanish, and the services are told. See `docs/OVERLAY.md`.
 

@@ -1,10 +1,10 @@
 // `zig build test`: the unit tests of every module, plus the fixtures the
 // TypeScript formats made (test/fixtures.json, test/fixtures.ts).
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const json = @import("json.zig");
-const secp = @import("secp.zig");
+const secp = @import("secp");
 const syscalls = @import("syscalls.zig");
 
 test {
@@ -14,7 +14,6 @@ test {
     _ = secp;
     _ = syscalls;
     _ = @import("tree.zig");
-    _ = @import("mst.zig");
     _ = @import("bitcoin.zig");
     _ = @import("index_test.zig");
     _ = @import("objects.zig");

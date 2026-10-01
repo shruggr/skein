@@ -7,7 +7,7 @@
 // a read deflates the record on the fly, and a write inflates, checks the
 // hash and keeps the record. Pure functions; the VFS (vfs.zig) wires them in.
 const std = @import("std");
-const cidm = @import("cid.zig");
+const cidm = @import("cid");
 
 /// A directory `xx` (two lowercase hex digits) directly inside `.git/objects`.
 pub fn isFanoutName(dir: []const u8, parent: []const u8, grandparent: []const u8) bool {

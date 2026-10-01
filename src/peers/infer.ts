@@ -72,7 +72,7 @@ export interface EngineRequest {
 }
 
 /**
- * A conversation node: one of the loop's `turn` records (programs/loop), as
+ * A conversation node: one of the loop's `turn` records (the loop: shruggr/skein-workbench programs/loop), as
  * kept in the instance, so its CID here is its CID there. `parent` is the node
  * before it; the root (the system prompt) has none.
  */

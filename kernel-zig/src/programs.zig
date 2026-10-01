@@ -2,13 +2,22 @@
 // (src/runtime/programs.ts). Kept in sync by hand; a test checks every CID
 // against the TypeScript's (test/fixtures.json).
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const Value = cbor.Value;
 
 pub const Module = struct { name: []const u8, cid: []const u8 };
 
-/// MODULES, in declaration order (install order).
+/// MODULES, in declaration order (install order). Since #71 skein's own
+/// sources build only the install handlers (objects, head, subscribe), the
+/// messagebox, the front door, resolve and the wallet (programs/, over the SDK
+/// in sdk/). The shell's modules (brush, coreutils, the toolset), run-handler
+/// and loop are the workbench's (shruggr/skein-workbench): built there, their
+/// modules committed in wasm/ and pinned here because the stock genesis and the
+/// stock shell program name them (scripts/update-workbench.sh moves a build in;
+/// wasm/WORKBENCH is its commit). Apps outside the stock genesis are not pinned:
+/// static is shruggr/skein-static (a tree carries bin/static.wasm), the overlay
+/// engine programs/overlay (to move to shruggr/skein-overlay).
 pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
@@ -25,9 +34,6 @@ pub const modules = [_]Module{
     .{ .name = "frontdoor", .cid = "bafkreicqqjjfwl2dioe2mywm3p6q5cxfj7kb27qtvgy7dlexntdh6mhyki" },
     // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreia3akvsvilh2nceat3v36zmdurjn3vu4lcn2ehlo6aftlyiplk47m" },
-    // The static file handler (#52): files from the `main` tree through the routes table (programs/static).
-    // Installed, not in a genesis by default: a tree wires it (bin/static.cid, a route to it).
-    .{ .name = "static", .cid = "bafkreiewar6biptwbkvwmrymqixp24nyekcv6skzibbw57mnkwuiykvazu" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },

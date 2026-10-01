@@ -70,7 +70,7 @@ fi
 echo "== the wallet in the VM (#29): oracle signing, plain entries, broadcast events through the host's broadcaster (#58, #65) to a fake Arcade, statuses and proofs to every holder, a restart resumed; replayed"
 # Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
 if command -v wasm-tools > /dev/null; then
-  (cd "$kz/../wallet-zig" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
+  (cd "$kz/../programs/wallet" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
 fi
 "${node[@]}" "$kz/equiv/wallet.ts" || status=1
 
@@ -86,8 +86,7 @@ echo "== overlay services (#36): programs/overlay built and tested; submit/looku
 (cd "$kz/../programs/overlay" && mise exec -- zig build && mise exec -- zig build test) || { echo "FAIL programs/overlay build or tests"; status=1; }
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
-echo "== static files (#52): programs/static tested; a tree's files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); each request an entry, no head moved; replayed"
-(cd "$kz/../programs/static" && mise exec -- zig build test) || { echo "FAIL programs/static tests"; status=1; }
+echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static.ts's pinned commit, or \$SKEIN_STATIC_DIR) in a tree; its files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); each request an entry, no head moved; replayed"
 "${node[@]}" "$kz/equiv/static.ts" || status=1
 
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"

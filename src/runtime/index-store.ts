@@ -2,7 +2,7 @@
 // only `blocks` and a `pointers` row `state` → the state record
 // {kind: "skein-state", log, cursor, heads, index: {<map>: <root>}}, whose
 // maps are Merkle search trees of dag-cbor nodes [left, [[key, value, right]…]]
-// (kernel-zig/src/mst.zig, index.zig; kernel-zig/README.md "The index").
+// (the SDK's mst.zig, sdk/src/mst.zig; kernel-zig/src/index.zig; kernel-zig/README.md "The index").
 //
 // - `openStoreFile(path)`: the right reader for a store file — this one when
 //   the file has the state pointer, else sqlite.ts's (a store of blocks the

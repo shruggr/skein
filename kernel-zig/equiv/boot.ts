@@ -68,7 +68,7 @@ const cli = async (home: string, ...argv: string[]) => {
 
 const home = join(work, "home"), home2 = join(work, "home2");
 const sys = join(work, "system");
-const COMPONENT = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../wallet-zig/zig-out/bin/wallet.component.wasm");
+const COMPONENT = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../programs/wallet/zig-out/bin/wallet.component.wasm");
 const withComponent = existsSync(COMPONENT);
 let router: Router | undefined;
 const routerFor = (h: string, db: HostDb) => {
@@ -150,7 +150,7 @@ try {
     const subs = JSON.parse(readFileSync(join(sys, "etc/subscriptions.json"), "utf8"));
     await fs.writeFile(join(sys, "etc/subscriptions.json"), JSON.stringify([...subs, { sender: "$owner", box: "wallet", handler: "wallet" }]));
     config.defaults.walletNetwork = "regtest";
-  } else process.stdout.write("note: no wallet component build (wallet-zig: zig build component); the component handler case is skipped\n");
+  } else process.stdout.write("note: no wallet component build (programs/wallet: zig build component); the component handler case is skipped\n");
   await fs.writeFile(join(sys, "etc/config.json"), JSON.stringify(config));
 
   // The owner's and the inference peer's mailbox instances, before the agents (whose geneses name the owner's).

@@ -1,5 +1,5 @@
 // A component's emit end to end (issues #15, #70, #67): the `fetch`
-// component (programs/fetch, Zig, a WASI 0.2 component, a test fixture) as
+// component (programs/test/fetch, Zig, a WASI 0.2 component, a test fixture) as
 // the handler of a box, run by the Zig kernel the router drives. The owner
 // sends {url}; the component emits {method: "GET", url} to the address
 // book's `fetch` provider (the host's HTTP proxy, whose network here is a

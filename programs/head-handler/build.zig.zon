@@ -1,0 +1,14 @@
+.{
+    .name = .skein_head_handler,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x2ef84b30630bc9f9,
+    .dependencies = .{
+        .skein_sdk = .{ .path = "../../sdk" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+    },
+}

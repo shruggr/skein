@@ -1,7 +1,7 @@
 // Named heads (src/runtime/heads.ts): a chain per name, origin {kind: "head",
 // name}, one update per move {tree, thread, input, at}.
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 

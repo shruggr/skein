@@ -23,9 +23,9 @@
 //         No envelope signature: the kernel checks the shape and that the
 //         payload carries the body (scheduler.zig).
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 const json = @import("json.zig");
-const secp = @import("secp.zig");
+const secp = @import("secp");
 const Value = cbor.Value;
 
 pub fn signedPart(alloc: std.mem.Allocator, env: Value) !Value {

@@ -1,0 +1,14 @@
+.{
+    .name = .skein_test_p2p_component,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xc30bf889e7d736d4,
+    .dependencies = .{
+        .skein_sdk = .{ .path = "../../../sdk" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "main.zig",
+    },
+}

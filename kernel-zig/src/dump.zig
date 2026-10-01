@@ -12,8 +12,8 @@
 //    (issue #5: each update's `fuel`, summed per thread in thread order),
 //    blocks: [cid] (not index nodes or state records), indexBlocks: n}
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const index = @import("index.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
 const Value = cbor.Value;

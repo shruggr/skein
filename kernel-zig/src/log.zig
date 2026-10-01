@@ -53,9 +53,9 @@
 //            the owner's mailbox), written into the head `peers` when the
 //            genesis is processed.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
-const secp = @import("secp.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
+const secp = @import("secp");
 const syscalls = @import("syscalls.zig");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
@@ -192,7 +192,7 @@ pub fn isMail(x: ?Value) bool {
 
 /// A signed message's preimage (#70): the dag-cbor of its mail record without
 /// `signature` — what the sender signed, BRC-169's way ([2, "metanet handles
-/// envelope"], key "send", counterparty anyone; message.zig in programs/lib
+/// envelope"], key "send", counterparty anyone; message.zig in the SDK (sdk/lib)
 /// checks it).
 pub fn signedPart(a: std.mem.Allocator, m: Value) ![]u8 {
     return cbor.encode(a, try cbor.without(a, m, "signature"));

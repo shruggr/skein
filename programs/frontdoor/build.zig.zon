@@ -1,0 +1,17 @@
+.{
+    .name = .skein_frontdoor,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0xc672a902e6c48f2e,
+    .dependencies = .{
+        .skein_sdk = .{ .path = "../../sdk" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "explore.zig",
+        "libp2p.zig",
+        "main.zig",
+        "sessions.zig",
+    },
+}

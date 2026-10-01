@@ -50,9 +50,10 @@ src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs` (replay is `skein-kernel replay`)
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        the stock programs, all Zig (#54): run-handler, objects-handler, head-handler, subscribe-handler, loop (the chat turn loop), messagebox, frontdoor, resolve, static (files from the tree through the routes, #52; installed, wired per tree), wire-probe (a test); lib/ (the `skein` imports and the helpers over them)
-scripts/         build-wasm.sh (brush, coreutils), build-programs.sh + pin-programs.sh (handlers), host/ (dev host)
-wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (the shell's and the wallet's also in src/runtime/programs.ts)
+programs/        skein's own programs, all Zig (#54) over the SDK: the install handlers (objects-handler, head-handler, subscribe-handler), messagebox, frontdoor, resolve, wallet (the boundary programs every instance needs), overlay (the overlay services engine, #36; moving to shruggr/skein-overlay); test/ (kernel test fixtures: fetch, p2p-component, p2p-demo, cron-demo, wire-probe)
+sdk/             the SDK, shruggr/skein-sdk as a git submodule (#71): the codecs (cid, cbor, mst, secp) the kernel shares, the `skein` imports and helpers (lib/), BRC-104, dag-json, messages, the WIT (wit/), the wallet library (wallet/); a Zig package programs depend on by path here, by URL+hash elsewhere
+scripts/         build-programs.sh + pin-programs.sh (skein's programs), update-workbench.sh (a workbench build's modules in, repinned), host/ (dev host)
+wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (the shell's and the wallet's also in src/runtime/programs.ts); run-handler, loop and the shell's toolset are built in shruggr/skein-workbench (wasm/README.md)
 ```
 
 `src/runtime/isolation.test.ts` fails if anything under `src/runtime` imports
@@ -79,6 +80,7 @@ oracle: a ProtoWallet over a key derived from one master secret
 host key: log entries are unsigned (format 2).
 
 ```
+git clone --recurse-submodules https://github.com/shruggr/skein   # or, in a clone: git submodule update --init (sdk/)
 npm install
 (cd kernel-zig && mise exec -- zig build --release)
 bin/skein-host add martha                   # a row: identity derived from the master secret, store ~/.skein/instances/martha/runtime.db
@@ -128,7 +130,7 @@ bin/skein-host subscribe martha add --sender <key> run run-handler   # a `subscr
 bin/skein-host disable kurt                 # also: add <handle> [--domain --derive --store --tree], enable, remove
 ```
 
-Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.sh`
+skein's programs change → `scripts/build-programs.sh && scripts/pin-programs.sh`; the workbench's (run-handler, loop, the toolset) → build in shruggr/skein-workbench, then `scripts/update-workbench.sh <its checkout>`
 (the build is reproducible; the pins are the modules' raw CIDs, in
 `kernel-zig/src/programs.zig`).
 

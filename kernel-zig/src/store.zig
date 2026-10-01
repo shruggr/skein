@@ -5,7 +5,7 @@
 // (sqlite_store.zig); a browser build brings its own backend. Everything
 // returned is allocated from the caller's allocator.
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 const Value = cbor.Value;
 
 pub const Rejected = enum {

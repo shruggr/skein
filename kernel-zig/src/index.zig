@@ -50,9 +50,9 @@
 // only the unprocessed entry's derived changes, which reprocessing makes
 // again.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
-const mst = @import("mst.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
+const mst = @import("mst");
 const storem = @import("store.zig");
 const bitcoin = @import("bitcoin.zig");
 const Value = cbor.Value;

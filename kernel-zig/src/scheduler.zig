@@ -25,10 +25,10 @@
 // carries on past the sleep under the wake entry. Same updates, same CIDs; a
 // sleeping shell costs a re-execution per wake.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const json = @import("json.zig");
-const secp = @import("secp.zig");
+const secp = @import("secp");
 const logm = @import("log.zig");
 const addressbook = @import("addressbook.zig");
 const oracle = @import("oracle.zig");
