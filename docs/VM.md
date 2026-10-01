@@ -111,61 +111,111 @@ writes the same chain. A name never moved has no chain.
   import (the tree must be in the store), and the move is written when that
   step ends without error; the step's update lists it (`heads`). Nothing moves
   a head at turn end, and a thread's tree stays private to the thread.
-- The owner moves one by sending `{name, tree}` to box `head` (`skein head
-  <name> <tree>`): `head-handler` reads the request (the plaintext body the
-  log entry names) and advances the head.
+- **Write scope by name** (#77, format 8). A head's name is `<app>/<rest>`
+  and its owner is `<app>` (a bare name is its own owner; every head update
+  carries `owner`). `advance` succeeds only when the name is in the stepping
+  program's write scope: an app's program (its record's `app`, written by the
+  install) writes `<app>/…` and nothing else; a program the genesis wired
+  (no app record) writes only what the genesis's `scopes` list under its
+  name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox", "outbound"],
+  resolve: ["peers"], wallet: ["wallet"]}` by default) — a bare head name,
+  or a prefix ending in `/`. An in-VM callee writes in its own scope, not its
+  caller's. A program record may also list `heads` it may write: a
+  transitional grant the install writes for an app built before its heads
+  moved under its name (the pinned overlay engine's `wallet`,
+  `overlay:gossip`, `ls:<service>`; the alias `<app>`), to go with #79.
+  Anything else is `advance: <name> is outside the write scope of <program>`.
+- The owner moves one by sending `{name, tree}` to the admin box `head`
+  (`skein head <name> <tree>`): the kernel's own `head` operation (below,
+  "The dispatch table") advances it — no program runs. The app's root head
+  `<app>/app` is created this way at install.
 - `main` is the default: `run` with no tree, and a new `chat` with no tree,
   start from `main`'s tree (the empty tree if there is no `main`). The loop
   records that tree in the opening turn it keeps.
 - An import sets `main` when the instance has none: the client names the root
-  on the last `objects` bundle, and `objects-handler` advances `main` to it.
+  on the last `objects` bundle, and the kernel's `objects` operation advances
+  `main` to it.
 
-### Subscriptions
+### The dispatch table, and the kernel's four tables (#77, format 8)
 
-The routing table is a chain too, one per instance: origin `{kind:
-"subscriptions"}` (found by encoding it, like a head by its name), one update
-per change `{op: "add" | "remove", sender?, box, handler, thread?, input,
-at}`. The rules are the updates folded in order: `add` appends the rule
-`(sender, box) → handler` at the end of the list, `remove` deletes it; an add
-of a rule already listed, or a remove of one that is not, writes nothing. No
-`sender` is any sender, and no `box` is any box (a genesis-only catch-all: a
-mailbox instance's, #40). The scheduler routes each message (a `mail`
-record, below "Messages") by the rules as they stand when its entry is
-processed, first match wins, replies before any of them (docs/MESSAGES.md).
-Replay writes the same chain.
+The kernel is the machine, four tables and the `wallet` (oracle) import.
+The tables are **objects** (the store: blocks by CID, global, unowned),
+**heads** (name → root, with its owner, above), the **dispatch table** and
+the **address book** (`peers`, docs/MESSAGES.md). No program import reaches
+a table: a step's writes are its `put`/`keep` records and the heads in its
+scope; everything else is an **admin operation the kernel itself performs**
+on a message at an admin box from the owner or a delegate — no program is
+stepped, no elevated scope exists. The host (transports + providers + store
++ oracle) routes nothing: the dispatch table does.
 
-- **The genesis carries only the seed.** Its `subscriptions` are written as
-  the chain's first updates when the genesis entry is processed (no
-  `thread`); nothing reads them for routing afterwards. By default
-  (`STOCK_SUBSCRIPTIONS`, src/host/genesis.ts): the owner's `run`,
-  `objects`, `head`, `chat`, `subscribe`, `peers` (→ `resolve`) and
-  `routes` (→ `frontdoor`: the installed routes, #72) boxes;
-  `chat` from anyone; and the reserved box the host admits into, `:ack`
-  (→ `messagebox`: a reader's pointer). A mailbox instance's seed is `:ack` and every message
-  from anyone in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`). Sessions
-  are state, but no box: the front door keeps them under the head
-  `sessions` (#68, MESSAGES.md). No `register` box: registration is application wiring
-  (an application's own etc/subscriptions.json, BOOTSTRAP.md).
-- The chain changes only by an explicit act: a program's step calls the
-  `subscribe` import (the handler must be a program record in the store, a
-  wasm program's module too), and the change is written when that step ends
-  without error; the step's update lists it (`subscriptions`).
-- The owner changes it by sending `{op, sender?, box, handler}` to box
-  `subscribe` (`skein subscribe add|remove [--sender key] <box> <handler>`,
-  `skein-host subscribe <handle> …`): `subscribe-handler` checks the handler
-  is a program record and calls the import. No reply.
-- **A subscription is the permission.** Who may change subscriptions is
-  whoever is subscribed to `subscribe`: the genesis subscribes the owner, and
-  delegating is the owner subscribing another sender to `subscribe`. A
-  `subscribe` from anyone else is recorded, and nothing runs.
-- **Registering a program** is subscribing a box to its CID. Its record (and
-  module) must be in the store first: `objects` delivers them.
+The dispatch table is one chain per instance: origin `{kind: "dispatch"}`,
+one update per change `{op: "add" | "remove", row, thread?, input, at}`,
+the rows the updates folded in order (`kernel-zig/src/dispatch.zig`;
+`src/runtime/dispatch.ts` reads it). A row:
+
+```
+{transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
+ sender: "*" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+```
+
+A route, a subscription and a libp2p topic or protocol differ only in where
+the address comes from: a `mailbox` row's address is a box (`*`: any box, a
+mailbox instance's catch-all); an `http` row's a path (`prefix: true` for a
+prefix; exact paths match first, then the longest prefix); a `libp2p` row's
+a pubsub topic, or `/<protocol>` for a stream protocol. `sender` is who the
+row admits: `*` anyone (an open route; the box an event lands in), a key
+that identity (a message's sender, or the BRC-104 session's), `session`
+(http only) any identity with a session. `program` is the handler, or the
+string `kernel`: an admin row, `fn` its operation. The rest is the
+handler's own (static's `root` and `index`, a route's `read` op, the
+install's `app`), carried to it as `match`. A row's key is (transport,
+address, prefix, sender): `add` replaces the row with that key in place, else
+appends; `remove` deletes it. **First match wins**, in table order; a reply
+routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
+`local` row fires today: a provider's answer is a message, routed by its
+`mailbox` row (to review).
+
+- **The genesis carries the seed.** Every genesis gets the owner's four admin
+  rows first — `{mailbox, objects | head | dispatch | peers, $owner, kernel}`
+  — then its own `dispatch` (src/host/genesis.ts; the stock seed: the
+  owner's `run` and `chat`, `chat` from anyone, the reserved box the host
+  admits into, `:ack` → the messagebox, and the stock HTTP rows; a mailbox
+  instance's: `:ack` and `*` → the messagebox), written as the chain's first
+  updates when the genesis entry is processed (no `thread`). A genesis
+  naming `subscriptions` or `routes` is refused. Sessions are state, but no
+  table: the front door keeps them under its own head `frontdoor/sessions`
+  (#68, MESSAGES.md). No `register` box: registration is application wiring
+  (an application's own etc/dispatch.json, BOOTSTRAP.md).
+- **The admin operations**, one per table, taken by the kernel on a message
+  at a row whose program is `kernel` (validated whole, then written under
+  the entry; a refusal is a log line and nothing written; replay performs
+  them again from the message):
+  - `objects` — `{records: [{cid, bytes}], root?}`: each block stored under
+    its CID (hash-checked); `root` becomes `main` if there is none.
+  - `head` — `{name, tree}`: the head advanced to a record in the store
+    (owner = the name's app).
+  - `dispatch` — `{op: "add" | "remove", row}`: the table changed (a program
+    row's record and module must be in the store).
+  - `peers` — `{op: "add", key, transport?, address? | url?, role?, handle?,
+    domain?}` | `{op: "remove", key}`: the address book.
+  `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
+  [--sender key] <box> <handler>` / `skein-host dispatch <handle> …`,
+  `skein-host peers` send them. No reply.
+- **A row is the permission.** Who may administer is whoever an admin row
+  admits: the genesis writes the owner's; delegating is the owner adding a
+  row with the same operation and another sender, through `dispatch` —
+  signed and logged like any entry. A message at an admin box from anyone
+  else matches no row: recorded, nothing runs.
+- **Registering a program** is a row to its CID. Its record (and module)
+  must be in the store first: `objects` delivers them. There is no
+  `subscribe` import (skein-sdk 0.3.0).
 - Nothing polls for messages (#40): a message arrives at the instance's front
   door (a `sendMessage` request, appended as an entry, #68) and the front
-  door's step routes it; a box subscribed at runtime takes messages from the
+  door's step routes it; a row added at runtime takes messages from the
   next one.
-- A store whose log predates the chain has no chain, so nothing would route:
-  the runtime refuses to start it. It needs a new genesis (no migration).
+- A store whose log predates the table has none, so nothing would route:
+  the runtime refuses to start it ("before format 8"). It needs a new
+  genesis (no migration).
 
 ## Programs and execution
 
@@ -370,8 +420,8 @@ function over the current state and return a value. It writes nothing.
 - **The ABI** is the program's ordinary entry (`_start`, or `wasi:cli/run`
   for a component), so it is the same for preview1 modules and components.
   `input()` returns `{kind: "call", fn, arg: bytes, caller?, now, self:
-  {handle, domain, identity}, owner, programs, peers, defaults, names, routes,
-  reads, subscriptions: [{sender?, box?, handler}], pending: [entry CIDs
+  {handle, domain, identity}, owner, programs, peers, defaults, names,
+  reads, dispatch: [<row>], pending: [entry CIDs
   admitted and not yet processed], state: <the committed state record>}`
   (an in-VM call from a step adds `step: {thread, step, entry, at}`);
   the program dispatches on `fn` and writes its result to stdout. A non-zero
@@ -381,7 +431,7 @@ function over the current state and return a value. It writes nothing.
   browser build takes the same frame through `skein_call`.
 - **No entry, no writes.** `get`, `head` and the store read as they stand;
   `put` and `putblock` keep their records in the call's write cache only (so
-  a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`, `subscribe`,
+  a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`,
   `emit` and `deadline` are refused (a call sends nothing). The oracle
   (`wallet`) is answered by the host and **not recorded**.
 - **No determinism.** Nothing replays a call, so it needs none: its clock is
@@ -426,8 +476,8 @@ the **request's thread**: origin `{kind: "thread", program: <middleware>,
 args: {request, transport}, launchedBy: <the request record>, input: <the
 entry>, at}`, a function of the entry, so the host can ask after it.
 
-- **Its steps' input** adds the genesis's `routes` and `reads`, and on the
-  first step `seen` (the entry that first admitted this very record, if the
+- **Its steps' input** adds the dispatch table's rows (`dispatch`, #77) and
+  the genesis's `reads`, and on the first step `seen` (the entry that first admitted this very record, if the
   `unique` map holds it: a redelivered GossipSub message). They run on
   `callFuelLimit` (the budget the front door had as a call), not
   `fuelPerStep`.
@@ -500,7 +550,7 @@ from zero. (Before #38: the stamp, then
 
 ## Messages
 
-(Issue #40, #68, #70, #65, #69; `kernel-zig/src/log.zig`, log format 7.) Skein is a
+(Issue #40, #68, #70, #65, #69, #77; `kernel-zig/src/log.zig`, log format 8.) Skein is a
 state process: the log is every package that arrived, as received, and an
 entry is one of
 
@@ -524,21 +574,24 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
   a reply's `replyTo` names; the same record is admitted once (the `unique`
   map). It is routed to
   the thread awaiting the message its body's `replyTo` names (a reply is from
-  the identity that message was sent to), else by subscription on (sender,
-  box).
+  the identity that message was sent to), else by its dispatch row on
+  (sender, box) — a kernel row is an admin operation, any other launches
+  the row's program.
 - **`event`** in a box: a self-validating record from the host's specific
   wiring (#29: a header from a feed; #65: a transaction's proof from the
   broadcaster), or one a front door's step routes (`:ack`, an accepted
-  libp2p message, a gossiped `submit`), routed by its `subject` or by box.
+  libp2p message, a gossiped `submit`), routed by its `subject` or by the
+  first `mailbox` row from anyone on its box.
   (No `wake` entry since format 7: wakes and ticks are providers' messages, #69.)
-- **`genesis`**: who the instance is, its programs, seed subscriptions,
-  routes and reads.
+- **`genesis`**: who the instance is, its programs, the dispatch table's
+  seed, the write scopes of its genesis-wired programs, its reads.
 
 Every request is an entry, a read's too; what a read moves is nothing. A
 message leaves an instance by `emit` (above): the address book (the head
-`peers`, written by its own programs — `resolve`'s BRC-169 lookup, the
-owner's `peers` box — and seeded by the genesis with the host's providers
-and the owner's mailbox) names how each key is reached. A store in an older
+`peers`, one of the kernel's tables: seeded by the genesis with the host's
+providers and the owner's mailbox, written by the kernel's `peers`
+operation on the owner's messages, and — transitional, to review — by the
+resolve program's BRC-169 lookup) names how each key is reached. A store in an older
 format is refused (start a new store).
 
 ## Time
@@ -566,14 +619,14 @@ turn is a run of steps. Two changes from v1:
   a model call) or an inbound message (a person's opening line, a message,
   a cron event). "Top-level" means launched by a message.
 - **There is no `david` runner.** A thread that needs a person waits on *a
-  message from that identity* (the `await` import on the message it sent). The subscription table is what makes David's
+  message from that identity* (the `await` import on the message it sent). The dispatch table is what makes David's
   messages resolve waiting threads while a stranger's are routed to a
   handler program or refused. **Scheduling is a message to a provider**
   (#69, superseding #60's genesis `jobs` and the router's clock): a program
   that wants ticks emits `{fn: "tick", every: <ms> | at: <ms>, box, body?,
   name}` to the cron provider (the address book's `cron`) and each tick comes
   back as a signed message from the provider's identity into `box`, routed
-  by the instance's subscription to it; `{fn: "stop", name}` ends it. The
+  by the instance's row for it; `{fn: "stop", name}` ends it. The
   message's entry stamp is the attestation, `due` which tick it is. The
   contract (shapes, answers, errors, local or remote) is docs/MESSAGES.md,
   "Scheduling". `skein-host event <handle> <box> [json]` sends a tick due
@@ -587,13 +640,13 @@ dropped and their threads' heads move back; the dead branch stays. The
 expected pattern is a thread that waits for the finality it needs before
 dependent work continues; optimistic versus gated is policy, deferred.
 
-## Subscriptions
+## Routing
 
-Routing is a **subscription**, not a permission check made at delivery time:
-a rule `(sender?, box) → handler` in the instance's subscriptions chain
-("Subscriptions" under "The filesystem" above, beside "Heads"). Delivery is
-a pure function of the message and the rules as of that point in the log. No
-match → recorded, nothing runs.
+Routing is a **row in the dispatch table**, not a permission check made at
+delivery time: `(transport, address, sender) → program` ("The dispatch
+table" under "The filesystem" above, beside "Heads"). Delivery is a pure
+function of the message and the rows as of that point in the log. No match →
+recorded, nothing runs.
 
 ## Host
 

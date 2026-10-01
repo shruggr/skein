@@ -2,7 +2,8 @@
 
 The skein kernel in Zig (issue #32): the block store, the input log, the
 index (issue #30: IPLD maps in the store and one state record), the
-scheduler, the subscriptions and heads chains, the filesystem over the
+scheduler, the kernel's four tables (#77: objects, heads with their owner,
+the dispatch table, the address book), the filesystem over the
 store, the WASI preview1 imports and the `skein` imports, and the same as a
 WASI 0.2 world for components (issue #34) — running the wasm programs
 through wasmtime's C API. It was built replay-exact against a first
@@ -20,7 +21,14 @@ one way out is `emit`, a signed message to a key the address book names, and
 the answer is an entry (format 6); since #65/#69 a broadcast is an emitted
 event, not a message, and a shell's sleep, like a step's deadline, is a
 wake-me message to the waker provider: no wake entries, no genesis jobs
-(format 7).
+(format 7); since #77 the kernel is the machine, four tables and the oracle:
+one dispatch table routes (rows for boxes, HTTP paths, libp2p topics and
+protocols), the admin operations (objects, head, dispatch, peers) are the
+kernel's own on messages from the owner or a delegate — no handler
+programs, no `subscribe` import — and a program advances only heads in its
+write scope (an app's `<app>/…`; a genesis-wired program's genesis
+`scopes`) (format 8). The host is transports + providers + store + oracle;
+it routes nothing.
 
 ## Build
 
@@ -85,7 +93,7 @@ is recorded and replayed like any other field.
   against the chain.
 - **The field**: every update that ends a step (`finished`, `errored`,
   `waiting`) has `fuel` (an integer); `running` updates have none, nor do
-  heads and subscriptions chains. A step that failed before running wasm
+  heads and dispatch chains. A step that failed before running wasm
   records `fuel: 0`.
 - **The limit**: `fuelPerStep` in the genesis's `defaults` (a decimal
   string, as every default is; `src/runtime/log.ts` `DEFAULTS` gives
@@ -184,8 +192,8 @@ What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's
   `Router.admitEvent`), with the record `event` names already put.
   Processing: the thread whose tip awaits the record's `subject` (a CID; a
   transaction's is its txid) steps with `input.event = {event, box,
-  subject}`; else a subscription with no sender on the entry's box launches
-  its handler with `args = {event, box}`.
+  subject}`; else the first `mailbox` dispatch row from anyone on the
+  entry's box launches its program with `args = {event, box}`.
 - **`await` on a record**: besides a message the step emitted, a step may
   await any record in the store — the subject of a plain entry to come.
 - **`emit(msg, len, out, cap)`** (#70, #67): a dag-cbor `{to: bytes(33),
@@ -458,10 +466,11 @@ skein-host run (the router, src/host/router.ts) ──spawn on demand──▶ s
                   └──────── frames ─────┘  length-prefixed dag-cbor on the kernel's stdin/stdout; its log lines on stderr
 ```
 
-The router speaks to the kernel through `src/host/kernel.ts`: it asks `tip`,
+The host speaks to the kernel through `src/host/kernel.ts`: it asks `tip`,
 `get`, `put`, `has`, `putblock`, `restore`, `append`, `genesis`, `programs`
 (the pinned program records, for a new genesis), `head`, `boxes`,
-`byEnvelope`, `admit` (`{entry, body?}`: the one call in that writes — a
+`dispatch` (#77: `{tip, rows}`, the dispatch table as it stands — the
+host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, body?}`: the one call in that writes — a
 request as received, #68, a feed's or a proof's event), `answer` (#66, below),
 `call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the router answers from the instance's
@@ -492,7 +501,7 @@ transport's middleware as the request's thread (`scheduler.zig`
 else its front door for `http`, `libp2p` and `local`), origin `{kind: "thread",
 program, args: {request, transport}, launchedBy: <record>, input: <entry>,
 at}` — so `requestThread(entry)` finds it again. Its steps run on
-`callFuelLimit`, read `routes`, `reads` (and, first, `seen`), and what their
+`callFuelLimit`, read `dispatch` (the rows, #77), `reads` (and, first, `seen`), and what their
 stdout lists in `admit` is routed after the step (`routeAdmits`; a message
 or `p2p` event once: `markUnique`, the `unique` map). A step may `await` a
 thread's origin; `rested()` steps its awaiters with `resolved`.
@@ -512,14 +521,14 @@ until the earliest parked bound. The host holds a synchronous client on it
 now?}` → `{ok, result | error, fuel}` runs a program as a function over the
 current state (`scheduler.zig` `call`): its normal entry, with `input()` =
 `{kind: "call", fn, arg, caller?, now, self: {handle, domain, identity},
-owner, programs, peers, defaults, names, routes, reads, subscriptions,
+owner, programs, peers, defaults, names, reads, dispatch,
 pending, state}`; the result is its stdout, a non-zero exit the error (the
 last stderr line). Since #68 no request is a call: calls are host-side
 reads (the front door's fn `read`, the answer of a route that reads live
 state, after its request's thread; the broadcaster's questions later, #65).
 No entry and no writes: `put`/`putblock` go to the call's write cache,
 dropped with it, `keep`/`launch`/`await`/`advance`/
-`subscribe`/`emit`/`deadline` are refused (a call sends nothing), `wallet`
+`emit`/`deadline` are refused (a call sends nothing), `wallet`
 is answered by the host and not recorded, random is real. Fuel is limited by
 `defaults.callFuelLimit` (default 10^10) and reported. The `call` import
 (preview1 `call(prog, prog_len, fn, fn_len, arg, arg_len, out, cap)`, WIT
@@ -531,11 +540,48 @@ output at most 64 MiB. `test/call/probe.wasm`
 (`test/call/probe.zig`) is the probe `src/host/call.test.ts` drives. The
 docs: `docs/VM.md`, "Calls".
 
+### Format 8 (issue #77)
+
+The state record's `format` is 8 (`index.FORMAT`); a store in an older
+format is refused for running ("before format 8": start a new store:
+re-genesis); read-only uses still open it. Format 8: the kernel is the
+machine, four tables and the oracle.
+
+- **The dispatch table** (`dispatch.zig`): one chain, origin `{kind:
+  "dispatch"}`, updates `{op: "add" | "remove", row, thread?, input, at}`,
+  rows `{transport: mailbox | http | libp2p | local, address, prefix?,
+  sender: "*" | "session" | bytes(33), program: <cid> | "kernel", fn?, …}`
+  folded in order by key (transport, address, prefix, sender). It replaces
+  the subscriptions chain, the genesis's `routes` and the head `routes`:
+  `processMail` routes by `forMail` (a kernel row → `kernelOp`, else the
+  row's program launched), `processEvent` by `forEvent`; a request thread's
+  input and a call's context carry the rows as `dispatch`. The genesis
+  carries `dispatch` (its seed) and `scopes`; one naming `subscriptions` or
+  `routes` is refused (`log.isGenesis`).
+- **The admin operations** (`scheduler.zig` `kernelOp`): a message at a row
+  whose program is `kernel` is one of `objects` (`{records, root?}`),
+  `head` (`{name, tree}`), `dispatch` (`{op, row}`), `peers` (`{op, key,
+  …}`) — validated whole, then written under the entry (chain updates with
+  `thread: null`); a refusal is a log line and nothing written. No program
+  runs: `objects-handler`, `head-handler`, `subscribe-handler` and the
+  front door's `routes` box are gone, as is the `subscribe` import
+  (preview1 and WIT; skein-sdk 0.3.0).
+- **Write scope** (`hAdvance`, `inScope`): `advance(name)` only when the
+  running program (the thread's, or the in-VM callee's: `StepState.progs`)
+  may write it — its record's `app` makes `<app>/…` its scope; a program
+  with no `app` has the genesis's `scopes[<its name>]` (exact names, or
+  prefixes ending in `/`); a record's `heads` list is a transitional grant.
+  A head update carries `owner` (`heads.ownerOf`: the name's text before
+  the first `/`), and `dump` lists `[name, tree, owner]`.
+- **The address book's `peers` operation** is `addressbook.write` (the
+  resolve program's writePeer, moved into the kernel; the resolve program
+  still writes its lookups under a `scopes` grant, to review). Sessions
+  are the head `frontdoor/sessions`.
+
 ### Format 7 (issues #65, #69)
 
-The state record's `format` is 7 (`index.FORMAT`); a store in an older
-format is refused for running ("before format 7": start a new store:
-re-genesis); read-only uses still open it. Format 7: `emitted` may list a
+The state record's `format` was 7; a store in an older format was refused
+for running ("before format 7"). Format 7: `emitted` may list a
 broadcast event (`{kind: "broadcast", tx, beef?}`) beside the messages; no
 `wake` entry (a shell's waiting update lists its wake-me in `emitted` and
 `awaits` and its oracle call in `calls`); a genesis naming `jobs` is refused;
@@ -785,7 +831,7 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `zig build test` | format 3's records (mail, genesis routes/reads) and, kept from format 2, §7.3 envelopes verified over the dag-cbor preimage, genesis keys as bytes, unsigned entries, against vectors the router's TypeScript made: `test/format2.ts`); dag-cbor encodings and CIDs, canonical re-encoding, strict decoding, program-record CIDs, "anyone" signatures, JCS, the entropy stream — against fixtures src/runtime's formats make (`test/fixtures.ts`); traps in V8's words; the Merkle search tree; the index; **fuel** (`fuel_test.zig`): the same module burns the same fuel, in proportion to the work; a spinning module traps out of fuel at the limit every time, with `used` = the limit; nested instances share one budget (a step's fuel is their sum; a child or the parent runs out); a segment starts a full budget; **components** (`component_test.zig`, #34): one C program as a preview1 module, through the adapter and as a native `wasm32-wasip2` component gives the same stdout, stderr and tree, exit statuses as the ABIs carry them, and a component's fuel is repeatable, metered per step and runs out at the limit, and the in-step clock (#38) advances by the same fuel on every ABI | 42/42 |
 | `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25; `equiv/shell-cases.ts`) through `skein-kernel shell`, against the results recorded from the TypeScript shell before it was deleted (`equiv/shell-expected.json`, #55): stdout, stderr, exit code, tree CID (none of which carries fuel). Then (#34) the same cases with every plain preview1 tool (coreutils, find, diff/cmp, jq, grep, tree, awk, sed, qjs/node, python/python3) made a component with the preview1 adapter, against the modules | 71/71 identical; as components 66/71 identical, the other 5 differing only in a printed exit status above 1 (the adapter's ok/err) |
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
-| `equiv/replays.ts` over `equiv/corpus.ts` | 18 logs: 10 agents (run/objects/head/subscribe handlers, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, a stranger's run, two agents, and `gen-fuel`: `fuelPerStep` 4·10^6, where a step runs out) and the 8 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is written by the Zig kernel as the router drives it (format 6 since #70/#67: every message out an `emit`, signed through the recorded oracle; on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering by their own delivery threads through the router's `fetch` provider, whose signed answers are `local` requests in the log), so each source is also reproduced exactly by its replay | 18/18 identical, sources reproduced |
+| `equiv/replays.ts` over `equiv/corpus.ts` | 18 logs: 10 agents (the kernel's objects/head/dispatch operations (#77), the run handler, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, a stranger's run, two agents, and `gen-fuel`: `fuelPerStep` 4·10^6, where a step runs out) and the 8 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is written by the Zig kernel as the router drives it (format 6 since #70/#67: every message out an `emit`, signed through the recorded oracle; on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering by their own delivery threads through the router's `fetch` provider, whose signed answers are `local` requests in the log), so each source is also reproduced exactly by its replay | 18/18 identical, sources reproduced |
 | `equiv/wallet.ts` | the router drives `serve` with the instance's oracle (a ProtoWallet) and a fake Arcade behind the router's broadcaster (#65); the wallet program (#29) subscribed to an owner's box, a sender-less `chain` box and the status provider's `status` box — headers from regtest's genesis (an owner's message, then plain `header` event entries admitted by the router), a BRC-29 payment internalized, a spend signed through the oracle and broadcast as an event (the host's queue posts it; the posted BEEF's scripts verify under @bsv/sdk), Arcade's RECEIVED and later statuses as status messages to the awaiting thread and the payee, MINED as a proof event, a rejected broadcast dropping its action, a draft signed by `signAction`, a 503 retried by the host's queue, a host restart resuming the stream; then the store replayed Zig against Zig | all ok; the store reproduced exactly |
 | `equiv/boot.ts` (#4) | `skein-host system` → a system tree (one handler as .wasm bytes, a SOUL.md, a config default); `add --boot <dir>` and `add --packet` of a mined ordfs-form packet of it (`--proofs`); a wrong `--scope` refused; both genesis name the tree, `main` is it, programs from bin/; each chatted with (the loop reads SOUL.md from main) and run over main; the wallet's component build (#34) as `bin/wallet.wasm` answering a `list`; `pack --checkpoint` restored on a second host (same master key): `dump` identical, still answering; both booted stores replayed Zig against Zig | all ok; both reproduced exactly |
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains and log lines; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly |
@@ -829,7 +875,7 @@ re-genesis when they move to this build).
 | `envelope.zig` | BRC-169 envelope checks, BRC-78 framing (`runtime/envelope.ts`) |
 | `store.zig`, `sqlite.zig`, `sqlite_store.zig` | the store interface; the SQLite file as blocks + the state pointer, and the import of the old format (`store.ts`, `sqlite.ts`; `index-store.ts` reads this format) |
 | `index.zig`, `mst.zig`, `dump.zig` | the index as maps in the store and the state record (#30); the Merkle search tree; `skein-kernel dump` |
-| `log.zig`, `heads.zig`, `subscriptions.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, `subscriptions.ts`, `programs.ts`, `syscalls.ts` |
+| `log.zig`, `heads.zig`, `dispatch.zig`, `programs.zig`, `syscalls.zig` | `log.ts`, `records.ts`, `heads.ts`, the dispatch table (#77; `src/runtime/dispatch.ts` reads it), `programs.ts`, `syscalls.ts` |
 | `engine.zig`, `engine_wasmtime.zig` | the engine interface; wasmtime behind compile/run/one host callback; traps as V8 names them; the fuel meter (#5) |
 | `engine_v8.zig`, `web_store.zig`, `component_web.zig`, `web.zig`, `wasm_fuel.zig`, `web/` | the browser build (#35): V8 through the shim, the shim's stores, preview1 only, the exported ABI, fuel by instrumentation, the JS shim |
 | `wasi.zig`, `vfs.zig`, `tree.zig` | the WASI host and vfs (deleted); `tree.ts` |
@@ -840,7 +886,7 @@ re-genesis when they move to this build).
 | `replay.zig`, `cmd_shell.zig` | `skein-kernel replay` (was `skein-dev replay`); the shell test driver |
 | `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (billing as a query over the log); the fuel unit tests (issue #5) |
 | `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
-| `addressbook.zig` | the address book (#70): the head `peers`, lookup by key and by role, the genesis's seed |
+| `addressbook.zig` | the address book (#70, #77): the head `peers`, lookup by key and by role, the genesis's seed, the kernel's `peers` operation (`write`) |
 | `oracle.zig` | the oracle's signature of an emitted message (#70): the BRC-100 `createSignature` frame, its answer |
 
 ## What is not the same, or not here

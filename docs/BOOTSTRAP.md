@@ -2,7 +2,7 @@
 
 An instance boots from a **system tree**. The loader (`src/host/boot.ts`)
 **pre-fills the store** with the tree's objects and writes the genesis from the
-tree's config and subscriptions, naming the tree. When the kernel processes
+tree's config and dispatch rows, naming the tree. When the kernel processes
 that genesis it sets the head `main` to the tree. The result is the state an
 authorised `objects` + `head` pair would have produced, written directly. It is
 also a function of the log: a replay copies the tree (`replay.zig` copyLog) and
@@ -20,13 +20,15 @@ The objects come from one of two sources. Both go through the same code:
 An instance with no tree (a plain `skein-host add`, and so the live agents)
 gets the **stock system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
-`STOCK_SUBSCRIPTIONS`, `STOCK_ROUTES` and `STOCK_READS`. The router's
+`STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
 hydration of an empty store calls `boot` with this source. A **mailbox
 instance** (#40, `skein-host add <h> --mailbox --owner <key>`) is code genesis
 too, with only the kernel's `frontdoor` and `messagebox` programs,
-`MAILBOX_SUBSCRIPTIONS` (`:ack` → messagebox, every
-message from anyone in any box → messagebox), the stock routes and reads, and
-no peers or names.
+`MAILBOX_DISPATCH` (`:ack` → messagebox, every message from anyone in any
+box (`*`) → messagebox), the stock http rows and reads, and no peers or
+names. **Every genesis carries the owner's four admin rows** first (the
+kernel's `objects`, `head`, `dispatch`, `peers` operations): a bare genesis
+is the four tables and those rows; a bundle adds what its apps ask for.
 
 ## The system tree
 
@@ -36,67 +38,84 @@ bin/<name>.cid           the CID (raw, bafkrei…) of a module the source or the
 bin/<name>.json          optional: the program record's {inputs, services, description}
                          (default: the handler inputs {envelope, body, box, sender}, no services)
 etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
-                                   feeds: [{kind: "headers", url, box?}]  (the router holds them, #33; statuses: the host's broadcaster, #58),
+                                   feeds: [{kind: "headers", url, box?}]  (the host holds them, #33; statuses: the host's broadcaster, #58),
                                    owner: {messagebox: url},  (#40: the owner's messagebox, the one peer a genesis names)
                                    libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]},
-                                   (#51: the router's libp2p host runs a node for the instance)}
+                                   (#51: the host's libp2p node runs for the instance)
+                                   scopes: {<program name>: [<head name | prefix/>]}}
+                                   (#77: the heads a genesis-wired program may advance, over the stock
+                                   scopes — frontdoor/, mailbox + outbound, peers, wallet; a genesis-wired
+                                   overlay engine needs wallet, overlay:gossip, and each lookup service
+                                   program its own ls:<service>: kernel-zig/equiv/overlay.ts)
                                    (no `jobs`, #69: a schedule is a program's message to the cron provider,
                                    docs/MESSAGES.md "Scheduling"; a config naming them is refused)
-etc/subscriptions.json   required: [{sender?: key, box?, handler}]   (a key: hex, $owner, $infer, or a host provider's
-                         $<name> — $status, $cron; one naming a provider the host has not is left out)
-etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}]; default the stock routes
-                         (root, index: the static handler's, #52)
+etc/dispatch.json        the dispatch rows (#77): [{transport?: mailbox | http | libp2p, address, prefix?: true,
+                         sender?: "*" | "session" | key, program, fn?, …settings}] — a box, an HTTP path or a libp2p
+                         topic / "/<protocol>"; the sender a key (hex, $owner, $infer, or a host provider's $<name> —
+                         $status, $cron; one naming a provider the host has not is left out) or "*" (anyone, the
+                         default); the program a bin/ name, a CID, or "kernel" with fn the operation. One of this
+                         file or etc/subscriptions.json is required.
+etc/subscriptions.json   the form before #77, still read: [{sender?: key, box?, handler}], each a mailbox row
+etc/routes.json          the form before #77, still read (#40): [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}],
+                         each an http row (auth none → sender "*", else "session") or, for a `libp2p:` path, a
+                         libp2p row; default the stock http rows (root, index: the static handler's, #52)
 etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
 
 - A **key** is an identity key in hex, or `$owner` / `$infer`. Those are the
   host's (`SKEIN_OWNER`, `SKEIN_INFER`), so one published tree serves any
-  owner. A subscription with no `sender` takes anyone.
-- A **handler** is a `bin/` name or a program record's CID; so is a route's
-  `program`. A route to a program the system lacks is dropped.
-- **Routes and reads** (#40) are the front door's tables (docs/MESSAGES.md):
-  an exact `path` or a `prefix` (exact paths first, then the longest prefix),
-  the program and function the front door calls with the request, `auth:
-  "none"` for an open route (an overlay's, docs/OVERLAY.md), else BRC-104,
-  and `read` an op the reads table must allow the caller. The stock routes
+  owner. A row with no `sender` (or `"*"`) takes anyone.
+- A row's **program** is a `bin/` name or a program record's CID. A row to a
+  program the system lacks is dropped. A row whose key is an admin row's
+  (the owner's `objects`, `head`, `dispatch`, `peers`) is left out: those are
+  the kernel's.
+- **Rows and reads** (#40, #77) are the kernel's dispatch table and the
+  front door's reads (docs/MESSAGES.md): an `http` row is an exact address
+  or a prefix (exact first, then the longest prefix), the program and
+  function the front door calls with the request, sender `"*"` for an open
+  route (an overlay's, docs/OVERLAY.md), `"session"` for BRC-104, and
+  `read` an op the reads table must allow the caller. The stock http rows
   are the BRC-33 messagebox — `sendMessage`, `listMessages`,
   `acknowledgeMessage` at the root and under `/messagebox` (program
   `messagebox`) — and the explorer, prefix `/explore` (program `frontdoor`,
   fn `explore`, `read: "explore"`). The stock reads are
   `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
-  writes `etc/routes.json` replaces the stock routes whole (include them to
-  keep the messagebox); likewise `etc/reads.json`.
+  writes `etc/routes.json` replaces the stock http rows whole (include them
+  to keep the messagebox); likewise `etc/reads.json`.
 - **Static files** (#52): an app, shruggr/skein-static (#71), not pinned:
   a tree that serves files wires it — `bin/static.wasm` (copied from that
   repo's tree; `bin/static.cid` if the instance already holds the module),
   optionally `bin/static.json`
-  (`{"inputs": {}, "description": …}`), and a route to it in
-  `etc/routes.json`, e.g. `{"prefix": "/site", "program": "static", "fn":
-  "get", "auth": "none", "root": "www"}` (and, for the site's root,
-  `{"path": "/", …, "root": "www"}`). `root` and `index` are the route's
-  settings, passed to the handler as the entry that matched
+  (`{"inputs": {}, "description": …}`), and a row to it in
+  `etc/dispatch.json`, e.g. `{"transport": "http", "address": "/site",
+  "prefix": true, "sender": "*", "program": "static", "fn": "get", "root":
+  "www"}` (and, for the site's root, `{"address": "/", …, "root":
+  "www"}`). `root` and `index` are the row's settings, passed to the
+  handler as the row that matched
   (docs/MESSAGES.md, "Static files"). The files are the tree's own
   (`www/…`), served from the `main` head's tree as it stands.
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
   where the instance delivers what it sends its owner. Unset, the host's
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
   fills it. It is the only peer a genesis names: the address book
-  (head `peers`) is written only by the instance's own programs (its resolve,
-  or the admin through the `peers` box: `skein-host peers`).
+  (head `peers`, one of the kernel's tables) is written by the kernel's
+  `peers` operation on the owner's messages (`skein-host peers`) and, to
+  review, by the resolve program's lookups.
 - **`libp2p`** (#51) becomes the genesis's `libp2p: {topics, protocols,
-  listen?}`: the router's libp2p host runs a node for the instance (its own
-  peer key, derived from the master secret, key ID `libp2p:<handle>`),
-  subscribes `topics` and serves `protocols`. Each topic message and stream
-  frame is a front-door call routed by `libp2p:<topic>` /
-  `libp2p:<protocol>` (docs/MESSAGES.md, "libp2p"): a topic's route comes
-  from `etc/routes.json` (`{path: "libp2p:<topic>", program, fn}`); a
-  protocol names its handler here — a program (fn `libp2p`) or `{program,
-  fn}` — which becomes its route unless `etc/routes.json` has one. `listen`
-  is this node's addresses over the host's `SKEIN_LIBP2P_LISTEN` (a fixed port
-  belongs to one node). No `libp2p`: no node, and the `libp2p` import is
-  refused. The host-wide settings (listen, bootstrap, DHT, relays, mDNS) are
-  the router's, not the tree's (scripts/host/README.md).
+  listen?}`: the host's libp2p node runs for the instance (its own peer key,
+  derived from the master secret, key ID `libp2p:<handle>`), subscribes
+  `topics` and serves `protocols`. Each topic message and stream frame is a
+  front-door step routed by the dispatch table's `libp2p` row for the topic
+  or protocol (docs/MESSAGES.md, "libp2p"): a topic's row comes from
+  `etc/dispatch.json` (`{transport: "libp2p", address: "<topic>", program,
+  fn}`, or the older `etc/routes.json`'s `libp2p:<topic>` path); a protocol
+  names its handler here — a program (fn `libp2p`) or `{program, fn}` —
+  which becomes its row unless the tree has one. `listen` is this node's
+  addresses over the host's `SKEIN_LIBP2P_LISTEN` (a fixed port belongs to
+  one node). No `libp2p` and no libp2p row: no node. The host-wide settings
+  (listen, bootstrap, DHT, relays, mDNS) are the host's, not the tree's
+  (scripts/host/README.md).
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
   plus the kernel's `shell`. The shell is the VM's own program: its modules
@@ -120,20 +139,21 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
 
 `skein-host system <dir>` writes the stock system as such a tree:
 `bin/*.cid` + `bin/*.json` taken from the kernel's own records, plus `etc/`
-(`config.json`, `subscriptions.json`, `routes.json`, `reads.json`).
-Booting from it unchanged gives the same programs and subscriptions as code
-genesis, plus the tree.
+(`config.json` with the stock `scopes`, `dispatch.json`, `reads.json`).
+Booting from it unchanged gives the same programs and rows as code genesis,
+plus the tree.
 
-The stock `etc/subscriptions.json` has no `register` box (#40): registration —
+The stock `etc/dispatch.json` has no `register` box (#40): registration —
 a sender entering itself in the address book — is **application wiring**, not
-core. An application that wants it adds its own line, with its own rules on
-who may call it: e.g. `{"box": "register", "handler": "resolve"}` (anyone; the
-resolve program's claim handler records `{handle, domain}` only if the handle
-resolves to the sender), or `{"sender": "<key>", "box": "register", "handler":
-"<its own program>"}`. Without one, the admin configures the address book
-(`skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]`), and a
-sender in it is answered; any other sender on an open box is still admitted,
-and an answer to it fails with "no route".
+core. An application that wants it adds its own row, with its own rules on
+who may call it: e.g. `{"address": "register", "program": "resolve"}` (anyone;
+the resolve program's claim handler records `{handle, domain}` only if the
+handle resolves to the sender), or `{"sender": "<key>", "address":
+"register", "program": "<its own program>"}`. Without one, the admin
+configures the address book (`skein-host peers <handle> add <key>
+<mailbox-url> [--handle h@d]`: the kernel's `peers` operation), and a sender
+in it is answered; any other sender on an open box is still admitted, and
+an answer to it fails with "no route".
 
 ## Installing an app
 
@@ -153,8 +173,9 @@ both at once: `scripts/sdk-local.sh` (README.md).
 There are two ways to install an app.
 
 - **At boot**, an app is part of a system tree. Copy the repo's `bin/`
-  entries the tree needs into its `bin/`, and its routes and subscriptions
-  into `etc/`. Then `skein-host add <h> --boot <dir>` (above).
+  entries the tree needs into its `bin/`, its rows into `etc/dispatch.json`
+  and, for the heads it writes outside its name, its `scopes` into
+  `etc/config.json`. Then `skein-host add <h> --boot <dir>` (above).
 - **Into a running instance** (#72, #76, built): `skein-host install`.
 
   ```
@@ -164,41 +185,41 @@ There are two ways to install an app.
 
   `install` clones the repo (or reads the directory), checks `etc/app.json`
   (docs/APPS.md §2; src/host/manifest.ts), checks the instance (every
-  `requires` interface provided by an installed app's head; no route or
-  head another app or the genesis has; every `$<provider>` sender in the
-  address book), and prints the permission prompt: the heads, each box with
-  its handler and its senders, each route under `/<app>/` (a `libp2p:`
-  topic or protocol as it is: global), `start`/`stop`,
-  `requires`/`provides`, what an overlay publishes, and the messages it
-  will send. An overlay app's wiring (docs/APPS.md §6) is derived from its
-  `config.overlay` and marked "(derived: config.overlay)". Approved (`--approve-all`, or "y" at a terminal; `--dry-run`
-  only prints), it sends them as the owner (SKEIN_OWNER_WALLET, as `deploy`
-  does), in order (docs/APPS.md §3, src/host/install.ts):
+  `requires` interface provided by an installed app's `*/app` head; the
+  name free; no row with a key the genesis or another app has; every
+  `$<provider>` sender in the address book), and prints the permission
+  prompt: the head `<app>/app`, the grants, each row (`row <transport>
+  <address> from <who> → <role>.<fn>`: an http address under `/<app>/`, a
+  libp2p topic or protocol as it is), `start`/`stop`, `requires`/`provides`,
+  what an overlay publishes, and the messages it will send. An overlay
+  app's wiring (docs/APPS.md §6) is derived from its `config.overlay` and
+  marked "(derived: config.overlay)". Approved (`--approve-all`, or "y" at
+  a terminal; `--dry-run` only prints), it sends them as the owner
+  (SKEIN_OWNER_WALLET, as `deploy` does), in order — each a kernel
+  operation on an admin box (docs/APPS.md §3, src/host/install.ts):
 
   1. `objects`: the tree's git objects, its `bin/*.wasm` modules, a program
-     record per program, and the **app record**, ≤ 1 MiB per message, no
-     root named (an app never becomes `main`);
-  2. `head` `{name: <app>, tree: <the app record>}`;
-  3. `subscribe` per (box, sender) — preceded, when the instance has no
-     owner's `routes` box and the app has routes, by `{sender: owner, box:
-     "routes", handler: <frontdoor>}`;
-  4. `routes` `{op: "add", route}` per route, the path under `/<app>/`
-     (`libp2p:` as written). The router's libp2p node follows the head
-     `routes`: an installed `libp2p:<topic>` is subscribed, a `libp2p:/<protocol>`
-     served, live — the node started if the instance had none;
-  5. the manifest's `start` body into the app's box.
+     record per program (with `app: <name>` and the transitional grants as
+     `heads`), and the **app record**, ≤ 1 MiB per message, no root named
+     (an app never becomes `main`);
+  2. `head` `{name: "<app>/app", tree: <the app record>}` (a manifest in
+     the form before #77: the alias `{name: "<app>", tree}` too);
+  3. `dispatch` `{op: "add", row}` per row, the sender resolved, an http
+     address under `/<app>/`, `app: <name>` on the row. The host's libp2p
+     node follows the dispatch table: an installed libp2p topic is
+     subscribed, a protocol served, live — the node started if the instance
+     had none;
+  4. the manifest's `start` body into the app's box.
 
   Installing an app that is installed already is the upgrade: its `state`
   is kept, what the old version asked for and the new one does not is
   removed, and `start` is sent again. `uninstall` sends `stop`, then removes
-  the app's subscriptions and routes (its libp2p topics unsubscribed); the
-  head is left. Each program record the install writes carries `app:
-  <name>`, so a program finds its app record (the overlay engine reads its
-  `config.overlay` there).
+  the app's rows (its libp2p topics unsubscribed); the heads are left.
 
   By hand, the same messages: `bin/skein import <checkout>` (objects),
-  `skein head`, `skein-host subscribe <h> add [--sender <key>] <box>
-  <handler>`; the routes box has no command of its own.
+  `skein head`, `skein dispatch add [--sender <key>] <box> <handler>` /
+  `skein-host dispatch <h> add …` (a mailbox row; http and libp2p rows
+  through `install`).
 
 ## Packets
 
@@ -293,15 +314,16 @@ boot is written, and the process exits 0.
 ## Kernel surface (kernel-zig)
 
 - genesis `tree?`: `log.zig`. Processing sets `main`: `scheduler.zig`.
-  `heads.By.thread` is optional.
+  `heads.By.thread` is optional (null: the genesis, or a kernel operation, #77).
 - `serve` frames: `has` (any codec), `putblock {cid, bytes}` (hash-checked),
   and `restore <state>` (`SqliteStore.restore`).
 - `replay.zig` copyLog copies the genesis tree.
 
 ## Tests
 
-- `src/host/manifest.test.ts`: the manifest's checks (route escapes,
-  senders, the handler map, shapes, `requires`); `kernel-zig/equiv/install.ts`
+- `src/host/manifest.test.ts`: the manifest's checks (the rows, the http
+  address escapes, the senders, the form before #77 converted, shapes,
+  `requires`); `kernel-zig/equiv/install.ts`
   (in `run.sh`): `skein-host install` of shruggr/skein-static and
   programs/test/app-demo into a running instance, driven, uninstalled,
   replayed.
@@ -309,7 +331,8 @@ boot is written, and the process exits 0.
   scope-mismatch, hash-mismatch, incomplete, unproven and malformed refusals; a
   patched file resolved through its base, and incomplete without it.
 - `src/host/boot.test.ts`: the tree read and resolved (including a component
-  in `bin/`, and the order of defaults); its refusals.
+  in `bin/`, the order of defaults, the owner's admin rows first); its
+  refusals.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
 - `kernel-zig/equiv/boot.ts` (in `run.sh`): two instances, one booted from a
   directory and one from a packet of it (mined, proofs checked). Each is

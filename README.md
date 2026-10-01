@@ -24,10 +24,10 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 ```
 src/runtime/     the formats and the store reader, in TypeScript — no machine (the kernel is kernel-zig);
                  no network, clock, randomness, messagebox or private key; the seed of a JS runtime (#55)
-  cid.ts records.ts types.ts   dag-cbor blocks and CIDs; record kinds (genesis, program, subscription, message, emit, oracle)
+  cid.ts records.ts types.ts   dag-cbor blocks and CIDs; record kinds (genesis, program, dispatch row, message, emit, oracle)
   log.ts           log entries (genesis | envelope | wake | outcome), their signed bytes, the genesis a log starts with
   heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
-  subscriptions.ts the routing table's chain, read (the kernel writes it)
+  dispatch.ts      the dispatch table's chain (#77), read (the kernel writes it)
   tree.ts          git-shaped trees and blobs (git-raw/sha1 CIDs)
   identity.ts envelope.ts bitcoin.ts   BRC-42/43 identities and "anyone" signatures; BRC-169 §7.2 checks; the bitcoin IPLD codecs
   syscalls.ts      log-entry stamps and the entropy stream (keyed by entry CID)
@@ -50,7 +50,7 @@ src/peers/       peers, each its own process and identity: infer.ts (`bin/skein-
 src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls|show|refs` (replay is `skein-kernel replay`)
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
-programs/        skein's own programs, all Zig (#54) over the SDK: the install handlers (objects-handler, head-handler, subscribe-handler), messagebox, frontdoor, resolve, wallet (the boundary programs every instance needs; the overlay services engine, #36, is the app shruggr/skein-overlay); test/ (kernel test fixtures: fetch, p2p-component, p2p-demo, cron-demo, wire-probe)
+programs/        skein's own programs, all Zig (#54) over the SDK: messagebox, frontdoor, resolve, wallet (the boundary programs every instance needs; the install boxes objects/head/dispatch/peers are the kernel's own operations since #77; the overlay services engine, #36, is the app shruggr/skein-overlay); test/ (kernel test fixtures: fetch, p2p-component, p2p-demo, cron-demo, wire-probe, app-demo)
 (shruggr/skein-sdk is a sibling repo and Zig package dependency, #75: the codecs (cid, cbor, mst, secp) the kernel shares, the `skein` imports and helpers (lib/), BRC-104, dag-json, messages, the WIT (wit/), the wallet library (wallet/) — not a path in this tree)
 scripts/         build-programs.sh + pin-programs.sh (skein's programs), update-workbench.sh (a workbench build's modules in, repinned), host/ (dev host)
 wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (the shell's and the wallet's also in src/runtime/programs.ts); run-handler, loop and the shell's toolset are built in shruggr/skein-workbench (wasm/README.md)
@@ -133,7 +133,7 @@ bin/skein-host list                         # handle, kind, status, identity, fr
 bin/skein-host identity [handle]            # the router's BRC-104 identity, or an instance's
 bin/skein-host mailboxes                    # handle, owner, front-door key, status, store
 bin/skein-host run                          # the router; SKEIN_ROUTER_PORT, SKEIN_IDLE_MS (default 0: never stop), SKEIN_MAILBOX_HOST, SKEIN_MASTER_KEY
-bin/skein-host subscribe martha add --sender <key> run run-handler   # a `subscribe` message as the owner; no new genesis
+bin/skein-host dispatch martha add --sender <key> run run-handler    # a dispatch row (the kernel's `dispatch` operation) as the owner; no new genesis
 bin/skein-host disable kurt                 # also: add <handle> [--domain --derive --store --tree], enable, remove
 ```
 
@@ -146,27 +146,28 @@ skein's programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | record | shape |
 |---|---|
 | log entry | `{kind: "log", prev, n, time: [sec, nsec], genesis \| envelope+box+body \| wake \| outcome: {emit, status: delivered \| failed, reason?}, sig}` — `sig` by the host identity (the genesis's `host`) over the entry without `sig` (`[2, "skein log"]`, key `1`, anyone) |
-| genesis | `{kind: "genesis", identity, handle, domain, owner, host, programs: {name: cid}, subscriptions: [{match: {sender?, box}, handler}], peers?: {infer}, defaults?: {model, thinking}, names?: {<identity>: {handle, domain}}, collect?: [box]}` — `subscriptions` is only the seed of the subscriptions chain; `names`: what outbound envelopes call the owner and the peers |
+| genesis | `{kind: "genesis", identity, handle, domain, owner, programs: {name: cid}, dispatch: [<row>], scopes?: {<program>: [<head>]}, peers?: {infer}, defaults?: {model, thinking}, names?: [{identityKey, handle, domain}], collect?: [box], reads?, addressBook?, tree?}` — `dispatch` is the seed of the dispatch table (#77: the owner's admin rows first); `scopes` the heads a genesis-wired program may write |
 | envelope | the BRC-169 envelope's signed part: its JSON object without `content`, as dag-cbor (its CID is the message id, the client's `replyTo`) |
 | body | the plaintext content: the sender's dag-cbor bytes, CIDv1 dag-cbor/sha2-256 — the digest is the envelope's signed `contentHash` |
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |
-| program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, subscriptions?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
+| program step | update `{state, step, input, at, fuel, calls?, launched?, waitingOn?, awaits?, kept?, emitted?, heads?, result: {exitCode, stdout, stderr}}` — `awaits`: what it rests on; `kept`: records the step keeps in the thread's state; `heads`: the moves it made, each in its write scope (#77) |
 | step input | `{kind: "step", thread, step, entry, at, self: {handle, domain}, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?, names?}` |
 | oracle | `{kind: "oracle", thread, step, i, request, result}` — the one recorded call (#67, format 6): a BRC-100 wire frame and the oracle's answer; replay serves `result` and never asks a wallet |
-| head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
-| subscriptions | origin `{kind: "subscriptions"}`, one per instance; update `{op: "add" \| "remove", sender?, box, handler, thread?, input, at}` — the genesis entry writes the seed (no `thread`), later ones are written when a step that called `subscribe` ends without error, listed in its `subscriptions`; the scheduler routes by the fold of them (docs/VM.md, "Subscriptions") |
+| head | origin `{kind: "head", name}`; update `{tree, owner, thread, input, at}` — written when a step that called `advance` ends without error (the step's update lists it in `heads`), or by the kernel's `head`/`objects` operation (no `thread`); `owner` is the name's app (#77) |
+| dispatch | origin `{kind: "dispatch"}`, one per instance; update `{op: "add" \| "remove", row: {transport, address, prefix?, sender, program, fn?, …}, thread?, input, at}` — the genesis entry writes the seed (no `thread`), later ones the kernel's `dispatch` operation on an admin message; the scheduler routes by the fold of them (docs/VM.md, "The dispatch table") |
 | emitted message | `{kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, nonce, signature}` — what `emit` makes (#70, format 6): signed through the oracle BRC-169's way, listed on the step's update in `emitted`, sent after the step by the recipient's address-book transport (docs/MESSAGES.md, "Outbound") |
 | broadcast event | `{kind: "broadcast", tx: <cid>, beef?: bytes}` — what `emit({event: "broadcast", …})` makes (#65, format 7): unsigned, addressed to no one, listed in `emitted`; the host carries it to the network (its broadcaster's queue). Proofs come back as events (box `chain`), statuses as a subscribed status provider's messages (docs/MESSAGES.md, "Broadcast out, proofs and statuses in") |
 
-Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
-`root` on the last) → objects-handler, which sets `main` to `root` if there is
-no `main`; `run` (`{cmd, tree?, cwd?, env?}`; no tree: `main`'s, else the empty
-tree) → run-handler, which replies in the sender's `results` box with
-`{exitCode, stdout, stderr, tree, replyTo}`; `head` (`{name, tree}`) →
-head-handler, which moves the head (no reply); `subscribe` (`{op: "add" |
-"remove", sender?, box, handler}`) → subscribe-handler, which adds or removes
-that subscription (no reply; the handler must be a program record in the
-store — registering a program is subscribing a box to its CID).
+Boxes: the kernel's admin boxes (#77: its own operations, no program) —
+`objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first, `root`
+on the last; sets `main` to `root` if there is no `main`), `head` (`{name,
+tree}`: moves the head), `dispatch` (`{op: "add" | "remove", row}`: a row
+of the dispatch table; the row's program must be a program record in the
+store — registering a program is a row to its CID), `peers` (`{op, key,
+…}`: the address book); and the programs' — `run` (`{cmd, tree?, cwd?,
+env?}`; no tree: `main`'s, else the empty tree) → run-handler, which
+replies in the sender's `results` box with `{exitCode, stdout, stderr,
+tree, replyTo}`.
 
 Chat: `chat` (`{text, tree?, model?, replyTo?}`) with no `replyTo` → a new loop
 thread, over `tree` or else `main`'s; the loop sends `infer` (`{model, messages, tools?, thinking?}`) to

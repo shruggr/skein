@@ -17,7 +17,13 @@ Revised for #65 and #69 (log format 7): **broadcast out and proof in are
 unauthenticated, self-validating events** through specific wiring (an
 optional status provider reports statuses as signed messages), and
 **scheduling is a message to a provider** (the waker, the cron provider); the
-genesis `jobs` and the `wake` entry are gone.
+genesis `jobs` and the `wake` entry are gone. Revised for #77 (log format
+8): **the kernel is the machine, four tables and the oracle** — objects,
+heads with their owner, one dispatch table (routes, subscriptions and libp2p
+topics are its rows), the address book; the admin operations are the
+kernel's own, on messages from the owner or a delegate; an app writes only
+heads under its own name. The host is transports + providers + store +
+oracle; it routes nothing ("The dispatch table", below).
 
 ## The persistence rule (#68: skein is a state process)
 
@@ -50,6 +56,43 @@ A reader with the log can check every message: the request that carried it
 is in the log as received, and the mail record carries the BRC-104 signed
 request (below), which verifies with the instance's key alone.
 
+## The dispatch table and the kernel's operations (#77)
+
+The kernel keeps four tables: **objects** (blocks by CID), **heads** (name →
+root, with an owner: the app the name is under), the **dispatch table** and
+the **address book**. The dispatch table is one chain of rows
+
+```
+{transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
+ sender: "*" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+```
+
+— a box, an HTTP path (prefix or exact), a libp2p topic or `/<protocol>`;
+who may send there; which program is stepped or called, or which of the
+kernel's own operations runs. A route and a subscription differ only in
+where the address comes from; first match wins (docs/VM.md, "The dispatch
+table", for the full rules). A program never writes the table: there is no
+`subscribe` import, no `routes` head. Every change is an **admin message**
+from the owner or a delegate at one of the kernel's admin boxes, which the
+kernel itself performs — no program is stepped:
+
+| box | body | the operation |
+|---|---|---|
+| `objects` | `{records: [{cid, bytes}], root?}` | each block stored under its CID (hash-checked); `root` → `main` if there is none |
+| `head` | `{name, tree}` | the head advanced to a record in the store (owner = the name's app) |
+| `dispatch` | `{op: "add" \| "remove", row}` | the row added (replacing the row with its key: transport, address, prefix, sender), or removed |
+| `peers` | `{op: "add", key, transport?, address? \| url?, role?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
+
+Every genesis seeds the owner's four admin rows (`sender` the owner,
+`program` `kernel`); delegating administration is the owner adding a row
+with the same operation and another sender. A refused operation (a bad
+body, a record not in the store) is a log line and nothing written. The
+client commands: `skein import` (objects), `skein head`, `skein dispatch`,
+`skein-host dispatch`, `skein-host peers`, and `skein-host install`
+(docs/APPS.md). An app's own writes are heads under its name,
+`<app>/…` (docs/VM.md, "Heads"); the front door's sessions are
+`frontdoor/sessions`.
+
 ## The instance as an HTTP server
 
 Each instance is an HTTP server at an origin of its own. Its **front door**
@@ -57,8 +100,8 @@ Each instance is an HTTP server at an origin of its own. Its **front door**
 the raw request as a `request` entry and the kernel steps the front door on
 it; the host holds the client's connection until that thread has come to
 rest and returns its answer as the HTTP response (#66, "A synchronous
-client waits on the thread", below). The host (`src/host/router.ts`) is a
-light router: it picks the instance by URL and appends; it holds no mail
+client waits on the thread", below). The host (`src/host/router.ts`) is the
+HTTP transport: it picks the instance by URL and appends; it holds no mail
 and no sessions, and verifies nothing.
 
 ```
@@ -66,12 +109,12 @@ request {kind: "http", method, path, route, query, headers: {name: value}, body:
 entry   {kind: "log", prev, n, time, request: <that record>, transport: "http"}
 ```
 
-`path` is what the client sent (what BRC-104 signs), `route` what the routes
-table sees (the host strips `/@<handle>`), header names lower-cased.
+`path` is what the client sent (what BRC-104 signs), `route` what the
+dispatch table sees (the host strips `/@<handle>`), header names lower-cased.
 
 ```
 http://<handle>.localhost:<port>/…     the instance's origin (the Host header)
-http://<host>:<port>/@<handle>/…       the same instance, a dev form: the router strips the prefix for the routes
+http://<host>:<port>/@<handle>/…       the same instance, a dev form: the host strips the prefix for the rows
 ```
 
 **Auth is by key.** The front door runs BRC-103/104 itself, in its step on
@@ -87,7 +130,8 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
   kernel process, a crash, an idle stop): a client's session is there when
   the instance comes back. Replay needs no session besides: each logged
   message carries the sender key, the 104 signature and both nonces.
-  - **Where.** The head `sessions` (`programs/frontdoor/sessions.zig`):
+  - **Where.** The head `frontdoor/sessions` (#77: the front door's own,
+    under its name; `programs/frontdoor/sessions.zig`):
     `{kind: "sessions", buckets: [<bucket> × 16]}`, each bucket `{kind:
     "session-bucket", sessions: [{nonce, peer: bytes(33), peerNonce,
     created}]}`; a session lives in bucket sha256(nonce)[0] mod 16, so a
@@ -104,24 +148,21 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
     nonce is not remembered: a replayed read reads again); a replayed write
     is the same mail record, which the kernel admits once (the `unique` map).
     The records are prunable like any others; nothing prunes them yet.
-- **Routes** (the genesis's `routes`, from `etc/routes.json`, then the
-  installed ones, #72): `[{path | prefix, program: <cid>, fn, auth?: "none",
-  read?: <op>}]`, exact paths first, then the longest prefix. **The box
-  `routes`** (the owner's, by the stock genesis; handled by the front door)
-  changes the installed ones: `{op: "add", route: {path | prefix, program:
-  <program record CID>, fn, auth?, read?, app?, …the handler's settings}}`
-  adds one (replacing the route with the same path, or the same prefix),
-  `{op: "remove", route: {path | prefix}}` removes it (a route not there:
-  nothing written). They are the head `routes`, `{kind: "routes", routes:
-  [<route>]}`, which the front door reads on every request after the
-  genesis's routes. An app's install writes its routes here, under
-  `/<app>/` (docs/APPS.md §3). `auth` defaults to BRC-104; `"none"` is for open
-  routes (an overlay's submit and lookup). The handler is an in-VM call of
-  `program`'s `fn` in the front door's step; what it receives and returns is
-  the program-facing contract below ("Route handlers").
-- **Static files** (#52, `programs/static`): the handler for a site. A route
-  `{prefix | path, program: "static", fn: "get", auth?: "none", root?,
-  index?}` answers `GET`/`HEAD` with the file at `<root>/<path>` in the
+- **Routes are rows of the dispatch table** (#77, below): the `http` rows
+  `{transport: "http", address: <path>, prefix?: true, sender: "*" |
+  "session" | <key>, program: <cid>, fn, read?: <op>, …the handler's
+  settings}`, exact addresses first, then the longest prefix. `sender`
+  `"*"` is an open route (no session: an overlay's submit and lookup);
+  `"session"` needs a BRC-104 session, any identity; a key needs a session
+  proving that identity (another's is 403). The genesis seeds the stock
+  rows; an app's install adds its rows under `/<app>/` through the kernel's
+  `dispatch` operation (docs/APPS.md §3); the front door reads the table as
+  it stands on every request. The handler is an in-VM call of `program`'s
+  `fn` in the front door's step; what it receives and returns is the
+  program-facing contract below ("Route handlers").
+- **Static files** (#52, `programs/static`): the handler for a site. A row
+  `{transport: "http", address, prefix?, sender: "*", program: static, fn: "get",
+  root?, index?}` answers `GET`/`HEAD` with the file at `<root>/<path>` in the
   `main` head's tree — `path` the route past the prefix, percent-decoded;
   `root` default the tree's top; a path ending in `/` (or an exact route on
   a directory) its `index`, default `index.html`; a directory without the
@@ -156,7 +197,9 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
   body:        bytes
   contentType: text            the media type alone
   session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes
-  match:       the routes-table entry that matched (a handler's own settings: static's root, index)
+  match:       the dispatch row that matched (a handler's own settings: static's root, index; the install's app),
+               plus the pre-#77 keys for handlers built before it — `path: <address>` (exact), `prefix: <address>`
+               (text, a prefix row), `path: "libp2p:<address>"` (a libp2p row) — until #79 moves the stock apps
   request:     <cid>           the request record: the package as received (its entry is `step.entry`)
   resolved?:   [{thread, state: "finished" | "errored", result?, error?}]   called again: the thread it waited on
   event?, reply?, woke?        called again: what else woke the request's thread (an awaited subject, a reply, a deadline) }
@@ -186,8 +229,8 @@ It answers (dag-cbor on stdout), one of:
   `admit`, as `{mail: <mail record>, body: <body's dag-cbor bytes>}` or
   `{event: <record>, box}`: the kernel routes each after the step, in
   order, exactly as it routes the entry of that kind (a message by its
-  `replyTo`, else by subscription on `(sender, box)`; an event by its
-  `subject`, else a sender-less subscription on `box`). A message is
+  `replyTo`, else by its `mailbox` row on `(sender, box)`; an event by its
+  `subject`, else the first `mailbox` row from anyone on `box`). A message is
   admitted once (its record's CID in the `unique` map): the same message
   again is recorded with its request and routed nowhere. There is no
   `then`.
@@ -253,7 +296,7 @@ handshake under the prefix too — `RawBox` (`src/client/raw.ts`) rewrites
 `/.well-known/auth` to `/@<handle>/.well-known/auth` — and signs the path it
 sent, which is what the front door verifies.
 
-## The log, format 7
+## The log, format 8
 
 ```
 entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}
@@ -295,19 +338,21 @@ has the shapes).
   a body with a `replyTo` CID resumes the thread awaiting that record, if the
   record is a message this instance sent to the replying sender; otherwise
   (no such thread, or `replyTo` not a CID) it is recorded and nothing runs. A
-  message with no `replyTo` is routed by subscription on `(sender, box)`,
-  first match wins; no subscription: recorded, nothing runs. A subscribed
-  message with a `subject` (#65: a status provider's status, about a
-  transaction) steps the thread whose tip awaits that subject, with input
-  `message: {message, body, box, sender, subject}`; with no such thread the
-  subscription's handler gets `{message, body, box, sender}`.
+  message with no `replyTo` is routed by the dispatch table's `mailbox`
+  rows on `(sender, box)`, first match wins (#77; a kernel row is an admin
+  operation the kernel performs; another row launches its program); no
+  row: recorded, nothing runs. A routed message with a `subject` (#65: a
+  status provider's status, about a transaction) steps the thread whose
+  tip awaits that subject, with input `message: {message, body, box,
+  sender, subject}`; with no such thread the row's program gets `{message,
+  body, box, sender}`.
 - **Events** (no sender, self-validating) come only through the host's
   specific wiring, never an open box: its feeds (#29: headers), its
   broadcaster's proofs (#65: `{kind: "proof", subject, txid, path, …}` in box
   `chain`), and what a front door's step routes (`:ack`; #51: an accepted
   libp2p message, `p2p` in `libp2p:<topic>`, below). An event goes to the
-  thread awaiting its `subject`, else to the first subscription **with no
-  sender** whose box is the entry's (or that names no box); none: recorded,
+  thread awaiting its `subject`, else to the first `mailbox` row **from
+  anyone** whose address is the entry's box (or `*`); none: recorded,
   nothing runs. The handler gets `{event, box, subject?}`.
 - **Wakes and ticks are messages** (#69): a step's `deadline` and a shell's
   `sleep` are wake-me messages to the waker, whose answer routes as a reply
@@ -326,10 +371,10 @@ bytes); the answer is in the form asked.
 - **sendMessage** → one message to admit (`admit`): the mail record
   (`sender` the caller) and its body, which the kernel routes after the
   front door's step. Accepted when something takes it: for this instance's
-  own boxes, a subscription on `(sender, box)` or a reply to a message this
-  instance sent that sender; for the identity it keeps a mailbox for (its
-  owner), a subscription whose handler is the messagebox. Refused, only the
-  request is recorded. The answer carries `id` (the record's CID) and
+  own boxes, a dispatch row on `(sender, box)` — the kernel's own, or a
+  program's — or a reply to a message this instance sent that sender; for
+  the identity it keeps a mailbox for (its owner), a row whose program is
+  the messagebox. Refused, only the request is recorded. The answer carries `id` (the record's CID) and
   `results` echoing the client's `messageId`.
 - **listMessages** is a read: the caller's list in that box, `{messageId,
   sender, body, …}` with `messageId` the mail record's CID (JSON: the body as
@@ -341,17 +386,16 @@ bytes); the answer is in the form asked.
 State: the head `mailbox` names `{kind: "mailbox", lists: [{recipient, box,
 list}]}`, each `{kind: "mail-list", recipient, box, acked, messages: [{id,
 at}]}` — the unacknowledged messages in arrival order. An instance's own
-subscribed boxes keep no list: admission is the acknowledgement, the log is
-the queue. **A mailbox exists only where a subscription to the messagebox
-exists**: a message the messagebox is not subscribed to keep is refused
-(`403`).
+routed boxes keep no list: admission is the acknowledgement, the log is
+the queue. **A mailbox exists only where a row to the messagebox
+exists**: a message no row sends the messagebox is refused (`403`).
 
 ## Mailbox instances
 
 An identity outside the host — David's wallet, the inference peer, a browser
 tab — gets its mail kept by a **mailbox instance**: an instance with only the
-front door and the messagebox, whose genesis subscribes `:ack` → messagebox
-and everything from anyone in any box → messagebox, for its owner. Its
+front door and the messagebox, whose dispatch rows send `:ack` and every
+message from anyone in any box (`*`) to the messagebox, for its owner. Its
 sessions are records like any instance's (#68). It has an identity of its own (its oracle's key;
 the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
@@ -362,7 +406,7 @@ the BRC-104 counterparty), and keeps the owner's mail as the owner's.
   key ID the username, counterparty anyone, over `register <username>` —
   proof that the key's holder asked. The answer: `{identityKey, username,
   handle, messagebox: <its origin>}`.
-- The router's resolve endpoint answers a mailbox instance's handle with its
+- The host's resolve endpoint answers a mailbox instance's handle with its
   owner's key and the instance's origin.
 
 ## Outbound: emit, the address book and the providers
@@ -461,29 +505,32 @@ sender is authenticated by its key (a BRC-104 session or the message's own
 signature) and admitted by subscription, whether or not the instance can
 answer it.
 
-Who writes it:
+The address book is one of the kernel's four tables (#77). Who writes it:
 
 - **the genesis**, once: `addressBook: [{key, transport, address, role?,
-  handle?, domain?}]` (source `genesis`) — the node host seeds its
-  providers (role = the provider's name; `libp2p` when it runs libp2p,
-  `status` when it has an Arcade) and the owner's mailbox;
-- **the resolve program**, from a BRC-169 lookup (source `resolve`; below);
-- **the box `peers`** (the owner, as admin; source `admin`): `{op: "add",
-  key, transport?, address? | url?, role?, handle?, domain?}` | `{op:
-  "remove", key}` — `url` alone, or no `transport`, is a mailbox.
+  handle?, domain?}]` (source `genesis`) — the host seeds its providers
+  (role = the provider's name; `libp2p` when it runs libp2p, `status` when
+  it has an Arcade) and the owner's mailbox;
+- **the kernel's `peers` operation** (the admin box `peers`, the owner's
+  by every genesis, or a delegate's; source `admin`): `{op: "add", key,
+  transport?, address? | url?, role?, handle?, domain?}` | `{op: "remove",
+  key}` — `url` alone, or no `transport`, is a mailbox. No program runs.
   `skein-host peers <agent> add <key> <address> [--transport t] [--role r]
   [--handle h@d]` / `remove <key>` / `list`; `scripts/host/up.sh` writes the
   owner and the inference peer into every agent this way, and the roster
-  step (`skein-host deploy`, `roster --deploy`) the other agents.
+  step (`skein-host deploy`, `roster --deploy`) the other agents;
+- **the resolve program**, from a BRC-169 lookup (source `resolve`; below)
+  — transitional: a program writing a kernel table, under the genesis's
+  `scopes` (`resolve: ["peers"]`), for David to review.
 
 A later record for the same key replaces it (a party that moved hosts).
 `sk.peers`, `sk.peerOf(key)` and `sk.peerByHandle(handle, domain)` read it.
 **Registration is application wiring, not core**: nothing registers itself
 or takes claims; an application that wants senders to enter themselves
-subscribes a box of its own (e.g. `{"box": "register", "handler":
-"resolve"}`: the resolve program writes a claim `{handle, domain}` — or a
-BRC-169 envelope's sender — only if it resolves to the sender, source
-`claim`).
+writes a row of its own (e.g. `{"address": "register", "sender": "*",
+"program": "resolve"}`: the resolve program writes a claim `{handle,
+domain}` — or a BRC-169 envelope's sender — only if it resolves to the
+sender, source `claim`).
 
 ### The providers
 
@@ -525,9 +572,9 @@ anyone (#65, below); the wallet and the overlay's gate emit it as an event.
 the reference host derives them from its master secret (`src/host/oracle.ts`
 `providerKey`: a BRC-42 child under `[2, "skein provider"]`, key ID the
 name); the browser page from a secret it keeps. A system tree names a
-provider as a subscription's sender by `$<name>` (`$status`, `$cron`),
-which the host resolves at genesis; a subscription to a provider the host
-has not is left out.
+provider as a row's sender by `$<name>` (`$status`, `$cron`), which the
+host resolves at genesis; a row from a provider the host has not is left
+out.
 
 ### Broadcast out, proofs and statuses in (#65)
 
@@ -571,7 +618,7 @@ event (box "chain")  {kind: "proof", subject: <tx CID>, txid (hex), path: bytes 
   status carrying the BUMP, by SSE or webhook), the same way it admits a
   header from a feed, into **every instance whose state holds the
   transaction** (a `has` read of its CID). It steps the thread awaiting the
-  transaction (input `event`), else a sender-less subscription on `chain`.
+  transaction (input `event`), else the first `mailbox` row from anyone on `chain`.
 - The VM records a proof only when its root is the header's at that height
   in the instance's own chain (a header not held yet leaves it pending).
   Nothing is signed; nothing needs to be.
@@ -592,14 +639,14 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
                    MINED / IMMUTABLE (with no path), REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED
 ```
 
-- **Subscribing** is a subscription `{sender: <the provider's key>, box:
-  "status", handler}` (a system tree writes `{"sender": "$status", "box":
-  "status", "handler": "wallet"}`), and the provider in the address book
-  (role `status`), which the genesis seeds when the host has one — how a
-  program knows one speaks to it. The message steps the thread awaiting the
-  transaction (input `message`), else the subscription's handler (args
-  `{message, body, box: "status", sender}`). An instance with no such
-  subscription records the message and runs nothing.
+- **Taking statuses** is a row `{transport: "mailbox", address: "status",
+  sender: <the provider's key>, program}` (a system tree writes
+  `{"address": "status", "sender": "$status", "program": "wallet"}`), and
+  the provider in the address book (role `status`), which the genesis seeds
+  when the host has one — how a program knows one speaks to it. The message
+  steps the thread awaiting the transaction (input `message`), else the
+  row's program (args `{message, body, box: "status", sender}`). An
+  instance with no such row records the message and runs nothing.
 - The reference host's status provider is its broadcaster's identity (key ID
   `status`): every status Arcade reports but a proof — its answer to the
   post (RECEIVED; a 400 as REJECTED with `extraInfo` its reason) and its SSE
@@ -659,10 +706,10 @@ error → {replyTo, error}   ("the cron provider takes {fn: "tick", …} or {fn:
   provider was late for is one tick, never a burst (the next grid point
   after now). `at` ticks once — at `at`, or at once if past — and is then
   gone. `box` is a box name (not empty, not starting `:`); `body` a map.
-- **A tick is routed by subscription** on (the cron provider's key, `box`),
-  or a sender-less one on `box`: the handler gets `{message, body, box,
-  sender}`. The reference host wakes an idle-stopped instance for a tick only
-  if something in it subscribes that box.
+- **A tick is routed by the dispatch table** on (the cron provider's key,
+  `box`), or a row from anyone on `box`: the program gets `{message, body,
+  box, sender}`. The reference host wakes an idle-stopped instance for a
+  tick only if a row in it takes that box.
 - **The reference host's cron provider** (`src/host/cron.ts`) keeps the
   schedules in host.db (`cron_schedule`): at a host start each `every`
   schedule ticks once (a restart is a late tick), each `at` one at its time.
@@ -767,13 +814,14 @@ sender:
 
 `replyTo` routes it as a reply: a program that emitted the call and awaits
 the message's CID is stepped with it (`reply`, above). Over HTTP, the
-app's route `{path: "/call", fn: "call"}` takes the same `{fn, args}` as
-the POST body and answers `{fn, result}` or `{fn, error}` on the connection
-(200; 400, 403 `not-admitted`, 404, 409, 500).
+app's row `{transport: "http", address: "/call", sender: "session", fn:
+"call"}` takes the same `{fn, args}` as the POST body and answers `{fn,
+result}` or `{fn, error}` on the connection (200; 400, 403 `not-admitted`,
+404, 409, 500).
 
 ## libp2p (#51)
 
-The same front door, another transport. The router's libp2p host
+The same front door, another transport. The host's libp2p node
 (docs/ARCH.md) appends each GossipSub message on a subscribed topic (inside
 GossipSub's async validator, so forwarding waits on it) and each frame read
 from an inbound stream on a served protocol as a `request` entry, transport
@@ -786,21 +834,23 @@ request {kind: "p2p", topic, from: bytes (the peer ID's multihash), seqno: bytes
 answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
 ```
 
-- **Routing.** The routes table gains `libp2p:` sources: `{path:
-  "libp2p:<topic>", program, fn}` for a topic, `libp2p:<protocol>` for a
-  stream protocol (from `etc/routes.json`; a protocol's handler named in
-  `etc/config.json` `libp2p.protocols` becomes its route; or installed, the
-  head `routes`, #72). No route: `ignore`. The handler gets `match`, the
-  entry that matched, as an HTTP route's does.
-- **What the node subscribes** (#72). The instance's node takes the
+- **Routing.** The dispatch table's `libp2p` rows: `{transport: "libp2p",
+  address: <topic>, sender: "*", program, fn}` for a topic, `address:
+  "/<protocol>"` for a stream protocol (from `etc/dispatch.json`, or the
+  older `etc/routes.json`'s `libp2p:` paths; a protocol's handler named in
+  `etc/config.json` `libp2p.protocols` becomes its row; or installed by an
+  app, #72). No row: `ignore`. The handler gets `match`, the row that
+  matched, as an HTTP row's handler does.
+- **What the node subscribes** (#72, #77). The instance's node takes the
   genesis's `libp2p` (topics, protocols, listen) plus the topics and
-  protocols its installed routes name (`libp2p:<topic>`,
-  `libp2p:/<protocol>` in the head `routes`; src/host/p2p.ts
-  `libp2pConfig`). After the kernel has processed what the router handed it,
-  the router reads the head `routes` (a kernel read); when it moved, it
-  declares the config again: new topics subscribed and protocols handled,
-  removed ones unsubscribed and unhandled, on the running node — started
-  if the instance had none, stopped when nothing is left. No restart.
+  protocols named by the `libp2p` rows added since the genesis — an app's
+  install (src/host/p2p.ts `libp2pConfig`); a genesis row alone subscribes
+  nothing: a tree says what its node takes in `config.libp2p`. After the kernel has processed what the host handed it,
+  the host reads the table (the kernel's `dispatch` frame); when its chain's
+  tip moved, it declares the config again: new topics subscribed and
+  protocols handled, removed ones unsubscribed and unhandled, on the
+  running node — started if the instance had none, stopped when nothing is
+  left. No restart.
 - **Verify in the step.** For a topic message the front door checks, from
   the request alone, that `from` is a secp256k1 peer ID (identity multihash of
   the key's protobuf) and that `signature` is its ECDSA signature (DER,
@@ -825,7 +875,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   is in `from`, and the signature covers topic, seqno, from and body — the
   same guarantee as a mail record's sender, 104 signature and nonces. The
   `p2p` event routes as any event: the thread awaiting its `subject` (none
-  here), else a sender-less subscription on `libp2p:<topic>`; with none
+  here), else a `mailbox` row from anyone on `libp2p:<topic>`; with none
   nothing runs. **Reject and ignore are recorded refusals**: the request's
   entry and thread, nothing else (a handler's `admit` beside them is
   dropped).
@@ -931,13 +981,13 @@ message {to: "@handle@domain", text}
 
 ## Inside the instance
 
-- **Routing** is by **subscription** on `(sender, box)`, first match wins,
-  over the rules as they stand when the entry is processed: the instance's
-  subscriptions chain (docs/VM.md, "Subscriptions"), seeded by the genesis and
-  changed only by `subscribe` messages from whoever is subscribed to that box.
-  A rule may name no sender (anyone) and no box (any box; the mailbox
-  instance's catch-all). The handler is the **box's handler program**: `(owner,
-  run) → run-handler`.
+- **Routing** is by the **dispatch table** on `(sender, box)`, first match
+  wins, over the rows as they stand when the entry is processed
+  (docs/VM.md, "The dispatch table"), seeded by the genesis and changed
+  only by the kernel's `dispatch` operation on the owner's (or a
+  delegate's) messages. A row may admit anyone (`*`) and take any box (`*`;
+  the mailbox instance's catch-all). The program is the **box's program**:
+  `(owner, run) → run-handler`; a kernel row is the kernel's own operation.
 - **The handler** knows the box's message shape; its arguments name the
   message record and the body; it reads the body and launches the next thread.
 - **A handler that errors** ends its thread `errored`, and that is all: no
@@ -947,9 +997,8 @@ message {to: "@handle@domain", text}
 - **Results** go to the sender of the request that started the thread, sent
   by the step (`send`), so their id is known and recorded before the step
   ends.
-- **Nothing is a message that isn't one.** Genesis is starting state; a wake
-  is an entry with no sender; a session and an acknowledgement are events, not
-  messages.
+- **Nothing is a message that isn't one.** Genesis is starting state; a
+  session and an acknowledgement are events, not messages.
 
 ## The infer protocol
 
