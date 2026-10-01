@@ -72,7 +72,9 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
     }
   ],
   "requires": ["wallet.records/1"],
-  "boxes": ["amm", "submit", "chain"],
+  "boxes": [{"box": "amm", "senders": ["*", "$cron"]}, "submit", "chain"],
+  "start": {"body": {"kind": "amm-p2p-start"}},
+  "stop":  {"body": {"kind": "amm-p2p-stop"}},
   "routes": [
     {"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},   // served at /amm/submit
     {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},   // served at /amm/lookup
@@ -93,7 +95,9 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, arrays, maps; `?` suffix = optional) |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
-| `boxes[]` | the boxes it asks to handle: its own name, plus any protocol boxes (`submit`, `chain`) |
+| `boxes[]` | the boxes it asks to handle: its own name, plus any protocol boxes (`submit`, `chain`). An entry is a name, or `{box, senders: [...]}` naming who may send into it: `"*"` (anyone — the app's public face), a provider name (`$cron`, `$status`, `$waker`: resolved through the address book), or an identity key. The install handler derives one `subscribe` per sender; a bare name means the owner only. The site shows every sender. (#76) |
+| `start` | optional: a message the owner sends into the app's box as the **fourth install message**, after `subscribe`, so a program whose first act is to schedule something (a heartbeat tick from `$cron`) actually runs; nothing else starts an app. Sending it again is the restart after a reconfiguration (a new manifest + head advance). (#76) |
+| `stop` | optional: a message the owner sends into the app's box at uninstall, before its subscriptions are removed, so the app can cancel what it scheduled. (#76) |
 | `routes[]` | the routes it asks for, in the routes-table shape (docs/MESSAGES.md "Routes": `path | prefix`, `program` (a `programs` role), `fn`, `auth?`, `read?`, handler-specific settings); libp2p topics and stream protocols are routes too (`libp2p:<topic>`, `libp2p:<protocol>`) |
 | `heads[]` | the heads it will own: its own name, and patterns for heads it creates (`ls:*` for lookup services) |
 
@@ -120,9 +124,10 @@ compiler; the manifest is the graph's copy of it, so a head is defined by
 what it provides and one app can replace another behind the same
 interface. (Spec.)
 
-## 3. Install: three owner messages
+## 3. Install: three owner messages, plus a start
 
-Nothing else. Each is an existing box with its existing body (built since
+Nothing else. (A manifest with `start` adds a fourth: the start message into
+the app's box, sent last — #76.) Each is an existing box with its existing body (built since
 #54; the boxes are the stock handlers). A management site is the permission
 prompt: it reads the manifest, shows what the app asks for, and has the
 owner's wallet sign the messages — one click sends all three; steps are
@@ -161,8 +166,12 @@ to a new version, swap the app behind an interface), all in the log.
 Deploy-by-message with a payment (#11) is the same `objects` message with a
 toll.
 
-Uninstall: `subscribe` remove for each box; the head is left (prunable) or
-advanced to an empty tree.
+4. **`start`** (if the manifest has one) — the owner sends the declared body
+   into the app's box. The app's handler runs its first step: scheduling
+   ticks with `$cron`, announcing itself, whatever it declared. (Spec, #76.)
+
+Uninstall: the `stop` message if declared, then `subscribe` remove for each
+box; the head is left (prunable) or advanced to an empty tree.
 
 ## 4. Calling an app: one box, the function in the body
 
@@ -246,9 +255,9 @@ concrete requests the owner approves (spec):
   `libp2p:<topic>-proof` (#74), plus `/<app>/submit` and `/<app>/lookup`
   (the app's base URL is what it advertises);
 - boxes `submit` and `chain`;
-- a subscription to a status feed if `config.overlay.status` names one
-  (`"$status"` for the host's provider, or a remote provider's key; none =
-  admit at the proof — #73);
+- a subscription of `$status` (or the remote status provider's key) to the
+  overlay's `status` box if `config.overlay.status` names one — the same
+  box-sender rule as `boxes[].senders` (#76); none = admit at the proof (#73);
 - heads `ls:<service>` for each lookup service.
 
 The site shows that list as the permission prompt, next to the manifest's
