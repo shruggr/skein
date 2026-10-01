@@ -89,7 +89,7 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
 | `name` | the app's name: its box (§4) and its head |
 | `version` | semver; shown by the site, compared by `requires` |
 | `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a pinned stock module such as the overlay engine); `routes[].program` and `config` refer to these names |
-| `handler` | which program handles the app's box (§4) |
+| `handler` | which program handles the app's box (§4): a `programs` role name, or a map `{<box>: <role>}` when the app handles several boxes with different programs (the workbench: `run`, `objects`, `head`, `subscribe`, `chat`) |
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, arrays, maps; `?` suffix = optional) |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
