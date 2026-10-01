@@ -56,7 +56,9 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
   "config": {
     "overlay": {
       "topics":  {"tm_amm_1": "topic"},
-      "lookups": {"ls_amm_1": {"program": "lookup", "topics": ["tm_amm_1"]}}
+      "lookups": {"ls_amm_1": {"program": "lookup", "topics": ["tm_amm_1"]}},
+      "status":  "$status",
+      "gossip":  {"tm_amm_1": true}
     },
     "amm": {"feeBps": 30, "tokens": ["1"]}
   },
@@ -220,7 +222,26 @@ managers and lookup services, in one tree under one head, with
 The engine reads that from the manifest at its head's root (spec: today it
 reads the genesis defaults `overlayTopics`/`overlayLookups`; #72 moves it to
 the manifest). Install is the three messages (§3); nothing registers with
-anything. The AMM app ships exactly this: the engine, `amm-topic`,
+anything.
+
+**The wiring is derived from `config.overlay`, and shown.** For every
+overlay topic the app runs, the install handler expands the config into the
+concrete requests the owner approves (spec):
+
+- inbound routes `libp2p:<topic>` (raw submissions), `libp2p:<topic>-admit`,
+  `libp2p:<topic>-proof` (#74), plus `/submit` and `/lookup`;
+- boxes `submit` and `chain`;
+- a subscription to a status feed if `config.overlay.status` names one
+  (`"$status"` for the host's provider, or a remote provider's key; none =
+  admit at the proof — #73);
+- heads `ls:<service>` for each lookup service.
+
+The site shows that list as the permission prompt, next to the manifest's
+own `boxes`/`routes`/`heads`. What the app **publishes** (`<topic>`,
+`<topic>-admit`, `<topic>-proof`, on by default, `config.overlay.gossip`
+per topic to turn off) needs no grant: emitting is the app acting as the
+instance, like any message it sends; the site lists it for information.
+Explicit `routes[]` entries in the manifest override the derived ones. The AMM app ships exactly this: the engine, `amm-topic`,
 `amm-lookup`, its validator and p2p programs, and its UI, one tree.
 
 **Several overlays on one instance coexist**: two heads, two apps, each
