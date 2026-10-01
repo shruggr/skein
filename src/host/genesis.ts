@@ -115,7 +115,8 @@ export interface SubscriptionSpec { sender?: string; box?: string; handler: stri
 
 /**
  * The stock seed: the owner's boxes, chat from anyone, the address book's box
- * (the admin's `peers`: resolve), and the reserved box the host admits into —
+ * (the admin's `peers`: resolve), the installed routes' box (the owner's
+ * `routes`: the front door, #72), and the reserved box the host admits into —
  * `:ack` (the messagebox moves a reader's pointer). The front door's sessions
  * are not state (in memory, never admitted). No `register` box (#40):
  * registration is application wiring — an application that wants senders to
@@ -131,6 +132,7 @@ export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
   { sender: "$owner", box: "chat", handler: "loop" },
   { sender: "$owner", box: "subscribe", handler: "subscribe-handler" },
   { sender: "$owner", box: "peers", handler: "resolve" },
+  { sender: "$owner", box: "routes", handler: "frontdoor" },
   { box: "chat", handler: "loop" },
   { box: ":ack", handler: "messagebox" },
 ];

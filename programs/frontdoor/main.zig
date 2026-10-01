@@ -22,7 +22,8 @@
 //!   an entry is {mail: <record>, body: bytes} or {event: <record>, box}:
 //!   routed by the kernel after the step as the entries they once were.
 //!
-//! The routes table (the genesis's `routes`, from etc/routes.json):
+//! The routes table (the genesis's `routes`, from etc/routes.json, then the
+//! installed ones, the head `routes` — #72):
 //!   [{path | prefix, program: <cid>, fn, auth?: "none", read?: <op>}]
 //!   exact paths first, then the longest prefix. `auth` defaults to BRC-104;
 //!   "none" is for open routes (an overlay's submit and lookup). `read`
@@ -43,6 +44,9 @@
 //! (the front door's). A handler never sees the session table; a message it
 //! admits carries the sender key, the 104 signature and both nonces, so its
 //! authorship verifies from the log alone.
+//!
+//! Stepped as the handler of the box `routes` (#72, routesBox below): the
+//! owner adds or removes an installed route, {op: "add" | "remove", route}.
 //!
 //! Called (a kernel call, #40 — reads only, nothing written):
 //!   fn "read"     {request: <cid>, read: {caller?, peer?, theirs?, requestId?}} → {status, headers, body}
@@ -84,8 +88,11 @@ pub fn main() u8 {
 }
 
 fn run(a: Allocator) !void {
-    const in = try sk.input(a);
+    var in = try sk.input(a);
     const kind = Value.str(in.get("kind")) orelse "";
+    // #72: a message in the box `routes` (the owner's change to the routes table), not a request.
+    if (eql(u8, kind, "step")) if (in.get("args")) |args| if (args.get("request") == null and args.get("box") != null) return routesBox(a, in);
+    in = try withRoutes(a, in);
     if (eql(u8, kind, "step")) return sk.answer(a, try stepped(a, in));
     if (!eql(u8, kind, "call")) return sk.report("the front door is stepped on a request, or called (fn \"read\", \"explore\")");
     const func = Value.str(in.get("fn")) orelse "";
@@ -320,6 +327,84 @@ fn unauthorized(msg: []const u8) error{Unauthorized} {
 }
 
 // ---------------------------------------------------------------- routes and reads
+
+/// The head the installed routes live under (#72): {kind: "routes", routes: [<route>]}.
+pub const ROUTES_HEAD = "routes";
+
+/// The routes installed at runtime (the head `routes`), in the order they were added.
+fn headRoutes(a: Allocator) ![]const Value {
+    const root = (try sk.head(a, ROUTES_HEAD)) orelse return &.{};
+    const t = try sk.get(a, root);
+    const rs = t.get("routes") orelse return &.{};
+    return if (rs == .array) rs.array else &.{};
+}
+
+/// The input with its `routes` = the genesis's, then the installed ones (the head `routes`).
+fn withRoutes(a: Allocator, in: Value) !Value {
+    const installed = try headRoutes(a);
+    if (installed.len == 0) return in;
+    const genesis: []const Value = if (in.get("routes")) |g| (if (g == .array) g.array else &.{}) else &.{};
+    var m = cbor.MapBuilder.init(a);
+    if (in == .map) for (in.map) |e| try m.put(e.key, e.value);
+    try m.put("routes", .{ .array = try std.mem.concat(a, Value, &.{ genesis, installed }) });
+    return m.value();
+}
+
+fn routeKey(r: Value) ?struct { kind: []const u8, at: []const u8 } {
+    const path = Value.str(r.get("path"));
+    const prefix = Value.str(r.get("prefix"));
+    if ((path == null) == (prefix == null)) return null;
+    return if (path) |p| .{ .kind = "path", .at = p } else .{ .kind = "prefix", .at = prefix.? };
+}
+
+/// The box `routes` (#72): the owner changes the routes table at runtime.
+/// Body {op: "add", route: {path | prefix, program: <program record CID>,
+/// fn, auth?: "none", read?: <op>, app?: <name>, …the handler's settings}}
+/// adds the route (replacing one with the same path, or the same prefix);
+/// {op: "remove", route: {path | prefix}} removes it. The table is the head
+/// `routes`, {kind: "routes", routes: [<route>]}, read after the genesis's
+/// routes by every request. A remove of a route not there writes nothing.
+/// Whoever is subscribed to the box may change the table: the stock genesis
+/// subscribes the owner.
+fn routesBox(a: Allocator, in: Value) !void {
+    const args = in.get("args").?;
+    const b = try sk.readBody(a, try sk.linkField(args, "message"), try sk.linkField(args, "body"));
+    const op = sk.textField(b, "op") catch |e| return sk.wrap(a, "body", e);
+    const route = b.get("route") orelse return sk.report("body: want {op: add|remove, route}");
+    if (route != .map) return sk.report("body: route is not a map");
+    const key = routeKey(route) orelse return sk.report("route: want a path or a prefix (one of them)");
+    const add = eql(u8, op, "add");
+    if (!add and !eql(u8, op, "remove")) return sk.report("body: want {op: add|remove, route}");
+    if (add) {
+        const prog = Value.cidOf(route.get("program")) orelse return sk.report("route: program is not a CID");
+        if (Value.str(route.get("fn")) == null) return sk.report("route: fn is not text");
+        if (route.get("auth")) |x| if (!eql(u8, Value.str(x) orelse "", "none")) return sk.report("route: auth is \"none\" or absent (BRC-104)");
+        if (route.get("read")) |x| if (Value.str(x) == null) return sk.report("route: read is not text");
+        const p = sk.get(a, prog) catch |e| return sk.wrap(a, try std.fmt.allocPrint(a, "route: program {s}", .{try sk.hex(a, prog)}), e);
+        if (!eql(u8, Value.str(p.get("kind")) orelse "", "program")) return sk.report("route: program is not a program record");
+    }
+    var out = std.array_list.Managed(Value).init(a);
+    var removed = false;
+    for (try headRoutes(a)) |r| {
+        const k = routeKey(r) orelse continue;
+        if (eql(u8, k.kind, key.kind) and eql(u8, k.at, key.at)) {
+            removed = true;
+            continue;
+        }
+        try out.append(r);
+    }
+    if (!add and !removed) return say(a, "routes: remove {s} {s}: not there", .{ key.kind, key.at });
+    if (add) try out.append(route);
+    var t = cbor.MapBuilder.init(a);
+    try t.put("kind", cbor.string("routes"));
+    try t.put("routes", .{ .array = out.items });
+    try sk.advance(ROUTES_HEAD, try sk.put(a, t.value()));
+    return say(a, "routes: {s} {s} {s}", .{ op, key.kind, key.at });
+}
+
+fn say(a: Allocator, comptime f: []const u8, args: anytype) !void {
+    try std.Io.File.stdout().writeStreamingAll(sk.io(), try std.fmt.allocPrint(a, f ++ "\n", args));
+}
 
 pub fn findRoute(in: Value, route: []const u8) ?Value {
     const rs = in.get("routes") orelse return null;
