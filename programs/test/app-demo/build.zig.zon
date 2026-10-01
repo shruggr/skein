@@ -1,11 +1,9 @@
 .{
-    .name = .skein_kernel,
+    .name = .skein_test_app_demo,
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
-    .fingerprint = 0x60166c03cdab6314,
+    .fingerprint = 0xef54f83cf7e219f8,
     .dependencies = .{
-        // The SDK (shruggr/skein-sdk, #75): the codecs. -Dwallet=false (sdkImports
-        // in build.zig) so the kernel never fetches bsvz.
         .skein_sdk = .{
             .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.2.0.tar.gz",
             .hash = "skein_sdk-0.2.0-YroFBDQIGAAK4MR6E1DwJ4qsdITStuQ5VO8BU8fcAX9j",
@@ -14,6 +12,6 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
-        "src",
+        "main.zig",
     },
 }

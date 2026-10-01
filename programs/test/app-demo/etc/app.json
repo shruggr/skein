@@ -1,0 +1,31 @@
+{
+  "kind": "app",
+  "name": "app-demo",
+  "version": "0.1.0",
+  "programs": {
+    "demo": "bin/app-demo.wasm"
+  },
+  "handler": "demo",
+  "provides": [
+    {
+      "interface": "demo.counter/1",
+      "functions": {
+        "get":  {"writes": false, "args": {}, "answer": {"count": "int"}},
+        "add":  {"writes": true,  "args": {"by": "int", "note?": "string"}, "answer": {"count": "int"}},
+        "peek": {"writes": false, "args": {}, "answer": {"count": "int"}}
+      }
+    }
+  ],
+  "requires": [],
+  "boxes": [
+    {"box": "app-demo", "senders": ["*"]},
+    {"box": "app-demo-tick", "senders": ["$cron"]}
+  ],
+  "routes": [
+    {"path": "/call", "program": "demo", "fn": "call"}
+  ],
+  "heads": ["app-demo"],
+  "start": {"body": {"kind": "app-demo-start"}},
+  "stop": {"body": {"kind": "app-demo-stop"}},
+  "description": "A counter (skein's test app for install, #72/#76): demo.counter/1 over its head's state, a heartbeat from the cron provider scheduled by its start message."
+}
