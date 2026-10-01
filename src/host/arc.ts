@@ -18,8 +18,8 @@
 //
 // Arcade unreachable (or slow past `timeoutMs`) is answered 503 with a JSON
 // body and no txStatus: to the wallet a transient failure, re-asked at its
-// deadline. The paths keep ARC's `/v1/tx` shape, so the wallet's calls are
-// the same whether `walletArc` names this route or an ARC.
+// deadline. The paths keep ARC's `/v1/tx` shape for clients outside; the
+// instances reach the same Broadcaster as the `broadcast` provider (#70).
 //
 // The subscription: one SSE connection to Arcade's `/events?callbackToken=`
 // (every transaction submitted under the token), resumed with

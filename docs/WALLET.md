@@ -10,10 +10,10 @@ outside as the per-instance **signing oracle** (a ProtoWallet, #18), and
 key: every key operation is a call to the oracle.
 
 The wallet runs on the Zig kernel: its transactions and headers are
-`bitcoin-tx` / `bitcoin-block` blocks, and it uses the kernel's `http` and
-`deadline` imports
-(kernel-zig/README.md, "For the wallet") — its component build makes the
-HTTP calls over standard `wasi:http` instead (#15).
+`bitcoin-tx` / `bitcoin-block` blocks, and it uses the kernel's `emit` and
+`deadline` imports (#70: it broadcasts by a message to the host's
+broadcaster; kernel-zig/README.md, "For the wallet") — its component build
+imports the same `emit` from `skein:kernel/skein`.
 
 ## Pieces
 
@@ -338,7 +338,7 @@ transaction (its inputs must still be unspent) and signs it.
 `lockTime`, `randomizeOutputs`, `sendWith` are not taken.
 
 **Every key operation is an oracle call** over the `wallet` import (BRC-100
-wire frames, attested): `getPublicKey` (call 8; forSelf; counterparty the
+wire frames, recorded as `oracle` records): `getPublicKey` (call 8; forSelf; counterparty the
 payment's sender, or self for change) for each input's key and the change
 key, and `createSignature` (call 15) with `hashToDirectlySign` = the input's
 BIP143/ForkID sighash (`ALL|FORKID`) — go-sdk's own pattern
@@ -352,7 +352,7 @@ them byte for byte.
 This is how Yours funds skein ("Browser with Yours"): a BRC-29 payment to a
 key derived for skein, internalized here as skein's own UTXO.
 
-## Feeds and calls: plain entries and `http`
+## Feeds and calls: plain entries and messages
 
 Two mechanisms, split by lifetime (#29, "no messagebox for ARC or
 ChainTracks"). Neither is a message: `emit` stays for identities.
@@ -377,35 +377,36 @@ on the entry's box (the instance subscribes e.g. `{match: {box: "chain"},
 handler: WALLET}`). What arrives is validated inside: headers by work and
 links, proofs against our headers; a status is provisional until its proof.
 
-**`http`** — one-shot calls are made from the VM and answered by the host,
-recorded calls (request + response), so replay never touches
-the network. The kernel import is `http(request) → response`, dag-cbor
-`{method, url, headers?, body?}` → `{status, headers, body}` — the
-preview1 build (the pinned `wasm/wallet.wasm`) uses it. The **component
-build** (`zig build component`) makes the same calls over standard
-`wasi:http/outgoing-handler` (#15, `src/wasi_http.zig`), which the kernel
-serializes into the very same request: the recorded calls are identical
-across the two builds (`kernel-zig/equiv/abi.ts`). The wallet speaks ARC's
-`/v1/tx` API to `defaults.walletArc`, which is **the host's broadcast
-route** (#58, below) — a new genesis names it when the host has an Arcade:
+**Broadcasting is a message** (#70, #67: external communication is a
+thread). The wallet `emit`s to the address book's `broadcast` provider (the
+entry with role `broadcast`, which the genesis seeds when the host has an
+Arcade; none: nothing is broadcast), `subject` the transaction's CID, and
+ends its step awaiting the answer, the transaction's CID (a `status` /
+`proof` entry) and a deadline; whichever comes first steps it. The answer
+is the provider's signed message `{replyTo, status, body}`: Arcade's own
+answer, its HTTP status and JSON body. Replay re-reads the answer from the
+log and never touches the network; the preview1 and component builds emit
+the same messages (`kernel-zig/equiv/abi.ts`).
 
-| call | when | |
+| message | when | the answer's `body` |
 |---|---|---|
-| `POST {walletArc}/v1/tx`, `Content-Type: application/octet-stream`, body = the Atomic BEEF | after `createAction` / `signAction` (not `noSend`, only if genesis `defaults.walletArc` is set) | JSON `{txid, txStatus, merklePath?, extraInfo}`; a 4xx without a `txStatus` is a rejection; a 5xx (Arcade's backpressure, Arcade unreachable) is no answer: pending, re-asked at the deadline |
-| `GET {walletArc}/v1/tx/{txid}` | at the deadline | the same JSON; a 404 (ARC never took it: the post failed transiently, or it lost its history) posts the BEEF again (`POST {walletArc}/v1/tx`), whose answer counts |
+| box `broadcast`, `{tx: <the Atomic BEEF>}` | after `createAction` / `signAction` (not `noSend`) | JSON `{txid, txStatus, merklePath?, extraInfo}`; a 4xx without a `txStatus` is a rejection; a 5xx (Arcade's backpressure, Arcade unreachable) is no answer: pending, re-asked at the deadline |
+| box `status`, `{txid}` | at the deadline | the same JSON; a 404 (ARC never took it: the post failed transiently, or it lost its history) posts the BEEF again (box `broadcast`), whose answer counts |
 
 **The host's broadcaster** (#58, `src/host/arc.ts`): one Arcade
 (bsv-blockchain/arcade) per host, configured on the host
-(`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`; scripts/host/README.md). The route is
-a plain proxy: `POST /arc/v1/tx` sends the transaction to Arcade's `POST
+(`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`; scripts/host/README.md); the
+`broadcast` provider and the router's routes (`POST /arc/v1/tx`, `GET
+/arc/v1/tx/{txid}`, for clients outside) both use it. It is a plain
+proxy: a broadcast sends the transaction to Arcade's `POST
 /tx` in Extended Format (the Atomic BEEF's subject with its inputs'
 sources) under the host's one callback token (`X-CallbackToken`,
 `X-FullStatusUpdates: true`, `X-CallbackUrl` when the host has a public
 webhook URL), and answers exactly what Arcade answered — 202 `RECEIVED`,
 a duplicate's current status, 400 with a `reason`, 503 with `Retry-After`
-— so the recorded answer is a receipt; `GET /arc/v1/tx/{txid}` is Arcade's
+— so the answer the wallet keeps is a receipt; a status question is Arcade's
 `GET /tx/{txid}` as is. There is no queue on the host: **the wallet's
-`broadcast` record is the queue** (a step writes it, makes the call, awaits
+`broadcast` record is the queue** (a step writes it, emits the message, awaits
 the tx CID with a deadline; a crash loses nothing, it is all in the log).
 
 Statuses come back over **one SSE subscription per host**: Arcade's
@@ -434,7 +435,7 @@ the step notes it in `awaiting`, then `await`s the transaction's CID and
 sets a `deadline` (`defaults.walletRecheckMs`, default 600000), so the thread
 rests `waiting` with `until`. A `status` or `proof` entry for that CID steps
 it (`input.event`); the deadline's wake entry steps it too (`input.woke`),
-and it re-asks the route over `http` (a 404 posts it again). Each time: a merkle path proves the
+and it asks the broadcaster again (box `status`; a 404 posts it again). Each time: a merkle path proves the
 transaction (a header not yet held leaves it pending), a rejection
 (`REJECTED`, `DOUBLE_SPEND_ATTEMPTED`, `INVALID`, `MALFORMED`, or a 4xx)
 rejects it and bubbles (Settlement, above); proven or rejected, it stops
@@ -442,9 +443,9 @@ awaiting and the thread finishes; otherwise it awaits again with a new
 deadline. At a deadline, a transaction awaited for `defaults.walletAbandonMs`
 (default 86400000) since its broadcast is abandoned instead of re-asked. One
 thread may await several transactions (a reorg re-broadcasts all it reverted
-from one step): the result lists them as `awaited`. A fallback ARC is a different URL.
+from one step): the result lists them as `awaited`. The broadcaster is the address book's entry with role `broadcast`.
 
-Not built: catching up on headers after a gap over `http` (a feed's gap is
+Not built: catching up on headers after a gap through the fetch provider (a feed's gap is
 refused as `Unconnected` until the missing headers arrive); fetching a
 missing proof on demand. A status whose merkle path does not match our
 header at its height (Arcade still reporting a block our chain orphaned)
@@ -482,9 +483,10 @@ senderIdentityKey}}` or `{outputIndex, protocol: "basket insertion",
 insertionRemittance: {basket, customInstructions?, tags?}}`.
 
 Config (genesis `defaults`, strings): `walletNetwork` (`main` \| `test` \|
-`regtest`), `walletFeeRate` (sat/kB), `walletArc` (the ARC-shaped base URL
-the wallet broadcasts to: the host's route `<router origin>/arc` by default
-when the host has an Arcade; unset: no broadcast), `walletRecheckMs`, `walletAbandonMs` (default 86400000; 0: never).
+`regtest`), `walletFeeRate` (sat/kB), `walletRecheckMs`, `walletAbandonMs`
+(default 86400000; 0: never). Where it broadcasts is not config but the
+address book (#70: the `broadcast` provider, seeded by the genesis when the
+host has an Arcade; none: no broadcast).
 
 ## Running it
 

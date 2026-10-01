@@ -17,13 +17,16 @@ The skein runtime is the only thing that communicates into or out of an
 instance. Its edges are:
 
 1. **Messages** — in through the instance's front door (BRC-33 on a
-   BRC-103/104 session: the session proves the sender), out through its own
-   messagebox program as an HTTP client. This is the only channel for another
-   party's word.
+   BRC-103/104 session, or a message signed by its sender), out by `emit`
+   (#70): a signed message to a key the address book names. This is the
+   only channel for another party's word.
 2. **The wallet** — the instance's oracle, for signing, verifying,
    encrypting, decrypting and deriving. Keys never enter the runtime.
-3. **HTTP** — the `http` import: a recorded call (request and response on the
-   step's update), how delivery and discovery reach the network.
+
+The network is not an edge of its own (#67: external communication is a
+thread): a program reaches it by emitting to a **provider** — the HTTP
+proxy, the libp2p node, the waker, the broadcaster — a recipient with an
+identity whose answer is a signed message like any other.
 
 Everything else that looks like an input — a model completion, a tree of
 files, a person's line — is a message from another identity, proven by its
@@ -32,7 +35,8 @@ session.
 The host's side of these edges is small: it appends every package a
 transport carries in as received (#68: an HTTP request, a GossipSub message,
 a stream frame — the front door is stepped on it inside), feeds (headers,
-proofs, statuses) and wakes; it answers `wallet` and `http`; it holds a
+proofs, statuses) and wakes; it answers `wallet`; it runs the providers
+and carries out what a step emitted, once the step is committed; it holds a
 synchronous client's connection until the request's thread has come to rest
 (#66). It verifies nothing. `MESSAGES.md` has the message path end to end.
 
@@ -61,11 +65,9 @@ Inside the runtime:
 - the **scheduler**: consumes the message log in order, routes by
   subscription (the subscriptions chain), steps programs;
 - **programs**: WASI modules stepped by the scheduler, with imports only for
-  the virtual filesystem, the store by CID, heads, the wallet, `http`,
-  `libp2p` (#51: publish, dial, send, receive, close — recorded like `http`), and
-  `call` (another program's function, in the VM); nothing emits: a program
-  that sends a message calls the messagebox program, which delivers over
-  `http`;
+  the virtual filesystem, the store by CID, heads, the wallet, `call`
+  (another program's function, in the VM) and `emit` (#70: the one way
+  out — a signed message, sent when the step ends; its answer an entry);
 - **requests** (#68): every package a transport carries in is an entry,
   and the transport's middleware (the front door) is stepped on it as the
   request's own thread (`docs/VM.md`, "Requests");
@@ -78,7 +80,7 @@ Inside the runtime:
 
 The runtime has no access to a disk, a network, a clock or a process table.
 Nothing in its code imports `node:fs`, `node:child_process` or `fetch`
-(`http` is answered by the host, recorded, replayed). The
+(the network is reached by messages to the host's providers, #70). The
 "WASI host" — the code that satisfies a module's imports — is *inside* the
 runtime; it is not a host in any other sense.
 
@@ -105,18 +107,18 @@ network. Peers include:
   instances").
 - **other instances** — peers like any other, on this host or another.
 
-Who an instance can reach is its **address book** (head `peers`: key →
-mailbox URL, handle optional), written only by its own programs: a BRC-169
-resolve (the resolve program), or the owner as admin (box `peers`:
-configuration, `skein-host peers`; up.sh and the roster step write the
-owner, the inference peer and the other agents into every agent). The host
-never seeds it; the one peer a genesis names is the owner (`etc/config.json`
-`owner.messagebox`). Receiving is separate: the key authenticates, the
-subscriptions decide. Nothing registers itself — no claims in the core; a
-registration flow (a `register` box wired to the resolve program's claim
-handler, or to a program with its own rules) is application wiring
-(MESSAGES.md, "The address book"). A key in no address book is "no route":
-the send fails once, permanently.
+Who an instance can reach, and how, is its **address book** (head `peers`:
+key → `{transport: mailbox | libp2p | local, address, role?, handle?}`,
+#70). The genesis seeds it once (`addressBook`: the host's providers, by
+role, and the owner's mailbox); after that only the instance's own programs
+write it: a BRC-169 resolve (the resolve program), or the owner as admin
+(box `peers`: configuration, `skein-host peers`; up.sh and the roster step
+write the inference peer and the other agents into every agent). Receiving
+is separate: the key authenticates, the subscriptions decide. Nothing
+registers itself — no claims in the core; a registration flow (a `register`
+box wired to the resolve program's claim handler, or to a program with its
+own rules) is application wiring (MESSAGES.md, "Outbound"). A key in no
+address book is "no route": the emit fails, permanently.
 
 A peer may be a thin proxy that receives messages and runs things on a real
 host; what makes that acceptable is that its result is signed by the peer's
@@ -138,8 +140,9 @@ through gib. The runtime never writes to a disk.
 ## The router (issues #33, #40)
 
 The host is a **router**: a reverse proxy in front of instances that are HTTP
-servers. The kernel's surface is small: out go `wallet` (the signing oracle),
-`http` and `libp2p` (#51); in come **admit an entry and run the step**,
+servers. The kernel's surface is small: out go `wallet` (the signing oracle)
+and what a committed step emitted (#70, the serve frame `emit`); in come
+**admit an entry and run the step**,
 **answer** (#66: wait on the thread a request entry launched), and **call a
 function** (no entry, no writes: host-side reads).
 
@@ -147,7 +150,9 @@ The router's components, each the sockets for one kind of traffic, none of
 them judging anything (the instance does, through its front door):
 
 - the **HTTP proxy** — instances' origins, each request appended and waited
-  on, the kernels' outbound `http` (below);
+  on;
+- the **providers** — fetch, waker, libp2p, broadcast: recipients of the
+  instances' emitted messages (below);
 - the **feeds** — SSE headers and ARC callbacks, admitted as plain entries
   (below);
 - the **libp2p host** (#43, #51; `src/host/p2p.ts`) — one js-libp2p node per
@@ -178,10 +183,20 @@ them judging anything (the instance does, through its front door):
 - **Mailbox instances**: an identity outside the host gets an instance of its
   own for its mail (`skein-host add <h> --mailbox --owner <key>`, or a signed
   `POST /account/register {username, identityKey, signature}`).
-- **Delivery** is the instance's: its messagebox program sends over the
-  kernel's `http`, on its own BRC-104 session with the recipient's front door.
-  The router answers a URL of its own in process (no socket) and sends any
-  other out.
+- **Delivery** is the instance's: a message to a `mailbox` recipient gets a
+  delivery thread (the messagebox program), on the instance's own BRC-104
+  session with the recipient's front door, its HTTP through the fetch
+  provider. The router answers a URL of its own in process (no socket) and
+  sends any other out.
+- **The providers** (#70, `src/host/providers.ts`): `fetch` (the HTTP
+  proxy), `waker` (a `deadline`'s wake-me), `libp2p` (publish, dial, send,
+  close) and `broadcast` (Arcade), each with a key of its own (a child of
+  the master secret). The genesis seeds them in the instance's address book
+  (`addressBook`, role = the name). The kernel hands the router what a
+  committed step emitted to a `local` or `libp2p` recipient (the serve frame
+  `emit`); each answer is a signed message appended as a `local` request,
+  which the front door checks. Their whole contract: docs/MESSAGES.md,
+  "Outbound".
 - **Discovery.** The router publishes BRC-169 for its instances
   (`/manifest.json`, `/.well-known/metanet-handles/resolve`: `{identityKey,
   messagebox}`) and the paymail PKI; an instance looks others up with its
@@ -199,11 +214,11 @@ them judging anything (the instance does, through its front door):
   validates.
 - **The broadcaster** (#58, `src/host/arc.ts`): one Arcade per host
   (`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`). Instances broadcast through the
-  router's route — `POST /arc/v1/tx`, `GET /arc/v1/tx/<txid>`, reached by
-  the kernel's recorded `http` (a new genesis names it as
-  `defaults.walletArc`) — a plain proxy to Arcade under the host's one
-  callback token that answers what Arcade answered (unreachable: 503, a
-  transient failure the wallet re-asks at its deadline). No queue on the
+  `broadcast` provider (#70: a message `{tx}` in box `broadcast`, `{txid}` in
+  box `status`) — a plain proxy to Arcade under the host's one callback
+  token whose answer is what Arcade answered (unreachable: 503, a transient
+  failure the wallet re-asks at its deadline). The router's routes `POST
+  /arc/v1/tx`, `GET /arc/v1/tx/<txid>` stay for clients outside. No queue on the
   host: the wallet's `broadcast` record is the queue. The router holds **one
   SSE subscription** to Arcade for the whole host (the header feeds' SSE
   client), resumed with `Last-Event-ID` from host.db; Arcade's webhooks
@@ -240,11 +255,11 @@ them judging anything (the instance does, through its front door):
     the router reads length-prefixed frames, appends each the same way
     (`{kind: "p2p-frame", protocol, from, body}`, no signature: the stream
     is Noise's) and writes the answer back.
-  - **Outbound, the kernel's `libp2p` import**: publish, dial, send, receive,
-    close, answered here and recorded by the kernel on the step's update. A
-    `receive` with no frame waiting answers `{pending}` and the thread rests;
-    the frame's arrival makes the router admit the thread's wake at once
-    (docs/VM.md, "libp2p").
+  - **Outbound, the `libp2p` provider** (#70): publish, dial, send, close
+    are messages to it, answered as signed messages; a dialed stream's
+    frames come back in box `frame`. A message to an address book entry
+    with `transport: "libp2p"` goes as a signed package, on the topic or as
+    a frame on `/skein/message/1.0.0` (which every node serves).
 - **Hydration**: an instance is a kernel the router can load
   (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
   length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
@@ -254,9 +269,11 @@ them judging anything (the instance does, through its front door):
   environment failure happens at hydrate time from the log (a thread whose
   step was cut off runs again; a deterministic error is recorded and never
   retried).
-- **The waker** is the router's timer: the kernel reports its sleepers; the
-  router keeps each instance's earliest deadline, and when it comes it
-  hydrates the instance and admits the wake.
+- **The waker** is the router's timer: a program's `deadline` is a message
+  to the `waker` provider, answered at its time (#70); a shell's sleep is
+  still a sleeper the kernel reports — the router keeps each instance's
+  earliest one, and when it comes it hydrates the instance and admits the
+  wake.
 - **The clock** (#60, `src/host/cron.ts`): the router admits each genesis's
   `jobs` as plain `cron` events into their boxes when they are due (`every`
   from the host's start, `at` once, host.db `cron_fired`; a missed firing made
@@ -286,12 +303,19 @@ them judging anything (the instance does, through its front door):
   message's id. `kernel-zig/src/log.zig` has the shapes.
 - **Format 4** (#62): entries as format 3; every recorded `http`/`libp2p`
   call carries the host's attestation, and the genesis names the host's
-  attest key (`attest`). docs/VM.md ("Attested by the host") has the shape.
+  attest key (`attest`). Superseded by format 6.
 - **Format 5** (#68): every package a transport carries in is a `request`
   entry (`{request: <record>, transport}`), the front door stepped on it;
   sessions are records (head `sessions`); what a request's step admits is
   routed by the kernel, a message once (the `unique` map). A format-4 store
   is refused for running (re-genesis). docs/VM.md ("Requests").
+- **Format 6** (#70, #67): no `http` or `libp2p` calls and no attestations
+  (format 4's are gone; a genesis naming `attest` is refused); the only
+  recorded call is the oracle's (`{kind: "oracle", thread, step, i,
+  request, result}`); an update lists what the step `emitted`, signed mail
+  records (`nonce`, `signature`, `subject?`); the genesis seeds the address
+  book (`addressBook`); requests gain the `local` transport (a provider's
+  answer). A format-5 store is refused for running (re-genesis).
 
 ## Bootstrap (issue #4)
 
@@ -317,9 +341,10 @@ one instance whose identity is the connected wallet's (Yours) — user, instance
 and host are the same identity on three separate interfaces
 (`web/kernel/host.ts`):
 
-- **out**: `wallet` → the page's BRC-100 wallet; `http` → fetch: the
-  instance's messagebox program delivers its messages itself (a BRC-104
-  client) and its resolve program looks handles up.
+- **out**: `wallet` → the page's BRC-100 wallet; `emit` → the page's own
+  providers (fetch, waker; a page-local key): the instance's messagebox
+  program delivers its messages itself (a BRC-104 client) and its resolve
+  program looks handles up, both through the page's fetch.
 - **in**, the same one call: the page's chat (a message from the user,
   admitted directly), a poll of the page identity's mailbox instance on the
   host (registered by the page, `listMessages` on a BRC-104 session, each
@@ -373,23 +398,18 @@ C/C++, Go `wasip1`, interpreters as modules). Programs target WASI, never
 skein. (The stock programs — the handlers, the loop, the messagebox, the
 front door — are all Zig since #54; Go `wasip1` remains a userland target
 for third-party programs.) Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
-— are answered inside, deterministically, and never recorded. **Attested**
-ones — anything that leaves the runtime: the wallet, `http` (a message
-delivered to a peer, a fetch, a resolve) — are recorded and replayed. A
-message to a peer (inference, run-on-machine) goes out as an `http` call and
-its answer comes back as a message. Time and random are pure: they derive from the
-stamp the runtime wrote on the current log entry.
-Request/response *is* attestation; peers all look the same from inside.
-Attested means signed by the host (#62): for every `http` and `libp2p`
-call the router signs the exchange — the op, the instance, the digests of
-the request and of the answer, and the time it answered — with its attest
-key (a child of its master secret), and the signature is recorded with the
-answer. The genesis names that key, so a reader of the log alone can check
-that this host relayed each exchange and when; replay refuses a recorded
-call whose attestation is missing or does not verify. It attests provenance
-and time, not that the answer is true. (A `wallet` answer is a signature
-already.) A
-program waiting on an recorded call is an ordinary thread at rest: the
+— are answered inside, deterministically, and never recorded. The one
+**recorded** syscall is the oracle (`wallet`): its answer is a signature
+already. Everything that leaves the runtime is a message (#70, #67): a step
+`emit`s a signed message — to a peer (inference, run-on-machine) or to a
+provider (a fetch, a publish, a wake, a broadcast) — and the answer comes
+back as a message, an entry of its own, signed by whoever answered. Time
+and random are pure: they derive from the stamp the runtime wrote on the
+current log entry. Request/response is a pair of messages; peers and
+providers all look the same from inside. (Format 4's host attestations of
+recorded `http`/`libp2p` calls, #62, went with the calls: a provider's
+answer is its own signed statement.) A
+program waiting on an answer is an ordinary thread at rest: the
 suspended instance is its transient handle, the scheduler wakes it when the
 reply arrives, and a restart re-executes it from the log. Pipeline stages are
 threads too; their records are recomputable cache. Which syscall is bound to

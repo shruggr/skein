@@ -70,7 +70,7 @@
 //                         default 4610; "off" starts none
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
 //   SKEIN_ARC_URL         the host's Arcade (#58, arc.ts): the broadcast route /arc/v1/tx, one status subscription,
-//                         a new genesis's walletArc; SKEIN_ARC_TOKEN its one callback token (required with it);
+//                         the instances' broadcast provider (#70); SKEIN_ARC_TOKEN its one callback token (required with it);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
 //                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
