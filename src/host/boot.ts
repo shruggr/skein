@@ -5,7 +5,8 @@
 //   bin/<name>.cid    the CID (raw, bafkrei…) of a module the source or the kernel holds
 //   bin/<name>.json   optional: the program record's {inputs, services, description}
 //   etc/config.json   optional: {defaults, peers, names, collect, feeds} (keys hex or $owner/$infer; feeds: feeds.ts)
-//   etc/subscriptions.json   [{sender?, box, handler}] (sender hex/$owner/$infer, handler a bin/ name or a CID)
+//   etc/dispatch.json        [{transport?, address, prefix?, sender?, program, fn?, …}] (#77: the dispatch rows; genesis.ts DispatchSpec)
+//   etc/subscriptions.json   [{sender?, box, handler}] (the form before #77, still read: a mailbox row each)
 //   … anything else: the instance's files (SOUL.md, skills/ …)
 //
 // The loader **pre-fills the store** with the tree's objects (git-raw blobs
@@ -33,7 +34,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
-import { codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
+import { codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const RAW = 0x55;
@@ -42,6 +43,7 @@ const SHA2_256 = 0x12;
 
 export const BIN = "bin";
 export const CONFIG = "etc/config.json";
+export const DISPATCH = "etc/dispatch.json";
 export const SUBSCRIPTIONS = "etc/subscriptions.json";
 export const ROUTES = "etc/routes.json";
 export const READS = "etc/reads.json";
@@ -99,8 +101,10 @@ export interface SystemTree {
   /** Modules named by bin/<name>.wasm (with their bytes) or bin/<name>.cid (bytes if the source has them). */
   modules: Array<{ cid: CID; bytes?: Uint8Array; name: string }>;
   config: ConfigSpec;
-  subscriptions: SubscriptionSpec[];
-  /** etc/routes.json (#40), else the stock routes; etc/reads.json, else the stock reads. */
+  /** etc/dispatch.json (#77): the dispatch rows; etc/subscriptions.json, the form before it (mailbox rows). One of them is required. */
+  dispatch?: DispatchSpec[];
+  subscriptions?: SubscriptionSpec[];
+  /** etc/routes.json (#40, the form before #77: http and libp2p rows), else the stock http rows; etc/reads.json, else the stock reads. */
   routes?: RouteSpec[];
   reads?: ReadSpec[];
 }
@@ -195,9 +199,12 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
     const meta = json<{ inputs?: unknown; services?: string[]; description?: string }>(`${BIN}/${name}.json`) ?? {};
     programs.push({ name, module, record: programRecord(name, module, meta) });
   }
+  const dispatch = json<DispatchSpec[]>(DISPATCH);
+  if (dispatch !== undefined && !Array.isArray(dispatch)) throw new Error(`${DISPATCH}: not a list`);
   const subscriptions = json<SubscriptionSpec[]>(SUBSCRIPTIONS);
-  if (!Array.isArray(subscriptions)) throw new Error(`${SUBSCRIPTIONS}: missing, or not a list (a system tree names its subscriptions)`);
-  for (const s of subscriptions) {
+  if (subscriptions !== undefined && !Array.isArray(subscriptions)) throw new Error(`${SUBSCRIPTIONS}: not a list`);
+  if (dispatch === undefined && subscriptions === undefined) throw new Error(`${DISPATCH}: missing (a system tree names its dispatch rows; ${SUBSCRIPTIONS} is the form before #77)`);
+  for (const s of subscriptions ?? []) {
     if (!s || typeof s.box !== "string" || !s.box || typeof s.handler !== "string" || (s.sender !== undefined && typeof s.sender !== "string")) {
       throw new Error(`${SUBSCRIPTIONS}: bad entry ${JSON.stringify(s)} (want {sender?, box, handler})`);
     }
@@ -208,7 +215,7 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
   if (routes !== undefined && !Array.isArray(routes)) throw new Error(`${ROUTES}: not a list`);
   const reads = json<ReadSpec[]>(READS);
   if (reads !== undefined && !Array.isArray(reads)) throw new Error(`${READS}: not a list`);
-  return { root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, subscriptions, ...(routes ? { routes } : {}), ...(reads ? { reads } : {}) };
+  return { root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, ...(dispatch ? { dispatch } : {}), ...(subscriptions ? { subscriptions } : {}), ...(routes ? { routes } : {}), ...(reads ? { reads } : {}) };
 }
 
 // ---------------------------------------------------------------- the loader
@@ -226,7 +233,7 @@ export interface Booted { entry?: CID; tree?: CID; state?: CID; objects: number;
 /**
  * Boot an empty store through its kernel: pre-fill and write the genesis (a
  * tree, or the stock system), or restore a checkpoint. The kernel processes
- * the genesis when it starts (subscriptions; `main` → the tree).
+ * the genesis when it starts (the dispatch rows; `main` → the tree).
  */
 export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: Stamp = clockNow()): Promise<Booted> {
   if (await k.store.log.tip()) throw new Error("the store already has a log: boot only into an empty store");
@@ -252,7 +259,7 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   // The shell is the VM's own program (its modules are the kernel's), and so is the front door when the tree brings none; every handler comes from bin/
   const programs: Record<string, CID> = { ...(kernelPrograms.shell ? { shell: kernelPrograms.shell } : {}), ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
-  const s: System = resolveSystem(c, programs, t.subscriptions, t.config, t.root, t.routes, t.reads);
+  const s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
   const entry = await writeSystemGenesis(k, c, s, time);
   return { entry, tree: t.root, objects: n, programs: Object.keys(programs) };
 }
@@ -271,11 +278,11 @@ export async function stockSystemFiles(k: Kernel): Promise<Record<string, string
     files[`${BIN}/${name}.json`] = `${JSON.stringify({ inputs: r.inputs, services: r.services, description: r.description }, null, 2)}\n`;
   }
   const { DEFAULTS } = await import("../runtime/log.ts");
-  const { STOCK_SUBSCRIPTIONS } = await import("./genesis.ts");
-  files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"] }, null, 2)}\n`;
-  files[SUBSCRIPTIONS] = `${JSON.stringify(STOCK_SUBSCRIPTIONS, null, 2)}\n`;
-  const { STOCK_ROUTES, STOCK_READS } = await import("./genesis.ts");
-  files[ROUTES] = `${JSON.stringify(STOCK_ROUTES, null, 2)}\n`;
+  const { STOCK_DISPATCH, STOCK_HTTP, STOCK_READS, STOCK_SCOPES } = await import("./genesis.ts");
+  files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"], scopes: STOCK_SCOPES }, null, 2)}\n`;
+  // The stock rows (#77): the admin rows and the boxes, then the HTTP rows as dispatch specs.
+  const http = STOCK_HTTP.map(({ path, prefix, program, fn, auth, read, root, index }) => ({ transport: "http", address: path ?? prefix, ...(prefix !== undefined ? { prefix: true } : {}), sender: auth === "none" ? "*" : "session", program, fn, ...(read ? { read } : {}), ...(root ? { root } : {}), ...(index ? { index } : {}) }));
+  files[DISPATCH] = `${JSON.stringify([...STOCK_DISPATCH, ...http], null, 2)}\n`;
   files[READS] = `${JSON.stringify(STOCK_READS, null, 2)}\n`;
   return files;
 }

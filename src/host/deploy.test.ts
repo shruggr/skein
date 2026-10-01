@@ -19,7 +19,7 @@ import { InferPeer } from "../peers/infer.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
-import { currentSubscriptions } from "../runtime/subscriptions.ts";
+import { currentDispatch, senderText } from "../runtime/dispatch.ts";
 import { gitCid, readFile, readTree, walk } from "../runtime/tree.ts";
 import { collect, iso, T0 } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
@@ -230,28 +230,29 @@ test("skein-host deploy: records the root and source in the row; again: unchange
   assert.match(other.err.at(-1)!, /not SKEIN_OWNER/);
 });
 
-test("skein-host subscribe: a `subscribe` message as the owner changes a running instance's subscriptions, a handler named from its genesis; no new genesis", { skip }, async (t) => {
+test("skein-host dispatch: a message to box `dispatch` as the owner changes a running instance's dispatch table (a kernel operation), a handler named from its genesis; no new genesis", { skip }, async (t) => {
   const { env, store } = await setup(t, ["martha"]);
   const s = await store("martha");
   const e = env();
   const cli = (...argv: string[]) => main(argv, e.env);
   const genesis = (await collect(s.log.entries(0)))[0]!.cid;
-  const before = await until("the genesis processed (its seed rules)", () => currentSubscriptions(s));
+  const before = await until("the genesis processed (its seed rows)", () => currentDispatch(s));
   const runHandler = (await programsOf(s))["run-handler"]!;
   const peer = PrivateKey.fromRandom().toPublicKey().toString();
-  const last = async () => (await currentSubscriptions(s))!.at(-1)!;
+  const last = async () => (await currentDispatch(s))!.at(-1)!;
 
-  assert.equal(await cli("subscribe", "martha", "add", "--sender", peer, "run", "run-handler"), 0, e.err.join("\n"));
-  await until("the new rule", async () => (await last()).match.sender === peer ? true : undefined);
-  assert.deepEqual([(await last()).match, String((await last()).handler)], [{ sender: peer, box: "run" }, String(runHandler)]);
-  assert.equal(await cli("subscribe", "martha", "remove", "--sender", peer, "run", String(runHandler)), 0);
-  await until("the rule removed", async () => (await currentSubscriptions(s))!.length === before!.length ? true : undefined);
-  assert.deepEqual(await currentSubscriptions(s), before, "removed: the rules as they were");
+  assert.equal(await cli("dispatch", "martha", "add", "--sender", peer, "run", "run-handler"), 0, e.err.join("\n"));
+  await until("the new row", async () => senderText((await last()).sender) === peer ? true : undefined);
+  const row = await last();
+  assert.deepEqual([row.transport, row.address, senderText(row.sender), String(row.program)], ["mailbox", "run", peer, String(runHandler)]);
+  assert.equal(await cli("dispatch", "martha", "remove", "--sender", peer, "run", String(runHandler)), 0);
+  await until("the row removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
+  assert.deepEqual(await currentDispatch(s), before, "removed: the rows as they were");
   assert.ok((await collect(s.log.entries(0)))[0]!.cid.equals(genesis), "the same genesis");
 
-  assert.equal(await cli("subscribe", "martha", "swap", "run", "loop"), 2);
-  assert.equal(await cli("subscribe", "nobody", "add", "run", "loop"), 1);
-  assert.equal(await cli("subscribe", "martha", "add", "run", "no-such-program"), 1);
+  assert.equal(await cli("dispatch", "martha", "swap", "run", "loop"), 2);
+  assert.equal(await cli("dispatch", "nobody", "add", "run", "loop"), 1);
+  assert.equal(await cli("dispatch", "martha", "add", "run", "no-such-program"), 1);
   assert.match(e.err.at(-1)!, /not a CID or a program name/);
 });
 

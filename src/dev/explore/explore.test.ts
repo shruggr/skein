@@ -1,5 +1,5 @@
 // The explorer over a small instance written by the Zig kernel through a
-// router (testhost.ts chatWorld): a directory imported (objects → `main`), a
+// host (testhost.ts chatWorld): a directory imported (objects, a kernel operation → `main`), a
 // chat turn with one bash tool call (loop → shell → loop → the answer in the
 // owner's mailbox), then every page rendered from the store file, opened
 // read-only beside the live kernel.
@@ -38,26 +38,27 @@ async function world(t: { after(fn: () => unknown): void }) {
   return { ...w, store, get };
 }
 
-test("explore: overview, log, entry, threads, the loop's conversation, the shell run, a tree, a head, the subscriptions chain", { skip }, async (t) => {
+test("explore: overview, log, entry, threads, the loop's conversation, the shell run, a tree, a head, the dispatch table", { skip }, async (t) => {
   const { store, root, get, h } = await world(t);
   assert.ok((await headTree(store, MAIN))?.equals(root), h.lines.join("\n"));
 
   const home = await get("/");
   assert.equal(home.status, 200);
-  for (const s of ["alpha@localhost", "peer infer", "objects-handler", root.toString(), "subscriptions", "format 2"]) assert.ok(home.text.includes(s), `overview: ${s}`);
+  for (const s of ["alpha@localhost", "peer infer", root.toString(), "<h2>dispatch</h2>", "kernel: objects", "kernel: dispatch", "run-handler", "anyone", "owner main", "owner frontdoor", "format 2"]) assert.ok(home.text.includes(s), `overview: ${s}`);
   assert.ok(home.text.includes(`href="/s"`), "the overview links the chain");
 
   const log = await get("/log");
-  for (const s of ["genesis", "wake", "objects-handler", "loop", "shell", "launched"]) assert.ok(log.text.includes(s), `log: ${s}`);
+  for (const s of ["genesis", "frontdoor", "loop", "shell", "launched"]) assert.ok(log.text.includes(s), `log: ${s}`);
 
   const e = await get("/e/0");
   assert.equal(e.status, 200);
   for (const s of ["log entry #0", "genesis", "entries are unsigned"]) assert.ok(e.text.includes(s), `entry: ${s}`);
 
   const threads = await get("/threads");
-  for (const s of ["loop", "shell", "objects-handler", "ls | head -3"]) assert.ok(threads.text.includes(s), `threads: ${s}`);
+  for (const s of ["loop", "shell", "frontdoor", "ls | head -3"]) assert.ok(threads.text.includes(s), `threads: ${s}`);
+  assert.ok(!threads.text.includes("objects-handler"), "objects is a kernel operation: no thread");
   const shells = await get("/threads?program=shell");
-  assert.ok(shells.text.includes("ls | head -3") && !shells.text.includes("objects-handler</td>"));
+  assert.ok(shells.text.includes("ls | head -3") && !shells.text.includes("frontdoor</span>"));
 
   const w = await load(store);
   const loop = w.threads.find((x) => x.program === "loop")!;
@@ -78,10 +79,13 @@ test("explore: overview, log, entry, threads, the loop's conversation, the shell
   assert.ok((await get(`/r/${root}?p=README`)).text.includes("hello"));
 
   const head = await get(`/h/${MAIN}`);
-  assert.ok(head.text.includes(root.toString()) && head.text.includes("objects-handler"));
+  for (const s of [root.toString(), "owner main", "a kernel operation"]) assert.ok(head.text.includes(s), `head: ${s}`);
 
-  const subs = await get("/s");
-  for (const s of ["genesis seed", "subscribe-handler", "add", "owner"]) assert.ok(subs.text.includes(s), `subscriptions: ${s}`);
+  const d = await get("/s");
+  for (const s of ["dispatch table changes", "genesis seed", "add", "mailbox", "kernel: objects", "run-handler", "owner", "anyone", "session"]) assert.ok(d.text.includes(s), `dispatch: ${s}`);
+  const w0 = await load(store);
+  const origin = (await store.get(w0.dispatch![0]!.cid) as { origin: import("multiformats/cid").CID }).origin;
+  assert.ok((await get(`/r/${origin}`)).text.includes("the dispatch table's origin"));
 
   const rec = await get(`/r/${loop.cid}`);
   assert.ok(rec.text.includes("thread view") && rec.text.includes("kind <b>thread</b>"));

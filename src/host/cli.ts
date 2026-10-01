@@ -12,7 +12,7 @@
 //   skein-host run
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
 //   skein-host roster [--for <handle> | --deploy]
-//   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
+//   skein-host dispatch <handle> add|remove [--sender key] <box> <handler-name-or-cid>
 //   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] | remove <key> | list
 //   skein-host event <handle> <box> [json]
 //   skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]
@@ -35,10 +35,10 @@
 // `roster` prints the front end's roster (roster.ts), which `run` also serves
 // at /roster.json; `roster --for h` prints h's ROSTER.md; `roster --deploy`
 // sends every enabled row whose ROSTER.md changed its deployed tree (from the
-// instance's store) with the new one. `subscribe` changes an instance's
-// subscriptions (#3) by a `subscribe` message as the owner, as `deploy` sends
-// (a new instance's genesis carries only the seed: the owner's boxes and
-// `chat` from anyone). `peers` writes an instance's address book (#40: key →
+// instance's store) with the new one. `dispatch` changes a mailbox row of an
+// instance's dispatch table (#77) by a message to its `dispatch` box as the
+// owner, a kernel operation, as `deploy` sends (a new instance's genesis
+// carries only the table's seed: the admin rows and the owner's boxes). `peers` writes an instance's address book (#40: key →
 // messagebox URL, handle optional; where it delivers to a key) by messages to
 // its `peers` box as the owner, the admin's configuration; `list` reads it
 // from the store. `deploy` and `roster --deploy` also write every other
@@ -48,19 +48,19 @@
 // `event` (#60, #69) sends one message from the host's cron provider into a
 // box of an instance now, as a tick due now would be (cron.ts): the JSON
 // object given, its kind "cron" unless it names one, `due` now; the instance
-// takes it by its subscription to that box (from the cron provider, or from
+// takes it by its dispatch row for that box (from the cron provider, or from
 // anyone). A store has one kernel: while `run` is up the event goes over its
 // control socket ($SKEIN_HOME/host.sock, control.ts) and the running router
 // sends it; with the host down, through a router of its own, closed
 // afterwards. A router that answers at SKEIN_HOST_URL / SKEIN_ROUTER_PORT
 // with no control socket here is refused.
-// `install` (#72, #76; install.ts, docs/APPS.md §3) is the owner's client for
+// `install` (#72, #76, #77; install.ts, docs/APPS.md §3) is the owner's client for
 // an app: the tree (a directory, or a git URL cloned) and its etc/app.json
 // checked, the requests derived and shown (the permission prompt: heads,
-// boxes and their senders, routes under /<app>/, start, requires, provides),
+// its dispatch rows: boxes and their senders, http paths under /<app>/, libp2p topics; start, requires, provides),
 // then — approved (`--approve-all`, or "y" at a terminal) — sent as the owner:
-// objects, head (the app record), subscribe per (box, sender), routes, start.
-// `uninstall` sends the app's stop, then removes its subscriptions and routes;
+// objects, head (the app record at <app>/app), dispatch per row, start.
+// `uninstall` sends the app's stop, then removes its dispatch rows;
 // the head is left. Both speak to the row's front door as `deploy` does.
 // `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
@@ -87,7 +87,7 @@
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
 //                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
-// `deploy`, `subscribe` and `peers` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
+// `deploy`, `dispatch` and `peers` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
 // (default http://127.0.0.1:8100) /@<handle>, as the owner — SKEIN_OWNER (checked against the wallet):
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
@@ -111,8 +111,8 @@ import { masterKey, Oracle } from "./oracle.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
-import { subscribeBody } from "../client/client.ts";
-import { addressBook, DEFAULT_ONLY, deploy, deployFiles, subscribeRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
+import { dispatchBody } from "../client/client.ts";
+import { addressBook, DEFAULT_ONLY, deploy, deployFiles, dispatchRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
 import { Supervisor, type Supervised } from "./supervisor.ts";
 import { noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
@@ -145,12 +145,12 @@ const USAGE = `usage:
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed
-  skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
+  skein-host dispatch <handle> add|remove [--sender key] <box> <handler-name-or-cid>   a mailbox row of the dispatch table (#77): (sender, box) → handler
   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d]   an address-book entry (#70): how the agent reaches <key> (mailbox: a URL; libp2p: a peer ID or topic:<name>; local: a provider)
   skein-host peers <handle> remove <key>
   skein-host peers <handle> list                          its address book: key, transport, address, role, handle, source
   skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]   an app (docs/APPS.md): check, show what it asks for, send as the owner
-  skein-host uninstall <app> --instance <handle> [--approve-all]                          its stop, then its subscriptions and routes removed (the head is left)
+  skein-host uninstall <app> --instance <handle> [--approve-all]                          its stop, then its dispatch rows removed (the heads are left)
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
@@ -249,8 +249,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return knowsCmd(db, rest, env);
       case "roster":
         return await rosterCmd(db, rest, env);
-      case "subscribe":
-        return await subscribeCmd(db, rest, env);
+      case "dispatch":
+        return await dispatchCmd(db, rest, env);
       case "peers":
         return await peersCmd(db, rest, env);
       case "event":
@@ -309,17 +309,17 @@ function knowsCmd(db: HostDb, rest: string[], env: Env): number {
   return 0;
 }
 
-async function subscribeCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+async function dispatchCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const { values: v, positionals: [handle, op, box, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { sender: { type: "string" } } });
   if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(USAGE); return 2; }
   const row = db.get(handle!);
-  if (!row) { env.err(`skein-host subscribe: no instance ${handle}`); return 1; }
-  const owner = await ownerOf(env, "skein-host subscribe");
+  if (!row) { env.err(`skein-host dispatch: no instance ${handle}`); return 1; }
+  const owner = await ownerOf(env, "skein-host dispatch");
   if (typeof owner === "number") return owner;
   const s = openRow(row, env);
   try {
-    await subscribeRow({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, subscribeBody({ op, sender: v.sender, box: box!, handler }, await genesisPrograms(s.blocks)));
-    env.out(`${row.handle}: subscribe ${op} (${v.sender ? short(v.sender) : "anyone"}, ${box}) → ${handler} sent`);
+    await dispatchRow({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, dispatchBody({ op, sender: v.sender, box: box!, handler }, await genesisPrograms(s.blocks)));
+    env.out(`${row.handle}: dispatch ${op} (mailbox ${box}, ${v.sender ? short(v.sender) : "anyone"}) → ${handler} sent`);
     return 0;
   } catch (e) {
     env.err(`${row.handle}: ${(e as Error).message}`);
@@ -477,7 +477,7 @@ async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number>
     if (typeof owner === "number") return owner;
     const box = owner.box(row);
     const r = await sendInstall(plan, (b, body) => box.send(row.identity!, b, body));
-    env.out(`${row.handle}: ${plan.app} ${plan.version} ${plan.upgrade ? "upgraded" : "installed"}: ${r.messages} messages sent as the owner · head ${plan.app} → ${plan.recordCid}`);
+    env.out(`${row.handle}: ${plan.app} ${plan.version} ${plan.upgrade ? "upgraded" : "installed"}: ${r.messages} messages sent as the owner · head ${plan.app}/app → ${plan.recordCid}`);
     return 0;
   } catch (e) {
     env.err(`skein-host install: ${(e as Error).message}`);
@@ -487,7 +487,7 @@ async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number>
   }
 }
 
-/** `skein-host uninstall <app> --instance <handle>` (#72, #76): stop, then its subscriptions and routes removed. */
+/** `skein-host uninstall <app> --instance <handle>` (#72, #76, #77): stop, then its dispatch rows removed. */
 async function uninstallCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const { values: v, positionals: [app, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, "approve-all": { type: "boolean" } } });
   if (!app || more.length || !v.instance) { env.err(USAGE); return 2; }
@@ -498,7 +498,7 @@ async function uninstallCmd(db: HostDb, rest: string[], env: Env): Promise<numbe
     if (!s.blocks) throw new Error(`no store at ${row.store}`);
     const { instanceView, planUninstall, sendUninstall } = await import("./install.ts");
     const p = await planUninstall(app, await instanceView(s.blocks));
-    env.out(`uninstall ${app} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · subscribe remove ×${p.subscriptions.length} · routes remove ×${p.routes.length} · head ${app} left`);
+    env.out(`uninstall ${app} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length} · head ${app}/app left`);
     if (!(await approved(v, env, `uninstall ${app} from ${row.handle}`))) return 1;
     const owner = await ownerOf(env, "skein-host uninstall");
     if (typeof owner === "number") return owner;
@@ -625,7 +625,7 @@ async function ownerMessageboxWarning(row: InstanceRow, store: Store | undefined
   return undefined;
 }
 
-/** The programs a store's genesis names (name → program record CID): what `subscribe` resolves a handler name against. */
+/** The programs a store's genesis names (name → program record CID): what `dispatch` resolves a handler name against. */
 async function genesisPrograms(store: Store | undefined): Promise<Record<string, CID>> {
   if (!store) return {};
   for await (const { entry } of store.log.entries(0)) {
@@ -784,7 +784,7 @@ async function systemCmd(rest: string[], env: Env): Promise<number> {
       mkdirSync(dirname(join(dir, p)), { recursive: true });
       writeFileSync(join(dir, p), text);
     }
-    env.out(`${dir}: ${Object.keys(files).length} files (${Object.keys(files).filter((f) => f.endsWith(".cid")).length} programs, etc/config.json, etc/subscriptions.json)`);
+    env.out(`${dir}: ${Object.keys(files).length} files (${Object.keys(files).filter((f) => f.endsWith(".cid")).length} programs, etc/config.json, etc/dispatch.json)`);
     return 0;
   } finally {
     await k.stop(5000);

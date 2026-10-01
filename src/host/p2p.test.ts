@@ -111,11 +111,12 @@ test("p2p: two nodes — a topic message through the validator, a stream round t
   await a.close("alpha", m);
 });
 
-test("p2p: an instance's config as its installed routes ask (#72), and a node declared again follows it — subscribed, unsubscribed, handled, unhandled, stopped — with no restart", async (t) => {
-  assert.equal(libp2pConfig({}, []), undefined, "no libp2p in the genesis, no installed libp2p route: no node");
-  const routes = [{ path: "/overlay/submit" }, { path: "libp2p:tm_demo" }, { path: "libp2p:tm_demo-admit" }, { path: "libp2p:/amm/1/swap" }, { prefix: "libp2p:x" }];
-  assert.deepEqual(libp2pConfig({}, routes), { topics: ["tm_demo", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "installed routes alone start a node");
-  assert.deepEqual(libp2pConfig({ libp2p: { topics: ["tm_demo", "g"], listen: ["/ip4/127.0.0.1/tcp/1"] } }, routes), { topics: ["tm_demo", "g", "tm_demo-admit"], protocols: ["/amm/1/swap"], listen: ["/ip4/127.0.0.1/tcp/1"] }, "the genesis's, then the routes', once each");
+test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #77), and a node declared again follows it — subscribed, unsubscribed, handled, unhandled, stopped — with no restart", async (t) => {
+  assert.equal(libp2pConfig({}, []), undefined, "no libp2p in the genesis, no libp2p row: no node");
+  const rows = [{ transport: "http", address: "/overlay/submit" }, { transport: "libp2p", address: "tm_demo" }, { transport: "libp2p", address: "tm_demo-admit" }, { transport: "libp2p", address: "/amm/1/swap" }, { transport: "mailbox", address: "x" }];
+  assert.deepEqual(libp2pConfig({}, rows), { topics: ["tm_demo", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "libp2p rows alone start a node");
+  assert.deepEqual(libp2pConfig({ libp2p: { topics: ["tm_demo", "g"], listen: ["/ip4/127.0.0.1/tcp/1"] } }, rows), { topics: ["tm_demo", "g", "tm_demo-admit"], protocols: ["/amm/1/swap"], listen: ["/ip4/127.0.0.1/tcp/1"] }, "the genesis's, then the rows', once each");
+  assert.deepEqual(libp2pConfig({ libp2p: { topics: ["g"] }, dispatch: [{ transport: "libp2p", address: "tm_demo" }] }, rows), { topics: ["g", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "a genesis row alone subscribes nothing: the tree's config.libp2p says what the node takes");
 
   const o = new Oracle(PrivateKey.fromHex("45".repeat(32)));
   const calls: InboundCall[] = [];

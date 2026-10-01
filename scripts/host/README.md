@@ -121,7 +121,7 @@ address book (head `peers`: key → transport and address, role and handle
 optional; docs/MESSAGES.md, "Outbound: emit, the address book and the
 providers"). Every new genesis seeds it with the host's providers and the
 owner's mailbox (source `genesis`); the rest is configuration: the admin
-writes it through the agent's `peers` box as the owner, like `subscribe`.
+writes it through the agent's `peers` box as the owner, like `dispatch`.
 
 ```
 bin/skein-host peers martha add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle bob@example.com]
@@ -267,7 +267,7 @@ The host-wide settings, from the environment or `~/.skein/host.env` (only the
 The sections below describe the pre-router layout (the `1sat serve`
 messagebox, a wallet-api per instance, host-signed entries, BRC-169
 envelopes) where they talk about those processes; `skein-host deploy`,
-`subscribe` and the roster work the same against the router, speaking raw
+`dispatch` and the roster work the same against the router, speaking raw
 BRC-33 to the row's front door (`SKEIN_HOST_URL`/@<handle>) as the owner.
 
 ## The messagebox (legacy: `1sat serve`)
@@ -433,32 +433,34 @@ explorer"): one line per enabled instance — handle, identity, status
 and a link to its explorer (src/dev/explore) over the row's store. This is
 the host operator's view, not the end-user UI.
 
-### Changing an instance's subscriptions: `skein-host subscribe`
+### Changing an instance's dispatch table: `skein-host dispatch`
 
-The genesis carries only the seed of an instance's subscriptions; the
-routing table is a chain in the instance (docs/VM.md, "Subscriptions"), so a
-change is a message, not a new genesis. `skein-host subscribe <handle>
-add|remove [--sender <key>] <box> <handler>` sends one `subscribe` envelope
-`{op, sender?, box, handler}` to the row's instance as the owner, through the
-owner's wallet to its front door exactly as `deploy` does (same checks).
+The genesis carries only the seed of an instance's dispatch table (#77,
+docs/MESSAGES.md "The dispatch table"); the table is a chain in the
+instance's store, so a change is a message, not a new genesis.
+`skein-host dispatch <handle> add|remove [--sender <key>] <box> <handler>`
+sends one message to the instance's `dispatch` box as the owner, through the
+owner's wallet to its front door exactly as `deploy` does (same checks). The
+kernel performs it (an admin operation, not a program): the body is
+`{op, row}`, the row `{transport: "mailbox", address: <box>, sender: "*" |
+<key bytes>, program: <handler>}`; `add` replaces the row with the same
+(transport, address, prefix, sender) or appends it, `remove` deletes it.
 `<handler>` is a program the instance's genesis names (`loop`,
 `run-handler`, …: resolved to its record's CID from the row's store) or a
-program record's CID (registering a program: its record and module go in
-through `objects` first). No reply; the change shows on the
-explorer's `/s` and in the log (`[handle] … subscribe-handler step 1 →
-finished · 1 subscription change`). Nothing in host.db maps to rules yet
-(`knows` is only ROSTER.md), so nothing sends these automatically.
+program record's CID (its record and module go in through `objects` first).
+No reply; the change shows on the explorer's `/s`. Nothing in host.db maps
+to rows yet (`knows` is only ROSTER.md), so nothing sends these
+automatically.
 
 ```
-bin/skein-host subscribe martha add --sender <key> run run-handler
-bin/skein-host subscribe martha remove --sender <key> run run-handler
+bin/skein-host dispatch martha add --sender <key> run run-handler
+bin/skein-host dispatch martha remove --sender <key> run run-handler
 ```
 
-**Stores from before the chain** (genesis written before #3) have no
-subscriptions chain: the kernel refuses to start them ("predates the
-subscriptions chain … it needs a new genesis"). Move the runtime.db aside,
-restart `skein-host run` on this build, and `deploy` again; host.db is
-untouched.
+**Stores from before the dispatch table** (a genesis with `subscriptions`
+or `routes`, before format 8) are not read by this kernel. Move the
+runtime.db aside, restart `skein-host run` on this build, and `deploy`
+again; host.db is untouched.
 
 ### Installing an app: `skein-host install` / `uninstall`
 
@@ -497,15 +499,15 @@ does what `bin/skein import` does, for the row's instance: it hashes `<dir>`
 into git objects, sends them in ≤ 1 MiB bundles to the instance's `objects`
 box (blobs, then trees, the root tree on the last bundle), and records the
 root CID as the row's `tree` and `<dir>` as its `source`. Each message is
-sent as the **owner** — the identity the genesis subscribes to `objects` and
-`head` — on the owner's BRC-104 session with the front door, as `bin/skein` does
+sent as the **owner** — the identity the genesis's dispatch rows take `objects` and
+`head` from — on the owner's BRC-104 session with the front door, as `bin/skein` does
 (`SKEIN_OWNER_WALLET`, default http://127.0.0.1:3322, origin
 `SKEIN_ORIGINATOR`, default `skein-client`); it refuses if that wallet is not
 `SKEIN_OWNER` or not the store's genesis owner. Each bundle is one message
 to the instance's front door (the router starts its kernel if it is not
 running), admitted as one `mail` entry.
 
-- **First deploy**: objects-handler makes the root `main` (there is none yet).
+- **First deploy**: the kernel's `objects` operation makes the root `main` (there is none yet).
 - **Redeploy of a changed directory**: only the records the instance's store
   lacks (read-only look at the store, if it exists), then `head` `{name:
   "main", tree: root}`, so the next *new* conversation starts from the new

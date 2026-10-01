@@ -19,13 +19,13 @@ import type { ClientConfig } from "./config.ts";
 import { RawBox } from "./raw.ts";
 import { chatBody, conversationFrom, loadConversation, parseReply, saveConversation, type Conversation } from "./conversation.ts";
 
-export const BOX = { objects: "objects", run: "run", head: "head", subscribe: "subscribe", results: "results", chat: "chat" } as const;
+export const BOX = { objects: "objects", run: "run", head: "head", dispatch: "dispatch", results: "results", chat: "chat" } as const;
 
 /** The boxes David reads, in this order: `run` results, then `chat` (the instance's replies, and chats from others). */
 export const INBOX = [BOX.results, BOX.chat] as const;
 
-/** A subscription change as the `subscribe` box takes it. */
-export interface SubscribeArgs { op: "add" | "remove"; sender?: string; box: string; handler: string }
+/** A dispatch table change for a mailbox row: (sender — anyone when absent, else an identity key in hex —, box) → handler. */
+export interface DispatchArgs { op: "add" | "remove"; sender?: string; box: string; handler: string }
 
 /**
  * A handler: a program record's CID, or the name of one in `programs` (an
@@ -37,13 +37,22 @@ export function handlerCid(s: string, programs: Record<string, CID> = {}): CID {
   if (named) return named;
   try { return CID.parse(s); } catch {
     const names = Object.keys(programs);
-    throw new Error(`handler ${JSON.stringify(s)}: not a CID${names.length ? ` or a program name (${names.join(", ")})` : " (a program by name needs the instance's genesis: skein-host subscribe)"}`);
+    throw new Error(`handler ${JSON.stringify(s)}: not a CID${names.length ? ` or a program name (${names.join(", ")})` : " (a program by name needs the instance's genesis: skein-host dispatch)"}`);
   }
 }
 
-/** The `subscribe` body: {op, sender?, box, handler}; a handler named from `programs` (handlerCid). */
-export function subscribeBody(a: SubscribeArgs, programs: Record<string, CID> = {}): Record<string, unknown> {
-  return { op: a.op, ...(a.sender ? { sender: a.sender } : {}), box: a.box, handler: handlerCid(a.handler, programs) };
+/**
+ * The kernel's `dispatch` operation's body (box `dispatch`, from the owner):
+ * {op, row} with row a mailbox row {transport, address: box, sender: "*" or
+ * the key's 33 bytes, program}; a handler named from `programs` (handlerCid).
+ */
+export function dispatchBody(a: DispatchArgs, programs: Record<string, CID> = {}): { op: "add" | "remove"; row: Record<string, unknown> } {
+  return { op: a.op, row: { transport: "mailbox", address: a.box, sender: a.sender ? senderKey(a.sender) : "*", program: handlerCid(a.handler, programs) } };
+}
+
+function senderKey(hex: string): Uint8Array {
+  if (!/^0[23][0-9a-f]{64}$/i.test(hex)) throw new Error(`sender ${JSON.stringify(hex)}: not an identity key (33 bytes, hex)`);
+  return new Uint8Array(Buffer.from(hex, "hex"));
 }
 
 /** A directory as git objects held in memory: [root, records]. `opts.ignore` as scan's. */
@@ -160,9 +169,9 @@ export class SkeinClient {
     return this.send(BOX.head, { name, tree: CID.parse(tree) }, { tree });
   }
 
-  /** Change the instance's subscriptions (box `subscribe`): add or remove (sender, box) → handler. No reply. */
-  subscribe(a: SubscribeArgs): Promise<Sent> {
-    return this.send(BOX.subscribe, subscribeBody(a));
+  /** Change the instance's dispatch table (box `dispatch`, a kernel operation): add or remove the mailbox row (sender, box) → handler. No reply. */
+  dispatch(a: DispatchArgs): Promise<Sent> {
+    return this.send(BOX.dispatch, dispatchBody(a));
   }
 
   /**

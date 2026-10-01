@@ -26,7 +26,7 @@ async function tree(t: { after(f: () => unknown): void }, files: Record<string, 
   return dirSource(dir);
 }
 
-test("system tree: bin/ programs (.wasm bytes, .cid, .json), config and subscriptions resolve into a genesis", async (t) => {
+test("system tree: bin/ programs (.wasm bytes, .cid, .json), config and subscriptions (the form before #77) resolve into a genesis of dispatch rows", async (t) => {
   const pinned = CID.parse("bafkreif57vlek2v7lbfa5y43txx7svtlseanithrjxjldqveknwvt3vfwm");
   const infer = key();
   const { root, objects } = await tree(t, {
@@ -44,26 +44,31 @@ test("system tree: bin/ programs (.wasm bytes, .cid, .json), config and subscrip
   assert.deepEqual(s.programs[0]!.record.services, ["outcomes"]);
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
   const c = { identity: key(), owner: key(), handle: "a", domain: "localhost", infer, defaults: { fuelPerStep: "9" } };
-  const g = genesisRecord(c, resolveSystem(c, programs, s.subscriptions, s.config, root)) as Record<string, any>;
+  const g = genesisRecord(c, resolveSystem(c, programs, s.subscriptions ?? [], s.config, root)) as Record<string, any>;
   assert.ok(g.tree.equals(root));
   assert.deepEqual(g.defaults.model, "m");
   assert.equal(g.defaults.fuelPerStep, "5", "the tree's config wins over the host's defaults");
   const warned: string[] = [];
   const o = { ...c, overrides: { fuelPerStep: "7" }, warn: (l: string) => warned.push(l) };
-  assert.equal((genesisRecord(o, resolveSystem(o, programs, s.subscriptions, s.config, root)) as Record<string, any>).defaults.fuelPerStep, "7", "an explicit override wins");
+  assert.equal((genesisRecord(o, resolveSystem(o, programs, s.subscriptions ?? [], s.config, root)) as Record<string, any>).defaults.fuelPerStep, "7", "an explicit override wins");
   assert.match(warned[0]!, /replaces the system tree's fuelPerStep = 5/);
   const fill = { ...c, defaults: { walletNetwork: "test" } };
-  assert.equal((genesisRecord(fill, resolveSystem(fill, programs, s.subscriptions, s.config, root)) as Record<string, any>).defaults.walletNetwork, "test", "the host fills what the tree leaves unset");
+  assert.equal((genesisRecord(fill, resolveSystem(fill, programs, s.subscriptions ?? [], s.config, root)) as Record<string, any>).defaults.walletNetwork, "test", "the host fills what the tree leaves unset");
   assert.equal(keyHex(g.peers.infer), infer);
-  assert.equal(keyHex(g.subscriptions[0].match.sender), c.owner);
-  assert.equal(g.subscriptions[1].match.sender, undefined);
-  assert.ok(g.subscriptions[1].handler.equals(programs.echo));
+  const boxes = g.dispatch.filter((r: { transport: string; program: unknown }) => r.transport === "mailbox" && r.program !== "kernel");
+  assert.equal(keyHex(boxes[0].sender), c.owner);
+  assert.equal(boxes[1].sender, "*");
+  assert.ok(boxes[1].program.equals(programs.echo));
+  assert.ok(!g.dispatch.some((r: { transport: string }) => r.transport === "http"), "the stock http rows name programs this tree lacks: dropped");
+  assert.deepEqual(g.dispatch.slice(0, 4).map((r: { address: string; program: unknown; fn?: string }) => [r.address, r.program, r.fn]), [["objects", "kernel", "objects"], ["head", "kernel", "head"], ["dispatch", "kernel", "dispatch"], ["peers", "kernel", "peers"]], "the owner's admin rows first (#77)");
+  assert.equal(keyHex(g.dispatch[0].sender), c.owner);
+  assert.deepEqual(g.scopes.frontdoor, ["frontdoor/"], "the stock scopes");
   assert.deepEqual(g.collect, ["x"]);
 });
 
-test("system tree: refusals — no subscriptions, a bad .cid, a handler that is no program, $infer on a host without one", async (t) => {
+test("system tree: refusals — no dispatch rows, a bad .cid, a handler that is no program, $infer on a host without one", async (t) => {
   const none = await tree(t, { "bin/x.wasm": MODULE });
-  await assert.rejects(readSystemTree(none.objects, none.root), /subscriptions\.json: missing/);
+  await assert.rejects(readSystemTree(none.objects, none.root), /dispatch\.json: missing/);
   const bad = await tree(t, { "bin/x.cid": "nope", "etc/subscriptions.json": "[]" });
   await assert.rejects(readSystemTree(bad.objects, bad.root), /not a CID/);
   const notWasm = await tree(t, { "bin/x.wasm": "text", "etc/subscriptions.json": "[]" });

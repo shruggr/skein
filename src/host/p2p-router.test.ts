@@ -139,9 +139,9 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   await lb.kernel.store.put(DEMO as never);
   assert.equal(A.r.p2p!.peerId("alpha"), idA);
   assert.equal(B.r.p2p!.node("beta")!.peerId.toString(), idB, "beta's node runs as its derived peer ID");
-  const g = await lb.kernel.genesis() as { libp2p?: unknown; routes?: Array<{ path?: string; fn: string }> };
+  const g = await lb.kernel.genesis() as { libp2p?: unknown; dispatch?: Array<{ transport: string; address: string; fn?: string }> };
   assert.deepEqual(g.libp2p, { topics: [TOPIC], protocols: [PROTOCOL] }, "the genesis carries the libp2p config");
-  assert.ok(g.routes?.some((r) => r.path === `libp2p:${PROTOCOL}` && r.fn === "stream") && g.routes?.some((r) => r.path === `libp2p:${TOPIC}`), "libp2p: route sources");
+  assert.ok(g.dispatch?.some((r) => r.transport === "libp2p" && r.address === PROTOCOL && r.fn === "stream") && g.dispatch?.some((r) => r.transport === "libp2p" && r.address === TOPIC), "libp2p rows (#77)");
 
   const pubsub = (r: Router, h: string) => (r.p2p!.node(h)!.services as { pubsub: { getSubscribers(t: string): unknown[] } }).pubsub;
   await until(() => pubsub(A.r, "alpha").getSubscribers(TOPIC).length > 0 && pubsub(B.r, "beta").getSubscribers(TOPIC).length > 0, "the two nodes see each other on the topic");

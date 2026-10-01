@@ -7,13 +7,13 @@ import type { CID } from "multiformats/cid";
 import { decode, isCID } from "../../runtime/cid.ts";
 import { headOrigin, MAIN, type HeadUpdate } from "../../runtime/heads.ts";
 import { genesisOf, readLog, type LogEntry } from "../../runtime/log.ts";
-import { isProgram, matches, type Genesis, type Subscription } from "../../runtime/records.ts";
+import { isProgram, type Genesis } from "../../runtime/records.ts";
 import { NotFound, type Store } from "../../runtime/store.ts";
-import { fold, subscriptionUpdates, type SubscriptionUpdate } from "../../runtime/subscriptions.ts";
+import { dispatchUpdates, fold, forMail, type DispatchRow, type DispatchUpdate } from "../../runtime/dispatch.ts";
 import type { ThreadOrigin, ThreadUpdate } from "../../runtime/types.ts";
 
 export type Update = ThreadUpdate & {
-  step?: number; calls?: CID[]; launched?: CID[]; kept?: CID[]; emits?: CID[]; heads?: CID[]; subscriptions?: CID[];
+  step?: number; calls?: CID[]; launched?: CID[]; kept?: CID[]; emits?: CID[]; heads?: CID[];
 };
 
 export interface Thread {
@@ -37,7 +37,7 @@ export interface World {
   touched: Map<string, Touch[]>;             // entry CID → the threads it launched or stepped
   envelopes: Map<string, EnvelopeRecord>;    // admitted envelopes, by CID
   outcomes: Map<string, { cid: CID; entry: LogEntry }>; // outcome entries, by the emit they report on
-  subscriptions?: Array<{ cid: CID; u: SubscriptionUpdate }>; // the subscriptions chain, oldest first; absent: never opened
+  dispatch?: Array<{ cid: CID; u: DispatchUpdate }>; // the dispatch table's chain, oldest first; absent: never opened
   cursor: number;
 }
 
@@ -69,7 +69,7 @@ export async function load(store: Store): Promise<World> {
     if (env) envelopes.set(entry.envelope!.toString(), env);
   }
   return {
-    store, genesis, log, threads, touched, envelopes, subscriptions: await subscriptionUpdates(store),
+    store, genesis, log, threads, touched, envelopes, dispatch: await dispatchUpdates(store),
     outcomes: new Map(log.filter((x) => x.entry.outcome).map((x) => [x.entry.outcome!.emit.toString(), x])),
     entries: new Map(log.map((x) => [x.cid.toString(), x])),
     byThread: new Map(threads.map((t) => [t.cid.toString(), t])),
@@ -104,33 +104,37 @@ export interface EnvelopeRecord {
 
 export const senderOf = (env: EnvelopeRecord | undefined) => env?.sender?.identityKey;
 
-/** The subscriptions as they stood when entry `n` was processed (the updates written by earlier entries); all of them if n is absent. */
-export function rulesAt(w: World, n?: number): Subscription[] {
-  const before = (u: SubscriptionUpdate) => n === undefined || (w.entries.get(u.input.toString())?.entry.n ?? Infinity) < n;
-  return fold((w.subscriptions ?? []).map((x) => x.u).filter(before));
+/** The dispatch table's rows as they stood when entry `n` was processed (the updates written by earlier entries); now if n is absent. */
+export function rowsAt(w: World, n?: number): DispatchRow[] {
+  const before = (u: DispatchUpdate) => n === undefined || (w.entries.get(u.input.toString())?.entry.n ?? Infinity) < n;
+  return fold((w.dispatch ?? []).map((x) => x.u).filter(before));
 }
 
-/** How the runtime routed envelope entry `n`: a reply (by its body's `replyTo`) or the first subscription matching then. */
+/** How the kernel routed envelope entry `n`: a reply (by its body's `replyTo`) or the first mailbox row taking it then (dispatch.ts forMail). */
 export function routeOf(w: World, n: number, sender: string | undefined, box: string | undefined, body: unknown):
-  { reply: CID | null } | { sub: Subscription; i: number } | undefined {
+  { reply: CID | null } | { row: DispatchRow; i: number } | undefined {
   if (body && typeof body === "object" && "replyTo" in body) {
     const r = (body as { replyTo: unknown }).replyTo;
     return { reply: isCID(r) ? r : null };
   }
   if (!sender || box === undefined) return undefined;
-  const rules = rulesAt(w, n);
-  const i = rules.findIndex((s) => matches(s, sender, box));
-  return i < 0 ? undefined : { sub: rules[i], i };
+  return forMail(rowsAt(w, n), sender, box);
 }
+
+/** The app a head name belongs to (heads.zig ownerOf): the text before the first `/`, or the whole name. */
+export const ownerOf = (name: string): string => name.split("/", 1)[0]!;
+
+/** An identity key as hex, whether a record holds it as text or as bytes (format 2). */
+export const hexKey = (k: unknown): string | undefined => typeof k === "string" ? k : k instanceof Uint8Array ? Buffer.from(k).toString("hex") : undefined;
 
 /** Who an identity is, as far as this instance knows. */
 export function label(w: World, id: string | undefined): string | undefined {
   const g = w.genesis;
   if (!g || !id) return undefined;
-  if (id === g.owner) return "owner";
-  if (id === g.identity) return "instance";
-  if (g.host && id === g.host) return "host";
-  return Object.entries(g.peers ?? {}).find(([, v]) => v === id)?.[0];
+  if (id === hexKey(g.owner)) return "owner";
+  if (id === hexKey(g.identity)) return "instance";
+  if (g.host && id === hexKey(g.host)) return "host";
+  return Object.entries(g.peers ?? {}).find(([, v]) => hexKey(v) === id)?.[0];
 }
 
 /** Head names moved by any step, `main` first. */

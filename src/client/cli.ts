@@ -8,7 +8,7 @@
 //   skein import <dir>
 //   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
 //   skein head <name> <tree-cid>
-//   skein subscribe add|remove [--sender <identity-key>] <box> <handler-cid>
+//   skein dispatch add|remove [--sender <identity-key>] <box> <handler-cid>
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
 //   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
 //   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
@@ -24,7 +24,7 @@ export type Command =
   | { cmd: "import"; dir: string }
   | { cmd: "run"; tree?: string; cwd?: string; env?: Record<string, string>; line: string }
   | { cmd: "head"; name: string; tree: string }
-  | { cmd: "subscribe"; op: "add" | "remove"; sender?: string; box: string; handler: string }
+  | { cmd: "dispatch"; op: "add" | "remove"; sender?: string; box: string; handler: string }
   | { cmd: "inbox"; wait: boolean; timeout: number; ack: boolean; json: boolean }
   | { cmd: "chat"; text: string; tree?: string; model?: string; fresh: boolean; wait: boolean; timeout: number }
   | { cmd: "talk"; tree?: string; model?: string; fresh: boolean; timeout: number }
@@ -35,7 +35,7 @@ export const USAGE = `usage:
   skein import <dir>
   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
   skein head <name> <tree-cid>
-  skein subscribe add|remove [--sender <identity-key>] <box> <handler-cid>
+  skein dispatch add|remove [--sender <identity-key>] <box> <handler-cid>
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]`;
@@ -87,11 +87,11 @@ export function parseCli(argv: string[]): Command {
       if (positionals.length !== 2) throw new Error("head: expected <name> <tree-cid>");
       return { cmd: "head", name: positionals[0]!, tree: positionals[1]! };
     }
-    case "subscribe": {
+    case "dispatch": {
       const { values, positionals } = parseArgs({ args: rest, options: { sender: { type: "string" } }, allowPositionals: true });
       const [op, box, handler] = positionals;
-      if (positionals.length !== 3 || (op !== "add" && op !== "remove")) throw new Error("subscribe: expected add|remove [--sender <identity-key>] <box> <handler>");
-      return { cmd: "subscribe", op, box: box!, handler: handler!, ...(values.sender !== undefined && { sender: values.sender }) };
+      if (positionals.length !== 3 || (op !== "add" && op !== "remove")) throw new Error("dispatch: expected add|remove [--sender <identity-key>] <box> <handler>");
+      return { cmd: "dispatch", op, box: box!, handler: handler!, ...(values.sender !== undefined && { sender: values.sender }) };
     }
     case "inbox": {
       const { values } = parseArgs({
@@ -194,8 +194,8 @@ export async function main(argv: string[]): Promise<number> {
       console.log(s.cid);
       return 0;
     }
-    case "subscribe": {
-      const s = await client.subscribe(c);
+    case "dispatch": {
+      const s = await client.dispatch(c);
       console.log(s.cid);
       return 0;
     }

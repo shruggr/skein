@@ -10,7 +10,7 @@ import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import { blobCid, gitSha } from "../runtime/tree.ts";
 import { chunk, decodeBundle, BUNDLE_LIMIT, type Rec } from "./bundle.ts";
-import { SkeinClient, hashDir, handlerCid, subscribeBody } from "./client.ts";
+import { SkeinClient, dispatchBody, hashDir, handlerCid } from "./client.ts";
 import { parseCli } from "./cli.ts";
 import type { ClientConfig } from "./config.ts";
 import { KERNEL_BIN } from "../host/kernel.ts";
@@ -84,10 +84,10 @@ test("parseCli", () => {
   assert.deepEqual(parseCli(["run", "--", "ls"]), { cmd: "run", line: "ls" }, "no --tree: the instance's `main`");
   assert.deepEqual(parseCli(["head", "main", "baf"]), { cmd: "head", name: "main", tree: "baf" });
   assert.throws(() => parseCli(["head", "baf"]), /<name> <tree-cid>/);
-  assert.deepEqual(parseCli(["subscribe", "add", "--sender", "02ab", "chat", "loop"]), { cmd: "subscribe", op: "add", sender: "02ab", box: "chat", handler: "loop" });
-  assert.deepEqual(parseCli(["subscribe", "remove", "chat", "baf"]), { cmd: "subscribe", op: "remove", box: "chat", handler: "baf" });
-  assert.throws(() => parseCli(["subscribe", "swap", "chat", "loop"]), /add\|remove/);
-  assert.throws(() => parseCli(["subscribe", "add", "chat"]), /add\|remove/);
+  assert.deepEqual(parseCli(["dispatch", "add", "--sender", "02ab", "chat", "loop"]), { cmd: "dispatch", op: "add", sender: "02ab", box: "chat", handler: "loop" });
+  assert.deepEqual(parseCli(["dispatch", "remove", "chat", "baf"]), { cmd: "dispatch", op: "remove", box: "chat", handler: "baf" });
+  assert.throws(() => parseCli(["dispatch", "swap", "chat", "loop"]), /add\|remove/);
+  assert.throws(() => parseCli(["dispatch", "add", "chat"]), /add\|remove/);
   assert.throws(() => parseCli(["run", "--tree", "x", "--env", "NOEQ", "--", "ls"]), /K=V/);
   assert.throws(() => parseCli(["import"]), /one <dir>/);
   assert.throws(() => parseCli(["inbox", "--bogus"]));
@@ -123,14 +123,19 @@ test("bin/skein on a host (#40): run to the instance's front door, the result re
   assert.deepEqual(await client.inbox(), [], "acknowledged");
 });
 
-test("subscribe body: a handler by CID, or by a name the genesis's programs give; sender only when given", () => {
+test("dispatch body: a mailbox row; a handler by CID, or by a name the genesis's programs give; sender anyone unless given (then its 33 bytes)", () => {
   const loop = encode({ kind: "program", name: "loop" }).cid, other = encode({ kind: "program", name: "other" }).cid;
   const programs = { loop };
   assert.ok(handlerCid("loop", programs).equals(loop));
   assert.ok(handlerCid(other.toString()).equals(other));
   assert.throws(() => handlerCid("nope", programs), /not a CID or a program name \(loop\)/);
   assert.throws(() => handlerCid("loop"), /needs the instance's genesis/);
-  const b = subscribeBody({ op: "add", box: "chat", handler: "loop" }, programs);
-  assert.deepEqual(Object.keys(b), ["op", "box", "handler"]);
-  assert.equal(subscribeBody({ op: "remove", sender: "02ab", box: "chat", handler: loop.toString() }).sender, "02ab");
+  const b = dispatchBody({ op: "add", box: "chat", handler: "loop" }, programs);
+  assert.deepEqual(b, { op: "add", row: { transport: "mailbox", address: "chat", sender: "*", program: loop } });
+  const key = `02${"ab".repeat(32)}`;
+  const r = dispatchBody({ op: "remove", sender: key, box: "chat", handler: loop.toString() });
+  assert.equal(r.op, "remove");
+  assert.ok(r.row.sender instanceof Uint8Array && r.row.sender.length === 33);
+  assert.equal(Buffer.from(r.row.sender as Uint8Array).toString("hex"), key);
+  assert.throws(() => dispatchBody({ op: "add", sender: "02ab", box: "chat", handler: "loop" }, programs), /not an identity key/);
 });

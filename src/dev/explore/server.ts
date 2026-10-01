@@ -4,14 +4,14 @@
 // from web/serve.ts (the browser client): it opens the SQLite file read-only
 // beside a live runtime and renders pages from it. No forms, no writes.
 //
-//   /                  the instance: identity, genesis, heads, subscriptions, boxes
+//   /                  the instance: identity, genesis, heads, dispatch table, boxes
 //   /log[?before=n]    the input log, newest first
 //   /e/<entry>         one log entry: envelope metadata, body, routing, threads
 //   /threads[?program=&state=]
 //   /t/<thread>        a thread's origin and steps (?frag=1 the body, ?tip=1 for polling)
 //   /r/<cid>[?p=path]  any record: dag-cbor as JSON, git trees browsable, raw blocks
 //   /h/<name>          a head's moves
-//   /s                 the subscriptions chain's changes
+//   /s                 the dispatch table's changes
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { CID } from "multiformats/cid";
@@ -19,7 +19,7 @@ import { parse } from "../../runtime/cid.ts";
 import { openStoreFile } from "../../runtime/index-store.ts";
 import { NotFound, type Store } from "../../runtime/store.ts";
 import { dbPath, resolveCid } from "../cli.ts";
-import { entryPage, errorPage, headPage, logPage, overview, recordPage, subscriptionsPage, threadBody, threadPage, threadsPage, tipOf } from "./pages.ts";
+import { entryPage, errorPage, headPage, logPage, overview, recordPage, dispatchPage, threadBody, threadPage, threadsPage, tipOf } from "./pages.ts";
 import { load } from "./view.ts";
 
 export interface Response { status: number; type: string; body: string }
@@ -40,7 +40,7 @@ export async function render(store: Store, url: URL): Promise<Response> {
     };
     if (p === "/") return html(await overview(w));
     if (p === "/log") return html(logPage(w, q("before") ? Number(q("before")) : undefined));
-    if (p === "/s") return html(subscriptionsPage(w));
+    if (p === "/s") return html(dispatchPage(w));
     if (p === "/threads") return html(threadsPage(w, { program: q("program"), state: q("state") }));
     if ((g = p.match(/^\/e\/([^/]+)$/))) {
       const s = decodeURIComponent(g[1]);

@@ -35,6 +35,8 @@ test("kernel call: a function over the state, no entry and no writes, fuel repor
     identity, owner: identity, handle: "probe", domain: "localhost",
     defaults: { callFuelLimit: "5000000" },
     subscriptions: [{ box: "probe", handler: probe }],
+    // #77: a genesis-wired program writes only the heads its genesis scopes name.
+    scopes: { probe: ["probe"] },
   });
   await k.start();
   await k.idle();
@@ -88,7 +90,7 @@ test("kernel call: a function over the state, no entry and no writes, fuel repor
   assert.equal(Buffer.from((input.self as { identity: Uint8Array }).identity).toString("hex"), identity);
   assert.deepEqual(input.pending, [], "nothing admitted and unprocessed");
   assert.ok(CID.asCID(input.state), "the committed state record");
-  assert.ok(Array.isArray(input.subscriptions) && (input.subscriptions as unknown[]).length > 0);
+  assert.ok(Array.isArray(input.dispatch) && (input.dispatch as unknown[]).length > 0, "the dispatch rows (#77)");
 
   // Nothing above wrote: the log is where it was, the file the same size.
   assert.ok((await k.store.log.tip())!.equals(tip!), "no entry");

@@ -1,8 +1,8 @@
 // The router's libp2p host (#43, #51): a router component, like the HTTP
 // proxy and the feeds. The runtime has no network; this is where the sockets
 // are. One js-libp2p node per instance that declares libp2p — in its config
-// (the genesis's `libp2p`, from etc/config.json), or by an installed route
-// (`libp2p:<topic>`, `libp2p:<protocol>` in the head `routes`, #72) — each
+// (the genesis's `libp2p`, from etc/config.json), or by a `libp2p` row in the
+// kernel's dispatch table (#72, #77: a topic, or a `/<protocol>`) — each
 // with its own peer key, all inside the router process:
 //
 //   peer key   a secp256k1 key derived from the master secret with BRC-42/43
@@ -14,8 +14,8 @@
 //              peer key), noise + yamux, TCP and WebSocket listeners (WSS with a
 //              certificate), Kademlia DHT off | client | server, mDNS on/off,
 //              bootstrap peers kept connected, circuit relays.
-//   topics     the instance's `libp2p.topics` and its installed routes' topics
-//              (libp2pConfig): subscribed; each message is judged
+//   topics     the instance's `libp2p.topics` and its dispatch table's libp2p
+//              rows' topics (libp2pConfig): subscribed; each message is judged
 //              by the async topic validator, which makes one front-door call
 //              (`inbound`) and returns its verdict to GossipSub (accept: admit +
 //              forward; reject: drop + penalise the delivering peer; ignore: drop).
@@ -25,8 +25,8 @@
 //              With the DHT on, each topic name is a rendezvous: provide the
 //              CID v1 raw sha2-256 of the name and dial the providers found
 //              (go-libp2p's RoutingDiscovery, as go-p2p-message-bus uses it).
-//   protocols  the instance's `libp2p.protocols` and its installed routes'
-//              protocols (`libp2p:/…`): for each inbound stream the
+//   protocols  the instance's `libp2p.protocols` and its dispatch table's
+//              libp2p rows' protocols (`/…`): for each inbound stream the
 //              router reads length-prefixed frames (unsigned varint), makes one
 //              front-door call per frame and writes the answer's body back.
 //              Every node also serves /skein/message/1.0.0 (#70): a frame there is
@@ -193,14 +193,18 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
 }
 
 /**
- * An instance's libp2p config as it stands (#72): the genesis's (libp2pOf),
- * plus the topics and protocols its installed routes name (the head
- * `routes`: `libp2p:<topic>`, `libp2p:/<protocol>`). Undefined: no node — the
- * genesis declares none and no installed route needs one.
+ * An instance's libp2p config as it stands (#72, #77): the genesis's
+ * (libp2pOf: a tree names what its node subscribes in `config.libp2p`),
+ * plus the topics and protocols named by the dispatch table's `libp2p`
+ * rows added since the genesis (an app's install; address: a topic, or
+ * `/<protocol>`) — a genesis row alone subscribes nothing, as a route alone
+ * did not. Undefined: no node — the genesis declares none and no row needs
+ * one.
  */
-export function libp2pConfig(g: Record<string, unknown> | null | undefined, installed: Array<Record<string, unknown>>): P2PInstanceConfig | undefined {
+export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>): P2PInstanceConfig | undefined {
   const base = libp2pOf(g);
-  const names = installed.map((r) => r.path).filter((p): p is string => typeof p === "string" && p.startsWith("libp2p:") && p.length > 7).map((p) => p.slice(7));
+  const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
+  const names = rows.filter((r) => r.transport === "libp2p" && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
   if (!base && !names.length) return undefined;
   const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
   return {

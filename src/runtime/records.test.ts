@@ -4,8 +4,8 @@ import { createHash } from "node:crypto";
 import { BigNumber, ECDSA, PrivateKey, PublicKey, Signature } from "@bsv/sdk";
 import { decode, encode } from "./cid.ts";
 import {
-  isEmit, isGenesis, isMessage, isOracleCall, isProgram, isSubscription, matches, messageBytes, messageDigest, program,
-  signMessage, verifyMessage, type Genesis, type Message, type Subscription,
+  isDispatchRow, isEmit, isGenesis, isMessage, isOracleCall, isProgram, messageBytes, messageDigest, program,
+  signMessage, verifyMessage, type Genesis, type Message,
 } from "./records.ts";
 import { ephemeralWallet, identityOf, signerFor } from "../wallet.ts";
 
@@ -51,18 +51,20 @@ test("message: any change breaks the signature", async () => {
   assert.equal(await verifyMessage({ ...m }), true);
 });
 
-test("subscription: matches on (sender, box); absent fields match anything; first match is the caller's rule", () => {
-  const david = PrivateKey.fromRandom().toPublicKey().toString();
-  const stranger = PrivateKey.fromRandom().toPublicKey().toString();
-  const run: Subscription = { match: { sender: david, box: "run" }, handler: wasm };
-  assert.ok(isSubscription(run));
-  assert.ok(matches(run, david, "run"));
-  assert.ok(!matches(run, stranger, "run"));
-  assert.ok(!matches(run, david, "objects"));
-  assert.ok(matches({ match: { box: "run" }, handler: wasm }, stranger, "run"));
-  assert.ok(matches({ match: {}, handler: wasm }, stranger, "anything"));
-  assert.ok(!isSubscription({ match: { sender: "nope" }, handler: wasm }));
-  assert.ok(!isSubscription({ match: {}, handler: "resolve-waiter" }));
+test("dispatch row: the kernel's rule (dispatch.zig problem)", () => {
+  const key = new Uint8Array(Buffer.from(PrivateKey.fromRandom().toPublicKey().toString(), "hex"));
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "run", sender: key, program: wasm }));
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "*", sender: "*", program: wasm }));
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "objects", sender: key, program: "kernel", fn: "objects" }));
+  assert.ok(isDispatchRow({ transport: "http", address: "/api/", prefix: true, sender: "session", program: wasm, fn: "get" }));
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: Buffer.from(key).toString("hex"), program: wasm }), "a key is bytes, not hex");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: "session", program: wasm }), "session: http only");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", prefix: true, sender: "*", program: wasm }), "prefix: http only");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "objects", sender: "*", program: "kernel", fn: "reboot" }), "no such kernel operation");
+  assert.ok(!isDispatchRow({ transport: "http", address: "/x", sender: "*", program: "kernel", fn: "objects" }), "a kernel row is a mailbox row");
+  assert.ok(!isDispatchRow({ transport: "smtp", address: "run", sender: "*", program: wasm }));
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "", sender: "*", program: wasm }));
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: "*", program: "run-handler" }), "a program is a CID");
 });
 
 test("program and genesis: validated", () => {
@@ -72,11 +74,13 @@ test("program and genesis: validated", () => {
   assert.throws(() => program({ name: "x", code: { ts: "", wasm } as never, inputs: {}, services: [], description: "" }), TypeError);
   assert.throws(() => program({ name: "", code: { ts: "" }, inputs: {}, services: [], description: "" }), TypeError);
   const id = PrivateKey.fromRandom().toPublicKey().toString();
-  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, host: id, programs: { w: wasm }, subscriptions: [{ match: { sender: id, box: "run" }, handler: wasm }] };
+  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, programs: { w: wasm }, dispatch: [{ transport: "mailbox", address: "run", sender: "*", program: wasm }], scopes: { w: ["main", "notes/"] } };
   assert.ok(isGenesis(g));
+  assert.ok(isGenesis({ ...g, host: id }), "format 1's host is still read");
   assert.ok(!isGenesis({ ...g, identity: "nope" }));
-  assert.ok(!isGenesis({ ...g, host: undefined }), "the host identity is required");
-  assert.ok(!isGenesis({ ...g, subscriptions: [{ match: {}, handler: "x" }] }));
+  assert.ok(!isGenesis({ ...g, dispatch: [{ transport: "mailbox", address: "run", sender: "*", program: "x" }] }), "a bad row is refused");
+  assert.ok(!isGenesis({ ...g, dispatch: undefined }), "the dispatch seed is required");
+  assert.ok(!isGenesis({ ...g, scopes: { w: [""] } }));
 });
 
 test("emit and oracle-call records: validated", () => {

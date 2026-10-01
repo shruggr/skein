@@ -1,38 +1,42 @@
-// Installing an app (#72, #76; docs/APPS.md §3): the owner's client. An app
-// is a tree (a directory or a git repository) with etc/app.json; installing
-// it into an instance is owner-signed messages to the instance's stock boxes,
-// nothing else:
+// Installing an app (#72, #76, #77; docs/APPS.md §3): the owner's client. An
+// app is a tree (a directory or a git repository) with etc/app.json;
+// installing it into an instance is owner-signed messages to the kernel's
+// admin boxes — the kernel's own operations on its four tables — nothing else:
 //
 //   1. objects    the tree's git objects, the modules its bin/*.wasm carry,
 //                 a program record per program, and the **app record** (below)
 //                 — ≤ 1 MiB bundles; no bundle names a root (an app never
 //                 becomes `main`)
-//   2. head       {name: <app>, tree: <the app record>}
-//   3. subscribe  one per (box, sender) the manifest asks for: {op: "add",
-//                 sender?, box, handler: <the role's program record>} — "*" is
-//                 no sender (anyone), "$owner" the owner, "$<provider>" the key
-//                 the instance's address book gives that role, a hex key itself.
-//                 (First, if the instance has no owner's `routes` box and the app
-//                 asks for routes: {sender: owner, box: "routes", handler: <frontdoor>}.)
-//      routes     one per route, to the box `routes` (the front door, #72):
-//                 {op: "add", route: {path | prefix: "/<app>/…", program: <record>, fn, …, app}}
+//   2. head       {name: "<app>/app", tree: <the app record>}: the app's root head, under its
+//                 own name (owner = the app). A manifest in the form before #77 (its SDK reads
+//                 and moves the bare name) gets the alias {name: "<app>", tree} too.
+//   3. dispatch   one per row the manifest asks for (#77): {op: "add", row: {transport, address,
+//                 prefix?, sender, program: <the role's program record>, fn?, …settings, app}} —
+//                 the sender "*" (anyone), "session", "$owner" → the owner's key, "$<provider>"
+//                 → the key the instance's address book gives that role, a hex key itself; an
+//                 http address under /<app>/, a libp2p topic or protocol as written.
 //   4. start      the manifest's `start.body`, into the app's box
 //
 // The **app record** is the head's root: the manifest as installed, so "what
-// does this head provide" is one read (`head(<app>)`, `get`):
+// does this head provide" is one read (`head("<app>/app")`, `get`):
 //
 //   {kind: "app", name, version, programs: {<role>: <program record CID>},
-//    handler?, config?, provides, requires, boxes: [{box, senders}], start?, stop?,
-//    routes (as the manifest wrote them, relative; `libp2p:` as is), heads (the app's own first)
-//    — boxes, routes and heads with what `config.overlay` derives (APPS.md §6),
-//    description?, tree: <the app's git tree>, state?: <the app's own state>}
+//    config?, provides, requires, dispatch: [<row as the manifest wrote it: relative addresses, roles>],
+//    grants?: [<head names outside <app>/ the app may write: transitional, #77>], legacy?: true,
+//    start?, stop?, description?, tree: <the app's git tree>, state?: <the app's own state>}
 //
 // `state` is the app's: its handler advances the head to the record with
 // `state` replaced (the SDK's app.Call.setState). An install over an earlier
-// version carries `state` over, removes the subscriptions and routes the
-// earlier record had and the new one does not, and sends `start` again (the
-// restart). Uninstall: `stop`, then every subscription and route removed;
-// the head is left.
+// version carries `state` over, removes the rows the earlier record had and
+// the new one does not, and sends `start` again (the restart). Uninstall:
+// `stop`, then every row removed; the heads are left.
+//
+// **Write scope** (#77): an app's programs write only heads under `<app>/`
+// (the kernel's rule, by the program record's `app`). The grants — a legacy
+// manifest's `heads`, the bare alias `<app>`, and what `config.overlay`
+// implies while the pinned engine writes `wallet`, `overlay:gossip` and
+// `ls:<service>` (until #79) — go on each program record as `heads`, which
+// the kernel honours as a transitional allowance. For David to review.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
@@ -44,13 +48,13 @@ import { chunk, type Rec } from "../client/bundle.ts";
 import { hashDir } from "../client/client.ts";
 import { defaultIgnore } from "../dev/scan.ts";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
+import { currentDispatch, rowKey as kernelRowKey, senderBytes, senderText, type DispatchRow } from "../runtime/dispatch.ts";
 import { headTree } from "../runtime/heads.ts";
 import type { IndexStore } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
-import { currentSubscriptions } from "../runtime/subscriptions.ts";
 import { programRecord, RAW, rawCid, wasmKind, type Objects } from "./boot.ts";
 import { addressBook, type AddressEntry } from "./deploy.ts";
-import { checkManifest, missingInterfaces, routePath, type Checked, type Derived, type Provide, type RouteIn } from "./manifest.ts";
+import { checkManifest, missingInterfaces, rowAddress, rowKey, type Checked, type Derived, type Provide, type Row } from "./manifest.ts";
 
 const textOf = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -103,11 +107,8 @@ export interface InstanceView {
   addressBook: AddressEntry[];
   /** Every head and its root (the store's index). */
   heads: Array<{ name: string; root: CID }>;
-  /** The subscriptions now (sender hex or none). */
-  subscriptions: Array<{ sender?: string; box: string; handler: CID }>;
-  /** The routes the genesis names, and the installed ones (the head `routes`). */
-  genesisRoutes: Array<Record<string, unknown>>;
-  installedRoutes: Array<Record<string, unknown>>;
+  /** The dispatch table now (#77): a row with `app` was installed by that app; without, it is the genesis's. */
+  dispatch: DispatchRow[];
 }
 
 export async function instanceView(store: Store): Promise<InstanceView> {
@@ -119,23 +120,23 @@ export async function instanceView(store: Store): Promise<InstanceView> {
   }
   if (!g) throw new Error("the instance's store has no genesis yet");
   const heads = typeof (store as Partial<IndexStore>).heads === "function" ? (store as IndexStore).heads() : [];
-  const routesRoot = await headTree(store, "routes");
-  const installed = routesRoot ? ((await store.get(routesRoot) as { routes?: Array<Record<string, unknown>> }).routes ?? []) : [];
   return {
     store,
     owner: String(g.owner),
     programs: (g.programs ?? {}) as Record<string, CID>,
     addressBook: await addressBook(store),
     heads,
-    subscriptions: ((await currentSubscriptions(store)) ?? []).map((s) => ({ ...(s.match.sender ? { sender: String(s.match.sender) } : {}), box: s.match.box!, handler: s.handler })),
-    genesisRoutes: (g.routes ?? []) as Array<Record<string, unknown>>,
-    installedRoutes: installed,
+    // The reader shows a 33-byte sender as hex; the kernel's rows carry bytes (a remove sends the row back).
+    dispatch: ((await currentDispatch(store)) ?? []).map((r) => ({ ...r, sender: senderBytes(r.sender) })),
   };
 }
 
+/** The app's root head (#77): `<name>/app`. */
+export const appHead = (name: string) => `${name}/app`;
+
 /** The app record a head's root is, if it is one. */
 export async function appRecordOf(store: Store, name: string): Promise<{ cid: CID; record: AppRecord } | undefined> {
-  const root = await headTree(store, name);
+  const root = await headTree(store, appHead(name));
   if (!root) return undefined;
   const r = await store.get(root).catch(() => undefined) as AppRecord | undefined;
   return r && r.kind === "app" ? { cid: root, record: r } : undefined;
@@ -146,8 +147,9 @@ export type AppRecord = Omit<Checked["manifest"], "programs"> & { programs: Reco
 
 // ---------------------------------------------------------------- the plan
 
-export interface Sub { op: "add" | "remove"; box: string; sender?: string; label: string; handler: CID; role?: string }
-export interface Route { op: "add" | "remove"; route: Record<string, unknown> & { app?: string } }
+/** A dispatch change the install sends: the row as the kernel takes it (sender resolved, program a CID, address as served, `app`), and how to show it. */
+export interface RowOp { op: "add" | "remove"; row: DispatchRow & { app: string }; label: string; role?: string }
+export interface HeadOp { name: string; tree: CID; alias?: boolean }
 
 /** What an install sends, in order, and what it shows. */
 export interface Plan {
@@ -157,64 +159,55 @@ export interface Plan {
   recordCid: CID;
   /** The records to send (the store does not have them), in order: objects, modules, program records, the app record. */
   records: Rec[];
-  /** The owner's `routes` box, when the instance lacks it and the app has routes. */
-  routesBox?: Sub;
-  subscriptions: Sub[];
-  routes: Route[];
+  heads: HeadOp[];
+  rows: RowOp[];
   start?: Record<string, unknown>;
   /** An install over an earlier version. */
   upgrade?: string;
   /** For the prompt only. */
   requires: string[];
-  heads: string[];
+  grants: string[];
   publishes: string[];
-  /** What `config.overlay` added to the boxes, routes and heads (APPS.md §6). */
+  /** What `config.overlay` added (APPS.md §6). */
   derived: Derived;
   notes: string[];
 }
 
-/** A sender as the manifest writes it → the key it is (hex) and how to show it; undefined key: anyone. */
-function senderOf(s: string, view: InstanceView): { key?: string; label: string } {
-  if (s === "*") return { label: "anyone" };
-  if (s === "$owner") return { key: view.owner, label: `the owner (${view.owner.slice(0, 10)}…)` };
+/** A sender as the manifest writes it → what the kernel's row carries, and how to show it. */
+function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"]; label: string } {
+  if (s === "*") return { sender: "*", label: "anyone" };
+  if (s === "session") return { sender: "session", label: "a session" };
+  if (s === "$owner") return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
   if (s.startsWith("$")) {
     const e = view.addressBook.find((x) => x.role === s.slice(1));
     if (!e) throw new Error(`sender ${s}: the instance's address book has no ${s.slice(1)} provider (an entry with role "${s.slice(1)}")`);
-    return { key: e.key, label: `${s} (${e.key.slice(0, 10)}…)` };
+    return { sender: keyBytes(e.key), label: `${s} (${e.key.slice(0, 10)}…)` };
   }
-  return { key: s, label: `${s.slice(0, 10)}…` };
+  return { sender: keyBytes(s), label: `${s.slice(0, 10)}…` };
 }
 
-/** The subscriptions and routes an app record asks for, resolved against the instance. */
-export function wiring(record: AppRecord, view: InstanceView): { subscriptions: Sub[]; routes: Route[] } {
-  const handlerOf = (box: string): { role: string; cid: CID } => {
-    const role = typeof record.handler === "string" ? record.handler : record.handler?.[box];
-    if (!role || !record.programs[role]) throw new Error(`box ${box}: no handler program`);
-    return { role, cid: record.programs[role]! };
-  };
-  const subscriptions: Sub[] = [];
-  for (const b of record.boxes) {
-    const h = handlerOf(b.box);
-    for (const s of b.senders) {
-      const who = senderOf(s, view);
-      subscriptions.push({ op: "add", box: b.box, ...(who.key ? { sender: who.key } : {}), label: who.label, handler: h.cid, role: h.role });
-    }
-  }
-  const routes: Route[] = record.routes.map((r: RouteIn) => {
-    const { path, prefix, program, ...rest } = r;
-    const at = routePath(record.name, (path ?? prefix)!);
-    return { op: "add", route: { ...rest, ...(path !== undefined ? { path: at } : { prefix: at }), program: record.programs[program]!, app: record.name } };
+/** The rows an app record asks for, resolved against the instance (as the kernel takes them). */
+export function wiring(record: AppRecord, view: InstanceView): RowOp[] {
+  return record.dispatch.map((r: Row) => {
+    const { transport, address, prefix, sender, program, fn, ...settings } = r;
+    const cid = record.programs[program];
+    if (!cid) throw new Error(`row ${rowKey(record.name, r)}: no program for role ${program}`);
+    const who = senderOf(sender, view);
+    const row: DispatchRow & { app: string } = { ...settings, transport, address: rowAddress(record.name, r), ...(prefix ? { prefix: true } : {}), sender: who.sender, program: cid, ...(fn ? { fn } : {}), app: record.name };
+    return { op: "add", row, label: who.label, role: program };
   });
-  return { subscriptions, routes };
 }
 
-const subKey = (s: { sender?: string; box: string; handler: CID }) => `${s.sender ?? "*"} ${s.box} ${s.handler}`;
-const routeKeyOf = (r: Record<string, unknown>) => (r.path !== undefined ? `path ${r.path}` : `prefix ${r.prefix}`);
+/** A row's key as the kernel's table knows it (the resolved row). */
+const keyOf = (r: DispatchRow) => kernelRowKey(r);
+/** A row as one line of the prompt: `<transport> <address>[*] from <who> → <role>[.<fn>]`. */
+const showRow = (r: RowOp) => `${r.row.transport} ${r.row.address}${r.row.prefix ? "*" : ""} from ${r.label} → ${r.role ?? String(r.row.program)}${r.row.fn ? `.${r.row.fn}` : ""}`;
 
 /** The program records of the tree's programs, the modules to send, and the role → record map. */
 async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promise<{ programs: Record<string, CID>; records: Rec[] }> {
   const programs: Record<string, CID> = {};
   const records: Rec[] = [];
+  const grants = t.checked.manifest.grants;
   for (const [role, src] of Object.entries(t.checked.sources)) {
     if (src.kind === "instance") {
       const p = view.programs[src.name];
@@ -240,8 +233,9 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
     }
     const metaPath = join(t.dir, "bin", `${src.name}.json`);
     const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) as { inputs?: unknown; services?: string[]; description?: string } : {};
-    // `app`: the program knows its app (its head) from its own record (APPS.md §2).
-    const b = encode({ ...programRecord(src.name, module, meta), app: t.checked.manifest.name });
+    // `app`: the program knows its app (its heads under `<app>/`) from its own record (APPS.md §2);
+    // `heads`: the transitional grants (#77), honoured by the kernel's write-scope check.
+    const b = encode({ ...programRecord(src.name, module, meta), app: t.checked.manifest.name, ...(grants.length ? { heads: grants } : {}) });
     programs[role] = b.cid;
     records.push({ cid: b.cid, bytes: b.bytes });
   }
@@ -252,67 +246,55 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
 export async function planInstall(t: AppTree, view: InstanceView, o: { modules: Objects }): Promise<Plan> {
   const m = t.checked.manifest;
   const notes: string[] = [];
-  // requires: every interface is provided by some installed app (each head's root record).
-  const installed: Array<{ name: string; provides?: Provide[]; heads?: string[] }> = [];
+  // requires: every interface is provided by some installed app (each app head's root record).
+  const installed: Array<{ name: string; provides?: Provide[] }> = [];
   for (const h of view.heads) {
-    if (h.name === m.name) continue;
+    if (!h.name.endsWith("/app") || h.name === appHead(m.name)) continue;
     const r = await view.store.get(h.root).catch(() => undefined) as AppRecord | undefined;
-    if (r?.kind === "app") installed.push({ name: h.name, provides: r.provides, heads: r.heads });
+    if (r?.kind === "app") installed.push({ name: h.name.slice(0, -"/app".length), provides: r.provides });
   }
   const missing = missingInterfaces(m.requires, installed);
   if (missing.length) throw new Error(`requires ${missing.join(", ")}: no installed app provides ${missing.length > 1 ? "them" : "it"}`);
-  // heads: the app's own is an app record or nothing; another app's heads are not asked for.
+  // The name is identity (#77): its root head is an app record or nothing.
   const before = await appRecordOf(view.store, m.name);
-  if (!before && view.heads.some((h) => h.name === m.name)) throw new Error(`head ${m.name} exists and its root is not an app record: another use of the name`);
-  for (const h of m.heads) {
-    const owner = installed.find((a) => a.name === h || (a.heads ?? []).includes(h));
-    if (owner) throw new Error(`head ${h}: app ${owner.name} owns it`);
-    if (h === "main") notes.push("head main is the shell's file system: the app asks to write it");
+  if (!before && view.heads.some((h) => h.name === appHead(m.name))) throw new Error(`head ${appHead(m.name)} exists and its root is not an app record: another use of the name`);
+  for (const g of m.grants) {
+    if (g === m.name) continue;
+    if (g === "main") notes.push("grant main: the shell's file system — the app asks to write it");
+    else notes.push(`grant ${g}: a head outside ${m.name}/ the app writes (transitional, #77)`);
   }
   const { programs, records: progRecords } = await programsOf(t, view, o.modules);
   const { programs: _paths, ...rest } = m;
   void _paths;
   const record: AppRecord = JSON.parse(JSON.stringify({ ...rest, programs: {}, tree: null })) as AppRecord;
+  if (!record.grants.length) delete (record as { grants?: string[] }).grants;
+  if (!record.legacy) delete (record as { legacy?: boolean }).legacy;
   record.programs = programs;
   record.tree = t.root;
   if (before?.record.state) record.state = before.record.state;
   const app = encode(record as never);
 
   const want = wiring(record, view);
-  // Routes: none may take a path the genesis or another app has.
+  // No row may take a key the genesis or another app has.
   const taken = new Map<string, string>();
-  for (const r of view.genesisRoutes) taken.set(routeKeyOf(r), "the genesis");
-  for (const r of view.installedRoutes) if (r.app !== m.name) taken.set(routeKeyOf(r), `app ${String(r.app ?? "?")}`);
-  for (const r of want.routes) {
-    const who = taken.get(routeKeyOf(r.route));
-    if (who) throw new Error(`route ${routeKeyOf(r.route)}: ${who} has it`);
+  for (const r of view.dispatch) if ((r as { app?: string }).app !== m.name) taken.set(keyOf(r), (r as { app?: string }).app ? `app ${String((r as { app?: string }).app)}` : "the genesis");
+  for (const r of want) {
+    const who = taken.get(keyOf(r.row));
+    if (who) throw new Error(`row ${keyOf(r.row)}: ${who} has it`);
   }
   // An earlier version: what it had and this one has not is removed.
-  const subscriptions = [...want.subscriptions];
-  const routes = [...want.routes];
+  const rows = [...want];
   if (before) {
-    let old: ReturnType<typeof wiring> | undefined;
-    try { old = wiring(before.record, view); } catch (e) { notes.push(`the installed version's wiring cannot be read (${(e as Error).message}): nothing of it removed`); }
-    const keep = new Set(want.subscriptions.map(subKey));
-    for (const s of old?.subscriptions ?? []) if (!keep.has(subKey(s))) subscriptions.push({ ...s, op: "remove" });
-    const keepR = new Set(want.routes.map((r) => routeKeyOf(r.route)));
-    for (const r of old?.routes ?? []) if (!keepR.has(routeKeyOf(r.route))) routes.push({ op: "remove", route: r.route });
+    const keep = new Set(want.map((r) => keyOf(r.row)));
+    for (const r of view.dispatch) if ((r as { app?: string }).app === m.name && !keep.has(keyOf(r))) rows.push({ op: "remove", row: r as DispatchRow & { app: string }, label: senderText(r.sender) });
   }
-  // Only what changes: a subscription the instance has, a route installed as asked, are not sent again.
-  const have = new Set(view.subscriptions.map(subKey));
-  const sendSubs = subscriptions.filter((s) => (s.op === "add") !== have.has(subKey(s)));
-  const installedNow = new Map(view.installedRoutes.map((r) => [routeKeyOf(r), r]));
-  const sendRoutes = routes.filter((r) => {
-    const cur = installedNow.get(routeKeyOf(r.route));
+  // Only what changes: a row the instance has as asked is not sent again.
+  const have = new Map(view.dispatch.map((r) => [keyOf(r), r]));
+  const sendRows = rows.filter((r) => {
+    const cur = have.get(keyOf(r.row));
     if (r.op === "remove") return !!cur;
-    return !cur || !sameRoute(cur, r.route);
+    return !cur || !sameRow(cur, r.row);
   });
-  let routesBox: Sub | undefined;
-  if (sendRoutes.length && !view.subscriptions.some((s) => s.box === "routes" && s.sender === view.owner)) {
-    const fd = view.programs.frontdoor;
-    if (!fd) throw new Error("the app asks for routes, and the instance's genesis names no front door to keep them");
-    routesBox = { op: "add", box: "routes", sender: view.owner, label: "the owner", handler: fd, role: "frontdoor" };
-  }
   // Records the store has are not sent again.
   const all: Rec[] = [];
   const seen = new Set<string>();
@@ -326,15 +308,16 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
     seen.add(k);
     if (!(await view.store.has(r.cid))) all.push(r);
   }
+  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }, ...(m.legacy ? [{ name: m.name, tree: app.cid, alias: true }] : [])];
   const publishes = gossipOf(m.config);
   return {
-    app: m.name, version: m.version, record, recordCid: app.cid, records: all, ...(routesBox ? { routesBox } : {}),
-    subscriptions: sendSubs, routes: sendRoutes, ...(m.start ? { start: m.start.body } : {}),
-    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, heads: m.heads, publishes, derived: t.checked.derived, notes,
+    app: m.name, version: m.version, record, recordCid: app.cid, records: all, heads,
+    rows: sendRows, ...(m.start ? { start: m.start.body } : {}),
+    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, grants: m.grants, publishes, derived: t.checked.derived, notes,
   };
 }
 
-const sameRoute = (a: Record<string, unknown>, b: Record<string, unknown>): boolean => encode(a as never).cid.equals(encode(b as never).cid);
+const sameRow = (a: DispatchRow, b: DispatchRow): boolean => encode(a as never).cid.equals(encode(b as never).cid);
 
 /** What an overlay app publishes (APPS.md §6), for information: `<topic>`, `-admit`, `-proof` per topic not turned off. */
 function gossipOf(config: Record<string, unknown> | undefined): string[] {
@@ -343,21 +326,18 @@ function gossipOf(config: Record<string, unknown> | undefined): string[] {
   return Object.keys(ov.topics).filter((t) => ov.gossip?.[t] !== false).flatMap((t) => [t, `${t}-admit`, `${t}-proof`]);
 }
 
-/** The permission prompt: what the app asks for (APPS.md §3). */
+/** The permission prompt: what the app asks for (APPS.md §3) — its rows read aloud. */
 export function describe(p: Plan, record = p.record): string[] {
   const out: string[] = [];
   out.push(`${p.upgrade ? "upgrade" : "install"} ${p.app} ${p.version}${p.upgrade ? ` (installed: ${p.upgrade})` : ""}${record.description ? ` — ${record.description}` : ""}`);
-  const d = p.derived ?? { boxes: [], routes: [], heads: [] };
+  const d = p.derived ?? { rows: [], grants: [] };
   const from = (yes: boolean) => (yes ? " (derived: config.overlay)" : "");
-  out.push(`  head      ${p.heads.join(", ")} → the app record ${p.recordCid} (tree ${record.tree})`);
-  if (d.heads.length) out.push(`  heads     ${d.heads.join(", ")}${from(true)}`);
-  for (const b of record.boxes) {
-    const role = typeof record.handler === "string" ? record.handler : record.handler?.[b.box];
-    out.push(`  box       ${b.box} → ${role}, from ${b.senders.join(", ")}${from(d.boxes.includes(b.box))}`);
-  }
-  for (const r of record.routes) {
-    const at = routePath(record.name, (r.path ?? r.prefix)!);
-    out.push(`  route     ${r.path !== undefined ? at : `${at}*`} → ${r.program}.${r.fn}${r.auth === "none" ? " (open: no session)" : ""}${r.read ? ` (read ${r.read})` : ""}${from(r.path !== undefined && d.routes.includes(r.path))}`);
+  for (const h of p.heads) out.push(`  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})${h.alias ? " (alias: a manifest in the form before #77)" : ""}`);
+  if (p.grants.length) out.push(`  grants    ${p.grants.join(", ")} (heads outside ${p.app}/ the app may write: transitional, #77)${from(d.grants.some((g) => p.grants.includes(g)))}`);
+  const keyed = (r: Row) => rowKey(record.name, r);
+  for (const r of record.dispatch) {
+    const who = r.sender === "*" ? "anyone" : r.sender;
+    out.push(`  row       ${r.transport} ${rowAddress(record.name, r)}${r.prefix ? "*" : ""} from ${who} → ${r.program}${r.fn ? `.${r.fn}` : ""}${r.read ? ` (read ${String(r.read)})` : ""}${from(d.rows.includes(keyed(r)))}`);
   }
   if (record.start) out.push(`  start     ${JSON.stringify(record.start.body)} into ${p.app}`);
   if (record.stop) out.push(`  stop      ${JSON.stringify(record.stop.body)} (at uninstall)`);
@@ -365,9 +345,8 @@ export function describe(p: Plan, record = p.record): string[] {
   for (const pr of record.provides) out.push(`  provides  ${pr.interface}: ${Object.entries(pr.functions).map(([f, d]) => `${f}${d.writes ? "" : " (read)"}`).join(", ")}`);
   if (p.publishes.length) out.push(`  publishes ${p.publishes.join(", ")} (for information: emitting needs no grant)`);
   for (const n of p.notes) out.push(`  note      ${n}`);
-  out.push(`  messages  objects ×${Math.max(1, [...chunk(p.records)].length)} (${p.records.length} records) · head · ${p.routesBox ? "subscribe routes → frontdoor · " : ""}subscribe ×${p.subscriptions.length} · routes ×${p.routes.length}${p.start ? " · start" : ""}`);
-  for (const s of p.subscriptions) out.push(`    subscribe ${s.op} ${s.box} from ${s.label} → ${s.role ?? s.handler}`);
-  for (const r of p.routes) out.push(`    routes    ${r.op} ${routeKeyOf(r.route)}`);
+  out.push(`  messages  objects ×${Math.max(1, [...chunk(p.records)].length)} (${p.records.length} records) · head ×${p.heads.length} · dispatch ×${p.rows.length}${p.start ? " · start" : ""}`);
+  for (const r of p.rows) out.push(`    dispatch ${r.op} ${showRow(r)}`);
   return out;
 }
 
@@ -376,34 +355,28 @@ export async function sendInstall(p: Plan, send: (box: string, body: Uint8Array)
   let n = 0;
   const go = async (box: string, body: Uint8Array) => { await send(box, body); n++; };
   for (const b of chunk(p.records)) await go("objects", b);
-  await go("head", dagCbor.encode({ name: p.app, tree: p.recordCid }));
-  if (p.routesBox) await go("subscribe", dagCbor.encode(subscribeBody(p.routesBox)));
+  for (const h of p.heads) await go("head", dagCbor.encode({ name: h.name, tree: h.tree }));
   // Removes first: an upgrade frees what it no longer asks for.
-  for (const s of [...p.subscriptions].sort((a, b) => (a.op === b.op ? 0 : a.op === "remove" ? -1 : 1))) await go("subscribe", dagCbor.encode(subscribeBody(s)));
-  for (const r of [...p.routes].sort((a, b) => (a.op === b.op ? 0 : a.op === "remove" ? -1 : 1))) await go("routes", dagCbor.encode(routeBody(r)));
+  for (const r of [...p.rows].sort((a, b) => (a.op === b.op ? 0 : a.op === "remove" ? -1 : 1))) await go("dispatch", dagCbor.encode(rowBody(r)));
   if (p.start) await go(p.app, dagCbor.encode(p.start));
   return { messages: n };
 }
 
 const keyBytes = (hex: string) => Uint8Array.from(Buffer.from(hex, "hex"));
-const subscribeBody = (s: Sub) => ({ op: s.op, ...(s.sender ? { sender: keyBytes(s.sender) } : {}), box: s.box, handler: s.handler });
-const routeBody = (r: Route) => r.op === "add" ? { op: "add", route: r.route } : { op: "remove", route: r.route.path !== undefined ? { path: r.route.path } : { prefix: r.route.prefix } };
+/** The kernel's `dispatch` operation's body: an add carries the whole row; a remove its key fields suffice (the row is sent as held). */
+const rowBody = (r: RowOp) => ({ op: r.op, row: r.row });
 
 // ---------------------------------------------------------------- uninstall
 
-export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; subscriptions: Sub[]; routes: Route[] }
+export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[] }
 
-/** What uninstalling `name` sends: `stop`, then its subscriptions and routes removed. The head is left. */
+/** What uninstalling `name` sends: `stop`, then its rows removed (every row the table holds with `app: name`). The heads are left. */
 export async function planUninstall(name: string, view: InstanceView): Promise<UninstallPlan> {
   const a = await appRecordOf(view.store, name);
   if (!a) throw new Error(`${name}: no app installed under that head`);
-  const w = wiring(a.record, view);
-  const have = new Set(view.subscriptions.map(subKey));
-  const routes = new Set(view.installedRoutes.filter((r) => r.app === name).map(routeKeyOf));
   return {
     app: name, record: a.record, ...(a.record.stop ? { stop: a.record.stop.body } : {}),
-    subscriptions: w.subscriptions.filter((s) => have.has(subKey(s))).map((s) => ({ ...s, op: "remove" as const })),
-    routes: view.installedRoutes.filter((r) => r.app === name && routes.has(routeKeyOf(r))).map((r) => ({ op: "remove" as const, route: r })),
+    rows: view.dispatch.filter((r) => (r as { app?: string }).app === name).map((r) => ({ op: "remove" as const, row: r as DispatchRow & { app: string }, label: senderText(r.sender) })),
   };
 }
 
@@ -411,7 +384,6 @@ export async function sendUninstall(p: UninstallPlan, send: (box: string, body: 
   let n = 0;
   const go = async (box: string, body: Uint8Array) => { await send(box, body); n++; };
   if (p.stop) await go(p.app, dagCbor.encode(p.stop));
-  for (const s of p.subscriptions) await go("subscribe", dagCbor.encode(subscribeBody(s)));
-  for (const r of p.routes) await go("routes", dagCbor.encode(routeBody(r)));
+  for (const r of p.rows) await go("dispatch", dagCbor.encode(rowBody(r)));
   return { messages: n };
 }

@@ -80,5 +80,5 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
   assert.equal(await h.entries("alpha"), n0 + 11, "the stranger's handshake and its refused read");
   const last = (await get("/explore")).v;
   assert.deepEqual(Object.keys(last.heads as Obj).sort(), Object.keys(heads).sort(), "the heads are the same ones");
-  for (const [k, v] of Object.entries(heads)) if (k !== "sessions") assert.deepEqual((last.heads as Obj)[k], v, `head ${k} unmoved`);
+  for (const [k, v] of Object.entries(heads)) if (k !== "frontdoor/sessions") assert.deepEqual((last.heads as Obj)[k], v, `head ${k} unmoved`);
 });

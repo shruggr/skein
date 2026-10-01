@@ -106,8 +106,8 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   assert.equal(await h.entries("david"), n0.david + 2, "the mailbox instance: the handshake and the listing, an entry each");
   assert.equal(await h.entries("alpha"), n0.alpha + 2, "the agent: the handshake and the listing, an entry each");
   const kd = (await h.router.hydrate("david")).kernel;
-  const s1 = await kd.call("head", "sessions") as CID | null;
-  assert.ok(s1, "david's session: a record (head `sessions`)");
+  const s1 = await kd.call("head", "frontdoor/sessions") as CID | null;
+  assert.ok(s1, "david's session: a record (head `frontdoor/sessions`)");
 
   // Kill both kernels: the next request hydrates a new process over the same store; the sessions are there.
   const kill = async (handle: string) => { const k = (await h.router.hydrate(handle)).kernel; k.proc.kill("SIGKILL"); await k.exited(); };
@@ -125,7 +125,7 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   assert.deepEqual(seen, ["alpha /listMessages 200"]);
   const kd2 = (await h.router.hydrate("david")).kernel;
   assert.notEqual(kd2, kd, "a new kernel process");
-  assert.ok((await kd2.call("head", "sessions") as CID).equals(s1), "the same session table");
+  assert.ok((await kd2.call("head", "frontdoor/sessions") as CID).equals(s1), "the same session table");
 
   // The message is routed from its request, and its record carries its proof: the sender, the 104 signature, both nonces.
   await h.router.settled();

@@ -192,17 +192,18 @@ test("arc: with a router — no broadcast route; a host with no Arcade drops a b
   none.providers.deliver("x", { message: { kind: "broadcast", tx: txCid("ab".repeat(32)) } as never, body: new Uint8Array(), transport: "event", address: "broadcast" });
   assert.ok(lines.some((l) => l === "[x] broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"));
 
-  // A subscription to the status provider is written `$status` (the host's key); on a host with none it is left out.
+  // A row from the status provider is written `$status` (the host's key); on a host with none it is left out.
   const me = PrivateKey.fromRandom().toPublicKey().toString();
   const handler = txCid("cd".repeat(32));
   const subs = [{ sender: "$status", box: "status", handler: "wallet" }];
   const programs = { wallet: handler };
   const withArc = resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me), owner }, programs, subs);
-  assert.deepEqual(withArc.subscriptions.map((s) => [Buffer.from(s.match.sender!).toString("hex"), s.match.box]), [[router.providers.key("status"), "status"]]);
+  const boxRows = (s: { dispatch: Array<{ transport: string; address: string; sender: unknown; program: unknown }> }) => s.dispatch.filter((r) => r.transport === "mailbox" && r.program !== "kernel").map((r) => [Buffer.from(r.sender as Uint8Array).toString("hex"), r.address]);
+  assert.deepEqual(boxRows(withArc), [[router.providers.key("status"), "status"]]);
   const warned: string[] = [];
   const without = resolveSystem({ ...none.genesisConfig({ handle: "w", domain: "localhost" }, me), owner, warn: (l) => warned.push(l) }, programs, subs);
-  assert.deepEqual(without.subscriptions, []);
-  assert.deepEqual(warned, ["a subscription from $status is left out: this host has no such provider"]);
+  assert.deepEqual(boxRows(without), []);
+  assert.deepEqual(warned, ["a dispatch row from $status is left out: this host has no such provider"]);
   assert.throws(() => resolveSystem({ identity: me, owner, handle: "w", domain: "localhost" }, programs, [], { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
 });
 

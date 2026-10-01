@@ -6,7 +6,7 @@ import type { CID } from "multiformats/cid";
 import { decode, encode, isCID } from "../../runtime/cid.ts";
 import { headTree, type HeadUpdate } from "../../runtime/heads.ts";
 import { bitcoinView } from "../../runtime/index-store.ts";
-import type { SubscriptionUpdate } from "../../runtime/subscriptions.ts";
+import { senderText, type DispatchRow } from "../../runtime/dispatch.ts";
 import { short, stampMs } from "../../runtime/log.ts";
 import { RAW } from "../../runtime/programs.ts";
 import { WALLET_CALLS, type Emit, type OracleCall } from "../../runtime/records.ts";
@@ -14,7 +14,7 @@ import { GIT_RAW, lookup, parseTree, readBlob, readTree } from "../../runtime/tr
 import type { Ref } from "../../runtime/types.ts";
 import { signedPart, verify } from "../../envelope.ts";
 import { escapeHtml, markdownToHtml } from "../../../web/markdown.ts";
-import { ancestry, emitter, headMoves, headNames, kindOf, label, maybe, routeOf, rulesAt, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
+import { ancestry, emitter, headMoves, headNames, hexKey, kindOf, label, maybe, ownerOf, routeOf, rowsAt, senderOf, tryDecode, type EnvelopeRecord, type Thread, type Update, type World } from "./view.ts";
 
 const DAG_CBOR = 0x71;
 const esc = (x: unknown) => escapeHtml(String(x));
@@ -124,22 +124,23 @@ export async function overview(w: World): Promise<string> {
   if (!g) return layout("skein explorer", `<h1>empty store</h1><p class="mut">no genesis in the log yet</p>`);
   const heads = await Promise.all((await headNames(w)).map(async (n) => {
     const tree = await headTree(w.store, n);
-    return `<tr><td><a href="/h/${encodeURIComponent(n)}">${esc(n)}</a></td><td>${tree ? link(w, tree, tree.toString()) : `<span class="mut">never moved</span>`}</td></tr>`;
+    return `<tr><td><a href="/h/${encodeURIComponent(n)}">${esc(n)}</a></td><td class="small mut">owner ${esc(ownerOf(n))}</td><td>${tree ? link(w, tree, tree.toString()) : `<span class="mut">never moved</span>`}</td></tr>`;
   }));
-  const rules = rulesAt(w);
-  const subs = rules.map((s, i) => `<tr><td>${i}</td><td>${s.match.sender ? key(w, s.match.sender) : `<span class="mut">anyone</span>`}</td><td>${esc(s.match.box ?? "any")}</td><td>${link(w, s.handler, programOf(w, s.handler))}</td></tr>`).join("");
+  const rows = rowsAt(w);
+  const table = rows.map((r, i) => `<tr><td>${i}</td>${rowCells(w, r)}</tr>`).join("");
+  const mailbox = rows.filter((r) => r.transport === "mailbox");
   const boxes = new Map<string, number>();
-  for (const b of [...rules.map((s) => s.match.box), ...(g.collect ?? [])]) if (b) boxes.set(b, 0);
+  for (const b of [...mailbox.map((r) => r.address).filter((a) => a !== "*"), ...(g.collect ?? [])]) boxes.set(b, 0);
   for (const { entry } of w.log) if (entry.box) boxes.set(entry.box, (boxes.get(entry.box) ?? 0) + 1);
   const states = new Map<string, number>();
   for (const t of w.threads) states.set(t.state, (states.get(t.state) ?? 0) + 1);
   const ident = (id: string) => `<span class="key">${esc(id)}</span>`;
   return layout(`${g.handle}@${g.domain}`, `<h1>${esc(g.handle)}@${esc(g.domain)}</h1>
 ${kv([
-    ["identity", ident(g.identity)],
-    ["host", g.host ? ident(g.host) : `<span class="mut small">none (format 2)</span>`],
-    ["owner", ident(g.owner)],
-    ...Object.entries(g.peers ?? {}).map(([r, id]): [string, string] => [`peer ${r}`, ident(id)]),
+    ["identity", ident(hexKey(g.identity) ?? "")],
+    ["host", g.host ? ident(hexKey(g.host) ?? "") : `<span class="mut small">none (format 2)</span>`],
+    ["owner", ident(hexKey(g.owner) ?? "")],
+    ...Object.entries(g.peers ?? {}).map(([r, id]): [string, string] => [`peer ${r}`, ident(hexKey(id) ?? "")]),
     ["state hash", tip ? link(w, tip.cid, tip.cid.toString()) : "(empty)"],
     ["log", `${w.log.length} entries · processed ${w.cursor} · <a href="/log">log</a>`],
     ["threads", `${w.threads.length} · ${[...states].map(([s, n]) => `<a href="/threads?state=${esc(s)}">${n} ${esc(s)}</a>`).join(" · ")}`],
@@ -147,25 +148,39 @@ ${kv([
     ["defaults", esc(Object.entries(g.defaults ?? {}).map(([k, v]) => `${k}=${v}`).join(" "))],
   ])}
 <h2>heads</h2><table>${heads.join("")}</table>
-<h2>subscriptions</h2><div class="small mut">${w.subscriptions ? `${w.subscriptions.length} change${w.subscriptions.length === 1 ? "" : "s"} · <a href="/s">chain</a>` : "no subscriptions chain: this log predates it"}</div><table><tr><th>#</th><th>sender</th><th>box</th><th>handler</th></tr>${subs}</table>
+<h2>dispatch</h2><div class="small mut">${w.dispatch ? `${rows.length} row${rows.length === 1 ? "" : "s"} · ${w.dispatch.length} change${w.dispatch.length === 1 ? "" : "s"} · <a href="/s">chain</a>` : "no dispatch table: this log predates it"}</div><table><tr><th>#</th><th>transport</th><th>address</th><th>sender</th><th>program</th></tr>${table}</table>
 <h2>programs</h2><table>${Object.entries(g.programs).map(([n, c]) => `<tr><td>${esc(n)}</td><td>${link(w, c, c.toString())}</td></tr>`).join("")}</table>
-<h2>boxes</h2><table><tr><th>box</th><th>routed</th><th>entries</th></tr>${[...boxes].map(([b, n]) => `<tr><td>${esc(b)}</td><td class="small mut">${rules.some((s) => s.match.box === b) ? "subscription" : (g.collect ?? []).includes(b) ? "collected (replies)" : "—"}</td><td>${n}</td></tr>`).join("")}</table>`);
+<h2>boxes</h2><table><tr><th>box</th><th>routed</th><th>entries</th></tr>${[...boxes].map(([b, n]) => `<tr><td>${esc(b)}</td><td class="small mut">${boxRoute(mailbox, b, g.collect ?? [])}</td><td>${n}</td></tr>`).join("")}</table>`);
 }
 
 function programOf(w: World, c: CID): string {
   return Object.entries(w.genesis?.programs ?? {}).find(([, p]) => p.equals(c))?.[0] ?? short(c);
 }
 
+/** A row's sender: anyone, a session, or a key. */
+const senderCell = (w: World, r: DispatchRow) => r.sender === "*" ? `<span class="mut">anyone</span>` : r.sender === "session" ? "session" : key(w, senderText(r.sender));
+/** A row's program: a program link, or the kernel operation. */
+const programCell = (w: World, r: DispatchRow) => r.program === "kernel" ? `kernel: ${esc(r.fn ?? "?")}` : `${link(w, r.program, programOf(w, r.program))}${r.fn ? ` <span class="mut small">${esc(r.fn)}</span>` : ""}`;
+const rowCells = (w: World, r: DispatchRow) =>
+  `<td>${esc(r.transport)}</td><td>${esc(r.address)}${r.prefix ? ` <span class="mut small">(prefix)</span>` : ""}</td><td>${senderCell(w, r)}</td><td>${programCell(w, r)}</td>`;
+
+/** How a box is routed: the first mailbox row for it (or "*"), else collected replies, else nothing. */
+function boxRoute(mailbox: DispatchRow[], b: string, collect: string[]): string {
+  const r = mailbox.find((x) => x.address === b) ?? mailbox.find((x) => x.address === "*");
+  if (r) return r.program === "kernel" ? `kernel ${esc(r.fn ?? "")}` : "dispatch";
+  return collect.includes(b) ? "collected (replies)" : "—";
+}
+
 // ---------------------------------------------------------------- /s
 
-export function subscriptionsPage(w: World): string {
-  const ups = w.subscriptions ?? [];
+export function dispatchPage(w: World): string {
+  const ups = w.dispatch ?? [];
   const rows = ups.map(({ cid, u }) => {
     const t = u.thread ? w.byThread.get(u.thread.toString()) : undefined;
-    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${esc(u.op)}</td><td>${u.sender ? key(w, u.sender) : `<span class="mut">anyone</span>`}</td><td>${esc(u.box)}</td><td>${link(w, u.handler, programOf(w, u.handler))}</td><td>${t ? threadLink(w, t) : u.thread ? link(w, u.thread) : `<span class="mut">genesis seed</span>`}</td><td>${entryLink(w, u.input)}</td></tr>`;
+    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${esc(u.op)}</td>${rowCells(w, u.row)}<td>${t ? threadLink(w, t) : u.thread ? link(w, u.thread) : `<span class="mut">genesis seed</span>`}</td><td>${entryLink(w, u.input)}</td></tr>`;
   }).reverse().join("");
-  return layout("subscriptions", `<h1>subscriptions</h1><div class="small mut">${w.subscriptions ? `${ups.length} change${ups.length === 1 ? "" : "s"}, newest first` : "no subscriptions chain: this log predates it"}</div>
-<table><tr><th>seq</th><th>at</th><th>op</th><th>sender</th><th>box</th><th>handler</th><th>by thread</th><th>input</th></tr>${rows}</table>`);
+  return layout("dispatch", `<h1>dispatch table changes</h1><div class="small mut">${w.dispatch ? `${ups.length} change${ups.length === 1 ? "" : "s"}, newest first` : "no dispatch table: this log predates it"}</div>
+<table><tr><th>seq</th><th>at</th><th>op</th><th>transport</th><th>address</th><th>sender</th><th>program</th><th>by thread</th><th>input</th></tr>${rows}</table>`);
 }
 
 // ---------------------------------------------------------------- /log
@@ -230,9 +245,9 @@ export async function entryPage(w: World, cid: CID): Promise<string> {
       ["signature", env && safe(() => verify(env as never)) ? `<span class="ok">verifies</span>` : `<span class="bad">does not verify</span>`],
     ])}<h2>body ${e.body ? link(w, e.body) : ""}</h2>${json(w, body)}`);
     const r = routeOf(w, e.n, senderOf(env), e.box, body);
-    parts.push(`<h2>routing</h2><p>${!r ? `no subscription matches (${key(w, senderOf(env))}, ${esc(e.box ?? "")}): recorded, nothing runs`
+    parts.push(`<h2>routing</h2><p>${!r ? `no dispatch row takes (${key(w, senderOf(env))}, ${esc(e.box ?? "")}): recorded, nothing runs`
       : "reply" in r ? (r.reply ? `a reply to ${link(w, r.reply)}: goes only to the thread awaiting it` : "a <code>replyTo</code> that is not a CID: recorded, nothing runs")
-      : `subscription #${r.i} (${r.sub.match.sender ? key(w, r.sub.match.sender) : "anyone"}, ${esc(r.sub.match.box ?? "any box")}) → ${link(w, r.sub.handler, programOf(w, r.sub.handler))}`}</p>`);
+      : `dispatch row #${r.i} (${r.row.sender === "*" ? "anyone" : key(w, senderText(r.row.sender))}, ${esc(r.row.address)}) → ${r.row.program === "kernel" ? `kernel ${esc(r.row.fn ?? "")}` : link(w, r.row.program, programOf(w, r.row.program))}`}</p>`);
   }
   const touched = w.touched.get(cid.toString()) ?? [];
   parts.push(`<h2>threads</h2>${touched.length ? `<ul class="plain">${touched.map((t) => `<li>${t.seq ? `stepped (update ${t.seq})` : "launched"} ${threadLink(w, t.thread)}</li>`).join("")}</ul>` : `<p class="mut">none</p>`}`);
@@ -311,10 +326,6 @@ async function updateCard(w: World, t: Thread, cid: CID, u: Update): Promise<str
     const hu = await maybe<HeadUpdate>(w.store, h);
     const name = (await maybe<{ name?: string }>(w.store, hu?.origin))?.name ?? "?";
     parts.push(`<div class="small">moved head <a href="/h/${encodeURIComponent(name)}">${esc(name)}</a> → ${hu ? link(w, hu.tree) : ""} ${link(w, h, "(move)")}</div>`);
-  }
-  for (const s of u.subscriptions ?? []) {
-    const su = await maybe<SubscriptionUpdate>(w.store, s);
-    if (su) parts.push(`<div class="small"><a href="/s">subscription</a> ${esc(su.op)} (${su.sender ? key(w, su.sender) : "anyone"}, ${esc(su.box)}) → ${link(w, su.handler, programOf(w, su.handler))} ${link(w, s, "(change)")}</div>`);
   }
   if (calls.length) {
     parts.push(details(`${calls.length} oracle call${calls.length === 1 ? "" : "s"}`, `<ul class="plain small">${calls.map(({ c, a }) => `<li>${link(w, c)} ${a ? `${a.i} ${a.request instanceof Uint8Array ? esc(WALLET_CALLS.get(a.request[0]) ?? `call ${a.request[0]}`) : ""}` : ""}</li>`).join("")}</ul>`, `calls-${cid}`));
@@ -433,7 +444,7 @@ export async function recordPage(w: World, cid: CID, path = ""): Promise<string>
   if (w.byThread.has(cid.toString())) notes.push(`a thread origin · <a href="/t/${cid}">thread view</a>`);
   if (w.entries.has(cid.toString())) notes.push(`a log entry · <a href="/e/${cid}">entry view</a>`);
   if (v?.kind === "head" && typeof v.name === "string") notes.push(`a head origin · <a href="/h/${encodeURIComponent(v.name)}">moves</a>`);
-  if (v?.kind === "subscriptions") notes.push(`the subscriptions origin · <a href="/s">changes</a>`);
+  if (v?.kind === "dispatch") notes.push(`the dispatch table's origin · <a href="/s">changes</a>`);
   if (origin && !origin.equals(cid)) notes.push(`update #${esc(v.seq)} of ${link(w, origin)}`);
   const admitted = await w.store.log.byEnvelope(cid);
   if (admitted) notes.push(`an admitted envelope · ${entryLink(w, admitted)}`);
@@ -489,8 +500,9 @@ export async function headPage(w: World, name: string): Promise<string> {
   const moves = await headMoves(w.store, name);
   const rows = moves.map(({ cid, u }) => {
     const t = u.thread ? w.byThread.get(u.thread.toString()) : undefined;
-    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${link(w, u.tree, u.tree.toString())}</td><td>${t ? threadLink(w, t) : u.thread ? link(w, u.thread) : `<span class="mut">genesis (system tree)</span>`}</td><td>${entryLink(w, u.input)}</td></tr>`;
+    return `<tr><td>${link(w, cid, String(u.seq))}</td><td class="small">${time(u.at)}</td><td>${link(w, u.tree, u.tree.toString())}</td><td>${t ? threadLink(w, t) : u.thread ? link(w, u.thread) : `<span class="mut">genesis or a kernel operation</span>`}</td><td>${entryLink(w, u.input)}</td></tr>`;
   }).reverse().join("");
-  return layout(`head ${name}`, `<h1>head ${esc(name)}</h1><div class="small mut">${moves.length} move${moves.length === 1 ? "" : "s"}, newest first</div>
+  const owner = (moves.at(-1)?.u as { owner?: unknown } | undefined)?.owner;
+  return layout(`head ${name}`, `<h1>head ${esc(name)}</h1><div class="small mut">owner ${esc(typeof owner === "string" ? owner : ownerOf(name))} · ${moves.length} move${moves.length === 1 ? "" : "s"}, newest first</div>
 <table><tr><th>seq</th><th>at</th><th>tree</th><th>by thread</th><th>input</th></tr>${rows || `<tr><td class="mut">never moved</td></tr>`}</table>`);
 }

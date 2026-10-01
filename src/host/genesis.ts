@@ -1,37 +1,46 @@
-// Format 7 (issues #65, #69: broadcast out an event, no wake entries, no jobs; format 6, #70, #67: emit, the address book seeded; #68: requests appended as received; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
-// router's side: the genesis a new instance's log starts with, and entries.
+// Format 8 (#77: the kernel's four tables — one dispatch table, admin operations in the kernel, write
+// scope by app name; format 7, #65, #69; format 6, #70, #67; #68: requests appended as received; format 3,
+// #40; format 2, #33: unsigned entries, keys as bytes) on the host's side: the genesis a new instance's
+// log starts with, and entries.
 //
 //   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}   — no `sig`: no host key
 //   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs,
-//             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
+//             dispatch: [<row>], scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
-//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}],
+//             reads?: [{caller?: bytes(33), op}],
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
 //             addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
+//   row      {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
+//             sender: "*" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+//            (`dispatch`, #77: the seed of the kernel's dispatch table, docs/MESSAGES.md "The dispatch
+//            table" — the admin rows (boxes objects, head, dispatch, peers → the kernel, from the owner),
+//            the boxes programs take (a subscription of old), the HTTP paths and libp2p topics and
+//            protocols the front door routes (a route of old). `scopes`: the heads a genesis-wired program
+//            may advance — STOCK_SCOPES, plus a tree's config `scopes`. No `subscriptions`, no `routes`.)
 //            (`addressBook`, #70: the address book's seed — the host's providers (role = their name: fetch,
 //            waker, cron, libp2p, status) and the owner's mailbox — written into the head `peers` at the genesis)
 //            (no `jobs`, #69: a schedule is a program's message to the cron provider; a genesis naming
 //            them is refused)
-//            (`libp2p`, #51: the router's libp2p host runs a node for the instance, subscribes
-//            `topics` and serves `protocols`; each message or frame is a front-door call routed
-//            by its `libp2p:<topic | protocol>` route)
-//            (`feeds`: what the router holds for the instance, feeds.ts; `routes`/`reads`: the
-//            front door's, #40 — its sessions are not state: never in the log; `:ack` → the
-//            messagebox moves a reader's pointer; `defaults.ownerMessagebox`: the owner's
-//            messagebox URL — the one peer a genesis names; `defaults.resolveOrigin`: where
-//            the instance's own domain is looked up (a dev host))
+//            (`libp2p`, #51: the host's libp2p node runs for the instance, subscribes `topics` and serves
+//            `protocols`; each message or frame is a front-door step routed by its `libp2p` row)
+//            (`feeds`: what the host holds for the instance, feeds.ts; `reads`: the front door's, #40;
+//            `defaults.ownerMessagebox`: the owner's messagebox URL — the one peer a genesis names;
+//            `defaults.resolveOrigin`: where the instance's own domain is looked up (a dev host))
 //
-// The stamp is the router's clock at admission (#10): the sequence is the
+// The stamp is the host's clock at admission (#10): the sequence is the
 // order. A genesis is written from a **system** (issue #4, docs/BOOTSTRAP.md):
-// the programs, the subscriptions, the config — read from a system tree by
+// the programs, the dispatch rows, the config — read from a system tree by
 // the loader (boot.ts), which then also names the tree (`tree`: `main` starts
 // there), or, for an instance with no tree, the stock system in code
-// (codeSystem: the kernel's own pinned programs and STOCK_SUBSCRIPTIONS). The
-// same `genesisRecord` writes both.
+// (codeSystem: the kernel's own pinned programs and STOCK_DISPATCH). The
+// same `genesisRecord` writes both. A tree may still write
+// etc/subscriptions.json and etc/routes.json (the forms before #77): each
+// entry becomes a row (rowsOfSubscriptions, rowsOfRoutes).
 
 import type { CID } from "multiformats/cid";
 import { parse as parseCid } from "../runtime/cid.ts";
+import { rowKey, type DispatchRow, type Sender, type Transport } from "../runtime/dispatch.ts";
 import { DEFAULTS, nextEntry, type EntryBody } from "../runtime/log.ts";
 import { Rejected } from "../runtime/store.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
@@ -39,7 +48,7 @@ import { now as clockNow } from "./clock.ts";
 import type { Kernel } from "./kernel.ts";
 import type { FeedSpec } from "./feeds.ts";
 
-/** Session expiry (#33 part 2, #40): the instance's own policy, judged against the in-memory session's stamp (a day). */
+/** Session expiry (#33 part 2, #40): the instance's own policy, judged against the session record's stamp (a day). */
 export const SESSION_DEFAULTS: Record<string, string> = { sessionTtlMs: "86400000" };
 
 export const keyBytes = (hex: string): Uint8Array => {
@@ -69,16 +78,20 @@ export interface Genesis2Config {
   warn?(line: string): void;
   /** Anyone may open a `chat` (default true): the seed after the owner's boxes (code genesis only). */
   openChat?: boolean;
-  /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex, `$owner`, or a provider's `$<name>`) or none, a box, a handler program record. */
+  /** More seed rows for boxes, after these (e.g. the wallet's boxes, #29): a sender (hex, `$owner`, or a provider's `$<name>`) or none (anyone), a box, a handler program record. */
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
-  /** The front door's routes and reads for code genesis (#40; default STOCK_ROUTES, STOCK_READS). */
+  /** More seed rows of any transport (#77), after these: the row as a system writes it (handler names resolved against the programs). */
+  dispatch?: DispatchSpec[];
+  /** The front door's routes (http and libp2p rows) and reads for code genesis (#40; default STOCK_HTTP, STOCK_READS). */
   routes?: RouteSpec[];
   reads?: ReadSpec[];
-  /** Feeds the router holds for the instance (code genesis; a tree's config names its own). */
+  /** Feeds the host holds for the instance (code genesis; a tree's config names its own). */
   feeds?: FeedSpec[];
   /** Code genesis (#51): libp2p for the instance (a tree's config names its own), and extra routes after the stock ones. */
   libp2p?: Libp2pSpec;
   extraRoutes?: RouteSpec[];
+  /** Write scopes of genesis-wired programs beyond STOCK_SCOPES (#77): program name → head names (a prefix ends in `/`). */
+  scopes?: Record<string, string[]>;
   /** A mailbox instance (#40): only the front door and the messagebox, keeping mail for `owner` from anyone. */
   mailbox?: boolean;
   /** The owner's messagebox URL (#40): the one peer a genesis names (`defaults.ownerMessagebox`). */
@@ -93,10 +106,9 @@ export interface Genesis2Config {
   addressBook?: AddressSeed[];
   /**
    * The host's providers by name (hex keys: fetch, waker, cron, libp2p,
-   * status), for a subscription's sender written `$<name>` (#65: `$status`,
-   * the status provider; #69: `$cron`). A subscription naming a provider this
-   * host has not is left out (a tree may subscribe statuses on a host with no
-   * Arcade).
+   * status), for a row's sender written `$<name>` (#65: `$status`, the
+   * status provider; #69: `$cron`). A row naming a provider this host has
+   * not is left out (a tree may take statuses on a host with no Arcade).
    */
   providers?: Record<string, string>;
 }
@@ -105,68 +117,98 @@ export interface Genesis2Config {
 export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" | "local"; address: string; role?: string; handle?: string; domain?: string }
 
 /**
- * A subscription as a system tree writes it (etc/subscriptions.json): the
- * sender is an identity key in hex, `$owner` / `$infer` (the host's), a
- * provider's `$<name>` (`$status`, `$cron`: Genesis2Config.providers), or
- * absent (anyone); the handler a program name (bin/<name>, or `shell`) or a
- * program record's CID.
+ * A box's row as a system tree wrote it before #77 (etc/subscriptions.json),
+ * still read: the sender is an identity key in hex, `$owner` / `$infer` (the
+ * host's), a provider's `$<name>` (`$status`, `$cron`: Genesis2Config.providers),
+ * or absent (anyone); the handler a program name (bin/<name>, or `shell`) or a
+ * program record's CID. It becomes a `mailbox` row.
  */
 export interface SubscriptionSpec { sender?: string; box?: string; handler: string }
 
 /**
- * The stock seed: the owner's boxes, chat from anyone, the address book's box
- * (the admin's `peers`: resolve), the installed routes' box (the owner's
- * `routes`: the front door, #72), and the reserved box the host admits into —
- * `:ack` (the messagebox moves a reader's pointer). The front door's sessions
- * are not state (in memory, never admitted). No `register` box (#40):
- * registration is application wiring — an application that wants senders to
- * enter themselves in the address book subscribes its own box (e.g.
- * `{box: "register", handler: "resolve"}`, the resolve program's claim
- * handler, or a program of its own with its own rules) in its
- * etc/subscriptions.json.
+ * A dispatch row as a system writes it (etc/dispatch.json, #77): `transport`
+ * defaults to `mailbox`; `address` a box (`*`: any box), an HTTP path (with
+ * `prefix: true` for a prefix), a libp2p topic or `/<protocol>`; `sender`
+ * `*` (default), `session` (an HTTP row needing a BRC-103/104 session), a key
+ * in hex, `$owner`, `$infer` or a provider's `$<name>`; `program` a program
+ * name (bin/<name>, `shell`), a program record's CID, or `kernel` (an admin
+ * row: `fn` the operation — objects, head, dispatch, peers); `fn` a handler's
+ * function; anything else a handler's own setting (static's `root`, `index`;
+ * a route's `read` op).
  */
-export const STOCK_SUBSCRIPTIONS: SubscriptionSpec[] = [
-  { sender: "$owner", box: "run", handler: "run-handler" },
-  { sender: "$owner", box: "objects", handler: "objects-handler" },
-  { sender: "$owner", box: "head", handler: "head-handler" },
-  { sender: "$owner", box: "chat", handler: "loop" },
-  { sender: "$owner", box: "subscribe", handler: "subscribe-handler" },
-  { sender: "$owner", box: "peers", handler: "resolve" },
-  { sender: "$owner", box: "routes", handler: "frontdoor" },
-  { box: "chat", handler: "loop" },
-  { box: ":ack", handler: "messagebox" },
+export interface DispatchSpec { transport?: Transport; address: string; prefix?: boolean; sender?: string; program: string; fn?: string; [setting: string]: unknown }
+
+/**
+ * The kernel's admin operations (#77), one per table. Every genesis carries
+ * the owner's admin rows — `{address: <op>, sender: $owner, program: kernel,
+ * fn: <op>}` — ahead of its own (#31: a bare genesis is the four tables and
+ * the owner's admin rows; a bundle adds what its apps ask for). Delegating
+ * is another row with the same operation and another sender, sent to the
+ * `dispatch` box.
+ */
+export const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
+export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, sender: "$owner", program: "kernel", fn: op }));
+
+/**
+ * The stock seed (#77), after the admin rows: the owner's `run` and `chat`;
+ * `chat` from anyone; the reserved box the host admits into, `:ack` (the
+ * messagebox moves a reader's pointer); and the stock HTTP rows (STOCK_HTTP).
+ * No `register` box (#40): registration is application wiring — an
+ * application that wants senders to enter themselves in the address book
+ * writes its own row (e.g. `{address: "register", program: "resolve"}`, the
+ * resolve program's claim handler, or a program of its own with its own
+ * rules) in its etc/dispatch.json.
+ */
+export const STOCK_DISPATCH: DispatchSpec[] = [
+  { address: "run", sender: "$owner", program: "run-handler" },
+  { address: "chat", sender: "$owner", program: "loop" },
+  { address: "chat", program: "loop" },
+  { address: ":ack", program: "messagebox" },
 ];
 
 /**
- * A mailbox instance's seed (#40): the
- * messagebox's acknowledgements, and every message from anyone in any box to
- * the messagebox (kept for the owner; a mailbox exists only where such a
- * subscription does).
+ * A mailbox instance's seed (#40): the messagebox's acknowledgements, and
+ * every message from anyone in any box to the messagebox (kept for the owner;
+ * a mailbox exists only where such a row does).
  */
-export const MAILBOX_SUBSCRIPTIONS: SubscriptionSpec[] = [
-  { box: ":ack", handler: "messagebox" },
-  { handler: "messagebox" },
+export const MAILBOX_DISPATCH: DispatchSpec[] = [
+  { address: ":ack", program: "messagebox" },
+  { address: "*", program: "messagebox" },
 ];
 
 /**
- * A front-door route as a system writes it (etc/routes.json, #40): an exact
- * `path` or a `prefix`, the handler program (a bin/ name or a CID) and its
- * function; `auth: "none"` for an open route; `read` an op the reads table
- * must allow the caller. `root` and `index` are the static handler's (#52:
- * the directory of the tree it serves, a directory's file), passed to the
- * handler as the route entry that matched.
+ * The write scopes of the stock genesis-wired programs (#77): the heads each
+ * may advance, by program name. The front door's sessions; the messagebox's
+ * lists and outbound sessions; the wallet's state; and, transitional (to
+ * review), the resolve program's writes into the address book (a resolved
+ * handle's record) — the kernel's `peers` operation is the admin path.
+ */
+export const STOCK_SCOPES: Record<string, string[]> = {
+  frontdoor: ["frontdoor/"],
+  messagebox: ["mailbox", "outbound"],
+  resolve: ["peers"],
+  wallet: ["wallet"],
+};
+
+/**
+ * A front-door route as a system wrote it before #77 (etc/routes.json, #40),
+ * still read: an exact `path` or a `prefix`, the handler program (a bin/ name
+ * or a CID) and its function; `auth: "none"` for an open route (sender `*`,
+ * else `session`); `read` an op the reads table must allow the caller.
+ * `root` and `index` are the static handler's (#52), carried on the row. A
+ * `libp2p:<topic>` or `libp2p:/<protocol>` path is a `libp2p` row.
  */
 export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; root?: string; index?: string }
 /** A read permission as a system writes it (etc/reads.json): a caller (hex or `$owner`; absent: anyone) may call routes marked `read: op`. */
 export interface ReadSpec { caller?: string; op: string }
 
 /**
- * The stock routes (#40): the BRC-33 messagebox, at the root and under
- * /messagebox (where older clients were pointed); the explorer's read route
- * (the front door's `explore`: log, threads, heads, records as JSON) behind
- * the read op `explore`.
+ * The stock HTTP rows (#40): the BRC-33 messagebox, at the root and under
+ * /messagebox (where older clients were pointed), on a session; the
+ * explorer's read route (the front door's `explore`: log, threads, heads,
+ * records as JSON) behind the read op `explore`.
  */
-export const STOCK_ROUTES: RouteSpec[] = [
+export const STOCK_HTTP: RouteSpec[] = [
   ...["", "/messagebox"].flatMap((p) => [
     { path: `${p}/sendMessage`, program: "messagebox", fn: "sendMessage" },
     { path: `${p}/listMessages`, program: "messagebox", fn: "listMessages" },
@@ -187,17 +229,19 @@ export interface ConfigSpec {
   feeds?: FeedSpec[];
   /** The owner as a peer (#40): its messagebox URL — the one peer a genesis names. */
   owner?: { messagebox?: string };
-  /** libp2p (#51): the topics the router subscribes for the instance, the protocols it serves, the node's own listen addresses. */
+  /** libp2p (#51): the topics the host subscribes for the instance, the protocols it serves, the node's own listen addresses. */
   libp2p?: Libp2pSpec;
+  /** Write scopes of the tree's genesis-wired programs (#77), over STOCK_SCOPES: program name → head names (a prefix ends in `/`). */
+  scopes?: Record<string, string[]>;
 }
 
 /**
  * libp2p as a system writes it (etc/config.json `libp2p`, #51): `topics` the
- * router's node subscribes (each message a front-door call; its route
- * `libp2p:<topic>` comes from etc/routes.json), `protocols` it serves, each
- * naming its handler — a program (bin/ name or CID; fn "libp2p") or
- * {program, fn} — which becomes the route `libp2p:<protocol>` (unless
- * etc/routes.json has one), `listen` this node's addresses over the host's.
+ * host's node subscribes (each message a front-door step; its `libp2p` row
+ * comes from etc/dispatch.json or etc/routes.json), `protocols` it serves,
+ * each naming its handler — a program (bin/ name or CID; fn "libp2p") or
+ * {program, fn} — which becomes its row (unless the tree has one), `listen`
+ * this node's addresses over the host's.
  */
 export interface Libp2pSpec {
   topics?: string[];
@@ -208,7 +252,9 @@ export interface Libp2pSpec {
 /** A system resolved for one instance: what its genesis says besides who it is. */
 export interface System {
   programs: Record<string, CID>;
-  subscriptions: Array<{ match: { sender?: Uint8Array; box?: string }; handler: CID }>;
+  /** The dispatch table's seed (#77), senders and programs resolved. */
+  dispatch: DispatchRow[];
+  scopes: Record<string, string[]>;
   peers?: Record<string, Uint8Array>;
   defaults: Record<string, string>;
   names: Array<{ identityKey: Uint8Array; handle: string; domain: string }>;
@@ -216,14 +262,13 @@ export interface System {
   /** The system tree (a git tree CID): `main` starts there. */
   tree?: CID;
   feeds?: FeedSpec[];
-  /** The front door's routes and reads (#40). */
-  routes: Array<{ path?: string; prefix?: string; program: CID; fn: string; auth?: "none"; read?: string; root?: string; index?: string }>;
+  /** The front door's reads (#40). */
   reads: Array<{ caller?: Uint8Array; op: string }>;
-  /** libp2p (#51): what the router's libp2p host does for the instance. */
+  /** libp2p (#51): what the host's libp2p node does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
 }
 
-/** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those routes.json lacks). */
+/** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those the tree lacks). */
 export function libp2pIn(spec: Libp2pSpec | undefined, routes: RouteSpec[]): { libp2p?: System["libp2p"]; routes: RouteSpec[] } {
   if (spec === undefined) return { routes };
   const bad = (why: string) => new Error(`etc/config.json: libp2p ${why} (want {topics?: [string], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]})`);
@@ -247,25 +292,6 @@ export function libp2pIn(spec: Libp2pSpec | undefined, routes: RouteSpec[]): { l
   return { libp2p: { topics, protocols: Object.keys(ps), ...(listen.length ? { listen } : {}) }, routes: out };
 }
 
-/** Routes and reads resolved for one instance: handler names to program CIDs (a route to a program this system lacks is dropped), `$owner` to its key. */
-export function resolveRoutes(c: Pick<Genesis2Config, "owner" | "infer">, programs: Record<string, CID>, routes: RouteSpec[], reads: ReadSpec[] = []): Pick<System, "routes" | "reads"> {
-  const out: System["routes"] = [];
-  for (const r of routes) {
-    if (!r || typeof r.fn !== "string" || typeof r.program !== "string" || (typeof r.path === "string") === (typeof r.prefix === "string")) {
-      throw new Error(`etc/routes.json: bad route ${JSON.stringify(r)} (want {path | prefix, program, fn, auth?, read?})`);
-    }
-    let program = programs[r.program];
-    if (!program) { try { program = parseCid(r.program); } catch { continue; } }
-    out.push({ ...(r.path !== undefined ? { path: r.path } : { prefix: r.prefix! }), program, fn: r.fn, ...(r.auth === "none" ? { auth: "none" as const } : {}), ...(r.read ? { read: r.read } : {}), ...(typeof r.root === "string" ? { root: r.root } : {}), ...(typeof r.index === "string" ? { index: r.index } : {}) });
-  }
-  const rs: System["reads"] = [];
-  for (const r of reads) {
-    if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op})`);
-    rs.push({ ...(r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
-  }
-  return { routes: out, reads: rs };
-}
-
 /** A key as a system writes it: hex, or `$owner` / `$infer` (the host's), or a provider's `$<name>` (Genesis2Config.providers). */
 export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer" | "providers">): Uint8Array {
   if (s === "$owner") return keyBytes(c.owner);
@@ -281,40 +307,119 @@ export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer" | "pr
   return keyBytes(s);
 }
 
-/** A subscription's `$<name>` that this host has no provider for: the subscription is left out. */
+/** A row's `$<name>` that this host has no provider for: the row is left out. */
 export class NoProvider extends Error {
   readonly provider: string;
   constructor(provider: string) { super(`no provider ${provider} on this host`); this.provider = provider; }
 }
 
-/** A subscription's sender resolved (absent: anyone), or null when it names a provider this host has not (left out, with a warning). */
-function senderOf(sender: string | undefined, c: Genesis2Config): Uint8Array | undefined | null {
-  if (!sender) return undefined;
+/** A row's sender resolved (`*` anyone, `session`, a key), or null when it names a provider this host has not (left out, with a warning). */
+function senderOf(sender: string | undefined, c: Genesis2Config): Sender | null {
+  if (!sender || sender === "*") return "*";
+  if (sender === "session") return "session";
   try { return keyOf(sender, c); } catch (e) {
     if (!(e instanceof NoProvider)) throw e;
-    c.warn?.(`a subscription from ${sender} is left out: this host has no such provider`);
+    c.warn?.(`a dispatch row from ${sender} is left out: this host has no such provider`);
     return null;
   }
 }
 
-/** Resolve a system's subscriptions, config and programs for one instance (both genesis paths). */
-export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID, routes: RouteSpec[] = STOCK_ROUTES, reads: ReadSpec[] = STOCK_READS): System {
-  const handler = (h: string): CID => {
-    const p = programs[h];
-    if (p) return p;
-    try { return parseCid(h); } catch { throw new Error(`subscription handler ${JSON.stringify(h)}: no such program (bin/${h}.wasm or bin/${h}.cid) and not a CID`); }
-  };
-  if ((config as { jobs?: unknown }).jobs !== undefined) throw new Error("etc/config.json: `jobs` are gone (#69): a schedule is a program's message to the cron provider ({fn: \"tick\", every | at, box, body?, name}, docs/MESSAGES.md)");
-  const subscriptions: System["subscriptions"] = [];
+/** The program a spec names: by name in `programs`, else a CID; `kernel` for an admin row. */
+function programOf(h: string, programs: Record<string, CID>, what: string): CID | "kernel" | undefined {
+  if (h === "kernel") return "kernel";
+  const p = programs[h];
+  if (p) return p;
+  try { return parseCid(h); } catch { return undefined; }
+}
+
+const isBox = (b: unknown): b is string => typeof b === "string" && b.length > 0 && !/[\s\0]/.test(b);
+
+/** The rows of a tree's subscriptions (etc/subscriptions.json, the form before #77): each a `mailbox` row. */
+export function rowsOfSubscriptions(subs: SubscriptionSpec[], c: Genesis2Config, programs: Record<string, CID>): DispatchRow[] {
+  const out: DispatchRow[] = [];
   for (const s of subs) {
+    if (!s || typeof s.handler !== "string" || (s.box !== undefined && !isBox(s.box)) || (s.sender !== undefined && typeof s.sender !== "string")) {
+      throw new Error(`etc/subscriptions.json: bad entry ${JSON.stringify(s)} (want {sender?, box?, handler})`);
+    }
+    const program = programOf(s.handler, programs, "handler");
+    if (!program) throw new Error(`subscription handler ${JSON.stringify(s.handler)}: no such program (bin/${s.handler}.wasm or bin/${s.handler}.cid) and not a CID`);
     const sender = senderOf(s.sender, c);
     if (sender === null) continue;
-    subscriptions.push({ match: { ...(sender ? { sender } : {}), ...(s.box !== undefined ? { box: s.box } : {}) }, handler: handler(s.handler) });
+    out.push({ transport: "mailbox", address: s.box ?? "*", sender, program });
   }
-  for (const x of c.subscriptions ?? []) {
-    const sender = senderOf(x.sender, c);
+  return out;
+}
+
+/** The rows of a tree's routes (etc/routes.json, the form before #77): `http` rows, or `libp2p` rows for `libp2p:` paths. A route to a program the system lacks is dropped. */
+export function rowsOfRoutes(routes: RouteSpec[], programs: Record<string, CID>): DispatchRow[] {
+  const out: DispatchRow[] = [];
+  for (const r of routes) {
+    if (!r || typeof r.fn !== "string" || typeof r.program !== "string" || (typeof r.path === "string") === (typeof r.prefix === "string")) {
+      throw new Error(`etc/routes.json: bad route ${JSON.stringify(r)} (want {path | prefix, program, fn, auth?, read?})`);
+    }
+    const program = programOf(r.program, programs, "route");
+    if (!program || program === "kernel") continue;
+    const at = (r.path ?? r.prefix)!;
+    const settings = { ...(r.read ? { read: r.read } : {}), ...(typeof r.root === "string" ? { root: r.root } : {}), ...(typeof r.index === "string" ? { index: r.index } : {}) };
+    if (at.startsWith("libp2p:")) out.push({ transport: "libp2p", address: at.slice("libp2p:".length), sender: "*", program, fn: r.fn, ...settings });
+    else out.push({ transport: "http", address: at, ...(r.prefix !== undefined ? { prefix: true } : {}), sender: r.auth === "none" ? "*" : "session", program, fn: r.fn, ...settings });
+  }
+  return out;
+}
+
+/** The rows of a system's dispatch specs (etc/dispatch.json, #77), senders and programs resolved; a row to a program the system lacks is dropped. */
+export function rowsOf(specs: DispatchSpec[], c: Genesis2Config, programs: Record<string, CID>): DispatchRow[] {
+  const out: DispatchRow[] = [];
+  for (const s of specs) {
+    if (!s || typeof s !== "object" || !isBox(s.address) || typeof s.program !== "string") throw new Error(`etc/dispatch.json: bad row ${JSON.stringify(s)} (want {transport?, address, prefix?, sender?, program, fn?, …})`);
+    const transport = s.transport ?? "mailbox";
+    if (!["mailbox", "http", "libp2p", "local"].includes(transport)) throw new Error(`etc/dispatch.json: row ${s.address}: transport ${JSON.stringify(transport)} is not mailbox, http, libp2p or local`);
+    const program = programOf(s.program, programs, "row");
+    if (!program) continue;
+    if (program === "kernel" && (typeof s.fn !== "string" || !(ADMIN_OPS as readonly string[]).includes(s.fn))) throw new Error(`etc/dispatch.json: row ${s.address}: a kernel row's fn is one of ${ADMIN_OPS.join(", ")}`);
+    const sender = senderOf(s.sender, c);
     if (sender === null) continue;
-    subscriptions.push({ match: { ...(sender ? { sender } : {}), box: x.box }, handler: x.handler });
+    const { transport: _t, address, prefix, sender: _s, program: _p, fn, ...settings } = s;
+    void _t; void _s; void _p;
+    out.push({ transport, address, ...(prefix ? { prefix: true } : {}), sender, program, ...(fn ? { fn } : {}), ...settings });
+  }
+  return out;
+}
+
+/** Reads resolved for one instance (`$owner` to its key). */
+export function resolveReads(c: Pick<Genesis2Config, "owner" | "infer">, reads: ReadSpec[] = []): System["reads"] {
+  const rs: System["reads"] = [];
+  for (const r of reads) {
+    if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op})`);
+    rs.push({ ...(r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
+  }
+  return rs;
+}
+
+/**
+ * Resolve a system's rows, config and programs for one instance (both genesis
+ * paths). `subs` and `routes` are the forms before #77 (a tree's
+ * etc/subscriptions.json and etc/routes.json); `specs` its etc/dispatch.json.
+ * The order: the owner's admin rows (every genesis), the dispatch specs, the
+ * subscriptions, the host's extra rows, then the routes (and the protocols'
+ * rows): first match wins in the kernel. A row with an admin row's key is
+ * left out (the kernel's operation keeps the box), with a warning.
+ */
+export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, subs: SubscriptionSpec[], config: ConfigSpec = {}, tree?: CID, routes: RouteSpec[] = STOCK_HTTP, reads: ReadSpec[] = STOCK_READS, specs: DispatchSpec[] = []): System {
+  if ((config as { jobs?: unknown }).jobs !== undefined) throw new Error("etc/config.json: `jobs` are gone (#69): a schedule is a program's message to the cron provider ({fn: \"tick\", every | at, box, body?, name}, docs/MESSAGES.md)");
+  if (config.scopes !== undefined && (typeof config.scopes !== "object" || Array.isArray(config.scopes) || Object.values(config.scopes).some((v) => !Array.isArray(v) || v.some((h) => typeof h !== "string" || !h)))) throw new Error("etc/config.json: scopes is {<program name>: [<head name | prefix/>]}");
+  const p2p = libp2pIn(config.libp2p ?? c.libp2p, [...routes, ...(c.extraRoutes ?? [])]);
+  const admin = rowsOf(ADMIN_ROWS, c, programs);
+  const dispatch: DispatchRow[] = [...admin];
+  for (const r of [
+    ...rowsOf(specs, c, programs),
+    ...rowsOfSubscriptions(subs, c, programs),
+    ...rowsOfSubscriptions((c.subscriptions ?? []).map((x) => ({ ...(x.sender ? { sender: x.sender } : {}), box: x.box, handler: x.handler.toString() })), c, programs),
+    ...rowsOf(c.dispatch ?? [], c, programs),
+    ...rowsOfRoutes(p2p.routes, programs),
+  ]) {
+    if (admin.some((a) => rowKey(a) === rowKey(r))) { if (r.program !== "kernel") c.warn?.(`a dispatch row for the admin box ${r.address} is left out: the kernel's ${r.address} operation keeps it`); continue; }
+    dispatch.push(r);
   }
   let names = [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });
@@ -322,13 +427,12 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
   const peers = config.peers
     ? Object.fromEntries(Object.entries(config.peers).map(([role, k]) => [role, keyOf(k, c)]))
     : c.infer ? { infer: keyBytes(c.infer) } : undefined;
-  const p2p = libp2pIn(config.libp2p ?? c.libp2p, [...routes, ...(c.extraRoutes ?? [])]);
   return {
-    programs, subscriptions, ...(peers ? { peers } : {}),
+    programs, dispatch, scopes: { ...STOCK_SCOPES, ...c.scopes, ...config.scopes }, ...(peers ? { peers } : {}),
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
-    ...resolveRoutes(c, programs, p2p.routes, reads),
+    reads: resolveReads(c, reads),
     ...(p2p.libp2p ? { libp2p: p2p.libp2p } : {}),
   };
 }
@@ -363,12 +467,12 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
   if (c.mailbox) {
     // A mailbox instance: the front door and the messagebox, nothing else.
     const mine: Record<string, CID> = { frontdoor: programs.frontdoor!, messagebox: programs.messagebox! };
-    const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined }, mine, MAILBOX_SUBSCRIPTIONS, { peers: {}, names: [] }, undefined, STOCK_ROUTES, STOCK_READS);
+    const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined, subscriptions: undefined, dispatch: undefined }, mine, [], { peers: {}, names: [] }, undefined, STOCK_HTTP, STOCK_READS, MAILBOX_DISPATCH);
     return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
   }
-  const subs = STOCK_SUBSCRIPTIONS.filter((s) => (s.box !== "chat" || s.sender || c.openChat !== false) && programs[s.handler]);
+  const specs = STOCK_DISPATCH.filter((s) => (s.address !== "chat" || s.sender || c.openChat !== false) && programs[s.program]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
-  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, subs, {}, undefined, c.routes ?? STOCK_ROUTES, c.reads ?? STOCK_READS), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
+  return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, [], {}, undefined, c.routes ?? STOCK_HTTP, c.reads ?? STOCK_READS, specs), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }
 
 /** The genesis record: who the instance is, and its system. */
@@ -376,9 +480,9 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
   return {
     kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, owner: keyBytes(c.owner),
     ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.role ? { role: e.role } : {}), ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
-    programs: s.programs, subscriptions: s.subscriptions, ...(s.peers ? { peers: s.peers } : {}),
+    programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
-    ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),
+    ...(s.reads.length ? { reads: s.reads } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}),
   };
 }

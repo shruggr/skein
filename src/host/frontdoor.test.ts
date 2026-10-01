@@ -2,7 +2,7 @@
 // appended as received and the front door is stepped on it, as the request's
 // own thread; the answer is read off that thread once it has come to rest.
 // The stock AuthFetch shakes hands with the instance — the handshake is a
-// request like any other, and its session is a record (head `sessions`) —
+// request like any other, and its session is a record (head `frontdoor/sessions`) —
 // its signed requests verify inside the VM and the answers verify at the
 // client. A refusal (401, 404) is recorded and changes nothing else. A poll
 // costs an entry. Sessions survive a new kernel process; an expired one is a
@@ -45,7 +45,7 @@ test("front door: every request is an entry and a thread; the handshake writes t
   await k.idle();
 
   const entries = async () => (await k.store.get((await k.store.log.tip())!) as unknown as { n: number }).n;
-  const sessions = async () => await k.call("head", "sessions") as CID | null;
+  const sessions = async () => await k.call("head", "frontdoor/sessions") as CID | null;
   // The entries' clock: shifted forward to expire a session (never back: the log's stamps only rise).
   let shift = 0;
   const now = () => msStamp(Date.now() + shift);
@@ -67,7 +67,7 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.deepEqual(statuses(), [200, 200], "the handshake, the request");
   assert.equal(await entries(), n0 + 2, "the handshake and the request: one entry each");
   const s1 = await sessions();
-  assert.ok(s1, "the handshake wrote the session table (head `sessions`)");
+  assert.ok(s1, "the handshake wrote the session table (head `frontdoor/sessions`)");
   const root = await k.store.get(s1) as unknown as { kind: string; buckets: CID[] };
   assert.equal(root.kind, "sessions");
   const held = (await Promise.all(root.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: Array<{ peer: Uint8Array; nonce: string; peerNonce: string; created: number }> }).sessions))).flat();

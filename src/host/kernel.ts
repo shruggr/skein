@@ -19,6 +19,7 @@
 // `Kernel` offers `store` (get/put/log), `admit`, `answer`, `invoke` (the call),
 // `boxes`, `idle`. Log lines (stderr) go to `log`.
 
+import type { DispatchRow } from "../runtime/dispatch.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -182,6 +183,8 @@ export class Kernel {
   /** Adopt a checkpoint's state record (its blocks put first) as this empty store's state (#4). */
   async restore(state: CID): Promise<void> { await this.call("restore", state); }
   async boxes(): Promise<string[]> { return await this.call("boxes") as string[]; }
+  /** The dispatch table as it stands (#77): its chain's tip (the change key; null before the genesis is processed) and its rows. */
+  async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   /** Admit an entry (a message's record put first; its body's bytes beside it). */
   async admit(entry: LogEntry | Record<string, unknown>, records: { body?: Uint8Array } = {}): Promise<CID> {

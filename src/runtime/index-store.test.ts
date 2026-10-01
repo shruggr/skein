@@ -83,7 +83,7 @@ test("index store: a store the kernel wrote — every map derived here is the ke
   assert.ok((await Promise.all(all.map(isDelivery))).filter(Boolean).length >= 2, "the infer and the answer each delivered by a thread of its own");
   const names = await Promise.all(threads.map(async (th) => ((await ix.get(((await ix.get(th)) as { program: CID }).program)) as unknown as { name: string }).name));
   // #67: the inference peer's handle resolved by a thread of its own (the loop waited on it).
-  assert.deepEqual(names.sort(), ["loop", "objects-handler", "resolve", "shell"], "objects-handler, loop, resolve, shell");
+  assert.deepEqual(names.sort(), ["loop", "resolve", "shell"], "loop, resolve, shell (#77: the objects box is a kernel operation, no thread)");
   const waiting = await collect(ix.edges.query({ kind: "thread", state: ["waiting"] }));
   assert.equal(waiting.length, 1, "the loop awaits the owner's reply");
   assert.equal((await collect(ix.live.resting())).length, 1);

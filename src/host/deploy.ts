@@ -1,10 +1,10 @@
 // Deployment via `objects` (#23): the host sends an agent's directory into its
 // instance exactly as `bin/skein import` does — git objects in ≤ 1 MiB bundles
 // to the instance's `objects` box, the root tree on the last one — sent as
-// the owner, the identity the genesis subscribes to `objects` (and `head`), as
+// the owner, the identity the genesis's dispatch rows take `objects` (and `head`) from, as
 // raw BRC-33 on the owner's BRC-104 session with the instance's front door
 // (#40: src/client/raw.ts). So the personality arrives as a message, admitted
-// as a log entry. The first root sets `main` (objects-handler does that when
+// as a log entry. The first root sets `main` (the kernel's `objects` operation does that when
 // there is none); a redeploy of a changed directory then moves `main` through
 // the `head` box, so a new conversation starts from the new tree.
 //
@@ -121,14 +121,15 @@ export async function deployFiles(o: DeployFilesOptions): Promise<Deployed> {
 }
 
 /**
- * Change the row's instance's subscriptions as the owner (#3): one `subscribe`
- * envelope (body {op, sender?, box, handler}, client.ts subscribeBody) — what
- * a changed rule sends, instead of a new genesis. Queued in the messagebox
- * like a deploy; the store, if given, is checked as for one.
+ * Change the row's instance's dispatch table as the owner (#77): one envelope
+ * to box `dispatch`, the kernel's `dispatch` operation (body {op, row},
+ * client.ts dispatchBody) — what a changed row sends, instead of a new
+ * genesis. Queued in the messagebox like a deploy; the store, if given, is
+ * checked as for one.
  */
-export async function subscribeRow(o: { row: InstanceRow; owner: WalletInterface; box: Outbox; store?: Store }, body: Record<string, unknown>): Promise<void> {
+export async function dispatchRow(o: { row: InstanceRow; owner: WalletInterface; box: Outbox; store?: Store }, body: Record<string, unknown>): Promise<void> {
   await checked(o);
-  await o.box.send(o.row.identity!, "subscribe", dagCbor.encode(body));
+  await o.box.send(o.row.identity!, "dispatch", dagCbor.encode(body));
 }
 
 /**
