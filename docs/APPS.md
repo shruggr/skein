@@ -265,6 +265,15 @@ own `boxes`/`routes`/`heads`. What the app **publishes** (`<topic>`,
 `<topic>-admit`, `<topic>-proof`, on by default, `config.overlay.gossip`
 per topic to turn off) needs no grant: emitting is the app acting as the
 instance, like any message it sends; the site lists it for information.
+The message shapes and the receiving rules are docs/OVERLAY.md "Gossip"
+(built, #74): `<topic>` carries the BEEF as received; `<topic>-admit`
+`{txid, topics: {<topic>: {outputsToAdmit, coinsToRetain}}}` (no BEEF;
+received → fn `peerAdmit`, recorded as `peer-admit` records under the head
+`overlay:gossip`, never admitting); `<topic>-proof` `{txid, blockHash,
+blockHeight, bump}` (received → fn `peerProof`, checked against the
+instance's own chain and admitted as the `chain` proof event, else
+`ignore`). Today `config.overlay.gossip` is genesis
+`defaults.overlayGossip` (`{"<topic>": false}`), the same mapping.
 Explicit `routes[]` entries in the manifest override the derived ones. The AMM app ships exactly this: the engine, `amm-topic`,
 `amm-lookup`, its validator and p2p programs, and its UI, one tree.
 
