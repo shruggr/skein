@@ -8,6 +8,11 @@
 //   libp2p   the instance's libp2p node: `topic:<name>` publishes the
 //            package, a peer ID gets it as one frame on /skein/message/1.0.0;
 //            the libp2p provider answers {replyTo, seqno, recipients} | {replyTo, sent: true}
+//   event    (#65) not a message: an unauthenticated, self-validating event
+//            (`address` its kind). The one is `broadcast` — {kind: "broadcast",
+//            tx: <cid>, beef?}, the transaction's bytes as `body` — handed to the
+//            host's broadcaster (arc.ts: a durable queue, retries, one Arcade
+//            session); none: dropped with a line (the instance abandons it)
 //
 // (A `mailbox` recipient's message never comes here: the instance delivers
 // it itself, over its own BRC-103/104 session, through the `fetch` provider.)
@@ -29,24 +34,30 @@
 //              → {status, headers, body}: the HTTP proxy. A URL of this host's own
 //              is answered in process (no socket); any other goes out when the host
 //              allows it (SKEIN_HTTP=fetch, or the router's `http` option)
-//   waker      wake {at: ms}  → at `at`: {at}. What the kernel's `deadline` emits
+//   waker      wake {at: ms}  → at `at`: {at}. What the kernel's `deadline`, and a shell's
+//              sleep, emit (#69)
+//   cron       cron {fn: "tick", every | at, box, body?, name} → {name, next};
+//              then each tick, a message of its own (no `replyTo`) in `box`:
+//              {...body, kind: body.kind ?? "cron", name, due}
+//              cron {fn: "stop", name} → {name, stopped} (#69, cron.ts)
 //   libp2p     publish {topic, body}   → {seqno: bytes(8), recipients}
 //              dial {peer, protocol}   → {stream}; then each frame read from the
 //                                        stream, in box `frame`: {stream, body}, and
 //                                        its end: {stream, closed: true, error?}
 //              send {stream, body}     → {}
 //              close {stream}          → {}
-//   broadcast  broadcast {tx: bytes}   → {status, body}: the host's Arcade's answer to
-//                                        POST /tx (arc.ts; 503 when it has none or it is
-//                                        unreachable), as the broadcast route answered it (#58)
-//              status {txid}           → {status, body}: its GET /tx/<txid>
+//   status     takes no messages (#65): it speaks first. Each status of a transaction
+//              an instance holds (but a proof: that is an event, arc.ts) is a message
+//              from it in box `status`, `subject` the transaction's CID, body
+//              {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?};
+//              an instance admits it only if it subscribes to this key in `status`
 //
 // How this host obtains the providers' keys is its own business (oracle.ts:
 // children of its master secret); the instance knows them from its address
 // book (the genesis seeds them: `addressBook`, role = the provider's name).
 
 import { randomBytes } from "node:crypto";
-import { ProtoWallet, Utils, type PrivateKey } from "@bsv/sdk";
+import { ProtoWallet, type PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
@@ -66,7 +77,7 @@ export interface MailRecord {
 export interface Outgoing { message: MailRecord; body: Uint8Array; transport: string; address: string }
 
 /** The stock providers' names (and the roles the address book gives them). */
-export const PROVIDERS = ["fetch", "waker", "libp2p", "broadcast"] as const;
+export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status"] as const;
 export type ProviderName = typeof PROVIDERS[number];
 
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number };
@@ -79,8 +90,10 @@ export interface ProvidersOptions {
   append(handle: string, pkg: { kind: "message"; message: MailRecord; body: Uint8Array }): Promise<unknown>;
   /** The HTTP proxy's network: one request, this host's own URLs in process. */
   fetch(req: HttpRequest, from: string): Promise<HttpResponse>;
-  /** The broadcaster (#58's Arcade), when the host has one. */
-  broadcast?: { submit(tx: Uint8Array, from: string): Promise<HttpResponse>; status(txid: string, from: string): Promise<HttpResponse> };
+  /** The broadcaster (#58, #65: the host's Arcade), when the host has one: a broadcast event's transaction and BEEF, queued. */
+  broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
+  /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
+  cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
   /** The libp2p host, when there is one: the instance's node does the work. */
   p2p?: {
     publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }>;
@@ -102,7 +115,7 @@ export class Providers {
   /** Messages taken (handle + CID), so a message handed over again (a kernel's start) is acted on once. */
   private taken = new Set<string>();
   /** The waker's timers, by handle + the wake-me's CID. */
-  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private timers = new Map<string, { at: number; handle: string; timer: ReturnType<typeof setTimeout>; fire(): void }>();
   /** Messages being carried now, and the waker's answers being appended. */
   private inflight = new Set<Promise<unknown>>();
   private stopped = false;
@@ -132,13 +145,14 @@ export class Providers {
   /** Stop the timers; nothing more is carried. */
   stop(): void {
     this.stopped = true;
-    for (const t of this.timers.values()) clearTimeout(t);
+    for (const t of this.timers.values()) clearTimeout(t.timer);
     this.timers.clear();
   }
 
-  /** A message from `handle` to carry out (the kernel's `emit` notice). */
+  /** A message (or an event, #65) from `handle` to carry out (the kernel's `emit` notice). */
   deliver(handle: string, out: Outgoing): void {
     if (this.stopped) return;
+    if (out.transport === "event") return this.event(handle, out);
     const id = encode(out.message).cid;
     const k = `${handle} ${id}`;
     if (this.taken.has(k)) return;
@@ -162,6 +176,14 @@ export class Providers {
     while (this.inflight.size) await Promise.all([...this.inflight]);
   }
 
+  /** An event out (#65): unauthenticated, self-validating, addressed to no one. Each is acted on every time it is handed over (a kernel's start hands over again what a waiting thread awaits: the queue takes a transaction once). */
+  private event(handle: string, out: Outgoing): void {
+    const m = out.message as unknown as Record<string, unknown>;
+    if (out.address !== "broadcast" || m.kind !== "broadcast") { this.say(handle, `provider: an event ${out.address} this host has no wiring for: dropped`); return; }
+    if (!this.o.broadcast) { this.say(handle, "broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"); return; }
+    this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);
+  }
+
   private async carry(handle: string, id: CID, out: Outgoing): Promise<void> {
     if (out.transport === "libp2p") return await this.libp2pRecipient(handle, id, out);
     if (out.transport !== "local") throw new Error(`no transport ${out.transport} here`);
@@ -177,7 +199,8 @@ export class Providers {
         case "fetch": return await this.fetch(handle, out.message, id, box, body);
         case "waker": return this.wake(handle, out.message, id, box, body);
         case "libp2p": return await this.p2p(handle, out.message, id, box, body);
-        case "broadcast": return await this.broadcast(handle, out.message, id, box, body);
+        case "cron": return await this.cron(handle, out.message, id, box, body);
+        case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"status\")" });
       }
     } catch (e) {
       await this.answer(handle, name, out.message, id, { error: (e as Error).message });
@@ -195,16 +218,26 @@ export class Providers {
 
   /** A signed message from provider `name` to the instance that sent `to`, in `to`'s box: {replyTo, …answer}, appended. */
   async answer(handle: string, name: ProviderName, to: MailRecord, id: CID, answer: Record<string, unknown>, box = to.box): Promise<void> {
-    if (this.stopped) return;
-    const body = dagCbor.encode({ replyTo: id, ...answer });
-    // Its own message (two like answers — two frames alike — are two messages: `nonce`), about what the question was about (`subject`).
+    await this.send(handle, name, to.sender, box, { replyTo: id, ...answer }, to.subject);
+  }
+
+  /**
+   * A signed message from provider `name` to `recipient` (the instance
+   * `handle`), in `box`, its body `body` — an answer, a tick (#69), a status
+   * (#65) — appended there as a `local` request (what the append answers:
+   * the entry). Its own message (two like bodies are two messages:
+   * `nonce`), about `subject` if given.
+   */
+  async send(handle: string, name: ProviderName, recipient: Uint8Array, box: string, body: Record<string, unknown>, subject?: CID): Promise<unknown> {
+    if (this.stopped) return undefined;
+    const bytes = dagCbor.encode(body);
     const unsigned = {
-      kind: "mail" as const, op: "put" as const, sender: Uint8Array.from(Buffer.from(this.key(name), "hex")), recipient: to.sender, box, body: encode(dagCbor.decode(body)).cid,
-      nonce: Uint8Array.from(randomBytes(16)), ...(to.subject ? { subject: to.subject } : {}),
+      kind: "mail" as const, op: "put" as const, sender: Uint8Array.from(Buffer.from(this.key(name), "hex")), recipient, box, body: encode(dagCbor.decode(bytes)).cid,
+      nonce: Uint8Array.from(randomBytes(16)), ...(subject ? { subject } : {}),
     };
     const { signature } = await this.wallet(name).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
     const message: MailRecord = { ...unsigned, signature: Uint8Array.from(signature) };
-    await this.o.append(handle, { kind: "message", message, body });
+    return await this.o.append(handle, { kind: "message", message, body: bytes });
   }
 
   // ---------------------------------------------------------------- fetch: the HTTP proxy
@@ -229,13 +262,31 @@ export class Providers {
     if (box !== "wake" || typeof b.at !== "number") { void this.answer(handle, "waker", m, id, { error: "the waker takes {at: ms} in box \"wake\"" }); return; }
     const at = b.at;
     const k = `${handle} ${id}`;
+    // A timer's longest wait is about 24.8 days; a later wake waits in steps.
+    const arm = () => this.timers.set(k, { at, handle, fire, timer: setTimeout(fire, Math.min(2 ** 31 - 1, Math.max(0, at - this.o.now()) + 1)) });
     const fire = () => {
       this.timers.delete(k);
-      if (this.o.now() < at) { this.timers.set(k, setTimeout(fire, Math.max(1, at - this.o.now()))); return; }
+      if (this.o.now() < at) { arm(); return; }
       this.track(this.answer(handle, "waker", m, id, { at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`)));
     };
-    // A timer's longest wait is about 24.8 days; a later wake waits in steps.
-    this.timers.set(k, setTimeout(fire, Math.min(2 ** 31 - 1, Math.max(0, at - this.o.now()) + 1)));
+    arm();
+  }
+
+  /**
+   * Answer now every wake-me that is due by the clock (`now`): what the
+   * timers do in real time, for a clock that is not (a script clock: tests,
+   * the corpus). The answers are being appended when it returns (idle()).
+   */
+  wakeDue(): void {
+    const now = this.o.now();
+    for (const [k, t] of [...this.timers]) if (t.at <= now) { clearTimeout(t.timer); this.timers.delete(k); t.fire(); }
+  }
+
+  /** The earliest wake the waker owes `handle` (ms), if any (the host page). */
+  nextWake(handle: string): number | undefined {
+    let next: number | undefined;
+    for (const t of this.timers.values()) if (t.handle === handle && (next === undefined || t.at < next)) next = t.at;
+    return next;
   }
 
   // ---------------------------------------------------------------- libp2p
@@ -301,21 +352,11 @@ export class Providers {
     }
   }
 
-  // ---------------------------------------------------------------- the broadcaster
+  // ---------------------------------------------------------------- cron (#69)
 
-  private async broadcast(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): Promise<void> {
-    const arc = this.o.broadcast;
-    const none = { status: 503, body: Utils.toArray(JSON.stringify({ status: 503, title: "no Arcade", extraInfo: "this host has no Arcade (SKEIN_ARC_URL)" }), "utf8") };
-    if (box === "broadcast") {
-      if (!(b.tx instanceof Uint8Array)) return await this.answer(handle, "broadcast", m, id, { error: "broadcast wants {tx: bytes}" });
-      const r = arc ? await arc.submit(b.tx, handle) : { status: none.status, body: Uint8Array.from(none.body), headers: {} };
-      return await this.answer(handle, "broadcast", m, id, { status: r.status, body: r.body });
-    }
-    if (box === "status") {
-      if (typeof b.txid !== "string") return await this.answer(handle, "broadcast", m, id, { error: "status wants {txid}" });
-      const r = arc ? await arc.status(b.txid, handle) : { status: none.status, body: Uint8Array.from(none.body), headers: {} };
-      return await this.answer(handle, "broadcast", m, id, { status: r.status, body: r.body });
-    }
-    return await this.answer(handle, "broadcast", m, id, { error: `the broadcaster takes broadcast, status: not ${box}` });
+  private async cron(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): Promise<void> {
+    if (!this.o.cron) return await this.answer(handle, "cron", m, id, { error: "this host keeps no schedules" });
+    if (box !== "cron") return await this.answer(handle, "cron", m, id, { error: `the cron provider takes box "cron", not ${box}` });
+    await this.answer(handle, "cron", m, id, this.o.cron(handle, hex(m.sender), id.toString(), b));
   }
 }

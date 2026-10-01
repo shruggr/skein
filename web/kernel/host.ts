@@ -21,8 +21,8 @@
 //                     user admitted directly), a poll of this identity's
 //                     mailbox instance on the host (listMessages on a BRC-104
 //                     session; each message admitted, acknowledged once
-//                     durable), the providers' answers, a timer for a shell's
-//                     sleep (wakes).
+//                     durable), the providers' answers (the waker's among
+//                     them: a deadline's or a shell's sleep, #69).
 //
 // The mailbox: registering this identity on the host creates its mailbox
 // instance (#40); the genesis names it as the owner's messagebox, so what the
@@ -128,7 +128,6 @@ export class WebKernel {
   async idle(): Promise<void> {}
   async genesis(): Promise<unknown> { return await this.call("genesis"); }
   async boxes(): Promise<string[]> { return await this.call("boxes") as string[]; }
-  async sleepers(): Promise<Array<{ thread: CID; until: number }>> { return await this.call("sleepers") as Array<{ thread: CID; until: number }>; }
   async state(): Promise<{ state: CID; log: CID | null; cursor: number }> { return WebKernel.unwrap(dagCbor.decode(await this.kw.call("state")) as Reply) as { state: CID; log: CID | null; cursor: number }; }
 }
 
@@ -141,10 +140,9 @@ export class BrowserHost {
   mailbox = "";
   private queue: Promise<unknown> = Promise.resolve();
   private pollTimer?: ReturnType<typeof setTimeout>;
-  private wakeTimer?: ReturnType<typeof setTimeout>;
   private wire: WalletWireProcessor;
   private stopped = false;
-  /** The page as the host's providers (#70): the HTTP proxy and the waker. */
+  /** The page as the host's providers (#70): the HTTP proxy and the waker (a deadline's and a shell's sleep, #69). */
   readonly providers: Providers;
   /** What happened, for the page and the tests. */
   readonly events: Array<{ kind: string; [k: string]: unknown }> = [];
@@ -205,7 +203,6 @@ export class BrowserHost {
       this.log(`genesis ${e}`);
     }
     await this.serial(async () => { await this.kernel.start(); await this.kernel.drain(); });
-    await this.scheduleWake(await this.kernel.sleepers());
     void this.pollLoop();
   }
 
@@ -213,7 +210,6 @@ export class BrowserHost {
     this.stopped = true;
     this.providers.stop();
     clearTimeout(this.pollTimer);
-    clearTimeout(this.wakeTimer);
     this.kernel?.kw.terminate();
   }
 
@@ -256,7 +252,6 @@ export class BrowserHost {
 
   private notified(op: string, v: Uint8Array | string): void {
     if (op === "say" || op === "panic") { this.log(String(v)); return; }
-    if (op === "sleepers") { void this.scheduleWake(dagCbor.decode(v as Uint8Array) as Array<{ thread: CID; until: number }>); return; }
     // #70: a signed message the instance emitted, its step committed: the page's providers carry it.
     if (op === "emit") { this.providers.deliver(this.o.handle, dagCbor.decode(v as Uint8Array) as Outgoing); return; }
   }
@@ -268,24 +263,6 @@ export class BrowserHost {
       const e = await admit2(this.kernel as unknown as Kernel, { request: rc, transport: "local" } as never, {}, now());
       await this.kernel.drain();
       return e;
-    });
-  }
-
-  private async scheduleWake(s: Array<{ thread: CID; until: number }>): Promise<void> {
-    clearTimeout(this.wakeTimer);
-    if (!s.length || this.stopped) return;
-    this.wakeTimer = setTimeout(() => void this.wake(), Math.max(0, s[0]!.until - Date.now()) + 1);
-  }
-
-  /** The waker: admit a wake for every sleeper that is due (late ones too: the tab may have been closed). */
-  private async wake(): Promise<void> {
-    await this.serial(async () => {
-      for (const { thread, until } of await this.kernel.sleepers()) {
-        if (until > Date.now()) break;
-        const e = await admit2(this.kernel as unknown as Kernel, { wake: thread }, {}, now());
-        this.log(`wake ${thread.toString().slice(-8)} as ${e.toString().slice(-8)}`);
-      }
-      await this.kernel.drain();
     });
   }
 

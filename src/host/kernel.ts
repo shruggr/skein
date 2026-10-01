@@ -3,19 +3,21 @@
 // (kernel-zig/src/ipc.zig). This is the kernel's whole surface:
 //
 //   the router asks      tip · get · put · has · putblock · restore · append · genesis · boxes · byEnvelope ·
-//                        admit (the one call in that writes: a request as received, #68, a feed's event, a
-//                        wake) · answer (#66: wait on the thread a request entry launched; its answer once it
+//                        admit (the one call in that writes: a request as received, #68, a feed's or a
+//                        proof's event) · answer (#66: wait on the thread a request entry launched; its answer once it
 //                        comes to rest, or its state at the wait's bound) · call (#40: a program's function
 //                        over the state, no entry, no writes: host-side reads only) · idle · start · running
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle; the one call a step
 //                        makes out mid-step, #67)
 //   the kernel tells     emit (#70: a signed message for the host to carry out — {message, body,
-//                        transport, address}, a `local` provider's or the libp2p node's; the answer
-//                        comes back as an entry) · sleepers (its sleeping shells and their
-//                        deadlines) · onSleep · stop
+//                        transport, address}, a `local` provider's or the libp2p node's, the answer
+//                        coming back as an entry; #65: a broadcast event, transport `event`) · stop
+//
+// Nothing here keeps an instance's time (#69): a step's deadline and a
+// shell's sleep are wake-me messages to the waker provider.
 //
 // `Kernel` offers `store` (get/put/log), `admit`, `answer`, `invoke` (the call),
-// `boxes`, `sleepersDue`/`onSleep`, `idle`. Log lines (stderr) go to `log`.
+// `boxes`, `idle`. Log lines (stderr) go to `log`.
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -33,7 +35,6 @@ const ROOT = resolvePath(dirname(fileURLToPath(import.meta.url)), "../..");
 export const KERNEL_BIN = process.env.SKEIN_KERNEL_BIN || join(ROOT, "kernel-zig/zig-out/bin/skein-kernel");
 
 type Frame = Record<string, unknown>;
-export interface Sleeper { thread: CID; until: Ms }
 /** A request thread's answer (#66, the `answer` frame): at rest (finished | errored), or not yet at the wait's bound. */
 export type RequestAnswer = { thread?: CID; state: "finished"; answer: Uint8Array } | { thread?: CID; state: "errored"; error: string } | { thread?: CID; state: "waiting" | "running" | "new" | "pending" };
 /** A kernel call's answer (#40): the program's stdout, or its error; the fuel it used either way. */
@@ -46,10 +47,8 @@ export interface KernelOptions {
   domain: string;
   /** Answers the kernel's `wallet` frames: the instance's oracle. Absent: every wallet call fails. */
   wallet?: WalletInterface;
-  /** A message the kernel hands over to carry out (#70, the `emit` notice): a `local` provider's or the libp2p node's (providers.ts). Absent: dropped. */
+  /** A message (#70) or an event (#65) the kernel hands over to carry out (the `emit` notice): a `local` provider's, the libp2p node's, the broadcaster's (providers.ts). Absent: dropped. */
   emit?(o: Outgoing): void;
-  /** The kernel's sleepers changed (earliest first). */
-  sleepers?(s: Sleeper[]): void;
   /** Log lines (the kernel's stderr and this side's notes). */
   log?(line: string): void;
   /** The process exited (code or signal). */
@@ -71,8 +70,6 @@ export class Kernel {
   busy = 0;
   last = Date.now();
   gone = false;
-  sleepers: Sleeper[] = [];
-  onSleep?: (thread: CID, until: Ms) => void;
 
   constructor(o: KernelOptions) {
     this.o = o;
@@ -151,14 +148,9 @@ export class Kernel {
           if (!this.wire) throw new Error("no wallet");
           return answer(Uint8Array.from(await this.wire.transmitToWallet([...(f.v as Uint8Array)])));
         case "emit":
-          // A signed message to carry out (#70), its step committed: nothing goes back.
+          // A signed message (#70) or an event (#65) to carry out, its step committed: nothing goes back.
           this.o.emit?.(f.v as Outgoing);
           return;
-        case "sleepers":
-          this.sleepers = f.v as Sleeper[];
-          this.o.sleepers?.(this.sleepers);
-          return;
-        case "onSleep": this.onSleep?.(undefined as never, 0); return;
         case "stop": return;
       }
     } catch (e) {
@@ -189,7 +181,6 @@ export class Kernel {
   async putBlock(cid: CID, bytes: Uint8Array): Promise<void> { await this.call("putblock", { cid, bytes }); }
   /** Adopt a checkpoint's state record (its blocks put first) as this empty store's state (#4). */
   async restore(state: CID): Promise<void> { await this.call("restore", state); }
-  sleepersDue(): Sleeper[] { return this.sleepers; }
   async boxes(): Promise<string[]> { return await this.call("boxes") as string[]; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   /** Admit an entry (a message's record put first; its body's bytes beside it). */
