@@ -460,6 +460,35 @@ subscriptions chain … it needs a new genesis"). Move the runtime.db aside,
 restart `skein-host run` on this build, and `deploy` again; host.db is
 untouched.
 
+### Installing an app: `skein-host install` / `uninstall`
+
+```
+skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]
+skein-host uninstall <app> --instance <handle> [--approve-all]
+```
+
+An app (docs/APPS.md, #72/#76) is a tree with `etc/app.json`. `install`
+clones the repo (a `#<rev>` checks that commit out) or reads the
+directory (leaving out `.git`, `node_modules`, `zig-out`, `.zig-cache`,
+`zig-pkg`), checks the manifest (src/host/manifest.ts) and the instance
+(its store, read only: `requires` provided by an installed app, routes and
+heads nobody else has, `$<provider>` senders in the address book), prints
+what the app asks for — heads, each box with its handler and senders, each
+route under `/<app>/`, start/stop, requires/provides, the messages — and,
+approved (`--approve-all`, or "y" at a terminal; `--dry-run` stops at the
+prompt), sends as the owner through the owner's wallet to the row's front
+door (as `deploy` does): `objects` (the tree, modules, program records,
+the app record), `head` `{name: <app>, tree: <app record>}`, `subscribe`
+per (box, sender), `routes` per route, then `start`. Installing it again is
+the upgrade (state kept, what it no longer asks for removed, start sent
+again). `uninstall` sends `stop`, then removes the app's subscriptions and
+routes; the head is left. Exit 0 sent, 1 refused or failed, 2 usage.
+
+```
+skein-host install https://github.com/shruggr/skein-static --instance martha --approve-all   # /static/… from main's www/
+skein-host install programs/test/app-demo --instance martha --dry-run
+```
+
 ### Deploying an agent: `skein-host deploy`
 
 Genesis is only the core image; the agent's personality arrives as a

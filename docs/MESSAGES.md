@@ -104,9 +104,18 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
     nonce is not remembered: a replayed read reads again); a replayed write
     is the same mail record, which the kernel admits once (the `unique` map).
     The records are prunable like any others; nothing prunes them yet.
-- **Routes** (the genesis's `routes`, from `etc/routes.json`): `[{path |
-  prefix, program: <cid>, fn, auth?: "none", read?: <op>}]`, exact paths first,
-  then the longest prefix. `auth` defaults to BRC-104; `"none"` is for open
+- **Routes** (the genesis's `routes`, from `etc/routes.json`, then the
+  installed ones, #72): `[{path | prefix, program: <cid>, fn, auth?: "none",
+  read?: <op>}]`, exact paths first, then the longest prefix. **The box
+  `routes`** (the owner's, by the stock genesis; handled by the front door)
+  changes the installed ones: `{op: "add", route: {path | prefix, program:
+  <program record CID>, fn, auth?, read?, app?, …the handler's settings}}`
+  adds one (replacing the route with the same path, or the same prefix),
+  `{op: "remove", route: {path | prefix}}` removes it (a route not there:
+  nothing written). They are the head `routes`, `{kind: "routes", routes:
+  [<route>]}`, which the front door reads on every request after the
+  genesis's routes. An app's install writes its routes here, under
+  `/<app>/` (docs/APPS.md §3). `auth` defaults to BRC-104; `"none"` is for open
   routes (an overlay's submit and lookup). The handler is an in-VM call of
   `program`'s `fn` in the front door's step; what it receives and returns is
   the program-facing contract below ("Route handlers").
@@ -743,6 +752,24 @@ questions of an instance (#65). A call needs no determinism: nothing it
 does is recorded. Its fuel is charged to the host's ledger. From a step, an
 in-VM `call` is part of the step (its recorded calls and head moves are the
 step's) — that is how the front door calls a route handler.
+
+### Calling an app: `{fn, args}` and the answer message (#72)
+
+An app's box takes `{fn: "<interface>.<function>", args}` (docs/APPS.md
+§4). Its handler (the SDK's `app.serve`, skein-sdk ≥ 0.2.0) answers with a
+message to the sender, in the same box, when the address book reaches the
+sender:
+
+```
+{fn, request: <the request message's CID>, replyTo: <the same CID>, result}
+{fn, request, replyTo, error: {code: "bad-request" | "unknown-fn" | "bad-args" | "read-only" | "failed", message}}
+```
+
+`replyTo` routes it as a reply: a program that emitted the call and awaits
+the message's CID is stepped with it (`reply`, above). Over HTTP, the
+app's route `{path: "/call", fn: "call"}` takes the same `{fn, args}` as
+the POST body and answers `{fn, result}` or `{fn, error}` on the connection
+(200; 400, 403 `not-admitted`, 404, 409, 500).
 
 ## libp2p (#51)
 

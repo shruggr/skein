@@ -143,7 +143,7 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 | repo | what | in a tree |
 |---|---|---|
 | shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
-| shruggr/skein-static | the static file handler (#52) | `bin/static.wasm` and a route (above, "Static files") |
+| shruggr/skein-static | the static file handler (#52) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its routes under `/static/`; or at boot, `bin/static.wasm` and a route (above, "Static files") |
 | shruggr/skein-overlay | the overlay services engine (#36) | after #73: today `programs/overlay` here |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
@@ -155,17 +155,42 @@ There are two ways to install an app.
 - **At boot**, an app is part of a system tree. Copy the repo's `bin/`
   entries the tree needs into its `bin/`, and its routes and subscriptions
   into `etc/`. Then `skein-host add <h> --boot <dir>` (above).
-- **Into a running instance**, install is the three owner messages of
-  docs/APPS.md §3:
-  1. clone the repo;
-  2. send `objects` with the tree's records (`bin/skein import <checkout>`
-     sends them and prints the tree CID);
-  3. send `head` `{name: <app>, tree}`;
-  4. send `subscribe` for each box the manifest asks for (`skein-host
-     subscribe <h> add [--sender <key>] <box> <handler>`).
+- **Into a running instance** (#72, #76, built): `skein-host install`.
 
-  The installer that reads the manifest and sends these from it is #72
-  (`skein-host install <repo|dir>`).
+  ```
+  skein-host install <repo-url[#rev] | dir> --instance <h> [--approve-all | --dry-run]
+  skein-host uninstall <app> --instance <h> [--approve-all]
+  ```
+
+  `install` clones the repo (or reads the directory), checks `etc/app.json`
+  (docs/APPS.md §2; src/host/manifest.ts), checks the instance (every
+  `requires` interface provided by an installed app's head; no route or
+  head another app or the genesis has; every `$<provider>` sender in the
+  address book), and prints the permission prompt: the heads, each box with
+  its handler and its senders, each route under `/<app>/`, `start`/`stop`,
+  `requires`/`provides`, what an overlay publishes, and the messages it
+  will send. Approved (`--approve-all`, or "y" at a terminal; `--dry-run`
+  only prints), it sends them as the owner (SKEIN_OWNER_WALLET, as `deploy`
+  does), in order (docs/APPS.md §3, src/host/install.ts):
+
+  1. `objects`: the tree's git objects, its `bin/*.wasm` modules, a program
+     record per program, and the **app record**, ≤ 1 MiB per message, no
+     root named (an app never becomes `main`);
+  2. `head` `{name: <app>, tree: <the app record>}`;
+  3. `subscribe` per (box, sender) — preceded, when the instance has no
+     owner's `routes` box and the app has routes, by `{sender: owner, box:
+     "routes", handler: <frontdoor>}`;
+  4. `routes` `{op: "add", route}` per route, the path under `/<app>/`;
+  5. the manifest's `start` body into the app's box.
+
+  Installing an app that is installed already is the upgrade: its `state`
+  is kept, what the old version asked for and the new one does not is
+  removed, and `start` is sent again. `uninstall` sends `stop`, then removes
+  the app's subscriptions and routes; the head is left.
+
+  By hand, the same messages: `bin/skein import <checkout>` (objects),
+  `skein head`, `skein-host subscribe <h> add [--sender <key>] <box>
+  <handler>`; the routes box has no command of its own.
 
 ## Packets
 
@@ -267,6 +292,11 @@ boot is written, and the process exits 0.
 
 ## Tests
 
+- `src/host/manifest.test.ts`: the manifest's checks (route escapes,
+  senders, the handler map, shapes, `requires`); `kernel-zig/equiv/install.ts`
+  (in `run.sh`): `skein-host install` of shruggr/skein-static and
+  programs/test/app-demo into a running instance, driven, uninstalled,
+  replayed.
 - `src/host/packet.test.ts`: both forms, with and without an index; the
   scope-mismatch, hash-mismatch, incomplete, unproven and malformed refusals; a
   patched file resolved through its base, and incomplete without it.
