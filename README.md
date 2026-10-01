@@ -51,7 +51,7 @@ src/dev/         developer tools, OUTSIDE the machine: `skein-dev install|log|ls
   explore/         `bin/skein-explore [port]`: a read-only graph explorer over the store file (http://localhost:4500)
 src/wallet.ts    connecting a BRC-100 wallet
 programs/        skein's own programs, all Zig (#54) over the SDK: the install handlers (objects-handler, head-handler, subscribe-handler), messagebox, frontdoor, resolve, wallet (the boundary programs every instance needs), overlay (the overlay services engine, #36; moving to shruggr/skein-overlay); test/ (kernel test fixtures: fetch, p2p-component, p2p-demo, cron-demo, wire-probe)
-sdk/             the SDK, shruggr/skein-sdk as a git submodule (#71): the codecs (cid, cbor, mst, secp) the kernel shares, the `skein` imports and helpers (lib/), BRC-104, dag-json, messages, the WIT (wit/), the wallet library (wallet/); a Zig package programs depend on by path here, by URL+hash elsewhere
+(shruggr/skein-sdk is a sibling repo and Zig package dependency, #75: the codecs (cid, cbor, mst, secp) the kernel shares, the `skein` imports and helpers (lib/), BRC-104, dag-json, messages, the WIT (wit/), the wallet library (wallet/) — not a path in this tree)
 scripts/         build-programs.sh + pin-programs.sh (skein's programs), update-workbench.sh (a workbench build's modules in, repinned), host/ (dev host)
 wasm/            the committed modules; pinned in kernel-zig/src/programs.zig (the shell's and the wallet's also in src/runtime/programs.ts); run-handler, loop and the shell's toolset are built in shruggr/skein-workbench (wasm/README.md)
 ```
@@ -80,7 +80,7 @@ oracle: a ProtoWallet over a key derived from one master secret
 host key: log entries are unsigned (format 2).
 
 ```
-git clone --recurse-submodules https://github.com/shruggr/skein   # or, in a clone: git submodule update --init (sdk/)
+git clone https://github.com/shruggr/skein   # no submodule: skein_sdk is fetched by zig build (shruggr/skein-sdk, URL+hash, #75)
 npm install
 (cd kernel-zig && mise exec -- zig build --release)
 bin/skein-host add martha                   # a row: identity derived from the master secret, store ~/.skein/instances/martha/runtime.db
@@ -94,6 +94,13 @@ bin/skein chat --new --tree <cid> --wait 'what is here?'   # the loop answers wi
 bin/skein-dev log; bin/skein-dev ls; bin/skein-dev show <cid-suffix>
 npm test
 ```
+
+Developing skein and skein-sdk together: `git clone https://github.com/shruggr/skein-sdk ../skein-sdk` next
+to this checkout, then prefix any build with `scripts/sdk-local.sh` to override the
+fetched `skein_sdk` dependency with that sibling — no edit to any `build.zig.zon`
+(Zig 0.16's `zig build --fork=<dir>`, matched by package name). Check:
+`cd kernel-zig && ../scripts/sdk-local.sh mise exec -- zig build test` picks up
+`../skein-sdk`'s sources (the summary line names the fork).
 
 ### The host: `skein-host`
 

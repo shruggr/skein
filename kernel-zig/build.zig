@@ -6,9 +6,10 @@
 // ~/.local/wasmtime-c-api/wasmtime-v49.0.1-aarch64-linux-c-api. The static
 // libwasmtime.a is linked, so the binary needs nothing of it at run time.
 // SQLite: the system libsqlite3 (JSON1 is built in since 3.38).
-// The codecs (cid, cbor, mst, secp) are the SDK's (../sdk, the skein-sdk
-// submodule, a path dependency in build.zig.zon; with -Dwallet=false, so the
-// kernel never fetches bsvz).
+// The codecs (cid, cbor, mst, secp) are the SDK's (shruggr/skein-sdk, a Zig
+// package dependency by URL+hash in build.zig.zon, #75; with -Dwallet=false,
+// so the kernel never fetches bsvz). scripts/sdk-local.sh overrides it with
+// a sibling checkout for development.
 //
 // The browser build (issue #35): `zig build web`, or any wasm target
 // (`zig build -Dtarget=wasm32-freestanding`) → zig-out/web/skein-kernel.wasm,

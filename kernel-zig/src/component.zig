@@ -5,7 +5,7 @@
 //
 // The host side is written by hand against wasmtime's component C API
 // (wasmtime_component_linker_instance_add_func: dynamic values, canonical ABI
-// lifting and lowering done by wasmtime). The WIT is the SDK's wit/ (../../sdk/wit, package
+// lifting and lowering done by wasmtime). The WIT is the SDK's wit/ (shruggr/skein-sdk, #75; package
 // skein:kernel, world `handler`); WASI 0.2.12, the version wasmtime v49 ships
 // and its preview1 adapter imports (older 0.2.x imports link by semver).
 //

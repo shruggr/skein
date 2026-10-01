@@ -240,8 +240,9 @@ The kernel runs **WASI 0.2 components** as well as preview1 core modules,
 wherever it runs a module: a handler program's step, or a program the shell
 spawns. `runner.zig` tells them apart by the binary's preamble.
 
-A component targets `skein:kernel/handler` in `../sdk/wit/skein.wit` (see
-`../sdk/wit/README.md`):
+A component targets `skein:kernel/handler` in the SDK's `wit/skein.wit`
+(shruggr/skein-sdk, a Zig package dependency by URL+hash, #75; see its
+`wit/README.md`):
 
 - WASI 0.2.12: `cli`, `clocks`, `filesystem`, `io` and `random`;
 - the interface `skein:kernel/skein`: the preview1 `skein` calls, including
@@ -255,7 +256,7 @@ Imports the kernel does not answer, such as sockets, link as traps.
 | what | version | where |
 |---|---|---|
 | wasmtime C API | v49.0.1 (its component API: `wasmtime/component/*.h`) | `~/.local/wasmtime-c-api/…` (unchanged) |
-| WASI | 0.2.12 (the WIT is vendored in `../sdk/wit/deps`, from wasmtime v49.0.1's `crates/wasi/src/p2/wit/deps`) | |
+| WASI | 0.2.12 (the WIT is vendored in the SDK's `wit/deps`, from wasmtime v49.0.1's `crates/wasi/src/p2/wit/deps`) | |
 | preview1 adapter | wasmtime v49.0.1's `wasi_snapshot_preview1.command.wasm` (sha256 `86c88319…9f76`) | `~/.local/wasi-adapter-v49.0.1/` (`$SKEIN_WASI_ADAPTER`) |
 | wasm-tools | 1.259.0 | `~/.local/wasm-tools-1.259.0-aarch64-linux/`, linked from `~/.local/bin` |
 | wit-bindgen | 0.62.0 (`wit-bindgen c`) | `~/.local/wit-bindgen-0.62.0-aarch64-linux/`, linked from `~/.local/bin` |
@@ -340,10 +341,10 @@ The wallet (`../programs/wallet`) is the example: `zig build component` gives
    carries the world.
 2. **Compile the program.** Build it for `wasm32-wasi` with `program.c` and
    the `.o`. In Zig, `@cImport(@cInclude("program.h"))`
-   (the SDK's `skein_wit` module, `sdk/wit/zig/skein_wit.zig`).
+   (the SDK's `skein_wit` module, `wit/zig/skein_wit.zig`).
 3. **Keep wasi-libc out** if the program must draw the same random bytes as
    its preview1 build. Linking wasi-libc switches Zig's random (`std.Io`'s
-   `randomSecure`) to `arc4random`. The SDK's `cabi` module (`sdk/wit/zig/cabi.zig`) provides the few libc
+   `randomSecure`) to `arc4random`. The SDK's `cabi` module (`wit/zig/cabi.zig`) provides the few libc
    functions `program.c` needs.
 4. **Make the component.**
    `wasm-tools component new core.wasm --adapt wasi_snapshot_preview1=<adapter> -o out.wasm`.

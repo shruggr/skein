@@ -223,7 +223,7 @@ the kernel runs both:
   `skein` namespace (pointers into its memory, `f(…, out, cap) → n`, with
   `take`/`error`; `kernel-zig/src/program.zig`);
 - a **WASI 0.2 component**, which targets the world `skein:kernel/handler`
-  (`sdk/wit/skein.wit`). That is WASI 0.2.12's `cli`, `clocks`, `filesystem`,
+  (the SDK's `wit/skein.wit`, shruggr/skein-sdk, #75). That is WASI 0.2.12's `cli`, `clocks`, `filesystem`,
   `io` and `random`, plus the interface `skein:kernel/skein`, and the export
   `wasi:cli/run`. The interface has the same calls as the `skein` namespace.
   Results come back through the canonical ABI, errors as

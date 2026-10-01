@@ -192,7 +192,7 @@ pub fn isMail(x: ?Value) bool {
 
 /// A signed message's preimage (#70): the dag-cbor of its mail record without
 /// `signature` — what the sender signed, BRC-169's way ([2, "metanet handles
-/// envelope"], key "send", counterparty anyone; message.zig in the SDK (sdk/lib)
+/// envelope"], key "send", counterparty anyone; message.zig in the SDK (lib/)
 /// checks it).
 pub fn signedPart(a: std.mem.Allocator, m: Value) ![]u8 {
     return cbor.encode(a, try cbor.without(a, m, "signature"));

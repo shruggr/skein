@@ -17,16 +17,16 @@ imports the same `emit` from `skein:kernel/skein`.
 
 ## Pieces
 
-- The library: the SDK's `wallet` module (shruggr/skein-sdk, #71; in skein
-  the `sdk/` submodule, `sdk/wallet/src/`), Zig 0.16.0, over **bsvz** (the
-  SDK's lazy URL+hash dependency: shruggr/bsvz branch `skein-sdk`). The index
-  maps are the Merkle search trees of the SDK's `mst` module, the kernel's
-  own, shared, not copied.
+- The library: the SDK's `wallet` module (shruggr/skein-sdk, #71; a sibling
+  repo, `wallet/src/`, a Zig package dependency by URL+hash, #75), Zig 0.16.0,
+  over **bsvz** (the SDK's lazy URL+hash dependency: shruggr/bsvz branch
+  `skein-sdk`). The index maps are the Merkle search trees of the SDK's `mst`
+  module, the kernel's own, shared, not copied.
 - The handler program: `programs/wallet` (wasm32-wasi → `wasm/wallet.wasm`,
   module `MODULES.wallet`, program record `WALLET` in
   `src/runtime/programs.ts`, installed by the Zig kernel; not in a genesis by
-  default), a boundary program, built against the SDK by path.
-- `sdk/wallet/vectors/` — the test-vector corpus (issue #14's rule): made by
+  default), a boundary program, built against the SDK by URL+hash.
+- the SDK's `wallet/vectors/` — the test-vector corpus (issue #14's rule): made by
   `gen-go` from go-sdk (fixtures snapshotted into `inputs/`, mainnet headers
   fetched from WhatsOnChain once), cross-checked by `gen-ts` against
   `@bsv/sdk` and the TS wallet-toolbox's chaintracks header utilities.
@@ -47,14 +47,15 @@ OP_LSHIFTNUM / OP_RSHIFTNUM and 32 MiB script numbers, **on by default**:
 `ExecutionFlags{}` is post-Chronicle mainnet, and `postGenesisBsv()` /
 `legacyReference()` are the opt-outs. The wallet passes no flags, so SPV
 (`src/spv.zig`) and the overlay (`src/overlay.zig`) verify with Chronicle
-rules. `sdk/wallet/vectors/chronicle.json` (Rúnar AMM pool spends, from the
-amm-poc fixtures) is the check: each pool input verifies by default, fails
-with `UnknownOpcode` under `postGenesisBsv()` and fails under
+rules. The SDK's `wallet/vectors/chronicle.json` (Rúnar AMM pool spends, from
+the amm-poc fixtures; a copy lives in skein as `kernel-zig/test/vectors/chronicle.json`
+for `equiv/overlay.ts`, #75) is the check: each pool input verifies by default,
+fails with `UnknownOpcode` under `postGenesisBsv()` and fails under
 `legacyReference()`.
 
 ### bsvz on wasm32-wasi
 
-One hunk (`sdk/wallet/patches/bsvz.patch`, committed on the `skein-sdk`
+One hunk (the SDK's `wallet/patches/bsvz.patch`, committed on the `skein-sdk`
 branch): `Preimage.parse` sliced with a `u64` (a compile error on 32-bit
 targets); it applies unchanged to the Chronicle pin. The wallet's tests and
 vectors pass under wasm32-wasi
@@ -160,7 +161,7 @@ is the hash of its children.
   root against our header at its height, then `putblock`s every node the
   path reveals — each pair of siblings it gives (a `duplicate` sibling is the
   left one again) makes a node, whose hash is the parent one level up —
-  hash-checked, nothing rewritten (sdk/wallet/src/merkle.zig `reveal`). A
+  hash-checked, nothing rewritten (the SDK's `wallet/src/merkle.zig` `reveal`). A
   path that also gives a node at a position with another hash than its
   children make is refused (`ConflictingNode`); one whose root is not our
   header's is refused (`RootMismatch`) and puts nothing. `proofs[txid]` then
@@ -456,13 +457,13 @@ event the host carries); a status provider is a subscription (above).
 ## Running it
 
 ```
-git submodule update --init                   # sdk/ (shruggr/skein-sdk); bsvz is fetched by zig build
-cd sdk && zig build test                      # the SDK: the wallet library + vectors (and the codecs), native
-cd sdk && zig build test-wasm                 # the wallet's tests built for wasm32-wasi, under Node's WASI
-scripts/build-programs.sh && scripts/pin-programs.sh   # rebuild wasm/wallet.wasm, repin its CID (also kernel-zig/src/programs.zig)
+git clone https://github.com/shruggr/skein-sdk ../skein-sdk   # a sibling checkout, for dev (#75); bsvz is fetched by zig build
+cd ../skein-sdk && zig build test             # the SDK: the wallet library + vectors (and the codecs), native
+cd ../skein-sdk && zig build test-wasm        # the wallet's tests built for wasm32-wasi, under Node's WASI
+scripts/build-programs.sh && scripts/pin-programs.sh   # rebuild wasm/wallet.wasm, repin its CID (also kernel-zig/src/programs.zig); fetches skein_sdk by URL+hash — scripts/sdk-local.sh overrides it with ../skein-sdk
 node --experimental-strip-types --no-warnings kernel-zig/equiv/wallet.ts   # end to end on the Zig kernel (also in equiv/run.sh)
-node sdk/wallet/vectors/gen-ts/run.mjs    # TS cross-check of the vectors
-(cd sdk/wallet/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
+node ../skein-sdk/wallet/vectors/gen-ts/run.mjs    # TS cross-check of the vectors
+(cd ../skein-sdk/wallet/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
 ```
 
 Vector counts (`zig build test`): tx 39 (fees 429), BEEF 27, merkle 43 (the

@@ -10,8 +10,8 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 
 /// MODULES, in declaration order (install order). Since #71 skein's own
 /// sources build only the install handlers (objects, head, subscribe), the
-/// messagebox, the front door, resolve and the wallet (programs/, over the SDK
-/// in sdk/). The shell's modules (brush, coreutils, the toolset), run-handler
+/// messagebox, the front door, resolve and the wallet (programs/, over the SDK,
+/// shruggr/skein-sdk, #75). The shell's modules (brush, coreutils, the toolset), run-handler
 /// and loop are the workbench's (shruggr/skein-workbench): built there, their
 /// modules committed in wasm/ and pinned here because the stock genesis and the
 /// stock shell program name them (scripts/update-workbench.sh moves a build in;

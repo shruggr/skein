@@ -146,7 +146,9 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 | shruggr/skein-static | the static file handler (#52) | `bin/static.wasm` and a route (above, "Static files") |
 | shruggr/skein-overlay | the overlay services engine (#36) | after #73: today `programs/overlay` here |
 
-The SDK they build against is shruggr/skein-sdk, which is `sdk/` here.
+The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
+package dependency by URL+hash (#75), not a path in this tree. Developing
+both at once: `scripts/sdk-local.sh` (README.md).
 
 There are two ways to install an app.
 

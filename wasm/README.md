@@ -16,9 +16,10 @@ two places.
 | `wallet.wasm` | `programs/wallet` | the wallet's handler (#29), over the SDK's wallet library |
 | `wire-probe.wasm` | `programs/test/wire-probe` | a test program, not pinned |
 
-All of these are Zig 0.16.0 and `wasm32-wasi`, over the SDK (`sdk/`, the
-shruggr/skein-sdk submodule). `scripts/build-programs.sh` builds them and
-`scripts/pin-programs.sh` rewrites the pins. The builds are reproducible.
+All of these are Zig 0.16.0 and `wasm32-wasi`, over the SDK (shruggr/skein-sdk,
+a Zig package dependency by URL+hash, #75 — not a path in this tree).
+`scripts/build-programs.sh` builds them and `scripts/pin-programs.sh` rewrites
+the pins. The builds are reproducible.
 
 ## From the workbench (shruggr/skein-workbench)
 
@@ -43,4 +44,4 @@ The overlay engine is `programs/overlay`, which moves to shruggr/skein-overlay
 after #73.
 
 Go `wasip1`, Rust, C and so on remain valid targets for third-party programs.
-The `skein` imports are the ABI (`sdk/wit/skein.wit`), not a language.
+The `skein` imports are the ABI (the SDK's `wit/skein.wit`), not a language.

@@ -528,13 +528,15 @@ try {
   }
   report.merkleAlone = alone;
 
-  // Chronicle script rules (#53): a Rúnar AMM pool spend (sdk/wallet/vectors/chronicle.json, from the amm-poc
-  // fixtures), whose pool input executes OP_2MUL. Its funding and token deploy are mined in block 5 (a coinbase,
+  // Chronicle script rules (#53): a Rúnar AMM pool spend (test/vectors/chronicle.json, from the amm-poc
+  // fixtures — a copy of the SDK's wallet/vectors/chronicle.json, #75: the SDK is a URL+hash dependency now,
+  // not a submodule, so this TS-only test keeps its own copy; refresh it here if the SDK's vector changes),
+  // whose pool input executes OP_2MUL. Its funding and token deploy are mined in block 5 (a coinbase,
   // fund, token deploy, a filler); the BEEF carries the pool deploy and the sats-in swap unproven, so the front
   // door's call verifies every input's script, the pool's included. No topic here takes it: 200 with the empty
   // STEAK is a verified submission (before Chronicle bsvz refused OP_2MUL: 400 ScriptFailed). The same swap with
   // its funding signature broken is refused (400 ScriptFailed): the scripts are run.
-  const chron = JSON.parse(readFileSync(join(here, "../../sdk/wallet/vectors/chronicle.json"), "utf8")) as { txs: Record<string, string> };
+  const chron = JSON.parse(readFileSync(join(here, "../test/vectors/chronicle.json"), "utf8")) as { txs: Record<string, string> };
   const cFund = Transaction.fromHex(chron.txs.fund!);
   const cToken = Transaction.fromHex(chron.txs.token_deploy!);
   const cPool = Transaction.fromHex(chron.txs.pool_deploy!);

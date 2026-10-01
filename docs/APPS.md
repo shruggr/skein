@@ -289,4 +289,4 @@ does not offer it.
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` route | spec (#72 build 2) |
 | the overlay engine reads `config.overlay` from its app's manifest (replacing genesis `overlayTopics`/`overlayLookups`) | spec (#72 build 3) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
-| apps in their own repos; the SDK as a Zig package | built (#71): shruggr/skein-sdk (in skein as the `sdk/` submodule), shruggr/skein-workbench, shruggr/skein-static; shruggr/skein-overlay after #73 |
+| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule), shruggr/skein-workbench, shruggr/skein-static; shruggr/skein-overlay after #73 |
