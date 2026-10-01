@@ -1,15 +1,16 @@
-// The input log and the record shapes the scheduler checks, in format 5
-// (issue #68; format 3, #40; format 2, #33: entries unsigned, identity keys
-// as 33-byte byte strings in every record). Skein is a state process: every
-// package a transport carries in is an entry, appended as received, and the
-// instance's middleware (the front door) is stepped on it; a message the
-// host admits directly, a wake and an event from a feed are the others.
+// The input log and the record shapes the scheduler checks, in format 6
+// (issues #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
+// unsigned, identity keys as 33-byte byte strings in every record). Skein is
+// a state process: every package a transport carries in is an entry,
+// appended as received, and the instance's middleware (the front door) is
+// stepped on it; a message the host admits directly, a wake and an event
+// from a feed are the others.
 //
 //   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box | request+transport}
 //   request  a package as a transport carried it in (#68), unverified: the
 //            host verifies nothing. `transport` names the middleware stepped
-//            on it (the genesis's front door for "http" and "libp2p"; #70
-//            adds "local": scheduler.zig middlewareOf). The record:
+//            on it (the genesis's front door for "http", "libp2p" and
+//            "local": scheduler.zig middlewareOf). The record:
 //              http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
 //                      `path` as the client sent it (what BRC-104 signs), `route` what the
 //                      routes table sees (the host strips `/@<handle>`)
@@ -18,25 +19,36 @@
 //                      message is routed as (box `libp2p:<topic>`)
 //                      {kind: "p2p-frame", protocol, from: bytes, body: bytes}
 //                      one frame of an inbound stream (unsigned: the stream is Noise's)
-//   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, json?: true,
-//             session?: {payload: bytes, signature: bytes, nonce, yourNonce}}
-//            a BRC-33 message (#40): the sender is the BRC-104 session's
-//            identity, `session` the signed request and its nonces (so the log
-//            verifies with the instance's key alone); its CID is the message's
-//            id — what a reply's `replyTo` names. Routed to the thread awaiting
-//            the message its body's `replyTo` names, else by subscription on
-//            (sender, box). Since #68 a message arrives inside a request and
-//            the middleware's step routes it; a host may still admit one as an
-//            entry of its own (the browser's).
+//              local   {kind: "message", message: <a signed mail record>, body: bytes}
+//                      a signed message a host provider (or anyone the host hands one
+//                      from) carried in with its body (#70): the front door checks the
+//                      signature and routes it
+//   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, subject?: <cid>,
+//             json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce} | nonce?: bytes, signature?: bytes}
+//            a message (#40, #70): its CID is the message's id — what a
+//            reply's `replyTo` names. Its sender is proven one of two ways:
+//            `session`, the BRC-104 signed request it came in (a BRC-33
+//            client's), or `signature`, the sender's own signature over the
+//            record without it (an emitted message, #70: BRC-169's signing —
+//            [2, "metanet handles envelope"], key "send", counterparty
+//            anyone — so anyone can check it with the sender's key). Routed to
+//            the thread awaiting the message its body's `replyTo` names, else
+//            by subscription on (sender, box). Since #68 a message arrives
+//            inside a request and the middleware's step routes it; a host may
+//            still admit one as an entry of its own (the browser's).
 //   event    a record from a feed (#29: a header, a proof, a status), routed
 //            by its `subject` or by box
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
-//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes, op}]}
+//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes, op}],
+//             addressBook?: [{key: bytes, transport, address, role?, handle?, domain?}]}
 //            `tree` (issue #4): the system tree the instance booted from (a git
 //            tree, its objects pre-filled by the loader); processing the genesis
 //            sets the head `main` to it. `routes`/`reads`: the front door's (#40).
+//            `addressBook` (#70): the address book's seed (the host's providers,
+//            the owner's mailbox), written into the head `peers` when the
+//            genesis is processed.
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -116,7 +128,36 @@ pub fn isRequest(transport: []const u8, x: ?Value) bool {
         if (std.mem.eql(u8, kind, "p2p-frame")) return Value.str(r.get("protocol")) != null;
         return false;
     }
+    if (std.mem.eql(u8, transport, "local")) {
+        // #70: a signed message and its body, as a provider carried it in.
+        if (!std.mem.eql(u8, kind, "message")) return false;
+        const m = r.get("message") orelse return false;
+        if (!isMail(m) or Value.bytesOf(m.get("signature")) == null) return false;
+        return Value.bytesOf(r.get("body")) != null;
+    }
     return false;
+}
+
+/// The transports an address book entry may name (#70): a messagebox URL over
+/// BRC-103/104, a libp2p peer ID or `topic:<name>`, a host provider's name.
+pub const transports = [_][]const u8{ "mailbox", "libp2p", "local" };
+
+pub fn isTransport(t: []const u8) bool {
+    for (transports) |x| if (std.mem.eql(u8, x, t)) return true;
+    return false;
+}
+
+/// An address book entry as a genesis seeds it, or as the head `peers` holds
+/// it (#70): {key, transport, address, role?, handle?, domain?} (the peer
+/// record adds kind, since, source).
+pub fn isAddress(x: ?Value) bool {
+    const e = x orelse return false;
+    if (e != .map) return false;
+    if (!secp.isKey(Value.bytesOf(e.get("key")) orelse return false)) return false;
+    if (!isTransport(Value.str(e.get("transport")) orelse return false)) return false;
+    if ((Value.str(e.get("address")) orelse return false).len == 0) return false;
+    for ([_][]const u8{ "role", "handle", "domain" }) |k| if (e.get(k)) |v| if (v != .string and v != .null) return false;
+    return true;
 }
 
 /// A message record (#40): a BRC-33 message that arrived, its sender the
@@ -133,13 +174,29 @@ pub fn isMail(x: ?Value) bool {
     if (box.len == 0 or box[0] == ':') return false;
     if (Value.cidOf(m.get("body")) == null) return false;
     if (m.get("json")) |j| if (j != .bool) return false;
+    if (m.get("subject")) |s| if (s != .cid) return false;
     if (m.get("session")) |s| {
         if (s != .map) return false;
         if (Value.bytesOf(s.get("payload")) == null or Value.bytesOf(s.get("signature")) == null) return false;
         if (Value.str(s.get("nonce")) == null or Value.str(s.get("yourNonce")) == null) return false;
+        if (m.get("signature") != null) return false; // proven one way or the other
     }
+    if (m.get("signature")) |s| if (s != .bytes) return false;
+    if (m.get("nonce")) |s| if (s != .bytes) return false;
     return true;
 }
+
+/// A signed message's preimage (#70): the dag-cbor of its mail record without
+/// `signature` — what the sender signed, BRC-169's way ([2, "metanet handles
+/// envelope"], key "send", counterparty anyone; message.zig in programs/lib
+/// checks it).
+pub fn signedPart(a: std.mem.Allocator, m: Value) ![]u8 {
+    return cbor.encode(a, try cbor.without(a, m, "signature"));
+}
+
+/// The BRC-43 protocol and key an emitted message is signed under (#70): BRC-169 §7.2's.
+pub const MESSAGE_PROTOCOL = "metanet handles envelope";
+pub const MESSAGE_KEY_ID = "send";
 
 fn isCidMap(v: ?Value) bool {
     const m = v orelse return false;
@@ -167,8 +224,13 @@ pub fn isGenesis(x: ?Value) bool {
         if (!secp.isKey(Value.bytesOf(g.get(k)) orelse return false)) return false;
     }
     if (g.get("host") != null) return false; // format 1
-    // #62: the host's attest key, which every recorded http/libp2p call is signed with.
-    if (g.get("attest")) |k| if (!secp.isKey(Value.bytesOf(k) orelse return false)) return false;
+    // #62's attest key went with the recorded http/libp2p calls (#67, format 6).
+    if (g.get("attest") != null) return false;
+    // #70: the address book's seed.
+    if (g.get("addressBook")) |ab| {
+        if (ab != .array) return false;
+        for (ab.array) |e| if (!isAddress(e)) return false;
+    }
     if (Value.str(g.get("handle")) == null or Value.str(g.get("domain")) == null) return false;
     if (!isCidMap(g.get("programs"))) return false;
     const subs = g.get("subscriptions") orelse return false;
@@ -212,15 +274,17 @@ pub fn isGenesis(x: ?Value) bool {
     return true;
 }
 
-/// records.ts isAttested.
-pub fn isAttested(x: ?Value) bool {
+/// An oracle call a step made (#67: the one recorded call left): {kind:
+/// "oracle", thread, step, i, request: bytes (the BRC-100 wire frame),
+/// result: bytes (its answer)}. Replay serves `result` for the call at (thread,
+/// step, i) and never asks a wallet (records.ts isOracleCall).
+pub fn isOracleCall(x: ?Value) bool {
     const a = x orelse return false;
     if (a != .map) return false;
-    if (!std.mem.eql(u8, Value.str(a.get("kind")) orelse return false, "attested")) return false;
+    if (!std.mem.eql(u8, Value.str(a.get("kind")) orelse return false, "oracle")) return false;
     if (Value.cidOf(a.get("thread")) == null) return false;
     if (!Value.isNumber(a.get("step")) or !Value.isNumber(a.get("i"))) return false;
-    const op = Value.str(a.get("op")) orelse return false;
-    if (!std.mem.eql(u8, op, "wallet") and !std.mem.eql(u8, op, "http") and !std.mem.eql(u8, op, "libp2p")) return false;
+    if (Value.bytesOf(a.get("request")) == null) return false;
     return Value.bytesOf(a.get("result")) != null;
 }
 

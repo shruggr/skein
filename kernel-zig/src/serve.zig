@@ -8,9 +8,10 @@
 // call in that writes: a request as received, #68, a feed's event, a wake),
 // waits on a request's thread (`answer`, #66: parked here until the thread
 // comes to rest, or its bound), makes `call`s (#40: a program's function
-// over the state, for host-side reads), answers the kernel's `wallet`, `http` and
-// `libp2p` requests (the oracle and the network; the last two with its
-// attestation of the exchange, #62) and keeps its earliest sleeper
+// over the state, for host-side reads), answers the kernel's `wallet`
+// requests (the oracle), carries out the messages the kernel tells it of
+// (`emit`, #70: a signed message for a local provider or the libp2p node;
+// the answer comes back as an entry) and keeps its earliest shell sleeper
 // deadline (`sleepers`) to wake it. Log lines go to stderr.
 const std = @import("std");
 const envm = @import("env.zig");
@@ -369,20 +370,20 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
-    /// A program's http request (#29, pre-#15): the peer performs it (or refuses)
-    /// and answers {answer, attest} (#62: the router's attestation of the exchange).
-    fn pHttp(p: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror!scheduler.Answer {
-        const r = try ctx(p).request(a, "http", .{ .bytes = req });
-        return scheduler.Answer.of(r) orelse error.BadAnswer;
-    }
-
-    /// A program's libp2p request (#51) and the thread making it: the router's libp2p host answers.
-    fn pLibp2p(p: *anyopaque, a: std.mem.Allocator, req: []const u8, thread: []const u8) anyerror!scheduler.Answer {
+    /// A message for the host to carry out (#70), told once its step is
+    /// committed: {message: <the signed mail record>, body: bytes, transport,
+    /// address}. Nothing comes back: the answer, if any, is an entry.
+    fn pEmit(p: *anyopaque, o: scheduler.Outgoing) void {
+        const s = ctx(p);
+        var arena = std.heap.ArenaAllocator.init(s.gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
         var m = cbor.MapBuilder.init(a);
-        try m.put("request", .{ .bytes = req });
-        try m.put("thread", cbor.cidv(thread));
-        const r = try ctx(p).request(a, "libp2p", m.value());
-        return scheduler.Answer.of(r) orelse error.BadAnswer;
+        m.put("message", cbor.decode(a, o.message) catch return) catch return;
+        m.put("body", .{ .bytes = o.body }) catch return;
+        m.put("transport", cbor.string(o.transport)) catch return;
+        m.put("address", cbor.string(o.address)) catch return;
+        s.notify(a, "emit", m.value());
     }
 
     fn pOnSleep(p: *anyopaque, _: []const u8, _: i64) void {
@@ -450,8 +451,7 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
     server.rt = try scheduler.Runtime.init(gpa, server.store, r, .{
         .ctx = &server,
         .wallet = Server.pWallet,
-        .http = Server.pHttp,
-        .libp2p = Server.pLibp2p,
+        .emit = Server.pEmit,
         .on_sleep = Server.pOnSleep,
         .on_answer = Server.pOnAnswer,
         .say = Server.pSay,

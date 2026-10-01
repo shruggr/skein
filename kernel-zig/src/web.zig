@@ -28,8 +28,9 @@
 //   skein_host_call(instance, index, nargs, memlen) → 0 | 1   a program's import (engine_v8.zig)
 //
 // Imports: `skein_engine` (engine_v8.zig), `skein_store` (web_store.zig), and
-// `skein_peer`: request(op, v) → the answer (wallet, http: blocking,
-// like serve's requests), notify(op, v) (sleepers, onSleep, say), take. Ops include `call` (#40).
+// `skein_peer`: request(op, v) → the answer (wallet: blocking, like serve's
+// requests), notify(op, v) (emit — #70: a message for the page to carry out —,
+// sleepers, onSleep, say), take. Ops include `call` (#40).
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -139,17 +140,14 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 5, issue #68: requests appended, the front door stepped): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 6, issues #70, #67: emit, no recorded http or libp2p calls): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));
     rt = scheduler.Runtime.init(gpa, s.store(), r, .{
         .ctx = @ptrCast(s),
         .wallet = pWallet,
-        .http = pHttp,
-        // #51: no libp2p host in a tab yet. A request with no recorded answer is refused (nothing recorded);
-        // a replay's recorded answers are served as natively.
-        .libp2p_refusal = "libp2p: unsupported in the browser (this build has no libp2p host)",
+        .emit = pEmit,
         .on_sleep = pOnSleep,
         .say = pSay,
     }) catch |err| return fail(@errorName(err));
@@ -175,10 +173,17 @@ fn pWallet(_: *anyopaque, a: std.mem.Allocator, fr: []const u8) anyerror![]u8 {
     return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
 }
 
-/// The page's http answer: the response bytes (a tab attests nothing), or {answer, attest} (#62).
-fn pHttp(_: *anyopaque, a: std.mem.Allocator, req: []const u8) anyerror!scheduler.Answer {
-    const r = try request(a, "http", .{ .bytes = req });
-    return scheduler.Answer.of(r) orelse error.BadAnswer;
+/// A message for the page to carry out (#70): serve's `emit` notice, the same shape.
+fn pEmit(_: *anyopaque, o: scheduler.Outgoing) void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var m = cbor.MapBuilder.init(a);
+    m.put("message", cbor.decode(a, o.message) catch return) catch return;
+    m.put("body", .{ .bytes = o.body }) catch return;
+    m.put("transport", cbor.string(o.transport)) catch return;
+    m.put("address", cbor.string(o.address)) catch return;
+    notifyValue("emit", m.value());
 }
 
 fn pOnSleep(_: *anyopaque, _: []const u8, _: i64) void {

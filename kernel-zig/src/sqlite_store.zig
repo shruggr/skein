@@ -55,7 +55,8 @@ pub const SqliteStore = struct {
     /// updates carry no fuel; before format 2 (issue #33) its entries are
     /// host-signed and its keys hex; before format 4 (issue #62) its recorded
     /// calls carry no attestation; before format 5 (issue #68) requests were
-    /// kernel calls and wrote nothing.
+    /// kernel calls and wrote nothing; before format 6 (issues #70, #67)
+    /// steps made mid-step `http`/`libp2p` calls, attested by the host.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !*SqliteStore {
         if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
             if (st.size > 0) {
@@ -64,6 +65,8 @@ pub const SqliteStore = struct {
                 if (probe.predatesFuel()) {
                     if (probe.ix.loaded_format < 1) {
                         std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    } else if (probe.ix.loaded_format == 5) {
+                        std.log.err("{s}: a store written before format 6 (issues #70, #67: one outbound primitive, emit; no recorded http/libp2p calls or attestations): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 4) {
                         std.log.err("{s}: a store written before format 5 (issue #68: every request appended and the front door stepped on it, sessions as records): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 3) {

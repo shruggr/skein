@@ -82,8 +82,11 @@ pub const STATE_KIND = "skein-state";
 /// 3 = messages as `mail` records, no envelopes, emits or outcomes (#40);
 /// 4 = recorded `http`/`libp2p` calls carry the host's attestation, the genesis its `attest` key (#62);
 /// 5 = every package a transport carries in is a `request` entry, the middleware stepped on it; sessions
-/// are records (head `sessions`); a message or event a middleware routes is unique by the `unique` map (#68).
-pub const FORMAT: i64 = 5;
+/// are records (head `sessions`); a message or event a middleware routes is unique by the `unique` map (#68);
+/// 6 = one outbound primitive, `emit` (#70, #67): a step's update lists the signed messages it emitted
+/// (`emitted`), no recorded `http`/`libp2p` calls and no attestations; the oracle's answers are `oracle`
+/// records; the address book (head `peers`) names each recipient's transport; the genesis names no `attest` key.
+pub const FORMAT: i64 = 6;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).
