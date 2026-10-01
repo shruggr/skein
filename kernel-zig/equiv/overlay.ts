@@ -87,7 +87,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test (#71): SKEIN_OVERLAY_DIR names a checkout, else this commit is cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = "012277886a8358de385504f4973f89f838f4b64a";
+const OVERLAY_REV = "bd406f30c20f6b5e1fc51a179b995775b87a0ab9";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));

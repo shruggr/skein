@@ -91,6 +91,9 @@ echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static
 echo "== apps (#72, #76): skein-host install of shruggr/skein-static (its routes under /static/, the head its app record) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
 "${node[@]}" "$kz/equiv/install.ts" || status=1
 
+echo "== an overlay installed as an app (#72): shruggr/skein-overlay (install-overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) by skein-host install into an instance with no overlay config and no libp2p; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router judged by the manifest's topic; a reinstall with a second topic read without a restart; uninstall unsubscribes; replayed"
+"${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 
