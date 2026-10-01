@@ -182,7 +182,9 @@ these imports:
 - stdio (stdin from the pipeline, stdout and stderr captured);
 - the record store, read-only, by CID (`get`), gated by reachability;
 - the connected wallet's BRC-100 operations (sign, verify, encrypt, decrypt,
-  derive);
+  derive): the oracle, answered synchronously and recorded;
+- **`emit`** (#70): a signed message to a recipient the address book names —
+  the one way out (below, "emit");
 - a **time attestation** (below).
 
 Not provided: wall clock, random, threads, network, host filesystem. A WASI
@@ -206,9 +208,10 @@ at `/opt/skein/python`; it is not part of the tree and never committed.
 
 A step function is the same idea one level up: the turn loop is a program
 whose input is the thread tip and the message that woke it, and whose output
-is records to append. A message out is not an output of the step: the step
-delivers it itself (#40), calling its messagebox program's `send`, whose
-`http` request is recorded on the step like any other.
+is records to append. A message out is part of the step's update: the step
+`emit`s it (#70), the update lists it, and it goes out when the step ends
+without error; its answer is an entry that steps the thread again (#67:
+external communication is a thread).
 
 ### The ABI: preview1 modules and WASI 0.2 components
 
@@ -247,119 +250,98 @@ replays exactly on the ABI it ran on (`kernel-zig/equiv/abi.ts`).
 The preview1 adapter and wasi-libc's 0.2 exit report any non-zero exit
 status as 1, because `wasi:cli/exit` is ok/err.
 
-### Outgoing HTTP: `wasi:http`, answered by the host and recorded
+### emit: the one way out (#70, #67)
 
-(Issue #15; built in the Zig kernel, `kernel-zig/src/component.zig` and
-`http.zig`.) A component makes HTTP requests through standard
-**`wasi:http/outgoing-handler`** (0.2.12, in the `handler` world) and knows
-nothing of skein: a program built against `wasi:http` runs unmodified. HTTP is
-a kernel call answered by the host — there is no provider peer and no message.
-
-- **One recorded-call shape.** The kernel serializes the outgoing request
-  into the shape a preview1 program hands the `skein.http` import itself:
-  dag-cbor `{method, url, headers?, body?, options?}` — `url` is scheme
-  (default `https`) `://` authority path-with-query (default `/`); `headers`
-  is `{name: text}`, a name given more than once joined with `", "`; `body`
-  only when the program wrote one; `options` only when a `request-options`
-  set a timeout (`connectTimeout`, `firstByteTimeout`,
-  `betweenBytesTimeout`, in ns). Both ABIs reach the same host function, so
-  the wallet's two builds make byte-identical requests (`equiv/abi.ts`).
-- **What is recorded.** Request and response go on the step's update as a
-  recorded call (op `http`: the request bytes and the host's answer
-  `{status, headers, body}`), like `wallet`. Nothing is
-  suspended: the step waits for the host inside the call.
-- **Replay** reads the response from the record and never touches the
-  network. A request that differs from the recorded one is a divergence.
-- **Attested by the host** (#62). The host signs every `http` and `libp2p`
-  exchange it answers, and the kernel keeps the signature in the record:
-
-  ```
-  recorded call  {kind: "attested", thread, step, i, op: "http" | "libp2p" | "wallet",
-                  request: bytes, result: bytes, attest?: {stamp, key, signature}}
-  preimage       dag-cbor {op, instance, request: sha256(request), response: sha256(result), stamp}
-  ```
-
-  `request` and `result` are the bytes as recorded; `instance` is the
-  genesis's `handle`; `stamp` the router's clock (ms) when it answered, the
-  clock that stamps entries; the preimage is encoded canonically (keys
-  length-first). `signature` is ECDSA secp256k1, DER, over sha256(preimage)
-  — what `createSignature` makes over the same data — by the router's
-  **attest key**: the BRC-42 child of its master under
-  `[2, "skein router"]`, key ID `"attest"` (`src/host/oracle.ts`
-  `attestKey`); `key` is its public key, and the genesis names it
-  (`attest: bytes(33)`), so the log alone verifies. The kernel checks an
-  answer's attestation before it records it (a bad or missing one fails the
-  call, nothing recorded) and again at replay, where a bad or missing one is
-  a divergence. A genesis with no `attest` asks for none (a host that does
-  not attest: the browser's). `wallet` answers are signatures already and
-  carry none. The readers check the same: `skein-dev log` and the explorer
-  (`src/runtime/attest.ts`).
-- **The host** (`src/host/router.ts`) answers with its handler (a test's
-  stand-in) or, with `SKEIN_HTTP=fetch`, real requests; it applies the
-  recorded options (connect + first-byte bound the wait for the head,
-  between-bytes each body read). A host failure is the program's
-  `error-code` `internal-error(message)`; it is not recorded (the step is
-  then refused a witness on replay, as for the preview1 import).
-- **Limits.** Bodies are buffered whole in both directions (at most 64 MiB
-  out); the request is sent at the first `future-incoming-response.get`
-  (its body is final then), and its future is always ready. No trailers:
-  request trailers are refused (`internal-error`), response trailers are
-  none. Response headers are what the host reports. No incoming handler, no
-  sockets.
-- **Long-lived feeds are not `wasi:http`**: the router holds SSE feeds and
-  webhooks and admits each event as an entry (#29, #33).
-
-A preview1 program keeps the `skein.http` import (the wallet's pinned build
-uses it); it is the same code path underneath.
-
-In the browser (issue #35) the same kernel, compiled to wasm, runs preview1
-modules on V8 through a JS shim; components are not run there yet (refused
-with a message). A preview1 program behaves the same on both engines — the
-same imports answered by the same kernel code, the same fuel — so a log
-written in the browser replays natively and the other way round.
-
-### libp2p: one import, answered by the router and recorded (#51)
-
-The runtime has no network; libp2p is the router's (docs/ARCH.md, "The
-libp2p host"). Outbound, a step has one import, **`libp2p`**: preview1
-`skein.libp2p(req, len, out, cap) → n` with a dag-cbor request, and in the
-WIT the typed interface `skein:kernel/libp2p` (`publish`, `dial`, `send`,
-`receive`, `close`), which the component host turns into the same request.
-One recorded shape for both ABIs:
+A step never asks the world anything mid-step but the oracle. **External
+communication is a thread**: the step emits a signed message, ends
+`waiting` on what it expects, and the answer arrives as an entry that steps
+the thread again. There is no `http` import, no `libp2p` import and no
+`wasi:http` (format 6 removed them, and with them the recorded http/libp2p
+calls and the host's attestation of them, #62); a program reaches the
+network by emitting to a provider — the HTTP proxy, the libp2p node — whose
+answer is a signed message like any other.
 
 ```
-{op: "publish", topic, body}         → {seqno: bytes(8), recipients}     GossipSub, signed with the instance's peer key
-{op: "dial", peer, protocol}         → {stream}                           peer: a peer ID, or a multiaddr with /p2p/<id>
-{op: "send", stream, body}           → {}                                 one length-prefixed frame (unsigned varint)
-{op: "receive", stream}              → {body} | {pending: true} | {closed: true}
-{op: "close", stream}                → {}
-any of them                          → {error}                            the call's failure (-1 / the WIT error)
+emit(message) → <cid>     preview1: skein.emit(msg, len, out, cap) → n (the CID, binary; n < 0: the error)
+                          WIT:      emit: func(message: list<u8>) -> result<cid, string>
+message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
 ```
 
-- **Recorded like `http`.** Each call is an attested record on the step's
-  update (op `libp2p`, the request bytes, the router's answer, the router's
-  signature over the exchange, #62) — an `{error}` answer too, so a failed
-  dial fails the same way on replay.
-  Replay serves the recorded answer and never touches the network; a request
-  that differs from the recorded one is a divergence.
-- **`receive` rests.** A frame not yet there answers `{pending}`: the program
-  sets a `deadline` (its timeout) and ends the step, and the thread rests. When
-  a frame arrives on the stream the router admits a **wake** for the thread at
-  once, before its deadline. The kernel steps a sleeper early only when its tip
-  update's last recorded call is a `libp2p` receive answered `{pending}` (a
-  function of the log: replay decides the same); any other early wake runs
-  nothing. The woken step calls `receive` again and gets the frame (recorded).
-  The stream id is the router's (unique across its restarts); after a restart
-  the stream is gone and `receive` answers `{error}`.
-- **Where it is refused.** In a kernel `call` (a call sends nothing: only a
-  step does), and in the browser build ("libp2p: unsupported in the browser"),
-  where nothing is recorded and the step sees the error; a store with
-  recorded libp2p calls replays in the browser as natively.
-- Published messages are signed by GossipSub with the instance's **peer key**
-  (a child of the master secret, key ID `libp2p:<handle>`), never a wallet
-  key. Inbound messages and stream frames are not an import: each is a
-  request entry, and the front door is stepped on it (docs/MESSAGES.md,
-  "libp2p").
+- `to` is the recipient's identity key — never a handle (resolve it first:
+  the resolve program, docs/MESSAGES.md "BRC-169 is discovery") — and it
+  must have an entry in the **address book** (the head `peers`, as this
+  step leaves it: a step that resolved a handle may emit to it at once).
+  `box` is not empty and does not start with `:`. `body` is the canonical
+  dag-cbor of the body record. `subject` names what the message is about
+  (a transaction's CID); a provider's answer carries it back.
+- The kernel builds the **message record**, signs it through the oracle
+  (a recorded call, an `oracle` record, as a program's own `wallet` calls
+  are), puts it and the body, lists its CID on the step's update
+  (`emitted`) and returns the CID — the message's id, what a reply's
+  `replyTo` names:
+
+  ```
+  {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>,
+   subject?: <cid>, nonce: bytes(16), signature: bytes}
+  ```
+
+  `signature` is BRC-169's signing (§7.2/§7.3) on skein's record: DER
+  ECDSA by the sender's BRC-42 child for `[2, "metanet handles envelope"]`,
+  key ID `send`, counterparty anyone, over sha256 of the dag-cbor of the
+  record without `signature` — anyone checks it with the sender's key.
+  `nonce` is sha256(thread ‖ step ‖ the emit's place in it)'s first 16
+  bytes: two threads asking the same thing send two messages.
+- It goes out **when the step ends without error** (an errored step's
+  emits are dropped), by the recipient's transport (docs/MESSAGES.md, "The
+  address book"): a `mailbox` recipient's by the instance's own delivery
+  thread (the messagebox program, launched by the kernel: the instance holds
+  its own BRC-103/104 sessions), a `local` provider's or a `libp2p`
+  recipient's handed to the host once the step is committed (the serve
+  frame `emit`). At a start the kernel hands over again what a waiting
+  thread still awaits (a host restart loses nothing a provider had); a host
+  acts on a message once. Replay re-signs from the recorded oracle answer
+  and sends nothing.
+- **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
+  <dag-cbor bytes>, subject?: <cid>}` · `emit: the message is not dag-cbor`
+  · ``emit: `to` is not an identity key (33 bytes): emit to a key, not a
+  handle (resolve the handle first)`` · `emit: the box is empty or starts
+  with ':' (reserved)` · `emit: the body is not dag-cbor` | `… not IPLD` |
+  `… not canonical dag-cbor` · ``emit: `subject` is not a CID`` · ``emit:
+  no route to <hex>: not in the address book (resolve its handle, or add
+  it to the `peers` box)`` · `emit: <hex> is reached by mailbox, and the
+  genesis has no messagebox program to deliver it` · `emit: the oracle did
+  not sign the message` · in a kernel call, `emit: a kernel call sends
+  nothing (emit from a step)`.
+
+**Awaiting the answer.** `await` the message's CID and end the step: it
+ends `waiting` with the CID in `awaits`. The answer is a message from the
+recipient whose body names `replyTo: <the CID>`; it steps the thread with
+input `reply: {message, body, box, sender, replyTo}` (`get` the body).
+Several messages, a subject (the events about it) and a deadline may be
+awaited at once; whichever comes first steps the thread, which awaits again
+what it still needs (a later answer to a message no longer awaited is
+recorded and runs nothing). A message to a `mailbox` recipient whose
+delivery gives up (its delivery thread errors) steps the thread awaiting it
+with `undelivered: {message, error}`: no answer can come.
+
+**deadline** stays, as sugar: `deadline(until_ms)` records the deadline
+(`until` on the update) and, when the step ends waiting, emits `{at:
+until_ms}` in box `wake` to the address book's **waker** (the entry with
+role `waker`) and awaits it. The waker's answer `{replyTo, at}` steps the
+thread with `woke: true`; one stamped before `at` runs nothing. Errors:
+`deadline: not after the step's time`, `deadline: no waker in the address
+book (an entry with role "waker")`. A shell's `sleep` is not this: the shell
+is re-executed from its origin and its sleep is a `wake` entry the host's
+timer admits (docs/ARCH.md, "The waker").
+
+**Components** (WASI 0.2) import `emit` from `skein:kernel/skein` like
+every other call; the world has no `wasi:http`. `kernel-zig/test/components/
+fetch.wasm` (programs/fetch) is the fixture: it emits a GET to the `fetch`
+provider and writes the answer's body on its next step.
+
+The program-facing contract — the address book's shape, each provider's
+boxes and answers, the outbound BRC-103/104 pattern — is docs/MESSAGES.md,
+"Outbound: emit, the address book and the providers".
 
 ### Calls: reading the state without an entry (#40)
 
@@ -381,9 +363,9 @@ function over the current state and return a value. It writes nothing.
   browser build takes the same frame through `skein_call`.
 - **No entry, no writes.** `get`, `head` and the store read as they stand;
   `put` and `putblock` keep their records in the call's write cache only (so
-  a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`, `subscribe` and
-  `deadline` are refused. The oracle (`wallet`) and `http` are answered by
-  the host and **not recorded**.
+  a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`, `subscribe`,
+  `emit` and `deadline` are refused (a call sends nothing). The oracle
+  (`wallet`) is answered by the host and **not recorded**.
 - **No determinism.** Nothing replays a call, so it needs none: its clock is
   the host's `now` (plus fuel, as in a step), its random is real entropy
   (a session nonce made there must not be guessable), and the host's answers
@@ -419,8 +401,9 @@ function over the current state and return a value. It writes nothing.
 Every package a transport carries in is an entry, as received:
 `{kind: "log", …, request: <record>, transport}` (docs/MESSAGES.md, "The
 log"). Processing it launches the transport's middleware — the genesis's
-`middleware[transport]`, else its front door for `http` and `libp2p`
-(`scheduler.zig` `middlewareOf`; #70's local providers hook in here) — as
+`middleware[transport]`, else its front door for `http`, `libp2p` and
+`local` (#70: a provider's signed message, its signature checked;
+`scheduler.zig` `middlewareOf`) — as
 the **request's thread**: origin `{kind: "thread", program: <middleware>,
 args: {request, transport}, launchedBy: <the request record>, input: <the
 entry>, at}`, a function of the entry, so the host can ask after it.
@@ -498,24 +481,24 @@ the next segment, its fuel counted from zero. (Before #38: the stamp, then
 
 ## Messages
 
-(Issue #40, #68; `kernel-zig/src/log.zig`, log format 5. The signed-message
-design this section once described — every input a signed message, sends as
-outbound messages the host carries out — is superseded.) Skein is a state
-process: the log is every package that arrived, as received, and an entry is one of
+(Issue #40, #68, #70; `kernel-zig/src/log.zig`, log format 6.) Skein is a
+state process: the log is every package that arrived, as received, and an
+entry is one of
 
 ```
 entry  {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}
-mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, json?,
-        session?: {payload, signature, nonce, yourNonce}}
+mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, json?,
+        session?: {payload, signature, nonce, yourNonce} | nonce?, signature?}
 ```
 
 - **`request`**: a package as a transport carried it in (an HTTP request, a
   GossipSub message, a stream frame), which the front door is stepped on
   ("Requests", above; the record shapes in docs/MESSAGES.md).
-- **`mail`** is a BRC-33 message that arrived at the front door: its sender
-  is the identity of the BRC-104 session it came on (authentication is by
-  key; `session` keeps the signed request, so the log verifies with keys
-  alone), its body a record of its own. The node host's messages arrive in
+- **`mail`** is a message that arrived at the front door: its sender is
+  proven by the BRC-104 session it came on (`session` keeps the signed
+  request, so the log verifies with keys alone) or, for a message another
+  instance or a provider emitted, by its own `signature` (#70, "emit"
+  above); its body is a record of its own. The node host's messages arrive in
   requests, and the front door's step routes them; a host may admit one as
   an entry of its own (`admit(entry, {body})`: the browser's). The mail
   record's CID is the message's id — what the sender computes too, and what
@@ -531,13 +514,12 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, json?,
 - **`genesis`**: who the instance is, its programs, seed subscriptions,
   routes and reads.
 
-Every request is an entry, a read's too; what a read moves is nothing. A message leaves
-an instance by the instance's own program: its messagebox's `send` (a BRC-104
-client, over recorded `http`) to the recipient's messagebox URL, which its
-address book names (written only by its own programs: `resolve`'s BRC-169
-lookup, or the owner's `peers` box — the admin's configuration) or, for the
-owner, the genesis's `defaults.ownerMessagebox`. A store in an older format
-is refused (start a new store).
+Every request is an entry, a read's too; what a read moves is nothing. A
+message leaves an instance by `emit` (above): the address book (the head
+`peers`, written by its own programs — `resolve`'s BRC-169 lookup, the
+owner's `peers` box — and seeded by the genesis with the host's providers
+and the owner's mailbox) names how each key is reached. A store in an older
+format is refused (start a new store).
 
 ## Time
 
