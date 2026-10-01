@@ -41,7 +41,9 @@
 //! does ({wait: true}): the frame's answer is written back when it comes to
 //! rest (the handler called again with `resolved`).
 //!
-//! The handler gets the request plus `key`: the 33-byte key from `from`.
+//! The handler gets the request plus `key`: the 33-byte key from `from`, and
+//! `match`: the routes-table entry that matched (#72: an installed route's
+//! `program` and `app`).
 //!
 //! A signed message (#70) over libp2p needs no route: a frame on
 //! MESSAGE_PROTOCOL (/skein/message/1.0.0), or a topic message no route
@@ -114,6 +116,9 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     }
     try h.put("body", .{ .bytes = body });
     try h.put("request", cbor.cidv(rc));
+    // The routes-table entry that matched (as HTTP's handlers get it, main.zig invoke): an installed
+    // route's `program` and `app` tell a handler which app it runs as (#72).
+    try h.put("match", route);
     for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     const out = sk.callValue(a, prog, func, h.value()) catch |err| {
         if (err == error.ImportFailed) return verdict(a, "ignore", try std.fmt.allocPrint(a, "the handler failed: {s}", .{sk.lastError()}));

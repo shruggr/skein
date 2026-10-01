@@ -258,10 +258,16 @@ pub const StepOutput = struct { exit_code: i32, stdout: []u8, stderr: []u8 };
 
 pub const RunError = error{ Fatal, OutOfMemory };
 
+/// A step's stdout (and stderr) bound. A step's stdout is its answer, and the
+/// front door's carries what it admits: a message's body, and its mail record
+/// with the BRC-104 session proof, whose signed payload is the request again
+/// (#72: an app's 1 MiB `objects` bundle is ~2 MiB of answer). 16 MiB.
+pub const STEP_OUTPUT_LIMIT: usize = 16 << 20;
+
 /// One step: a plain WASI command with the skein imports, over an empty tree,
-/// stdin null, stdout/stderr captured (1 MiB each), the thread's clock and random.
+/// stdin null, stdout/stderr captured (STEP_OUTPUT_LIMIT each), the thread's clock and random.
 pub fn runProgram(alloc: std.mem.Allocator, r: *runner.Runner, mod: *runner.Compiled, name: []const u8, host: *const Host, svc: *wasi.Services) RunError!StepOutput {
-    return runProgramLimit(alloc, r, mod, name, host, svc, 1 << 20);
+    return runProgramLimit(alloc, r, mod, name, host, svc, STEP_OUTPUT_LIMIT);
 }
 
 /// runProgram with stdout/stderr captured up to `limit` bytes each (an in-VM call's result is its stdout, #40).
