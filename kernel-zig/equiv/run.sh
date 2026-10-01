@@ -82,8 +82,7 @@ echo "== a component's emit (#15, #70): the fetch component through the router's
 echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip (over the libp2p provider, #70); replayed natively and in the browser; a live step with no oracle in the browser"
 "${node[@]}" "$kz/equiv/libp2p.ts" || status=1
 
-echo "== overlay services (#36): programs/overlay built and tested; submit/lookup through the router with the stock SDK clients; replayed"
-(cd "$kz/../programs/overlay" && mise exec -- zig build && mise exec -- zig build test) || { echo "FAIL programs/overlay build or tests"; status=1; }
+echo "== overlay services (#36): the app shruggr/skein-overlay (#71: cloned at overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) in a tree; submit/lookup through the router with the stock SDK clients; the gate; the gossip; replayed"
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
 echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static.ts's pinned commit, or \$SKEIN_STATIC_DIR) in a tree; its files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); each request an entry, no head moved; replayed"

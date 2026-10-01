@@ -10,7 +10,8 @@
 #
 # The apps' modules are built in their own repos (#71): run-handler and loop
 # in shruggr/skein-workbench (their built modules stay pinned here, moved in by
-# scripts/update-workbench.sh), static in shruggr/skein-static.
+# scripts/update-workbench.sh), static in shruggr/skein-static, the overlay
+# engine in shruggr/skein-overlay.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 programs=(objects-handler head-handler subscribe-handler messagebox frontdoor resolve wallet)

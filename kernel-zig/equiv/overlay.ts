@@ -3,7 +3,8 @@
 // overlay engine's route handlers; the router only proxies to the instance's
 // origin) to the stock @bsv/sdk overlay clients: an instance booted from a
 // system tree (#4) whose bin/ holds the front door, the overlay engine, the
-// tm_demo topic and the ls_demo lookup (programs/overlay), its config naming
+// tm_demo topic and the ls_demo lookup (the app shruggr/skein-overlay, #71:
+// its committed bin/*.wasm, cloned at a pinned commit or $SKEIN_OVERLAY_DIR), its config naming
 // them (#50: ls_demo listening to tm_demo, keeping its own index through its
 // hooks). Every request is an entry (#68: appended as received, the front
 // door stepped on it); a submit is the one write (decoded once and judged in
@@ -50,7 +51,7 @@
 // clients waiting on the thread both get the STEAK. A fourth instance, on a
 // host with no Arcade (so no status provider is seeded in its address book):
 // nothing is admitted before its proof, fed directly as the headers are
-// (overlay unit test.zig covers the status-first and proof-first orderings
+// (skein-overlay's test.zig covers the status-first and proof-first orderings
 // and that a later signal never admits twice). The standard overlay gossip
 // (#74), three instances on three routers with libp2p: A (with Arcade)
 // admits an HTTP submission and publishes it on `tm_demo` and its verdict on
@@ -84,9 +85,11 @@ import { Router } from "../../src/host/router.ts";
 import { Oracle } from "../../src/host/oracle.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
+// The app under test (#71): SKEIN_OVERLAY_DIR names a checkout, else this commit is cloned.
+const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
+const OVERLAY_REV = "012277886a8358de385504f4973f89f838f4b64a";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
-const overlayBin = join(here, "../../programs/overlay/zig-out/bin");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));
 const db = join(home, "instances/overlay/runtime.db");
 const key = (h: string) => new PrivateKey(h, 16);
@@ -100,6 +103,8 @@ const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 const sys = join(home, "system");
 mkdirSync(join(sys, "bin"), { recursive: true });
 mkdirSync(join(sys, "etc"), { recursive: true });
+// The app (#71): the overlay is shruggr/skein-overlay, not pinned here; the tree carries its modules (that repo's bin/).
+const overlayBin = join(process.env.SKEIN_OVERLAY_DIR ?? cloneOverlay(), "bin");
 for (const p of ["overlay", "topic-demo", "lookup-demo"]) copyFileSync(join(overlayBin, `${p}.wasm`), join(sys, `bin/${p}.wasm`));
 copyFileSync(join(here, "../../wasm/frontdoor.wasm"), join(sys, "bin/frontdoor.wasm"));
 writeFileSync(join(sys, "bin/frontdoor.json"), JSON.stringify({ inputs: {}, description: "The front door." }));
@@ -125,6 +130,18 @@ writeFileSync(join(sys, "README.md"), "An overlay node: tm_demo and ls_demo.\n")
 // #57: the same node again, for the transient-failure case (Arcade busy).
 const sys2 = join(home, "system-gate");
 cpSync(sys, sys2, { recursive: true });
+
+/** shruggr/skein-overlay at the commit this test was written against, cloned into the scratch home. */
+function cloneOverlay(): string {
+  const dir = join(home, "skein-overlay");
+  const git = (...args: string[]) => {
+    const r = spawnSync("git", args, { stdio: ["ignore", "ignore", "inherit"] });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: exit ${r.status}`);
+  };
+  git("clone", "-q", OVERLAY_REPO, dir);
+  git("-C", dir, "checkout", "-q", OVERLAY_REV);
+  return dir;
+}
 
 // ---------------------------------------------------------------- regtest
 
@@ -909,7 +926,7 @@ try {
   report.g74badProof = [bad.verdict, bad.reason, (await logLenOf("gb")) - bLen0, (await headOf("gb", "wallet")) === bWallet0, (await proofBlock("gb")) === blockCid(gh2b)];
 
   // (5) Late duplicates on `tm_demo`: the same BEEF from another publisher (a message GossipSub never saw) is
-  // decoded, looked up, "already judged" — no topic manager runs (programs/overlay test.zig counts the calls);
+  // decoded, looked up, "already judged" — no topic manager runs (skein-overlay's test.zig counts the calls);
   // A's own message redelivered past the seen-cache is the same record, already admitted: nothing runs at all.
   const bLen1 = await logLenOf("gb");
   const late = await gr("gb").p2pInbound("gb", await signed(mallory, "tm_demo", new Uint8Array(gTok.toBEEF()), 2n));

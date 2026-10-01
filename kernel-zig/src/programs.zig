@@ -17,7 +17,7 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 /// stock shell program name them (scripts/update-workbench.sh moves a build in;
 /// wasm/WORKBENCH is its commit). Apps outside the stock genesis are not pinned:
 /// static is shruggr/skein-static (a tree carries bin/static.wasm), the overlay
-/// engine programs/overlay (to move to shruggr/skein-overlay).
+/// engine shruggr/skein-overlay (bin/overlay.wasm).
 pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
