@@ -51,13 +51,22 @@
 // host with no Arcade (so no status provider is seeded in its address book):
 // nothing is admitted before its proof, fed directly as the headers are
 // (overlay unit test.zig covers the status-first and proof-first orderings
-// and that a later signal never admits twice). All stores replay to
-// themselves exactly.
+// and that a later signal never admits twice). The standard overlay gossip
+// (#74), three instances on three routers with libp2p: A (with Arcade)
+// admits an HTTP submission and publishes it on `tm_demo` and its verdict on
+// `tm_demo-admit`; B (no status provider) judges the gossiped submission and
+// waits at its gate; A's proof (its chain feed) goes out on `tm_demo-proof`,
+// B checks it against its own headers and admits at it; C (on
+// `tm_demo-admit` only) records A's and B's admits as peer-admit records; a
+// reorg's re-proof reaches B and replaces the old one; a bad BUMP is ignored
+// (its request entry only); late duplicates are "already judged" / "already
+// admitted". All stores replay to themselves exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -710,6 +719,224 @@ await arcade.close();
 hostDb.close();
 await noarcRouter.stop();
 noarcHostDb.close();
+
+// ---------------------------------------------------------------- #74: the standard overlay gossip
+// Three instances on three routers, each with a libp2p node (loopback TCP, bootstrapping each other):
+// A (`ga`, with the host's Arcade, so a status provider) and B (`gb`, no Arcade: it admits at the proof)
+// subscribe `tm_demo` and `tm_demo-proof`; C (`gc`) subscribes only `tm_demo-admit`. Every tree routes
+// the three inbound topics to the overlay (`submit`, `peerAdmit`, `peerProof`).
+const freePort = () => new Promise<number>((resolve, reject) => {
+  const s = createServer();
+  s.once("error", reject);
+  s.listen(0, "127.0.0.1", () => { const p = (s.address() as { port: number }).port; s.close(() => resolve(p)); });
+});
+const G = ["ga", "gb", "gc"] as const;
+type GH = typeof G[number];
+const gDb: Record<GH, string> = { ga: join(home, "instances/ga/runtime.db"), gb: join(home, "instances/gb/runtime.db"), gc: join(home, "instances/gc/runtime.db") };
+const p2pOracle = new Oracle(new PrivateKey("a77e57", 16));
+const gossipTree = (dir: string, topics: string[]) => {
+  cpSync(sys, dir, { recursive: true });
+  const c = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8")) as Record<string, unknown>;
+  writeFileSync(join(dir, "etc/config.json"), JSON.stringify({ ...c, libp2p: { topics } }));
+  const rs = JSON.parse(readFileSync(join(sys, "etc/routes.json"), "utf8")) as unknown[];
+  writeFileSync(join(dir, "etc/routes.json"), JSON.stringify([...rs,
+    { path: "libp2p:tm_demo-admit", program: "overlay", fn: "peerAdmit" },
+    { path: "libp2p:tm_demo-proof", program: "overlay", fn: "peerProof" }]));
+};
+gossipTree(join(home, "system-gossip-ab"), ["tm_demo", "tm_demo-proof"]);
+gossipTree(join(home, "system-gossip-c"), ["tm_demo-admit"]);
+const g: Partial<Record<GH, { hdb: HostDb; r: Router }>> = {};
+const arcade74 = await FakeArcade.start();
+const gr = (h: GH) => g[h]!.r;
+try {
+  const ports: Record<GH, number> = { ga: await freePort(), gb: await freePort(), gc: await freePort() };
+  const idOf = (h: GH) => peerIdOf(p2pOracle.peerKey(h)).toString();
+  for (const h of G) {
+    const hdb = new HostDb(join(home, `${h}-host.db`));
+    hdb.add(h, { store: gDb[h] });
+    g[h] = {
+      hdb,
+      r: new Router({
+        db: hdb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0,
+        providerKeyFor: (n) => p2pOracle.providerKey(n), peerKeyFor: (x) => p2pOracle.peerKey(x), answerWaitMs: 6000,
+        kernel: { command: kernel, env: { SKEIN_HOME: home } },
+        ...(h === "ga" ? { arc: { url: arcade74.url, token: "the-ga-arcade-token", events: arcade74.eventsUrl }, arcRetry: { min: 500, max: 2000 } } : {}),
+        libp2p: { listen: [`/ip4/127.0.0.1/tcp/${ports[h]}`], bootstrap: G.filter((x) => x !== h).map((x) => `/ip4/127.0.0.1/tcp/${ports[x]}/p2p/${idOf(x)}`), dht: "off", relays: [], mdns: false },
+        libp2pDiscoveryMs: 300,
+        log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${h}:${s}] ${l}\n`); },
+      }),
+    };
+  }
+  const srcAB = await dirSource(join(home, "system-gossip-ab"));
+  const srcC = await dirSource(join(home, "system-gossip-c"));
+  for (const h of G) {
+    await gr(h).listen(0);
+    const s = h === "gc" ? srcC : srcAB;
+    await gr(h).bootRow(h, { kind: "tree", root: s.root, objects: s.objects });
+  }
+  // (A node starts as its instance hydrates: until then, no subscribers.)
+  const subscribers = (h: GH, topic: string) => ((gr(h).p2p?.node(h)?.services as { pubsub: { getSubscribers(t: string): unknown[] } } | undefined)?.pubsub.getSubscribers(topic).length ?? 0);
+  for (const h of G) await gr(h).hydrate(h);
+  await until("the three nodes see each other's topics", async () => (
+    subscribers("ga", "tm_demo") > 0 && subscribers("ga", "tm_demo-proof") > 0
+    && subscribers("ga", "tm_demo-admit") > 0 && subscribers("gb", "tm_demo-admit") > 0) || undefined);
+
+  // Reading the instances: a map of the wallet state (key hex → value), the peer-admit records, the log length.
+  const kOf = async (h: GH) => (await gr(h).hydrate(h)).kernel;
+  const walk = async (h: GH, root: CID | null | undefined): Promise<Array<[string, unknown]>> => {
+    const k = await kOf(h);
+    const out: Array<[string, unknown]> = [];
+    const go = async (c: CID | null | undefined): Promise<void> => {
+      if (!c) return;
+      const [left, es] = await k.store.get(c) as unknown as [CID | null, Array<[Uint8Array, unknown, CID | null]>];
+      await go(left);
+      for (const [kk, v, right] of es) { out.push([Buffer.from(kk).toString("hex"), v]); await go(right); }
+    };
+    await go(root);
+    return out;
+  };
+  const gMap = async (h: GH, name: string) => {
+    const k = await kOf(h);
+    const st = await k.store.get(await k.call("head", "wallet") as CID) as unknown as { maps: Record<string, CID | null> };
+    return new Map(await walk(h, st.maps[name]));
+  };
+  const peerAdmits = async (h: GH) => {
+    const k = await kOf(h);
+    const head = await k.call("head", "overlay:gossip") as CID | null;
+    if (!head) return [];
+    const st = await k.store.get(head) as unknown as { maps: { peerAdmits: CID | null } };
+    const out: Array<{ kind: string; topic: string; txid: string; from: string; outputsToAdmit: number[]; coinsToRetain: number[] }> = [];
+    for (const [, c] of await walk(h, st.maps.peerAdmits)) {
+      const r = await k.store.get(c as CID) as unknown as { kind: string; topic: string; txid: string; from: Uint8Array; outputsToAdmit: number[]; coinsToRetain: number[] };
+      out.push({ ...r, from: Buffer.from(r.from).toString("hex") });
+    }
+    return out;
+  };
+  const logLenOf = async (h: GH) => { const k = await kOf(h); return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
+  const headOf = async (h: GH, name: string) => String(await (await kOf(h)).call("head", name));
+  const settleAll = async () => { for (const h of G) await gr(h).settled(); };
+  const header = async (ev: Record<string, unknown>) => { for (const h of G) await gr(h).admitEvent(h, "chain", { kind: "header", ...ev }); await settleAll(); };
+  const signed = async (k: PrivateKey, topic: string, body: Uint8Array, seq: bigint) => {
+    const sq = new Uint8Array(8);
+    new DataView(sq.buffer).setBigUint64(0, seq, false);
+    const from = peerIdOf(k).toMultihash().bytes;
+    const pb: number[] = [];
+    const fld = (tag: number, b: Uint8Array) => { pb.push(tag); let n = b.length; while (n >= 0x80) { pb.push((n & 0x7f) | 0x80); n >>>= 7; } pb.push(n, ...b); };
+    fld(0x0a, from); fld(0x12, body); fld(0x1a, sq); fld(0x22, new TextEncoder().encode(topic));
+    const signature = await libp2pKey(k).sign(Uint8Array.from([...new TextEncoder().encode("libp2p-pubsub:"), ...pb]));
+    return { transport: "libp2p" as const, topic, from, seqno: sq, signature, body };
+  };
+  const disp = (b: Uint8Array) => Buffer.from(b).reverse().toString("hex");
+  const blockCid = (raw: Uint8Array) => String(CID.createV1(0xb0, Digest.create(0x56, sha256d(raw))));
+  const peerKeyHex = (h: GH) => p2pOracle.peerKey(h).toPublicKey().toString();
+
+  // The chain: a funding transaction mined at 1 (second in its block), fed to all three.
+  const carol = key("6666");
+  const gFund = new Transaction();
+  gFund.addInput({ sourceTXID: "66".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
+  gFund.addOutput({ lockingScript: new P2PKH().lock(carol.toPublicKey().toHash()), satoshis: 30_000 });
+  const gCb = "c6".repeat(32);
+  gFund.merklePath = new MerklePath(1, [[{ offset: 0, hash: gCb }, { offset: 1, hash: gFund.id("hex"), txid: true }]]);
+  const gh1 = mine(sha256d(REGTEST_GENESIS), sha256d(Buffer.concat([internal(gCb), internal(gFund.id("hex"))])), 1_790_020_000);
+  await header({ raw: gh1 });
+  const tokenOf = (k: PrivateKey) => Script.fromBinary([0x07, ...Buffer.from("tm_demo"), 0x75, ...new P2PKH().lock(k.toPublicKey().toHash()).toBinary()]);
+  const gTok = new Transaction();
+  gTok.addInput({ sourceTransaction: gFund, sourceOutputIndex: 0, unlockingScriptTemplate: new P2PKH().unlock(carol), sequence: 0xffffffff });
+  gTok.addOutput({ lockingScript: tokenOf(carol), satoshis: 1 });
+  gTok.addOutput({ lockingScript: new P2PKH().lock(carol.toPublicKey().toHash()), satoshis: 29_000 });
+  await gTok.sign();
+  const gTokId = gTok.id("hex");
+  const gKey = internal(gTokId).toString("hex");
+
+  // (1) A submission over HTTP to A: admitted on Arcade's RECEIVED (A's status provider) → A publishes the
+  // BEEF as received on `tm_demo` and its verdict on `tm_demo-admit`.
+  const sub = await fetch(`${gr("ga").originOf("ga")}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(gTok.toBEEF()) });
+  report.g74submit = [sub.status, await sub.json()];
+  // B gets the raw submission by gossip, judges it (its own identify), holds it and waits at its gate: no status
+  // provider, so nothing is admitted before the proof.
+  await until("B holds the gossiped submission, pending", async () => (await gMap("gb", "awaiting")).has(gKey) || undefined);
+  await settleAll();
+  report.g74bPending = { awaiting: (await gMap("gb", "awaiting")).has(gKey), applied: (await gMap("gb", "applied")).size, proven: (await gMap("gb", "proofs")).has(gKey) };
+  // C, on `tm_demo-admit` only, records A's verdict: a peer-admit record, nothing admitted.
+  await until("C records A's admit", async () => (await peerAdmits("gc")).length > 0 || undefined);
+  report.g74cFirst = (await peerAdmits("gc")).map((r) => [r.kind, r.topic, r.txid === gTokId, r.from === peerKeyHex("ga"), r.outputsToAdmit, r.coinsToRetain]);
+
+  // (2) The proof: block 2 mines the token (a filler, then it); the header to all three, the proof event to A
+  // only (its chain feed). A records it and publishes `tm_demo-proof`; B checks the BUMP against its own headers,
+  // admits the proof event, which steps its pending submission: admitted at the proof. B then publishes its own
+  // `tm_demo-admit` (not `tm_demo`: it came by gossip; not the proof: it came by gossip) — C records B's admit too.
+  const f2 = "f2".repeat(32);
+  const gh2 = mine(sha256d(gh1), sha256d(Buffer.concat([internal(f2), internal(gTokId)])), 1_790_020_600);
+  await header({ raw: gh2 });
+  const path2 = new MerklePath(2, [[{ offset: 0, hash: f2 }, { offset: 1, hash: gTokId, txid: true }]]);
+  await gr("ga").admitEvent("ga", "chain", { kind: "proof", subject: txCid(gTokId), txid: gTokId, path: Uint8Array.from(path2.toBinary()) });
+  await until("B admits at the proof", async () => ((await gMap("gb", "applied")).size > 0 && (await gMap("gb", "proofs")).has(gKey)) || undefined);
+  await until("C records B's admit", async () => (await peerAdmits("gc")).length > 1 || undefined);
+  await settleAll();
+  const proofBlock = async (h: GH) => String(((await gMap(h, "proofs")).get(gKey) as { block?: CID } | undefined)?.block);
+  const bLive = await new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [gr("gb").originOf("gb")] } }).query({ service: "ls_demo", query: { topic: "tm_demo" } }) as { outputs: Array<{ beef: number[]; outputIndex: number }> };
+  report.g74bAdmitted = {
+    applied: (await gMap("gb", "applied")).size, awaiting: (await gMap("gb", "awaiting")).has(gKey),
+    block: (await proofBlock("gb")) === blockCid(gh2), aBlock: (await proofBlock("ga")) === blockCid(gh2),
+    live: bLive.outputs.map((o) => [Transaction.fromBEEF(o.beef).id("hex") === gTokId, o.outputIndex]),
+  };
+  report.g74cBoth = {
+    froms: (await peerAdmits("gc")).map((r) => r.from).sort(), want: [peerKeyHex("ga"), peerKeyHex("gb")].sort(),
+    cApplied: (await gMap("gc", "applied")).size,
+  };
+
+  // (3) A reorg: a heavier branch from 1 (2', 3') mines the token second in block 2'. All three take the run;
+  // A gets the token's re-proof (its chain feed) and publishes `tm_demo-proof` again (a new block); B checks it
+  // against its new headers and replaces the old proof.
+  const f2b = "fb".repeat(32);
+  const gh2b = mine(sha256d(gh1), sha256d(Buffer.concat([internal(f2b), internal(gTokId)])), 1_790_020_700);
+  const gh3b = mine(sha256d(gh2b), sha256d(Buffer.from("filler 3b")), 1_790_021_300);
+  await header({ raws: [gh2b, gh3b] });
+  const path2b = new MerklePath(2, [[{ offset: 0, hash: f2b }, { offset: 1, hash: gTokId, txid: true }]]);
+  await gr("ga").admitEvent("ga", "chain", { kind: "proof", subject: txCid(gTokId), txid: gTokId, path: Uint8Array.from(path2b.toBinary()) });
+  await until("B takes the reorg's re-proof", async () => (await proofBlock("gb")) === blockCid(gh2b) || undefined);
+  await settleAll();
+  report.g74reorg = { a: (await proofBlock("ga")) === blockCid(gh2b), b: (await proofBlock("gb")) === blockCid(gh2b), bApplied: (await gMap("gb", "applied")).size };
+
+  // (4) A bad BUMP on `tm_demo-proof` (a path claiming block 3', whose root is not that header's): ignore, not reject (it may be our
+  // missing headers); only its request entry is written, nothing else moves.
+  const mallory = key("7777");
+  const badPath = new MerklePath(3, [[{ offset: 0, hash: "ba".repeat(32) }, { offset: 1, hash: gTokId, txid: true }]]);
+  const bLen0 = await logLenOf("gb");
+  const bWallet0 = await headOf("gb", "wallet");
+  const bad = await gr("gb").p2pInbound("gb", await signed(mallory, "tm_demo-proof", dagCbor.encode({ txid: gTokId, blockHash: disp(sha256d(gh3b)), blockHeight: 3, bump: Uint8Array.from(badPath.toBinary()) }), 1n));
+  await settleAll();
+  report.g74badProof = [bad.verdict, bad.reason, (await logLenOf("gb")) - bLen0, (await headOf("gb", "wallet")) === bWallet0, (await proofBlock("gb")) === blockCid(gh2b)];
+
+  // (5) Late duplicates on `tm_demo`: the same BEEF from another publisher (a message GossipSub never saw) is
+  // decoded, looked up, "already judged" — no topic manager runs (programs/overlay test.zig counts the calls);
+  // A's own message redelivered past the seen-cache is the same record, already admitted: nothing runs at all.
+  const bLen1 = await logLenOf("gb");
+  const late = await gr("gb").p2pInbound("gb", await signed(mallory, "tm_demo", new Uint8Array(gTok.toBEEF()), 2n));
+  await settleAll();
+  const kb = await kOf("gb");
+  let original: { topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array } | undefined;
+  for (let c = await kb.tip(); c;) {
+    const e = await kb.store.get(c) as unknown as { request?: CID; transport?: string; prev?: CID };
+    if (e.request && e.transport === "libp2p") {
+      const rec = await kb.store.get(e.request) as unknown as { kind: string; topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array };
+      if (rec.kind === "p2p" && rec.topic === "tm_demo" && Buffer.from(rec.from).equals(Buffer.from(peerIdOf(p2pOracle.peerKey("ga")).toMultihash().bytes))) original = rec;
+    }
+    c = e.prev;
+  }
+  const again = original ? await gr("gb").p2pInbound("gb", { transport: "libp2p", topic: original.topic, from: original.from, seqno: original.seqno, signature: original.signature, body: original.body }) : undefined;
+  await settleAll();
+  report.g74late = {
+    late: [late.verdict, late.reason], redelivered: again ? [again.verdict, again.reason] : "A's message not found in B's log",
+    entries: (await logLenOf("gb")) - bLen1, wallet: (await headOf("gb", "wallet")) === bWallet0,
+  };
+  report.g74ok = true;
+} catch (e) {
+  report.g74error = (e as Error).stack ?? String(e);
+}
+for (const h of G) if (g[h]) { await g[h]!.r.stop(); g[h]!.hdb.close(); }
+await arcade74.close();
+
 // #42 (decided 2026-09-30): the merkle nodes the BUMPs revealed are kept 64-byte bitcoin-tx blocks that
 // contribute no edges (nor does the header): no token is a `child` edge target, and no edge in the map is
 // `child` / `prev` / `merkleroot`. The nodes still link forward: the root's two children, n23's two
@@ -787,6 +1014,23 @@ check(eq(report.mined, { status: 200, steak: { tm_demo: { outputsToAdmit: [0], c
 }
 check(eq(report.edges, { sameRoot: true, children: [false, false, false], noNodeEdges: true, forward: true }), `#42: kept merkle nodes and headers contribute no edges (no token is a \`child\` edge target), the nodes still link forward to their children; the TS reader derives the kernel's edges map, same root (${JSON.stringify(report.edges)})`);
 
+process.stdout.write("== overlay gossip (#74)\n");
+check(report.g74ok === true, `the gossip scenario ran${report.g74error ? `: ${report.g74error}` : ""}`);
+check(eq(report.g74submit, [200, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } }]), `A: POST /submit admitted on Arcade's RECEIVED (its status provider) (${JSON.stringify(report.g74submit)})`);
+check(eq(report.g74bPending, { awaiting: true, applied: 0, proven: false }), `A re-published the raw submission on \`tm_demo\`: B (no status provider) judged it by gossip, holds it and waits at its gate — nothing admitted before the proof (${JSON.stringify(report.g74bPending)})`);
+check(eq(report.g74cFirst, [["peer-admit", "tm_demo", true, true, [0], []]]), `A's verdict on \`tm_demo-admit\` (STEAK + txid, no BEEF): C records it as a peer-admit record from A's peer key under its head overlay:gossip (${JSON.stringify(report.g74cFirst)})`);
+check(eq(report.g74bAdmitted, { applied: 1, awaiting: false, block: true, aBlock: true, live: [[true, 0]] }), `A recorded the proof (its chain feed) and published \`tm_demo-proof\`; B checked the BUMP against its own headers, recorded it, and admitted at the proof (its lookup answers the token) (${JSON.stringify(report.g74bAdmitted)})`);
+{
+  const c = report.g74cBoth as { froms: string[]; want: string[]; cApplied: number } | undefined;
+  check(!!c && eq(c.froms, c.want) && c.cApplied === 0, `B published its own admit: C holds A's and B's peer-admits, and admitted nothing itself (${JSON.stringify(c)})`);
+}
+check(eq(report.g74reorg, { a: true, b: true, bApplied: 1 }), `a reorg (2', 3' heavier, the token second in 2'): A's re-proof published again (a new block); B checked it against its new headers and replaced the old proof (${JSON.stringify(report.g74reorg)})`);
+check(eq(report.g74badProof, ["ignore", "the bump's root is not our header's merkle root", 1, true, true]), `a bad BUMP on \`tm_demo-proof\`: ignore (not reject), only its request entry written, B's state where it was (${JSON.stringify(report.g74badProof)})`);
+{
+  const l = report.g74late as { late: unknown[]; redelivered: unknown; entries: number; wallet: boolean } | undefined;
+  check(!!l && eq(l.late, ["ignore", "already judged"]) && eq(l.redelivered, ["ignore", "already admitted"]) && l.entries === 2 && l.wallet, `late duplicates on \`tm_demo\`: the same BEEF from another publisher is "already judged" (one decode, one lookup, no topic manager); A's message redelivered is "already admitted" (nothing runs); each one request entry, the state unchanged (${JSON.stringify(l)})`);
+}
+
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
 process.stdout.write(r.stdout);
 if (r.status !== 0) process.stdout.write(r.stderr);
@@ -803,6 +1047,13 @@ const rn = spawnSync("node", ["--experimental-strip-types", "--no-warnings", joi
 process.stdout.write(rn.stdout);
 if (rn.status !== 0) process.stdout.write(rn.stderr);
 check(rn.status === 0 && /identical .*the source store reproduced exactly/.test(rn.stdout), "#73: the no-Arcade instance's store (its 503, its proof fed directly) replays to itself exactly");
+for (const h of G) {
+  if (report.g74ok !== true) break;
+  const rg74 = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), gDb[h]], { encoding: "utf8" });
+  process.stdout.write(rg74.stdout);
+  if (rg74.status !== 0) process.stdout.write(rg74.stderr);
+  check(rg74.status === 0 && /identical .*the source store reproduced exactly/.test(rg74.stdout), `#74: ${h}'s store (its gossip: publishes and their answers, peers' messages) replays to itself exactly`);
+}
 
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `overlay: ${failures} FAILED\n` : "overlay: all ok\n");
