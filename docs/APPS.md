@@ -74,8 +74,8 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
   "requires": ["wallet.records/1"],
   "boxes": ["amm", "submit", "chain"],
   "routes": [
-    {"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},
-    {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},
+    {"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},   // served at /amm/submit
+    {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},   // served at /amm/lookup
     {"path": "libp2p:amm-proofs", "program": "p2p", "fn": "proof"},
     {"path": "libp2p:/amm-validator/1/swap", "program": "validator", "fn": "swap"}
   ],
@@ -96,6 +96,20 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
 | `boxes[]` | the boxes it asks to handle: its own name, plus any protocol boxes (`submit`, `chain`) |
 | `routes[]` | the routes it asks for, in the routes-table shape (docs/MESSAGES.md "Routes": `path | prefix`, `program` (a `programs` role), `fn`, `auth?`, `read?`, handler-specific settings); libp2p topics and stream protocols are routes too (`libp2p:<topic>`, `libp2p:<protocol>`) |
 | `heads[]` | the heads it will own: its own name, and patterns for heads it creates (`ls:*` for lookup services) |
+
+**Routes are namespaced under `/<app>/`, enforced.** Every route an app
+asks for lives under its own prefix: the AMM's routes are `/amm/submit`,
+`/amm/lookup`, `/amm/…`; `routes[].path` in the manifest is relative to
+that prefix and the install handler refuses anything else. No top-level
+grants exist for apps. The protocol endpoints are unaffected: BRC-22's
+`/submit` and BRC-24's `/lookup` are relative to the overlay's **base
+URL**, which BRC-23's advertisement carries (a host base URL, not a bare
+domain), so an overlay app advertises `https://<host>/<handle>/amm` and the
+stock clients call `${baseUrl}/submit`. The root belongs to skein's
+boundary programs (the messagebox routes, the BRC-103 well-known path),
+which are not apps. libp2p topic names are global by nature and are not
+namespaced. Boxes follow the same rule: an app's box is its name; the
+protocol boxes it handles (`submit`, `chain`) are explicit requests.
 
 **The app declares; it never installs.** Everything in `boxes`, `routes`
 and `heads` is a request the owner approves (§3). A manifest asking for a
@@ -229,7 +243,8 @@ overlay topic the app runs, the install handler expands the config into the
 concrete requests the owner approves (spec):
 
 - inbound routes `libp2p:<topic>` (raw submissions), `libp2p:<topic>-admit`,
-  `libp2p:<topic>-proof` (#74), plus `/submit` and `/lookup`;
+  `libp2p:<topic>-proof` (#74), plus `/<app>/submit` and `/<app>/lookup`
+  (the app's base URL is what it advertises);
 - boxes `submit` and `chain`;
 - a subscription to a status feed if `config.overlay.status` names one
   (`"$status"` for the host's provider, or a remote provider's key; none =
