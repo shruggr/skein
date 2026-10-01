@@ -372,7 +372,10 @@ class ReadOnly extends Error {
   constructor(what: string) { super(`${what}: this store's index is kept by the Zig kernel (issue #30); readonly here`); }
 }
 
-export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): SqliteStore & { state(): State } {
+/** A store over the kernel's index (#30): its state record, and every head's name and root (the state's `heads` map). */
+export type IndexStore = SqliteStore & { state(): State; heads(): Array<{ name: string; root: CID }> };
+
+export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): IndexStore {
   db.exec("PRAGMA busy_timeout = 5000;");
   const blockGet = db.prepare("SELECT bytes FROM blocks WHERE cid = ?");
   const blockHas = db.prepare("SELECT 1 AS x FROM blocks WHERE cid = ?");
@@ -409,8 +412,9 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): Sq
     .map((m) => m.cid);
   const cids = (list: unknown) => (Array.isArray(list) ? list.filter(isCID).map(fmt) : []);
 
-  const store: SqliteStore & { state(): State } = {
+  const store: IndexStore = {
     state,
+    heads: () => [...trees.range(root("heads"))].map(([k, v]) => ({ name: readStrKey(k).s, root: v as CID })),
     async put(value: Block) {
       if (!blockPut) throw new ReadOnly("put");
       const b = encode(value);

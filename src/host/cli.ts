@@ -15,6 +15,8 @@
 //   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
 //   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] | remove <key> | list
 //   skein-host event <handle> <box> [json]
+//   skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]
+//   skein-host uninstall <app> --instance <handle> [--approve-all]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
@@ -52,6 +54,14 @@
 // sends it; with the host down, through a router of its own, closed
 // afterwards. A router that answers at SKEIN_HOST_URL / SKEIN_ROUTER_PORT
 // with no control socket here is refused.
+// `install` (#72, #76; install.ts, docs/APPS.md §3) is the owner's client for
+// an app: the tree (a directory, or a git URL cloned) and its etc/app.json
+// checked, the requests derived and shown (the permission prompt: heads,
+// boxes and their senders, routes under /<app>/, start, requires, provides),
+// then — approved (`--approve-all`, or "y" at a terminal) — sent as the owner:
+// objects, head (the app record), subscribe per (box, sender), routes, start.
+// `uninstall` sends the app's stop, then removes its subscriptions and routes;
+// the head is left. Both speak to the row's front door as `deploy` does.
 // `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
@@ -139,6 +149,8 @@ const USAGE = `usage:
   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d]   an address-book entry (#70): how the agent reaches <key> (mailbox: a URL; libp2p: a peer ID or topic:<name>; local: a provider)
   skein-host peers <handle> remove <key>
   skein-host peers <handle> list                          its address book: key, transport, address, role, handle, source
+  skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]   an app (docs/APPS.md): check, show what it asks for, send as the owner
+  skein-host uninstall <app> --instance <handle> [--approve-all]                          its stop, then its subscriptions and routes removed (the head is left)
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
@@ -243,6 +255,10 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await peersCmd(db, rest, env);
       case "event":
         return await eventCmd(db, rest, env);
+      case "install":
+        return await installCmd(db, rest, env);
+      case "uninstall":
+        return await uninstallCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -429,6 +445,72 @@ async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     return 1;
   } finally {
     await router.close();
+  }
+}
+
+/** The owner's yes: `--approve-all`, else "y" at a terminal; refused when neither can be had. */
+async function approved(v: { "approve-all"?: boolean }, env: Env, what: string): Promise<boolean> {
+  if (v["approve-all"]) return true;
+  if (!process.stdin.isTTY || env.owner) { env.err(`${what}: not approved (--approve-all, or run it at a terminal to answer the prompt)`); return false; }
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try { return /^y(es)?$/i.test((await rl.question(`${what}? [y/N] `)).trim()); } finally { rl.close(); }
+}
+
+/** `skein-host install <repo-url | dir> --instance <handle>` (#72, #76): install.ts. */
+async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [spec, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, "approve-all": { type: "boolean" }, "dry-run": { type: "boolean" } } });
+  if (!spec || more.length || !v.instance) { env.err(USAGE); return 2; }
+  const row = db.get(v.instance);
+  if (!row) { env.err(`skein-host install: no instance ${v.instance}`); return 1; }
+  if (row.kind === "mailbox") { env.err(`skein-host install: ${row.handle} is a mailbox instance`); return 1; }
+  const s = openRow(row, env);
+  try {
+    if (!s.blocks) throw new Error(`no store at ${row.store} yet (run the instance once)`);
+    const { fetchApp, readApp, instanceView, planInstall, describe, sendInstall } = await import("./install.ts");
+    const tree = await readApp(fetchApp(spec));
+    const plan = await planInstall(tree, await instanceView(s.blocks), { modules: wasmDirObjects(WASM_DIR) });
+    for (const l of describe(plan)) env.out(l);
+    if (v["dry-run"]) return 0;
+    if (!(await approved(v, env, `install ${plan.app} into ${row.handle}`))) return 1;
+    const owner = await ownerOf(env, "skein-host install");
+    if (typeof owner === "number") return owner;
+    const box = owner.box(row);
+    const r = await sendInstall(plan, (b, body) => box.send(row.identity!, b, body));
+    env.out(`${row.handle}: ${plan.app} ${plan.version} ${plan.upgrade ? "upgraded" : "installed"}: ${r.messages} messages sent as the owner · head ${plan.app} → ${plan.recordCid}`);
+    return 0;
+  } catch (e) {
+    env.err(`skein-host install: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await s.close?.();
+  }
+}
+
+/** `skein-host uninstall <app> --instance <handle>` (#72, #76): stop, then its subscriptions and routes removed. */
+async function uninstallCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [app, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, "approve-all": { type: "boolean" } } });
+  if (!app || more.length || !v.instance) { env.err(USAGE); return 2; }
+  const row = db.get(v.instance);
+  if (!row) { env.err(`skein-host uninstall: no instance ${v.instance}`); return 1; }
+  const s = openRow(row, env);
+  try {
+    if (!s.blocks) throw new Error(`no store at ${row.store}`);
+    const { instanceView, planUninstall, sendUninstall } = await import("./install.ts");
+    const p = await planUninstall(app, await instanceView(s.blocks));
+    env.out(`uninstall ${app} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · subscribe remove ×${p.subscriptions.length} · routes remove ×${p.routes.length} · head ${app} left`);
+    if (!(await approved(v, env, `uninstall ${app} from ${row.handle}`))) return 1;
+    const owner = await ownerOf(env, "skein-host uninstall");
+    if (typeof owner === "number") return owner;
+    const box = owner.box(row);
+    const r = await sendUninstall(p, (b, body) => box.send(row.identity!, b, body));
+    env.out(`${row.handle}: ${app} uninstalled: ${r.messages} messages sent as the owner`);
+    return 0;
+  } catch (e) {
+    env.err(`skein-host uninstall: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await s.close?.();
   }
 }
 

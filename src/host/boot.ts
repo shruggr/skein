@@ -108,6 +108,18 @@ export interface SystemTree {
 /** A handler program's record inputs when bin/<name>.json gives none (the kernel's handler inputs). */
 const HANDLER_INPUTS = { message: "cid", body: "cid", box: "string", sender: "identity" };
 
+/**
+ * The program record for bin/<name>.wasm or bin/<name>.cid (its module's CID),
+ * with bin/<name>.json's {inputs, services, description} if the tree has one:
+ * what a boot puts, and what an app install (install.ts, #72) sends.
+ */
+export function programRecord(name: string, module: CID, meta: { inputs?: unknown; services?: string[]; description?: string } = {}): Record<string, unknown> {
+  return {
+    kind: "program", name, code: { wasm: module },
+    inputs: meta.inputs ?? HANDLER_INPUTS, services: meta.services ?? [], description: meta.description ?? `${name} (from the system tree)`,
+  };
+}
+
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {
   const b = await objects.get(cid);
   if (!b) throw new Error(`incomplete: ${what} (${cid}) is not in the source`);
@@ -181,13 +193,7 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
       modules.push({ cid: module, bytes: await objects.get(module), name });
     }
     const meta = json<{ inputs?: unknown; services?: string[]; description?: string }>(`${BIN}/${name}.json`) ?? {};
-    programs.push({
-      name, module,
-      record: {
-        kind: "program", name, code: { wasm: module },
-        inputs: meta.inputs ?? HANDLER_INPUTS, services: meta.services ?? [], description: meta.description ?? `${name} (from the system tree)`,
-      },
-    });
+    programs.push({ name, module, record: programRecord(name, module, meta) });
   }
   const subscriptions = json<SubscriptionSpec[]>(SUBSCRIPTIONS);
   if (!Array.isArray(subscriptions)) throw new Error(`${SUBSCRIPTIONS}: missing, or not a list (a system tree names its subscriptions)`);
