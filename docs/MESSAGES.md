@@ -9,6 +9,10 @@ the router's mailbox keeping, outcome entries and peer seeding. Revised for
 #68 and #66 (2026-10-01): **skein is a state process** — every package a
 transport carries in is appended as received and the front door is stepped
 on it; sessions are state; a synchronous client waits on the thread.
+Revised for #70 and #67 (2026-10-02): **one way out, and external
+communication is a thread** — a step `emit`s a signed message to a key the
+address book names and ends waiting; the answer is an entry. The `http` and
+`libp2p` imports and the host's attestations are gone (log format 6).
 
 ## The persistence rule (#68: skein is a state process)
 
@@ -29,8 +33,10 @@ step is recorded. There is no in-memory execution path:
 - a message that arrived is a `mail` record the front door's step routes
   (its id, as before, the record's CID); an acknowledgement moves the
   reader's pointer;
-- what the instance sends is part of the step that sends it (a recorded
-  `http` call and the record it put), not an entry;
+- what the instance sends is part of the step that sends it (the signed
+  message record it emitted, listed in the update's `emitted`), not an
+  entry; what comes back — a peer's reply, a provider's answer — is an
+  entry like any other arrival;
 - the blocks a step puts before it commits are the **write cache** (the
   decoded BEEF a submit judges, say): a cache in front of the store, not a
   different kind of execution.
@@ -198,8 +204,7 @@ It answers (dag-cbor on stdout), one of:
   state — and signs its answer on the session (not recorded).
 - **Replay.** The handler runs again in the request's steps on replay, over
   the same state at the same place in the log, and must answer the same;
-  its recorded calls (the oracle's signatures, `http`) are served from the
-  log.
+  its recorded calls (the oracle's signatures) are served from the log.
 
 ### A synchronous client waits on the thread (#66)
 
@@ -234,31 +239,38 @@ handshake under the prefix too — `RawBox` (`src/client/raw.ts`) rewrites
 `/.well-known/auth` to `/@<handle>/.well-known/auth` — and signs the path it
 sent, which is what the front door verifies.
 
-## The log, format 5
+## The log, format 6
 
 ```
 entry    {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
                  {kind: "p2p-frame", protocol, from: bytes, body: bytes}
-mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, json?: true,
-          session?: {payload: bytes, signature: bytes, nonce, yourNonce}}
+         local:  {kind: "message", message: <a signed mail record>, body: bytes}
+mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, subject?: <cid>,
+          json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce}
+          | nonce?: bytes(16), signature?: bytes}
 ```
 
 Entries are unsigned (#9): the sender signed its request, `prev` fixes the
 order, `time` is the router's clock at admission (#10). A `request` names
 the package as received and its transport, whose middleware the kernel
-steps on it (the genesis's front door for `http` and `libp2p`; a genesis may
-name others in `middleware: {<transport>: <program>}`, the hook #70's local
-providers take). A mail entry is what a host that admits a message directly
+steps on it (the genesis's front door for `http`, `libp2p` and `local`; a
+genesis may name others in `middleware: {<transport>: <program>}`). A
+`local` request is a provider's answer on this host (below, "Outbound"): the
+front door checks the message's signature against its sender and that its
+body is the one named, and admits it. A mail entry is what a host that admits a message directly
 writes (the browser's); the node host's messages arrive inside requests. A
 store in an older format is refused for running (`kernel-zig/src/log.zig`
 has the shapes).
 
-- **A message is its mail record.** `sender` is the session's identity,
-  `session` the BRC-104 signed request (the payload that carried the body, its
-  signature and nonces), `body` the dag-cbor record beside it, `json` set when
-  the client sent JSON (so the answer to it goes back as JSON). A box a client
+- **A message is its mail record.** A client's message: `sender` is the
+  session's identity, `session` the BRC-104 signed request (the payload that
+  carried the body, its signature and nonces), `json` set when the client
+  sent JSON (so the answer to it goes back as JSON). An emitted message (an
+  instance's or a provider's, #70) carries its own `signature` and `nonce`
+  instead, and keeps it whatever carried it. `body` is the dag-cbor record
+  beside it. A box a client
   names never starts with `:` (reserved for the host's own boxes).
 - **A message's id is the CID of its mail record.** Sender and recipient
   compute it alike; a reply names it in its body's `replyTo`. A second
@@ -282,8 +294,9 @@ has the shapes).
   runs. The handler gets `{event, box, subject?}`. A mail message never
   becomes an event: a program that wants a start signal from the operator
   takes a job, or its owner's mail in a box it subscribes with `$owner`.
-- **Wakes** are a sleeper's deadline, one entry each — or, for a thread
-  resting on a libp2p `receive`, the arrival of a frame on its stream (#51).
+- **Wakes** are a shell sleeper's deadline, one entry each. A program's
+  `deadline` is not a wake entry any more (#70): it is a message to the
+  waker, whose answer routes as a reply (`woke`).
 
 ## The messagebox
 
@@ -335,107 +348,210 @@ the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 - The router's resolve endpoint answers a mailbox instance's handle with its
   owner's key and the instance's origin.
 
-## Delivery
+## Outbound: emit, the address book and the providers
 
-An instance delivers its own messages: the messagebox program's `send`
-(`deliver.zig`), called from a step — the loop's `message` tool, its `infer`
-and its answer, the run handler's result (`sk.send`, programs/lib) — as a BRC-103/104
-client of the recipient's messagebox.
+(#70, #67.) This is the program-facing contract for everything that leaves
+an instance. A step never talks to the network: it **emits a signed
+message** to an identity key the address book names, ends `waiting` on it,
+and the answer — a peer's reply, a provider's answer — is an entry that
+steps the thread again. **External communication is a thread.**
+
+### emit
 
 ```
-send {to: <key>, box, body: <dag-cbor bytes>, handle?, domain?}  →  {id: <cid>}
+emit(message) → <cid>    preview1: skein.emit(msg, len, out, cap) → n   (the CID, binary; n < 0: the error)
+                         WIT:      emit: func(message: list<u8>) -> result<cid, string>
+                         Zig:      sk.emit(a, to, box, body: Value, subject: ?cid) → cid; sk.send(a, to, box, body)
+message  dag-cbor {to: bytes(33), box: text, body: bytes (the body record's canonical dag-cbor), subject?: <cid>}
+record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, subject?: <cid>,
+          nonce: bytes(16), signature: bytes}
 ```
 
-- **Where.** The address book (head `peers`, below) gives the recipient's
-  URL; for the owner, the genesis's `defaults.ownerMessagebox`; else, with a
-  handle, the resolve program on first contact. A key in none of them, with no
-  handle to resolve, is **no route**: a permanent failure (`no route to <key>:
-  not in the address book …`).
-- **The session.** One outbound session per peer, kept as a small record
-  (head `outbound`: `{peer, url, ours, theirs, server, created}`). `server` is
-  the identity that answered the handshake — the recipient's own, or a mailbox
-  instance's for a mailbox kept for someone (the URL names whose mailbox; the
-  session proves who answers). Sending never tells the peer who we are: no
-  claim, no registration (#40). Whether the peer can answer is its own
-  address book's business.
-- **The request** is a recorded `http` POST of `/sendMessage` as BRC-231
-  CBOR: request and response are on the step's update, so replay never touches
-  the network, with the host's attestation of the exchange (#62: its signature
-  over both digests and the time it answered; docs/VM.md, "Attested"). The
-  answer's signature is verified; a 401 means the session is gone: shake hands
-  again and send once more.
-- **The id.** `send` puts the same mail record the recipient keeps (sender
-  this instance, the session proof included) and answers with its CID, so a
-  reply's `replyTo` names a record this instance holds and can `await`.
-- **Failure** is the call's error, in the step: `transient: …` for no answer,
-  5xx, 408, 425, 429 (`skein.Transient`; the caller may try again later),
-  anything else permanent. There is no outcome entry. The loop's `message`
-  tool tries a transient failure again: it keeps a `retry` note beside the
-  turns and rests on a deadline `defaults.sendRetryMs` ahead (default
-  30 000), and the wake runs the call again; after `defaults.sendAttempts`
-  attempts in all (default 3) the failure is the tool's error result, as a
-  permanent one is at once. (Its `infer` and its answer are not retried: an
-  answer that cannot be delivered — no route, say — is an error turn, the
-  thread ends, and the step's log line carries it once, `stderr: loop: could
-  not deliver the answer: …`.)
-- **Local delivery.** The kernels' `http` goes through the router
-  (`Router.http`): a URL of the host's own is dispatched in process through
-  the same front-door path, no socket; any other goes out (`SKEIN_HTTP=fetch`,
-  or the router's `http` option). Since #68 the recipient appends the
-  request and the sender's step waits until the recipient's request thread
-  answers — which it does at once, before the message it routed runs. Until
-  #67 makes sending a write (emit, end the step waiting), two instances
-  whose steps deliver to each other at the same moment wait on each other
-  until the host's bound (`answerWaitMs`): each delivery then fails
-  transient, and the sender's retry applies.
+- The kernel builds the record (`sender` the instance, `recipient` = `to`),
+  signs it through the oracle — DER ECDSA by the sender's BRC-42 child for
+  `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone,
+  over the dag-cbor of the record without `signature` (BRC-169 §7.2/§7.3's
+  signing on skein's record; anyone verifies it with the sender's key) —
+  puts it and the body, and returns its CID: the message's id, what an
+  answer's `replyTo` names. `nonce` is the first 16 bytes of sha256(thread ‖
+  step ‖ the emit's place in the step): two threads asking the same thing
+  send two messages.
+- It goes out **when the step ends without error** (an errored step sends
+  nothing), listed on the step's update as `emitted`. Replay re-signs from
+  the recorded oracle answer and sends nothing. At a start the kernel hands
+  over again every emitted message a waiting thread still awaits; a host
+  acts on a message once.
+- **Errors** (the call's; the step may catch them): `emit: want {to:
+  <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}` · `emit: the
+  message is not dag-cbor` · ``emit: `to` is not an identity key (33
+  bytes): emit to a key, not a handle (resolve the handle first)`` · `emit:
+  the box is empty or starts with ':' (reserved)` · `emit: the body is not
+  dag-cbor` | `… not IPLD` | `… not canonical dag-cbor` · ``emit: `subject`
+  is not a CID`` · ``emit: no route to <hex>: not in the address book
+  (resolve its handle, or add it to the `peers` box)`` · `emit: <hex> is
+  reached by mailbox, and the genesis has no messagebox program to deliver
+  it` · `emit: the oracle did not sign the message` · in a kernel call,
+  `emit: a kernel call sends nothing (emit from a step)`.
 
-## The address book
+### Awaiting the answer
 
-Sending to anyone needs their mailbox URL, and optionally their handle
-(display, resolution): that is the **address book**, key → `{mailbox,
-handle?}`. Receiving needs none of it: the key authenticates (the front
-door's BRC-104), the subscription decides. The two are independent — a
-sender on an open box (`chat` from anyone) is admitted whether or not the
-instance can answer it.
+`await` the message's CID (`sk.awaitRecord`) and end the step; it rests
+`waiting` with the CID in `awaits`. The thread is stepped again by:
 
-The address book is the head `peers`: `{kind: "peers", peers: [{key, peer}]}`,
-each `{kind: "peer", key, url, handle?, domain?, since, source}`. It is
-written **only by the instance's own programs** — the host never seeds it:
+| input | when |
+|---|---|
+| `reply: {message, body, box, sender, replyTo}` | a message from the recipient whose body names `replyTo: <the CID>` (`sk.replyOf`; `get` the body) |
+| `undelivered: {message, error}` | a `mailbox` recipient's delivery thread gave up: no answer can come |
+| `woke: true` | the waker's answer to the step's `deadline` |
 
-- the **resolve** program (`programs/resolve`): called from a step (`resolve
-  {handle, domain, key?}`), it looks the handle up and writes the record
-  (source `resolve`);
-- the box **`peers`** (the owner, as admin): `{op: "add", key, url, handle?,
-  domain?}` | `{op: "remove", key}` (source `admin`). This is configuration:
-  `skein-host peers <agent> add <key> <mailbox-url> [--handle h@d]` /
-  `remove <key>` / `list`; `scripts/host/up.sh` writes the owner and the
-  inference peer into every agent this way, and the roster step (`skein-host
-  deploy`, `roster --deploy`) the other agents.
+Several messages, a subject and a deadline may be awaited at once; whichever
+comes first steps the thread, which awaits again what it still needs. An
+answer nothing awaits any more is recorded and runs nothing. A reply is
+routed only if the awaited record is a message this instance sent **to the
+replying sender** — a provider answers as itself, so its key is what the
+address book names.
 
-**Registration is application wiring, not core.** Nothing in the core
-registers itself or takes claims: the messagebox's `send` never posts one, and
-the stock genesis has no `register` box. An application that wants senders to
-enter themselves subscribes a box of its own in its `etc/subscriptions.json`
-— e.g. `{"box": "register", "handler": "resolve"}`: the resolve program's
-claim handler takes `{handle, domain}` (or a BRC-169 envelope's sender),
-resolves it, and writes the record only if it resolves to the sender (source
-`claim`) — or a program of its own with its own rules on who may.
+`deadline(until_ms)` is sugar over the same: when the step ends waiting it
+emits `{at: until_ms}` in box `wake` to the address book's `waker` and
+awaits it; the answer `{replyTo, at}` steps the thread with `woke: true`.
 
-The owner is the one peer a genesis names: `etc/config.json` `owner:
-{messagebox}` (or the host's `ownerMessagebox`, its mailbox instance on the
-host) becomes `defaults.ownerMessagebox`.
+### The address book
+
+The head `peers` — who the instance can reach, and how:
+
+```
+{kind: "peers", peers: [{key, peer: <cid>}]}                                   sorted by key
+{kind: "peer", key: bytes(33), transport: "mailbox" | "libp2p" | "local", address: text,
+ role?: text, handle?: text, domain?: text, since: ms, source: "genesis" | "admin" | "resolve" | "claim"}
+```
+
+| transport | address | how a message goes out |
+|---|---|---|
+| `mailbox` | the recipient's messagebox URL | the instance's own **delivery thread** (below): BRC-103/104, through the `fetch` provider |
+| `libp2p` | a peer ID, or `topic:<name>` | the host's libp2p node: the package `{message, body}` (dag-cbor) as one frame on `/skein/message/1.0.0`, or published on the topic; the libp2p provider answers in box `sent`: `{replyTo, sent: true}` or `{replyTo, seqno, recipients}`, or `{replyTo, error}` |
+| `local` | a provider's name on this host | handed to the provider |
+
+`role` is the part an entry plays for the instance — `fetch`, `waker`,
+`libp2p`, `broadcast`: how a program finds a provider (`sk.provider(a,
+role)`; `deadline` finds the waker). Receiving needs none of this: a
+sender is authenticated by its key (a BRC-104 session or the message's own
+signature) and admitted by subscription, whether or not the instance can
+answer it.
+
+Who writes it:
+
+- **the genesis**, once: `addressBook: [{key, transport, address, role?,
+  handle?, domain?}]` (source `genesis`) — the node host seeds its
+  providers (role = the provider's name; `libp2p` when it runs libp2p,
+  `broadcast` when it has an Arcade) and the owner's mailbox;
+- **the resolve program**, from a BRC-169 lookup (source `resolve`; below);
+- **the box `peers`** (the owner, as admin; source `admin`): `{op: "add",
+  key, transport?, address? | url?, role?, handle?, domain?}` | `{op:
+  "remove", key}` — `url` alone, or no `transport`, is a mailbox.
+  `skein-host peers <agent> add <key> <address> [--transport t] [--role r]
+  [--handle h@d]` / `remove <key>` / `list`; `scripts/host/up.sh` writes the
+  owner and the inference peer into every agent this way, and the roster
+  step (`skein-host deploy`, `roster --deploy`) the other agents.
+
+A later record for the same key replaces it (a party that moved hosts).
+`sk.peers`, `sk.peerOf(key)` and `sk.peerByHandle(handle, domain)` read it.
+**Registration is application wiring, not core**: nothing registers itself
+or takes claims; an application that wants senders to enter themselves
+subscribes a box of its own (e.g. `{"box": "register", "handler":
+"resolve"}`: the resolve program writes a claim `{handle, domain}` — or a
+BRC-169 envelope's sender — only if it resolves to the sender, source
+`claim`).
+
+### The providers
+
+A provider is a recipient with an identity of its own that carries a
+message out and answers. The host runs four (`src/host/providers.ts`); their
+keys are the host's business (children of its master secret), the instance
+knows them from its address book. Every answer is a signed message from
+the provider to the instance — the same record an `emit` makes, signed the
+same way, `subject` echoed, a fresh `nonce` — in the box asked (`frame`
+for a stream's frames), its body `{replyTo: <the message>, …}`; a failure is
+`{replyTo, error}`. It arrives as a `local` request (`{kind: "message",
+message, body}`): the front door checks the signature and the body, and the
+message routes by `replyTo` to the thread awaiting it.
+
+| role | box | body | answer body (beside `replyTo`) |
+|---|---|---|---|
+| `fetch` | `fetch` | `{method, url, headers?: {name: value}, body?: bytes, timeoutMs?}` | `{status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`) |
+| `waker` | `wake` | `{at: ms}` | `{at}`, at `at` |
+| `libp2p` | `publish` | `{topic, body: bytes}` | `{seqno: bytes(8), recipients}` |
+| | `dial` | `{peer, protocol}` | `{stream}`; then each frame read, in box `frame`: `{stream, body}`, and its end `{stream, closed: true, error?}` — all answering the dial |
+| | `send` | `{stream, body: bytes}` | `{}` |
+| | `close` | `{stream}` | `{}` |
+| `broadcast` | `broadcast` | `{tx: bytes}` (BEEF) | `{status, body: bytes}` — Arcade's answer to `POST /tx` (503 when the host has none) |
+| | `status` | `{txid}` | `{status, body: bytes}` — its `GET /tx/<txid>` |
+
+`sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
+awaits it; the reply's body is the answer. The wallet broadcasts through
+the `broadcast` provider (docs/WALLET.md), the overlay's gate likewise
+(docs/OVERLAY.md).
+
+### The outbound BRC-103/104 pattern (delivery)
+
+A `mailbox` recipient's message is delivered by the instance itself: the
+kernel launches the messagebox program as the message's **delivery thread**
+(origin `{program: messagebox, args: {message, transport: "mailbox"}}`),
+which is a BRC-103/104 client of the recipient's messagebox, its HTTP each
+an emit to the `fetch` provider (`programs/messagebox/deliver.zig`):
+
+```
+step 1   no session with that messagebox:  POST <url>/.well-known/auth (the BRC-103 initialRequest) → await
+step 2   the initialResponse: its signature over both nonces checked, the session kept;
+         the BRC-104-signed POST <url>/sendMessage, BRC-231 CBOR {message: {recipient, messageBox,
+         body, signature, subject?, nonce}} — the signed message itself → await
+step 3   the answer: its signature checked against the session; 200 → finished {delivered: <cid>, url}
+         (the recipient keeps the same record under the same CID). A 401: shake hands again, once.
+```
+
+- **The session** is the instance's own, one per peer: head `outbound`,
+  `{kind: "outbound", sessions: [{key, session: <cid>}]}`, each `{kind:
+  "outbound-session", peer, url, ours, theirs, server, created}`. `server`
+  is the identity that answered the handshake — the recipient's own, or a
+  mailbox instance's for a mailbox kept for someone. Sending never tells
+  the peer who we are beyond the session (no claim, no registration, #40).
+- **Failure.** `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
+  `defaults.sendRetryMs` later (default 30 000; a `deadline`) up to
+  `defaults.sendAttempts` attempts in all (default 3); anything else, or
+  the last attempt, ends the delivery thread errored, and the thread
+  awaiting the message is stepped with `undelivered: {message, error}`.
+- **Two instances on one host** deliver to each other through the fetch
+  provider's in-process path; since nothing waits mid-step, two that send
+  to each other at once no longer wait on each other.
+
+A program that speaks another request/response protocol over HTTP follows
+the same shape: build and sign the request in a step, emit it to the
+`fetch` provider, await, check the answer in the next step, keep any
+session as a record.
+
+### Resolving a handle
+
+`emit` takes a key, never a handle. A handle is looked up by **launching**
+the resolve program (`sk.launchResolve(a, in, handle, domain, key?)`; args
+`{handle, domain, key?}`): this step then waits on that thread, and when it
+comes to rest the launcher is stepped again — finished, the address book
+names the handle (the thread's result is the peer record); errored, the
+lookup failed (`transient: …` when no answer came, or a 5xx). `key` is the
+identity the launcher expects; another answer is refused.
 
 ## BRC-169 is discovery
 
 BRC-169 is used for one thing: a handle to an identity key and a messagebox
-URL. It is a program, not the core: the resolve program fetches
+URL. It is a program, not the core: the resolve program's thread fetches
 `https://<domain>/manifest.json` (`metanet.handles.resolve`, default
 `/.well-known/metanet-handles/resolve`), then `GET <resolve>?handle=<handle>`
-→ `{identityKey, messagebox, …}`, as recorded `http` calls. The instance's own
-domain is looked up at `defaults.resolveOrigin` (a dev host). The BRC-52
-certificate is recorded, not checked (`unchecked`). The router publishes the
-manifest and the resolve endpoint for its instances (`{handle, domain,
-identityKey, messagebox}`), and the paymail PKI (`/bsvalias/id`).
+→ `{identityKey, messagebox, …}`, each GET an emit to the `fetch` provider
+and its answer the next step, and writes `{transport: "mailbox", address:
+<messagebox>}` (source `resolve`). The instance's own domain is looked up at
+`defaults.resolveOrigin` (a dev host). The BRC-52 certificate is recorded,
+not checked (`unchecked`). The router publishes the manifest and the resolve
+endpoint for its instances (`{handle, domain, identityKey, messagebox}`),
+and the paymail PKI (`/bsvalias/id`). An emitted message is signed the way
+BRC-169 signs an envelope (above), so a BRC-169 peer can check it.
 
 ## Calls
 
@@ -515,9 +631,18 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   the request's thread comes to rest.
 - **Fuel** is each request thread's, on its updates.
 
-Outbound (publish, dial, send, receive, close) is the kernel's `libp2p`
-import, recorded on the step's update like `http` (docs/VM.md, "libp2p").
-Messagebox delivery stays HTTP.
+- **Signed messages** (#70). A frame on `/skein/message/1.0.0` (which every
+  node serves) and a message on a topic no route takes are read as a package
+  `{message, body}`: a signed mail record for this instance and its body.
+  The front door checks the signature as for a `local` request and admits
+  it; one for another identity is `ignore`, and a frame that is not a
+  package is `reject` (on a topic, `ignore`).
+
+Outbound is the `libp2p` provider (above, "The providers"): a step emits
+`publish`, `dial`, `send` or `close` to it and awaits the answer; a dialed
+stream's frames come back as messages in box `frame`. A message to an
+address book entry with `transport: "libp2p"` is carried as a signed
+package. Messagebox delivery stays HTTP.
 
 ## Fuel
 
@@ -542,9 +667,10 @@ The loop (`programs/loop`) gives the model a `message` tool beside `bash`:
 message {to: "@handle@domain", text}
 ```
 
-- **Addressing.** The loop finds the handle in its address book, else calls the
-  resolve program (`skein.Resolve`), which writes the peer record with the
-  step. A handle that does not resolve is an error result.
+- **Addressing.** The loop finds the handle in its address book, else
+  launches the resolve program (`sk.launchResolve`) and rests on it; when it
+  comes to rest the call runs again. A handle that does not resolve is an
+  error result.
 - **Who the loop sends to, and what it replies to.** Every chat the loop sends
   replies to the recipient's latest message in this thread, if it has one —
   the chats of the party that opened the thread (its user turns), or a party's
@@ -566,7 +692,9 @@ message {to: "@handle@domain", text}
   runs. A resumed thread that rests on a `message` takes the reply as that
   call's result, `{of: <their chat>, role: "tool", call, to, sent: <our chat>,
   text}`; one that rests on its answer takes it as the next user turn.
-- **Undeliverable.** A send that fails fails in the step: a `message` becomes
+- **Undeliverable.** A send to a key with no route fails in the step; one
+  whose delivery thread gives up (after its retries) steps the loop with
+  `undelivered`. Either way a `message` becomes
   an error result for the model (`{of, role: "tool", call, to, error}`) and the
   loop goes on; its `infer`, an `error` turn answered to the opener as an
   inference error; its answer to the opener, an `error` turn, and the thread
@@ -748,7 +876,10 @@ BRC-104 session, none of that carries weight: the session proves the sender,
 TLS (or localhost) keeps the wire private, and the recipient is the host. The
 mail record keeps the signed request, so the proof outlives the session and
 verifies from the log with the instance's key alone. Replay needs the log
-and nothing else.
+and nothing else. (#70 brought back one part of it: an emitted message is
+signed itself, BRC-169's way, because it may travel by a provider or over
+libp2p, with no session to prove its sender. Still no encryption and no
+shared relay.)
 
 ## Bodies
 

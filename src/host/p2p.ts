@@ -26,11 +26,13 @@
 //   protocols  the instance's `libp2p.protocols`: for each inbound stream the
 //              router reads length-prefixed frames (unsigned varint), makes one
 //              front-door call per frame and writes the answer's body back.
-//   outbound   the kernel's `libp2p` import (`request`): publish, dial, send,
-//              receive, close — answered here, recorded by the kernel on the
-//              step's update. A `receive` with no frame waiting answers
-//              {pending}; when a frame arrives the waiting thread is woken
-//              (`wake`, a wake entry) and its next step's `receive` gets it.
+//              Every node also serves /skein/message/1.0.0 (#70): a frame there is
+//              a signed message to the instance, its package {message, body}; the
+//              front door checks and routes it, no route needed.
+//   outbound   the `libp2p` provider's work (#70, providers.ts): publish, dial,
+//              send, close for the messages an instance emits to it, and each frame
+//              read from a dialled stream handed back (`frames`) to become a
+//              message to the instance — the next frame arrives as an entry.
 //
 // Host-wide settings (hostP2PConfig): SKEIN_LIBP2P_LISTEN, _BOOTSTRAP, _RELAYS
 // (comma-separated multiaddrs), _DHT (off | client | server), _MDNS (on | off),
@@ -58,7 +60,6 @@ import type { PrivateKey } from "@bsv/sdk";
 import { createLibp2p } from "libp2p";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
-import type { CID as CIDT } from "multiformats/cid";
 
 export type DhtMode = "off" | "client" | "server";
 
@@ -104,14 +105,11 @@ export interface InboundAnswer {
   reason?: string;
 }
 
-/** A recorded libp2p request (the kernel import), and its result. */
-export type P2PRequest =
-  | { op: "publish"; topic: string; body: Uint8Array }
-  | { op: "dial"; peer: string; protocol: string }
-  | { op: "send"; stream: number; body: Uint8Array }
-  | { op: "receive"; stream: number }
-  | { op: "close"; stream: number };
-export type P2PResult = Record<string, unknown>;
+/** A frame read from a dialled stream, or its end. */
+export type Frame = { body: Uint8Array } | { closed: true; error?: string };
+
+/** The stream protocol a signed message travels on to an instance (#70). */
+export const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
 
 export interface P2POptions {
   host: P2PHostConfig;
@@ -119,8 +117,6 @@ export interface P2POptions {
   keyOf(handle: string): PrivateKey;
   /** One front-door call for an inbound message or frame (Router.p2pInbound). */
   inbound(handle: string, call: InboundCall): Promise<InboundAnswer>;
-  /** A frame arrived for a thread resting on `receive`: admit its wake. */
-  wake(handle: string, thread: CIDT): void;
   log?(source: string, line: string): void;
   /** How often topics are re-advertised and looked up in the DHT, and bootstrap peers redialled (ms). */
   discoveryMs?: number;
@@ -190,16 +186,8 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
 }
 
 // ---------------------------------------------------------------- the host
-
-interface OpenStream {
-  stream: Stream;
-  lp: LengthPrefixedStream;
-  frames: Uint8Array[];
-  closed: boolean;
-  error?: string;
-  /** The thread resting on `receive` of this stream, if any. */
-  waiter?: CIDT;
-}
+/** A stream an instance dialled (the libp2p provider's). */
+interface OpenStream { stream: Stream; lp: LengthPrefixedStream }
 
 interface Node {
   handle: string;
@@ -297,7 +285,7 @@ export class P2PHost {
       ps.topicValidators.set(topic, (from: PeerId, msg: { type: string }) => this.validate(n, topic, from, msg as never));
       ps.subscribe(topic);
     }
-    for (const protocol of config.protocols) {
+    for (const protocol of [...config.protocols, ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) {
       await node.handle(protocol, (stream, connection) => { void this.serve(n, protocol, stream, connection.remotePeer); }, { runOnLimitedConnection: true });
     }
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
@@ -372,89 +360,64 @@ export class P2PHost {
     }
   }
 
-  // ---------------------------------------------------------------- outbound (the kernel's import)
+  // ---------------------------------------------------------------- outbound (the libp2p provider's, #70)
 
-  /**
-   * One request of the kernel's `libp2p` import, from `thread`. Every outcome
-   * is an answer (the kernel records it: replay serves it, never the network):
-   *   publish {topic, body}      → {seqno: bytes(8), recipients}
-   *   dial {peer, protocol}      → {stream}        peer: a peer ID, or a multiaddr (with /p2p/<id>)
-   *   send {stream, body}        → {}              one length-prefixed frame
-   *   receive {stream}           → {body} | {pending: true} | {closed: true}
-   *   close {stream}             → {}
-   * and any failure → {error}.
-   */
-  async request(handle: string, req: P2PRequest, thread?: CIDT): Promise<P2PResult> {
+  private nodeOf(handle: string): Node {
     const n = this.nodes.get(handle);
-    if (!n) return { error: "this instance has no libp2p node (its config names no libp2p)" };
-    try {
-      switch (req.op) {
-        case "publish": {
-          if (typeof req.topic !== "string" || !(req.body instanceof Uint8Array)) return { error: "publish: want {topic, body}" };
-          const data = Uint8Array.from(req.body); // a fresh object: the key msgIdFn catches the seqno by
-          n.seqnos.set(data, -1n);
-          try {
-            const r = await this.pubsub(n).publish(req.topic, data);
-            const seq = n.seqnos.get(data)!;
-            if (seq < 0n) return { error: "publish: no seqno" };
-            return { seqno: u64(seq), recipients: r.recipients.length };
-          } finally { n.seqnos.delete(data); }
-        }
-        case "dial": {
-          if (typeof req.peer !== "string" || typeof req.protocol !== "string") return { error: "dial: want {peer, protocol}" };
-          const target = req.peer.startsWith("/") ? multiaddr(req.peer) : peerIdFromString(req.peer);
-          const stream = await n.node.dialProtocol(target, req.protocol, { signal: AbortSignal.timeout(15_000) });
-          const id = ++nextStream;
-          const s: OpenStream = { stream, lp: lpStream(stream), frames: [], closed: false };
-          n.streams.set(id, s);
-          void this.read(n, s);
-          return { stream: id };
-        }
-        case "send": {
-          const s = n.streams.get(Number(req.stream));
-          if (!s) return { error: `send: no stream ${req.stream}` };
-          if (!(req.body instanceof Uint8Array)) return { error: "send: want {stream, body}" };
-          await s.lp.write(req.body);
-          return {};
-        }
-        case "receive": {
-          const s = n.streams.get(Number(req.stream));
-          if (!s) return { error: `receive: no stream ${req.stream}` };
-          const f = s.frames.shift();
-          if (f) return { body: f };
-          if (s.closed) return s.error ? { error: `receive: ${s.error}` } : { closed: true };
-          if (thread) s.waiter = thread;
-          return { pending: true };
-        }
-        case "close": {
-          const s = n.streams.get(Number(req.stream));
-          if (!s) return { error: `close: no stream ${req.stream}` };
-          n.streams.delete(Number(req.stream));
-          await s.stream.close().catch(() => s.stream.abort(new Error("closed")));
-          return {};
-        }
-        default:
-          return { error: `unknown op ${String((req as { op?: unknown }).op)}` };
-      }
-    } catch (e) {
-      return { error: `${req.op}: ${(e as Error).message}` };
-    }
+    if (!n) throw new Error("this instance has no libp2p node (its config names no libp2p)");
+    return n;
   }
 
-  /** A dialled stream's frames, buffered for `receive`; a thread resting on it is woken by each. */
-  private async read(n: Node, s: OpenStream): Promise<void> {
-    for (;;) {
-      try {
-        s.frames.push((await s.lp.read()).subarray());
-      } catch (e) {
-        s.closed = true;
-        const name = (e as Error).name;
-        if (name !== "UnexpectedEOFError" && name !== "StreamClosedError" && name !== "StreamResetError") s.error = (e as Error).message;
+  /** Publish `body` on `topic` from `handle`'s node (signed with its peer key): the message's seqno, and how many peers took it. */
+  async publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }> {
+    const n = this.nodeOf(handle);
+    const data = Uint8Array.from(body); // a fresh object: the key msgIdFn catches the seqno by
+    n.seqnos.set(data, -1n);
+    try {
+      const r = await this.pubsub(n).publish(topic, data);
+      const seq = n.seqnos.get(data)!;
+      if (seq < 0n) throw new Error("publish: no seqno");
+      return { seqno: u64(seq), recipients: r.recipients.length };
+    } finally { n.seqnos.delete(data); }
+  }
+
+  /** Open a stream from `handle`'s node to a peer (a peer ID, or a multiaddr with /p2p/<id>): its id; each frame read from it, and its end, to `frames`. */
+  async dial(handle: string, peer: string, protocol: string, frames: (f: Frame) => void): Promise<number> {
+    const n = this.nodeOf(handle);
+    const target = peer.startsWith("/") ? multiaddr(peer) : peerIdFromString(peer);
+    const stream = await n.node.dialProtocol(target, protocol, { signal: AbortSignal.timeout(15_000) });
+    const id = ++nextStream;
+    const s = { stream, lp: lpStream(stream) };
+    n.streams.set(id, s);
+    void (async () => {
+      for (;;) {
+        try {
+          frames({ body: (await s.lp.read()).subarray() });
+        } catch (e) {
+          const name = (e as Error).name;
+          const clean = name === "UnexpectedEOFError" || name === "StreamClosedError" || name === "StreamResetError";
+          if (n.streams.get(id) === s) frames({ closed: true, ...(clean ? {} : { error: (e as Error).message }) });
+          return;
+        }
       }
-      const w = s.waiter;
-      if (w) { s.waiter = undefined; this.o.wake(n.handle, w); }
-      if (s.closed) return; // nothing more comes: what is buffered, and the end, wait for `receive`
-    }
+    })();
+    return id;
+  }
+
+  /** Write one length-prefixed frame on a dialled stream. */
+  async send(handle: string, id: number, body: Uint8Array): Promise<void> {
+    const s = this.nodeOf(handle).streams.get(id);
+    if (!s) throw new Error(`send: no stream ${id}`);
+    await s.lp.write(body);
+  }
+
+  /** Close a dialled stream (our side), and forget it. */
+  async close(handle: string, id: number): Promise<void> {
+    const n = this.nodeOf(handle);
+    const s = n.streams.get(id);
+    if (!s) throw new Error(`close: no stream ${id}`);
+    n.streams.delete(id);
+    await s.stream.close().catch(() => s.stream.abort(new Error("closed")));
   }
 
   // ---------------------------------------------------------------- lifecycle

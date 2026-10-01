@@ -42,6 +42,12 @@
 //! rest (the handler called again with `resolved`).
 //!
 //! The handler gets the request plus `key`: the 33-byte key from `from`.
+//!
+//! A signed message (#70) over libp2p needs no route: a frame on
+//! MESSAGE_PROTOCOL (/skein/message/1.0.0), or a topic message no route
+//! takes, whose body is {message: <signed mail record>, body: bytes}, is
+//! checked and admitted as the message it is (main.zig signedMessage) — a
+//! message for another identity is `ignore`.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -54,6 +60,10 @@ const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 const SIGN_PREFIX = "libp2p-pubsub:";
 
+/// The stream protocol a signed message travels on to a libp2p recipient (#70):
+/// one frame, dag-cbor {message: <the signed mail record>, body: bytes}.
+pub const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
+
 /// A step of a libp2p request's thread: the first verifies and routes, a later one calls a waiting frame's handler again.
 pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     const kind = Value.str(req.get("kind")) orelse "";
@@ -63,8 +73,20 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     const source = try std.fmt.allocPrint(a, "libp2p:{s}", .{name});
     const from = Value.bytesOf(req.get("from")) orelse return verdict(a, "reject", "no from");
     const body = Value.bytesOf(req.get("body")) orelse "";
-    const route = findRoute(in, source) orelse return verdict(a, "ignore", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
     const key = keyOfPeerId(from) orelse return verdict(a, "reject", "from is not a secp256k1 peer ID");
+    // #70: a signed message over libp2p — a frame on MESSAGE_PROTOCOL, or a topic message no route takes.
+    const route = findRoute(in, source) orelse {
+        if (protocol != null and !eql(u8, protocol.?, MESSAGE_PROTOCOL)) return verdict(a, "ignore", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
+        if (topic) |t| {
+            if (in.get("seen") != null) return verdict(a, "ignore", "already admitted");
+            const sq = Value.bytesOf(req.get("seqno")) orelse return verdict(a, "reject", "no seqno");
+            const sg = Value.bytesOf(req.get("signature")) orelse return verdict(a, "reject", "no signature");
+            if (sq.len != 8 or !try verifyMessage(a, from, body, sq, t, sg, key)) return verdict(a, "reject", "the signature does not verify");
+        }
+        const pkg = cbor.decode(a, body) catch return verdict(a, if (topic != null) "ignore" else "reject", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
+        const m = pkg.get("message") orelse return verdict(a, if (topic != null) "ignore" else "reject", "not a message {message, body}");
+        return main.signedMessage(a, in, m, Value.bytesOf(pkg.get("body")) orelse "");
+    };
     const again = Value.cidOf(in.get("tip")) != null;
     if (again) _ = try main.saved(a, Value.cidOf(in.get("tip")).?);
 

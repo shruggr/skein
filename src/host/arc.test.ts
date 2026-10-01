@@ -79,7 +79,7 @@ test("arc: the route proxies to Arcade under the host's token and answers what A
     const r = await router.dispatch({ method, url: `${o}${path}`, headers: {}, body: body ?? new Uint8Array(), ...(from ? { from } : {}) });
     return { status: r.status, headers: r.headers, json: JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown> };
   };
-  assert.equal(router.arcRoute(), `${o}/arc`, "what a new genesis names as walletArc");
+  assert.deepEqual(router.addressSeed().map((e) => e.role), ["fetch", "waker", "broadcast"], "a new genesis names the broadcast provider (#70): this host has an Arcade");
 
   const { tx, beef } = await spend(2);
   const txid = tx.id("hex");

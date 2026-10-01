@@ -1,15 +1,23 @@
-//! p2p-demo (#51): a test program for the `libp2p` import and the front
+//! p2p-demo (#51, #70): a test program for libp2p over `emit` and the front
 //! door's libp2p routes. kernel-zig/test/p2p/build.sh builds it into
 //! kernel-zig/test/p2p/p2p-demo.wasm (committed; src/host/p2p-router.test.ts
-//! runs it).
+//! and kernel-zig/equiv/libp2p.ts run it).
+//!
+//! Outbound is a thread (#67): each operation is a message to the address
+//! book's `libp2p` provider, and its answer — a signed message replying to
+//! it — the entry that steps the thread again.
 //!
 //! As a step (a box's handler; the message body a dag-cbor record):
-//!   {op: "publish", topic, text}          publish → stdout "published <seqno hex>"
-//!   {op: "echo", peer, protocol, text}     dial, send, receive: the reply at once, or
-//!                                          the step rests (deadline in 30 s) with
-//!                                          stdout "stream <id>"; the router wakes it
-//!                                          when the frame comes and the next step's
-//!                                          receive has it → stdout "reply <text>", close
+//!   {op: "publish", topic, text}          emit publish {topic, body} → await; the answer
+//!                                          {seqno, recipients} → stdout "published <seqno hex>"
+//!   {op: "echo", peer, protocol, text}     emit dial {peer, protocol} → await; its answer
+//!                                          {stream} → emit send {stream, body: text}, await the
+//!                                          dial again (a frame read from the stream arrives as a
+//!                                          reply to the dial, in box `frame`: {stream, body}); the
+//!                                          frame → emit close {stream} → stdout "reply <text>"
+//!   Between steps the thread's state is its last stdout line:
+//!     "dial <dial cid hex> <text>"   waiting on the dial's answer
+//!     "stream <id> <dial cid hex>"   waiting on the frame (the send's answer, if it comes first, rests again)
 //! Called (a front-door route's handler, kind "call"):
 //!   topic    {transport, topic, from, key, seqno, signature, body} → {verdict}: a body
 //!            starting "bad" is reject, "skip" ignore, anything else accept
@@ -28,6 +36,17 @@ pub fn main() u8 {
 
 fn out(s: []const u8) !void {
     try std.Io.File.stdout().writeStreamingAll(sk.io(), s);
+}
+
+fn map(a: Allocator, es: []const cbor.Entry) !Value {
+    return .{ .map = try a.dupe(cbor.Entry, es) };
+}
+
+/// A message to the libp2p provider in `box`, awaited: its CID.
+fn ask(a: Allocator, box: []const u8, body: Value) ![]const u8 {
+    const id = try sk.emit(a, try sk.provider(a, "libp2p"), box, body, null);
+    try sk.awaitRecord(id);
+    return id;
 }
 
 fn run(a: Allocator) !void {
@@ -49,15 +68,43 @@ fn run(a: Allocator) !void {
         return sk.answer(a, m.value());
     }
 
-    const at = Value.intOf(in.get("at")) orelse 0;
-    // A later step: the stream this thread rests on, from its last update's stdout.
-    if (Value.cidOf(in.get("tip"))) |tip| {
+    // A later step: the provider's answer, read with the state the last step left on stdout.
+    if (try sk.replyOf(a, in)) |r| {
+        const tip = Value.cidOf(in.get("tip")) orelse return sk.report("an answer, and no step before it");
         const u = try sk.get(a, tip);
         const res = u.get("result") orelse return sk.report("the tip has no result");
-        const prev = Value.bytesOf(res.get("stdout")) orelse "";
-        if (!std.mem.startsWith(u8, prev, "stream ")) return sk.report("woken, and not resting on a stream");
-        const id = try std.fmt.parseInt(i64, std.mem.trim(u8, prev["stream ".len..], " \n"), 10);
-        return receive(a, id, at);
+        const prev = std.mem.trim(u8, Value.bytesOf(res.get("stdout")) orelse "", " \n");
+        if (Value.str(r.body.get("error"))) |e| return sk.report(try std.fmt.allocPrint(a, "{s}: {s}", .{ r.box, e }));
+        if (eql(u8, r.box, "publish")) {
+            const seq = Value.bytesOf(r.body.get("seqno")) orelse return sk.report("publish: no seqno");
+            return out(try std.fmt.allocPrint(a, "published {s}\n", .{try sk.hex(a, seq)}));
+        }
+        if (eql(u8, r.box, "dial")) {
+            // "dial <dial cid hex> <text>"
+            if (!std.mem.startsWith(u8, prev, "dial ")) return sk.report("a dial's answer, and not dialling");
+            var it = std.mem.splitScalar(u8, prev["dial ".len..], ' ');
+            const dial_hex = it.next() orelse return sk.report("bad state");
+            const text = it.rest();
+            const id = Value.intOf(r.body.get("stream")) orelse return sk.report("dial: no stream");
+            _ = try ask(a, "send", try map(a, &.{ .{ .key = "stream", .value = cbor.int(id) }, .{ .key = "body", .value = .{ .bytes = text } } }));
+            try sk.awaitRecord(sk.unhex(a, dial_hex) orelse return sk.report("bad state"));
+            return out(try std.fmt.allocPrint(a, "stream {d} {s}\n", .{ id, dial_hex }));
+        }
+        if (!std.mem.startsWith(u8, prev, "stream ")) return sk.report("an answer, and not resting on a stream");
+        var it = std.mem.splitScalar(u8, prev["stream ".len..], ' ');
+        const id = try std.fmt.parseInt(i64, it.next() orelse return sk.report("bad state"), 10);
+        const dial = sk.unhex(a, it.next() orelse return sk.report("bad state")) orelse return sk.report("bad state");
+        if (eql(u8, r.box, "send")) {
+            // The send went out; the frame is still to come.
+            try sk.awaitRecord(dial);
+            return out(try std.fmt.allocPrint(a, "{s}\n", .{prev}));
+        }
+        if (!eql(u8, r.box, "frame")) return sk.report(try std.fmt.allocPrint(a, "an answer in box {s}", .{r.box}));
+        if (r.body.get("closed") != null) return sk.report("the stream closed with no reply");
+        const b = Value.bytesOf(r.body.get("body")) orelse return sk.report("frame: no body");
+        // Close it (its answer is not awaited) and finish with the reply.
+        _ = try sk.emit(a, try sk.provider(a, "libp2p"), "close", try map(a, &.{.{ .key = "stream", .value = cbor.int(id) }}), null);
+        return out(try std.fmt.allocPrint(a, "reply {s}\n", .{b}));
     }
 
     const args = in.get("args") orelse return sk.report("no args");
@@ -65,45 +112,15 @@ fn run(a: Allocator) !void {
     const op = Value.str(body.get("op")) orelse "";
     const text = Value.str(body.get("text")) orelse "";
     if (eql(u8, op, "publish")) {
-        var q = cbor.MapBuilder.init(a);
-        try q.put("op", cbor.string("publish"));
-        try q.put("topic", cbor.string(Value.str(body.get("topic")) orelse return sk.report("publish: no topic")));
-        try q.put("body", .{ .bytes = text });
-        const r = try sk.libp2p(a, q.value());
-        const seq = Value.bytesOf(r.get("seqno")) orelse return sk.report("publish: no seqno");
-        return out(try std.fmt.allocPrint(a, "published {s}\n", .{try sk.hex(a, seq)}));
+        const topic = Value.str(body.get("topic")) orelse return sk.report("publish: no topic");
+        _ = try ask(a, "publish", try map(a, &.{ .{ .key = "topic", .value = cbor.string(topic) }, .{ .key = "body", .value = .{ .bytes = text } } }));
+        return out("publishing\n");
     }
     if (eql(u8, op, "echo")) {
-        var d = cbor.MapBuilder.init(a);
-        try d.put("op", cbor.string("dial"));
-        try d.put("peer", cbor.string(Value.str(body.get("peer")) orelse return sk.report("echo: no peer")));
-        try d.put("protocol", cbor.string(Value.str(body.get("protocol")) orelse return sk.report("echo: no protocol")));
-        const id = Value.intOf((try sk.libp2p(a, d.value())).get("stream")) orelse return sk.report("dial: no stream");
-        var s = cbor.MapBuilder.init(a);
-        try s.put("op", cbor.string("send"));
-        try s.put("stream", cbor.int(id));
-        try s.put("body", .{ .bytes = text });
-        _ = try sk.libp2p(a, s.value());
-        return receive(a, @intCast(id), at);
+        const peer = Value.str(body.get("peer")) orelse return sk.report("echo: no peer");
+        const protocol = Value.str(body.get("protocol")) orelse return sk.report("echo: no protocol");
+        const dial = try ask(a, "dial", try map(a, &.{ .{ .key = "peer", .value = cbor.string(peer) }, .{ .key = "protocol", .value = cbor.string(protocol) } }));
+        return out(try std.fmt.allocPrint(a, "dial {s} {s}\n", .{ try sk.hex(a, dial), text }));
     }
     return sk.report("unknown op (publish, echo)");
-}
-
-/// The next frame on the stream: printed and the stream closed; or, none yet, rest on it.
-fn receive(a: Allocator, id: i64, at: i128) !void {
-    var q = cbor.MapBuilder.init(a);
-    try q.put("op", cbor.string("receive"));
-    try q.put("stream", cbor.int(id));
-    const r = try sk.libp2p(a, q.value());
-    if (Value.bytesOf(r.get("body"))) |b| {
-        var c = cbor.MapBuilder.init(a);
-        try c.put("op", cbor.string("close"));
-        try c.put("stream", cbor.int(id));
-        _ = try sk.libp2p(a, c.value());
-        return out(try std.fmt.allocPrint(a, "reply {s}\n", .{b}));
-    }
-    if (r.get("closed") != null) return sk.report("the stream closed with no reply");
-    // Pending: rest; a frame on the stream wakes this thread before the deadline.
-    try sk.deadline(@intCast(at + 30_000));
-    return out(try std.fmt.allocPrint(a, "stream {d}\n", .{id}));
 }

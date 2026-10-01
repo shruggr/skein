@@ -1,11 +1,11 @@
-// fetch (issue #15): GET a URL over wasi:http, the body to stdout — a WASI 0.2
-// component, Zig 0.16.0. Built as the wallet's component build is (wallet-zig/
+// fetch (issue #15, #70): GET a URL by a message to the `fetch` provider, the
+// body to stdout — a WASI 0.2 component (a test fixture for a component's
+// `emit`), Zig 0.16.0. Built as the wallet's component build is (wallet-zig/
 // build.zig, kernel-zig/README.md "Building a component handler"): a
 // wasm32-wasi core module with wit-bindgen's C bindings for world
 // skein:kernel/program (../../wit/bindings/c) and no libc
 // (../../wallet-zig/src/cabi.zig), made a component with the preview1
-// command adapter. The wasi:http client is ../../wallet-zig/src/wasi_http.zig,
-// the dag-cbor ../../kernel-zig/src/cbor.zig — shared, not copied.
+// command adapter. The dag-cbor is ../../kernel-zig/src/cbor.zig, shared.
 //
 //   zig build    → zig-out/bin/fetch.wasm (a component)
 //
@@ -27,9 +27,6 @@ pub fn build(b: *std.Build) void {
     const libc_headers = b.path("../../wallet-zig/src/c");
     const cbor = b.createModule(.{ .root_source_file = b.path("../../kernel-zig/src/cbor.zig"), .target = wasi, .optimize = opt });
     const cabi = b.createModule(.{ .root_source_file = b.path("../../wallet-zig/src/cabi.zig"), .target = wasi, .optimize = opt });
-    const http = b.createModule(.{ .root_source_file = b.path("../../wallet-zig/src/wasi_http.zig"), .target = wasi, .optimize = opt });
-    http.addIncludePath(bindings);
-    http.addIncludePath(libc_headers);
     const mod = b.createModule(.{
         .root_source_file = b.path("main.zig"),
         .target = wasi,
@@ -38,7 +35,6 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "cbor", .module = cbor },
             .{ .name = "cabi", .module = cabi },
-            .{ .name = "wasi_http", .module = http },
         },
     });
     mod.addIncludePath(bindings);

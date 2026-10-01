@@ -14,16 +14,12 @@ test {
     _ = secp;
     _ = syscalls;
     _ = @import("tree.zig");
-    _ = @import("attest.zig");
     _ = @import("mst.zig");
     _ = @import("bitcoin.zig");
     _ = @import("index_test.zig");
     _ = @import("objects.zig");
     _ = @import("fuel_test.zig");
     _ = @import("component_test.zig");
-    _ = @import("http.zig");
-    _ = @import("http_test.zig");
-    _ = @import("libp2p_test.zig");
     _ = @import("wasm_fuel.zig");
     _ = @import("wasm_fuel_test.zig");
 }
@@ -125,62 +121,6 @@ test "entropy stream and the fixed CIDs" {
     try std.testing.expectEqualStrings(c.get("headMain").?.string, try cidm.format(a, try @import("heads.zig").headOrigin(a, "main")));
     try std.testing.expectEqualStrings(c.get("subscriptions").?.string, try cidm.format(a, try @import("subscriptions.zig").origin(a)));
     try std.testing.expectEqualStrings(c.get("emptyTree").?.string, try cidm.format(a, (try @import("tree.zig").hashTree(a, &.{})).cid));
-}
-
-test "host-attested recorded calls (#62): the router's attestation verifies against the genesis key, as TS made it" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const attest = @import("attest.zig");
-    const f = (try fixtures(a)).object.get("attest").?.object;
-    const key = try unhex(a, f.get("key").?.string);
-    const instance = f.get("instance").?.string;
-    const op = f.get("op").?.string;
-    const request = try unhex(a, f.get("request").?.string);
-    const response = try unhex(a, f.get("response").?.string);
-    const stamp = f.get("stamp").?.integer;
-    const sig = try unhex(a, f.get("signature").?.string);
-    // The preimage: the same canonical dag-cbor bytes as TS.
-    try std.testing.expectEqualSlices(u8, try unhex(a, f.get("preimage").?.string), try attest.preimage(a, op, instance, request, response, stamp));
-
-    var g = cbor.MapBuilder.init(a);
-    try g.put("handle", cbor.string(instance));
-    try g.put("attest", .{ .bytes = key });
-    const genesis = g.value();
-    var r = cbor.MapBuilder.init(a);
-    try r.put("stamp", cbor.int(stamp));
-    try r.put("key", .{ .bytes = key });
-    try r.put("signature", .{ .bytes = sig });
-    const rec = r.value();
-
-    try std.testing.expectEqual(@as(?[]const u8, null), try attest.problem(a, genesis, op, request, response, rec));
-    // A tampered response, another stamp, another op, another instance: the signature no longer holds.
-    const tampered = try a.dupe(u8, response);
-    tampered[tampered.len - 1] ^= 1;
-    try std.testing.expectEqualStrings("the attestation does not verify", (try attest.problem(a, genesis, op, request, tampered, rec)).?);
-    var r2 = cbor.MapBuilder.init(a);
-    try r2.put("stamp", cbor.int(stamp + 1));
-    try r2.put("key", .{ .bytes = key });
-    try r2.put("signature", .{ .bytes = sig });
-    try std.testing.expectEqualStrings("the attestation does not verify", (try attest.problem(a, genesis, op, request, response, r2.value())).?);
-    try std.testing.expectEqualStrings("the attestation does not verify", (try attest.problem(a, genesis, "libp2p", request, response, rec)).?);
-    var g2 = cbor.MapBuilder.init(a);
-    try g2.put("handle", cbor.string("other"));
-    try g2.put("attest", .{ .bytes = key });
-    try std.testing.expectEqualStrings("the attestation does not verify", (try attest.problem(a, g2.value(), op, request, response, rec)).?);
-    // No attestation where the genesis names a key: refused; the genesis of another host: refused.
-    try std.testing.expectEqualStrings("no attestation (the genesis names the host's attest key)", (try attest.problem(a, genesis, op, request, response, null)).?);
-    var g3 = cbor.MapBuilder.init(a);
-    try g3.put("handle", cbor.string(instance));
-    const other = try a.dupe(u8, key);
-    other[0] = if (other[0] == 2) 3 else 2;
-    try g3.put("attest", .{ .bytes = other });
-    try std.testing.expectEqualStrings("the attestation is by another key than the genesis's", (try attest.problem(a, g3.value(), op, request, response, rec)).?);
-    // A genesis with no attest key asks nothing; the wallet op is never attested.
-    var g4 = cbor.MapBuilder.init(a);
-    try g4.put("handle", cbor.string(instance));
-    try std.testing.expectEqual(@as(?[]const u8, null), try attest.problem(a, g4.value(), op, request, response, null));
-    try std.testing.expectEqual(@as(?[]const u8, null), try attest.problem(a, genesis, "wallet", request, response, null));
 }
 
 test "traps come back as V8 names them (modules as in README; messages read from Node 26)" {

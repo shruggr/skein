@@ -6,20 +6,18 @@
 // the result is held for take(out, cap). n < 0 is an error; error(out, cap)
 // returns its message.
 //
-// Added for the wallet (#29):
-//   http(req, len, out, cap) → n   a dag-cbor request {method, url, headers?, body?}
-//                                  → the response {status, headers, body}, answered
-//                                  by the host and recorded (op "http"); kept for
-//                                  preview1 programs — a component's standard
-//                                  wasi:http becomes this same request (http.zig)
-//   libp2p(req, len, out, cap) → n (#51) a dag-cbor request {op, …} → its result:
-//                                  publish {topic, body} → {seqno, recipients};
-//                                  dial {peer, protocol} → {stream}; send {stream,
-//                                  body} → {}; receive {stream} → {body} | {pending}
-//                                  | {closed}; close {stream} → {}. Answered by the
-//                                  host's libp2p host and recorded (op "libp2p");
-//                                  {error} is a failure (n < 0), recorded as well
-//   deadline(until_ms) → 0         a step that ends waiting rests until then at most
+//   emit(msg, len, out, cap) → n   (#70) the one outbound primitive: dag-cbor {to:
+//                                  bytes(33), box, body: <dag-cbor bytes>, subject?:
+//                                  <cid>} → the signed message's CID (binary). The
+//                                  recipient must be in the address book (head
+//                                  `peers`); the kernel signs the message through
+//                                  the oracle (a recorded call), lists it on the
+//                                  step's update (`emitted`) and sends it by the
+//                                  recipient's transport when the step ends without
+//                                  error. The answer is an entry (await the CID)
+//   deadline(until_ms) → 0         a step that ends waiting rests until then at most:
+//                                  a wake-me to the waker (#70), emitted and awaited
+//                                  when the step ends; its answer steps it (`woke`)
 //   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
 //                                  (input kind "call"), its stdout the result
 //   edges(to, len, rel, rel_len, out, cap) → n   (#42) the edges into `to` (a binary CID)
@@ -61,18 +59,10 @@ pub const Host = struct {
     advance: *const fn (imp: *Imports, name: []const u8, tree: []const u8) Err!void,
     subscribe: *const fn (imp: *Imports, op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8) Err!void,
     wallet: *const fn (imp: *Imports, frame: []const u8) Err![]const u8,
-    /// One HTTP request (dag-cbor {method, url, headers?, body?, options?}) → the
-    /// response (dag-cbor {status, headers, body}), answered by the host and
-    /// recorded: the preview1 `http` import (#29) and a component's wasi:http
-    /// (#15, component.zig through http.zig) both come here.
-    http: *const fn (imp: *Imports, request: []const u8) Err![]const u8,
-    /// If this step ends waiting, rest no later than `until` (ms): a wake entry then steps it.
+    /// Emit a signed message (#70): dag-cbor {to, box, body, subject?} → its CID.
+    emit: *const fn (imp: *Imports, message: []const u8) Err![]const u8,
+    /// If this step ends waiting, rest no later than `until` (ms): the waker's answer then steps it.
     deadline: *const fn (imp: *Imports, until: i64) Err!void,
-    /// One libp2p request (#51, dag-cbor {op: "publish" | "dial" | "send" |
-    /// "receive" | "close", …}) → its result (dag-cbor), answered by the host's
-    /// libp2p host and recorded like `http`; a result {error} is the call's
-    /// failure (recorded: replay fails the same way).
-    libp2p: *const fn (imp: *Imports, request: []const u8) Err![]const u8 = noLibp2p,
     /// An in-VM call (#40): run `prog` (a program record) as a function — its
     /// entry with `input()` = {kind: "call", fn, arg, …} — and return what it
     /// wrote to stdout. From a step it is part of the step (its recorded calls,
@@ -85,10 +75,6 @@ pub const Host = struct {
 
 fn noEdges(imp: *Imports, _: []const u8, _: ?[]const u8) Err![]const u8 {
     return imp.failWith("edges: this host keeps no index");
-}
-
-fn noLibp2p(imp: *Imports, _: []const u8) Err![]const u8 {
-    return imp.failWith("libp2p: this host answers no libp2p");
 }
 
 /// The answer of `edges` (#42): the index's edges into `to` (with `rel`
@@ -223,8 +209,7 @@ pub const Imports = struct {
                 return 0;
             },
             .wallet => return imp.out(p, try h.wallet(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
-            .http => return imp.out(p, try h.http(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
-            .libp2p => return imp.out(p, try h.libp2p(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
+            .emit => return imp.out(p, try h.emit(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
             .deadline => {
                 try h.deadline(imp, a[0]);
                 return 0;

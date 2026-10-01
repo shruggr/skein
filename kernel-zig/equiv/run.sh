@@ -67,7 +67,7 @@ else
   echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1
 fi
 
-echo "== the wallet in the VM (#29): oracle signing, plain entries, the host broadcaster (#58) to a fake Arcade, statuses to every holder, deadline wakes, a restart resumed; replayed"
+echo "== the wallet in the VM (#29): oracle signing, plain entries, the broadcaster provider (#58, #70) to a fake Arcade, statuses to every holder, deadline wakes, a restart resumed; replayed"
 # Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
 if command -v wasm-tools > /dev/null; then
   (cd "$kz/../wallet-zig" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
@@ -76,10 +76,10 @@ fi
 
 echo "== bootstrap (#4): a system tree from a directory and from a packet, chatted with; a checkpoint restored; replayed"
 "${node[@]}" "$kz/equiv/boot.ts" || status=1
-echo "== wasi:http (#15): the fetch component through the router, its call recorded; replayed with no host to ask"
+echo "== a component's emit (#15, #70): the fetch component through the router's fetch provider, its answer an entry; replayed with no host to ask"
 "${node[@]}" "$kz/equiv/fetch.ts" || status=1
 
-echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip; replayed natively and in the browser; a live call refused in the browser"
+echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip (over the libp2p provider, #70); replayed natively and in the browser; a live step with no oracle in the browser"
 "${node[@]}" "$kz/equiv/libp2p.ts" || status=1
 
 echo "== overlay services (#36): programs/overlay built and tested; submit/lookup through the router with the stock SDK clients; replayed"

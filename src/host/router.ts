@@ -20,8 +20,8 @@
 //                                         signature: [2, "skein register"], key ID the username, counterparty
 //                                         anyone, over "register <username>")
 //   POST /arc/v1/tx                       the host's broadcaster (#58, arc.ts): a transaction to Arcade, under the
-//   GET  /arc/v1/tx/<txid>                host's callback token, answered with Arcade's answer; its status. An
-//                                         instance's genesis names it as `defaults.walletArc` when the host has an Arcade
+//   GET  /arc/v1/tx/<txid>                host's callback token, answered with Arcade's answer; its status (the
+//                                         instances reach the same broadcaster as the `broadcast` provider, #70)
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
 // The broadcaster's one SSE subscription (arc.ts) routes each status to every
@@ -32,22 +32,22 @@
 // held until the thread the kernel steps the front door on comes to rest;
 // its answer, signed on the session inside, is the response (frontdoor.ts).
 // Past `answerWaitMs`, or at shutdown, 503 + Retry-After. Every request is an
-// entry; a read moves nothing. The instances' outbound http (the messagebox's
-// delivery, a resolve) comes back here through the kernels' `http`: a URL of
-// this host's own is answered in process (the same path, no socket), any
-// other goes out.
+// entry; a read moves nothing.
+//
+// What the instances send out goes through the host's providers (#70,
+// providers.ts): each kernel hands over the signed messages its steps
+// emitted to a `local` provider or a libp2p recipient, and the provider's
+// answer comes back as a signed message, a `local` request entry. The HTTP
+// proxy (`fetch`) answers a URL of this host's own in process (the same
+// path, no socket) and sends any other out; the waker keeps the instances'
+// deadlines; the broadcaster is the host's Arcade (#58); the libp2p node is
+// the instance's own (p2p.ts). Each genesis it writes names the providers'
+// keys in its address book (`addressBook`).
 //
 // The libp2p host (#51, p2p.ts) is the router's too: one node per instance
 // whose genesis declares `libp2p`, each topic message and stream frame one
 // request entry (`p2pInbound`: the verdict or the frame's answer read off its
-// thread and handed back to GossipSub or the stream), and the kernels'
-// `libp2p` import answered here (`p2pRequest`); a frame for a thread resting
-// on `receive` admits its wake (`wakeThread`).
-//
-// Every `http` and `libp2p` exchange it answers for a kernel is attested
-// (#62): signed with the router's attest key (oracle.ts), stamped by its
-// clock, recorded by the kernel with the answer; each genesis it writes names
-// the key, so the log alone verifies.
+// thread and handed back to GossipSub or the stream).
 //
 // The router is the instances' clock too (#60, cron.ts): each genesis's
 // `jobs`, a plain `cron` event admitted into the job's box when it is due
@@ -57,7 +57,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
-import { ProtoWallet, Utils, type WalletInterface } from "@bsv/sdk";
+import { KeyDeriver, PrivateKey, ProtoWallet, Utils, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
@@ -72,15 +72,14 @@ import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { admit2, keyHex, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
+import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
-import { Kernel, type HttpRequest, type HttpResponse, type Sleeper } from "./kernel.ts";
-import { DEFAULT_LISTEN, libp2pOf, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig, type P2PRequest, type P2PResult } from "./p2p.ts";
+import { Kernel, type Sleeper } from "./kernel.ts";
+import { DEFAULT_LISTEN, libp2pOf, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
-import { attestExchange } from "./oracle.ts";
+import { Providers, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import * as Digest from "multiformats/hashes/digest";
-import type { PrivateKey } from "@bsv/sdk";
 
 type Named = { handle: string; domain: string };
 
@@ -98,11 +97,11 @@ export interface RouterOptions {
   genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[]; jobs?: JobSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
-  /** The host's Arcade (#58, arc.ts): the broadcast route, the status subscription, a new genesis's `walletArc`. Absent: no broadcaster. */
+  /** The host's Arcade (#58, arc.ts): the `broadcast` provider (#70), the broadcast route, the status subscription. Absent: no broadcaster. */
   arc?: ArcConfig;
   /** Tests: how the broadcaster reaches Arcade. */
   arcFetch?: typeof fetch;
-  /** Answers programs' HTTP to URLs that are not this host's (#15, #40); default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
+  /** The HTTP proxy's network (#70, the `fetch` provider) for URLs that are not this host's; default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears). */
   idleMs?: number;
@@ -133,11 +132,12 @@ export interface RouterOptions {
   /** An instance's libp2p peer key (oracle.ts peerKey). Absent: no libp2p host; the kernels' `libp2p` is refused. */
   peerKeyFor?(handle: string): PrivateKey;
   /**
-   * The router's attest key (#62, oracle.ts attestKey): it signs every `http`
-   * and `libp2p` exchange it answers, stamped by the router's clock, and each
-   * new genesis names its public key (`attest`). Absent: nothing is attested.
+   * A provider's key (#70, oracle.ts providerKey: the HTTP proxy `fetch`, the
+   * `waker`, `libp2p`, the `broadcast`er), which each new genesis's address
+   * book names. Absent: keys of this router's own, made fresh (a test's; a
+   * restarted router would not be the providers its instances know).
    */
-  attestKey?: PrivateKey;
+  providerKeyFor?(name: ProviderName): PrivateKey;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
 }
@@ -153,34 +153,12 @@ const KEY = /^0[23][0-9a-f]{64}$/;
 export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
 
 /**
- * SKEIN_HTTP=fetch: programs' http requests performed for real. A wasi:http
- * request's options (#15, recorded with the request, in ns) are applied here:
- * connect + first-byte bound the wait for the response head, between-bytes
- * each read of the body.
+ * SKEIN_HTTP=fetch: the HTTP proxy's requests (#70, the `fetch` provider)
+ * performed for real; `timeoutMs` (default 30 000) bounds the whole exchange.
  */
 export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
-  const o = req.options ?? {};
-  const head = (o.connectTimeout ?? 0) + (o.firstByteTimeout ?? 0);
-  const ctl = new AbortController();
-  const timer = head > 0 ? setTimeout(() => ctl.abort(new Error("timed out waiting for the response")), Math.ceil(head / 1e6)) : undefined;
-  try {
-    const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: ctl.signal });
-    clearTimeout(timer);
-    const headers = Object.fromEntries(r.headers.entries());
-    if (!o.betweenBytesTimeout || !r.body) return { status: r.status, headers, body: new Uint8Array(await r.arrayBuffer()) };
-    const chunks: Uint8Array[] = [];
-    const reader = r.body.getReader();
-    for (;;) {
-      let t: ReturnType<typeof setTimeout> | undefined;
-      const stall = new Promise<never>((_, no) => { t = setTimeout(() => no(new Error("timed out between bytes")), Math.ceil(o.betweenBytesTimeout! / 1e6)); });
-      const { done, value } = await Promise.race([reader.read(), stall]).finally(() => clearTimeout(t));
-      if (done) break;
-      chunks.push(value);
-    }
-    return { status: r.status, headers, body: Buffer.concat(chunks) };
-  } finally {
-    clearTimeout(timer);
-  }
+  const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: AbortSignal.timeout(req.timeoutMs ?? 30_000) });
+  return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
 }
 
 /**
@@ -222,6 +200,8 @@ export class Router {
   readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
   readonly p2p?: P2PHost;
+  /** The host's providers (#70): what carries the instances' messages out. */
+  readonly providers: Providers;
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   private queues = new Map<string, Promise<unknown>>();
@@ -275,10 +255,28 @@ export class Router {
         host: o.libp2p ?? { listen: DEFAULT_LISTEN, bootstrap: [], dht: "off", relays: [], mdns: false },
         keyOf: o.peerKeyFor, discoveryMs: o.libp2pDiscoveryMs,
         inbound: (h, c) => this.p2pInbound(h, c),
-        wake: (h, t) => void this.wakeThread(h, t).catch((e) => this.say(h, `wake ${short(t.toString())}: ${(e as Error).message}`)),
         log: (s, l) => this.say(s, l),
       });
     }
+    // Without a host's own provider keys: a router's own, fresh (a test's).
+    const own = o.providerKeyFor ? undefined : new KeyDeriver(PrivateKey.fromRandom());
+    const p2p = this.p2p;
+    this.providers = new Providers({
+      keyOf: o.providerKeyFor ?? ((n) => own!.derivePrivateKey([2, "skein provider"], n, "self")),
+      append: (h, pkg) => this.appendLocal(h, pkg),
+      fetch: (req, from) => this.http(req, from),
+      ...(this.arc ? { broadcast: { submit: (tx: Uint8Array, from: string) => this.arc!.submit(tx, from), status: (txid: string, from: string) => this.arc!.status(txid, from) } } : {}),
+      ...(p2p ? {
+        p2p: {
+          publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
+          dial: (h: string, peer: string, protocol: string, frames: Parameters<P2PHost["dial"]>[3]) => p2p.dial(h, peer, protocol, frames),
+          send: (h: string, s: number, body: Uint8Array) => p2p.send(h, s, body),
+          close: (h: string, s: number) => p2p.close(h, s),
+        },
+      } : {}),
+      now: () => stampMs(this.now()),
+      log: (s, l) => this.say(s, l),
+    });
     const idle = o.idleMs ?? 0;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
     this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
@@ -291,8 +289,6 @@ export class Router {
 
   /** This host's own origin. */
   origin(): string { return (this.o.origin ?? "http://127.0.0.1:{port}").replace("{port}", String(this.port || this.o.port || 0)); }
-  /** The broadcast route (#58), as a genesis's `walletArc` names it: the wallet calls <it>/v1/tx. */
-  arcRoute(): string { return `${this.origin()}${ARC_ROUTE}`; }
   /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
   originOf(handle: string): string {
     return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
@@ -351,6 +347,7 @@ export class Router {
     this.servers = [];
     if (this.control) closed.push(closeControl(this.control.server, this.control.path));
     this.control = undefined;
+    this.providers.stop();
     await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
     await Promise.all([...this.loading.values()].map((p) => p.catch(() => {})));
@@ -376,15 +373,14 @@ export class Router {
   }
 
   /**
-   * A thread resting on a libp2p `receive` (#51): a frame arrived on its
-   * stream, so admit its wake now (before its deadline). The kernel steps a
-   * sleeper early only if its last update recorded a pending `receive`.
+   * A signed message for an instance (#70): a provider's answer, appended as
+   * received — a `local` request entry, {kind: "message", message, body}; the
+   * front door checks its signature and routes it. Nobody waits on it.
    */
-  async wakeThread(handle: string, thread: CID): Promise<CID> {
+  async appendLocal(handle: string, pkg: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
       const l = await this.hydrate(handle);
-      const e = await admit2(l.kernel, { wake: thread }, {}, this.now());
-      this.say(handle, `libp2p: wake ${short(thread.toString())} as ${short(e.toString())} (a frame arrived)`);
+      const e = await appendRequest(l.kernel, "local", pkg, this.now());
       this.settle(l);
       return e;
     });
@@ -421,19 +417,14 @@ export class Router {
     return { verdict, ...(r.body instanceof Uint8Array ? { body: r.body } : {}), ...(r.close ? { close: true } : {}), ...(r.reason ? { reason: r.reason } : {}) };
   }
 
-  /** The kernel's `libp2p` import (#51): answered by the libp2p host; the kernel records the answer. */
-  async p2pRequest(handle: string, req: P2PRequest, thread?: CID): Promise<P2PResult> {
-    if (!this.p2p) return { error: "this host runs no libp2p" };
-    return await this.p2p.request(handle, req, thread);
-  }
-
   /** Until nothing is queued and every loaded kernel has processed what it was given (tests, corpus). */
   async settled(): Promise<void> {
     for (let i = 0; i < 1000; i++) {
       await Promise.all([...this.queues.values()]);
       await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {})));
+      await this.providers.idle(); // what the providers carry now (#70): its answers are entries
       await new Promise((r) => setImmediate(r));
-      if (!this.queues.size && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
+      if (!this.queues.size && !this.providers.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
     }
   }
 
@@ -471,9 +462,7 @@ export class Router {
     const kernel = new Kernel({
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       log: (line) => this.say(handle, line),
-      http: (req) => this.http(req, handle),
-      libp2p: (req, thread) => this.p2pRequest(handle, req, thread),
-      ...(this.o.attestKey ? { attest: (x) => attestExchange(this.o.attestKey!, { ...x, instance: row.handle, stamp: stampMs(this.now()) }) } : {}),
+      emit: (o) => this.providers.deliver(handle, o),
       sleepers: (s) => this.sleepersOf(handle, s),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
@@ -548,18 +537,30 @@ export class Router {
     return mb ? this.originOf(mb.handle) : undefined;
   }
 
+  /**
+   * A new agent's address book seed (#70): this host's providers — the HTTP
+   * proxy, the waker, the libp2p node (when it runs one), the broadcaster
+   * (when it has an Arcade) — and the owner's mailbox, when it knows it.
+   */
+  addressSeed(): AddressSeed[] {
+    const names: ProviderName[] = ["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["broadcast" as const] : [])];
+    const out: AddressSeed[] = this.providers.entries(names);
+    const mb = this.ownerMessagebox();
+    if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
+    return out;
+  }
+
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */
   genesisConfig(row: Pick<InstanceRow, "handle" | "domain"> & Partial<Pick<InstanceRow, "kind" | "owner">>, identity: string, code = true): Genesis2Config {
     if (row.kind === "mailbox") {
       if (!row.owner) throw new Error(`${row.handle}: a mailbox instance names its owner`);
-      return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true, ...this.attestFact() };
+      return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true };
     }
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
-    // #58: with an Arcade, the wallet broadcasts through the host's route (the configured defaults win).
-    const genesisDefaults = this.arc ? { walletArc: this.arcRoute(), ...this.o.genesis?.defaults } : this.o.genesis?.defaults;
+    const genesisDefaults = this.o.genesis?.defaults;
     const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
     const warn = (l: string) => this.say(row.handle, l);
-    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), ...this.attestFact() };
+    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed() };
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
@@ -576,11 +577,6 @@ export class Router {
       libp2p: this.o.genesis?.libp2p, extraRoutes: this.o.genesis?.routes,
       ...facts,
     };
-  }
-
-  /** The router's attest key for a genesis (#62), when it attests. */
-  private attestFact(): { attest?: string } {
-    return this.o.attestKey ? { attest: this.o.attestKey.toPublicKey().toString() } : {};
   }
 
   /**
@@ -701,7 +697,7 @@ export class Router {
   }
 
   /**
-   * A program's HTTP request (the kernel's `http`): this host's own URLs in
+   * The HTTP proxy's request (#70, the `fetch` provider): this host's own URLs in
    * process, the rest as configured. A delivery (`POST …/sendMessage`, from
    * instance `from`) is logged in one line: where it went, how, and the result.
    */

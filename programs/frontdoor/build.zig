@@ -11,6 +11,8 @@ pub fn build(b: *std.Build) void {
     const sk = b.createModule(.{ .root_source_file = b.path("../lib/sk.zig"), .target = t, .optimize = o, .imports = &.{.{ .name = "cbor", .module = cbor }} });
     const brc = b.createModule(.{ .root_source_file = b.path("../lib/brc104.zig"), .target = t, .optimize = o, .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "sk.zig", .module = sk } } });
     const dagjson = b.createModule(.{ .root_source_file = b.path("../lib/dagjson.zig"), .target = t, .optimize = o, .imports = &.{ .{ .name = "cbor", .module = cbor } } });
+    const secp = b.createModule(.{ .root_source_file = b.path("../../kernel-zig/src/secp.zig"), .target = t, .optimize = o });
+    const message = b.createModule(.{ .root_source_file = b.path("../lib/message.zig"), .target = t, .optimize = o, .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "secp", .module = secp } } });
     const exe = b.addExecutable(.{
         .name = "frontdoor",
         .root_module = b.createModule(.{
@@ -18,7 +20,7 @@ pub fn build(b: *std.Build) void {
             .target = t,
             .optimize = o,
             .strip = true,
-            .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "sk", .module = sk }, .{ .name = "brc104", .module = brc }, .{ .name = "dagjson", .module = dagjson } },
+            .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "sk", .module = sk }, .{ .name = "brc104", .module = brc }, .{ .name = "dagjson", .module = dagjson }, .{ .name = "message", .module = message } },
         }),
     });
     b.installArtifact(exe);

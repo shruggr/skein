@@ -63,7 +63,7 @@ test("explore: overview, log, entry, threads, the loop's conversation, the shell
   const loop = w.threads.find((x) => x.program === "loop")!;
   const shell = w.threads.find((x) => x.program === "shell")!;
   const th = await get(`/t/${loop.cid}`);
-  for (const s of ["What is here?", "tool call", "ls | head -3", "README", "<strong>src</strong>", "attested call", "awaits a reply to"]) assert.ok(th.text.includes(s), `thread: ${s}`);
+  for (const s of ["What is here?", "tool call", "ls | head -3", "README", "<strong>src</strong>", "oracle call", "awaits a reply to"]) assert.ok(th.text.includes(s), `thread: ${s}`);
   const tip = JSON.parse((await get(`/t/${loop.cid}?tip=1`)).text);
   assert.equal(tip.state, "waiting");
   assert.ok(th.text.includes("setTimeout(poll"), "a waiting thread polls");

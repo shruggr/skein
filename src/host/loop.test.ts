@@ -87,7 +87,8 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
     const root = await k.call("head", "peers") as CID | null;
     if (!root) return [];
     const t = await k.store.get(root) as unknown as { peers: Array<{ peer: CID }> };
-    return await Promise.all(t.peers.map(async (p) => await k.store.get(p.peer) as unknown as { key: Uint8Array; source: string; handle?: string }));
+    const all = await Promise.all(t.peers.map(async (p) => await k.store.get(p.peer) as unknown as { key: Uint8Array; source: string; handle?: string }));
+    return all.filter((p) => p.source !== "genesis"); // the genesis seeds the host's providers and the owner (#70)
   };
   const ap = await peersOf("alpha"), bp = await peersOf("beta");
   const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");

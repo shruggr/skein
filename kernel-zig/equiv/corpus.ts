@@ -74,7 +74,7 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
   const ownerKey = key();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const router = new Router({
-    db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
+    db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
     owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, ledgerMs: 3_600_000,
     fuelPerStep: o.defaults?.fuelPerStep, kernel: { command: kernel, env: { SKEIN_HOME: home } },
     log: (src, l) => { if (verbose) process.stdout.write(`  | [${src}] ${l}\n`); },

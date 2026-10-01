@@ -31,10 +31,12 @@
 // (but for each step's own time), `byTopic` map and lookup storage as the
 // POST /submit path produced, and a redelivery of the message is recorded and
 // ignored, nothing else changed.
-// The broadcast gate (#57), against the host's broadcaster (#58) in front of a
-// fake Arcade (src/host/fake-arcade.ts): every unproven submission is posted
-// to Arcade (Extended Format) by the step and admitted only once Arcade takes
-// it — the GossipSub one too (Arcade's duplicate answer); the three tokens'
+// The broadcast gate (#57), against the host's broadcaster (#58: the
+// `broadcast` provider, #70) in front of a fake Arcade
+// (src/host/fake-arcade.ts): every unproven submission is emitted to the
+// broadcaster by the step, which posts it to Arcade (Extended Format), and
+// admitted only once the broadcaster's answer says Arcade took it — the
+// GossipSub one too (Arcade's duplicate answer); the three tokens'
 // SEEN and MINED statuses (with their merkle paths) come back over Arcade's
 // SSE stream to the chain feed, which proves them; a resubmission answers
 // the STEAK from the state; a mined submission (its BEEF proves it) is
@@ -90,7 +92,7 @@ const handler = { event: "cid", box: "string" };
 writeFileSync(join(sys, "bin/overlay.json"), JSON.stringify({ inputs: handler, description: "The overlay engine: BRC-22 submit, BRC-24 lookup, the chain feed." }));
 writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, description: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP.\n\nEvery such output is admitted; the tokens a transaction spends are retained when it admits one." }));
 writeFileSync(join(sys, "bin/lookup-demo.json"), JSON.stringify({ inputs: {}, description: "Demo token lookup: {topic}, {scriptHash, topic?}, {txid, outputIndex, topic}." }));
-// No walletArc: the host names its broadcast route (#58). Re-asked hourly here: no deadline wakes during the run.
+// No broadcaster in the tree: the host's genesis seeds its `broadcast` provider in the address book (#70). Re-asked hourly here: no deadline wakes during the run.
 const config = (recheckMs: string) => JSON.stringify({ defaults: { walletNetwork: "regtest", overlayRecheckMs: recheckMs, overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) } });
 writeFileSync(join(sys, "etc/config.json"), config("3600000"));
 writeFileSync(join(sys, "etc/subscriptions.json"), JSON.stringify([{ box: "submit", handler: "overlay" }, { box: "chain", handler: "overlay" }]));
@@ -140,11 +142,11 @@ hostDb.add("gossip", { store: gossipDb });
 const gateDb = join(home, "instances/gate/runtime.db");
 hostDb.add("gate", { store: gateDb });
 const owner = key("2222").toPublicKey().toString();
-// The host's Arcade (#58): the overlay's step posts through the router's /arc route; statuses come back over SSE.
+// The host's Arcade (#58) behind its broadcaster provider (#70): the overlay's step emits to it, its answer steps the thread; statuses come back over SSE.
 const arcade = await FakeArcade.start();
 const posted = (txid: string) => arcade.posts.filter((b) => FakeArcade.txOf(b).id("hex") === txid);
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
+  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
   // #66: a client waits on its request's thread; the gate's pending broadcast answers 503 + Retry-After at this bound.
   answerWaitMs: 6000,
   kernel: { command: kernel, env: { SKEIN_HOME: home } },
@@ -152,6 +154,18 @@ const router = new Router({
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** An instance's log entries from position `from` on (with their CIDs), oldest first. */
+async function entriesSince(handle: string, from: number): Promise<Array<{ cid: CID; n: number; request?: CID; transport?: string }>> {
+  const k = (await router.hydrate(handle)).kernel;
+  const out: Array<{ cid: CID; n: number; request?: CID; transport?: string }> = [];
+  for (let c = await k.tip(); c;) {
+    const e = await k.store.get(c) as unknown as { n: number; request?: CID; transport?: string; prev?: CID };
+    if (e.n < from) break;
+    out.unshift({ cid: c, n: e.n, ...(e.request ? { request: e.request } : {}), ...(e.transport ? { transport: e.transport } : {}) });
+    c = e.prev;
+  }
+  return out;
+}
 async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_000): Promise<T> {
   const t0 = Date.now();
   for (;;) {
@@ -163,7 +177,7 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_0
 }
 
 try {
-  // Listening first: a genesis names the router's broadcast route (its port) as walletArc.
+  // Listening first (the instances' origins name the port).
   await router.listen(0);
   const src = await dirSource(sys);
   await router.bootRow("overlay", { kind: "tree", root: src.root, objects: src.objects });
@@ -209,7 +223,7 @@ try {
   const broadcaster = new TopicBroadcaster(["tm_demo"], { networkPreset: "local", facilitator });
   const b1 = await broadcaster.broadcast(t1);
   report.submit1 = { status: b1.status, steak: steaks.at(-1) };
-  // #57: the step posted it to Arcade through the host's route before admitting it: once, in Extended Format.
+  // #57: the step posted it to Arcade through the host's broadcaster before admitting it: once, in Extended Format.
   report.posted1 = posted(t1.id("hex")).map((b) => Buffer.from(b).equals(Buffer.from(t1.toEF())));
 
   // #57: the same transaction as a GossipSub message on the second instance's `libp2p:tm_demo` route — signed
@@ -290,6 +304,10 @@ try {
   const g1 = await router.p2pInbound("gossip", message);
   await router.settled();
   const lenAfter = await gossipLen();
+  // #70: the submission's step emitted the post to the broadcaster; its answer — an entry of its own, later —
+  // admits it. Nobody waits on this thread (GossipSub got its verdict), so wait for the admission here.
+  await until("the gossip instance's admission", async () => ((await persisted("gossip")).applied.length > 0 ? true : undefined));
+  await router.settled();
   const byHttp = await persisted("overlay");
   const byGossip = await persisted("gossip");
   // #68: the message is one entry, as received; what the front door's step admitted — the `p2p` event, then
@@ -297,14 +315,11 @@ try {
   const gk = (await router.hydrate("gossip")).kernel;
   const boxes: string[] = [];
   let appended = 0;
-  for (let c = await gk.tip(), i = 0; c && i < lenAfter - lenBefore; i++) {
-    const e = await gk.store.get(c) as unknown as { request?: CID; prev?: CID };
-    if (e.request) {
-      appended++;
-      const a = await gk.answer(c, 0);
-      if (a.state === "finished") for (const x of (dagCbor.decode(a.answer) as { admit?: Array<{ box: string; event: { kind: string } }> }).admit ?? []) boxes.push(`${x.box}:${x.event.kind}`);
-    }
-    c = e.prev;
+  // The message's own request (the broadcaster's answers are requests too, transport `local`, #70).
+  for (const e of (await entriesSince("gossip", lenBefore)).filter((x) => x.request && x.transport === "libp2p" && x.n < lenAfter)) {
+    appended++;
+    const a = await gk.answer(e.cid, 0);
+    if (a.state === "finished") for (const x of (dagCbor.decode(a.answer) as { admit?: Array<{ box: string; event: { kind: string } }> }).admit ?? []) boxes.push(`${x.box}:${x.event.kind}`);
   }
   const { times: httpTimes, ...httpState } = byHttp;
   const { times: gossipTimes, ...gossipState } = byGossip;
@@ -412,7 +427,9 @@ try {
   await look({ topic: "tm_demo" });
   await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
   await router.settled();
-  report.readsWrite = [before, await logLen(), requests, eq(await stateOf(), state1)];
+  // #70: the broadcaster's answers are entries too (signed messages, `local` requests): T2's post was answered.
+  const local = (await entriesSince("overlay", before)).filter((e) => e.transport === "local").length;
+  report.readsWrite = [before, (await logLen()) - local, requests, eq(await stateOf(), state1), local];
   fwd.forward = forward0;
 
   // Merkle proofs as IPLD nodes (#29): three tokens mined in one block (4: a coinbase, u1, u2, u3), each
@@ -631,7 +648,7 @@ if (report.ok === true) {
 process.stdout.write("== overlay services (#36)\n");
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(eq(report.submit1, { status: "success", steak: { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } } }), `TopicBroadcaster → POST /submit: the token admitted (${JSON.stringify(report.submit1)})`);
-check(eq(report.posted1, [true]), `#57: the step posted the token transaction to Arcade through the host's route (Extended Format) before admitting it (${JSON.stringify(report.posted1)})`);
+check(eq(report.posted1, [true]), `#57: the step posted the token transaction to Arcade through the host's broadcaster (Extended Format) before admitting it (${JSON.stringify(report.posted1)})`);
 {
   const g = report.gossip as { verdict: string; appended: number; boxes: string[]; applied: number; admitted: number; same: boolean; posts: number } | undefined;
   check(g?.verdict === "accept" && g.appended === 1 && eq(g.boxes, ["libp2p:tm_demo:p2p", "submit:submit"]) && g.applied === 1 && g.admitted === 1 && g.same, `#57, #68: the same transaction as a GossipSub message on \`libp2p:tm_demo\` (the same submit fn): one entry, the message as received; accept, its step admitting the \`p2p\` event then the handler's submit event; and the store holds the same applied / admitted records (but for their step times), byTopic map and lookup storage as POST /submit produced (${JSON.stringify(g)})`);
@@ -653,10 +670,11 @@ check(Array.isArray(report.badBeef) && report.badBeef[0] === 400 && report.unkno
 check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the program records (${JSON.stringify([report.topics, report.lookups])})`);
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
 {
-  const [b, a, n, still] = (report.readsWrite ?? []) as [number, number, number, boolean];
-  // #68: between the two counts, every request the router forwarded is one entry, and the status entry one more;
+  const [b, a, n, still, local] = (report.readsWrite ?? []) as [number, number, number, boolean, number];
+  // #68: between the two counts, every request the router forwarded is one entry, and the status entry one more
+  // (#70: besides the broadcaster's answer to T2's post, a signed message counted apart);
   // the reads after the last write — a rejected resubmission, refusals, listings, a lookup, a dupe — moved no state.
-  check(n > 10 && a === b + n + 1 && still === true, `every request is an entry (${n} requests and a status entry: ${b} → ${a}); the reads moved nothing (${still})`);
+  check(n > 10 && a === b + n + 1 && local === 1 && still === true, `every request is an entry (${n} requests and a status entry: ${b} → ${a}, and ${local} answer of the broadcaster); the reads moved nothing (${still})`);
 }
 
 check(eq(report.awaitingU, { state: [[false, true, false], [false, true, false], [false, true, false]], posts: [1, 1, 1] }), `#57: three unproven tokens, each posted once and admitted on Arcade's 202 (each submission's thread finished then, #66), each awaiting its status (${JSON.stringify(report.awaitingU)})`);

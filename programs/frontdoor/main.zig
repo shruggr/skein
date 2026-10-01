@@ -11,6 +11,9 @@
 //! Stepped: input {kind: "step", args: {request: <record>, transport}, routes, reads, seen?, tip?, …}
 //!   the request record (kernel-zig/src/log.zig):
 //!     http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
+//!     local   {kind: "message", message: <a signed mail record>, body: bytes}   (#70: a
+//!             provider's answer, or any signed message the host hands in: the
+//!             signature checked, and admitted — signedMessage)
 //!   Its stdout is its answer (the kernel routes `admit`; the host reads the
 //!   rest off the thread's last update once it has come to rest):
 //!     {status, headers: {name: value}, body: bytes, admit?: [entry]}     answered (signed on the session)
@@ -66,6 +69,7 @@ const brc = @import("brc104");
 const explore = @import("explore.zig");
 const p2p = @import("libp2p.zig");
 const sessions = @import("sessions.zig");
+const message = @import("message");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -112,9 +116,38 @@ fn stepped(a: Allocator, in: Value) !Value {
     const transport = Value.str(args.get("transport")) orelse "";
     const req = try sk.get(a, rc);
     if (eql(u8, transport, "libp2p")) return p2p.stepped(a, in, rc, req);
-    if (!eql(u8, transport, "http")) return sk.report("the front door takes http and libp2p");
+    if (eql(u8, transport, "local")) return signedMessage(a, in, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "");
+    if (!eql(u8, transport, "http")) return sk.report("the front door takes http, libp2p and local");
     if (Value.cidOf(in.get("tip"))) |tip| return resumed(a, in, rc, req, tip);
     return http(a, in, rc, req);
+}
+
+/// A signed message carried in whole (#70): a provider's (transport
+/// `local`: {kind: "message", message, body}) or one over libp2p (a frame on
+/// /skein/message/1.0.0, a topic message nothing else routes). Its signature,
+/// its body and its recipient (this instance) checked here, it is admitted as
+/// the message it is — routed by the kernel after the step by its `replyTo`,
+/// else by subscription on (sender, box), once (the `unique` map). The answer:
+/// {verdict: "accept", admit: [{mail, body}]} | {verdict: "reject" | "ignore", reason}.
+pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8) !Value {
+    const V = struct {
+        fn no(al: Allocator, v: []const u8, reason: []const u8) !Value {
+            var r = cbor.MapBuilder.init(al);
+            try r.put("verdict", cbor.string(v));
+            try r.put("reason", cbor.string(reason));
+            return r.value();
+        }
+    };
+    if (try message.problem(a, m, body)) |bad| return V.no(a, "reject", bad);
+    const me = selfIdentity(in) orelse return V.no(a, "ignore", "no identity");
+    if (!eql(u8, Value.bytesOf(m.get("recipient")).?, me)) return V.no(a, "ignore", "the message is for another identity");
+    var entry = cbor.MapBuilder.init(a);
+    try entry.put("mail", m);
+    try entry.put("body", .{ .bytes = body });
+    var r = cbor.MapBuilder.init(a);
+    try r.put("verdict", cbor.string("accept"));
+    try r.put("admit", .{ .array = try a.dupe(Value, &.{entry.value()}) });
+    return r.value();
 }
 
 /// What this thread's last step saved (`wait`), from its tip's stdout.

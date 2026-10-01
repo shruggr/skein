@@ -7,15 +7,22 @@
 //   the imports out   wallet  → the page's BRC-100 wallet (Yours through
 //                               @1sat/connect; a ProtoWallet in tests), over the
 //                               BRC-100 wire (WalletWireProcessor)
-//                     http    → fetch: the instance's own programs deliver its
-//                               messages (#40: the messagebox program, a BRC-104
-//                               client) and resolve handles (the resolve program,
-//                               BRC-169) — there is no emit and no resolve
+//   what it carries   emit    → the page is the host's providers (#70,
+//                               src/host/providers.ts): the HTTP proxy `fetch`
+//                               (the page's fetch: the instance's own programs
+//                               deliver its messages — the messagebox program, a
+//                               BRC-104 client — and resolve handles through it)
+//                               and the `waker` (setTimeout). Each answers with a
+//                               signed message from its own key, admitted as a
+//                               `local` request. The keys: children of a provider
+//                               master the page keeps (localStorage, per store);
+//                               the genesis seeds them in the address book.
 //   the call in       admit + drain, from: the page (a chat: a message from the
 //                     user admitted directly), a poll of this identity's
 //                     mailbox instance on the host (listMessages on a BRC-104
 //                     session; each message admitted, acknowledged once
-//                     durable), a timer for wakes.
+//                     durable), the providers' answers, a timer for a shell's
+//                     sleep (wakes).
 //
 // The mailbox: registering this identity on the host creates its mailbox
 // instance (#40); the genesis names it as the owner's messagebox, so what the
@@ -24,8 +31,9 @@
 // (#16): nothing runs while the tab is closed; inbound waits in the mailbox
 // instance and wakes fire late, at the next open.
 
-import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
+import { KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
+import { Providers, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
 import type { CID } from "multiformats/cid";
 // @ts-expect-error: plain JS module (kernel-zig/web/client.js)
 import { KernelWorker } from "../../kernel-zig/web/client.js";
@@ -64,6 +72,27 @@ export interface HostOptions {
 }
 
 const now = (): Stamp => msStamp(Date.now());
+
+/**
+ * The page's provider master (#70): a secret the page keeps (localStorage,
+ * one per store), whose BRC-42 children are its providers' keys — the waker
+ * and the HTTP proxy sign their answers with them, and the genesis names
+ * their public keys. Not the wallet's: a provider signs by itself, unasked.
+ * Lost (cleared site data), the instance's address book names keys no page
+ * holds: start a new store. Without storage, a fresh one for this session.
+ */
+function providerMaster(db: string): PrivateKey {
+  const name = `skein-provider-master:${db}`;
+  try {
+    const had = globalThis.localStorage?.getItem(name);
+    if (had) return PrivateKey.fromHex(had);
+    const k = PrivateKey.fromRandom();
+    globalThis.localStorage?.setItem(name, k.toHex().padStart(64, "0"));
+    return k;
+  } catch {
+    return PrivateKey.fromRandom();
+  }
+}
 
 /** The kernel in the worker, with the surface src/host's helpers use (writeGenesis, admit2: Kernel in kernel.ts). */
 export class WebKernel {
@@ -115,12 +144,26 @@ export class BrowserHost {
   private wakeTimer?: ReturnType<typeof setTimeout>;
   private wire: WalletWireProcessor;
   private stopped = false;
+  /** The page as the host's providers (#70): the HTTP proxy and the waker. */
+  readonly providers: Providers;
   /** What happened, for the page and the tests. */
   readonly events: Array<{ kind: string; [k: string]: unknown }> = [];
 
   constructor(o: HostOptions) {
     this.o = o;
     this.wire = new WalletWireProcessor(o.wallet);
+    const master = new KeyDeriver(providerMaster(o.db ?? `skein-${o.handle}`));
+    this.providers = new Providers({
+      keyOf: (name: ProviderName) => master.derivePrivateKey([2, "skein provider"], name, "self"),
+      append: (_h, pkg) => this.appendLocal(pkg),
+      fetch: async (req) => {
+        const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: AbortSignal.timeout(req.timeoutMs ?? 30_000) });
+        this.events.push({ kind: "http", method: req.method, url: req.url, status: r.status });
+        return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
+      },
+      now: () => Date.now(),
+      log: (_s, l) => this.log(l),
+    });
   }
 
   private log(line: string): void { this.o.log?.(line); }
@@ -156,6 +199,8 @@ export class BrowserHost {
         infer: this.o.infer, inferHandle: this.o.inferHandle, ownerHandle: { handle: this.o.handle, domain: this.domain },
         defaults: this.o.defaults ? { ...DEFAULTS, ...this.o.defaults } : undefined,
         ownerMessagebox: this.mailbox, resolveOrigin: this.origin,
+        // #70: the page's providers, and this identity's mailbox (the owner's).
+        addressBook: [...this.providers.entries(["fetch", "waker"]), { key: keyBytes(this.identity), transport: "mailbox", address: this.mailbox, handle: this.o.handle, domain: this.domain }],
       }, now());
       this.log(`genesis ${e}`);
     }
@@ -166,6 +211,7 @@ export class BrowserHost {
 
   stop(): void {
     this.stopped = true;
+    this.providers.stop();
     clearTimeout(this.pollTimer);
     clearTimeout(this.wakeTimer);
     this.kernel?.kw.terminate();
@@ -202,12 +248,6 @@ export class BrowserHost {
     switch (op) {
       case "wallet":
         return dagCbor.encode(Uint8Array.from(await this.wire.transmitToWallet([...(arg as Uint8Array)])));
-      case "http": {
-        const req = dagCbor.decode(arg as Uint8Array) as { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array };
-        const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined });
-        this.events.push({ kind: "http", method: req.method, url: req.url, status: r.status });
-        return dagCbor.encode(dagCbor.encode({ status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) }));
-      }
     }
     throw new Error(`this host answers no ${op}`);
   }
@@ -217,6 +257,18 @@ export class BrowserHost {
   private notified(op: string, v: Uint8Array | string): void {
     if (op === "say" || op === "panic") { this.log(String(v)); return; }
     if (op === "sleepers") { void this.scheduleWake(dagCbor.decode(v as Uint8Array) as Array<{ thread: CID; until: number }>); return; }
+    // #70: a signed message the instance emitted, its step committed: the page's providers carry it.
+    if (op === "emit") { this.providers.deliver(this.o.handle, dagCbor.decode(v as Uint8Array) as Outgoing); return; }
+  }
+
+  /** A provider's answer (#70): a signed message, appended as a `local` request; the front door checks it and routes it. */
+  private async appendLocal(pkg: Record<string, unknown>): Promise<CID> {
+    return await this.serial(async () => {
+      const rc = await this.kernel.store.put(pkg);
+      const e = await admit2(this.kernel as unknown as Kernel, { request: rc, transport: "local" } as never, {}, now());
+      await this.kernel.drain();
+      return e;
+    });
   }
 
   private async scheduleWake(s: Array<{ thread: CID; until: number }>): Promise<void> {

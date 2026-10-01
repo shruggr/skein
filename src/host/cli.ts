@@ -13,7 +13,7 @@
 //   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
 //   skein-host roster [--for <handle> | --deploy]
 //   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
-//   skein-host peers <handle> add <key> <mailbox-url> [--handle h@d] | remove <key> | list
+//   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] | remove <key> | list
 //   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host system <dir>
@@ -70,7 +70,7 @@
 //                         default 4610; "off" starts none
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
 //   SKEIN_ARC_URL         the host's Arcade (#58, arc.ts): the broadcast route /arc/v1/tx, one status subscription,
-//                         a new genesis's walletArc; SKEIN_ARC_TOKEN its one callback token (required with it);
+//                         the instances' broadcast provider (#70); SKEIN_ARC_TOKEN its one callback token (required with it);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
 //                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
@@ -133,9 +133,9 @@ const USAGE = `usage:
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed
   skein-host subscribe <handle> add|remove [--sender key] <box> <handler-name-or-cid>
-  skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]   an address-book entry: where the agent delivers to <key>
+  skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d]   an address-book entry (#70): how the agent reaches <key> (mailbox: a URL; libp2p: a peer ID or topic:<name>; local: a provider)
   skein-host peers <handle> remove <key>
-  skein-host peers <handle> list                          its address book: key, mailbox URL, handle, source
+  skein-host peers <handle> list                          its address book: key, transport, address, role, handle, source
   skein-host event <handle> <box> [json]                  admit one plain event now (default {kind: "cron", due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
@@ -321,7 +321,7 @@ export function originOf(vars: Env["vars"], handle: string): string {
 
 /** The other enabled agents, as `row`'s address book should have them: key, origin, handle. */
 function agentAddresses(row: InstanceRow, rows: InstanceRow[], vars: Env["vars"]): Array<{ op: "add" } & AddressEntry> {
-  return rows.filter((r) => r.handle !== row.handle && r.kind !== "mailbox" && r.identity).map((r) => ({ op: "add" as const, key: r.identity!, url: originOf(vars, r.handle), handle: r.handle, domain: r.domain }));
+  return rows.filter((r) => r.handle !== row.handle && r.kind !== "mailbox" && r.identity).map((r) => ({ op: "add" as const, key: r.identity!, transport: "mailbox" as const, address: originOf(vars, r.handle), handle: r.handle, domain: r.domain }));
 }
 
 /** Write the other agents into `row`'s address book (unchanged entries are not sent); a line saying what was sent, if anything. */
@@ -334,20 +334,22 @@ async function syncAgents(row: InstanceRow, rows: InstanceRow[], owner: { wallet
 }
 
 async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [handle, op, key, url, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { handle: { type: "string" } } });
+  const { values: v, positionals: [handle, op, key, url, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { handle: { type: "string" }, transport: { type: "string" }, role: { type: "string" } } });
   const shape = op === "list" ? !key : op === "remove" ? !!key && !url : op === "add" ? !!key && !!url : false;
-  if (!handle || more.length || !shape || (v.handle !== undefined && op !== "add")) { env.err(USAGE); return 2; }
+  if (!handle || more.length || !shape || ((v.handle !== undefined || v.transport !== undefined || v.role !== undefined) && op !== "add")) { env.err(USAGE); return 2; }
+  const transport = (v.transport ?? "mailbox") as AddressEntry["transport"];
+  if (!["mailbox", "libp2p", "local"].includes(transport)) { env.err(`skein-host peers: --transport is mailbox, libp2p or local`); return 2; }
   const row = db.get(handle);
   if (!row) { env.err(`skein-host peers: no instance ${handle}`); return 1; }
   if (row.kind === "mailbox") { env.err(`skein-host peers: ${handle} is a mailbox instance: it keeps mail, it sends nothing`); return 1; }
   const s = openRow(row, env);
   try {
     if (op === "list") {
-      for (const e of await addressBook(s.blocks)) env.out([e.key, e.url, e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
+      for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.role ?? "-", e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
       return 0;
     }
     if (!/^0[23][0-9a-f]{64}$/.test(key!)) { env.err(`skein-host peers: ${key} is not an identity key (hex)`); return 2; }
-    if (op === "add" && !/^https?:\/\/[^/]/.test(url!)) { env.err(`skein-host peers: ${url} is not an http(s) URL`); return 2; }
+    if (op === "add" && transport === "mailbox" && !/^https?:\/\/[^/]/.test(url!)) { env.err(`skein-host peers: ${url} is not an http(s) URL`); return 2; }
     let named: { handle?: string; domain?: string } = {};
     if (v.handle !== undefined) {
       const at = v.handle.replace(/^@/, "").lastIndexOf("@");
@@ -357,7 +359,7 @@ async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     }
     const owner = await ownerOf(env, "skein-host peers");
     if (typeof owner === "number") return owner;
-    const change = op === "add" ? { op: "add" as const, key: key!, url: url!, ...named } : { op: "remove" as const, key: key! };
+    const change = op === "add" ? { op: "add" as const, key: key!, transport, address: url!, ...(v.role ? { role: v.role } : {}), ...named } : { op: "remove" as const, key: key! };
     const [r] = await writeAddresses({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, [change]);
     env.out(`${row.handle}: peers ${op} ${short(key!)}${op === "add" ? ` → ${url}${named.handle ? ` (@${named.handle}@${named.domain})` : ""}` : ""}: ${r === "sent" ? "sent" : "unchanged (the address book has it so already)"}`);
     return 0;
@@ -627,12 +629,12 @@ export interface Host {
 /**
  * The oracle (#18, oracle.ts): every instance's wallet is a ProtoWallet over a
  * key derived from the router's master secret (key ID = the handle); the
- * router's BRC-104 identity is another child of it, and so is its attest key
- * (#62), which signs every recorded call it answers.
+ * router's BRC-104 identity is another child of it, and so are its providers'
+ * keys (#70: the HTTP proxy, the waker, the libp2p node, the broadcaster).
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "attestKey"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), attestKey: oracle.attestKey() };
+  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), providerKeyFor: (name) => oracle.providerKey(name) };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
@@ -805,8 +807,8 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const omb = router.ownerMessagebox();
   if (omb) env.out(`skein-host: the owner's messagebox for new geneses: ${omb}`);
   else if (v.SKEIN_OWNER) env.err(`skein-host: WARNING: the owner ${short(v.SKEIN_OWNER)} has no mailbox instance here and SKEIN_OWNER_MESSAGEBOX is unset: a new agent's genesis names no owner messagebox, and its answers cannot be delivered (scripts/host/up.sh makes the mailbox first)`);
-  if (router.arc) env.out(`skein-host: broadcaster: ${router.arcRoute()}/v1/tx → Arcade ${router.o.arc!.url}; statuses from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
-  else env.out("skein-host: no Arcade (SKEIN_ARC_URL): nothing broadcasts; a new genesis names no walletArc");
+  if (router.arc) env.out(`skein-host: broadcaster: the broadcast provider → Arcade ${router.o.arc!.url}; statuses from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
+  else env.out("skein-host: no Arcade (SKEIN_ARC_URL): nothing broadcasts; a new genesis names no broadcast provider");
   await router.start();
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
   const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);

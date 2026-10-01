@@ -1,16 +1,16 @@
-// Format 5 (issue #68: requests appended as received; #62: recorded calls attested; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
+// Format 6 (issues #70, #67: emit, the address book seeded; #68: requests appended as received; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
 // router's side: the genesis a new instance's log starts with, and entries.
 //
 //   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}   — no `sig`: no host key
-//   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs, attest?: bytes(33),
+//   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}],
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
-//             jobs?: [{box, body?, every: ms | at: ms, name?}]}
-//            (`attest`, #62: the host's attest key — oracle.ts attestKey — which signs every
-//            recorded http/libp2p call; replay refuses a call without a valid attestation)
+//             jobs?: [{box, body?, every: ms | at: ms, name?}], addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
+//            (`addressBook`, #70: the address book's seed — the host's providers (role = their name: fetch,
+//            waker, libp2p, broadcast) and the owner's mailbox — written into the head `peers` at the genesis)
 //            (`jobs`, #60: the router is the clock — cron.ts — admitting a plain
 //            `cron` event into `box` when each is due)
 //            (`libp2p`, #51: the router's libp2p host runs a node for the instance, subscribes
@@ -88,9 +88,16 @@ export interface Genesis2Config {
   ownerMessagebox?: string;
   /** Where the instance's own domain resolves (`defaults.resolveOrigin`): the host's origin in dev. */
   resolveOrigin?: string;
-  /** The host's attest key (hex, #62): it signs every recorded http/libp2p call; the genesis names it. */
-  attest?: string;
+  /**
+   * The address book's seed (#70): the host's providers (their keys, `local`,
+   * role = name) and, when the host knows it, the owner's mailbox. Written
+   * into the head `peers` when the genesis is processed.
+   */
+  addressBook?: AddressSeed[];
 }
+
+/** One address book entry a genesis seeds (#70): key → transport and address. */
+export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" | "local"; address: string; role?: string; handle?: string; domain?: string }
 
 /**
  * A subscription as a system tree writes it (etc/subscriptions.json): the
@@ -333,10 +340,10 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
 }
 
 /** The genesis record: who the instance is, and its system. */
-export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "handle" | "domain" | "attest">, s: System): Record<string, unknown> {
+export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "handle" | "domain" | "addressBook">, s: System): Record<string, unknown> {
   return {
     kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, owner: keyBytes(c.owner),
-    ...(c.attest ? { attest: keyBytes(c.attest) } : {}),
+    ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.role ? { role: e.role } : {}), ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
     programs: s.programs, subscriptions: s.subscriptions, ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
     ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),

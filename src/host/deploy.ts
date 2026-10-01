@@ -132,12 +132,15 @@ export async function subscribeRow(o: { row: InstanceRow; owner: WalletInterface
 }
 
 /**
- * An address-book entry (#40): where to deliver to a key — its messagebox URL,
- * and optionally its handle (display, resolution). The instance keeps them
- * under the head `peers` (programs/resolve); `source` says who wrote one
- * (`admin`: the `peers` box; `resolve`: its own BRC-169 lookup).
+ * An address-book entry (#70): how to reach a key — its transport
+ * (`mailbox`: a messagebox URL over BRC-103/104; `libp2p`: a peer ID or
+ * `topic:<name>`; `local`: a host provider's name) and address, the provider
+ * role it plays (`fetch`, `libp2p`, `waker`, `broadcast`), and optionally its
+ * handle. The instance keeps them under the head `peers` (programs/resolve);
+ * `source` says who wrote one (`genesis`, `admin`: the `peers` box,
+ * `resolve`: its own BRC-169 lookup, `claim`).
  */
-export interface AddressEntry { key: string; url: string; handle?: string; domain?: string; source?: string }
+export interface AddressEntry { key: string; transport: "mailbox" | "libp2p" | "local"; address: string; role?: string; handle?: string; domain?: string; source?: string }
 
 const hexKey = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "";
 
@@ -149,18 +152,19 @@ export async function addressBook(store: Store | undefined): Promise<AddressEntr
   const t = await store.get(root) as unknown as { peers?: Array<{ key: unknown; peer: CID }> };
   const out: AddressEntry[] = [];
   for (const e of t.peers ?? []) {
-    const p = await store.get(e.peer) as unknown as { key: unknown; url?: string; handle?: string | null; domain?: string | null; source?: string };
-    out.push({ key: hexKey(p.key ?? e.key), url: p.url ?? "", ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
+    const p = await store.get(e.peer) as unknown as { key: unknown; transport?: AddressEntry["transport"]; address?: string; role?: string | null; handle?: string | null; domain?: string | null; source?: string };
+    out.push({ key: hexKey(p.key ?? e.key), transport: p.transport ?? "mailbox", address: p.address ?? "", ...(p.role ? { role: p.role } : {}), ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
   }
   return out;
 }
 
 /**
- * Write the row's address book as the owner (#40): one message to its `peers`
- * box per change — {op: "add", key, url, handle?, domain?} or {op: "remove",
- * key} — the admin's configuration, admitted and applied by the instance's
- * resolve program. An add identical to the entry the store already has, or a
- * remove of a key it does not have, is not sent. Returns what was sent.
+ * Write the row's address book as the owner (#40, #70): one message to its
+ * `peers` box per change — {op: "add", key, transport, address, role?,
+ * handle?, domain?} or {op: "remove", key} — the admin's configuration,
+ * admitted and applied by the instance's resolve program. An add identical to
+ * the entry the store already has, or a remove of a key it does not have, is
+ * not sent. Returns what was sent.
  */
 export async function writeAddresses(o: { row: InstanceRow; owner: WalletInterface; box: Outbox; store?: Store }, changes: Array<({ op: "add" } & AddressEntry) | { op: "remove"; key: string }>): Promise<Array<"sent" | "unchanged">> {
   const store = await checked(o);
@@ -169,11 +173,11 @@ export async function writeAddresses(o: { row: InstanceRow; owner: WalletInterfa
   for (const c of changes) {
     if (!/^0[23][0-9a-f]{64}$/.test(c.key)) throw new Error(`${c.key}: not an identity key (hex)`);
     const have = book.find((e) => e.key === c.key);
-    const same = c.op === "remove" ? !have : have?.url === c.url && have.handle === c.handle && have.domain === c.domain;
+    const same = c.op === "remove" ? !have : have?.transport === c.transport && have.address === c.address && have.role === c.role && have.handle === c.handle && have.domain === c.domain;
     if (same) { out.push("unchanged"); continue; }
     const body = c.op === "remove"
       ? { op: "remove", key: Uint8Array.from(Buffer.from(c.key, "hex")) }
-      : { op: "add", key: Uint8Array.from(Buffer.from(c.key, "hex")), url: c.url, ...(c.handle ? { handle: c.handle } : {}), ...(c.domain ? { domain: c.domain } : {}) };
+      : { op: "add", key: Uint8Array.from(Buffer.from(c.key, "hex")), transport: c.transport, address: c.address, ...(c.role ? { role: c.role } : {}), ...(c.handle ? { handle: c.handle } : {}), ...(c.domain ? { domain: c.domain } : {}) };
     await o.box.send(o.row.identity!, "peers", dagCbor.encode(body));
     out.push("sent");
   }

@@ -54,11 +54,11 @@
 //! alternate on one thread each.
 //!
 //! Tools: `bash` (a command in the shell over the working tree) and `message`
-//! ({to: "@handle@domain", text}: a `chat` to another party — the identity the
-//! handle resolves to, from the peer table, or on first contact through the
-//! resolve program (an in-VM call; its BRC-169 lookup is recorded) — delivered
-//! by the messagebox program over http (#40), then rest on the reply as on an
-//! `infer`; their reply is the tool result).
+//! ({to: "@handle@domain", text}: a `chat` to another party — the identity
+//! the address book names for the handle, or, on first contact, the one the
+//! resolve program finds: launched as a thread (#67), this step waits on it
+//! and the call runs again when it finishes — emitted (#70), then rest on
+//! the reply as on an `infer`; their reply is the tool result).
 //! Calls run one at a time, in order. With `defaults.tools` in the genesis
 //! naming them (a comma-separated list; default none), three more: `say`
 //! ({text}), `present` ({page, blocks?}) and `annotate` ({present, block?,
@@ -89,21 +89,17 @@
 //!     a reply to our `message`                   keep it as the tool result; run the next call
 //!     the shell at rest                          keep the tool result; run the next call, or
 //!                                                emit `infer` again when none is left
-//!     a send fails (the messagebox's error:      a `message` → an error tool result, run the
-//!       delivery is inside the step, #40)        next call (a transient one is tried again
-//!                                                first: below); the `infer` → an error, answered
+//!     the resolve at rest (a handle looked up)   the pending `message` call (or the `infer`)
+//!                                                again; it errored → as undelivered
+//!     undelivered (#70: the delivery of what we  a `message` → an error tool result, run the
+//!       sent gave up: no reply can come)         next call; the `infer` → an error, answered
 //!                                                as an inference error; the answer → an error
-//!                                                turn, and the thread ends (no reply can come)
-//!     woken (a retry's deadline came)            run the pending `message` call again
+//!                                                turn, and the thread ends
 //!
-//! Retries: a `message` whose delivery fails with a transient error (the
-//! messagebox's "transient: …": no answer, 5xx, 408, 425, 429 — or the
-//! resolve's) is tried again after a while: the step keeps a note beside the
-//! turns, {kind: "retry", of: <entry>, call, to, attempt, error}, and rests on
-//! a deadline (the kernel's `deadline` import) `defaults.sendRetryMs` ahead (default 30 s);
-//! the wake runs the call again. After `defaults.sendAttempts` attempts
-//! (default 3) it is an error tool result for the model, as a permanent
-//! failure is at once.
+//! Sending is an `emit` (#70): a recipient not in the address book fails at
+//! once (as undelivered); delivery, and its retries of transient failures
+//! (`defaults.sendRetryMs`, `defaults.sendAttempts`), are the messagebox's
+//! delivery thread's, which tells this thread `undelivered` if it gives up.
 //!
 //! Records are built with the Go loop's field rules (#54: it was Go before):
 //! text fields are left out when empty, links when absent, an exit code and
@@ -123,10 +119,6 @@ const system = "You are working with David through skein. Use the bash tool to r
 const default_model = "ripper/qwen38";
 
 const output_cap = 16 << 10;
-
-// A transient `message` failure: this many attempts in all, this far apart (defaults.sendAttempts, defaults.sendRetryMs).
-const send_attempts = 3;
-const send_retry_ms = 30_000;
 
 // ---------------------------------------------------------------- the tools
 
@@ -332,7 +324,6 @@ fn say(a: Allocator, comptime f: []const u8, args: anytype) void {
 }
 
 const Presented = struct { cid: []const u8, blocks: []const []const u8 };
-const RetryMark = struct { call: []const u8, turns: usize };
 
 /// One step's view: its input, the thread's args, the conversation so far
 /// (its turns and their CIDs), and the kind of the last record kept.
@@ -347,8 +338,10 @@ const Loop = struct {
     last: []const u8 = "",
     /// the pages presented in this thread: their CIDs and block ids
     presents: std.array_list.Managed(Presented),
-    /// the retry notes kept: which call, and how many turns the conversation had then
-    retries: std.array_list.Managed(RetryMark),
+    /// this step runs a `message` call again after its handle was resolved (#67)
+    resumed: bool = false,
+    /// the resolve this step waited on failed: why (the call fails with it)
+    resolveFailed: ?[]const u8 = null,
 
     fn default(l: *Loop, name: []const u8) []const u8 {
         const d = l.in.get("defaults") orelse return "";
@@ -435,7 +428,7 @@ const Loop = struct {
             say(l.a, "loop: turn stream: {s}\n", .{sk.errorText(e)});
             return;
         };
-        _ = sk.send(l.a, l.in, l.sender, "turn", v, "", "") catch |e| {
+        _ = sk.send(l.a, l.sender, "turn", v) catch |e| {
             if (e == error.OutOfMemory) return e;
             say(l.a, "loop: turn stream: {s}\n", .{sk.errorText(e)});
         };
@@ -553,9 +546,9 @@ const Loop = struct {
     /// if the last answer called tools, else answer with its content.
     fn next(l: *Loop) !void {
         const a = l.a;
-        for (try l.pendingCalls()) |call| {
-            const attempt = l.attemptOf(call.id);
-            if (attempt == 1) try l.started(call);
+        for (try l.pendingCalls(), 0..) |call, i| {
+            // A call run again after its handle was resolved has been logged as started.
+            if (!(i == 0 and l.resumed)) try l.started(call);
             if (eql(u8, call.name, "message")) {
                 const ma = try messageArgs(a, call);
                 var msg = ma.problem;
@@ -564,9 +557,7 @@ const Loop = struct {
                         error.Awaiting => return,
                         else => return e,
                     };
-                    if (sk.transient(cause) and attempt < l.setting("sendAttempts", send_attempts)) return l.retry(call, ma.to, attempt, cause);
                     msg = try std.fmt.allocPrint(a, "could not deliver to {s}: {s}", .{ ma.to, cause });
-                    if (attempt > 1) msg = try std.fmt.allocPrint(a, "{s} ({d} attempts)", .{ msg, attempt });
                 }
                 try l.result(call, .{ .of = l.entry, .to = ma.to, .err = msg });
                 continue;
@@ -587,15 +578,21 @@ const Loop = struct {
         return l.answer(text);
     }
 
-    /// deliver a `message` call: resolve the handle, send the chat and rest on
-    /// the reply (error.Awaiting); or why it could not be delivered.
+    /// deliver a `message` call: the handle's identity from the address book —
+    /// else the resolve program, launched (this step waits on it; the call runs
+    /// again when it finishes) — then the chat emitted and awaited
+    /// (error.Awaiting); or why it could not be sent.
     fn deliver(l: *Loop, ma: MessageArgs) ![]const u8 {
         const a = l.a;
-        const key = sk.resolve(a, l.in, ma.handle, ma.domain) catch |e| {
-            if (e == error.OutOfMemory) return e;
-            return a.dupe(u8, sk.errorText(e));
+        const key = (try sk.peerByHandle(a, ma.handle, ma.domain)) orelse {
+            if (l.resolveFailed) |why| return why;
+            _ = sk.launchResolve(a, l.in, ma.handle, ma.domain, null) catch |e| {
+                if (e == error.OutOfMemory) return e;
+                return a.dupe(u8, sk.errorText(e));
+            };
+            return error.Awaiting;
         };
-        const sent = l.messageTo(key, ma.handle, ma.domain, ma.text) catch |e| {
+        const sent = l.messageTo(key, ma.text) catch |e| {
             if (e == error.OutOfMemory) return e;
             return a.dupe(u8, sk.errorText(e));
         };
@@ -603,53 +600,57 @@ const Loop = struct {
         return error.Awaiting;
     }
 
-    /// attemptOf: which attempt at tool call `id` of the latest assistant turn this is (1 + its retry notes since).
-    fn attemptOf(l: *Loop, id: []const u8) i64 {
-        var last: i64 = -1;
-        for (l.conv.items, 0..) |r, i| if (eql(u8, role(r), "assistant")) {
-            last = @intCast(i);
-        };
-        var n: i64 = 1;
-        for (l.retries.items) |m| if (eql(u8, m.call, id) and @as(i64, @intCast(m.turns)) > last) {
-            n += 1;
-        };
-        return n;
-    }
-
-    /// retry: a `message` delivery failed transiently: keep a note of it and rest
-    /// until the retry's deadline; the wake runs the call again (next).
-    fn retry(l: *Loop, call: ToolCall, to: []const u8, attempt_n: i64, cause: []const u8) !void {
-        const a = l.a;
-        var m = cbor.MapBuilder.init(a);
-        try m.put("kind", cbor.string("retry"));
-        try m.put("of", try link(l.entry));
-        try m.put("call", cbor.string(call.id));
-        try m.put("to", cbor.string(to));
-        try m.put("attempt", cbor.int(attempt_n));
-        try m.put("error", cbor.string(cause));
-        _ = try l.put("retry", m.value());
-        try l.retries.append(.{ .call = call.id, .turns = l.conv.items.len });
-        const wait = l.setting("sendRetryMs", send_retry_ms);
-        say(a, "loop: message to {s}: attempt {d} failed ({s}); again in {d} ms\n", .{ to, attempt_n, cause, wait });
-        const at: i64 = @intCast(Value.intOf(l.in.get("at")) orelse 0);
-        sk.deadline(at + wait) catch |e| {
-            if (e == error.ImportFailed and sk.lastError().len > 0) return sk.wrap(a, "deadline", e);
-            return sk.report(try std.fmt.allocPrint(a, "deadline {d} refused", .{at + wait}));
-        };
-    }
-
     /// messageTo: a `chat` to another party (the identity its handle resolved to),
-    /// delivered over http by the messagebox (#40); the caller rests on the reply,
-    /// as on an `infer`. If this thread already has a conversation with that
-    /// identity — it opened the thread, or answered one of our messages — the chat
-    /// is a reply to their latest message here, so their waiting thread resumes
-    /// with it; else it starts a new conversation.
-    fn messageTo(l: *Loop, key: []const u8, handle: []const u8, domain: []const u8, text: []const u8) ![]const u8 {
+    /// emitted (#70); the caller rests on the reply, as on an `infer`. If this
+    /// thread already has a conversation with that identity — it opened the
+    /// thread, or answered one of our messages — the chat is a reply to their
+    /// latest message here, so their waiting thread resumes with it; else it
+    /// starts a new conversation.
+    fn messageTo(l: *Loop, key: []const u8, text: []const u8) ![]const u8 {
         const reply_to = try l.latestFrom(key);
         var b = cbor.MapBuilder.init(l.a);
         try b.put("text", cbor.string(text));
         try b.put("replyTo", optLink(reply_to));
-        return sk.send(l.a, l.in, key, "chat", b.value(), handle, domain);
+        return sk.send(l.a, key, "chat", b.value());
+    }
+
+    /// undelivered (#70): what this thread sent and rests on could not be
+    /// delivered — its delivery gave up, so no reply can come. A pending
+    /// `message` call gets it as its error result, and the calls go on; an
+    /// `infer`, an inference error answered to the opener; the answer to the
+    /// opener, an error turn, and the thread ends.
+    fn undelivered(l: *Loop, u: Value) !void {
+        const a = l.a;
+        const why = Value.str(u.get("error")) orelse "undelivered";
+        const sent = try sk.readMessage(a, Value.cidOf(u.get("message")) orelse return sk.report("undelivered: no message"));
+        const box = Value.str(sent.get("box")) orelse "";
+        if (try l.messaging()) |call| {
+            const ma = try messageArgs(a, call);
+            try l.result(call, .{ .of = l.entry, .to = ma.to, .err = try std.fmt.allocPrint(a, "could not deliver to {s}: {s}", .{ ma.to, why }) });
+            return l.next();
+        }
+        if (eql(u8, box, "infer")) {
+            const msg = try std.fmt.allocPrint(a, "could not deliver to the inference peer: {s}", .{why});
+            try l.fail(l.entry, msg);
+            return l.answer(try std.fmt.allocPrint(a, "inference failed: {s}", .{msg}));
+        }
+        say(a, "loop: could not deliver the answer: {s}\n", .{why});
+        return l.fail(l.entry, try std.fmt.allocPrint(a, "could not deliver the answer: {s}", .{why}));
+    }
+
+    /// resolvedHandle: the resolve thread a `message` (or the `infer`) waited
+    /// on came to rest: the call runs again — the address book now names the
+    /// handle, or, the resolve having failed, the call fails with its error.
+    fn resolvedHandle(l: *Loop, res: Value) !void {
+        if (!eql(u8, Value.str(res.get("state")) orelse "", "finished")) {
+            const e: Value = res.get("error") orelse .null;
+            l.resolveFailed = try l.a.dupe(u8, Value.str(e.get("message")) orelse "the handle did not resolve");
+        }
+        if (try l.messaging()) |_| {
+            l.resumed = true;
+            return l.next();
+        }
+        return l.infer(false);
     }
 
     /// latestFrom: the latest message this thread received from identity `key` —
@@ -760,7 +761,17 @@ const Loop = struct {
                 break;
             }
         };
-        const sent = sk.send(a, l.in, peer, "infer", body.value(), handle, domain) catch |e| {
+        // Not in the address book, with a name for it: resolve it first (a thread; infer runs again after).
+        if (handle.len > 0 and l.resolveFailed == null and (try sk.peerOf(a, peer)) == null) {
+            _ = sk.launchResolve(a, l.in, handle, domain, peer) catch |e| {
+                if (e == error.OutOfMemory) return e;
+                const msg = try std.fmt.allocPrint(a, "could not deliver to the inference peer: {s}", .{sk.errorText(e)});
+                try l.fail(l.entry, msg);
+                return l.answer(try std.fmt.allocPrint(a, "inference failed: {s}", .{msg}));
+            };
+            return;
+        }
+        const sent = (if (l.resolveFailed) |why| sk.report(why) else sk.send(a, peer, "infer", body.value())) catch |e| {
             if (e == error.OutOfMemory) return e;
             const msg = try std.fmt.allocPrint(a, "could not deliver to the inference peer: {s}", .{sk.errorText(e)});
             try l.fail(l.entry, msg);
@@ -780,7 +791,7 @@ const Loop = struct {
         try b.put("tree", optLink(l.workTree()));
         try b.put("thread", optLink(Value.cidOf(l.in.get("thread"))));
         try b.put("replyTo", optLink(reply_to));
-        const sent = sk.send(a, l.in, l.sender, "chat", b.value(), "", "") catch |e| {
+        const sent = sk.send(a, l.sender, "chat", b.value()) catch |e| {
             if (e == error.OutOfMemory) return e;
             // The reply this turn would rest on cannot come: note it (the error
             // turn, and one line on stderr: the step's log line), and the thread
@@ -1006,7 +1017,6 @@ fn start(a: Allocator) !void {
         .conv = .init(a),
         .cids = .init(a),
         .presents = .init(a),
-        .retries = .init(a),
     };
     if (Value.cidOf(in.get("tip"))) |tip| {
         const cids = sk.kept(a, tip) catch |e| return sk.wrap(a, "chain", e);
@@ -1020,21 +1030,29 @@ fn start(a: Allocator) !void {
             } else if (eql(u8, kind, "present")) {
                 const bs = sk.listField(r, "blocks") catch |e| return sk.wrap(a, "present", e);
                 try l.presents.append(.{ .cid = c, .blocks = try blockIds(a, bs) });
-            } else if (eql(u8, kind, "retry")) {
-                try l.retries.append(.{ .call = Value.str(r.get("call")) orelse "", .turns = l.conv.items.len });
             }
         }
     }
     const reply: ?Value = if (in.get("reply")) |r| (if (r == .null) null else r) else null;
     const resolved = sk.listField(in, "resolved") catch |e| return sk.wrap(a, "input", e);
-    const woke = if (in.get("woke")) |w| w == .bool and w.bool else false;
+    if (in.get("undelivered")) |u| if (u == .map) return l.undelivered(u);
     if (reply) |r| {
         if (eql(u8, Value.str(r.get("box")) orelse "", "completions")) return l.completion(r);
         if (try l.messaging()) |call| return l.messageDone(call, r);
         return l.chat(try sk.linkField(r, "message"), try sk.linkField(r, "body"));
     }
-    if (resolved.len > 0) return l.toolDone(resolved[0]);
-    // A retry's deadline: the pending `message` call again.
-    if (woke) return l.next();
+    if (resolved.len > 0) {
+        // The thread this step waited on: a shell (a `bash` call), or a resolve (a handle looked up).
+        if (try isResolve(a, in, resolved[0])) return l.resolvedHandle(resolved[0]);
+        return l.toolDone(resolved[0]);
+    }
     return l.chat(l.message, try sk.linkField(args, "body"));
+}
+
+/// Whether a resolved thread runs the genesis's resolve program.
+fn isResolve(a: Allocator, in: Value, res: Value) !bool {
+    const rp = sk.program(in, "resolve") orelse return false;
+    const t = Value.cidOf(res.get("thread")) orelse return false;
+    const o = try sk.get(a, t);
+    return eql(u8, Value.cidOf(o.get("program")) orelse "", rp);
 }

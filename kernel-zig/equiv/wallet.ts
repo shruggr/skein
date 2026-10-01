@@ -136,7 +136,7 @@ const make = () => new Router({
   // The signing oracles: ProtoWallets (any other instance has a key of its own).
   db: hostDb, walletFor: (row) => ephemeralWallet(key(row.handle === "wallettest" ? KEYS.instance : row.handle === "payee" ? KEYS.payee : "9999")), home,
   owner: ownerId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: home } },
-  attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
+  providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
   // The host's Arcade (#58): no walletArc below — a new genesis names the router's route.
   arc: { url: arcade.url, token: ARC_TOKEN, events: arcade.eventsUrl },
   feeds: { backoff: { min: 50, max: 500 } },
@@ -247,7 +247,7 @@ async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array
   out.noOutputsOfAB = !(list.result.outputs as Array<Record<string, unknown>>).some((o) => o.txid === txA || o.txid === txB);
 
   // B's thread was not replayed: its deadline wakes it, it finds B rejected, and finishes.
-  const bw = await resultWhere("B's deadline", (res, _s, t) => t.equals(b.thread) && res.op === "callback", 15_000);
+  const bw = await resultWhere("B's deadline", (res, _s, t) => t.equals(b.thread) && res.op === "callback" && res.event === undefined && res.arc === undefined, 15_000);
   out.bThread = { outcome: bw.result.outcome, state: bw.state };
   // The results mention the transactions (kernel edges with rel `mentions`).
   out.mentions = (await view.edges.refsTo(txCid(txA))).some((x) => x.rel === "mentions");
@@ -268,6 +268,7 @@ async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array
   const alt103 = mine(reorg.h102, sha256d(Buffer.from("alt 103")), 1_790_000_000 + 103 * 600 + 1);
   const alt104 = mine(sha256d(alt103), sha256d(Buffer.from("alt 104")), 1_790_000_000 + 104 * 600);
   const h = await owned({ op: "headers", headers: [alt103, alt104] });
+  await router.settled(); // the broadcaster has posted what the step emitted (#70)
   out.reorg = {
     replaced: h.result.replaced, reverted: (h.result.reverted as string[] | undefined)?.map((t) => t === reorg.spend ? "spend" : "?"),
     reposted: arcade.posts.length === posts + 1 && lastPosted().id("hex") === reorg.spend,
@@ -285,8 +286,8 @@ try {
   await pk.store.put(WALLET as never);
   view = openStoreFile(db, { readOnly: true });
   payeeView = openStoreFile(payeeDb, { readOnly: true });
-  const g = await k.genesis() as { defaults?: Record<string, string> };
-  report.walletArc = g.defaults?.walletArc === router.arcRoute() && router.arcRoute() === `http://127.0.0.1:${port}/arc`;
+  const g = await k.genesis() as { addressBook?: Array<{ role?: string; transport?: string }> };
+  report.walletArc = !!g.addressBook?.some((e) => e.role === "broadcast" && e.transport === "local");
 
   // The funding: mined alone at 101 (root = its txid), paying the owner.
   const fund = new Transaction();
@@ -332,9 +333,11 @@ try {
   const payeeScript = new P2PKH().lock(new KeyDeriver(key(KEYS.instance)).derivePublicKey([2, "3241645161d8"], `${p2} ${s2}`, payeeId, false).toHash()).toBinary();
   r = await owned({ op: "createAction", description: "pay the payee", labels: ["out"], outputs: [{ lockingScript: new Uint8Array(payeeScript), satoshis: 10_000, outputDescription: "to the payee" }] });
   const spendTxid = r.result.txid as string;
+  // #70: the broadcast is a message to the broadcaster; its answer (Arcade's) is the thread's next step.
+  const answered = await resultWhere("the broadcaster's answer", (res, _s, t) => t.equals(r.thread) && res.op === "callback" && res.arc !== undefined);
   const posted = lastPosted();
   report.create = {
-    state: r.state, awaiting: r.result.awaiting, outcome: r.result.outcome, arc: (r.result.arc as { txStatus?: string; status?: number }),
+    state: r.state, awaiting: r.result.awaiting, outcome: r.result.outcome, arc: (answered.result.arc as { txStatus?: string; status?: number }),
     postedIsTheTx: posted.id("hex") === spendTxid, extendedFormat: Buffer.from(arcade.posts.at(-1)!).equals(Buffer.from(posted.toEF())),
     token: arcade.postHeaders.at(-1)!["x-callbacktoken"] === ARC_TOKEN,
     scriptsVerify: await Transaction.fromAtomicBEEF([...(r.result.tx as Uint8Array)]).verify("scripts only"),
@@ -350,8 +353,9 @@ try {
   report.payeeInternalize = [pr.result.txid === spendTxid, pr.result.status];
 
   // The deadline passes: the tick wakes the thread, it re-asks through the route (Arcade has it: 200), and rests again.
-  r = await resultWhere("the woken callback", (res, _s, t) => t.equals(spendThread) && res.op === "callback" && res.event === undefined);
-  report.woke = { op: r.result.op, outcome: r.result.outcome, state: r.state, arc: (r.result.arc as { status?: number; txStatus?: string }), asked: arcade.gets.includes(spendTxid) };
+  const ask = await resultWhere("the woken callback", (res, _s, t) => t.equals(spendThread) && res.op === "callback" && res.event === undefined && res.arc === undefined);
+  r = await resultWhere("the re-ask's answer", (res, _s, t) => t.equals(spendThread) && res.op === "callback" && res.arc !== undefined);
+  report.woke = { op: ask.result.op, outcome: r.result.outcome, state: r.state, arc: (r.result.arc as { status?: number; txStatus?: string }), asked: arcade.gets.includes(spendTxid) };
 
   // Arcade's statuses on the host's one stream reach both holders: the wallet's awaiting thread, the payee's subscription.
   arcade.emit(spendTxid, { txStatus: "SEEN_ON_NETWORK" });
@@ -401,6 +405,8 @@ try {
   const someone = new P2PKH().lock(key("5555").toPublicKey().toHash()).toBinary();
   arcade.mode = "reject";
   r = await owned({ op: "createAction", description: "rejected", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 1_000 }] });
+  const refusedTx = r.thread;
+  r = await resultWhere("the broadcaster's 400", (res, _s, t) => t.equals(refusedTx) && res.op === "callback" && res.arc !== undefined);
   report.rejected = { outcome: r.result.outcome, state: r.state, awaiting: r.result.awaiting ?? false };
   arcade.mode = "ok";
   r = await owned({ op: "list" });
@@ -418,11 +424,14 @@ try {
   // Backpressure (Arcade's 503): not a rejection; the deadline's re-ask finds Arcade never took it (404) and posts it again.
   arcade.mode = "busy";
   const t = await owned({ op: "createAction", description: "transient", outputs: [{ lockingScript: new Uint8Array(someone), satoshis: 700 }] });
+  const busy = await resultWhere("the broadcaster's 503", (res, _s, th) => th.equals(t.thread) && res.op === "callback" && res.arc !== undefined);
   arcade.mode = "ok";
   const T = t.result.txid as string;
   const posts = arcade.posts.length;
-  report.transient = { outcome: t.result.outcome, state: t.state, awaiting: t.result.awaiting, arc: (t.result.arc as { status?: number }).status };
-  r = await resultWhere("the transient broadcast's deadline", (res, _s, th) => th.equals(t.thread) && res.op === "callback" && res.event === undefined);
+  report.transient = { outcome: busy.result.outcome, state: busy.state, awaiting: busy.result.awaiting, arc: (busy.result.arc as { status?: number }).status };
+  // The deadline: the thread asks again (box status); Arcade never took it (404), so it posts again (box broadcast): 202.
+  await resultWhere("the transient broadcast's deadline", (res, _s, th) => th.equals(t.thread) && res.op === "callback" && res.event === undefined && res.arc === undefined);
+  r = await resultWhere("the re-post's answer", (res, _s, th) => th.equals(t.thread) && res.op === "callback" && (res.arc as { status?: number } | undefined)?.status === 202);
   report.retried = {
     outcome: r.result.outcome, state: r.state, arc: (r.result.arc as { status?: number; txStatus?: string }),
     askedFirst: arcade.gets.includes(T), postedAgain: arcade.posts.length === posts + 1 && lastPosted().id("hex") === T,
@@ -472,7 +481,7 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
-check(report.walletArc === true, "#58: the genesis names the host's broadcast route as walletArc (the router's /arc), the host's default");
+check(report.walletArc === true, "#70: the genesis's address book names the host's broadcaster (a local provider, role broadcast)");
 check(eq(report.headers, [100, 100]), `headers 1..100 from the owner, chained from regtest's genesis (${JSON.stringify(report.headers)})`);
 check(eq(report.headerEntry, ["header", 102]), `plain header entries from the router's SSE feed, routed by a sender-less subscription (${JSON.stringify(report.headerEntry)})`);
 check(eq(report.internalize, [true, "unproven"]), `a BRC-29 payment internalized (${JSON.stringify(report.internalize)})`);
