@@ -32,8 +32,8 @@
 // putblock also takes bitcoin-tx / bitcoin-block (dbl-sha2-256) CIDs, and
 // await also takes a record in the store: the subject of a plain entry to come.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const wasi = @import("wasi.zig");
 const runner = @import("runner.zig");
 const vfsm = @import("vfs.zig");

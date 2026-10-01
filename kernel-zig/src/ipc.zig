@@ -2,7 +2,7 @@
 // a 4-byte big-endian length, then one dag-cbor map. Blocking IO: the reader
 // reads its file descriptor (serve.zig polls it) and buffers partial frames.
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 
 pub const Reader = struct {
     fd: std.posix.fd_t,

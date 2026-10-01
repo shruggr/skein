@@ -1,0 +1,15 @@
+.{
+    .name = .skein_kernel,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x60166c03cdab6314,
+    .dependencies = .{
+        // The SDK (shruggr/skein-sdk), skein's sdk/ submodule: the codecs.
+        .skein_sdk = .{ .path = "../sdk" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

@@ -67,10 +67,10 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
   writes `etc/routes.json` replaces the stock routes whole (include them to
   keep the messagebox); likewise `etc/reads.json`.
-- **Static files** (#52): the kernel installs the `static` module in every
-  store (pinned, `kernel-zig/src/programs.zig`) but no genesis names it; a
-  tree that serves files wires it — `bin/static.cid` (the pinned CID, or
-  its own build as `bin/static.wasm`), optionally `bin/static.json`
+- **Static files** (#52): an app, shruggr/skein-static (#71), not pinned:
+  a tree that serves files wires it — `bin/static.wasm` (copied from that
+  repo's tree; `bin/static.cid` if the instance already holds the module),
+  optionally `bin/static.json`
   (`{"inputs": {}, "description": …}`), and a route to it in
   `etc/routes.json`, e.g. `{"prefix": "/site", "program": "static", "fn":
   "get", "auth": "none", "root": "www"}` (and, for the site's root,
@@ -134,6 +134,36 @@ resolves to the sender), or `{"sender": "<key>", "box": "register", "handler":
 (`skein-host peers <handle> add <key> <mailbox-url> [--handle h@d]`), and a
 sender in it is answered; any other sender on an open box is still admitted,
 and an answer to it fails with "no route".
+
+## Installing an app
+
+Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
+`etc/app.json` (the manifest, docs/APPS.md §2), and whatever the app serves.
+
+| repo | what | in a tree |
+|---|---|---|
+| shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
+| shruggr/skein-static | the static file handler (#52) | `bin/static.wasm` and a route (above, "Static files") |
+| shruggr/skein-overlay | the overlay services engine (#36) | after #73: today `programs/overlay` here |
+
+The SDK they build against is shruggr/skein-sdk, which is `sdk/` here.
+
+There are two ways to install an app.
+
+- **At boot**, an app is part of a system tree. Copy the repo's `bin/`
+  entries the tree needs into its `bin/`, and its routes and subscriptions
+  into `etc/`. Then `skein-host add <h> --boot <dir>` (above).
+- **Into a running instance**, install is the three owner messages of
+  docs/APPS.md §3:
+  1. clone the repo;
+  2. send `objects` with the tree's records (`bin/skein import <checkout>`
+     sends them and prints the tree CID);
+  3. send `head` `{name: <app>, tree}`;
+  4. send `subscribe` for each box the manifest asks for (`skein-host
+     subscribe <h> add [--sender <key>] <box> <handler>`).
+
+  The installer that reads the manifest and sends these from it is #72
+  (`skein-host install <repo|dir>`).
 
 ## Packets
 

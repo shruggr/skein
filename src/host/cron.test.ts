@@ -37,7 +37,7 @@ import { fetchHttp } from "./router.ts";
 import { testHost, until } from "./testhost.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEMO_WASM = join(ROOT, "programs/cron-demo/cron-demo.wasm");
+const DEMO_WASM = join(ROOT, "programs/test/cron-demo/cron-demo.wasm");
 const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
 const KEY = "02".padEnd(66, "a");
 

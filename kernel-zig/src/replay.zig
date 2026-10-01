@@ -10,8 +10,8 @@
 // equiv/replays.ts compares a replay with its source.
 const std = @import("std");
 const envm = @import("env.zig");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const logm = @import("log.zig");
 const programs = @import("programs.zig");
 const runner = @import("runner.zig");

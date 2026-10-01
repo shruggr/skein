@@ -1,6 +1,6 @@
 // The static file handler (#52) end to end: an instance booted from a system
-// tree (#4) whose bin/ names the kernel's pinned `static` and `frontdoor`
-// modules by CID (bin/*.cid), and whose etc/routes.json puts static on the
+// tree (#4) that carries the static app's module (bin/static.wasm from
+// shruggr/skein-static, #71) and names the kernel's pinned `frontdoor` by CID, and whose etc/routes.json puts static on the
 // prefix `/site` (root `www`, open), on the exact path `/favicon.ico` (a
 // file root) and on `/` (a directory root: its index). Through the router, at the instance's own origin: the index
 // for the prefix and for a directory, nested files with their content types,
@@ -28,6 +28,9 @@ import { Router } from "../../src/host/router.ts";
 import { rawCid } from "../../src/runtime/programs.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
+// The app under test (#71): SKEIN_STATIC_DIR names a checkout, else this commit is cloned.
+const STATIC_REPO = "https://github.com/shruggr/skein-static";
+const STATIC_REV = "a6ea46e069487bee2ebe891953bda0e9eaefd488";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const wasm = join(here, "../../wasm");
@@ -57,8 +60,13 @@ for (const [p, s] of Object.entries(files)) {
 }
 mkdirSync(join(sys, "bin"), { recursive: true });
 mkdirSync(join(sys, "etc"), { recursive: true });
-// The kernel's pinned modules, by CID: the kernel installs them into every store.
-for (const p of ["static", "frontdoor"]) writeFileSync(join(sys, `bin/${p}.cid`), `${rawCid(readFileSync(join(wasm, `${p}.wasm`)))}\n`);
+// The app (#71): static is shruggr/skein-static, not pinned here; the tree
+// carries its module (bin/static.wasm from that repo's tree). The front door
+// is the kernel's pinned module, by CID: the kernel installs it into every store.
+const staticDir = process.env.SKEIN_STATIC_DIR ?? cloneStatic();
+const staticWasm = readFileSync(join(staticDir, "bin/static.wasm"));
+writeFileSync(join(sys, "bin/static.wasm"), staticWasm);
+writeFileSync(join(sys, "bin/frontdoor.cid"), `${rawCid(readFileSync(join(wasm, "frontdoor.wasm")))}\n`);
 writeFileSync(join(sys, "bin/static.json"), JSON.stringify({ inputs: {}, description: "Files from the main tree through the routes table (#52)." }));
 writeFileSync(join(sys, "bin/frontdoor.json"), JSON.stringify({ inputs: {}, description: "The front door." }));
 writeFileSync(join(sys, "etc/subscriptions.json"), "[]");
@@ -67,6 +75,18 @@ writeFileSync(join(sys, "etc/routes.json"), JSON.stringify([
   { path: "/favicon.ico", program: "static", fn: "get", auth: "none", root: "www/favicon.ico" },
   { path: "/", program: "static", fn: "get", auth: "none", root: "www" },
 ]));
+
+/** shruggr/skein-static at the commit this test was written against, cloned into the scratch home. */
+function cloneStatic(): string {
+  const dir = join(home, "skein-static");
+  const git = (...args: string[]) => {
+    const r = spawnSync("git", args, { stdio: ["ignore", "ignore", "inherit"] });
+    if (r.status !== 0) throw new Error(`git ${args.join(" ")}: exit ${r.status}`);
+  };
+  git("clone", "-q", STATIC_REPO, dir);
+  git("-C", dir, "checkout", "-q", STATIC_REV);
+  return dir;
+}
 
 /** A blob's git CID (git-raw, sha1): what the ETag names. */
 const blobCid = (s: string) => {

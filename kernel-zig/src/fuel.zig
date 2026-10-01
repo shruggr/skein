@@ -7,8 +7,8 @@
 //   fuel<TAB>steps<TAB>thread<TAB>program      one line per thread that burnt fuel, in thread order
 //   total<TAB>fuel<TAB>steps<TAB>threads       the sum
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const programs = @import("programs.zig");
 const dump = @import("dump.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;

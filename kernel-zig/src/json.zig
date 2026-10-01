@@ -2,7 +2,7 @@
 // string (error messages quote names with it), Number::toString, and RFC 8785
 // (JCS) canonical JSON over a dag-cbor value (envelope.ts `jcs`).
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 
 const Out = std.array_list.Managed(u8);
 

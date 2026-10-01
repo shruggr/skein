@@ -35,7 +35,7 @@
 // thread.
 //
 // Issue #34, when the wallet's component build is there
-// (wallet-zig/zig-out/bin/wallet.component.wasm from `zig build component`, or
+// (programs/wallet/zig-out/bin/wallet.component.wasm from `zig build component`, or
 // $SKEIN_WALLET_COMPONENT): the preview1 store's log is replayed with the
 // component in the module's place (equiv/abi.ts: every update identical but
 // for fuel), and the whole scenario runs again with the component as the
@@ -70,7 +70,7 @@ import { collect } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const component = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../wallet-zig/zig-out/bin/wallet.component.wasm");
+const component = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../programs/wallet/zig-out/bin/wallet.component.wasm");
 /** This run's ABI: the pinned preview1 module, or (issue #34) the component build of the same program. */
 const abi = process.env.SKEIN_WALLET_ABI === "component" ? "component" : "preview1";
 if (abi === "component") process.env.SKEIN_EXTRA_MODULES = component; // the kernel the router spawns installs it
@@ -545,7 +545,7 @@ if (abi === "preview1" && existsSync(component)) {
   const theirs = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : {};
   check(eq(theirs, JSON.parse(JSON.stringify(report))), "the component's run reports exactly what the module's did");
 } else if (abi === "preview1") {
-  process.stdout.write(`== the wallet as a component: skipped (no ${component}; \`cd wallet-zig && zig build component\`)\n`);
+  process.stdout.write(`== the wallet as a component: skipped (no ${component}; \`cd programs/wallet && zig build component\`)\n`);
 }
 
 rmSync(home, { recursive: true, force: true });

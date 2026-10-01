@@ -194,7 +194,7 @@ The same function is reachable three ways with one definition:
   handlers", "A synchronous client waits on the thread"). Synchronous.
 - **In-VM**: another program calls `call(<app program>, "<function>", args)`
   with the same shapes (docs/VM.md `call`). The SDK's dispatch helper
-  (spec, `programs/lib`) maps `fn` to the exported function.
+  (spec, the SDK's `lib/`, shruggr/skein-sdk) maps `fn` to the exported function.
 
 `writes: false` functions answer from the app's head as it stands; their
 request is still an entry (§2).
@@ -289,4 +289,4 @@ does not offer it.
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` route | spec (#72 build 2) |
 | the overlay engine reads `config.overlay` from its app's manifest (replacing genesis `overlayTopics`/`overlayLookups`) | spec (#72 build 3) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
-| apps in their own repos; the SDK as a Zig package | #71 (after #70/#67) |
+| apps in their own repos; the SDK as a Zig package | built (#71): shruggr/skein-sdk (in skein as the `sdk/` submodule), shruggr/skein-workbench, shruggr/skein-static; shruggr/skein-overlay after #73 |

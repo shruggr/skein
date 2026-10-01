@@ -17,7 +17,7 @@
 // genesis (`addressBook`: the host's providers, the owner's mailbox; source
 // "genesis"); the kernel reads it for `emit`.
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 const heads = @import("heads.zig");
 const logm = @import("log.zig");
 const Store = @import("store.zig").Store;

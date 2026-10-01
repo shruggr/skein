@@ -32,8 +32,8 @@
 // a deadline's or a sleep's wake-me among them (#69) —, say), take. Ops
 // include `call` (#40).
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const logm = @import("log.zig");
 const programsm = @import("programs.zig");
 const runner = @import("runner.zig");

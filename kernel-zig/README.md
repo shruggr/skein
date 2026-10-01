@@ -141,7 +141,7 @@ any printed mid-step time.
 
 ## For the wallet (issue #29)
 
-What this kernel adds for the wallet in the VM (`wallet-zig/`, docs/WALLET.md).
+What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's wallet library, docs/WALLET.md).
 
 - **Bitcoin codecs** (`cid.zig`, `bitcoin.zig`, #42): `putblock` accepts
   `bitcoin-tx` (0xb1) and `bitcoin-block` (0xb0, 80 bytes) with
@@ -240,8 +240,8 @@ The kernel runs **WASI 0.2 components** as well as preview1 core modules,
 wherever it runs a module: a handler program's step, or a program the shell
 spawns. `runner.zig` tells them apart by the binary's preamble.
 
-A component targets `skein:kernel/handler` in `../wit/skein.wit` (see
-`../wit/README.md`):
+A component targets `skein:kernel/handler` in `../sdk/wit/skein.wit` (see
+`../sdk/wit/README.md`):
 
 - WASI 0.2.12: `cli`, `clocks`, `filesystem`, `io` and `random`;
 - the interface `skein:kernel/skein`: the preview1 `skein` calls, including
@@ -255,7 +255,7 @@ Imports the kernel does not answer, such as sockets, link as traps.
 | what | version | where |
 |---|---|---|
 | wasmtime C API | v49.0.1 (its component API: `wasmtime/component/*.h`) | `~/.local/wasmtime-c-api/…` (unchanged) |
-| WASI | 0.2.12 (the WIT is vendored in `../wit/deps`, from wasmtime v49.0.1's `crates/wasi/src/p2/wit/deps`) | |
+| WASI | 0.2.12 (the WIT is vendored in `../sdk/wit/deps`, from wasmtime v49.0.1's `crates/wasi/src/p2/wit/deps`) | |
 | preview1 adapter | wasmtime v49.0.1's `wasi_snapshot_preview1.command.wasm` (sha256 `86c88319…9f76`) | `~/.local/wasi-adapter-v49.0.1/` (`$SKEIN_WASI_ADAPTER`) |
 | wasm-tools | 1.259.0 | `~/.local/wasm-tools-1.259.0-aarch64-linux/`, linked from `~/.local/bin` |
 | wit-bindgen | 0.62.0 (`wit-bindgen c`) | `~/.local/wit-bindgen-0.62.0-aarch64-linux/`, linked from `~/.local/bin` |
@@ -305,10 +305,10 @@ does: `skein:kernel/skein.emit(message) -> result<cid, string>` (the
 component host's `sk_emit`, over `program.Host.emit`, the scheduler's
 `hEmit`) — a signed message to a provider or a peer — and awaits the
 answer, which steps it again. `test/components/fetch.wasm`
-(`../programs/fetch`) is the fixture: it emits `{method: "GET", url}` in box
+(`../programs/test/fetch`) is the fixture: it emits `{method: "GET", url}` in box
 `fetch` to the address book's `fetch` provider, ends awaiting, and writes
 the answer's body on its next step (`equiv/fetch.ts`).
-`test/components/p2p.wasm` (`../programs/p2p-component`) publishes the
+`test/components/p2p.wasm` (`../programs/test/p2p-component`) publishes the
 same way, by an emit to the `libp2p` provider.
 
 Fuel is per store, so a component draws on the step's `engine.Meter` like a
@@ -331,7 +331,7 @@ use them:
 
 ### Building a component handler
 
-The wallet (`../wallet-zig`) is the example: `zig build component` gives
+The wallet (`../programs/wallet`) is the example: `zig build component` gives
 `zig-out/bin/wallet.component.wasm`.
 
 1. **Generate the C bindings.**
@@ -340,10 +340,10 @@ The wallet (`../wallet-zig`) is the example: `zig build component` gives
    carries the world.
 2. **Compile the program.** Build it for `wasm32-wasi` with `program.c` and
    the `.o`. In Zig, `@cImport(@cInclude("program.h"))`
-   (`wallet-zig/src/skein_wit.zig`).
+   (the SDK's `skein_wit` module, `sdk/wit/zig/skein_wit.zig`).
 3. **Keep wasi-libc out** if the program must draw the same random bytes as
    its preview1 build. Linking wasi-libc switches Zig's random (`std.Io`'s
-   `randomSecure`) to `arc4random`. `wallet-zig/src/cabi.zig` provides the few libc
+   `randomSecure`) to `arc4random`. The SDK's `cabi` module (`sdk/wit/zig/cabi.zig`) provides the few libc
    functions `program.c` needs.
 4. **Make the component.**
    `wasm-tools component new core.wasm --adapt wasi_snapshot_preview1=<adapter> -o out.wasm`.
@@ -355,7 +355,7 @@ wasi-sdk's `wasm32-wasip2`, as in the unit test.
 The wallet's two builds share one source (`program.zig`, where `sk` is the
 preview1 imports or `skein_wit.zig`). Both broadcast the same way: a
 broadcast event (`emit`, #65), the same record from either build. The preview1 build stays byte-identical to the pinned
-`wasm/wallet.wasm`, and the pin stays on preview1. `../programs/fetch` is a
+`wasm/wallet.wasm`, and the pin stays on preview1. `../programs/test/fetch` is a
 second, minimal example (an emit to the `fetch` provider, its URL from argv
 or the step's input).
 
@@ -443,7 +443,7 @@ used by the explorer and `skein-dev` (`rebuild` is refused on such a store:
 the kernel keeps its index); and `buildIndex`, the same maps built
 canonically in TypeScript — equiv checks it reaches the kernel's state CID,
 and that every explorer page renders the same over the TS and the Zig
-replays' files. The wallet (`wallet-zig`, #29) builds `mst.zig` as a module
+replays' files. The wallet (the SDK's `wallet`, #29) uses `mst.zig` as the SDK module `mst`
 of its own for its index maps (inside the VM). **Not yet:** pruning old
 spine nodes and state records; a cache bound (decoded nodes are dropped at
 every commit).

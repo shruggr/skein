@@ -3,9 +3,9 @@
 // handler, thread?, input, at}; the rules are the updates folded in order.
 // The sender is an identity key's 33 bytes (format 2, #33).
 const std = @import("std");
-const cbor = @import("cbor.zig");
+const cbor = @import("cbor");
 const json = @import("json.zig");
-const secp = @import("secp.zig");
+const secp = @import("secp");
 const heads = @import("heads.zig");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;

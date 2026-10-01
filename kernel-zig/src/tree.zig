@@ -2,7 +2,7 @@
 // object, a tree a git tree object, each under CIDv1(git-raw, sha1 of the
 // whole object), so a tree's CID is its git id. Pure hashing and parsing.
 const std = @import("std");
-const cidm = @import("cid.zig");
+const cidm = @import("cid");
 
 pub const Mode = enum {
     file, // 100644

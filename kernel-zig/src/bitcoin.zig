@@ -34,8 +34,8 @@
 // the non-coinbase inputs). Headers and merkle nodes contribute none: nothing
 // asks the reverse questions, and a proof reads downward from the root.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const Value = cbor.Value;
 
 pub const Error = error{ Malformed, OutOfMemory };

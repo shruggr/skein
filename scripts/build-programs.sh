@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Build the stock programs into wasm/<name>.wasm and print their
+# Build skein's own programs into wasm/<name>.wasm and print their
 # CIDv1(raw, sha2-256) (scripts/pin-programs.sh writes them into the pins):
-# all Zig 0.16.0 (mise.toml), wasm32-wasi — the handlers under programs/
-# (run, objects, head, subscribe, the loop; issue #54), the wire-probe test
-# program, the messagebox, the front door, resolve (over the kernel's dag-cbor
-# and programs/lib), the static file handler (#52), and the wallet (wallet-zig/, over bsvz).
+# all Zig 0.16.0 (mise.toml), wasm32-wasi, over the SDK (sdk/, the
+# shruggr/skein-sdk submodule: `git submodule update --init`) — the boundary
+# programs (the messagebox, the front door, resolve, the wallet over the SDK's
+# wallet library and bsvz) and the install handlers (objects, head, subscribe),
+# plus the wire-probe test program.
+#
+# The apps' modules are built in their own repos (#71): run-handler and loop
+# in shruggr/skein-workbench (their built modules stay pinned here, moved in by
+# scripts/update-workbench.sh), static in shruggr/skein-static.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-for p in run-handler objects-handler head-handler subscribe-handler loop wire-probe messagebox frontdoor resolve static; do
+[ -f sdk/build.zig ] || { echo "sdk/ is empty: git submodule update --init" >&2; exit 1; }
+programs=(objects-handler head-handler subscribe-handler messagebox frontdoor resolve wallet)
+for p in "${programs[@]}"; do
   (cd "programs/$p" && zig build)
   cp "programs/$p/zig-out/bin/$p.wasm" "wasm/$p.wasm"
 done
-# The wallet (issue #29): over bsvz (scripts/fetch-bsvz.sh).
-[ -d .build/bsvz/.git ] || scripts/fetch-bsvz.sh
-(cd wallet-zig && zig build program)
-cp wallet-zig/zig-out/bin/wallet.wasm wasm/wallet.wasm
+(cd programs/test/wire-probe && zig build)
+cp programs/test/wire-probe/zig-out/bin/wire-probe.wasm wasm/wire-probe.wasm
 node --experimental-strip-types --no-warnings -e '
   const { readFileSync } = await import("node:fs");
   const { rawCid } = await import("./src/runtime/programs.ts");
-  for (const p of ["run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "wire-probe", "wallet", "messagebox", "frontdoor", "resolve", "static"]) console.log(p, rawCid(readFileSync(`wasm/${p}.wasm`)).toString());
-'
+  for (const p of process.argv.slice(1)) console.log(p, rawCid(readFileSync(`wasm/${p}.wasm`)).toString());
+' "${programs[@]}" wire-probe

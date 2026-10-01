@@ -16,8 +16,8 @@
 // the waker provider (#69). Log lines go to stderr.
 const std = @import("std");
 const envm = @import("env.zig");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const ipc = @import("ipc.zig");
 const logm = @import("log.zig");
 const programsm = @import("programs.zig");

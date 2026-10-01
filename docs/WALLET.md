@@ -17,15 +17,16 @@ imports the same `emit` from `skein:kernel/skein`.
 
 ## Pieces
 
-- `wallet-zig/` — Zig 0.16.0 (pinned in `mise.toml`), over **bsvz** (pinned
-  and patched by `scripts/fetch-bsvz.sh`). The library (`src/`) and the
-  handler program (`src/program.zig`, wasm32-wasi → `wasm/wallet.wasm`,
+- The library: the SDK's `wallet` module (shruggr/skein-sdk, #71; in skein
+  the `sdk/` submodule, `sdk/wallet/src/`), Zig 0.16.0, over **bsvz** (the
+  SDK's lazy URL+hash dependency: shruggr/bsvz branch `skein-sdk`). The index
+  maps are the Merkle search trees of the SDK's `mst` module, the kernel's
+  own, shared, not copied.
+- The handler program: `programs/wallet` (wasm32-wasi → `wasm/wallet.wasm`,
   module `MODULES.wallet`, program record `WALLET` in
   `src/runtime/programs.ts`, installed by the Zig kernel; not in a genesis by
-  default). The index maps are the kernel's Merkle search trees:
-  `kernel-zig/src/mst.zig` built as a module of wallet-zig (`build.zig`),
-  shared, not copied.
-- `wallet-zig/vectors/` — the test-vector corpus (issue #14's rule): made by
+  default), a boundary program, built against the SDK by path.
+- `sdk/wallet/vectors/` — the test-vector corpus (issue #14's rule): made by
   `gen-go` from go-sdk (fixtures snapshotted into `inputs/`, mainnet headers
   fetched from WhatsOnChain once), cross-checked by `gen-ts` against
   `@bsv/sdk` and the TS wallet-toolbox's chaintracks header utilities.
@@ -36,29 +37,31 @@ imports the same `emit` from `skein:kernel/skein`.
 
 ### The bsvz pin: Chronicle rules (#53)
 
-`scripts/fetch-bsvz.sh` pins bsvz at the head of the `chronicle` branch of
-shruggr/bsvz (8e1c956, opldotdev/bsvz PR #2, still open; once merged the pin
-moves to the merged opldotdev commit). That branch carries the Zig 0.16
+The SDK pins bsvz at branch `skein-sdk` of shruggr/bsvz (309085f): the head
+of its `chronicle` branch (8e1c956, opldotdev/bsvz PR #2, still open) plus
+the one wasm32 hunk below. Once that PR is merged with the fix, the pin
+moves to the merged opldotdev commit. That branch carries the Zig 0.16
 migration and Chronicle (SV Node 1.2.0, mainnet height 943,816): OP_2MUL /
 OP_2DIV, OP_VER / OP_VERIF / OP_VERNOTIF, OP_SUBSTR / OP_LEFT / OP_RIGHT /
 OP_LSHIFTNUM / OP_RSHIFTNUM and 32 MiB script numbers, **on by default**:
 `ExecutionFlags{}` is post-Chronicle mainnet, and `postGenesisBsv()` /
-`legacyReference()` are the opt-outs. wallet-zig passes no flags, so SPV
+`legacyReference()` are the opt-outs. The wallet passes no flags, so SPV
 (`src/spv.zig`) and the overlay (`src/overlay.zig`) verify with Chronicle
-rules. `wallet-zig/vectors/chronicle.json` (Rúnar AMM pool spends, from the
+rules. `sdk/wallet/vectors/chronicle.json` (Rúnar AMM pool spends, from the
 amm-poc fixtures) is the check: each pool input verifies by default, fails
 with `UnknownOpcode` under `postGenesisBsv()` and fails under
 `legacyReference()`.
 
 ### bsvz on wasm32-wasi
 
-One hunk (`wallet-zig/patches/bsvz.patch`): `Preimage.parse` sliced with a
-`u64` (a compile error on 32-bit targets); it applies unchanged to the
-Chronicle pin. wallet-zig's tests and vectors pass under wasm32-wasi
+One hunk (`sdk/wallet/patches/bsvz.patch`, committed on the `skein-sdk`
+branch): `Preimage.parse` sliced with a `u64` (a compile error on 32-bit
+targets); it applies unchanged to the Chronicle pin. The wallet's tests and
+vectors pass under wasm32-wasi
 (`zig build test-wasm`, Node's WASI).
 `bsvz.broadcast` (HTTP) does not build for WASI and is never imported. bsvz's
 own `Beef` keeps transactions in a hash map and serializes them in txid
-order, which breaks BRC-96's parents-first rule; wallet-zig has its own BEEF
+order, which breaks BRC-96's parents-first rule; the wallet has its own BEEF
 codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 
 ## Records
@@ -157,7 +160,7 @@ is the hash of its children.
   root against our header at its height, then `putblock`s every node the
   path reveals — each pair of siblings it gives (a `duplicate` sibling is the
   left one again) makes a node, whose hash is the parent one level up —
-  hash-checked, nothing rewritten (wallet-zig/src/merkle.zig `reveal`). A
+  hash-checked, nothing rewritten (sdk/wallet/src/merkle.zig `reveal`). A
   path that also gives a node at a position with another hash than its
   children make is refused (`ConflictingNode`); one whose root is not our
   header's is refused (`RootMismatch`) and puts nothing. `proofs[txid]` then
@@ -345,7 +348,7 @@ BIP143/ForkID sighash (`ALL|FORKID`) — go-sdk's own pattern
 (transaction/template/pushdrop). The oracle sees a key reference and a
 32-byte hash, nothing else; the unlocking script is `<DER ‖ 0x41> <pubkey>`.
 `vectors/signing.json` (go-sdk ProtoWallet) fixes every frame, preimage,
-sighash, fee, change amount and the final transaction; wallet-zig reproduces
+sighash, fee, change amount and the final transaction; the wallet reproduces
 them byte for byte.
 
 `internalize` asks the oracle only `getPublicKey` (the BRC-29 payee key).
@@ -453,13 +456,13 @@ event the host carries); a status provider is a subscription (above).
 ## Running it
 
 ```
-scripts/fetch-bsvz.sh                         # bsvz at the pinned rev, patched, in .build/bsvz
-cd wallet-zig && zig build test               # library + vectors, native
-cd wallet-zig && zig build test-wasm          # the same, built for wasm32-wasi, under Node's WASI
+git submodule update --init                   # sdk/ (shruggr/skein-sdk); bsvz is fetched by zig build
+cd sdk && zig build test                      # the SDK: the wallet library + vectors (and the codecs), native
+cd sdk && zig build test-wasm                 # the wallet's tests built for wasm32-wasi, under Node's WASI
 scripts/build-programs.sh && scripts/pin-programs.sh   # rebuild wasm/wallet.wasm, repin its CID (also kernel-zig/src/programs.zig)
 node --experimental-strip-types --no-warnings kernel-zig/equiv/wallet.ts   # end to end on the Zig kernel (also in equiv/run.sh)
-node wallet-zig/vectors/gen-ts/run.mjs        # TS cross-check of the vectors
-(cd wallet-zig/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
+node sdk/wallet/vectors/gen-ts/run.mjs    # TS cross-check of the vectors
+(cd sdk/wallet/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
 ```
 
 Vector counts (`zig build test`): tx 39 (fees 429), BEEF 27, merkle 43 (the

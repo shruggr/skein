@@ -2,8 +2,8 @@
 // tables did, commits write only new nodes, and an import (the rebuild path)
 // comes to the same state record as the incremental path.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const index = @import("index.zig");
 const Value = cbor.Value;
 

@@ -24,7 +24,7 @@ export function rawCid(bytes: Uint8Array): CID {
 export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
-  // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (wallet-zig/, built by scripts/build-programs.sh).
+  // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
   "wallet": CID.parse("bafkreib4oifx2cc7s3u6y44higdtlbov2j6aahrprrhwghyygxpc7x7krq"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs
   // beyond brush/coreutils. find/xargs are two binaries from one build
@@ -90,7 +90,7 @@ export const SHELL_CID = encode(SHELL_PROGRAM).cid;
 
 /**
  * The wallet's state as records (issue #29; docs/WALLET.md): the `wallet`
- * box's handler, written in Zig (wallet-zig/). Not in a genesis by default:
+ * box's handler, written in Zig (programs/wallet, over the SDK's wallet library). Not in a genesis by default:
  * an instance that wants it subscribes a box to its record's CID (an owner's
  * box, and a sender-less box for plain header/proof/status entries).
  */

@@ -8,7 +8,7 @@
 // fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
 // python) ending on their own under that limit, the clock being the entry
 // stamp + fuel × 1 ns, and (issue #69) scheduling as a message: a program
-// (programs/cron-demo) asks the host's cron provider for ticks, and its tick
+// (programs/test/cron-demo) asks the host's cron provider for ticks, and its tick
 // starts a thread that rests on a deadline and is woken by the waker.
 // Then the stores the Zig kernel wrote are replayed by
 // the Zig kernel twice over (equiv/replays.ts): identical to each other and
@@ -167,7 +167,7 @@ try {
   const tree = await fs.mkdtemp(join(tmpdir(), "skein-kz-cron-"));
   await fs.mkdir(join(tree, "bin"));
   await fs.mkdir(join(tree, "etc"));
-  await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/cron-demo/cron-demo.wasm")));
+  await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/test/cron-demo/cron-demo.wasm")));
   await fs.writeFile(join(tree, "bin/messagebox.wasm"), readFileSync(join(here, "../../wasm/messagebox.wasm")));
   await fs.writeFile(join(tree, "etc/subscriptions.json"), JSON.stringify([{ sender: "$owner", box: "schedule", handler: "cron-demo" }, { box: "tick", handler: "cron-demo" }, { box: ":ack", handler: "messagebox" }]));
   db.add("crontest", { store: join(home, "instances/crontest/runtime.db") });

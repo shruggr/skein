@@ -1,5 +1,5 @@
 // The kernel's own BRC-100 wire frames to the oracle (#70): what `emit` signs
-// a message with. The same framing as a program's (programs/lib/brc104.zig
+// a message with. The same framing as a program's (the SDK's lib/brc104.zig
 // keyParams): the call code, an empty originator, security level, protocol,
 // key ID, counterparty, privileged false; the answer frame is 0 ‖ payload on
 // success. A frame the kernel makes goes through the step's `wallet` path, so

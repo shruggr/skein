@@ -12,8 +12,8 @@
 // and the old tables are renamed `legacy_*` so nothing reads them stale. Read
 // only (a replay's source), the import stays in memory.
 const std = @import("std");
-const cbor = @import("cbor.zig");
-const cidm = @import("cid.zig");
+const cbor = @import("cbor");
+const cidm = @import("cid");
 const sql = @import("sqlite.zig");
 const storem = @import("store.zig");
 const index = @import("index.zig");

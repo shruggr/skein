@@ -223,7 +223,7 @@ the kernel runs both:
   `skein` namespace (pointers into its memory, `f(…, out, cap) → n`, with
   `take`/`error`; `kernel-zig/src/program.zig`);
 - a **WASI 0.2 component**, which targets the world `skein:kernel/handler`
-  (`wit/skein.wit`). That is WASI 0.2.12's `cli`, `clocks`, `filesystem`,
+  (`sdk/wit/skein.wit`). That is WASI 0.2.12's `cli`, `clocks`, `filesystem`,
   `io` and `random`, plus the interface `skein:kernel/skein`, and the export
   `wasi:cli/run`. The interface has the same calls as the `skein` namespace.
   Results come back through the canonical ABI, errors as
@@ -353,7 +353,7 @@ subscribed status provider's messages (input `message`). docs/MESSAGES.md,
 
 **Components** (WASI 0.2) import `emit` from `skein:kernel/skein` like
 every other call; the world has no `wasi:http`. `kernel-zig/test/components/
-fetch.wasm` (programs/fetch) is the fixture: it emits a GET to the `fetch`
+fetch.wasm` (programs/test/fetch) is the fixture: it emits a GET to the `fetch`
 provider and writes the answer's body on its next step.
 
 The program-facing contract — the address book's shape, each provider's
