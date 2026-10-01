@@ -232,7 +232,8 @@ request is still an entry (§2).
 
 An overlay (BRC-22: topic managers and lookup services; docs/OVERLAY.md) is
 not a service other apps register with. **It is an app**: the overlay
-engine (the pinned stock module, `bin/overlay.cid`) plus the app's own topic
+engine (shruggr/skein-overlay's `bin/overlay.wasm`, or `bin/overlay.cid`
+when the instance already holds that module) plus the app's own topic
 managers and lookup services, in one tree under one head, with
 `config.overlay` naming which topics and services it runs:
 
@@ -288,6 +289,29 @@ service's own head `ls:<service>` (§1).
 service (docs/OVERLAY.md). Authors of topic managers and lookup services
 build those now, and ship them inside their own overlay app.
 
+**The engine's repo is itself an overlay app**:
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (#71)
+ships the engine with its example topic manager and lookup service, and its
+`etc/app.json` is this section's wiring written out for `tm_demo`/`ls_demo`:
+
+```json
+"programs": {"overlay": "bin/overlay.wasm", "topic-demo": "bin/topic-demo.wasm", "lookup-demo": "bin/lookup-demo.wasm"},
+"handler":  "overlay",
+"config":   {"overlay": {"topics": {"tm_demo": "topic-demo"},
+                         "lookups": {"ls_demo": {"program": "lookup-demo", "topics": ["tm_demo"]}},
+                         "status": "$status", "gossip": {"tm_demo": true}}},
+"boxes":    [{"box": "submit", "senders": ["*"]}, "chain", {"box": "status", "senders": ["$status"]}],
+"routes":   [{"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},
+             {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},
+             {"path": "libp2p:tm_demo", "program": "overlay", "fn": "submit"},
+             {"path": "libp2p:tm_demo-admit", "program": "overlay", "fn": "peerAdmit"},
+             {"path": "libp2p:tm_demo-proof", "program": "overlay", "fn": "peerProof"}],
+"heads":    ["overlay", "overlay:gossip", "ls:*"]
+```
+
+An overlay app of your own takes the engine's module from there and ships
+it beside its own topic managers and lookup services.
+
 **A multi-tenant overlay is a choice, not core.** An overlay app that wants
 to accept topic managers from outside may offer `overlay.topics/1`
 (`add`/`remove`/`list`, `writes` as expected) and `overlay.lookups/1` on its
@@ -307,4 +331,4 @@ does not offer it.
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` route | spec (#72 build 2) |
 | the overlay engine reads `config.overlay` from its app's manifest (replacing genesis `overlayTopics`/`overlayLookups`) | spec (#72 build 3) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
-| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule), shruggr/skein-workbench, shruggr/skein-static; shruggr/skein-overlay after #73 |
+| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule), shruggr/skein-workbench, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |

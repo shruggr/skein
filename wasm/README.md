@@ -40,8 +40,8 @@ in, rewrites the pins, and writes the workbench commit to `WORKBENCH`.
 
 Apps outside the stock genesis ship their own modules in their trees
 (docs/APPS.md). Static files are shruggr/skein-static (`bin/static.wasm`).
-The overlay engine is `programs/overlay`, which moves to shruggr/skein-overlay
-after #73.
+The overlay engine is shruggr/skein-overlay (`bin/overlay.wasm`, with its
+demo topic manager and lookup service).
 
 Go `wasip1`, Rust, C and so on remain valid targets for third-party programs.
 The `skein` imports are the ABI (the SDK's `wit/skein.wit`), not a language.
