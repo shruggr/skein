@@ -14,7 +14,8 @@ programs see that stamp (+1 ns per read) as "now" and a stream keyed by the
 entry's CID as random bytes. Replaying the log reproduces the graph, with no
 wallet.
 
-Read `docs/ARCH.md` first (the architecture; "The kernel, in one paragraph" is
+Apps (install, the manifest, interfaces, the overlay registry) are specified in
+`docs/APPS.md`. Read `docs/ARCH.md` first (the architecture; "The kernel, in one paragraph" is
 the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 `docs/VM.md`. Open questions are in `docs/OPEN.md`.
 
