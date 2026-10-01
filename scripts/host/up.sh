@@ -25,10 +25,13 @@
 #      Its broadcaster (#58) is the host's Arcade: SKEIN_ARC_URL and
 #      SKEIN_ARC_TOKEN (and SKEIN_ARC_EVENTS_URL, SKEIN_ARC_CALLBACK_URL) in the
 #      environment or ~/.skein/host.env; without them nothing broadcasts and a
-#      new genesis names no walletArc (README.md, "The broadcaster")
+#      new genesis names no broadcast provider (#70; README.md, "The broadcaster").
+#      Every new genesis seeds its address book with the host's providers
+#      (fetch, waker, libp2p when it runs one, broadcast with an Arcade: local,
+#      keys derived from the master secret) and the owner's mailbox
 #   4. the grants, toward every row's front-door key (`skein-host list`), now
 #      that every row exists
-#   5. the address books (#40): where each agent delivers to a key. Into every
+#   5. the address books (#40, #70): how each agent reaches a key. Into every
 #      enabled agent, through its `peers` box as the owner (`skein-host peers`):
 #      the owner's key and mailbox instance, the inference peer's key and its
 #      mailbox instance; then the roster step (`skein-host roster --deploy`)
