@@ -3,13 +3,13 @@
 // stopped when idle — each instance an HTTP server (its front door, #40),
 // the owner and the inference peer speaking raw BRC-33 on BRC-104 sessions,
 // each with its mailbox instance on the same router. Checks a run and a chat answered end to end, a sleep woken by the
-// router's waker, an idle stop mid-sleep and the hydration that finishes it,
+// waker provider (#69: the shell's sleep is a wake-me message), an idle stop mid-sleep and the hydration that finishes it,
 // and (issue #5) a shell that never ends running out of fuel under a low
 // fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
 // python) ending on their own under that limit, the clock being the entry
-// stamp + fuel × 1 ns, and (issue #60) a job: a system tree's etc/config.json
-// `jobs`, the router the clock, its cron event starting a program
-// (programs/cron-demo) that rests on a deadline and is woken by the waker.
+// stamp + fuel × 1 ns, and (issue #69) scheduling as a message: a program
+// (programs/cron-demo) asks the host's cron provider for ticks, and its tick
+// starts a thread that rests on a deadline and is woken by the waker.
 // Then the stores the Zig kernel wrote are replayed by
 // the Zig kernel twice over (equiv/replays.ts): identical to each other and
 // to the stores themselves, fuel included.
@@ -111,8 +111,9 @@ try {
 
   // A sleep longer than the idle timeout: stopped mid-sleep, hydrated by the waker, re-executed, woken.
   await sendTo(zig, "zigtest", "run", { cmd: "sleep 3; echo woke", tree: root });
-  await until("stopped mid-sleep", async () => !router.loaded.has("zigtest") && router.deadlines.has("zigtest") ? true : undefined, 15_000);
-  check(true, "the kernel is stopped while its thread sleeps; the router keeps the deadline");
+  await until("stopped mid-sleep", async () => !router.loaded.has("zigtest") && router.nextWake("zigtest") !== undefined ? true : undefined, 15_000);
+  check(lines.some((l) => /^\[zigtest\] \S+ shell running → waiting \(until \d+\)$/.test(l)), "the sleep: the shell rests waiting, its wake-me with the waker (#69)");
+  check(true, "the kernel is stopped while its thread sleeps; the waker keeps the wake-me");
   const [r2] = await results(1);
   check(text(r2!.body.stdout) === "woke\n", "the waker hydrates it at the deadline and the wake finishes the run");
   check(lines.some((l) => l.includes("re-executing from its origin")), "the sleeper re-executed from its origin at hydration");
@@ -158,27 +159,31 @@ try {
   waited = { exitCode: w!.body.exitCode as number, stdout: w!.body.stdout ? text(w!.body.stdout) : undefined };
   await box.ack([w!.id]);
 
-  // Jobs (#60): a system tree whose etc/config.json declares an hourly job into `tick`, which
-  // cron-demo (a sender-less subscription) handles. The router fires it once at the instance's
-  // boot: a plain `cron` event, stamped at admission; cron-demo rests 300 ms on a deadline, and
+  // Scheduling is a message (#69): a system tree with cron-demo for the owner's `schedule` box and
+  // (sender-less) `tick`. The owner asks it for an hourly tick; it emits the request to its
+  // address book's cron provider (the host's, `local`) and rests on the answer; the provider ticks
+  // at once — a signed message into `tick` — and cron-demo rests 300 ms on a deadline there, and
   // the waker wakes it.
   const tree = await fs.mkdtemp(join(tmpdir(), "skein-kz-cron-"));
   await fs.mkdir(join(tree, "bin"));
   await fs.mkdir(join(tree, "etc"));
   await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/cron-demo/cron-demo.wasm")));
-  await fs.writeFile(join(tree, "etc/subscriptions.json"), JSON.stringify([{ box: "tick", handler: "cron-demo" }]));
-  await fs.writeFile(join(tree, "etc/config.json"), JSON.stringify({ jobs: [{ box: "tick", every: 3_600_000, name: "beat", body: { rest: 300 } }] }));
+  await fs.writeFile(join(tree, "bin/messagebox.wasm"), readFileSync(join(here, "../../wasm/messagebox.wasm")));
+  await fs.writeFile(join(tree, "etc/subscriptions.json"), JSON.stringify([{ sender: "$owner", box: "schedule", handler: "cron-demo" }, { box: "tick", handler: "cron-demo" }, { box: ":ack", handler: "messagebox" }]));
   db.add("crontest", { store: join(home, "instances/crontest/runtime.db") });
   const src = await dirSource(tree);
   await router.bootRow("crontest", { kind: "tree", root: src.root, objects: src.objects });
   await router.hydrate("crontest");
+  await sendTo(db.get("crontest")!.identity!, "crontest", "schedule", { name: "beat", every: 3_600_000, rest: 300 });
   const cronLine = (re: RegExp) => lines.some((l) => l.startsWith("[crontest]") && re.test(l));
-  await until("cron-demo woken", async () => cronLine(/cron-demo step 2 → finished/) || undefined, 20_000);
-  check(cronLine(/^\[crontest\] cron: beat → tick as /), "a job from the tree's etc/config.json, carried by its genesis: its cron event admitted at boot");
-  check(cronLine(/cron-demo step 1 → waiting/), "the cron event started cron-demo's thread, which rested on its deadline");
-  check(cronLine(/cron-demo step 2 → finished/), "the waker woke it at the deadline and it finished");
+  const finished = () => lines.filter((l) => l.startsWith("[crontest]") && /cron-demo step 2 → finished/.test(l)).length;
+  await until("cron-demo woken", async () => finished() >= 2 || undefined, 20_000);
+  check(cronLine(/^\[crontest\] cron: beat \(tick every 3600000 ms\) scheduled/), "cron-demo's tick request reached the host's cron provider (a message, from the instance's step)");
+  check(cronLine(/^\[crontest\] cron: beat \(tick every 3600000 ms\) → tick$/), "the provider ticked at once: a signed message into `tick`");
+  check(cronLine(/cron-demo step 1 → waiting/), "the tick started cron-demo's thread, which rested on its deadline");
+  check(finished() === 2, "the provider's answer finished the request's thread, the waker the tick's");
   const next = router.cron.of("crontest")[0]?.next ?? 0;
-  check(next - Date.now() > 3_500_000, "the job's next firing is an hour on, not a burst");
+  check(next - Date.now() > 3_500_000, "the next tick is an hour on, not a burst");
   await fs.rm(tree, { recursive: true, force: true });
   await router.stop();
   await fs.rm(dir, { recursive: true, force: true });
