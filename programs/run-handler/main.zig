@@ -6,7 +6,7 @@
 //! the shell with it. The step ends; the thread waits on the shell.
 //!
 //! Step 2 (input: the shell at rest): send the result to the sender in box
-//! `results` (the messagebox's delivery, #40): {exitCode, stdout, stderr, tree,
+//! `results` (an emit, #70: delivered by its transport): {exitCode, stdout, stderr, tree,
 //! replyTo: <message>} (or {error, replyTo} if the shell errored).
 const std = @import("std");
 const cbor = @import("cbor");
@@ -29,7 +29,7 @@ fn step(a: Allocator) !void {
     const args: Value = in.get("args") orelse .null;
     const resolved = sk.listField(in, "resolved") catch |e| return sk.wrap(a, "input", e);
     if (resolved.len == 0) return first(a, in, args);
-    return second(a, in, args, resolved[0]);
+    return second(a, args, resolved[0]);
 }
 
 fn first(a: Allocator, in: Value, args: Value) !void {
@@ -72,7 +72,7 @@ fn bytesField(v: Value, key: []const u8) !Value {
     };
 }
 
-fn second(a: Allocator, in: Value, args: Value, r: Value) !void {
+fn second(a: Allocator, args: Value, r: Value) !void {
     const sender = (try sk.keyOf(a, args.get("sender"))) orelse "";
     const message = try sk.linkField(args, "message");
     const state = try sk.textField(r, "state");
@@ -96,5 +96,5 @@ fn second(a: Allocator, in: Value, args: Value, r: Value) !void {
     }
     if (message.len == 0) return sk.report("skein: empty CID");
     try body.put("replyTo", cbor.cidv(message));
-    _ = try sk.send(a, in, sender, "results", body.value(), "", "");
+    _ = try sk.send(a, sender, "results", body.value());
 }

@@ -12,19 +12,19 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
-    .{ .name = "run-handler", .cid = "bafkreifud6liynzfcaw47b4eyrbzml2np55p7g445tnstebca6lyv4baia" },
+    .{ .name = "run-handler", .cid = "bafkreicd63a4ffjozgou3axes5p5tymfoi72ne2dpeqnhij33uqgvpdyle" },
     .{ .name = "objects-handler", .cid = "bafkreict5sd5od75tqijprryrlfz73elsmt2dwy6jc5htjhwfgqayiptji" },
     .{ .name = "head-handler", .cid = "bafkreihjehwu5gfhtds6iztu6kebv42descynthh5t6g4qp3vpd7bjy6bm" },
     .{ .name = "subscribe-handler", .cid = "bafkreih4dcxbinnd3gg65fsvtjmfitfewk66ju6dvmo4w3gqe4gfuh3bp4" },
-    .{ .name = "loop", .cid = "bafkreigbel6r224szooz5ycckbm7q7ebdqgqi67ylr42h332kkovnfoeqi" },
+    .{ .name = "loop", .cid = "bafkreihbfmv6az4esnmf7wk5lmljvjzvt5f5xtef2b2asrtbam53bclmgy" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreid646iculbaivslklowskfhnfyzcct3d7folvlbklk3fphm4vfwoa" },
+    .{ .name = "wallet", .cid = "bafkreifpnghkfciqsqhar2n5o7xj5qdthpi7gxnsji5nklicyluhtdkxkm" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreibrnt5gr63umbolu7b67eulchldjbzizlg67bhtc2kw32etoru34y" },
+    .{ .name = "messagebox", .cid = "bafkreibuunqajgx45yh5na74go6gsibkgruqtb677rpqr24ibpewpjmera" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreih6krjnp775lvlmclc6nuwkcmel7koa7xxqm6nyoxkusljj4o3ax4" },
+    .{ .name = "frontdoor", .cid = "bafkreicqqjjfwl2dioe2mywm3p6q5cxfj7kb27qtvgy7dlexntdh6mhyki" },
     // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
-    .{ .name = "resolve", .cid = "bafkreif5ymrtyt5uobxikyq4z5xrq3rzyxc6avm3etbrxtbwhqwqxz6yxi" },
+    .{ .name = "resolve", .cid = "bafkreia3akvsvilh2nceat3v36zmdurjn3vu4lcn2ehlo6aftlyiplk47m" },
     // The static file handler (#52): files from the `main` tree through the routes table (programs/static).
     // Installed, not in a genesis by default: a tree wires it (bin/static.cid, a route to it).
     .{ .name = "static", .cid = "bafkreiewar6biptwbkvwmrymqixp24nyekcv6skzibbw57mnkwuiykvazu" },

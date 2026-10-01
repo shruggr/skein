@@ -8,9 +8,10 @@
 // from it in process (kernel.ts), and authenticates its own transport (BRC-104)
 // as a second child, [2, "skein router"] / "messagebox". Its libp2p host (#51)
 // signs as a third per instance: [2, "skein instance"], key ID
-// `libp2p:<handle>`, self (peerKey). Every recorded call it answers (#62:
-// `http`, `libp2p`) it attests with a fourth, [2, "skein router"] / "attest"
-// (attestKey), whose public key each genesis it writes names.
+// `libp2p:<handle>`, self (peerKey). Its providers (#70: the HTTP proxy,
+// the waker, the libp2p node, the broadcaster — providers.ts) are fourth
+// children, one per provider for the whole host: [2, "skein provider"], key
+// ID = the provider's name (providerKey).
 //
 // Custody (dev): the secret is a file, `$SKEIN_HOME/master.key` (64 hex
 // digits, mode 0600), made on first use; `SKEIN_MASTER_KEY` (hex) overrides
@@ -20,11 +21,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KeyDeriver, PrivateKey, type WalletInterface, type WalletProtocol } from "@bsv/sdk";
-import { ATTEST_KEY_ID, attestPreimage, type Attestation, type Exchange } from "../runtime/attest.ts";
 import { ephemeralWallet } from "../wallet.ts";
 
 export const INSTANCE_PROTOCOL: WalletProtocol = [2, "skein instance"];
 export const ROUTER_PROTOCOL: WalletProtocol = [2, "skein router"];
+export const PROVIDER_PROTOCOL: WalletProtocol = [2, "skein provider"];
 
 /** The master secret: SKEIN_MASTER_KEY, else the file (created if absent). */
 export function masterKey(vars: Record<string, string | undefined>, home: string): PrivateKey {
@@ -75,12 +76,14 @@ export class Oracle {
   }
 
   /**
-   * The router's attest key (#62): a BRC-42 child of the master under
-   * ROUTER_PROTOCOL, key ID "attest". It signs every recorded call the router
-   * answers (attestExchange); a genesis names its public key.
+   * A provider's key (#70: the HTTP proxy, the waker, the libp2p node, the
+   * broadcaster — providers.ts): a BRC-42 child of the master under
+   * PROVIDER_PROTOCOL, key ID = the provider's name. The same identity for
+   * every instance on this host; each genesis's address book names it. How a
+   * host obtains provider keys is its own business: this is this host's way.
    */
-  attestKey(): PrivateKey {
-    return this.deriver.derivePrivateKey(ROUTER_PROTOCOL, ATTEST_KEY_ID, "self");
+  providerKey(name: string): PrivateKey {
+    return this.deriver.derivePrivateKey(PROVIDER_PROTOCOL, name, "self");
   }
 
   /** The router's own transport identity (BRC-104 server key). */
@@ -91,12 +94,3 @@ export class Oracle {
   }
 }
 
-/**
- * The host's attestation of one recorded exchange (#62): DER ECDSA (low-S)
- * over sha256 of the canonical preimage (src/runtime/attest.ts) — what
- * createSignature makes over the same data — with the key and the stamp.
- */
-export function attestExchange(key: PrivateKey, x: Exchange): Attestation {
-  const sig = key.sign([...attestPreimage(x)]);
-  return { stamp: x.stamp, key: Uint8Array.from(key.toPublicKey().encode(true) as number[]), signature: Uint8Array.from(sig.toDER() as number[]) };
-}

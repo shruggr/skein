@@ -65,11 +65,12 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const ownerKey = o.ownerKey ?? PrivateKey.fromRandom();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
+  const providerMaster = PrivateKey.fromRandom();
   const router = new Router({
     db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), owner: ownerId, infer: o.infer, home,
     idleMs: o.idleMs ?? 0, http: o.http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
-    // The host attests every recorded call (#62), as `skein-host run` does.
-    attestKey: new Oracle(PrivateKey.fromRandom()).attestKey(),
+    // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
+    providerKeyFor: (name) => new Oracle(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
   t.after(async () => { await router.stop(); db.close(); });

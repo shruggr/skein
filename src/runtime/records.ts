@@ -9,7 +9,6 @@ import { PublicKey, Signature } from "@bsv/sdk";
 import { CID, decode, encode, isCID } from "./cid.ts";
 import type { Ms, Ref } from "./types.ts";
 import type { Signer } from "./identity.ts";
-import type { Attestation } from "./attest.ts";
 
 export type * from "./types.ts";
 
@@ -193,35 +192,30 @@ export function isEmit(x: unknown): x is Emit {
 }
 
 /**
- * An attested call's record: the request a step made across the boundary and
- * the answer, at (thread, step, i). Referenced, in order, from the step's
- * update (`calls`); on replay the answer is served from here, not the host.
- *   op "wallet": request = a BRC-100 wire request frame, result = the result frame
- *   op "http": request = dag-cbor {method, url, headers?, body?, options?}, result = {status, headers, body}
- *   op "libp2p" (#51): request = dag-cbor {op, …}, result = its result ({error} too)
- * `http` and `libp2p` carry the host's attestation (#62, attest.ts) when the
- * genesis names an attest key.
+ * An oracle call's record (format 6, #67: the one call a step makes out
+ * mid-step): a BRC-100 wire request frame and its result frame, at (thread,
+ * step, i). Referenced, in order, from the step's update (`calls`); on replay
+ * the answer is served from here, not a wallet. (Before format 6 these were
+ * `attested` records, with `http` and `libp2p` calls beside the wallet's.)
  */
-export type Attested = {
-  kind: "attested";
+export type OracleCall = {
+  kind: "oracle";
   thread: CID;
   step: number;
   i: number;
-  op: "wallet" | "http" | "libp2p";
   request: Uint8Array;
   result: Uint8Array;
-  attest?: Attestation;
 };
 
-export function isAttested(x: unknown): x is Attested {
-  return isObj(x) && x.kind === "attested" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
-    && (x.op === "wallet" || x.op === "http" || x.op === "libp2p") && x.result instanceof Uint8Array;
+export function isOracleCall(x: unknown): x is OracleCall {
+  return isObj(x) && x.kind === "oracle" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
+    && x.request instanceof Uint8Array && x.result instanceof Uint8Array;
 }
 
 /**
  * Wallet wire calls a program may make (BRC-100 call codes): key derivation
  * and crypto only — no actions, no certificates (the kernel's scheduler.zig
- * `wallet_calls`). By code, for showing an attested `wallet` request.
+ * `wallet_calls`). By code, for showing an oracle call.
  */
 export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
   [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],

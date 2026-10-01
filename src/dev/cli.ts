@@ -18,7 +18,6 @@ import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
 import { readLog } from "../runtime/log.ts";
-import { checkAttestations } from "../runtime/attest.ts";
 import { FILES, MODULES, rawCid } from "../runtime/programs.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
@@ -120,12 +119,9 @@ const COMMANDS: Record<string, Command> = {
 
   log: {
     usage: `skein-dev log [--limit n]
-  The input log: position, admission stamp, entry CID (the last is the state hash), and what it admits;
-  then every recorded http/libp2p call's attestation checked against the genesis's attest key (#62):
-  a bad or missing one is reported DIVERGED (exit 1).`,
+  The input log: position, admission stamp, entry CID (the last is the state hash), and what it admits.`,
     flags: { limit: "string" },
     async run(a, env) {
-      let bad = 0;
       await withStore(async (store) => {
         const all = await readLog(store);
         const lim = a.opts.limit ? Number(a.opts.limit) : all.length;
@@ -137,14 +133,8 @@ const COMMANDS: Record<string, Command> = {
         }
         const tip = await store.log.tip();
         env.out(`state ${tip ? fmt(tip) : "(empty)"} · processed ${await store.live.cursor.get()}/${all.length}`);
-        // #62: every recorded http/libp2p call against the host's attest key the genesis names.
-        const r = await checkAttestations(store);
-        if (!r.key) env.out("recorded calls: the genesis names no attest key (nothing attested)");
-        else env.out(`recorded calls: ${r.verified} attested by ${r.key.slice(0, 12)}…, verified${r.bad.length ? ` · ${r.bad.length} DIVERGED` : ""}`);
-        for (const b of r.bad) env.out(`DIVERGED ${short(b.thread)} step ${b.step} call ${b.i} (${b.op}) ${fmt(b.call)}: ${b.why}`);
-        bad = r.bad.length;
       });
-      return bad ? 1 : 0;
+      return 0;
     },
   },
 

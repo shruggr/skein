@@ -8,7 +8,11 @@
 //!                        record {kind: "mail", op: "put", sender (the
 //!                        session's identity), recipient, box, body: <cid>,
 //!                        json?, session: {payload, signature, nonce,
-//!                        yourNonce}} and its body. Nothing is written if it is
+//!                        yourNonce}} and its body — or, for a BRC-231 message
+//!                        that carries `signature` (and `subject?`), another
+//!                        instance's signed message (#70), kept as the record
+//!                        its sender signed (checked: message.zig), so both
+//!                        sides know it by one CID. Nothing is written if it is
 //!                        refused. Accepted when a subscription takes it —
 //!                        (sender, box) for this instance's own boxes, or a
 //!                        reply to a message this instance sent that sender;
@@ -17,9 +21,9 @@
 //!   listMessages         a read of the caller's mailbox: nothing is written
 //!   acknowledgeMessage   one entry moving the reader's pointer (an `ack`
 //!                        event in `:ack`); the records stay in the log
-//! Called from a step (the loop's, an in-VM call):
-//!   send                 deliver a message over http: deliver.zig
 //! Stepped:
+//!   a message's delivery thread (#70: args {message, transport: "mailbox"},
+//!     launched by the kernel for an emit to a mailbox recipient) → deliver.zig
 //!   a `mail` message routed here by a subscription → kept in the mailbox
 //!   an `ack` event (box `:ack`) → the reader's pointer moves
 //!
@@ -35,6 +39,7 @@ const cid = cbor.cidm;
 const sk = @import("sk");
 const dagjson = @import("dagjson");
 const deliver = @import("deliver.zig");
+const message = @import("message");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -54,7 +59,6 @@ fn run(a: Allocator) !void {
     if (!eql(u8, kind, "call")) return sk.report("the messagebox is called or stepped");
     const func = Value.str(in.get("fn")) orelse "";
     const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
-    if (eql(u8, func, "send")) return sk.answer(a, try deliver.send(a, in, arg));
     const r: Resp = if (eql(u8, func, "sendMessage"))
         try sendMessage(a, in, arg)
     else if (eql(u8, func, "listMessages"))
@@ -208,8 +212,18 @@ fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
     try rec.put("recipient", .{ .bytes = recipient });
     try rec.put("box", cbor.string(box));
     try rec.put("body", cbor.cidv(blk.cid));
-    if (json) try rec.put("json", .{ .bool = true });
-    try rec.put("session", arg.get("session"));
+    if (rb.cbor and Value.bytesOf(m.get("signature")) != null) {
+        // #70: a signed message (another instance's emit, delivered on its own session): kept as
+        // the record its sender signed, so both sides know it by the same CID. The session proves
+        // who sent it; the signature, checked here, makes the record verify on its own.
+        if (m.get("subject")) |s| if (s != .null) try rec.put("subject", s);
+        if (m.get("nonce")) |s| if (s != .null) try rec.put("nonce", s);
+        try rec.put("signature", m.get("signature"));
+        if (try message.problem(a, rec.value(), blk.bytes)) |why| return failure(a, true, 400, "ERR_INVALID_SIGNATURE", why);
+    } else {
+        if (json) try rec.put("json", .{ .bool = true });
+        try rec.put("session", arg.get("session"));
+    }
     const id = try cbor.cidOfValue(a, rec.value());
     const id_text = try cid.format(a, id);
 
@@ -355,6 +369,8 @@ fn isoTime(a: Allocator, ms: i128) ![]const u8 {
 
 fn step(a: Allocator, in: Value) !void {
     const args = in.get("args") orelse return sk.report("no args");
+    // #70: a message's delivery thread (the mailbox transport's outbound middleware).
+    if (eql(u8, Value.str(args.get("transport")) orelse "", "mailbox")) return deliver.step(a, in);
     const at = Value.intOf(in.get("at")) orelse 0;
     var ls = std.ArrayList(List).fromOwnedSlice(try a.dupe(List, try lists(a)));
     if (Value.cidOf(args.get("message"))) |id| {
