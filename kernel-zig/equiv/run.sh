@@ -16,6 +16,8 @@ kz="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 node=(node --experimental-strip-types --no-warnings)
 work="$(mktemp -d "${TMPDIR:-/tmp}/skein-kz-equiv-XXXXXX")"
 trap 'rm -rf "$work"' EXIT
+# Every mkdtemp the TS drivers make (os.tmpdir() honours TMPDIR) lands under the work dir, gone with it (#77).
+export TMPDIR="$work"
 status=0
 
 echo "== build and unit tests"

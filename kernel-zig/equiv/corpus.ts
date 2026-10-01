@@ -5,7 +5,7 @@
 // log), delivery over http from
 // the VM, wakes by the waker), on a script clock. It exercises the shell
 // under run-handler (writes, cwd, failures, sleeps and their wakes), the
-// script runtimes, objects/head/subscribe handlers, the loop with bash and
+// script runtimes, the kernel's objects/head/dispatch operations (#77), the loop with bash and
 // message tools, replies, resolves (no claims, #40), delivery failures, inference
 // errors, two agents talking, the owner's mailbox instance, and a low
 // fuelPerStep. The owner speaks raw BRC-33 (src/client/raw.ts); the
@@ -215,7 +215,7 @@ const mailboxes: string[] = [];
   made.push("gen-scripts");
 }
 
-// ---------------------------------------------------------------- heads and subscriptions
+// ---------------------------------------------------------------- heads and the dispatch table (#77: kernel operations)
 {
   const h = await host();
   const i = await h.add("gen-subs");
@@ -226,14 +226,16 @@ const mailboxes: string[] = [];
   for (const b of bundles) await h.send(i, "objects", b);
   const handler = (await h.router.loaded.get("gen-subs")!.kernel.call("programs") as Record<string, unknown>)["run-handler"];
   await h.send(i, "chat", { text: "hello?" }, sw, sid);
-  // The subscribe body's sender: bytes (format 2), and once as hex (a JSON-era client; the handler takes both).
-  await h.send(i, "subscribe", { op: "add", sender: Uint8Array.from(Buffer.from(sid, "hex")), box: "run", handler });
-  await h.send(i, "subscribe", { op: "add", sender: sid, box: "run", handler }); // no change
+  // The kernel's `dispatch` operation (#77): a row's sender is bytes; the same row again changes nothing; a hex sender is refused.
+  const row = { transport: "mailbox", address: "run", sender: Uint8Array.from(Buffer.from(sid, "hex")), program: handler };
+  await h.send(i, "dispatch", { op: "add", row });
+  await h.send(i, "dispatch", { op: "add", row }); // no change
+  await h.send(i, "dispatch", { op: "add", row: { ...row, sender: sid } }); // refused: the sender is not a key
   h.later(1);
   await h.send(i, "run", { cmd: "ls; echo stranger", tree: root }, sw, sid); // run; its result has nowhere to go (no peer record)
-  await h.send(i, "subscribe", { op: "remove", sender: Uint8Array.from(Buffer.from(sid, "hex")), box: "run", handler });
-  await h.send(i, "run", { cmd: "echo again", tree: root }, sw, sid).catch(() => {}); // not subscribed: refused, nothing written
-  await h.send(i, "subscribe", { op: "bogus", box: "run", handler });
+  await h.send(i, "dispatch", { op: "remove", row });
+  await h.send(i, "run", { cmd: "echo again", tree: root }, sw, sid).catch(() => {}); // no row: refused, nothing written
+  await h.send(i, "dispatch", { op: "bogus", row });
   await h.send(i, "head", { name: "work", tree: root });
   await h.send(i, "head", { name: "bad name", tree: root });
   await h.send(i, "run", { cmd: "echo x > y; ls" });

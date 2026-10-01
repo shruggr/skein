@@ -126,7 +126,7 @@ function get(path: string, method = "GET", headers: Record<string, string> = {})
 }
 // #68: every request is an entry (the site's access log); none moves a head.
 const entries = async () => { const k = (await router.hydrate("site")).kernel; return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
-const heads = async () => { const k = (await router.hydrate("site")).kernel; return [String(await k.call("head", "main")), String(await k.call("head", "sessions"))]; };
+const heads = async () => { const k = (await router.hydrate("site")).kernel; return [String(await k.call("head", "main")), String(await k.call("head", "frontdoor/sessions"))]; };
 
 try {
   await router.listen(0);

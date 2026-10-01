@@ -109,7 +109,7 @@ async function talk(r: Router, handles: string[]): Promise<void> {
     await box.ack([a!.id]);
     await send("run", { cmd: "cat etc/config.json | head -c 1; ls bin | head -3; cat SOUL.md" });
     const [x] = await until(`${h}'s run`, async () => { const y = await inbox("results"); return y.length ? y : undefined; });
-    check(text(x!.body.stdout).includes("booted from a system tree") && text(x!.body.stdout).includes("head-handler.cid"), `${h}: a run over main sees the system tree (${JSON.stringify(text(x!.body.stdout)).slice(0, 100)})`);
+    check(text(x!.body.stdout).includes("booted from a system tree") && text(x!.body.stdout).includes("frontdoor.cid"), `${h}: a run over main sees the system tree (${JSON.stringify(text(x!.body.stdout)).slice(0, 100)})`);
     await box.ack([x!.id]);
     if (!withComponent) continue;
     // The component handler from bin/ (#34): an owner's `list` to its box, answered by the component.
@@ -147,8 +147,8 @@ try {
     // A WASI 0.2 component as a handler (#34): its bytes in bin/, its record's metadata beside it, a box for it.
     copyFileSync(COMPONENT, join(sys, "bin/wallet.wasm"));
     await fs.writeFile(join(sys, "bin/wallet.json"), JSON.stringify({ inputs: WALLET.inputs, services: WALLET.services, description: WALLET.description }));
-    const subs = JSON.parse(readFileSync(join(sys, "etc/subscriptions.json"), "utf8"));
-    await fs.writeFile(join(sys, "etc/subscriptions.json"), JSON.stringify([...subs, { sender: "$owner", box: "wallet", handler: "wallet" }]));
+    const rows = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8"));
+    await fs.writeFile(join(sys, "etc/dispatch.json"), JSON.stringify([...rows, { address: "wallet", sender: "$owner", program: "wallet" }]));
     config.defaults.walletNetwork = "regtest";
   } else process.stdout.write("note: no wallet component build (programs/wallet: zig build component); the component handler case is skipped\n");
   await fs.writeFile(join(sys, "etc/config.json"), JSON.stringify(config));
@@ -176,10 +176,10 @@ try {
   await router.start();
   for (const h of ["alpha", "beta"]) {
     const k = router.loaded.get(h)!.kernel;
-    const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; subscriptions: unknown[] };
+    const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; dispatch: unknown[] };
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
-    check(Object.keys(g.programs).sort().join() === `frontdoor,head-handler,loop,messagebox,objects-handler,resolve,run-handler,shell,subscribe-handler${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
+    check(Object.keys(g.programs).sort().join() === `frontdoor,loop,messagebox,resolve,run-handler,shell${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
     check(keyHex((await k.genesis() as { owner: Uint8Array }).owner) === ownerId, `${h}: $owner is the host's owner`);
   }
   await talk(router, ["alpha", "beta"]);

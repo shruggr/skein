@@ -60,8 +60,8 @@ try {
     copyFileSync(join(work, "alpha.db"), live);
     if (existsSync(join(work, "alpha.db-wal"))) copyFileSync(join(work, "alpha.db-wal"), `${live}-wal`);
     const k = new Kernel({ db: live, handle: "alpha", domain: "localhost", command: kernelBin, env: { SKEIN_HOME: work } });
-    const g = await k.genesis() as { identity: Uint8Array; subscriptions: Array<{ match: { sender?: Uint8Array; box?: string } }> };
-    const owner = g.subscriptions.find((s) => s.match.box === "p2p")!.match.sender!;
+    const g = await k.genesis() as { identity: Uint8Array; dispatch: Array<{ transport: string; address: string; sender: Uint8Array | string }> };
+    const owner = g.dispatch.find((r) => r.transport === "mailbox" && r.address === "p2p")!.sender as Uint8Array;
     const bodyBytes = dagCbor.encode({ op: "publish", topic: "skein-test/demo", text: "from a tab" });
     const mail = { kind: "mail", op: "put", sender: owner, recipient: g.identity, box: "p2p", body: encode(dagCbor.decode(bodyBytes)).cid };
     const mailCid = await k.store.put(mail as never);

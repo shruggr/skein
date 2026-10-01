@@ -113,7 +113,8 @@ writeFileSync(join(sys, "bin/overlay.json"), JSON.stringify({ inputs: handler, d
 writeFileSync(join(sys, "bin/topic-demo.json"), JSON.stringify({ inputs: {}, description: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP.\n\nEvery such output is admitted; the tokens a transaction spends are retained when it admits one." }));
 writeFileSync(join(sys, "bin/lookup-demo.json"), JSON.stringify({ inputs: {}, description: "Demo token lookup: {topic}, {scriptHash, topic?}, {txid, outputIndex, topic}." }));
 // No broadcaster in the tree: a broadcast is an event the host carries (#65); the host's genesis seeds its status provider in the address book.
-const config = () => JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) } });
+// #77: a genesis-wired engine writes only the heads the tree's `scopes` name (the wallet's, its gossip); a lookup service program writes its own `ls:<service>`.
+const config = () => JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) }, scopes: { overlay: ["wallet", "overlay:gossip", "ls:ls_demo"], "lookup-demo": ["ls:ls_demo"] } });
 writeFileSync(join(sys, "etc/config.json"), config());
 // The submit entries, the chain feed (headers, proofs) and the status provider's messages (#65: `$status`).
 writeFileSync(join(sys, "etc/subscriptions.json"), JSON.stringify([{ box: "submit", handler: "overlay" }, { box: "chain", handler: "overlay" }, { sender: "$status", box: "status", handler: "overlay" }]));

@@ -3,10 +3,10 @@
 // the stock system on a router:
 //
 //   skein-static (shruggr/skein-static at a pinned commit, cloned by the
-//   install itself; or $SKEIN_STATIC_DIR): the head `static` is the app
-//   record (the manifest as installed, linking the tree), its routes are
-//   served under /static/ (the files from `main`), the routes table is the
-//   head `routes`; uninstalled, its routes are gone.
+//   install itself; or $SKEIN_STATIC_DIR): the head `static/app` is the app
+//   record (the manifest as installed, linking the tree; `static` an alias for
+//   its pre-#77 manifest), its rows are served under /static/ (the files from
+//   `main`) out of the kernel's dispatch table; uninstalled, its rows are gone.
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
 //   start message schedules a heartbeat with the cron provider, whose tick
@@ -88,17 +88,16 @@ try {
   // ------------------------------------------------ skein-static, from its repo
   const staticSpec = process.env.SKEIN_STATIC_DIR ?? `${STATIC_REPO}#${STATIC_REV}`;
   let code = await cli("install", staticSpec, "--instance", "inst", "--dry-run");
-  check(code === 0 && out.some((l) => l.includes("route     /static/site* → static.get (open: no session)")) && out.some((l) => l.includes("route     /static/ → static.get")), `the prompt shows static's routes under /static/ (${code}: ${out.filter((l) => l.includes("route")).join(" | ")})`);
-  check((await record("static")) === undefined, "a dry run sends nothing");
+  check(code === 0 && out.some((l) => l.includes("row       http /static/site* from anyone → static.get")) && out.some((l) => l.includes("row       http /static/ from anyone → static.get")), `the prompt shows static's rows under /static/ (${code}: ${out.filter((l) => l.includes("row ")).join(" | ")})`);
+  check((await record("static/app")) === undefined, "a dry run sends nothing");
   code = await cli("install", staticSpec, "--instance", "inst");
   check(code === 1 && err.some((l) => /not approved/.test(l)), `without --approve-all (and no terminal) the install is refused (${code} ${err.join(" ")})`);
   code = await cli("install", staticSpec, "--instance", "inst", "--approve-all");
   check(code === 0, `skein-host install skein-static: exit ${code} ${err.join(" ")}`);
-  const st = await record("static");
-  check(st?.kind === "app" && st.name === "static" && !!st.tree && !!(st.programs as Record<string, unknown>)?.static, `the head static is the app record, linking the tree and the program record (${JSON.stringify(st && { kind: st.kind, name: st.name, heads: st.heads })})`);
-  const rt = await record("routes");
-  const paths = ((rt?.routes ?? []) as Array<Record<string, unknown>>).map((r) => `${r.path ?? `${r.prefix}*`}:${r.app}`);
-  check(paths.join(",") === "/static/site*:static,/static/:static", `the routes table (head routes): ${paths.join(", ")}`);
+  const st = await record("static/app");
+  check(st?.kind === "app" && st.name === "static" && !!st.tree && !!(st.programs as Record<string, unknown>)?.static && (await record("static"))?.kind === "app", `the head static/app is the app record, linking the tree and the program record; static its alias (${JSON.stringify(st && { kind: st.kind, name: st.name, grants: st.grants, legacy: st.legacy })})`);
+  const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
+  check((await appRows("static")).join(",") === "http /static/site*,http /static/", `the dispatch table has static's rows: ${(await appRows("static")).join(", ")}`);
   let r = await get("/static/");
   check(r.status === 200 && r.body === "<p>the site</p>\n", `GET /static/: main's www/index.html (${r.status})`);
   r = await get("/static/site/docs/");
@@ -108,16 +107,16 @@ try {
 
   // ------------------------------------------------ app-demo: start, ticks, calls
   code = await cli("install", demoDir, "--instance", "inst", "--approve-all");
-  check(code === 0 && out.some((l) => l.startsWith("  box       app-demo-tick → demo, from $cron")), `skein-host install app-demo: exit ${code} ${err.join(" ")}`);
+  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo-tick from $cron → demo")), `skein-host install app-demo: exit ${code} ${err.join(" ")}`);
   const state = async () => {
-    const rec = await record("app-demo");
+    const rec = await record("app-demo/app");
     return rec?.state ? await (await k()).store.get(rec.state as CID) as { count: number; ticks: number } : undefined;
   };
   const ticked = await until("the first tick", async () => { await h.router.settled(); const s = await state(); return s && s.ticks >= 1 ? s : undefined; }, 20_000).catch(() => undefined);
   check(!!ticked, `the start message scheduled a heartbeat with the cron provider, and its tick reached app-demo-tick from $cron (ticks ${ticked?.ticks})`);
   check(h.lines.some((l) => /cron: beat \(app-demo-tick every 3600000 ms\) scheduled/.test(l)), "the cron provider took the schedule (beat, every hour)");
 
-  // A stranger's "tick" is not admitted (only $cron is subscribed to app-demo-tick).
+  // A stranger's "tick" is not admitted (only $cron's row takes app-demo-tick).
   const strangerKey = PrivateKey.fromRandom();
   const refused = await new RawBox(ephemeralWallet(strangerKey), `${h.base}/@inst`).send(inst, "app-demo-tick", { kind: "cron", name: "fake", due: 0 }).then(() => "sent", (e: Error) => e.message);
   await h.router.settled();
@@ -168,23 +167,23 @@ try {
   c = await call({ fn: "demo.counter.nope" });
   check(c.status === 404 && c.v.error?.code === "unknown-fn", `POST /app-demo/call nope: ${c.status}`);
 
-  // An install over itself: nothing new to subscribe or route, the state kept, start sent again.
+  // An install over itself: no new row, the state kept, start sent again.
   code = await cli("install", demoDir, "--instance", "inst", "--approve-all");
-  check(code === 0 && out[0]?.startsWith("upgrade app-demo 0.1.0 (installed: 0.1.0)") && out.some((l) => l.includes("subscribe ×0 · routes ×0 · start")), `reinstalled: ${out[0]} · ${out.find((l) => l.startsWith("  messages"))}`);
+  check(code === 0 && out[0]?.startsWith("upgrade app-demo 0.1.0 (installed: 0.1.0)") && out.some((l) => l.includes("dispatch ×0 · start")), `reinstalled: ${out[0]} · ${out.find((l) => l.startsWith("  messages"))}`);
   check((await state())?.count === 7, "the state is kept across the install");
 
   // ------------------------------------------------ uninstall
   code = await cli("uninstall", "app-demo", "--instance", "inst", "--approve-all");
-  check(code === 0 && out[0]?.includes("subscribe remove ×2 · routes remove ×1"), `skein-host uninstall app-demo: ${code} ${out[0]} ${err.join(" ")}`);
+  check(code === 0 && out[0]?.includes("dispatch remove ×3"), `skein-host uninstall app-demo: ${code} ${out[0]} ${err.join(" ")}`);
   const stopped = await until("the stop", async () => { await h.router.settled(); return h.lines.some((l) => /cron: beat stopped$/.test(l)) || undefined; }, 10_000).catch(() => false);
-  check(stopped, "the stop message reached app-demo before its subscriptions went: the cron provider stopped beat");
+  check(stopped, "the stop message reached app-demo before its rows went: the cron provider stopped beat");
   c = await call({ fn: "demo.counter.get" });
   check(c.status === 404, `after uninstall, /app-demo/call is no route: ${c.status}`);
-  check((await record("app-demo"))?.kind === "app", "the head app-demo is left");
+  check((await record("app-demo/app"))?.kind === "app", "the head app-demo/app is left");
   code = await cli("uninstall", "static", "--instance", "inst", "--approve-all");
   r = await get("/static/");
   check(code === 0 && r.status === 404, `skein-host uninstall static: its routes are gone (${code}, GET /static/ ${r.status})`);
-  check(((await record("routes"))?.routes as unknown[]).length === 0, "the routes table is empty");
+  check((await appRows("static")).length === 0 && (await appRows("app-demo")).length === 0, "no app rows left in the dispatch table");
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

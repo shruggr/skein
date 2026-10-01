@@ -152,11 +152,12 @@ try {
   let code = await cli("install", spec, "--instance", "ov", "--approve-all");
   const derived = out.filter((l) => l.includes("(derived: config.overlay)"));
   check(code === 0, `skein-host install skein-overlay: exit ${code} ${err.join(" ")}`);
-  check(["route     libp2p:tm_demo → overlay.submit", "route     libp2p:tm_demo-admit → overlay.peerAdmit", "route     libp2p:tm_demo-proof → overlay.peerProof", "route     /overlay/submit → overlay.submit (open: no session)", "route     /overlay/lookup → overlay.lookup (open: no session)", "box       submit → overlay, from *", "box       chain → overlay, from *", "box       status → overlay, from $status", "heads     ls:ls_demo"].every((x) => derived.some((l) => l.includes(x))), `the prompt shows the wiring derived from config.overlay (${derived.length} lines: ${derived.map((l) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "")).join(" | ")})`);
-  const app = await record("overlay");
-  const routesT = ((await record("routes"))?.routes ?? []) as Array<Record<string, unknown>>;
-  check(app?.kind === "app" && (app.config as { overlay?: unknown })?.overlay !== undefined, "the head overlay is the app record, with config.overlay");
-  check(["libp2p:tm_demo", "libp2p:tm_demo-admit", "libp2p:tm_demo-proof", "/overlay/submit", "/overlay/lookup"].every((p) => routesT.some((r) => r.path === p && r.app === "overlay")), `the routes table (head routes) has the derived routes: ${routesT.map((r) => r.path ?? r.prefix).join(", ")}`);
+  check(["row       libp2p tm_demo from anyone → overlay.submit", "row       libp2p tm_demo-admit from anyone → overlay.peerAdmit", "row       libp2p tm_demo-proof from anyone → overlay.peerProof", "row       http /overlay/submit from anyone → overlay.submit", "row       http /overlay/lookup from anyone → overlay.lookup", "row       mailbox submit from anyone → overlay", "row       mailbox chain from anyone → overlay", "row       mailbox status from $status → overlay", "grants    overlay, wallet, overlay:gossip, ls:ls_demo"].every((x) => derived.some((l) => l.includes(x))), `the prompt shows the wiring derived from config.overlay (${derived.length} lines: ${derived.map((l) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "")).join(" | ")})`);
+  const app = await record("overlay/app");
+  const appRows = async () => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "overlay");
+  const rowsT = await appRows();
+  check(app?.kind === "app" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await record("overlay"))?.kind === "app", "the head overlay/app is the app record, with config.overlay (overlay its alias: a pre-#77 manifest)");
+  check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "http /overlay/lookup"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)), `the dispatch table has the derived rows: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const topics1 = ["tm_demo", "tm_demo-admit", "tm_demo-proof"];
   const s1 = await until("the node subscribes the installed topics", () => { const s = served(); return s && topics1.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!s1 && s1.topics.length === 3, `live, no restart: the instance's node subscribes ${s1?.topics.join(", ")}`);
@@ -225,7 +226,7 @@ try {
   mf.config.overlay.lookups.ls_demo!.topics = ["tm_demo", "tm_two"];
   writeFileSync(join(dir, "etc/app.json"), JSON.stringify(mf, null, 2));
   code = await cli("install", dir, "--instance", "ov", "--approve-all");
-  check(code === 0 && /^upgrade overlay /.test(out[0] ?? "") && out.some((l) => l.includes("route     libp2p:tm_two → overlay.submit")), `reinstalled with config.overlay.topics.tm_two: exit ${code} ${out[0]} ${err.join(" ")}`);
+  check(code === 0 && /^upgrade overlay /.test(out[0] ?? "") && out.some((l) => l.includes("row       libp2p tm_two from anyone → overlay.submit")), `reinstalled with config.overlay.topics.tm_two: exit ${code} ${out[0]} ${err.join(" ")}`);
   const topics2 = [...topics1, "tm_two", "tm_two-admit", "tm_two-proof"];
   const s2 = await until("the node subscribes tm_two", () => { const s = served(); return s && topics2.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!s2 && s2.topics.length === 6 && rA.p2p?.node("ov") !== undefined, `no restart: the node now subscribes ${s2?.topics.join(", ")}`);
@@ -241,8 +242,8 @@ try {
   // ------------------------------------------------ uninstall: the routes go, the node unsubscribes
   code = await cli("uninstall", "overlay", "--instance", "ov", "--approve-all");
   check(code === 0, `skein-host uninstall overlay: exit ${code} ${out[0]} ${err.join(" ")}`);
-  const left = ((await record("routes"))?.routes ?? []) as unknown[];
-  check(left.length === 0, `the routes table is empty (${left.length})`);
+  const left = await appRows();
+  check(left.length === 0, `no overlay rows left in the dispatch table (${left.length})`);
   const gone = await until("the node unsubscribes", () => (served() === undefined && rA.p2p?.node("ov") === undefined) || undefined, 10_000).catch(() => false);
   check(gone, "no libp2p route left and none in the genesis: the instance's node unsubscribed and stopped");
   const leftB = await until("the publisher sees it leave", () => (subscribers(rB, "pub", "tm_demo") === 0 && subscribers(rB, "pub", "tm_two") === 0) || undefined, 20_000).catch(() => false);

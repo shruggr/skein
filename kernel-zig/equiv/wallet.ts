@@ -294,9 +294,9 @@ try {
   await pk.store.put(WALLET as never);
   view = openStoreFile(db, { readOnly: true });
   payeeView = openStoreFile(payeeDb, { readOnly: true });
-  const g = await k.genesis() as { addressBook?: Array<{ role?: string; transport?: string; key?: Uint8Array }>; subscriptions?: Array<{ match: { sender?: Uint8Array; box?: string } }> };
+  const g = await k.genesis() as { addressBook?: Array<{ role?: string; transport?: string; key?: Uint8Array }>; dispatch?: Array<{ transport: string; address: string; sender: Uint8Array | string }> };
   const statusKey = g.addressBook?.find((e) => e.role === "status" && e.transport === "local")?.key;
-  report.statusProvider = !!statusKey && !!g.subscriptions?.some((s) => s.match.box === "status" && s.match.sender && Buffer.from(s.match.sender).equals(Buffer.from(statusKey)));
+  report.statusProvider = !!statusKey && !!g.dispatch?.some((r) => r.transport === "mailbox" && r.address === "status" && r.sender instanceof Uint8Array && Buffer.from(r.sender).equals(Buffer.from(statusKey)));
 
   // The funding: mined alone at 101 (root = its txid), paying the owner.
   const fund = new Transaction();
@@ -489,7 +489,7 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 process.stdout.write(`== the wallet on ${abi}${abi === "component" ? ` (${component})` : ""}\n`);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
-check(report.statusProvider === true, "#65: the genesis's address book names the host's status provider (local, role status), and the instance subscribes to it in `status`");
+check(report.statusProvider === true, "#65: the genesis's address book names the host's status provider (local, role status), and the instance's dispatch table takes its `status` messages");
 check(eq(report.headers, [100, 100]), `headers 1..100 from the owner, chained from regtest's genesis (${JSON.stringify(report.headers)})`);
 check(eq(report.headerEntry, ["header", 102]), `plain header entries from the router's SSE feed, routed by a sender-less subscription (${JSON.stringify(report.headerEntry)})`);
 check(eq(report.internalize, [true, "unproven"]), `a BRC-29 payment internalized (${JSON.stringify(report.internalize)})`);
