@@ -11,7 +11,6 @@ two places.
 
 | module | source | what |
 |---|---|---|
-| `objects-handler.wasm`, `head-handler.wasm`, `subscribe-handler.wasm` | `programs/` | the install boxes (`objects`, `head`, `subscribe`): boundary programs every instance needs |
 | `messagebox.wasm`, `frontdoor.wasm`, `resolve.wasm` | `programs/` | the boundary programs (#40) |
 | `wallet.wasm` | `programs/wallet` | the wallet's handler (#29), over the SDK's wallet library |
 | `wire-probe.wasm` | `programs/test/wire-probe` | a test program, not pinned |

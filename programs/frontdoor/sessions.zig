@@ -4,7 +4,7 @@
 //! a signed request's step reads its session back. The table survives a
 //! restart; like every record it is prunable later.
 //!
-//!   head `sessions` → {kind: "sessions", buckets: [<bucket> × 16]}
+//!   head `frontdoor/sessions` (#77: the front door's own) → {kind: "sessions", buckets: [<bucket> × 16]}
 //!   bucket          → {kind: "session-bucket", sessions: [{nonce, peer: bytes(33), peerNonce, created}]}
 //!
 //! `nonce` is ours (what a request's `yourNonce` names), `peerNonce` the
@@ -21,7 +21,7 @@ const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
-pub const HEAD = "sessions";
+pub const HEAD = "frontdoor/sessions";
 const BUCKETS = 16;
 
 pub const Session = struct { peer: []const u8, ours: []const u8, theirs: []const u8, created: i128 };

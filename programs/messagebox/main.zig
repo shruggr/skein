@@ -149,14 +149,20 @@ fn ownerKey(in: Value) []const u8 {
     return Value.bytesOf(in.get("owner")) orelse "";
 }
 
-/// The first subscription (sender, box) matches, as the kernel routes (subscriptions.zig matches).
+/// The first `mailbox` dispatch row for (sender, box), as the kernel routes (#77, dispatch.zig forMail):
+/// its program's CID, or null for a kernel row (an admin box: the message is taken, by the kernel).
 fn route(in: Value, sender: []const u8, box: []const u8) ?[]const u8 {
-    const rs = in.get("subscriptions") orelse return null;
+    const rs = in.get("dispatch") orelse return null;
     if (rs != .array) return null;
     for (rs.array) |r| {
-        if (Value.bytesOf(r.get("sender"))) |s| if (!eql(u8, s, sender)) continue;
-        if (Value.str(r.get("box"))) |b| if (!eql(u8, b, box)) continue;
-        return Value.cidOf(r.get("handler"));
+        if (!eql(u8, Value.str(r.get("transport")) orelse "", "mailbox")) continue;
+        const addr = Value.str(r.get("address")) orelse continue;
+        if (!eql(u8, addr, "*") and !eql(u8, addr, box)) continue;
+        const s = r.get("sender") orelse continue;
+        if (Value.str(s)) |t| {
+            if (!eql(u8, t, "*")) continue;
+        } else if (!eql(u8, Value.bytesOf(s) orelse "", sender)) continue;
+        return Value.cidOf(r.get("program")) orelse "";
     }
     return null;
 }

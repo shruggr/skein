@@ -9,7 +9,7 @@
 //!   answer   {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
 //!            (or, while a stream frame's handler waits on a thread, {wait: {}, admit?})
 //!
-//! Routing: the route whose `path` is `libp2p:<topic>` (or `libp2p:<protocol>`).
+//! Routing (#77): the kernel's dispatch row {transport: "libp2p", address: <topic> | </protocol>, program, fn}.
 //! None: ignore (this instance cannot judge it; GossipSub does not penalise).
 //!
 //! A topic message is verified here, before any handler sees it, from the
@@ -77,7 +77,7 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     const body = Value.bytesOf(req.get("body")) orelse "";
     const key = keyOfPeerId(from) orelse return verdict(a, "reject", "from is not a secp256k1 peer ID");
     // #70: a signed message over libp2p — a frame on MESSAGE_PROTOCOL, or a topic message no route takes.
-    const route = findRoute(in, source) orelse {
+    const route = findRoute(in, name) orelse {
         if (protocol != null and !eql(u8, protocol.?, MESSAGE_PROTOCOL)) return verdict(a, "ignore", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
         if (topic) |t| {
             if (in.get("seen") != null) return verdict(a, "ignore", "already admitted");
@@ -116,9 +116,9 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     }
     try h.put("body", .{ .bytes = body });
     try h.put("request", cbor.cidv(rc));
-    // The routes-table entry that matched (as HTTP's handlers get it, main.zig invoke): an installed
-    // route's `program` and `app` tell a handler which app it runs as (#72).
-    try h.put("match", route);
+    // The dispatch row that matched (as HTTP's handlers get it, main.zig invoke, with the pre-#77 keys): an
+    // installed row's `program` and `app` tell a handler which app it runs as (#72).
+    try h.put("match", try main.legacyMatch(a, route));
     for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     const out = sk.callValue(a, prog, func, h.value()) catch |err| {
         if (err == error.ImportFailed) return verdict(a, "ignore", try std.fmt.allocPrint(a, "the handler failed: {s}", .{sk.lastError()}));
@@ -168,10 +168,14 @@ fn verdict(a: Allocator, v: []const u8, reason: ?[]const u8) !Value {
     return m.value();
 }
 
-fn findRoute(in: Value, source: []const u8) ?Value {
-    const rs = in.get("routes") orelse return null;
+/// The `libp2p` row whose address is the topic or protocol (#77).
+fn findRoute(in: Value, name: []const u8) ?Value {
+    const rs = in.get("dispatch") orelse return null;
     if (rs != .array) return null;
-    for (rs.array) |r| if (Value.str(r.get("path"))) |p| if (eql(u8, p, source)) return r;
+    for (rs.array) |r| {
+        if (!eql(u8, Value.str(r.get("transport")) orelse "", "libp2p")) continue;
+        if (Value.str(r.get("address"))) |p| if (eql(u8, p, name)) return r;
+    }
     return null;
 }
 

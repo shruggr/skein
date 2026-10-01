@@ -13,10 +13,10 @@
 //!   it finishes with the peer record as its stdout, having written it, or
 //!   errors ("transient: …" when no answer came, or a 5xx). `key`: the
 //!   identity the launcher expects — another answer is refused.
-//! Stepped on messages routed here by subscriptions:
-//!   box `peers` (the owner, the admin): {op: "add", key, transport?, address?
-//!     | url?, role?, handle?, domain?} | {op: "remove", key}. `url` alone is a
-//!     mailbox; `transport` defaults to "mailbox". Written at once.
+//! Stepped on messages a dispatch row sends here (#77: the admin's `peers`
+//! box is the kernel's own operation now, not this program's; writing the
+//! head `peers` — one of the kernel's tables — from a lookup is a transitional
+//! grant in the genesis's `scopes`, STOCK_SCOPES resolve → peers, to review):
 //!   box `register`, only where an application wires it (#40: the stock
 //!     genesis does not): a claim {handle, domain} — or a BRC-169 envelope,
 //!     whose sender's handle and domain are the claim — resolved; the record
@@ -186,19 +186,7 @@ fn step(a: Allocator, in: Value) !void {
         const domain = Value.str(claim.get("domain")) orelse return sk.report("a claim names a domain");
         return begin(a, in, .{ .handle = handle, .domain = domain, .key = sender, .source = "claim" });
     }
-    // The admin's box.
-    const op = Value.str(body.get("op")) orelse return sk.report("peers wants {op: add|remove, key, transport?, address? | url?, role?, handle?, domain?}");
-    const key = keyOf(a, body.get("key")) orelse return sk.report("peers: `key` is not an identity key");
-    if (eql(u8, op, "remove")) {
-        _ = try writePeer(a, key, "", null, null, null, null, at, "admin");
-        return;
-    }
-    if (!eql(u8, op, "add")) return sk.report("peers: op is add or remove");
-    const transport = Value.str(body.get("transport")) orelse "mailbox";
-    if (!eql(u8, transport, "mailbox") and !eql(u8, transport, "libp2p") and !eql(u8, transport, "local")) return sk.report("peers: transport is mailbox, libp2p or local");
-    const address = Value.str(body.get("address")) orelse Value.str(body.get("url")) orelse return sk.report("peers add wants an address (a mailbox's url, a peer ID or topic:<name>, a provider's name)");
-    if (address.len == 0) return sk.report("peers add wants an address");
-    _ = try writePeer(a, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), at, "admin");
+    return sk.report(try std.fmt.allocPrint(a, "resolve takes no messages in box {s} (the admin's `peers` box is the kernel's operation, #77)", .{box}));
 }
 
 /// A step on the fetch provider's answer.

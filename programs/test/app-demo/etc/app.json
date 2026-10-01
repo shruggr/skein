@@ -5,27 +5,66 @@
   "programs": {
     "demo": "bin/app-demo.wasm"
   },
-  "handler": "demo",
   "provides": [
     {
       "interface": "demo.counter/1",
       "functions": {
-        "get":  {"writes": false, "args": {}, "answer": {"count": "int"}},
-        "add":  {"writes": true,  "args": {"by": "int", "note?": "string"}, "answer": {"count": "int"}},
-        "peek": {"writes": false, "args": {}, "answer": {"count": "int"}}
+        "get": {
+          "writes": false,
+          "args": {},
+          "answer": {
+            "count": "int"
+          }
+        },
+        "add": {
+          "writes": true,
+          "args": {
+            "by": "int",
+            "note?": "string"
+          },
+          "answer": {
+            "count": "int"
+          }
+        },
+        "peek": {
+          "writes": false,
+          "args": {},
+          "answer": {
+            "count": "int"
+          }
+        }
       }
     }
   ],
   "requires": [],
-  "boxes": [
-    {"box": "app-demo", "senders": ["*"]},
-    {"box": "app-demo-tick", "senders": ["$cron"]}
+  "dispatch": [
+    {
+      "address": "app-demo",
+      "sender": "*",
+      "program": "demo"
+    },
+    {
+      "address": "app-demo-tick",
+      "sender": "$cron",
+      "program": "demo"
+    },
+    {
+      "transport": "http",
+      "address": "/call",
+      "sender": "session",
+      "program": "demo",
+      "fn": "call"
+    }
   ],
-  "routes": [
-    {"path": "/call", "program": "demo", "fn": "call"}
-  ],
-  "heads": ["app-demo"],
-  "start": {"body": {"kind": "app-demo-start"}},
-  "stop": {"body": {"kind": "app-demo-stop"}},
-  "description": "A counter (skein's test app for install, #72/#76): demo.counter/1 over its head's state, a heartbeat from the cron provider scheduled by its start message."
+  "start": {
+    "body": {
+      "kind": "app-demo-start"
+    }
+  },
+  "stop": {
+    "body": {
+      "kind": "app-demo-stop"
+    }
+  },
+  "description": "A counter (skein's test app for install, #72/#76/#77): demo.counter/1 over its head's state (app-demo/app), a heartbeat from the cron provider scheduled by its start message."
 }

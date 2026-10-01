@@ -8,7 +8,7 @@
 //! failed verification is a recorded refusal: the step answers it and
 //! nothing else changes.
 //!
-//! Stepped: input {kind: "step", args: {request: <record>, transport}, routes, reads, seen?, tip?, …}
+//! Stepped: input {kind: "step", args: {request: <record>, transport}, dispatch, reads, seen?, tip?, …}
 //!   the request record (kernel-zig/src/log.zig):
 //!     http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
 //!     local   {kind: "message", message: <a signed mail record>, body: bytes}   (#70: a
@@ -22,12 +22,15 @@
 //!   an entry is {mail: <record>, body: bytes} or {event: <record>, box}:
 //!   routed by the kernel after the step as the entries they once were.
 //!
-//! The routes table (the genesis's `routes`, from etc/routes.json, then the
-//! installed ones, the head `routes` — #72):
-//!   [{path | prefix, program: <cid>, fn, auth?: "none", read?: <op>}]
-//!   exact paths first, then the longest prefix. `auth` defaults to BRC-104;
-//!   "none" is for open routes (an overlay's submit and lookup). `read`
-//!   names an op the reads table must allow the caller.
+//! The routes are the kernel's dispatch table (#77: the `dispatch` rows in the
+//! input, as the kernel holds them — the genesis's seed and the admin's
+//! changes; docs/MESSAGES.md "The dispatch table"), this transport's rows:
+//!   {transport: "http", address: <path>, prefix?: true, sender: "*" | "session" | <key>, program, fn, read?, …}
+//!   exact paths first, then the longest prefix. `sender` "*" is an open
+//!   route (no session: an overlay's submit and lookup); "session" needs a
+//!   BRC-103/104 session, any identity; a key needs a session proving that
+//!   identity (another's is 403). `read` names an op the reads table must
+//!   allow the caller. The row is the handler's `match`.
 //! The reads table (the genesis's `reads`, from etc/reads.json):
 //!   [{caller?: <key>, op}] — no caller: anyone.
 //!
@@ -45,9 +48,6 @@
 //! admits carries the sender key, the 104 signature and both nonces, so its
 //! authorship verifies from the log alone.
 //!
-//! Stepped as the handler of the box `routes` (#72, routesBox below): the
-//! owner adds or removes an installed route, {op: "add" | "remove", route}.
-//!
 //! Called (a kernel call, #40 — reads only, nothing written):
 //!   fn "read"     {request: <cid>, read: {caller?, peer?, theirs?, requestId?}} → {status, headers, body}
 //!                 a route whose answer is a read of live state (the explorer: the
@@ -57,7 +57,8 @@
 //!                 the answer is signed on the session here (not recorded).
 //!   fn "explore"  the explorer's route handler (explore.zig).
 //!
-//! Sessions are state (#68, sessions.zig): the head `sessions`. A request's
+//! Sessions are state (#68, sessions.zig): the head `frontdoor/sessions` (#77:
+//! the front door's own, under its name). A request's
 //! session is looked up by its `yourNonce`. Expiry: `defaults.sessionTtlMs`
 //! (a day) from `created` (the handshake entry's time); an unknown or
 //! expired session is a plain 401 and the stock client shakes hands again.
@@ -88,11 +89,8 @@ pub fn main() u8 {
 }
 
 fn run(a: Allocator) !void {
-    var in = try sk.input(a);
+    const in = try sk.input(a);
     const kind = Value.str(in.get("kind")) orelse "";
-    // #72: a message in the box `routes` (the owner's change to the routes table), not a request.
-    if (eql(u8, kind, "step")) if (in.get("args")) |args| if (args.get("request") == null and args.get("box") != null) return routesBox(a, in);
-    in = try withRoutes(a, in);
     if (eql(u8, kind, "step")) return sk.answer(a, try stepped(a, in));
     if (!eql(u8, kind, "call")) return sk.report("the front door is stepped on a request, or called (fn \"read\", \"explore\")");
     const func = Value.str(in.get("fn")) orelse "";
@@ -231,7 +229,8 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         resp = try jsonError(a, 404, "ERR_NOT_FOUND", "no route for this path");
         return resp.value(a);
     };
-    if (eql(u8, Value.str(r.get("auth")) orelse "", "none")) return routed(a, in, r, rc, req, null);
+    const who = senderOf(r);
+    if (who == .open) return routed(a, in, r, rc, req, null);
     // BRC-104: a general message.
     const headers = req.get("headers");
     const request_id = brc.headerOf(headers, "x-bsv-auth-request-id") orelse {
@@ -247,12 +246,27 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         };
         return resp.value(a);
     };
+    // #77: a row for one identity takes that identity's session only.
+    if (who == .key and !eql(u8, Value.bytesOf(r.get("sender")).?, v.peer)) {
+        resp = try jsonError(a, 403, "ERR_FORBIDDEN", "this route is another identity's");
+        try sign(a, in, &resp, v);
+        return resp.value(a);
+    }
     if (Value.str(r.get("read"))) |op| if (!mayRead(in, v.peer, op)) {
         resp = try jsonError(a, 403, "ERR_FORBIDDEN", "this identity may not read here");
         try sign(a, in, &resp, v);
         return resp.value(a);
     };
     return routed(a, in, r, rc, req, v);
+}
+
+/// Who a row admits (#77): anyone (an open route), any session, or one identity's session.
+const Who = enum { open, session, key };
+
+fn senderOf(r: Value) Who {
+    const s = r.get("sender") orelse return .session;
+    if (Value.str(s)) |t| return if (eql(u8, t, "*")) .open else .session;
+    return if (Value.bytesOf(s) != null) .key else .session;
 }
 
 /// A later step (#66): the thread the handler waited on has come to rest
@@ -326,99 +340,47 @@ fn unauthorized(msg: []const u8) error{Unauthorized} {
     return error.Unauthorized;
 }
 
-// ---------------------------------------------------------------- routes and reads
+// ---------------------------------------------------------------- the dispatch rows and the reads
 
-/// The head the installed routes live under (#72): {kind: "routes", routes: [<route>]}.
-pub const ROUTES_HEAD = "routes";
-
-/// The routes installed at runtime (the head `routes`), in the order they were added.
-fn headRoutes(a: Allocator) ![]const Value {
-    const root = (try sk.head(a, ROUTES_HEAD)) orelse return &.{};
-    const t = try sk.get(a, root);
-    const rs = t.get("routes") orelse return &.{};
-    return if (rs == .array) rs.array else &.{};
-}
-
-/// The input with its `routes` = the genesis's, then the installed ones (the head `routes`).
-fn withRoutes(a: Allocator, in: Value) !Value {
-    const installed = try headRoutes(a);
-    if (installed.len == 0) return in;
-    const genesis: []const Value = if (in.get("routes")) |g| (if (g == .array) g.array else &.{}) else &.{};
-    var m = cbor.MapBuilder.init(a);
-    if (in == .map) for (in.map) |e| try m.put(e.key, e.value);
-    try m.put("routes", .{ .array = try std.mem.concat(a, Value, &.{ genesis, installed }) });
-    return m.value();
-}
-
-fn routeKey(r: Value) ?struct { kind: []const u8, at: []const u8 } {
-    const path = Value.str(r.get("path"));
-    const prefix = Value.str(r.get("prefix"));
-    if ((path == null) == (prefix == null)) return null;
-    return if (path) |p| .{ .kind = "path", .at = p } else .{ .kind = "prefix", .at = prefix.? };
-}
-
-/// The box `routes` (#72): the owner changes the routes table at runtime.
-/// Body {op: "add", route: {path | prefix, program: <program record CID>,
-/// fn, auth?: "none", read?: <op>, app?: <name>, …the handler's settings}}
-/// adds the route (replacing one with the same path, or the same prefix);
-/// {op: "remove", route: {path | prefix}} removes it. The table is the head
-/// `routes`, {kind: "routes", routes: [<route>]}, read after the genesis's
-/// routes by every request. A remove of a route not there writes nothing.
-/// Whoever is subscribed to the box may change the table: the stock genesis
-/// subscribes the owner.
-fn routesBox(a: Allocator, in: Value) !void {
-    const args = in.get("args").?;
-    const b = try sk.readBody(a, try sk.linkField(args, "message"), try sk.linkField(args, "body"));
-    const op = sk.textField(b, "op") catch |e| return sk.wrap(a, "body", e);
-    const route = b.get("route") orelse return sk.report("body: want {op: add|remove, route}");
-    if (route != .map) return sk.report("body: route is not a map");
-    const key = routeKey(route) orelse return sk.report("route: want a path or a prefix (one of them)");
-    const add = eql(u8, op, "add");
-    if (!add and !eql(u8, op, "remove")) return sk.report("body: want {op: add|remove, route}");
-    if (add) {
-        const prog = Value.cidOf(route.get("program")) orelse return sk.report("route: program is not a CID");
-        if (Value.str(route.get("fn")) == null) return sk.report("route: fn is not text");
-        if (route.get("auth")) |x| if (!eql(u8, Value.str(x) orelse "", "none")) return sk.report("route: auth is \"none\" or absent (BRC-104)");
-        if (route.get("read")) |x| if (Value.str(x) == null) return sk.report("route: read is not text");
-        const p = sk.get(a, prog) catch |e| return sk.wrap(a, try std.fmt.allocPrint(a, "route: program {s}", .{try sk.hex(a, prog)}), e);
-        if (!eql(u8, Value.str(p.get("kind")) orelse "", "program")) return sk.report("route: program is not a program record");
-    }
-    var out = std.array_list.Managed(Value).init(a);
-    var removed = false;
-    for (try headRoutes(a)) |r| {
-        const k = routeKey(r) orelse continue;
-        if (eql(u8, k.kind, key.kind) and eql(u8, k.at, key.at)) {
-            removed = true;
-            continue;
-        }
-        try out.append(r);
-    }
-    if (!add and !removed) return say(a, "routes: remove {s} {s}: not there", .{ key.kind, key.at });
-    if (add) try out.append(route);
-    var t = cbor.MapBuilder.init(a);
-    try t.put("kind", cbor.string("routes"));
-    try t.put("routes", .{ .array = out.items });
-    try sk.advance(ROUTES_HEAD, try sk.put(a, t.value()));
-    return say(a, "routes: {s} {s} {s}", .{ op, key.kind, key.at });
-}
-
-fn say(a: Allocator, comptime f: []const u8, args: anytype) !void {
-    try std.Io.File.stdout().writeStreamingAll(sk.io(), try std.fmt.allocPrint(a, f ++ "\n", args));
-}
-
+/// The `http` row for `route` (#77): an exact address first, then the longest prefix row.
 pub fn findRoute(in: Value, route: []const u8) ?Value {
-    const rs = in.get("routes") orelse return null;
+    const rs = in.get("dispatch") orelse return null;
     if (rs != .array) return null;
-    for (rs.array) |r| if (Value.str(r.get("path"))) |p| if (eql(u8, p, route)) return r;
+    for (rs.array) |r| {
+        if (!eql(u8, Value.str(r.get("transport")) orelse "", "http")) continue;
+        if (isPrefix(r)) continue;
+        if (Value.str(r.get("address"))) |p| if (eql(u8, p, route)) return r;
+    }
     var best: ?Value = null;
     var best_len: usize = 0;
-    for (rs.array) |r| if (Value.str(r.get("prefix"))) |p| {
+    for (rs.array) |r| {
+        if (!eql(u8, Value.str(r.get("transport")) orelse "", "http") or !isPrefix(r)) continue;
+        const p = Value.str(r.get("address")) orelse continue;
         if (std.mem.startsWith(u8, route, p) and p.len >= best_len) {
             best = r;
             best_len = p.len;
         }
-    };
+    }
     return best;
+}
+
+fn isPrefix(r: Value) bool {
+    const p = r.get("prefix") orelse return false;
+    return p == .bool and p.bool;
+}
+
+/// The row as a handler built before #77 reads it (skein-static 0.1.0, the
+/// pinned overlay): the row, plus the pre-#77 route keys — `path: <address>`
+/// for an exact row, `prefix: <address>` (text) for a prefix row, `path:
+/// "libp2p:<address>"` for a libp2p row. A handler on skein-sdk >= 0.3.0
+/// reads `address`; the old keys go with #79 (to review).
+pub fn legacyMatch(a: Allocator, r: Value) !Value {
+    const addr = Value.str(r.get("address")) orelse return r;
+    var m = cbor.MapBuilder.init(a);
+    for (r.map) |e| if (!eql(u8, e.key, "prefix") or !isPrefix(r)) try m.put(e.key, e.value);
+    const t = Value.str(r.get("transport")) orelse "";
+    if (eql(u8, t, "libp2p")) try m.put("path", cbor.string(try std.fmt.allocPrint(a, "libp2p:{s}", .{addr}))) else if (isPrefix(r)) try m.put("prefix", cbor.string(addr)) else try m.put("path", cbor.string(addr));
+    return m.value();
 }
 
 fn mayRead(in: Value, caller: []const u8, op: []const u8) bool {
@@ -445,8 +407,8 @@ fn invoke(a: Allocator, in: Value, r: Value, rc: []const u8, req: Value, v: ?Ver
     const ct = brc.headerOf(req.get("headers"), "content-type") orelse "";
     try h.put("contentType", cbor.string(std.mem.trim(u8, ct[0 .. std.mem.indexOfScalar(u8, ct, ';') orelse ct.len], " ")));
     if (v) |x| try h.put("session", x.proof);
-    // #52: the routes-table entry that matched, as the genesis holds it (a handler's own settings: static's root, index).
-    try h.put("match", r);
+    // #52: the dispatch row that matched (a handler's own settings: static's root, index; the install's app).
+    try h.put("match", try legacyMatch(a, r));
     try h.put("request", cbor.cidv(rc));
     for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     return sk.callValue(a, prog, func, h.value());

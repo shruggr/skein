@@ -5,8 +5,8 @@
 # Zig package dependency by URL+hash, #75 — `zig build` fetches it; override
 # with a sibling checkout via scripts/sdk-local.sh) — the boundary programs
 # (the messagebox, the front door, resolve, the wallet over the SDK's wallet
-# library and bsvz) and the install handlers (objects, head, subscribe), plus
-# the wire-probe test program.
+# library and bsvz; the install handlers went with #77: those are kernel
+# operations), plus the wire-probe test program.
 #
 # The apps' modules are built in their own repos (#71): run-handler and loop
 # in shruggr/skein-workbench (their built modules stay pinned here, moved in by
@@ -14,7 +14,7 @@
 # engine in shruggr/skein-overlay.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-programs=(objects-handler head-handler subscribe-handler messagebox frontdoor resolve wallet)
+programs=(messagebox frontdoor resolve wallet)
 for p in "${programs[@]}"; do
   (cd "programs/$p" && zig build)
   cp "programs/$p/zig-out/bin/$p.wasm" "wasm/$p.wasm"
