@@ -71,7 +71,7 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 | `action` | dag-cbor | `txid`, `tx` (link), `description`, `labels`, `noSend?` | a transaction that is ours |
 | `output` | dag-cbor | `txid`, `vout`, `tx` (link), `basket`, `protocol`, protocol fields | satoshis and script come from the tx |
 | `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (outpoints), `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
-| `broadcast` | dag-cbor | `txid`, `subject` (the tx's CID), `arc` (URL), `txStatus` (last heard), `since` (ms, first broadcast) | a transaction awaiting its status |
+| `broadcast` | dag-cbor | `txid`, `subject` (the tx's CID), `txStatus` (last heard), `since` (ms, first broadcast); an overlay's `submission?`, `thread?` | a transaction awaiting its proof (#65: where it went is the host's, not recorded) |
 | `settlement` | dag-cbor | `txid`, `status: "rejected"`, `reason`, `cause?` (the root txid), `at` | a transaction that will never be mined (#37) |
 | `wallet-state` | dag-cbor | `network`, `maps: {name: root \| null}` | what the head `wallet` names |
 | `wallet-result` | dag-cbor | `op`, per-op fields, `state` | a step's answer, kept in its thread |
@@ -222,9 +222,9 @@ provisional until it settles.
 
 | from → to | by | |
 |---|---|---|
-| unproven → proven | a `proof` / `status` entry with a path, ARC's answer, `{op: "proof"}` | the path's root is our header's at its height |
+| unproven → proven | a `proof` event (#65), `{op: "proof"}` | the path's root is our header's at its height |
 | proven → unproven | a reorg (a heavier branch replaces ours from height h) | every proof at ≥ h (`proofHeights`) stops holding; ours are re-posted to ARC and awaited like a fresh broadcast |
-| unproven → rejected | ARC says `REJECTED` / `DOUBLE_SPEND_ATTEMPTED` / `INVALID` / `MALFORMED` (or a 4xx) | reason: ARC's status |
+| unproven → rejected | a status provider says `REJECTED` / `DOUBLE_SPEND_ATTEMPTED` / `INVALID` / `MALFORMED` (the reference host's: Arcade's status, or its 400) | reason: the status |
 | unproven → rejected | a competing spend of one of its inputs is proven | reason `double-spent` (a transaction arriving after such a proof is rejected at once) |
 | unproven → rejected | still awaited `walletAbandonMs` after its broadcast (the `since` of its `broadcast` record), at a deadline wake | reason `abandoned` |
 | unproven → rejected | a transaction it depends on is rejected | reason `input-rejected`, `cause` the root txid |
@@ -276,7 +276,7 @@ by the step that learned it.
 **Threads fork, they do not replay.** A thread whose history took the
 transaction as input is never re-run. The thread awaiting the transaction's
 CID (the broadcast's awaiting-callback thread, or any program that
-`await`ed it) receives the `status` entry as a new input, routed by its
+`await`ed it) receives the proof event or the status message as a new input, routed by its
 `subject`; a wallet thread whose transaction was rejected by another step
 finds it rejected at its next deadline and finishes. Records that merely
 `mentions` a transaction change nothing; whoever holds one reads its
@@ -352,102 +352,65 @@ them byte for byte.
 This is how Yours funds skein ("Browser with Yours"): a BRC-29 payment to a
 key derived for skein, internalized here as skein's own UTXO.
 
-## Feeds and calls: plain entries and messages
+## Broadcasts, proofs and statuses (#65)
 
-Two mechanisms, split by lifetime (#29, "no messagebox for ARC or
-ChainTracks"). Neither is a message: `emit` stays for identities.
+A transaction is self-validating: neither broadcasting it nor recording its
+proof is a signed message. The program-facing contract is docs/MESSAGES.md,
+"Broadcast out, proofs and statuses in"; the wallet's side of it:
 
-**Plain entries** — subscriptions are host wiring: the router holds the SSE
-feeds and webhooks (ChainTracks headers; Arcade's statuses, through the
-host's broadcaster, below) and admits each event as a plain, unsigned log
-entry `{kind: "log", n, prev, time, box, event}`; `event` names a record the
-router puts first. Headers go to every instance whose config declares the
-feed (`feeds: [{kind: "headers", url, box?}]`); a status goes to every
-instance that holds its transaction. The wallet takes three kinds:
+**Broadcasting is an event.** After `createAction` / `signAction` (not
+`noSend`), and after a reorg turns ours back to unproven, the wallet notes
+the transaction in `awaiting` (its `broadcast` record, `since` the first
+broadcast) and emits `{event: "broadcast", tx: <its CID>, beef: <its Atomic
+BEEF>}` — addressed to no one; whatever wiring the host has carries it (the
+reference host: a durable queue in host.db, retries, one Arcade session,
+`src/host/arc.ts`). The step `await`s the transaction's CID and sets a
+`deadline` at its abandonment (`since` + `defaults.walletAbandonMs`; 0: no
+deadline), and rests `waiting`. No URL, no HTTP status, no re-ask: the
+instance never sees a 503. Replay re-reads the step from the log and hands
+nothing to anyone; the preview1 and component builds emit the same events
+(`kernel-zig/equiv/abi.ts`).
+
+**Plain entries** — the host's specific wiring admits self-validating
+records as unsigned entries `{kind: "log", n, prev, time, box, event}`:
 
 | record | fields | |
 |---|---|---|
-| `header` | `raw` (80 bytes) | one header; added to the chain (self-validating) |
-| `proof` | `subject` (the tx's CID), `txid` (hex), `path` (BRC-74 bytes) | a merkle proof for a transaction we hold |
-| `status` | `subject`, `txid`, `txStatus` (Arcade's), `merklePath?` (BRC-74 bytes), `blockHeight?`, `blockHash?` | a status from the host's broadcaster (its SSE stream or a webhook) |
+| `header` | `raw` (80 bytes) | one header (a feed: `feeds: [{kind: "headers", url, box?}]`); added to the chain (self-validating) |
+| `proof` | `subject` (the tx's CID), `txid` (hex), `path` (BRC-74 bytes), `blockHash?`, `blockHeight?` | a merkle proof, from the host's Arcade session (a MINED / IMMUTABLE status with its BUMP), into box `chain` of every instance holding the transaction |
 
-The kernel routes a plain entry to the thread whose tip awaits its `subject`
-(a transaction's CID is its txid), else to a subscription with **no sender**
-on the entry's box (the instance subscribes e.g. `{match: {box: "chain"},
-handler: WALLET}`). What arrives is validated inside: headers by work and
-links, proofs against our headers; a status is provisional until its proof.
+**Status messages** — when the instance subscribes to a status provider
+(`{sender: <its key>, box: "status", handler: WALLET}`; a tree writes
+`"$status"`), each status about a transaction it holds arrives as a signed
+message, `subject` the transaction's CID, body `{kind: "status", txid,
+txStatus, blockHash?, blockHeight?, extraInfo?}`. A rejection
+(`REJECTED`, `DOUBLE_SPEND_ATTEMPTED`, `INVALID`, `MALFORMED`) rejects it and
+bubbles (Settlement, above); anything else is noted on its `broadcast`
+record (provisional). Without the subscription nothing changes but that:
+acceptance is learned from the proof, rejection from a competing proof or
+abandonment.
 
-**Broadcasting is a message** (#70, #67: external communication is a
-thread). The wallet `emit`s to the address book's `broadcast` provider (the
-entry with role `broadcast`, which the genesis seeds when the host has an
-Arcade; none: nothing is broadcast), `subject` the transaction's CID, and
-ends its step awaiting the answer, the transaction's CID (a `status` /
-`proof` entry) and a deadline; whichever comes first steps it. The answer
-is the provider's signed message `{replyTo, status, body}`: Arcade's own
-answer, its HTTP status and JSON body. Replay re-reads the answer from the
-log and never touches the network; the preview1 and component builds emit
-the same messages (`kernel-zig/equiv/abi.ts`).
+The kernel routes a proof to the thread whose tip awaits its `subject` (a
+transaction's CID is its txid), else to a subscription with **no sender**
+on the entry's box (`{match: {box: "chain"}, handler: WALLET}`); a status
+message to the thread awaiting its subject, else the subscription on
+`(provider, "status")`. Who holds a transaction is the host's read (the
+kernel's `has` of its CID), never written.
 
-| message | when | the answer's `body` |
-|---|---|---|
-| box `broadcast`, `{tx: <the Atomic BEEF>}` | after `createAction` / `signAction` (not `noSend`) | JSON `{txid, txStatus, merklePath?, extraInfo}`; a 4xx without a `txStatus` is a rejection; a 5xx (Arcade's backpressure, Arcade unreachable) is no answer: pending, re-asked at the deadline |
-| box `status`, `{txid}` | at the deadline | the same JSON; a 404 (ARC never took it: the post failed transiently, or it lost its history) posts the BEEF again (box `broadcast`), whose answer counts |
-
-**The host's broadcaster** (#58, `src/host/arc.ts`): one Arcade
-(bsv-blockchain/arcade) per host, configured on the host
-(`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`; scripts/host/README.md); the
-`broadcast` provider and the router's routes (`POST /arc/v1/tx`, `GET
-/arc/v1/tx/{txid}`, for clients outside) both use it. It is a plain
-proxy: a broadcast sends the transaction to Arcade's `POST
-/tx` in Extended Format (the Atomic BEEF's subject with its inputs'
-sources) under the host's one callback token (`X-CallbackToken`,
-`X-FullStatusUpdates: true`, `X-CallbackUrl` when the host has a public
-webhook URL), and answers exactly what Arcade answered — 202 `RECEIVED`,
-a duplicate's current status, 400 with a `reason`, 503 with `Retry-After`
-— so the answer the wallet keeps is a receipt; a status question is Arcade's
-`GET /tx/{txid}` as is. There is no queue on the host: **the wallet's
-`broadcast` record is the queue** (a step writes it, emits the message, awaits
-the tx CID with a deadline; a crash loses nothing, it is all in the log).
-
-Statuses come back over **one SSE subscription per host**: Arcade's
-`/events?callbackToken=<the host token>` carries every transaction
-submitted under the token. The router resumes it with `Last-Event-ID` (the
-last event id it took, in host.db) and reconnects with backoff; Arcade's
-webhooks, when it has a callback URL, take the same path (`POST
-/arc/callback`, the host token as bearer). Each status becomes the `status`
-record above and is admitted into box `chain` of **every instance whose
-state holds the transaction** — not only the one that broadcast it: a
-payee that internalized it, an overlay that admitted it. Who holds it is
-read, never written (the kernel's `has` of the tx CID), and cached: the
-route notes the instance that asked, and a txid's first status after the
-router starts reads every enabled instance (hydrating it), later ones only
-the running instances not yet known. A status already routed (txid +
-`txStatus` + `blockHash`, in host.db) is not routed again. Arcade's
-statuses: `RECEIVED`, `SENT_TO_NETWORK`, `ACCEPTED_BY_NETWORK`,
-`SEEN_ON_NETWORK`, `SEEN_MULTIPLE_NODES`, `MINED` (with the BUMP),
-`IMMUTABLE`, and the terminal `REJECTED` / `DOUBLE_SPEND_ATTEMPTED`; a reorg
-turns `MINED` back to `SEEN_ON_NETWORK` and proves again in the new block.
-The deadline's re-ask stays the backstop for anything the stream missed —
-even an Arcade that lost its history (the 404 posts it again).
-
-**The awaiting-callback thread** is the whole monitor: after a broadcast
-the step notes it in `awaiting`, then `await`s the transaction's CID and
-sets a `deadline` (`defaults.walletRecheckMs`, default 600000), so the thread
-rests `waiting` with `until`. A `status` or `proof` entry for that CID steps
-it (`input.event`); the deadline's wake entry steps it too (`input.woke`),
-and it asks the broadcaster again (box `status`; a 404 posts it again). Each time: a merkle path proves the
-transaction (a header not yet held leaves it pending), a rejection
-(`REJECTED`, `DOUBLE_SPEND_ATTEMPTED`, `INVALID`, `MALFORMED`, or a 4xx)
-rejects it and bubbles (Settlement, above); proven or rejected, it stops
-awaiting and the thread finishes; otherwise it awaits again with a new
-deadline. At a deadline, a transaction awaited for `defaults.walletAbandonMs`
-(default 86400000) since its broadcast is abandoned instead of re-asked. One
-thread may await several transactions (a reorg re-broadcasts all it reverted
-from one step): the result lists them as `awaited`. The broadcaster is the address book's entry with role `broadcast`.
+**The awaiting-callback thread** is the whole monitor: a proof event for an
+awaited transaction steps it (`input.event`) and proves it (a header not yet
+held leaves it pending); a status message steps it (`input.message`) and
+notes or rejects it; the deadline steps it (`input.woke`) and abandons each
+awaited transaction still unproven past `walletAbandonMs` (rejected,
+`abandoned`). Proven or rejected, it stops awaiting the transaction and the
+thread finishes once none is left; otherwise it awaits again, with the
+deadline at the earliest abandonment. One thread may await several
+transactions (a reorg re-broadcasts all it reverted from one step): the
+result lists them as `awaited`.
 
 Not built: catching up on headers after a gap through the fetch provider (a feed's gap is
 refused as `Unconnected` until the missing headers arrive); fetching a
-missing proof on demand. A status whose merkle path does not match our
+missing proof on demand. A proof whose merkle path does not match our
 header at its height (Arcade still reporting a block our chain orphaned)
 fails the step (`RootMismatch`) rather than being ignored.
 
@@ -471,8 +434,8 @@ error ends the step `errored`; no head moves.
 | plain entry / callback | result |
 |---|---|
 | `header` (args.event) | `{event: "header", added, known, replaced, ignored, tip, reverted?}` |
-| `proof` / `status` (args.event) | `{event, txid, outcome: proven \| pending \| rejected}` |
-| a callback (input.event / input.woke) | `op: "callback"`: `{txid, outcome, event? \| arc?, awaiting?, awaited?}` |
+| `proof` (args.event), a `status` message (args.body, box `status`) | `{event, txid, txStatus?, outcome: proven \| pending \| rejected}` |
+| a callback (input.event / input.message / input.woke) | `op: "callback"`: `{txid, outcome, event?, txStatus?, awaiting?, awaited?}` |
 
 Any result may also carry `reverted` (after a reorg) and `refs` (the
 transactions it names, rel `mentions`).
@@ -483,10 +446,9 @@ senderIdentityKey}}` or `{outputIndex, protocol: "basket insertion",
 insertionRemittance: {basket, customInstructions?, tags?}}`.
 
 Config (genesis `defaults`, strings): `walletNetwork` (`main` \| `test` \|
-`regtest`), `walletFeeRate` (sat/kB), `walletRecheckMs`, `walletAbandonMs`
-(default 86400000; 0: never). Where it broadcasts is not config but the
-address book (#70: the `broadcast` provider, seeded by the genesis when the
-host has an Arcade; none: no broadcast).
+`regtest`), `walletFeeRate` (sat/kB), `walletAbandonMs` (default 86400000;
+0: never). Where a broadcast goes is not the wallet's to know (#65: an
+event the host carries); a status provider is a subscription (above).
 
 ## Running it
 

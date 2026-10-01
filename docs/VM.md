@@ -265,6 +265,7 @@ answer is a signed message like any other.
 emit(message) → <cid>     preview1: skein.emit(msg, len, out, cap) → n (the CID, binary; n < 0: the error)
                           WIT:      emit: func(message: list<u8>) -> result<cid, string>
 message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
+          or an event (#65): {event: "broadcast", tx: <cid>, beef?: bytes}
 ```
 
 - `to` is the recipient's identity key — never a handle (resolve it first:
@@ -330,9 +331,25 @@ until_ms}` in box `wake` to the address book's **waker** (the entry with
 role `waker`) and awaits it. The waker's answer `{replyTo, at}` steps the
 thread with `woke: true`; one stamped before `at` runs nothing. Errors:
 `deadline: not after the step's time`, `deadline: no waker in the address
-book (an entry with role "waker")`. A shell's `sleep` is not this: the shell
-is re-executed from its origin and its sleep is a `wake` entry the host's
-timer admits (docs/ARCH.md, "The waker").
+book (an entry with role "waker")`. **A shell's `sleep`** is the same
+message (#69): the kernel signs the wake-me through the oracle (the call on
+the shell's waiting update, with the message in `emitted` and `awaits`),
+and the waker's answer re-executes the shell from its origin, which carries
+on past the sleep under that entry (no waker: the shell errors, `sleep: no
+waker in the address book …`). There is no `wake` entry (format 7) and the
+kernel keeps no sleepers of its own: the waker holds what it owes, and at a
+start the kernel hands it again every wake-me a waiting thread still
+awaits. (The index's `sleepers` map — until ‖ origin of every thread
+resting with a deadline — stays as a derived read for `skein-kernel dump`;
+nothing wakes from it.)
+
+**Broadcast out is an event** (#65): `emit({event: "broadcast", tx:
+<cid>, beef?: bytes})` lists `{kind: "broadcast", tx, beef?}` in the
+step's `emitted` — unsigned, addressed to no one — and the host carries it
+(serve frame `emit`, transport `event`); the step awaits the transaction's
+CID. Its proof comes back as an event (box `chain`), its statuses as a
+subscribed status provider's messages (input `message`). docs/MESSAGES.md,
+"Broadcast out, proofs and statuses in".
 
 **Components** (WASI 0.2) import `emit` from `skein:kernel/skein` like
 every other call; the world has no `wasi:http`. `kernel-zig/test/components/
@@ -475,18 +492,19 @@ replay and a fresh run read the same times. Time moves with work — a program
 that waits on the clock inside a step (a busy-wait, a timeout loop) sees it
 pass and ends on its own instead of spinning until fuel runs out, and
 mid-step timestamps spread with real work. A shell's sleep takes its
-deadline from this clock and rests the thread; the wake entry's stamp starts
-the next segment, its fuel counted from zero. (Before #38: the stamp, then
+deadline from this clock and rests the thread on a wake-me to the waker
+(#69); the waker's answer's stamp starts the next segment, its fuel counted
+from zero. (Before #38: the stamp, then
 +1 ns per read.)
 
 ## Messages
 
-(Issue #40, #68, #70; `kernel-zig/src/log.zig`, log format 6.) Skein is a
+(Issue #40, #68, #70, #65, #69; `kernel-zig/src/log.zig`, log format 7.) Skein is a
 state process: the log is every package that arrived, as received, and an
 entry is one of
 
 ```
-entry  {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}
+entry  {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}
 mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, json?,
         session?: {payload, signature, nonce, yourNonce} | nonce?, signature?}
 ```
@@ -507,10 +525,11 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
   the thread awaiting the message its body's `replyTo` names (a reply is from
   the identity that message was sent to), else by subscription on (sender,
   box).
-- **`event`** in a box: a record from a feed the host holds (#29: a header,
-  a proof, a status), or one a front door's step routes (`:ack`, an
-  accepted libp2p message, a gossiped `submit`), routed by its `subject` or by box.
-- **`wake`**: a sleeper's deadline.
+- **`event`** in a box: a self-validating record from the host's specific
+  wiring (#29: a header from a feed; #65: a transaction's proof from the
+  broadcaster), or one a front door's step routes (`:ack`, an accepted
+  libp2p message, a gossiped `submit`), routed by its `subject` or by box.
+  (No `wake` entry since format 7: wakes and ticks are providers' messages, #69.)
 - **`genesis`**: who the instance is, its programs, seed subscriptions,
   routes and reads.
 
@@ -548,25 +567,16 @@ turn is a run of steps. Two changes from v1:
 - **There is no `david` runner.** A thread that needs a person waits on *a
   message from that identity* (the `await` import on the message it sent). The subscription table is what makes David's
   messages resolve waiting threads while a stranger's are routed to a
-  handler program or refused. Cron is a time attestation that a subscription
-  routes to whatever waits for it (#60). Concretely: an instance's genesis
-  carries its **jobs** (`etc/config.json` `jobs: [{box, body?, every: <ms> |
-  at: <ms since the epoch>, name?}]`), and the router is the clock
-  (`src/host/cron.ts`): when a job is due it admits a plain **event** entry
-  into the job's box, `{event: {...body, kind: "cron" (unless the body names
-  one), name, due}, box}`. It is sender-less, so it is routed by a
-  subscription with no sender on that box (or to the thread awaiting its
-  `subject`, if the body names one); the entry's stamp, the router's clock at
-  admission, is the attestation, and `due` says which firing it is. An
-  `every` job fires once at the host's start, then every `every` ms; an `at`
-  job once. A firing missed while the host was down is made up once at the
-  next start, never as a burst. An idle-stopped instance is hydrated for a job
-  only if something in it subscribes the job's box. The program takes the
-  event as its start signal and carries on with `deadline` wakes; the next
-  `every` firing is its retry if its thread died. `skein-host event <handle>
-  <box> [json]` admits one such event by hand (through the running router's
-  control socket, `$SKEIN_HOME/host.sock`, or with the host down a router of
-  its own).
+  handler program or refused. **Scheduling is a message to a provider**
+  (#69, superseding #60's genesis `jobs` and the router's clock): a program
+  that wants ticks emits `{fn: "tick", every: <ms> | at: <ms>, box, body?,
+  name}` to the cron provider (the address book's `cron`) and each tick comes
+  back as a signed message from the provider's identity into `box`, routed
+  by the instance's subscription to it; `{fn: "stop", name}` ends it. The
+  message's entry stamp is the attestation, `due` which tick it is. The
+  contract (shapes, answers, errors, local or remote) is docs/MESSAGES.md,
+  "Scheduling". `skein-host event <handle> <box> [json]` sends a tick due
+  now from the host's cron provider by hand.
 
 A transaction is a thread whose state chain is its finality (created,
 broadcast, mined with merkle path, rejected, reorged), each transition an

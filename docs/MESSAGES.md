@@ -13,6 +13,11 @@ Revised for #70 and #67 (2026-10-02): **one way out, and external
 communication is a thread** — a step `emit`s a signed message to a key the
 address book names and ends waiting; the answer is an entry. The `http` and
 `libp2p` imports and the host's attestations are gone (log format 6).
+Revised for #65 and #69 (log format 7): **broadcast out and proof in are
+unauthenticated, self-validating events** through specific wiring (an
+optional status provider reports statuses as signed messages), and
+**scheduling is a message to a provider** (the waker, the cron provider); the
+genesis `jobs` and the `wake` entry are gone.
 
 ## The persistence rule (#68: skein is a state process)
 
@@ -239,10 +244,10 @@ handshake under the prefix too — `RawBox` (`src/client/raw.ts`) rewrites
 `/.well-known/auth` to `/@<handle>/.well-known/auth` — and signs the path it
 sent, which is what the front door verifies.
 
-## The log, format 6
+## The log, format 7
 
 ```
-entry    {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}
+entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
                  {kind: "p2p-frame", protocol, from: bytes, body: bytes}
@@ -282,21 +287,24 @@ has the shapes).
   record is a message this instance sent to the replying sender; otherwise
   (no such thread, or `replyTo` not a CID) it is recorded and nothing runs. A
   message with no `replyTo` is routed by subscription on `(sender, box)`,
-  first match wins; the handler gets `{message, body, box, sender}`. No
-  subscription: recorded, nothing runs.
-- **Events** (no sender) are the host's feeds (#29: headers, proofs,
-  statuses; plain entries), what a front door's step routes (`:ack`; #51:
-  an accepted libp2p message, `p2p` in `libp2p:<topic>`, below), and the router's clock
-  (#60: a job's `{kind: "cron", name?, due, …body}` in the job's box, when it
-  is due; `skein-host event` admits one by hand). An event goes to the thread
-  awaiting its `subject`, else to the first subscription **with no sender**
-  whose box is the entry's (or that names no box); none: recorded, nothing
-  runs. The handler gets `{event, box, subject?}`. A mail message never
-  becomes an event: a program that wants a start signal from the operator
-  takes a job, or its owner's mail in a box it subscribes with `$owner`.
-- **Wakes** are a shell sleeper's deadline, one entry each. A program's
-  `deadline` is not a wake entry any more (#70): it is a message to the
-  waker, whose answer routes as a reply (`woke`).
+  first match wins; no subscription: recorded, nothing runs. A subscribed
+  message with a `subject` (#65: a status provider's status, about a
+  transaction) steps the thread whose tip awaits that subject, with input
+  `message: {message, body, box, sender, subject}`; with no such thread the
+  subscription's handler gets `{message, body, box, sender}`.
+- **Events** (no sender, self-validating) come only through the host's
+  specific wiring, never an open box: its feeds (#29: headers), its
+  broadcaster's proofs (#65: `{kind: "proof", subject, txid, path, …}` in box
+  `chain`), and what a front door's step routes (`:ack`; #51: an accepted
+  libp2p message, `p2p` in `libp2p:<topic>`, below). An event goes to the
+  thread awaiting its `subject`, else to the first subscription **with no
+  sender** whose box is the entry's (or that names no box); none: recorded,
+  nothing runs. The handler gets `{event, box, subject?}`.
+- **Wakes and ticks are messages** (#69): a step's `deadline` and a shell's
+  `sleep` are wake-me messages to the waker, whose answer routes as a reply
+  (`woke`); a schedule is a message to the cron provider, whose ticks are
+  messages into the box it names. There is no `wake` entry and no genesis
+  `jobs`; `skein-host event` sends a tick from the cron provider by hand.
 
 ## The messagebox
 
@@ -381,8 +389,11 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   the recorded oracle answer and sends nothing. At a start the kernel hands
   over again every emitted message a waiting thread still awaits; a host
   acts on a message once.
+- **An event instead of a message** (#65): `emit({event: "broadcast", tx,
+  beef?})` — below, "Broadcast out, proofs and statuses in".
 - **Errors** (the call's; the step may catch them): `emit: want {to:
-  <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}` · `emit: the
+  <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>} or {event:
+  "broadcast", tx: <cid>, beef?: bytes}` · `emit: the
   message is not dag-cbor` · ``emit: `to` is not an identity key (33
   bytes): emit to a key, not a handle (resolve the handle first)`` · `emit:
   the box is empty or starts with ':' (reserved)` · `emit: the body is not
@@ -403,6 +414,8 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 | `reply: {message, body, box, sender, replyTo}` | a message from the recipient whose body names `replyTo: <the CID>` (`sk.replyOf`; `get` the body) |
 | `undelivered: {message, error}` | a `mailbox` recipient's delivery thread gave up: no answer can come |
 | `woke: true` | the waker's answer to the step's `deadline` |
+| `event: {event, box, subject}` | an event about a record the step awaits (#65: a transaction's proof, awaiting its CID) |
+| `message: {message, body, box, sender, subject}` | a subscribed sender's message about a record the step awaits (#65: a status provider's status) |
 
 Several messages, a subject and a deadline may be awaited at once; whichever
 comes first steps the thread, which awaits again what it still needs. An
@@ -413,7 +426,8 @@ address book names.
 
 `deadline(until_ms)` is sugar over the same: when the step ends waiting it
 emits `{at: until_ms}` in box `wake` to the address book's `waker` and
-awaits it; the answer `{replyTo, at}` steps the thread with `woke: true`.
+awaits it; the answer `{replyTo, at}` steps the thread with `woke: true`. A
+shell's `sleep` is the same message (#69, below "Scheduling").
 
 ### The address book
 
@@ -432,8 +446,8 @@ The head `peers` — who the instance can reach, and how:
 | `local` | a provider's name on this host | handed to the provider |
 
 `role` is the part an entry plays for the instance — `fetch`, `waker`,
-`libp2p`, `broadcast`: how a program finds a provider (`sk.provider(a,
-role)`; `deadline` finds the waker). Receiving needs none of this: a
+`cron`, `libp2p`, `status`: how a program finds a provider (`sk.provider(a,
+role)`; `deadline` and a shell's sleep find the waker). Receiving needs none of this: a
 sender is authenticated by its key (a BRC-104 session or the message's own
 signature) and admitted by subscription, whether or not the instance can
 answer it.
@@ -443,7 +457,7 @@ Who writes it:
 - **the genesis**, once: `addressBook: [{key, transport, address, role?,
   handle?, domain?}]` (source `genesis`) — the node host seeds its
   providers (role = the provider's name; `libp2p` when it runs libp2p,
-  `broadcast` when it has an Arcade) and the owner's mailbox;
+  `status` when it has an Arcade) and the owner's mailbox;
 - **the resolve program**, from a BRC-169 lookup (source `resolve`; below);
 - **the box `peers`** (the owner, as admin; source `admin`): `{op: "add",
   key, transport?, address? | url?, role?, handle?, domain?}` | `{op:
@@ -465,7 +479,8 @@ BRC-169 envelope's sender — only if it resolves to the sender, source
 ### The providers
 
 A provider is a recipient with an identity of its own that carries a
-message out and answers. The host runs four (`src/host/providers.ts`); their
+message out and answers. The reference host runs five
+(`src/host/providers.ts`): `fetch`, `waker`, `cron`, `libp2p` and `status`; their
 keys are the host's business (children of its master secret), the instance
 knows them from its address book. Every answer is a signed message from
 the provider to the instance — the same record an `emit` makes, signed the
@@ -478,18 +493,169 @@ message routes by `replyTo` to the thread awaiting it.
 | role | box | body | answer body (beside `replyTo`) |
 |---|---|---|---|
 | `fetch` | `fetch` | `{method, url, headers?: {name: value}, body?: bytes, timeoutMs?}` | `{status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`) |
-| `waker` | `wake` | `{at: ms}` | `{at}`, at `at` |
+| `waker` | `wake` | `{at: ms}` | `{at}`, at `at` (#69, below) |
+| `cron` | `cron` | `{fn: "tick", every: ms \| at: ms, box, body?, name}` · `{fn: "stop", name}` | `{name, next}` · `{name, stopped}`; then each tick, a message of its own into `box` (#69, below) |
 | `libp2p` | `publish` | `{topic, body: bytes}` | `{seqno: bytes(8), recipients}` |
 | | `dial` | `{peer, protocol}` | `{stream}`; then each frame read, in box `frame`: `{stream, body}`, and its end `{stream, closed: true, error?}` — all answering the dial |
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
-| `broadcast` | `broadcast` | `{tx: bytes}` (BEEF) | `{status, body: bytes}` — Arcade's answer to `POST /tx` (503 when the host has none) |
-| | `status` | `{txid}` | `{status, body: bytes}` — its `GET /tx/<txid>` |
+| `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `status` (#65, below) |
 
 `sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
-awaits it; the reply's body is the answer. The wallet broadcasts through
-the `broadcast` provider (docs/WALLET.md), the overlay's gate likewise
-(docs/OVERLAY.md).
+awaits it; the reply's body is the answer. A broadcast is not a message to
+anyone (#65, below); the wallet and the overlay's gate emit it as an event.
+
+**How a host obtains its providers' keys is its own business**, not core:
+the reference host derives them from its master secret (`src/host/oracle.ts`
+`providerKey`: a BRC-42 child under `[2, "skein provider"]`, key ID the
+name); the browser page from a secret it keeps. A system tree names a
+provider as a subscription's sender by `$<name>` (`$status`, `$cron`),
+which the host resolves at genesis; a subscription to a provider the host
+has not is left out.
+
+### Broadcast out, proofs and statuses in (#65)
+
+A transaction is self-validating, so neither its broadcast nor its proof is
+a signed message to or from anyone. Only how it *stands* on the network
+(Arcade's word) needs an attestation, and that is optional.
+
+**Broadcast out is an event.**
+
+```
+emit({event: "broadcast", tx: <the transaction's CID>, beef?: bytes})   → the event record's CID
+record  {kind: "broadcast", tx: <cid>, beef?: bytes}                     (Zig: sk.broadcast(a, tx, beef))
+```
+
+- `tx` is a `bitcoin-tx` CID of a transaction in the store; `beef` (its
+  Atomic BEEF) gives a broadcaster the ancestry it needs (Extended Format).
+  No recipient, no signature, no oracle call. The record is listed in the
+  step's `emitted` with the messages, recorded, never re-executed on replay,
+  and goes out when the step ends without error — handed to the host
+  (transport `event`) — and again at a start while the thread awaits the
+  transaction's CID. Errors: `emit: no event "<x>" (the one event is
+  "broadcast")` · `emit: a broadcast names its transaction: …` · `emit:
+  <cid> is not a transaction in the store (put it first)` · ``emit: `beef` is
+  bytes (an Atomic BEEF)``.
+- The step then `await`s the transaction's CID (with a `deadline` at its
+  abandonment) and ends. The instance never sees a URL, a 503 or a retry.
+- **The reference host's wiring** (`src/host/arc.ts`): a durable queue in
+  host.db, the transaction posted to its one Arcade under its callback token
+  (Extended Format), retried with backoff while Arcade does not take it (a
+  503, no answer), taken up again after a restart, given up after a day. A
+  host with no Arcade drops the event (a line in its log); the instance
+  abandons the transaction in time.
+
+**Proof in is an event**, through specific wiring — never an open box:
+
+```
+event (box "chain")  {kind: "proof", subject: <tx CID>, txid (hex), path: bytes (BRC-74), blockHash?, blockHeight?}
+```
+
+- The reference host admits it from its Arcade session (a MINED or IMMUTABLE
+  status carrying the BUMP, by SSE or webhook), the same way it admits a
+  header from a feed, into **every instance whose state holds the
+  transaction** (a `has` read of its CID). It steps the thread awaiting the
+  transaction (input `event`), else a sender-less subscription on `chain`.
+- The VM records a proof only when its root is the header's at that height
+  in the instance's own chain (a header not held yet leaves it pending).
+  Nothing is signed; nothing needs to be.
+
+**The status provider is optional.** Intermediate and terminal statuses
+reach an instance only as signed messages from a status provider it
+subscribes to:
+
+```
+message  box "status", subject: <tx CID>, from the status provider's key (no replyTo)
+body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraInfo?}
+         txStatus: RECEIVED, SENT_TO_NETWORK, ACCEPTED_BY_NETWORK, SEEN_ON_NETWORK, SEEN_MULTIPLE_NODES,
+                   MINED / IMMUTABLE (with no path), REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED
+```
+
+- **Subscribing** is a subscription `{sender: <the provider's key>, box:
+  "status", handler}` (a system tree writes `{"sender": "$status", "box":
+  "status", "handler": "wallet"}`), and the provider in the address book
+  (role `status`), which the genesis seeds when the host has one — how a
+  program knows one speaks to it. The message steps the thread awaiting the
+  transaction (input `message`), else the subscription's handler (args
+  `{message, body, box: "status", sender}`). An instance with no such
+  subscription records the message and runs nothing.
+- The reference host's status provider is its broadcaster's identity (key ID
+  `status`): every status Arcade reports but a proof — its answer to the
+  post (RECEIVED; a 400 as REJECTED with `extraInfo` its reason) and its SSE
+  and webhook statuses — goes to every instance holding the transaction,
+  once (a redelivery writes nothing; the answer to a later broadcaster's
+  post reaches it even if routed before). Arcade does not sign its statuses:
+  the provider's signature is the attestation.
+- **Without a status provider** an instance still works: it learns
+  acceptance by the proof arriving, and rejection by a competing proof
+  (`double-spent`) or abandonment at `walletAbandonMs`.
+- Arcade itself may later be the status sender (a signed-message callback
+  beside webhook and SSE): an instance would subscribe to Arcade's key
+  instead, and nothing on its side changes.
+
+**The overlay's gate** (`defaults.overlayAdmitOn`, docs/OVERLAY.md):
+
+| `overlayAdmitOn` | with a status provider (role `status`) | without one |
+|---|---|---|
+| `"status"` (default) | admitted on its first status that is not a rejection; a rejection rejects it | admitted at once, on validation; settled by its proof — a competing proof, a rejection or abandonment unwinds it through `admits` |
+| `"proof"` | admitted on its proof; statuses are noted (a rejection still rejects it) | admitted on its proof |
+
+### Scheduling: the waker and the cron provider (#69)
+
+Scheduling is a message to a provider. The schedule originates in a step,
+never in host configuration; the wake or the tick comes back as a signed
+message from the provider's identity, verified at the front door like any
+message.
+
+**The waker** (role `waker`, box `wake`):
+
+| ask | body | answer |
+|---|---|---|
+| a step's `deadline(until_ms)` (sugar), or a program's own emit | `{at: ms}` | `{replyTo, at}` at `at` — steps the thread with `woke: true`; one stamped before `at` runs nothing |
+| a shell's `sleep` (the kernel emits it) | `{at: ms}` | the same; the shell is re-executed from its origin and carries on past the sleep under that entry |
+| anything else | | `{replyTo, error: "the waker takes {at: ms} in box \"wake\""}` |
+
+A shell's wake-me is signed through the oracle (the call recorded on its
+waiting update with `emitted` and `awaits`). No waker in the address book:
+`deadline` fails (`deadline: no waker in the address book (an entry with
+role "waker")`), and a shell's sleep errors the shell (`sleep: no waker in
+the address book …`). The waker keeps what it owes in its own timers; at a
+start the kernel hands it again every wake-me a waiting thread still awaits.
+
+**The cron provider** (role `cron`, box `cron`):
+
+```
+tick  {fn: "tick", every: <ms> | at: <ms since the epoch>, box, body?: {…}, name}
+      → {replyTo, name, next: <ms>}
+      then each tick: a message from the provider into `box` (no replyTo):
+      {...body, kind: body.kind ?? "cron", name, due: <ms>}
+stop  {fn: "stop", name}   → {replyTo, name, stopped: true | false}
+error → {replyTo, error}   ("the cron provider takes {fn: "tick", …} or {fn: "stop", name} in box "cron"": …)
+```
+
+- A schedule is the instance's, by `name`: a tick request replaces the one
+  of that name. `every` ticks at once, then on its grid; a tick the
+  provider was late for is one tick, never a burst (the next grid point
+  after now). `at` ticks once — at `at`, or at once if past — and is then
+  gone. `box` is a box name (not empty, not starting `:`); `body` a map.
+- **A tick is routed by subscription** on (the cron provider's key, `box`),
+  or a sender-less one on `box`: the handler gets `{message, body, box,
+  sender}`. The reference host wakes an idle-stopped instance for a tick only
+  if something in it subscribes that box.
+- **The reference host's cron provider** (`src/host/cron.ts`) keeps the
+  schedules in host.db (`cron_schedule`): at a host start each `every`
+  schedule ticks once (a restart is a late tick), each `at` one at its time.
+  `skein-host event <agent> <box> [json]` sends a tick due now by hand.
+
+**Local or remote, the address book decides.** A provider's key is in the
+address book with a transport: `local` (the host hands the message to its
+own provider, no transport, no handshake) or `mailbox` (the instance's own
+delivery thread carries it over BRC-103/104 to the provider's messagebox —
+a paid tick service, a waker elsewhere). The program does not know which:
+it emits to the key `sk.provider(a, "cron")` names and its ticks come back
+the same way. `src/peers/cron.ts` is a remote cron service: it collects its
+mailbox's `cron` box and answers, and ticks, at the sender's messagebox
+(its own address book's), on a BRC-104 session of its own.
 
 ### The outbound BRC-103/104 pattern (delivery)
 
