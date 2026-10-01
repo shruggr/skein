@@ -230,12 +230,13 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
   // A tree takes from the kernel only the shell and, unless its bin/ has one, the front door (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them).
-  const kernelPrograms = await k.call("programs", src.kind === "code" ? (c.mailbox ? ["frontdoor", "messagebox"] : undefined) : ["shell", "frontdoor"]) as Record<string, CID>;
   if (src.kind === "code") {
+    const kernelPrograms = await k.call("programs", c.mailbox ? ["frontdoor", "messagebox"] : undefined) as Record<string, CID>;
     const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
     return { entry, objects: 0, programs: Object.keys(kernelPrograms) };
   }
   const t = await readSystemTree(src.objects, src.root);
+  const kernelPrograms = await k.call("programs", t.programs.some((p) => p.name === "frontdoor") ? ["shell"] : ["shell", "frontdoor"]) as Record<string, CID>;
   let n = 0;
   for (const o of t.objects) if (!(await k.hasBlock(o.cid))) { await k.putBlock(o.cid, o.bytes); n++; }
   for (const m of t.modules) {
