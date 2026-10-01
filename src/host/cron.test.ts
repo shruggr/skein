@@ -182,7 +182,8 @@ test("cron through the router: cron-demo asks the host's cron provider; each tic
   const said = (re: RegExp, from = 0) => h.lines.slice(from).some((l) => re.test(l));
   const owner = new RawBox(h.owner, h.origin("cronny"));
   await owner.send(id, "schedule", { name: "beat", every: 60_000, rest: 150 });
-  await until("the first tick's thread woke", () => said(/^\[cronny\] \S+ cron-demo step 2 → finished · stderr/) || said(/^\[cronny\] \S+ cron-demo step 2 → finished$/) || undefined);
+  // Two threads come to rest: the schedule's (the provider's answer) and the tick's (woken by the waker).
+  await until("the first tick's thread woke", () => h.lines.filter((l) => /^\[cronny\] \S+ cron-demo step 2 → finished/.test(l)).length >= 2 || undefined);
   assert.ok(said(/^\[cronny\] cron: beat \(tick every 60000 ms\) scheduled/), "the provider took the request");
   assert.ok(said(/^\[cronny\] cron: beat \(tick every 60000 ms\) → tick$/), "and ticked at once");
   assert.equal(h.router.cron.of("cronny")[0]!.recipient, id, "the ticks go to the instance that asked");
