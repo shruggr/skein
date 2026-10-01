@@ -4,9 +4,11 @@
 // with an agent on the native kernel and a scripted inference peer. The page
 // identity (a ProtoWallet here; Yours in use) registers its mailbox
 // instance on the router and chats its instance; the instance's loop asks the
-// inference peer (its messagebox program delivers over http — fetch from the
-// page — on a BRC-104 session), resolves the agent (its resolve program, a
-// BRC-169 lookup), delivers a chat to it; the agent's loop answers into the
+// inference peer (its messagebox program's delivery thread, on a BRC-104
+// session, its requests emitted to the page's HTTP proxy provider — #70: the
+// page's fetch, each answer a signed message admitted as a `local` request),
+// resolves the agent (its resolve program, a BRC-169 lookup through the same
+// provider), delivers a chat to it; the agent's loop answers into the
 // page identity's mailbox instance (the admin put its key and URL in the
 // agent's address book: nothing registers itself, #40), which the page polls
 // and admits into the browser instance; the thread resumes and answers the page (into the same
@@ -121,8 +123,8 @@ try {
   const kinds = evs.map((e) => `${e.kind}${e.box ? `:${String(e.box)}` : ""}`).join(" ");
   if (verbose) console.log(`  events: ${kinds}`);
   const http = (f: (u: string, m: string, s: number) => boolean) => evs.some((e) => e.kind === "http" && f(String(e.url), String(e.method), Number(e.status)));
-  check(http((u, m, st) => u.startsWith(router.originOf("infer")) && u.endsWith("/sendMessage") && m === "POST" && st === 200), "the browser instance's loop delivered its inference request itself: its messagebox program over http (fetch), on a BRC-104 session signed through the page wallet");
-  check(http((u, m, st) => u.includes("/.well-known/metanet-handles/resolve?handle=agent") && m === "GET" && st === 200), "its resolve program looked the agent up (BRC-169, over http)");
+  check(http((u, m, st) => u.startsWith(router.originOf("infer")) && u.endsWith("/sendMessage") && m === "POST" && st === 200), "the browser instance's loop delivered its inference request itself: its messagebox program's delivery thread through the page's fetch provider, on a BRC-104 session signed through the page wallet");
+  check(http((u, m, st) => u.includes("/.well-known/metanet-handles/resolve?handle=agent") && m === "GET" && st === 200), "its resolve program looked the agent up (BRC-169, through the fetch provider)");
   check(http((u, m, st) => u.startsWith(router.originOf("agent")) && u.endsWith("/sendMessage") && m === "POST" && st === 200), "the browser instance delivered the chat to the agent's front door (on the router)");
   check(evs.some((e) => e.kind === "admitted" && e.sender === agentId && e.box === "chat"), "the agent's reply was polled from the page identity's mailbox and admitted into the browser instance");
   const msg = evs.find((e) => e.kind === "message") as { body?: { text?: string } } | undefined;
