@@ -1,16 +1,17 @@
 // libp2p (#51) in the equivalence suite: the two-router scenario
 // (src/host/p2p-router.test.ts: publish → validate → admit, reject writes
-// nothing, a stream round trip woken by its frame; replayed natively with no
-// network) keeps its two stores here, and then the browser build:
+// nothing, a stream round trip whose frame arrives as an entry; replayed
+// natively with no network) keeps its two stores here, and then the browser
+// build:
 //
-//   - replays both in headless Chrome (equiv/browser.ts): the recorded libp2p
-//     answers are served by the wasm kernel as natively — same report, same
-//     dump, fuel included;
-//   - runs a live step that calls the import: alpha's store with one more
-//     message for its p2p-demo handler (admitted natively, not processed), then
-//     loaded into a Worker and drained. The browser build has no libp2p host:
-//     the call is refused with "libp2p: unsupported in the browser", nothing is
-//     recorded, and the step ends errored with that message.
+//   - replays both in headless Chrome (equiv/browser.ts): the libp2p
+//     provider's answers are entries in the log, so the wasm kernel replays
+//     them as natively — same report, same dump, fuel included;
+//   - runs a live step that publishes (#70: an emit to the libp2p provider):
+//     alpha's store with one more message for its p2p-demo handler (admitted
+//     natively, not processed), then loaded into a Worker and drained. This
+//     page answers no oracle, so the message cannot be signed: the step ends
+//     errored and nothing is handed to the tab (no `emit` notice).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/libp2p.ts
 //
@@ -51,9 +52,9 @@ try {
     // ---------------------------------------------------------------- recorded answers, served in the browser
     const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "browser.ts"), join(work, "alpha.db"), join(work, "beta.db")], { encoding: "utf8" });
     process.stdout.write(r.stdout.split("\n").map((l) => (l ? `  ${l}\n` : "")).join(""));
-    check(r.status === 0, "the browser build replays both stores (recorded libp2p answers served by the wasm kernel) exactly as natively");
+    check(r.status === 0, "the browser build replays both stores (the libp2p provider's answers are entries) exactly as natively");
 
-    // ---------------------------------------------------------------- a live call, refused
+    // ---------------------------------------------------------------- a live step in a tab with no oracle
     // One more message for alpha's p2p-demo box, admitted natively but not processed (no `start`).
     const live = join(work, "live.db");
     copyFileSync(join(work, "alpha.db"), live);
@@ -74,7 +75,7 @@ try {
           import { KernelWorker } from "/web/client.js";
           window.runLive = async () => {
             const said = [];
-            const kw = new KernelWorker({ wasm: "/kernel/skein-kernel.wasm", workerUrl: "/web/worker.js", onNotify: (op, v) => { if (op === "say") said.push(typeof v === "string" ? v : new TextDecoder().decode(v)); } });
+            const kw = new KernelWorker({ wasm: "/kernel/skein-kernel.wasm", workerUrl: "/web/worker.js", onNotify: (op, v) => { if (op === "say") said.push(typeof v === "string" ? v : new TextDecoder().decode(v)); if (op === "emit") said.push("EMIT " + (v.length ?? 0)); } });
             await kw.ready;
             await kw.call("openMemory", 1, await (await fetch("/bundle")).arrayBuffer(), false);
             await kw.call("open", 1);
@@ -110,8 +111,10 @@ try {
       await browser.close();
       server.close();
     }
-    const step = said.find((l) => /p2p-demo step 1 → /.test(l) && l.includes("unsupported in the browser"));
-    check(!!step && /→ errored/.test(step) && !/attested/.test(step), `the live step in the browser: the libp2p call refused, nothing recorded, the step errored (${step ?? said.slice(-3).join(" | ")})`);
+    // This page answers no oracle (no onRequest): the emit cannot be signed, so the step errors and nothing goes out.
+    const step = said.find((l) => /p2p-demo step 1 → /.test(l));
+    check(!!step && /→ errored/.test(step) && !/emitted/.test(step), `the live step in the browser, with no oracle: the publish cannot be signed, the step errored, nothing emitted (${step ?? said.slice(-3).join(" | ")})`);
+    check(!said.some((l) => l.startsWith("EMIT ")), "nothing handed to the tab to carry out (an errored step emits nothing)");
     const dump = JSON.parse(execFileSync(kernelBin, ["dump", join(work, "live.web.db")], { maxBuffer: 1 << 30 }).toString()) as { entries: unknown[] };
     check(dump.entries.length > 0, `the tab's store reads back natively (${dump.entries.length} entries)`);
   }

@@ -1,15 +1,15 @@
 // libp2p end to end (#51): two routers on scratch ports, one instance each
 // (alpha on A, beta on B), both subscribed to one topic, loopback TCP, mDNS
 // off, bootstrapping each other. A program in alpha (kernel-zig/test/p2p/
-// p2p-demo.wasm) publishes through the kernel's `libp2p` import; beta's host
+// p2p-demo.wasm) publishes by a message to its libp2p provider (#70); beta's host
 // appends each message as received (#68), and its front door, stepped on it,
 // verifies the GossipSub signature; its route handler judges. The accepted
 // message's entry carries from/seqno/topic/signature and the body —
 // re-verified here from the entry alone. A rejected (or ignored) message is
 // an entry too, its refusal recorded on its thread, nothing else changed; a
 // redelivered accepted one is ignored (the kernel's `unique` map holds it). A
-// stream round trip alpha → beta → alpha, the `receive` resting and woken by
-// the frame. Each request's fuel on its thread's update. Then both stores
+// stream round trip alpha → beta → alpha: dial and send are messages to the
+// provider, and the frame comes back as an entry (#67). Each request's fuel on its thread's update. Then both stores
 // replayed with no router and no network: identical.
 
 import { test } from "node:test";
@@ -97,7 +97,7 @@ async function reverify(ev: { topic: string; from: Uint8Array; seqno: Uint8Array
   return await key.verify(signed, ev.signature);
 }
 
-test("libp2p across two routers: publish → validate → admit (re-verifiable), reject recorded, a stream round trip woken by its frame, fuel on the updates, replay with no network", { timeout: 180_000 }, async (t) => {
+test("libp2p across two routers: publish → validate → admit (re-verifiable), reject recorded, a stream round trip whose frame arrives as an entry, fuel on the updates, replay with no network", { timeout: 180_000 }, async (t) => {
   const home = mkdtempSync(join(tmpdir(), "skein-p2p-router-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   process.env.SKEIN_EXTRA_MODULES = DEMO_WASM; // the kernels install it (not pinned)
@@ -113,7 +113,7 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
     const db = new HostDb(join(home, `${handle}-host.db`));
     db.add(handle, { store: join(home, handle, "runtime.db") });
     const r = new Router({
-      db, walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (h) => oracle.peerKey(h), attestKey: oracle.attestKey(), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
+      db, walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (h) => oracle.peerKey(h), providerKeyFor: (n) => oracle.providerKey(n), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
       kernel: { command: kernel, env: { SKEIN_HOME: home } },
       libp2p: { listen: [listen], bootstrap: [bootstrap], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
       genesis,
@@ -180,8 +180,8 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.ok(await reverify(ev), "the entry re-verifies from the log alone (GossipSub's signature over topic, seqno, from, body)");
   assert.ok(!(await reverify({ ...ev, body: new TextEncoder().encode("hellp") })), "and a changed body does not");
 
-  // alpha's publish step: one recorded call (checked below, from its update).
-  await until(() => lines.some((l) => l.startsWith("[alpha]") && /p2p-demo step 1 → finished · 1 attested/.test(l)), "alpha's publish step");
+  // alpha's publish thread (#70): step 1 emits to the libp2p provider and waits; its answer steps it (checked below).
+  await until(() => lines.some((l) => l.startsWith("[alpha]") && /p2p-demo step 2 → finished/.test(l)), "alpha's publish thread, stepped by the provider's answer");
 
   // ------------------------------------------------ reject and ignore: recorded, nothing else changed
   await B.r.settled();
@@ -205,15 +205,9 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.equal((await logOf(lb.kernel)).length, n1 + 1, "one entry: the redelivery as received");
   assert.equal(accepted().length, 1, "accepted once");
 
-  // ------------------------------------------------ a stream round trip, receive resting and woken
+  // ------------------------------------------------ a stream round trip: dial, send, the frame arrives as an entry (#67)
   await send({ op: "echo", peer: idB, protocol: PROTOCOL, text: "ping" });
-  await until(() => lines.some((l) => l.startsWith("[alpha]") && /p2p-demo step \d → finished/.test(l) && !/step 1 → finished · 1 attested/.test(l)), "the echo thread finishes");
-  const woke = lines.find((l) => l.startsWith("[alpha] libp2p: wake"));
-  const echoSteps = lines.filter((l) => l.startsWith("[alpha]") && /p2p-demo step/.test(l));
-  const echoThread = lines.find((l) => /^\[alpha\] \S+ p2p-demo step 2 → finished/.test(l));
-  assert.ok(woke, `a frame woke the resting thread (${echoSteps.join(" | ")})`);
-  assert.ok(echoThread, "the echo thread took two steps: rest on the stream, then the woken receive");
-  assert.ok(lines.some((l) => /p2p-demo step 1 → waiting · 3 attested/.test(l)), "step 1: dial, send, a pending receive → waiting");
+  await until(() => lines.some((l) => l.startsWith("[alpha]") && / message \S+ in frame from \S+: reply to /.test(l)), "the echo's frame arrives at alpha as a reply to its dial");
   assert.ok(verdicts.some((v) => v.call.protocol === PROTOCOL), "the frame went through beta's front door");
 
   // ------------------------------------------------ fuel: on each request thread's updates (#68), not a ledger
@@ -236,40 +230,42 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
     } finally { view.close?.(); }
   }
 
-
-  // alpha's updates: the recorded calls, and the reply on stdout.
+  // alpha's updates (#70): what each step emitted (the messages to the libp2p provider), and its stdout.
   const readUpdates = async () => {
     const { openStoreFile } = await import("../runtime/index-store.ts");
     const { collect } = await import("../testkit.ts");
     const view = openStoreFile(join(home, "alpha", "runtime.db"), { readOnly: true });
     try {
-      const out: Array<{ state: string; calls: Array<{ op: string; request: Record<string, unknown>; result: Record<string, unknown> }>; stdout: string }> = [];
+      const out: Array<{ thread: string; state: string; emitted: Array<{ box: string; body: Record<string, unknown> }>; stdout: string }> = [];
       for (const th of await collect(view.edges.query({ kind: "thread", program: DEMO_CID }))) {
         for (const u of (await collect(view.chains.history(th))).slice(1)) {
-          const up = await view.get(u) as { state: string; calls?: CID[]; result?: { stdout: Uint8Array } };
-          const calls = [];
-          for (const c of up.calls ?? []) {
-            const rec = await view.get(c) as unknown as { op: string; request: Uint8Array; result: Uint8Array };
-            calls.push({ op: rec.op, request: dagCbor.decode(rec.request) as Record<string, unknown>, result: dagCbor.decode(rec.result) as Record<string, unknown> });
+          const up = await view.get(u) as { state: string; emitted?: CID[]; result?: { stdout: Uint8Array } };
+          const emitted = [];
+          for (const c of up.emitted ?? []) {
+            const m = await view.get(c) as unknown as { box: string; body: CID };
+            emitted.push({ box: m.box, body: await view.get(m.body) as unknown as Record<string, unknown> });
           }
-          out.push({ state: up.state, calls, stdout: Buffer.from(up.result?.stdout ?? []).toString() });
+          out.push({ thread: th.toString(), state: up.state, emitted, stdout: Buffer.from(up.result?.stdout ?? []).toString() });
         }
       }
       return out;
     } finally { view.close?.(); }
   };
   await A.r.settled();
+  await until(async () => (await readUpdates()).some((u) => u.stdout.startsWith("reply ")), "the echo thread finishes");
   const ups = await readUpdates();
-  const pub = ups.find((u) => u.calls[0]?.request.op === "publish" && u.calls[0].request.body instanceof Uint8Array && new TextDecoder().decode(u.calls[0].request.body as Uint8Array) === "hello");
-  assert.ok(pub, "the publish is recorded");
-  assert.equal(pub!.calls[0]!.op, "libp2p");
-  assert.equal(pub!.calls[0]!.request.topic, TOPIC);
-  assert.equal(Buffer.from(pub!.calls[0]!.result.seqno as Uint8Array).toString("hex"), Buffer.from(ev.seqno).toString("hex"), "the recorded seqno is the admitted message's");
+  const pub = ups.find((u) => u.emitted[0]?.box === "publish" && new TextDecoder().decode(u.emitted[0].body.body as Uint8Array) === "hello");
+  assert.ok(pub, "the publish is a message to the libp2p provider, on its step's update");
+  assert.equal(pub!.emitted[0]!.body.topic, TOPIC);
+  assert.equal(pub!.state, "waiting", "the publishing step waits on the answer");
+  const published = ups.find((u) => u.thread === pub!.thread && u.stdout.startsWith("published "));
+  assert.equal(published?.stdout, `published ${Buffer.from(ev.seqno).toString("hex")}\n`, "the provider's answer: the admitted message's seqno");
   const reply = ups.find((u) => u.stdout.startsWith("reply "));
-  assert.equal(reply?.stdout, "reply echo: ping\n", "the reply, received on the woken step");
-  assert.deepEqual(reply!.calls.map((c) => c.request.op), ["receive", "close"]);
-  const rest = ups.find((u) => u.state === "waiting");
-  assert.deepEqual(rest?.calls.map((c) => [c.request.op, Object.keys(c.result).join()]), [["dial", "stream"], ["send", ""], ["receive", "pending"]], "the resting step's calls, recorded");
+  assert.equal(reply?.stdout, "reply echo: ping\n", "the reply, the frame that arrived as an entry");
+  assert.deepEqual(reply!.emitted.map((e) => e.box), ["close"]);
+  const echo = ups.filter((u) => u.thread === reply!.thread);
+  assert.deepEqual(echo[0]!.emitted.map((e) => e.box), ["dial"], "the echo's first step dials");
+  assert.ok(echo.some((u) => u.emitted.some((e) => e.box === "send")), "and, on the dial's answer, sends");
 
   // ------------------------------------------------ replay, no router, no network
   await stop();

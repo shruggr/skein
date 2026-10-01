@@ -1,5 +1,5 @@
-// p2p-component (#51): a test fixture calling skein:kernel/libp2p from a WASI
-// 0.2 component, built as programs/fetch is: a wasm32-wasi core module with
+// p2p-component (#51, #70): a test fixture publishing from a WASI 0.2 component by `emit`, built as
+// programs/fetch is: a wasm32-wasi core module with
 // wit-bindgen's C bindings for world skein:kernel/program (../../wit/bindings/c)
 // and no libc (../../wallet-zig/src/cabi.zig), made a component with the
 // preview1 command adapter.
@@ -19,12 +19,13 @@ pub fn build(b: *std.Build) void {
     const bindings = b.path("../../wit/bindings/c");
     const libc_headers = b.path("../../wallet-zig/src/c");
     const cabi = b.createModule(.{ .root_source_file = b.path("../../wallet-zig/src/cabi.zig"), .target = wasi, .optimize = opt });
+    const cbor = b.createModule(.{ .root_source_file = b.path("../../kernel-zig/src/cbor.zig"), .target = wasi, .optimize = opt });
     const mod = b.createModule(.{
         .root_source_file = b.path("main.zig"),
         .target = wasi,
         .optimize = opt,
         .strip = true,
-        .imports = &.{.{ .name = "cabi", .module = cabi }},
+        .imports = &.{ .{ .name = "cabi", .module = cabi }, .{ .name = "cbor", .module = cbor } },
     });
     mod.addIncludePath(bindings);
     mod.addIncludePath(libc_headers);
