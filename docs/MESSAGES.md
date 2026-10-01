@@ -164,7 +164,7 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
 
 For libp2p routes the request fields are the message's (`transport:
 "libp2p"`, `topic | protocol`, `from`, `key`: the 33-byte key out of `from`,
-`seqno?`, `signature?`, `body`), below.
+`seqno?`, `signature?`, `body`, and `match`), below.
 
 It answers (dag-cbor on stdout), one of:
 
@@ -789,7 +789,18 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
 - **Routing.** The routes table gains `libp2p:` sources: `{path:
   "libp2p:<topic>", program, fn}` for a topic, `libp2p:<protocol>` for a
   stream protocol (from `etc/routes.json`; a protocol's handler named in
-  `etc/config.json` `libp2p.protocols` becomes its route). No route: `ignore`.
+  `etc/config.json` `libp2p.protocols` becomes its route; or installed, the
+  head `routes`, #72). No route: `ignore`. The handler gets `match`, the
+  entry that matched, as an HTTP route's does.
+- **What the node subscribes** (#72). The instance's node takes the
+  genesis's `libp2p` (topics, protocols, listen) plus the topics and
+  protocols its installed routes name (`libp2p:<topic>`,
+  `libp2p:/<protocol>` in the head `routes`; src/host/p2p.ts
+  `libp2pConfig`). After the kernel has processed what the router handed it,
+  the router reads the head `routes` (a kernel read); when it moved, it
+  declares the config again: new topics subscribed and protocols handled,
+  removed ones unsubscribed and unhandled, on the running node — started
+  if the instance had none, stopped when nothing is left. No restart.
 - **Verify in the step.** For a topic message the front door checks, from
   the request alone, that `from` is a secp256k1 peer ID (identity multihash of
   the key's protobuf) and that `signature` is its ECDSA signature (DER,

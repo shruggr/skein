@@ -144,7 +144,7 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 |---|---|---|
 | shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
 | shruggr/skein-static | the static file handler (#52) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its routes under `/static/`; or at boot, `bin/static.wasm` and a route (above, "Static files") |
-| shruggr/skein-overlay | the overlay services engine (#36) | after #73: today `programs/overlay` here |
+| shruggr/skein-overlay | the overlay services engine (#36) and its demo topic manager and lookup service | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>`: its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
 package dependency by URL+hash (#75), not a path in this tree. Developing
@@ -167,9 +167,11 @@ There are two ways to install an app.
   `requires` interface provided by an installed app's head; no route or
   head another app or the genesis has; every `$<provider>` sender in the
   address book), and prints the permission prompt: the heads, each box with
-  its handler and its senders, each route under `/<app>/`, `start`/`stop`,
+  its handler and its senders, each route under `/<app>/` (a `libp2p:`
+  topic or protocol as it is: global), `start`/`stop`,
   `requires`/`provides`, what an overlay publishes, and the messages it
-  will send. Approved (`--approve-all`, or "y" at a terminal; `--dry-run`
+  will send. An overlay app's wiring (docs/APPS.md §6) is derived from its
+  `config.overlay` and marked "(derived: config.overlay)". Approved (`--approve-all`, or "y" at a terminal; `--dry-run`
   only prints), it sends them as the owner (SKEIN_OWNER_WALLET, as `deploy`
   does), in order (docs/APPS.md §3, src/host/install.ts):
 
@@ -180,13 +182,19 @@ There are two ways to install an app.
   3. `subscribe` per (box, sender) — preceded, when the instance has no
      owner's `routes` box and the app has routes, by `{sender: owner, box:
      "routes", handler: <frontdoor>}`;
-  4. `routes` `{op: "add", route}` per route, the path under `/<app>/`;
+  4. `routes` `{op: "add", route}` per route, the path under `/<app>/`
+     (`libp2p:` as written). The router's libp2p node follows the head
+     `routes`: an installed `libp2p:<topic>` is subscribed, a `libp2p:/<protocol>`
+     served, live — the node started if the instance had none;
   5. the manifest's `start` body into the app's box.
 
   Installing an app that is installed already is the upgrade: its `state`
   is kept, what the old version asked for and the new one does not is
   removed, and `start` is sent again. `uninstall` sends `stop`, then removes
-  the app's subscriptions and routes; the head is left.
+  the app's subscriptions and routes (its libp2p topics unsubscribed); the
+  head is left. Each program record the install writes carries `app:
+  <name>`, so a program finds its app record (the overlay engine reads its
+  `config.overlay` there).
 
   By hand, the same messages: `bin/skein import <checkout>` (objects),
   `skein head`, `skein-host subscribe <h> add [--sender <key>] <box>

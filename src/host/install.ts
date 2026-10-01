@@ -23,7 +23,8 @@
 //
 //   {kind: "app", name, version, programs: {<role>: <program record CID>},
 //    handler?, config?, provides, requires, boxes: [{box, senders}], start?, stop?,
-//    routes (as the manifest wrote them, relative), heads (the app's own first),
+//    routes (as the manifest wrote them, relative; `libp2p:` as is), heads (the app's own first)
+//    — boxes, routes and heads with what `config.overlay` derives (APPS.md §6),
 //    description?, tree: <the app's git tree>, state?: <the app's own state>}
 //
 // `state` is the app's: its handler advances the head to the record with

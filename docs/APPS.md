@@ -78,12 +78,11 @@ src/host/manifest.ts, the record is written by src/host/install.ts.)
     }
   ],
   "requires": ["wallet.records/1"],
-  "boxes": [{"box": "amm", "senders": ["*", "$cron"]}, "submit", "chain"],
+  "boxes": [{"box": "amm", "senders": ["*", "$cron"]}],                      // + submit, chain, status: derived (§6)
   "start": {"body": {"kind": "amm-p2p-start"}},
   "stop":  {"body": {"kind": "amm-p2p-stop"}},
   "routes": [
-    {"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},   // served at /amm/submit
-    {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},   // served at /amm/lookup
+    // + /submit, /lookup (served at /amm/submit, /amm/lookup), libp2p:tm_amm_1, -admit, -proof: derived (§6)
     {"path": "libp2p:amm-proofs", "program": "p2p", "fn": "proof"},
     {"path": "libp2p:/amm-validator/1/swap", "program": "validator", "fn": "swap"}
   ],
@@ -96,15 +95,15 @@ src/host/manifest.ts, the record is written by src/host/install.ts.)
 |---|---|
 | `name` | the app's name: its box (§4) and its head |
 | `version` | semver; shown by the site, compared by `requires` |
-| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a pinned stock module such as the overlay engine; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), or a bare name: a program the instance already has by that name in its genesis (the workbench's `"shell": "shell"`); `routes[].program` and `config` refer to these names |
+| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a pinned stock module such as the overlay engine; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), or a bare name: a program the instance already has by that name in its genesis (the workbench's `"shell": "shell"`); `routes[].program` and `config` refer to these names. The program record the install writes for each carries `app: <name>`: a program finds its app (its head, the app record) from its own record — a step's thread names it (`program`), a route's call its matched entry (`match.program`) (#72, built) |
 | `handler` | which program handles the app's box (§4): a `programs` role name, or a map `{<box>: <role>}` when the app handles several boxes with different programs (the workbench: `run`, `objects`, `head`, `subscribe`, `chat`) |
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
-| `boxes[]` | the boxes it asks to handle: its own name, plus any protocol boxes (`submit`, `chain`). An entry is a name, or `{box, senders: [...]}` naming who may send into it: `"*"` (anyone — the app's public face), a provider name (`$cron`, `$status`, `$waker`: resolved through the address book), or an identity key. The install handler derives one `subscribe` per sender (`"*"`: no sender; `$owner`: the genesis owner); a bare name means the owner only. The site shows every sender. (#76, built) |
+| `boxes[]` | the boxes it asks to handle: its own name, plus any protocol boxes (`submit`, `chain`; an overlay app gets these from `config.overlay`, §6 — listing one here overrides the derived entry, and a bare name admits only the owner, not the events the engine takes there). An entry is a name, or `{box, senders: [...]}` naming who may send into it: `"*"` (anyone — the app's public face), a provider name (`$cron`, `$status`, `$waker`: resolved through the address book), or an identity key. The install handler derives one `subscribe` per sender (`"*"`: no sender; `$owner`: the genesis owner); a bare name means the owner only. The site shows every sender. (#76, built) |
 | `start` | optional: a message the owner sends into the app's box as the **fourth install message**, after `subscribe`, so a program whose first act is to schedule something (a heartbeat tick from `$cron`) actually runs; nothing else starts an app. Sending it again is the restart after a reconfiguration (a new manifest + head advance): an install over an installed version sends it again. It needs the owner admitted to the app's box (`"$owner"` or `"*"` among its senders). (#76, built) |
 | `stop` | optional: a message the owner sends into the app's box at uninstall, before its subscriptions are removed, so the app can cancel what it scheduled. (#76, built) |
-| `routes[]` | the routes it asks for, in the routes-table shape (docs/MESSAGES.md "Routes": `path | prefix`, `program` (a `programs` role), `fn`, `auth?`, `read?`, handler-specific settings); libp2p topics and stream protocols are routes too (`libp2p:<topic>`, `libp2p:<protocol>`) — not installable yet: the host's libp2p node subscribes only the topics and protocols its instance's genesis declares, so `skein-host install` refuses them (a question on #72). The install adds `app: <name>` to each route it writes |
+| `routes[]` | the routes it asks for, in the routes-table shape (docs/MESSAGES.md "Routes": `path | prefix`, `program` (a `programs` role), `fn`, `auth?`, `read?`, handler-specific settings); libp2p topics and stream protocols are routes too (`libp2p:<topic>`, `libp2p:/<protocol>`: a path, global, not under `/<app>/`, no `auth` or `read`); the host's libp2p node subscribes and serves what the installed routes name, live: after a step moves the head `routes` it declares the instance's topics and protocols again (#72, built; docs/MESSAGES.md "libp2p"). The install adds `app: <name>` to each route it writes |
 | `heads[]` | the heads it will own: its own name (always, listed or not), and patterns for heads it creates (`ls:*` for lookup services); the instance's own `peers`, `sessions`, `routes` are refused, and a head another installed app lists is refused; `main` is allowed and shown as the shell's |
 
 **Routes are namespaced under `/<app>/`, enforced.** Every route an app
@@ -136,6 +135,7 @@ box, route or head the owner did not approve is refused at install.
  handler?, config?, provides, requires,
  boxes: [{box, senders}],                         normalised: a bare name → {box, senders: ["$owner"]}
  start?, stop?, routes (as the manifest wrote them, relative), heads (the app's own first),
+   — boxes, routes, heads with what config.overlay derives (§6); handler a {box: role} map when one role no longer covers every box
  description?,
  tree: <the app's git tree CID>,                  etc/app.json as shipped, bin/, www/, …
  state?: <the app's own state record>}            the handler's (§1); kept across installs
@@ -318,26 +318,39 @@ managers and lookup services, in one tree under one head, with
                          "lookups": {"ls_amm_1": {"program": "lookup", "topics": ["tm_amm_1"]}}}}
 ```
 
-The engine reads that from the manifest at its head's root (spec: today it
-reads the genesis defaults `overlayTopics`/`overlayLookups`; #72 moves it to
-the manifest). Install is the three messages (§3); nothing registers with
-anything.
+The engine reads that from the app record at its head's root, at every
+step and call (built, #72: skein-overlay ≥ 0.2.0, `src/config.zig`): its
+program record names the app (§2, `programs`), the head's root gives
+`config.overlay` and the roles. A reinstall with a changed `config.overlay`
+(a new app record, the head advanced) is read at the next step; nothing
+restarts. An engine with no app record — wired into a genesis by a system
+tree — reads the genesis defaults `overlayTopics`/`overlayLookups`/
+`overlayGossip` instead. Install is the three messages (§3); nothing
+registers with anything.
 
-**The wiring is derived from `config.overlay`, and shown.** For every
-overlay topic the app runs, the install handler expands the config into the
-concrete requests the owner approves (spec):
+**The wiring is derived from `config.overlay`, and shown** (built, #72:
+src/host/manifest.ts `overlayWiring`; the engine is the role `overlay`).
+For every overlay topic the app runs, the install handler expands the
+config into the concrete requests the owner approves, all to the role
+`overlay`, and the prompt marks them "(derived: config.overlay)":
 
 - inbound routes `libp2p:<topic>` (raw submissions), `libp2p:<topic>-admit`,
   `libp2p:<topic>-proof` (#74), plus `/<app>/submit` and `/<app>/lookup`
   (the app's base URL is what it advertises);
-- boxes `submit` and `chain`;
+- boxes `submit` and `chain`, from anyone (`"*"`): what arrives there are
+  events — the front door's admits, the host's chain feed — which carry no
+  sender, and a message from a stranger in them is not an event the engine
+  takes;
 - a subscription of `$status` (or the remote status provider's key) to the
   overlay's `status` box if `config.overlay.status` names one — the same
   box-sender rule as `boxes[].senders` (#76); none = admit at the proof (#73);
 - heads `ls:<service>` for each lookup service.
 
 The site shows that list as the permission prompt, next to the manifest's
-own `boxes`/`routes`/`heads`. What the app **publishes** (`<topic>`,
+own `boxes`/`routes`/`heads`; the app record holds them with the
+manifest's own, so an upgrade or an uninstall removes them like any other.
+The host's libp2p node subscribes the derived topics once their routes are
+installed, and unsubscribes them when they are removed. What the app **publishes** (`<topic>`,
 `<topic>-admit`, `<topic>-proof`, on by default, `config.overlay.gossip`
 per topic to turn off) needs no grant: emitting is the app acting as the
 instance, like any message it sends; the site lists it for information.
@@ -348,9 +361,9 @@ received → fn `peerAdmit`, recorded as `peer-admit` records under the head
 `overlay:gossip`, never admitting); `<topic>-proof` `{txid, blockHash,
 blockHeight, bump}` (received → fn `peerProof`, checked against the
 instance's own chain and admitted as the `chain` proof event, else
-`ignore`). Today `config.overlay.gossip` is genesis
-`defaults.overlayGossip` (`{"<topic>": false}`), the same mapping.
-Explicit `routes[]` entries in the manifest override the derived ones. The AMM app ships exactly this: the engine, `amm-topic`,
+`ignore`). A genesis-wired engine reads `defaults.overlayGossip`
+(`{"<topic>": false}`) instead, the same mapping. An explicit entry in the
+manifest (the same box, the same route path) overrides the derived one. The AMM app ships exactly this: the engine, `amm-topic`,
 `amm-lookup`, its validator and p2p programs, and its UI, one tree.
 
 **Several overlays on one instance coexist**: two heads, two apps, each
@@ -366,8 +379,9 @@ build those now, and ship them inside their own overlay app.
 
 **The engine's repo is itself an overlay app**:
 [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (#71)
-ships the engine with its example topic manager and lookup service, and its
-`etc/app.json` is this section's wiring written out for `tm_demo`/`ls_demo`:
+ships the engine with its example topic manager and lookup service. Its
+`etc/app.json` (0.2.0) names the config and leaves the wiring to the
+install:
 
 ```json
 "programs": {"overlay": "bin/overlay.wasm", "topic-demo": "bin/topic-demo.wasm", "lookup-demo": "bin/lookup-demo.wasm"},
@@ -375,14 +389,15 @@ ships the engine with its example topic manager and lookup service, and its
 "config":   {"overlay": {"topics": {"tm_demo": "topic-demo"},
                          "lookups": {"ls_demo": {"program": "lookup-demo", "topics": ["tm_demo"]}},
                          "status": "$status", "gossip": {"tm_demo": true}}},
-"boxes":    [{"box": "submit", "senders": ["*"]}, "chain", {"box": "status", "senders": ["$status"]}],
-"routes":   [{"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},
-             {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},
-             {"path": "libp2p:tm_demo", "program": "overlay", "fn": "submit"},
-             {"path": "libp2p:tm_demo-admit", "program": "overlay", "fn": "peerAdmit"},
-             {"path": "libp2p:tm_demo-proof", "program": "overlay", "fn": "peerProof"}],
-"heads":    ["overlay", "overlay:gossip", "ls:*"]
+"routes":   [{"path": "/listTopicManagers", "program": "overlay", "fn": "listTopicManagers", "auth": "none"}, …],
+"heads":    ["overlay", "wallet", "overlay:gossip", "ls:*"]
 ```
+
+Installed, it asks for the boxes `submit`, `chain` (from anyone) and
+`status` (from `$status`), the routes `/overlay/submit`, `/overlay/lookup`,
+`libp2p:tm_demo`, `libp2p:tm_demo-admit`, `libp2p:tm_demo-proof`, and the
+head `ls:ls_demo` — derived (equiv/install-overlay.ts installs it from its
+repo and checks each).
 
 An overlay app of your own takes the engine's module from there and ships
 it beside its own topic managers and lookup services.
@@ -402,8 +417,10 @@ does not offer it.
 | routes table shape; route handler contract; synchronous answer on thread completion | built (#68/#66) |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `ls:<service>` | built (#50) |
 | manifest schema (`programs`, `handler`, `config`, `provides`/`requires`, `boxes`, `routes`, `heads`); the head's root record (the app record); `requires` check; `writes` validation | built (#72: src/host/manifest.ts, install.ts; the SDK's `app`) |
-| install handler (manifest → objects + head + subscribe + routes + start, approvals); `skein-host install <repo|dir>` / `uninstall`; the `routes` box; `start`/`stop`, box senders | built (#72, #76) — libp2p routes not installable yet |
+| install handler (manifest → objects + head + subscribe + routes + start, approvals); `skein-host install <repo|dir>` / `uninstall`; the `routes` box; `start`/`stop`, box senders | built (#72, #76) |
+| libp2p routes installed by apps; the host's libp2p node follows the head `routes` (subscribe/unsubscribe, handle/unhandle, live) | built (#72: src/host/p2p.ts `libp2pConfig`, router.ts `syncP2p`) |
+| an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` route | built (#72: skein-sdk v0.2.0 `app`) |
-| the overlay engine reads `config.overlay` from its app's manifest (replacing genesis `overlayTopics`/`overlayLookups`) | spec (#72 build 3) |
+| the overlay engine reads `config.overlay` from its app record, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72: skein-overlay 0.2.0 `src/config.zig`) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
 | apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule), shruggr/skein-workbench, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |
