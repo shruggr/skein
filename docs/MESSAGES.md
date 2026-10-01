@@ -501,6 +501,13 @@ message routes by `replyTo` to the thread awaiting it.
 | | `close` | `{stream}` | `{}` |
 | `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `status` (#65, below) |
 
+The overlay's gossip (#74, docs/OVERLAY.md "Gossip") is `publish`
+messages, not awaited (the answer is recorded and runs nothing): on
+`<topic>` the body is the submission's BEEF as received; on `<topic>-admit`
+the dag-cbor `{txid, topics: {<topic>: {outputsToAdmit, coinsToRetain}}}`;
+on `<topic>-proof` the dag-cbor `{txid, blockHash, blockHeight, bump:
+bytes}` (txid and block hash hex, display order).
+
 `sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
 awaits it; the reply's body is the answer. A broadcast is not a message to
 anyone (#65, below); the wallet and the overlay's gate emit it as an event.
@@ -559,6 +566,11 @@ event (box "chain")  {kind: "proof", subject: <tx CID>, txid (hex), path: bytes 
 - The VM records a proof only when its root is the header's at that height
   in the instance's own chain (a header not held yet leaves it pending).
   Nothing is signed; nothing needs to be.
+- The overlay's `libp2p:<topic>-proof` route (#74) is the other wiring: a
+  peer's proof for a transaction the overlay admitted under that topic (or
+  holds pending), checked in the call against the instance's own chain and
+  admitted as this same event with `via: "libp2p:<topic>-proof"` (so it is
+  not re-published); anything it cannot check is `ignore`.
 
 **The status provider is optional.** Intermediate and terminal statuses
 reach an instance only as signed messages from a status provider it
