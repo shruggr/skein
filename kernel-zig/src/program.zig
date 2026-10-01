@@ -57,7 +57,6 @@ pub const Host = struct {
     awaitReply: *const fn (imp: *Imports, c: []const u8) Err!void,
     head: *const fn (imp: *Imports, name: []const u8) Err!?[]const u8,
     advance: *const fn (imp: *Imports, name: []const u8, tree: []const u8) Err!void,
-    subscribe: *const fn (imp: *Imports, op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8) Err!void,
     wallet: *const fn (imp: *Imports, frame: []const u8) Err![]const u8,
     /// Emit a signed message (#70): dag-cbor {to, box, body, subject?} → its CID.
     emit: *const fn (imp: *Imports, message: []const u8) Err![]const u8,
@@ -198,14 +197,6 @@ pub const Imports = struct {
             .advance => {
                 const name = try imp.strAt(p, a[0], a[1]);
                 try h.advance(imp, name, try imp.cidAt(p, a[2], a[3]));
-                return 0;
-            },
-            .subscribe => {
-                const op = try imp.strAt(p, a[0], a[1]);
-                // The sender is an identity key's 33 bytes (format 2, #33), not text.
-                const sender: ?[]const u8 = if (a[3] != 0) try imp.alloc.dupe(u8, p.slice(a[2], a[3]) catch return error.OutOfMemory) else null;
-                const box = try imp.strAt(p, a[4], a[5]);
-                try h.subscribe(imp, op, sender, box, try imp.cidAt(p, a[6], a[7]));
                 return 0;
             },
             .wallet => return imp.out(p, try h.wallet(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),

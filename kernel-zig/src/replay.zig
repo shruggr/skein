@@ -82,16 +82,9 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
         try dst.putBlock(p.value.cid, b);
     }
-    // Handlers the genesis subscribes that are not among its programs (the wallet, #29).
-    for (g.get("subscriptions").?.array) |s| {
-        const h = Value.cidOf(s.get("handler")) orelse continue;
-        if (try dst.has(h)) continue;
-        const b = (try src.bytes(a, h)) orelse continue;
-        try dst.putBlock(h, b);
-    }
-    // Route handlers the genesis names that are not among its programs (#40's routes; #51's libp2p: sources):
-    // the middleware's steps call them (#68), so replay needs them as the source holds them.
-    if (g.get("routes")) |rs| if (rs == .array) for (rs.array) |r| {
+    // Programs the genesis's dispatch rows name that are not among its programs (the wallet, #29; a
+    // route handler the middleware's steps call, #68): replay needs them as the source holds them.
+    if (g.get("dispatch")) |rs| if (rs == .array) for (rs.array) |r| {
         const h = Value.cidOf(r.get("program")) orelse continue;
         if (try dst.has(h)) continue;
         const b = (try src.bytes(a, h)) orelse continue;

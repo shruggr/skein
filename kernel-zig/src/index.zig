@@ -89,8 +89,13 @@ pub const STATE_KIND = "skein-state";
 /// 7 = broadcast out is an event (#65): `emitted` may list a `broadcast` record ({kind, tx, beef?}) beside the
 /// messages; no `wake` entries (#69: a step's deadline and a shell's sleep are wake-me messages to the waker,
 /// a shell's waiting update listing its wake-me in `emitted`/`awaits` and the oracle call in `calls`); the
-/// genesis names no `jobs` (a schedule is a message to the cron provider).
-pub const FORMAT: i64 = 7;
+/// genesis names no `jobs` (a schedule is a message to the cron provider);
+/// 8 = the kernel's four tables (#77): one dispatch chain ({kind: "dispatch"}: rows {transport, address,
+/// sender, program, fn?}) replaces the subscriptions chain, the genesis's `routes` and the head `routes`; the
+/// genesis carries `dispatch` and `scopes`, no `subscriptions` or `routes`; a head update carries `owner`; the
+/// admin operations (objects, head, dispatch, peers) are the kernel's, on a message at a kernel row — no
+/// handler program, no `subscribe` import; a program advances only heads in its write scope.
+pub const FORMAT: i64 = 8;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).

@@ -20,6 +20,7 @@ const cbor = @import("cbor");
 const cidm = @import("cid");
 const ipc = @import("ipc.zig");
 const logm = @import("log.zig");
+const dispatchm = @import("dispatch.zig");
 const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
@@ -265,6 +266,13 @@ const Server = struct {
             s.reply(a, id, cbor.optCid(try s.store.headTree(a, name)) orelse .null, null, null);
         } else if (eq(u8, op, "genesis")) {
             s.reply(a, id, logm.genesisOf(a, s.store) catch .null, null, null);
+        } else if (eq(u8, op, "dispatch")) {
+            // The dispatch table as it stands (#77): {tip: <the chain's tip, the change key> | null, rows}.
+            const rows = (try dispatchm.current(a, s.store)) orelse &.{};
+            var m = cbor.MapBuilder.init(a);
+            try m.put("tip", cbor.optCid(try s.store.chainTip(a, try dispatchm.origin(a))) orelse .null);
+            try m.put("rows", try dispatchm.valueOf(a, rows));
+            s.reply(a, id, m.value(), null, null);
         } else if (eq(u8, op, "boxes")) {
             const bs = try s.rt.boxes(a);
             const arr = try a.alloc(Value, bs.len);

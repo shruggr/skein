@@ -1,5 +1,5 @@
-// The input log and the record shapes the scheduler checks, in format 7
-// (issues #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
+// The input log and the record shapes the scheduler checks, in format 8
+// (#77: the kernel's four tables; format 7, #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
 // unsigned, identity keys as 33-byte byte strings in every record). Skein is
 // a state process: every package a transport carries in is an entry,
 // appended as received, and the instance's middleware (the front door) is
@@ -42,13 +42,20 @@
 //            header from a feed; a proof — a transaction's merkle path — from
 //            the broadcaster's Arcade session), routed by its `subject` or by box
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
-//             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
+//             dispatch: [<row>], scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
-//             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes, op}],
+//             reads?: [{caller?: bytes, op}],
 //             addressBook?: [{key: bytes, transport, address, role?, handle?, domain?}]}
+//            `dispatch` (#77, format 8): the seed of the dispatch table (dispatch.zig: the rows
+//            that route — boxes, HTTP paths, libp2p topics and protocols — and the admin rows
+//            whose program is the kernel), written as the chain's first updates when the
+//            genesis is processed. `scopes`: the heads a genesis-wired program (one with no
+//            app record) may advance, by the program's name — an exact head name, or a prefix
+//            ending in `/` (an app's program writes `<app>/…` by its record's `app`). A genesis
+//            naming `subscriptions` or `routes` (format 7) is refused.
 //            `tree` (issue #4): the system tree the instance booted from (a git
 //            tree, its objects pre-filled by the loader); processing the genesis
-//            sets the head `main` to it. `routes`/`reads`: the front door's (#40).
+//            sets the head `main` to it. `reads`: the front door's (#40).
 //            `addressBook` (#70): the address book's seed (the host's providers,
 //            the owner's mailbox), written into the head `peers` when the
 //            genesis is processed.
@@ -57,6 +64,7 @@ const cbor = @import("cbor");
 const cidm = @import("cid");
 const secp = @import("secp");
 const syscalls = @import("syscalls.zig");
+const dispatch = @import("dispatch.zig");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
@@ -209,16 +217,6 @@ fn isCidMap(v: ?Value) bool {
     return true;
 }
 
-/// records.ts isSubscription.
-fn isSubscription(x: Value) bool {
-    if (x != .map) return false;
-    const m = x.get("match") orelse return false;
-    if (m != .map) return false;
-    if (m.get("sender")) |s| if (!secp.isKey(Value.bytesOf(s) orelse return false)) return false;
-    if (m.get("box")) |b| if (b != .string) return false;
-    return Value.cidOf(x.get("handler")) != null;
-}
-
 /// records.ts isGenesis.
 pub fn isGenesis(x: ?Value) bool {
     const g = x orelse return false;
@@ -239,9 +237,24 @@ pub fn isGenesis(x: ?Value) bool {
     }
     if (Value.str(g.get("handle")) == null or Value.str(g.get("domain")) == null) return false;
     if (!isCidMap(g.get("programs"))) return false;
-    const subs = g.get("subscriptions") orelse return false;
-    if (subs != .array) return false;
-    for (subs.array) |s| if (!isSubscription(s)) return false;
+    // #77 (format 8): one dispatch table; no subscriptions chain, no routes.
+    if (g.get("subscriptions") != null or g.get("routes") != null) return false;
+    const rows = g.get("dispatch") orelse return false;
+    if (rows != .array) return false;
+    var scratch: [4096]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&scratch);
+    for (rows.array) |r| {
+        fba.reset();
+        const bad = dispatch.problem(fba.allocator(), r) catch return false;
+        if (bad != null) return false;
+    }
+    if (g.get("scopes")) |sc| {
+        if (sc != .map) return false;
+        for (sc.map) |e| {
+            if (e.value != .array) return false;
+            for (e.value.array) |h| if (h != .string or h.string.len == 0) return false;
+        }
+    }
     if (g.get("peers")) |p| {
         if (p != .map) return false;
         for (p.map) |e| if (!secp.isKey(Value.bytesOf(e.value) orelse return false)) return false;
@@ -262,14 +275,7 @@ pub fn isGenesis(x: ?Value) bool {
         for (c.array) |b| if (b != .string or b.string.len == 0) return false;
     }
     if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
-    // #40: the front door's routes [{path | prefix, program, fn, auth?, read?}] and reads [{caller?, op}].
-    if (g.get("routes")) |rs| {
-        if (rs != .array) return false;
-        for (rs.array) |r| {
-            if (r != .map or Value.cidOf(r.get("program")) == null or Value.str(r.get("fn")) == null) return false;
-            if ((Value.str(r.get("path")) == null) == (Value.str(r.get("prefix")) == null)) return false;
-        }
-    }
+    // #40: the front door's reads [{caller?, op}].
     if (g.get("reads")) |rs| {
         if (rs != .array) return false;
         for (rs.array) |r| {

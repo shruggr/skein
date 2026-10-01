@@ -135,7 +135,6 @@ const F = enum(u32) {
     sk_await,
     sk_head,
     sk_advance,
-    sk_subscribe,
     sk_wallet,
     sk_emit,
     sk_deadline,
@@ -255,7 +254,6 @@ const interfaces = [_]Iface{
         .{ .name = "await", .f = .sk_await },
         .{ .name = "head", .f = .sk_head },
         .{ .name = "advance", .f = .sk_advance },
-        .{ .name = "subscribe", .f = .sk_subscribe },
         .{ .name = "wallet", .f = .sk_wallet },
         .{ .name = "emit", .f = .sk_emit },
         .{ .name = "deadline", .f = .sk_deadline },
@@ -905,7 +903,7 @@ const Session = struct {
             },
 
             // ---- skein:kernel/skein: program.Host, as the preview1 imports call it
-            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_subscribe, .sk_wallet, .sk_emit, .sk_deadline, .sk_call, .sk_edges => return s.skein(f, a),
+            .sk_input, .sk_get, .sk_put, .sk_putblock, .sk_keep, .sk_launch, .sk_await, .sk_head, .sk_advance, .sk_wallet, .sk_emit, .sk_deadline, .sk_call, .sk_edges => return s.skein(f, a),
         }
     }
 
@@ -1077,13 +1075,6 @@ const Session = struct {
             .sk_advance => {
                 const n = try A.dupe(u8, str(&a[0]));
                 try h.advance(imp, n, try program.checkCid(imp, try listBytes(A, &a[1])));
-                return vOk(null);
-            },
-            .sk_subscribe => {
-                const op = try A.dupe(u8, str(&a[0]));
-                const sender: ?[]const u8 = if (a[1].of.option) |o| try A.dupe(u8, str(o)) else null;
-                const box = try A.dupe(u8, str(&a[2]));
-                try h.subscribe(imp, op, sender, box, try program.checkCid(imp, try listBytes(A, &a[3])));
                 return vOk(null);
             },
             .sk_wallet => return vOk(vBytes(try h.wallet(imp, try listBytes(A, &a[0])))),

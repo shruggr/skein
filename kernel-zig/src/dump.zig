@@ -8,7 +8,7 @@
 //    updates: [[origin, seq, cid, fuel|null]], threads: [origin] (at, origin),
 //    resting: [origin] (at, origin), sleepers: [[until, origin]],
 //    awaits: [[envelope, origin]], edges: [[from, seq, ord, to, rel, locator|null]],
-//    heads: [[name, tree]], fuel: {total, threads: [[origin, fuel, steps]]}
+//    heads: [[name, tree, owner]], fuel: {total, threads: [[origin, fuel, steps]]}
 //    (issue #5: each update's `fuel`, summed per thread in thread order),
 //    blocks: [cid] (not index nodes or state records), indexBlocks: n}
 const std = @import("std");
@@ -203,6 +203,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !u8 {
         try w.str(strAt(kv.key).s);
         try w.raw(",");
         try w.cid(kv.value.cid);
+        try w.raw(",");
+        try w.str(@import("heads.zig").ownerOf(strAt(kv.key).s));
         try w.raw("]");
     }
     try w.raw("],\"fuel\":{\"total\":");

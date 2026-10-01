@@ -210,7 +210,6 @@ pub const Fn = enum {
     @"await",
     head,
     advance,
-    subscribe,
     wallet,
     emit,
     deadline,

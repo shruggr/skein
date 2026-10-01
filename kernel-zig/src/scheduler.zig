@@ -1,12 +1,21 @@
 // The scheduler: the log consumer (first a line-by-line port of the TypeScript
 // scheduler, deleted in #55; docs/VM.md is the design record). Entries come in finished
 // and signed through `admit`; the runtime checks them and consumes them in
-// order: genesis → the seed subscriptions; a request (#68) → the transport's
+// order: genesis → the seed of the dispatch table (#77); a request (#68) → the transport's
 // middleware launched on it as the request's thread (what its steps admit
 // routed as the entries below); a message (`mail`, #40) → a reply
-// to the thread awaiting the message it answers, else route by subscription
-// and launch the handler; wake → a sleeping thread; event → the thread
-// awaiting its subject, else a sender-less subscription on its box.
+// to the thread awaiting the message it answers, else its dispatch row
+// (dispatch.zig forMail): a kernel row is one of the kernel's own admin
+// operations (kernelOp: objects, head, dispatch, peers — no program runs),
+// any other launches the row's program; event → the thread awaiting its
+// subject, else a sender-less row on its box.
+//
+// The kernel's four tables (#77): objects (the store), heads (with an owner,
+// heads.zig), the dispatch table (dispatch.zig) and the address book
+// (addressbook.zig). No program import reaches a table: a step advances a
+// head only in its write scope (hAdvance — an app's `<app>/…`, a
+// genesis-wired program's genesis `scopes`), and everything else is an
+// admin message from the owner or a delegate, taken by the kernel itself.
 //
 // Outbound there is one primitive, `emit` (#70, #67): a step signs a message
 // to a recipient its address book names (addressbook.zig), the update lists
@@ -33,7 +42,7 @@ const logm = @import("log.zig");
 const addressbook = @import("addressbook.zig");
 const oracle = @import("oracle.zig");
 const heads = @import("heads.zig");
-const subs = @import("subscriptions.zig");
+const dispatch = @import("dispatch.zig");
 const programs = @import("programs.zig");
 const syscalls = @import("syscalls.zig");
 const shell = @import("shell.zig");
@@ -257,7 +266,7 @@ pub const Runtime = struct {
         const a = arena.allocator();
         try rt.loadGenesis();
         rt.cursor = try rt.store.cursorGet();
-        if (rt.cursor > 0 and (try rt.store.chainTip(a, try subs.origin(a))) == null) return error.PredatesSubscriptions;
+        if (rt.cursor > 0 and (try rt.store.chainTip(a, try dispatch.origin(a))) == null) return error.PredatesDispatch;
         rt.say("runtime {s} · log {d} processed{s}", .{ shortKey(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
@@ -353,23 +362,24 @@ pub const Runtime = struct {
     }
 
 
-    /// The boxes the subscriptions route plus the genesis's `collect`.
+    /// The boxes the dispatch table's `mailbox` rows route ("*" aside) plus the genesis's `collect`.
     pub fn boxes(rt: *Runtime, a: std.mem.Allocator) ![]const []const u8 {
         try rt.loadGenesis();
         const seeded = (try rt.store.cursorGet()) > 0;
         var out = std.array_list.Managed([]const u8).init(a);
         const add = struct {
             fn f(o: *std.array_list.Managed([]const u8), b: []const u8) !void {
+                if (std.mem.eql(u8, b, "*")) return;
                 for (o.items) |x| if (std.mem.eql(u8, x, b)) return;
                 try o.append(b);
             }
         }.f;
-        const current: ?[]subs.Sub = if (seeded) try subs.current(a, rt.store) else null;
-        if (current) |rules| {
-            for (rules) |s| if (s.box) |b| if (b.len > 0) try add(&out, b);
+        const current: ?[]dispatch.Row = if (seeded) try dispatch.current(a, rt.store) else null;
+        if (current) |rows| {
+            for (rows) |r| if (std.mem.eql(u8, r.transport, "mailbox")) try add(&out, r.address);
         } else if (rt.genesis) |g| {
-            if (g.get("subscriptions")) |ss| for (ss.array) |s| {
-                if (Value.str(s.get("match").?.get("box"))) |b| if (b.len > 0) try add(&out, b);
+            if (g.get("dispatch")) |rs| for (rs.array) |v| if (dispatch.rowOf(v)) |r| {
+                if (std.mem.eql(u8, r.transport, "mailbox")) try add(&out, r.address);
             };
         }
         if (rt.genesis) |g| if (g.get("collect")) |c| for (c.array) |b| try add(&out, b.string);
@@ -495,12 +505,10 @@ pub const Runtime = struct {
         const at = time.ms();
 
         if (e.get("genesis") != null) {
-            _ = try subs.open(a, rt.store);
-            const ss = g.get("subscriptions").?.array;
-            for (ss) |s| {
-                const m = s.get("match").?;
-                _ = try subs.subscribe(a, rt.store, .{ .op = "add", .sender = Value.bytesOf(m.get("sender")), .box = Value.str(m.get("box")), .handler = Value.cidOf(s.get("handler")).? }, .{ .thread = null, .input = entry, .at = at });
-            }
+            // #77: the dispatch table's seed, the chain's first updates (no thread).
+            _ = try dispatch.open(a, rt.store);
+            const rows = g.get("dispatch").?.array;
+            for (rows) |r| _ = try dispatch.apply(a, rt.store, "add", r, .{ .thread = null, .input = entry, .at = at });
             // A system tree (issue #4): the loader pre-filled its objects; `main` starts there.
             if (Value.cidOf(g.get("tree"))) |tree| {
                 if (!(try rt.store.has(tree))) {
@@ -512,7 +520,7 @@ pub const Runtime = struct {
             }
             // #70: the address book's seed (the host's providers, the owner's mailbox).
             try addressbook.seed(a, rt.store, g, .{ .thread = null, .input = entry, .at = at });
-            rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} subscriptions", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(Value.bytesOf(g.get("owner")).?), ss.len });
+            rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} dispatch rows", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(Value.bytesOf(g.get("owner")).?), rows.len });
             return;
         }
 
@@ -810,15 +818,12 @@ pub const Runtime = struct {
                 },
             }
         }
-        var sub: ?subs.Sub = null;
-        for ((try subs.current(a, rt.store)) orelse &.{}) |s| if (subs.matches(s, sender, box)) {
-            sub = s;
-            break;
-        };
-        if (sub == null) {
-            rt.say("{s}: no subscription; recorded, nothing runs", .{what});
+        const row = dispatch.forMail((try dispatch.current(a, rt.store)) orelse &.{}, sender, box) orelse {
+            rt.say("{s}: no dispatch row; recorded, nothing runs", .{what});
             return;
-        }
+        };
+        // #77: an admin box — the kernel's own operation, no program.
+        if (row.program == null) return rt.kernelOp(a, n, ctx, row.op.?, mc, m, what, at);
         // #65: a message about something — its `subject`, a transaction's CID — from a sender the
         // instance subscribes to (a status provider's status) steps the thread awaiting that
         // subject, before the subscription's handler: as an event about it would.
@@ -845,14 +850,126 @@ pub const Runtime = struct {
         try args.put("sender", .{ .bytes = sender });
         var origin = cbor.MapBuilder.init(a);
         try origin.put("kind", cbor.string("thread"));
-        try origin.put("program", cbor.cidv(sub.?.handler));
+        try origin.put("program", cbor.cidv(row.program.?));
         try origin.put("args", args.value());
         try origin.put("launchedBy", cbor.cidv(mc));
         try origin.put("input", cbor.cidv(ctx.cid));
         try origin.put("at", cbor.int(at));
         const t = try rt.store.chainOpen(a, origin.value());
-        rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
+        rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, row.program.?), short(a, t) });
         try rt.run(a, t);
+    }
+
+    // ------------------------------------------------------------ the kernel's admin operations (#77)
+
+    /// A message at an admin row: the kernel itself performs the table write
+    /// — validated whole, then written, under the entry (no thread; the chain
+    /// updates carry `thread: null`), or refused with a log line and nothing
+    /// written. Replay performs it again from the message and comes to the
+    /// same records.
+    ///   objects   {records: [{cid, bytes}], root?}: each block stored under its CID (hash-checked);
+    ///             `root` becomes `main` if the instance has none
+    ///   head      {name, tree | root}: the head advanced to the record (in the store); owner = its name's app
+    ///   dispatch  {op: "add" | "remove", row}: the table changed (dispatch.zig; a program row's record
+    ///             and module must be in the store)
+    ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?} | {op: "remove", key}:
+    ///             the address book (addressbook.zig write, source "admin")
+    fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, op: []const u8, mc: []const u8, m: Value, what: []const u8, at: i64) !void {
+        const body = rt.store.getOpt(a, Value.cidOf(m.get("body")).?) orelse {
+            rt.say("{s}: kernel {s}: the body is not in the store; nothing done", .{ what, op });
+            return;
+        };
+        const by = heads.By{ .thread = null, .input = ctx.cid, .at = at };
+        _ = mc;
+        _ = n;
+        rt.kernelOpBody(a, op, body, by) catch |err| switch (err) {
+            error.Refused => rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error }),
+            else => return err,
+        };
+    }
+
+    fn refuse(a: std.mem.Allocator, comptime f: []const u8, args: anytype) error{ Refused, OutOfMemory } {
+        last_error = try std.fmt.allocPrint(a, f, args);
+        return error.Refused;
+    }
+
+    fn kernelOpBody(rt: *Runtime, a: std.mem.Allocator, op: []const u8, body: Value, by: heads.By) !void {
+        if (body != .map) return refuse(a, "the body is not a map", .{});
+        if (std.mem.eql(u8, op, "objects")) {
+            const records = body.get("records") orelse return refuse(a, "want {{records: [{{cid, bytes}}], root?}}", .{});
+            if (records != .array) return refuse(a, "records: not a list", .{});
+            // Checked whole before anything is stored.
+            for (records.array, 0..) |r, i| {
+                const c = Value.cidOf(r.get("cid")) orelse return refuse(a, "record {d}: cid is not a CID", .{i});
+                const bytes = Value.bytesOf(r.get("bytes")) orelse return refuse(a, "record {d}: bytes: not bytes", .{i});
+                if (!cidm.hashMatches(c, bytes)) return refuse(a, "record {d}: bytes do not hash to {s}", .{ i, fmtCid(a, c) });
+            }
+            var root: ?[]const u8 = null;
+            if (body.get("root")) |x| if (x != .null) {
+                root = Value.cidOf(x) orelse return refuse(a, "root: not a CID", .{});
+            };
+            for (records.array) |r| try rt.store.putBlock(Value.cidOf(r.get("cid")).?, Value.bytesOf(r.get("bytes")).?);
+            rt.say("kernel objects: {d} record{s} stored", .{ records.array.len, if (records.array.len == 1) "" else "s" });
+            if (root) |t| if ((try rt.store.headTree(a, "main")) == null) {
+                if (!(try rt.store.has(t))) return refuse(a, "root {s} is not in the store", .{fmtCid(a, t)});
+                _ = try heads.advanceHead(a, rt.store, "main", t, by);
+                rt.say("kernel objects: main → {s}", .{short(a, t)});
+            };
+            return;
+        }
+        if (std.mem.eql(u8, op, "head")) {
+            const name = Value.str(body.get("name")) orelse return refuse(a, "want {{name, tree}}", .{});
+            const tree = Value.cidOf(body.get("tree")) orelse Value.cidOf(body.get("root")) orelse return refuse(a, "want {{name, tree}}", .{});
+            if (!heads.isHeadName(name)) return refuse(a, "bad head name {s}", .{try json.quoted(a, name)});
+            if (!(try rt.store.has(tree))) return refuse(a, "tree {s} is not in the store", .{fmtCid(a, tree)});
+            _ = try heads.advanceHead(a, rt.store, name, tree, by);
+            rt.say("kernel head: {s} → {s} (owner {s})", .{ name, short(a, tree), heads.ownerOf(name) });
+            return;
+        }
+        if (std.mem.eql(u8, op, "dispatch")) {
+            const what = Value.str(body.get("op")) orelse return refuse(a, "want {{op: add|remove, row}}", .{});
+            if (!std.mem.eql(u8, what, "add") and !std.mem.eql(u8, what, "remove")) return refuse(a, "op {s}: add or remove", .{try json.quoted(a, what)});
+            const row = body.get("row") orelse return refuse(a, "want {{op: add|remove, row}}", .{});
+            if (try dispatch.problem(a, row)) |bad| return refuse(a, "row: {s}", .{bad});
+            const r = dispatch.rowOf(row).?;
+            if (std.mem.eql(u8, what, "add")) if (r.program) |pc| {
+                const p = rt.store.getOpt(a, pc);
+                if (!programs.isProgram(p)) return refuse(a, "row: program {s} is not a program record in the store", .{fmtCid(a, pc)});
+                if (programs.wasmOf(p.?)) |w| if (!(try rt.store.has(w))) return refuse(a, "row: {s}'s module {s} is not in the store", .{ Value.str(p.?.get("name")).?, fmtCid(a, w) });
+            };
+            const c = try dispatch.apply(a, rt.store, what, row, .{ .thread = null, .input = by.input, .at = by.at });
+            rt.say("kernel dispatch: {s} {s} {s}{s} {s}", .{ what, r.transport, r.address, if (r.prefix) "*" else "", if (c == null) "(no change)" else if (r.program == null) "→ kernel" else "→ program" });
+            return;
+        }
+        if (std.mem.eql(u8, op, "peers")) {
+            const what = Value.str(body.get("op")) orelse return refuse(a, "want {{op: add|remove, key, transport?, address? | url?, role?, handle?, domain?}}", .{});
+            const key = keyOf(a, body.get("key")) orelse return refuse(a, "`key` is not an identity key", .{});
+            if (std.mem.eql(u8, what, "remove")) {
+                try addressbook.write(a, rt.store, key, "", null, null, null, null, "admin", by);
+                rt.say("kernel peers: remove {s}", .{shortKey(key)});
+                return;
+            }
+            if (!std.mem.eql(u8, what, "add")) return refuse(a, "op is add or remove", .{});
+            const transport = Value.str(body.get("transport")) orelse "mailbox";
+            if (!logm.isTransport(transport)) return refuse(a, "transport is mailbox, libp2p or local", .{});
+            const address = Value.str(body.get("address")) orelse Value.str(body.get("url")) orelse return refuse(a, "add wants an address (a mailbox's url, a peer ID or topic:<name>, a provider's name)", .{});
+            if (address.len == 0) return refuse(a, "add wants an address", .{});
+            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), "admin", by);
+            rt.say("kernel peers: add {s} by {s} {s}", .{ shortKey(key), transport, address });
+            return;
+        }
+        return refuse(a, "no such operation", .{});
+    }
+
+    /// An identity key given as bytes or hex (a JSON-era client's).
+    fn keyOf(a: std.mem.Allocator, v: ?Value) ?[]const u8 {
+        const x = v orelse return null;
+        if (Value.bytesOf(x)) |b| return if (secp.isKey(b)) b else null;
+        const s = Value.str(x) orelse return null;
+        if (s.len != 66) return null;
+        const out = a.alloc(u8, 33) catch return null;
+        _ = std.fmt.hexToBytes(out, s) catch return null;
+        return if (secp.isKey(out)) out else null;
     }
 
     /// A plain entry (#29: a header, a proof, a transaction status the host
@@ -877,24 +994,23 @@ pub const Runtime = struct {
                 return;
             }
         };
-        var sub: ?subs.Sub = null;
-        for ((try subs.current(a, rt.store)) orelse &.{}) |s| if (s.sender == null and (s.box == null or std.mem.eql(u8, s.box.?, box))) {
-            sub = s;
-            break;
-        };
-        if (sub == null) {
-            rt.say("{s}: no subscription; recorded, nothing runs", .{what});
+        const row = dispatch.forEvent((try dispatch.current(a, rt.store)) orelse &.{}, box) orelse {
+            rt.say("{s}: no dispatch row; recorded, nothing runs", .{what});
             return;
-        }
+        };
+        const handler = row.program orelse {
+            rt.say("{s}: an event cannot drive a kernel row; recorded, nothing runs", .{what});
+            return;
+        };
         var origin = cbor.MapBuilder.init(a);
         try origin.put("kind", cbor.string("thread"));
-        try origin.put("program", cbor.cidv(sub.?.handler));
+        try origin.put("program", cbor.cidv(handler));
         try origin.put("args", info.value());
         try origin.put("launchedBy", cbor.cidv(ev));
         try origin.put("input", cbor.cidv(ctx.cid));
         try origin.put("at", cbor.int(at));
         const t = try rt.store.chainOpen(a, origin.value());
-        rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, sub.?.handler), short(a, t) });
+        rt.say("{s} → {s} {s}", .{ what, try rt.programName(a, handler), short(a, t) });
         try rt.run(a, t);
     }
 
@@ -1089,8 +1205,9 @@ pub const Runtime = struct {
         kept: std.array_list.Managed([]const u8),
         awaits: std.array_list.Managed([]const u8),
         moves: std.array_list.Managed([2][]const u8),
-        rules: std.array_list.Managed(subs.Rule),
         children: std.array_list.Managed(Value),
+        /// The program running now (#77: the thread's, and under it each in-VM callee): its write scope.
+        progs: std.array_list.Managed(Value),
         /// The messages the step emitted (#70), in order: listed on its update, sent when it ends without error.
         emitted: std.array_list.Managed([]const u8),
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
@@ -1208,10 +1325,10 @@ pub const Runtime = struct {
         if (rt.step_extra) |x| try input.put(x.key, x.value);
         rt.step_extra = null;
         if (isRequestThread(o)) {
-            // The middleware (#68): the tables it routes by, and — on the request's first step —
-            // whether the request record was admitted before as what it routes (a redelivered
-            // GossipSub message: the `unique` map holds its `p2p` record).
-            try input.put("routes", g.get("routes"));
+            // The middleware (#68): the tables it routes by (#77: the dispatch rows, the reads), and — on
+            // the request's first step — whether the request record was admitted before as what it
+            // routes (a redelivered GossipSub message: the `unique` map holds its `p2p` record).
+            try input.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, rt.store)) orelse &.{}));
             try input.put("reads", g.get("reads"));
             if (std.mem.eql(u8, tip_cid, origin)) {
                 const rc = Value.cidOf(o.get("args").?.get("request")).?;
@@ -1233,10 +1350,11 @@ pub const Runtime = struct {
             .kept = .init(a),
             .awaits = .init(a),
             .moves = .init(a),
-            .rules = .init(a),
             .children = .init(a),
+            .progs = .init(a),
             .emitted = .init(a),
         };
+        try st.progs.append(prog);
         st.clock.drive(time.ns());
         st.clock.meter = meter; // the in-step clock runs on the step's fuel (issue #38)
 
@@ -1259,7 +1377,6 @@ pub const Runtime = struct {
             .awaitReply = hAwait,
             .head = hHead,
             .advance = hAdvance,
-            .subscribe = hSubscribe,
             .wallet = hWallet,
             .emit = hEmit,
             .deadline = hDeadline,
@@ -1313,9 +1430,7 @@ pub const Runtime = struct {
         };
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
         var head_updates = std.array_list.Managed([]const u8).init(a);
-        var sub_updates = std.array_list.Managed([]const u8).init(a);
         if (!errored) for (st.moves.items) |m| try head_updates.append(try heads.advanceHead(a, rt.store, m[0], m[1], .{ .thread = origin, .input = ctx.cid, .at = at }));
-        if (!errored) for (st.rules.items) |r| if (try subs.subscribe(a, rt.store, r, .{ .thread = origin, .input = ctx.cid, .at = at })) |c| try sub_updates.append(c);
         const waiting = std.mem.eql(u8, state, "waiting");
 
         var u = cbor.MapBuilder.init(a);
@@ -1332,7 +1447,6 @@ pub const Runtime = struct {
         try u.put("launched", try cbor.cidArray(a, st.launched.items));
         try u.put("kept", try cbor.cidArray(a, st.kept.items));
         try u.put("heads", try cbor.cidArray(a, head_updates.items));
-        try u.put("subscriptions", try cbor.cidArray(a, sub_updates.items));
         var res = cbor.MapBuilder.init(a);
         try res.put("exitCode", cbor.int(out.exit_code));
         try res.put("stdout", .{ .bytes = out.stdout });
@@ -1367,7 +1481,6 @@ pub const Runtime = struct {
             try w.appendSlice(" · moved ");
             for (st.moves.items, 0..) |m, i| try w.print("{s}{s}→{s}", .{ if (i > 0) "," else "", m[0], short(a, m[1]) });
         }
-        if (sub_updates.items.len > 0) try w.print(" · {d} subscription change{s}", .{ sub_updates.items.len, if (sub_updates.items.len == 1) "" else "s" });
         if (st.awaits.items.len > 0) {
             try w.appendSlice(" · awaits ");
             for (st.awaits.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
@@ -1453,20 +1566,38 @@ pub const Runtime = struct {
         while (i > 0) : (i -= 1) if (std.mem.eql(u8, st.moves.items[i - 1][0], name)) return st.moves.items[i - 1][1];
         return heads.headTree(st.a, st.rt.store, name) catch imp.failWith("store error");
     }
+    /// `advance` (#77): only a head in the running program's write scope. An app's program (its
+    /// record's `app`) writes `<app>/…`; a genesis-wired program writes what the genesis's `scopes`
+    /// list under its name (an exact name, or a prefix ending in `/`); a program record may also
+    /// list `heads` it may write (a transitional grant the install writes for an app built before
+    /// its heads moved under its name, to review). Nothing else.
     fn hAdvance(imp: *program.Imports, name: []const u8, t: []const u8) program.Err!void {
         const st = stepOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("advance: bad head name {s}", .{try json.quoted(st.a, name)});
+        const prog = st.progs.items[st.progs.items.len - 1];
+        if (!inScope(st.rt.genesis, prog, name)) {
+            const pname = Value.str(prog.get("name")) orelse "?";
+            if (Value.str(prog.get("app"))) |app| return imp.failFmt("advance: {s} is outside the write scope of {s} (app {s} writes only heads under its own name, {s}/…)", .{ try json.quoted(st.a, name), pname, app, app });
+            return imp.failFmt("advance: {s} is outside the write scope of {s} (a genesis-wired program writes only the heads its genesis `scopes` name under {s})", .{ try json.quoted(st.a, name), pname, pname });
+        }
         if (!(st.rt.store.has(t) catch false)) return imp.failFmt("advance: tree {s} is not in the store", .{fmtCid(st.a, t)});
         try st.moves.append(.{ name, t });
     }
-    fn hSubscribe(imp: *program.Imports, op: []const u8, sender: ?[]const u8, box: []const u8, handler: []const u8) program.Err!void {
-        const st = stepOf(imp);
-        const a = st.a;
-        if (try subs.ruleProblem(a, op, sender, box)) |bad| return imp.failFmt("subscribe: {s}", .{bad});
-        const p = st.rt.store.getOpt(a, handler);
-        if (!programs.isProgram(p)) return imp.failFmt("subscribe: handler {s} is not a program record in the store", .{fmtCid(a, handler)});
-        if (programs.wasmOf(p.?)) |w| if (!(st.rt.store.has(w) catch false)) return imp.failFmt("subscribe: {s}'s module {s} is not in the store", .{ Value.str(p.?.get("name")).?, fmtCid(a, w) });
-        try st.rules.append(.{ .op = op, .sender = sender, .box = box, .handler = handler });
+
+    fn scopeMatch(entry: []const u8, name: []const u8) bool {
+        if (entry.len > 0 and entry[entry.len - 1] == '/') return std.mem.startsWith(u8, name, entry);
+        return std.mem.eql(u8, entry, name);
+    }
+
+    /// Whether `prog` (a program record) may advance `name` (#77).
+    pub fn inScope(genesis: ?Value, prog: Value, name: []const u8) bool {
+        if (Value.str(prog.get("app"))) |app| {
+            if (name.len > app.len and std.mem.startsWith(u8, name, app) and name[app.len] == '/') return true;
+        } else if (genesis) |g| if (g.get("scopes")) |sc| if (sc == .map) if (Value.str(prog.get("name"))) |pname| if (sc.get(pname)) |list| if (list == .array) {
+            for (list.array) |e| if (Value.str(e)) |s| if (scopeMatch(s, name)) return true;
+        };
+        if (prog.get("heads")) |hs| if (hs == .array) for (hs.array) |h| if (Value.str(h)) |s| if (scopeMatch(s, name)) return true;
+        return false;
     }
     fn hWallet(imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
@@ -1647,6 +1778,9 @@ pub const Runtime = struct {
         const a = st.a;
         if (st.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
         const loaded = try loadCallee(st.rt, imp, a, prog);
+        // #77: the callee's writes are the step's, in the callee's own write scope.
+        try st.progs.append(loaded.record);
+        defer _ = st.progs.pop();
         var ctx = st.rt.callContext(a, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
         var extra = cbor.MapBuilder.init(a);
         try extra.put("thread", cbor.cidv(st.origin));
@@ -1664,7 +1798,7 @@ pub const Runtime = struct {
         return runCallee(imp, a, st.rt, loaded, func, st.host.?, st.svc.?);
     }
 
-    const Callee = struct { mod: *runner.Compiled, name: []const u8 };
+    const Callee = struct { mod: *runner.Compiled, name: []const u8, record: Value };
 
     fn loadCallee(rt: *Runtime, imp: *program.Imports, a: std.mem.Allocator, prog: []const u8) program.Err!Callee {
         const p = rt.store.getOpt(a, prog);
@@ -1675,7 +1809,7 @@ pub const Runtime = struct {
             error.OutOfMemory => error.OutOfMemory,
             else => imp.failFmt("call: {s}", .{@errorName(err)}),
         };
-        return .{ .mod = mod, .name = Value.str(p.?.get("name")).? };
+        return .{ .mod = mod, .name = Value.str(p.?.get("name")).?, .record = p.? };
     }
 
     fn runCallee(imp: *program.Imports, a: std.mem.Allocator, rt: *Runtime, c: Callee, func: []const u8, host: *const program.Host, svc: *wasi.Services) program.Err![]const u8 {
@@ -1693,7 +1827,7 @@ pub const Runtime = struct {
 
     /// The input a called program reads (`kind: "call"`): what it is asked,
     /// by whom, and the instance it runs in — the genesis's facts and the
-    /// subscriptions as they stand.
+    /// dispatch table as it stands (#77).
     fn callContext(rt: *Runtime, a: std.mem.Allocator, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !cbor.MapBuilder {
         const g = rt.genesis orelse return error.NoGenesis;
         var m = cbor.MapBuilder.init(a);
@@ -1712,17 +1846,8 @@ pub const Runtime = struct {
         try m.put("peers", g.get("peers"));
         try m.put("defaults", g.get("defaults"));
         try m.put("names", g.get("names"));
-        try m.put("routes", g.get("routes"));
         try m.put("reads", g.get("reads"));
-        var rules = std.array_list.Managed(Value).init(a);
-        for ((try subs.current(a, rt.store)) orelse &.{}) |r| {
-            var x = cbor.MapBuilder.init(a);
-            if (r.sender) |sd| try x.put("sender", .{ .bytes = sd });
-            if (r.box) |b| try x.put("box", cbor.string(b));
-            try x.put("handler", cbor.cidv(r.handler));
-            try rules.append(x.value());
-        }
-        try m.put("subscriptions", .{ .array = rules.items });
+        try m.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, rt.store)) orelse &.{}));
         return m;
     }
 
@@ -1799,7 +1924,6 @@ pub const Runtime = struct {
         .awaitReply = cAwait,
         .head = cHead,
         .advance = cAdvance,
-        .subscribe = cSubscribe,
         .wallet = cWallet,
         .emit = cEmit,
         .deadline = cDeadline,
@@ -1852,9 +1976,6 @@ pub const Runtime = struct {
     }
     fn cAdvance(imp: *program.Imports, _: []const u8, _: []const u8) program.Err!void {
         return readOnly(imp, "advance");
-    }
-    fn cSubscribe(imp: *program.Imports, _: []const u8, _: ?[]const u8, _: []const u8, _: []const u8) program.Err!void {
-        return readOnly(imp, "subscribe");
     }
     /// A kernel call sends nothing (#70): only a step emits.
     fn cEmit(imp: *program.Imports, _: []const u8) program.Err![]const u8 {

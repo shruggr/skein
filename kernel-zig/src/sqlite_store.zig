@@ -58,7 +58,8 @@ pub const SqliteStore = struct {
     /// kernel calls and wrote nothing; before format 6 (issues #70, #67)
     /// steps made mid-step `http`/`libp2p` calls, attested by the host;
     /// before format 7 (issues #65, #69) broadcasts were messages, wakes were
-    /// entries and the genesis carried jobs.
+    /// entries and the genesis carried jobs; before format 8 (#77) routing was
+    /// a subscriptions chain plus routes, and the admin boxes had handler programs.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !*SqliteStore {
         if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
             if (st.size > 0) {
@@ -67,6 +68,8 @@ pub const SqliteStore = struct {
                 if (probe.predatesFuel()) {
                     if (probe.ix.loaded_format < 1) {
                         std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    } else if (probe.ix.loaded_format == 7) {
+                        std.log.err("{s}: a store written before format 8 (issue #77: the kernel's four tables — one dispatch table, admin operations in the kernel, write scope by app name): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 6) {
                         std.log.err("{s}: a store written before format 7 (issues #65, #69: broadcast out an event, wakes and ticks messages from the waker and cron providers, no genesis jobs): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 5) {

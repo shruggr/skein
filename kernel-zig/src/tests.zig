@@ -118,7 +118,7 @@ test "entropy stream and the fixed CIDs" {
     const c = f.object.get("cids").?.object;
     try std.testing.expectEqualStrings(c.get("shell").?.string, try cidm.format(a, try programs.programCid(a, "shell")));
     try std.testing.expectEqualStrings(c.get("headMain").?.string, try cidm.format(a, try @import("heads.zig").headOrigin(a, "main")));
-    try std.testing.expectEqualStrings(c.get("subscriptions").?.string, try cidm.format(a, try @import("subscriptions.zig").origin(a)));
+    try std.testing.expectEqualStrings(c.get("dispatch").?.string, try cidm.format(a, try @import("dispatch.zig").origin(a)));
     try std.testing.expectEqualStrings(c.get("emptyTree").?.string, try cidm.format(a, (try @import("tree.zig").hashTree(a, &.{})).cid));
 }
 

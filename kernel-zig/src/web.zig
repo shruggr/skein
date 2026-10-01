@@ -139,7 +139,7 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 7, issues #65, #69: broadcast out an event, wakes and ticks messages from the waker and cron providers): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 8, issue #77: the kernel's four tables, one dispatch table): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));
@@ -369,14 +369,8 @@ fn copyLog(a: std.mem.Allocator, src: storem.Store, dst: storem.Store) !void {
         const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
         try dst.putBlock(p.value.cid, b);
     }
-    for (g.get("subscriptions").?.array) |sub| {
-        const h = Value.cidOf(sub.get("handler")) orelse continue;
-        if (try dst.has(h)) continue;
-        const b = (try src.bytes(a, h)) orelse continue;
-        try dst.putBlock(h, b);
-    }
-    // Route handlers not among the programs (replay.zig: #40's routes, #51's libp2p: sources).
-    if (g.get("routes")) |rs| if (rs == .array) for (rs.array) |r| {
+    // Programs the genesis's dispatch rows name that are not among its programs (replay.zig copyLog, #77).
+    if (g.get("dispatch")) |rs| if (rs == .array) for (rs.array) |r| {
         const h = Value.cidOf(r.get("program")) orelse continue;
         if (try dst.has(h)) continue;
         const b = (try src.bytes(a, h)) orelse continue;

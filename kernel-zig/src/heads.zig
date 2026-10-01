@@ -1,5 +1,10 @@
-// Named heads (src/runtime/heads.ts): a chain per name, origin {kind: "head",
-// name}, one update per move {tree, thread, input, at}.
+// Named heads (#77: one of the kernel's four tables): a chain per name,
+// origin {kind: "head", name}, one update per move {tree, owner, thread,
+// input, at}. `owner` is the app the name belongs to (ownerOf): the text
+// before the first `/`, or the whole name (`main`, `wallet`, `peers`). A
+// program may advance only the heads in its write scope (scheduler.zig
+// hAdvance): an app's are `<app>/…`; a genesis-wired program's are what the
+// genesis's `scopes` name; the kernel's own operations write the rest.
 const std = @import("std");
 const cbor = @import("cbor");
 const Store = @import("store.zig").Store;
@@ -42,7 +47,12 @@ pub fn headTree(a: std.mem.Allocator, s: Store, name: []const u8) !?[]const u8 {
     return s.headTree(a, name);
 }
 
-/// `thread` null: moved by the genesis (a system tree, issue #4), not by a thread.
+/// The app a head's name belongs to (#77): `<app>/<rest>` → `<app>`; a bare name is its own.
+pub fn ownerOf(name: []const u8) []const u8 {
+    return name[0 .. std.mem.indexOfScalar(u8, name, '/') orelse name.len];
+}
+
+/// `thread` null: moved by the genesis (a system tree, issue #4) or by a kernel operation (#77), not by a thread.
 pub const By = struct { thread: ?[]const u8, input: []const u8, at: i64 };
 
 pub fn advanceHead(a: std.mem.Allocator, s: Store, name: []const u8, tree: []const u8, by: By) ![]const u8 {
@@ -54,6 +64,7 @@ pub fn advanceHead(a: std.mem.Allocator, s: Store, name: []const u8, tree: []con
     }
     var m = cbor.MapBuilder.init(a);
     try m.put("tree", cbor.cidv(tree));
+    try m.put("owner", cbor.string(ownerOf(name)));
     try m.put("thread", cbor.optCid(by.thread));
     try m.put("input", cbor.cidv(by.input));
     try m.put("at", cbor.int(by.at));

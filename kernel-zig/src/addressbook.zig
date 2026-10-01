@@ -12,10 +12,13 @@
 // host's libp2p node carries it); `local`, the name of a provider on this
 // host (handed to it directly). `role` is the provider role the entry plays
 // for the instance (`fetch`, `libp2p`, `waker`, `broadcast`): how a program
-// finds a provider (`deadline` finds the waker). Written by the instance's own
-// programs (the resolve program, the owner's `peers` box) and, once, by the
-// genesis (`addressBook`: the host's providers, the owner's mailbox; source
-// "genesis"); the kernel reads it for `emit`.
+// finds a provider (`deadline` finds the waker). One of the kernel's four
+// tables (#77): written by the genesis (`addressBook`: the host's providers,
+// the owner's mailbox; source "genesis") and by the kernel's `peers`
+// operation on an admin message (source "admin"; `write` below). The resolve
+// program still writes a resolved handle's record itself (source "resolve" /
+// "claim": a transitional grant in the genesis's `scopes`, to review); the
+// kernel reads it for `emit`.
 const std = @import("std");
 const cbor = @import("cbor");
 const heads = @import("heads.zig");
@@ -63,6 +66,41 @@ pub fn byRole(a: std.mem.Allocator, s: Store, root: ?[]const u8, role: []const u
         if (e.role) |r| if (std.mem.eql(u8, r, role)) return e;
     }
     return null;
+}
+
+/// Write (or replace) the peer record for `key` (#77: the kernel's `peers`
+/// operation; the resolve program's writePeer, moved here); a null `address`
+/// removes it. The head `peers` moves under `by`.
+pub fn write(a: std.mem.Allocator, s: Store, key: []const u8, transport: []const u8, address: ?[]const u8, role: ?[]const u8, handle: ?[]const u8, domain: ?[]const u8, source: []const u8, by: heads.By) !void {
+    var list = std.array_list.Managed(Value).init(a);
+    if (try s.headTree(a, HEAD)) |root| if (try s.get(a, root)) |r| if (r.get("peers")) |ps| if (ps == .array) for (ps.array) |x| {
+        if (!std.mem.eql(u8, Value.bytesOf(x.get("key")) orelse "", key)) try list.append(x);
+    };
+    if (address) |u| {
+        var rec = cbor.MapBuilder.init(a);
+        try rec.put("kind", cbor.string("peer"));
+        try rec.put("key", .{ .bytes = key });
+        try rec.put("transport", cbor.string(transport));
+        try rec.put("address", cbor.string(u));
+        try rec.put("role", cbor.optStr(role));
+        try rec.put("handle", cbor.optStr(handle));
+        try rec.put("domain", cbor.optStr(domain));
+        try rec.put("since", cbor.int(by.at));
+        try rec.put("source", cbor.string(source));
+        var e = cbor.MapBuilder.init(a);
+        try e.put("key", .{ .bytes = key });
+        try e.put("peer", cbor.cidv(try s.put(a, rec.value())));
+        try list.append(e.value());
+    }
+    std.mem.sort(Value, list.items, {}, struct {
+        fn lt(_: void, x: Value, y: Value) bool {
+            return std.mem.order(u8, Value.bytesOf(x.get("key")) orelse "", Value.bytesOf(y.get("key")) orelse "") == .lt;
+        }
+    }.lt);
+    var root = cbor.MapBuilder.init(a);
+    try root.put("kind", cbor.string("peers"));
+    try root.put("peers", .{ .array = list.items });
+    _ = try heads.advanceHead(a, s, HEAD, try s.put(a, root.value()), by);
 }
 
 /// The genesis's seed (#70): each `addressBook` entry written as a peer

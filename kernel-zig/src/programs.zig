@@ -9,9 +9,10 @@ const Value = cbor.Value;
 pub const Module = struct { name: []const u8, cid: []const u8 };
 
 /// MODULES, in declaration order (install order). Since #71 skein's own
-/// sources build only the install handlers (objects, head, subscribe), the
-/// messagebox, the front door, resolve and the wallet (programs/, over the SDK,
-/// shruggr/skein-sdk, #75). The shell's modules (brush, coreutils, the toolset), run-handler
+/// sources build only the messagebox, the front door, resolve and the wallet
+/// (programs/, over the SDK, shruggr/skein-sdk, #75); the install handlers
+/// (objects, head, subscribe) went with #77: those are the kernel's own
+/// operations on admin messages (scheduler.zig kernelOp). The shell's modules (brush, coreutils, the toolset), run-handler
 /// and loop are the workbench's (shruggr/skein-workbench): built there, their
 /// modules committed in wasm/ and pinned here because the stock genesis and the
 /// stock shell program name them (scripts/update-workbench.sh moves a build in;
@@ -22,18 +23,15 @@ pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
     .{ .name = "run-handler", .cid = "bafkreicd63a4ffjozgou3axes5p5tymfoi72ne2dpeqnhij33uqgvpdyle" },
-    .{ .name = "objects-handler", .cid = "bafkreict5sd5od75tqijprryrlfz73elsmt2dwy6jc5htjhwfgqayiptji" },
-    .{ .name = "head-handler", .cid = "bafkreihjehwu5gfhtds6iztu6kebv42descynthh5t6g4qp3vpd7bjy6bm" },
-    .{ .name = "subscribe-handler", .cid = "bafkreih4dcxbinnd3gg65fsvtjmfitfewk66ju6dvmo4w3gqe4gfuh3bp4" },
     .{ .name = "loop", .cid = "bafkreihbfmv6az4esnmf7wk5lmljvjzvt5f5xtef2b2asrtbam53bclmgy" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreib4oifx2cc7s3u6y44higdtlbov2j6aahrprrhwghyygxpc7x7krq" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreibuunqajgx45yh5na74go6gsibkgruqtb677rpqr24ibpewpjmera" },
+    .{ .name = "messagebox", .cid = "bafkreif55a4bpzojvvdi7i2ezexjvvimdbikjawvgr4wj4gu2riw32avqa" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreidqlmi77l5cic2ns5yqe3gojgjuigd6nc24aea5xsr2m56bt2ko3m" },
+    .{ .name = "frontdoor", .cid = "bafkreihhfgpg24tm5bxbsr2pyy64sbvi55tvlokakosinewokuvxlfiyla" },
     // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
-    .{ .name = "resolve", .cid = "bafkreia3akvsvilh2nceat3v36zmdurjn3vu4lcn2ehlo6aftlyiplk47m" },
+    .{ .name = "resolve", .cid = "bafkreicx5n7iespjs2nhixdrrjzxtwl5ssaresvhi7ywfh7sp3ruh3s62u" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -119,17 +117,14 @@ const Handler = struct { name: []const u8, services: []const []const u8, descrip
 
 const handlers = [_]Handler{
     .{ .name = "run-handler", .services = &.{}, .description = "The `run` box: read the body {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), run the shell over it, reply in `results`." },
-    .{ .name = "objects-handler", .services = &.{}, .description = "The `objects` box: read the bundle {records: [{cid, bytes}], root?}, store each record; a root becomes `main` if there is none." },
-    .{ .name = "head-handler", .services = &.{}, .description = "The `head` box: read the body {name, tree}, advance the named head to the tree." },
-    .{ .name = "subscribe-handler", .services = &.{}, .description = "The `subscribe` box: read the body {op, sender?, box, handler}, add or remove the subscription (sender, box) → handler (a program record in the store)." },
     .{ .name = "loop", .services = &.{"infer"}, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs. Everything it sends goes through the messagebox's `send` (#40)." },
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
-    .{ .name = "resolve", .services = &.{}, .description = "The peer table (#40, head `peers`): `resolve` {handle, domain} looks a BRC-169 handle up (recorded http) and writes its record; the `peers` box (the admin) adds or removes one; a `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender." },
-    .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door: called with each HTTP request (fn http); runs BRC-103/104 against the instance's session table (held in memory by the host, passed in and changed by the answer; never in the log), routes by the routes table, invokes the handler, signs the answer. Never stepped." },
+    .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that writes the handle's peer record into the address book (head `peers`); a `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The admin's `peers` box is the kernel's own operation (#77)." },
+    .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door (#68): the instance's middleware, stepped on every request a transport carries in (http: BRC-103/104 against its session records, head frontdoor/sessions; libp2p: the GossipSub signature; local: a provider's signed message), routed by the kernel's dispatch rows for its transport, the handler an in-VM call, the answer signed on the session. Called (fn read) for a route whose answer is a read of live state." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "shell", "run-handler", "objects-handler", "head-handler", "subscribe-handler", "loop", "messagebox", "frontdoor", "resolve" };
+pub const program_names = [_][]const u8{ "shell", "run-handler", "loop", "messagebox", "frontdoor", "resolve" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
