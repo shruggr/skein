@@ -803,7 +803,7 @@ step's) — that is how the front door calls a route handler.
 ### Calling an app: `{fn, args}` and the answer message (#72)
 
 An app's box takes `{fn: "<interface>.<function>", args}` (docs/APPS.md
-§4). Its handler (the SDK's `app.serve`, skein-sdk ≥ 0.2.0) answers with a
+§4). Its handler (the SDK's `app.serve`, skein-sdk ≥ 0.3.0: it reads `<app>/app`) answers with a
 message to the sender, in the same box, when the address book reaches the
 sender:
 
