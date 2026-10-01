@@ -138,7 +138,8 @@ Replay writes the same chain.
   the chain's first updates when the genesis entry is processed (no
   `thread`); nothing reads them for routing afterwards. By default
   (`STOCK_SUBSCRIPTIONS`, src/host/genesis.ts): the owner's `run`,
-  `objects`, `head`, `chat`, `subscribe` and `peers` (→ `resolve`) boxes;
+  `objects`, `head`, `chat`, `subscribe`, `peers` (→ `resolve`) and
+  `routes` (→ `frontdoor`: the installed routes, #72) boxes;
   `chat` from anyone; and the reserved box the host admits into, `:ack`
   (→ `messagebox`: a reader's pointer). A mailbox instance's seed is `:ack` and every message
   from anyone in any box to `messagebox` (`MAILBOX_SUBSCRIPTIONS`). Sessions
