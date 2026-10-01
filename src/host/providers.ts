@@ -103,6 +103,8 @@ export class Providers {
   private taken = new Set<string>();
   /** The waker's timers, by handle + the wake-me's CID. */
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Messages being carried now, and the waker's answers being appended. */
+  private inflight = new Set<Promise<unknown>>();
   private stopped = false;
 
   constructor(o: ProvidersOptions) { this.o = o; }
@@ -142,7 +144,22 @@ export class Providers {
     if (this.taken.has(k)) return;
     this.taken.add(k);
     if (this.taken.size > 100_000) this.taken.delete(this.taken.values().next().value!);
-    void this.carry(handle, id, out).catch((e) => this.say(handle, `provider: message ${id.toString().slice(-8)}: ${(e as Error).message}`));
+    const p = this.carry(handle, id, out).catch((e) => this.say(handle, `provider: message ${id.toString().slice(-8)}: ${(e as Error).message}`));
+    this.inflight.add(p);
+    void p.finally(() => this.inflight.delete(p));
+  }
+
+  private track(p: Promise<unknown>): void {
+    this.inflight.add(p);
+    void p.finally(() => this.inflight.delete(p));
+  }
+
+  /** Whether anything is being carried now (a waker's timer is not: it is waiting). */
+  busy(): boolean { return this.inflight.size > 0; }
+
+  /** Until what is being carried now is done (tests, the corpus: Router.settled). */
+  async idle(): Promise<void> {
+    while (this.inflight.size) await Promise.all([...this.inflight]);
   }
 
   private async carry(handle: string, id: CID, out: Outgoing): Promise<void> {
@@ -215,7 +232,7 @@ export class Providers {
     const fire = () => {
       this.timers.delete(k);
       if (this.o.now() < at) { this.timers.set(k, setTimeout(fire, Math.max(1, at - this.o.now()))); return; }
-      void this.answer(handle, "waker", m, id, { at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`));
+      this.track(this.answer(handle, "waker", m, id, { at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`)));
     };
     // A timer's longest wait is about 24.8 days; a later wake waits in steps.
     this.timers.set(k, setTimeout(fire, Math.min(2 ** 31 - 1, Math.max(0, at - this.o.now()) + 1)));
@@ -241,7 +258,7 @@ export class Providers {
         const frames = (f: { body: Uint8Array } | { closed: true; error?: string }) => {
           const x = { ...("body" in f ? { body: f.body } : { closed: true, ...(f.error ? { error: f.error } : {}) }) };
           if (!ready) { queue.push(x); return; }
-          void this.answer(handle, "libp2p", m, id, { stream, ...x }, "frame").catch((e) => this.say(handle, `libp2p: frame: ${(e as Error).message}`));
+          this.track(this.answer(handle, "libp2p", m, id, { stream, ...x }, "frame").catch((e) => this.say(handle, `libp2p: frame: ${(e as Error).message}`)));
         };
         stream = await p.dial(handle, b.peer, b.protocol, frames);
         await this.answer(handle, "libp2p", m, id, { stream });

@@ -390,7 +390,7 @@ pub const Runtime = struct {
         if (Value.cidOf(entry.get("request"))) |rc| {
             // #68: the package as received; its form only (what it says is the middleware's to judge).
             const transport = Value.str(entry.get("transport")).?;
-            if (middlewareOf(rt.genesis.?, transport) == null) return .{ .invalid = "admit: no middleware for this transport (the genesis's front door takes \"http\" and \"libp2p\")" };
+            if (middlewareOf(rt.genesis.?, transport) == null) return .{ .invalid = "admit: no middleware for this transport (the genesis's front door takes \"http\", \"libp2p\" and \"local\")" };
             if (!logm.isRequest(transport, rt.store.getOpt(a, rc))) return .{ .invalid = "admit: a request entry names its request record, put first, in its transport's shape (docs/VM.md, \"Requests\")" };
             return null;
         }

@@ -229,8 +229,8 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     await k.restore(src.state);
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
-  // A tree takes only the shell from the kernel: the other pinned records would sit in the store unreferenced (a replay would not reproduce them).
-  const kernelPrograms = await k.call("programs", src.kind === "code" ? (c.mailbox ? ["frontdoor", "messagebox"] : undefined) : ["shell"]) as Record<string, CID>;
+  // A tree takes from the kernel only the shell and, unless its bin/ has one, the front door (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them).
+  const kernelPrograms = await k.call("programs", src.kind === "code" ? (c.mailbox ? ["frontdoor", "messagebox"] : undefined) : ["shell", "frontdoor"]) as Record<string, CID>;
   if (src.kind === "code") {
     const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
     return { entry, objects: 0, programs: Object.keys(kernelPrograms) };
@@ -242,8 +242,8 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     if (m.bytes) { if (!(await k.hasBlock(m.cid))) { await k.putBlock(m.cid, m.bytes); n++; } }
     else if (!(await k.hasBlock(m.cid))) throw new Error(`incomplete: bin/${m.name}.cid names ${m.cid}, which neither the source nor the kernel holds`);
   }
-  // The shell is the VM's own program (its modules are the kernel's); every handler comes from bin/.
-  const programs: Record<string, CID> = { ...(kernelPrograms.shell ? { shell: kernelPrograms.shell } : {}) };
+  // The shell is the VM's own program (its modules are the kernel's), and so is the front door when the tree brings none; every handler comes from bin/
+  const programs: Record<string, CID> = { ...(kernelPrograms.shell ? { shell: kernelPrograms.shell } : {}), ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
   const s: System = resolveSystem(c, programs, t.subscriptions, t.config, t.root, t.routes, t.reads);
   const entry = await writeSystemGenesis(k, c, s, time);

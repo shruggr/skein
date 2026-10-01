@@ -50,9 +50,13 @@ test("router: the stock client by host name, our client by path prefix; the answ
   assert.match(body.text, /no inference peer/);
   assert.ok(CID.asCID(body.replyTo)?.equals(sent.id), "the answer replies to the chat's id: the record alpha keeps");
 
-  // Alpha's peer table: only what its own programs wrote (nothing: the owner is the genesis's one peer).
+  // Alpha's peer table: the genesis's seed (#70: the host's providers, the owner's mailbox) and nothing from the host's rows.
   const k = (await h.router.hydrate("alpha")).kernel;
-  assert.equal(await k.call("head", "peers"), null, "no peer seeded from the host's rows");
+  const root = await k.call("head", "peers") as CID;
+  const tab = await k.store.get(root) as unknown as { peers: Array<{ peer: CID }> };
+  const seeded = await Promise.all(tab.peers.map(async (p) => await k.store.get(p.peer) as unknown as { source: string; role?: string; transport: string }));
+  assert.ok(seeded.every((p) => p.source === "genesis"), "no peer seeded from the host's rows");
+  assert.deepEqual(seeded.map((p) => p.role ?? p.transport).sort(), ["fetch", "mailbox", "waker"], "the providers and the owner's mailbox");
 
   // Polls (#68: skein is a state process): each listMessages on david's mailbox is an entry — an access
   // log — and a read: the mailbox itself does not move.

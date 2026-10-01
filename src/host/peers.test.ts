@@ -26,18 +26,18 @@ test("skein-host peers: add / list / remove through the `peers` box as the owner
     owner: { wallet: h.owner, box: (row: { handle: string }) => new RawBox(h.owner, `${h.base}/@${row.handle}`) },
   };
   const cli = (...argv: string[]) => main(argv, env);
-  const list = async (handle: string) => { await h.router.settled(); const n = out.length; assert.equal(await cli("peers", handle, "list"), 0, err.join("\n")); return out.slice(n); };
+  const list = async (handle: string) => { await h.router.settled(); const n = out.length; assert.equal(await cli("peers", handle, "list"), 0, err.join("\n")); return out.slice(n).filter((l) => !l.endsWith("\tgenesis")); }; // the genesis seeds the providers and the owner (#70)
 
   const bob = PrivateKey.fromRandom().toPublicKey().toString();
   assert.equal(await cli("peers", "alpha", "add", bob, "https://mail.example/bob", "--handle", "bob@example.com"), 0, err.join("\n"));
   assert.equal(out.at(-1), `alpha: peers add ${bob.slice(-8)} → https://mail.example/bob (@bob@example.com): sent`);
   const got = await until("bob in alpha's address book", async () => { const l = await list("alpha"); return l.length ? l : undefined; });
-  assert.deepEqual(got, [[bob, "https://mail.example/bob", "bob@example.com", "admin"].join("\t")]);
+  assert.deepEqual(got, [[bob, "mailbox", "https://mail.example/bob", "-", "bob@example.com", "admin"].join("\t")]);
   assert.equal(await cli("peers", "alpha", "add", bob, "https://mail.example/bob", "--handle", "bob@example.com"), 0);
   assert.match(out.at(-1)!, /: unchanged/, "the same entry again is not sent");
   assert.equal(await cli("peers", "alpha", "add", bob, "https://other.example/bob"), 0);
   assert.match(out.at(-1)!, /→ https:\/\/other\.example\/bob: sent$/, "a changed URL is");
-  await until("the new URL", async () => (await list("alpha"))[0]?.includes("https://other.example/bob\t-\tadmin") ? true : undefined);
+  await until("the new URL", async () => (await list("alpha"))[0]?.includes("https://other.example/bob\t-\t-\tadmin") ? true : undefined);
   assert.equal(await cli("peers", "alpha", "remove", bob), 0);
   assert.match(out.at(-1)!, /: sent$/);
   await until("bob removed", async () => (await list("alpha")).length === 0 ? true : undefined);
@@ -61,8 +61,8 @@ test("skein-host peers: add / list / remove through the `peers` box as the owner
   assert.ok(out.includes("alpha: address book: beta written") && out.includes("beta: address book: alpha written"), out.join("\n"));
   const origin = (x: string) => `http://${x}.localhost:${h.router.port}`;
   await until("the roster's entries", async () => (await list("alpha")).length && (await list("beta")).length ? true : undefined);
-  assert.deepEqual(await list("alpha"), [[beta, origin("beta"), "beta@localhost", "admin"].join("\t")]);
-  assert.deepEqual(await list("beta"), [[alpha, origin("alpha"), "alpha@localhost", "admin"].join("\t")]);
+  assert.deepEqual(await list("alpha"), [[beta, "mailbox", origin("beta"), "-", "beta@localhost", "admin"].join("\t")]);
+  assert.deepEqual(await list("beta"), [[alpha, "mailbox", origin("alpha"), "-", "alpha@localhost", "admin"].join("\t")]);
   const n = out.length;
   assert.equal(await cli("roster", "--deploy"), 0);
   assert.ok(!out.slice(n).some((l) => l.includes("address book")), "unchanged: nothing sent");

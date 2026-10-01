@@ -36,12 +36,14 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
     const root = await k.call("head", "peers") as CID | null;
     if (!root) return [];
     const tab = await k.store.get(root) as unknown as { peers: Array<{ peer: CID }> };
-    return await Promise.all(tab.peers.map(async (p) => await k.store.get(p.peer) as unknown as { key: Uint8Array; url: string; source: string }));
+    const all = await Promise.all(tab.peers.map(async (p) => await k.store.get(p.peer) as unknown as { key: Uint8Array; transport: string; address: string; source: string }));
+    return all.filter((p) => p.source !== "genesis"); // the genesis seeds the host's providers (#70)
   };
   const added = await table();
   assert.equal(added.length, 1);
   assert.equal(Buffer.from(added[0]!.key).toString("hex"), a.ownerId);
-  assert.equal(added[0]!.url, url);
+  assert.equal(added[0]!.address, url);
+  assert.equal(added[0]!.transport, "mailbox");
   assert.equal(added[0]!.source, "admin");
 
   // A run: its result goes to the owner — over the wire, to host B.

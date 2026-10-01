@@ -136,7 +136,7 @@ const make = () => new Router({
   // The signing oracles: ProtoWallets (any other instance has a key of its own).
   db: hostDb, walletFor: (row) => ephemeralWallet(key(row.handle === "wallettest" ? KEYS.instance : row.handle === "payee" ? KEYS.payee : "9999")), home,
   owner: ownerId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: home } },
-  attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
+  providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
   // The host's Arcade (#58): no walletArc below — a new genesis names the router's route.
   arc: { url: arcade.url, token: ARC_TOKEN, events: arcade.eventsUrl },
   feeds: { backoff: { min: 50, max: 500 } },

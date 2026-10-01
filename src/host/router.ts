@@ -422,8 +422,9 @@ export class Router {
     for (let i = 0; i < 1000; i++) {
       await Promise.all([...this.queues.values()]);
       await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {})));
+      await this.providers.idle(); // what the providers carry now (#70): its answers are entries
       await new Promise((r) => setImmediate(r));
-      if (!this.queues.size && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
+      if (!this.queues.size && !this.providers.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
     }
   }
 

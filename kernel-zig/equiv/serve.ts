@@ -55,7 +55,7 @@ const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
 const inferId = key(KEYS.infer).toPublicKey().toString();
 const make = (fuel?: string) => new Router({
-  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home, attestKey: new Oracle(new PrivateKey("a77e57", 16)).attestKey(),
+  db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
   owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
