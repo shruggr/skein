@@ -23,7 +23,7 @@ the spec), then `docs/MESSAGES.md` (how messages enter and leave) and
 ```
 src/runtime/     the formats and the store reader, in TypeScript — no machine (the kernel is kernel-zig);
                  no network, clock, randomness, messagebox or private key; the seed of a JS runtime (#55)
-  cid.ts records.ts types.ts   dag-cbor blocks and CIDs; record kinds (genesis, program, subscription, message, emit, attested)
+  cid.ts records.ts types.ts   dag-cbor blocks and CIDs; record kinds (genesis, program, subscription, message, emit, oracle)
   log.ts           log entries (genesis | envelope | wake | outcome), their signed bytes, the genesis a log starts with
   heads.ts         named heads: a chain per name; `main` is where `run`/`chat` start
   subscriptions.ts the routing table's chain, read (the kernel writes it)
@@ -142,10 +142,10 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | thread origin | `{kind: "thread", program, args, launchedBy, input: <entry>, at, nonce?}`; handler args `{envelope, body, box, sender}` |
 | program step | update `{state, step, input, at, calls?, launched?, waitingOn?, awaits?, kept?, emits?, heads?, subscriptions?, result: {exitCode, stdout, stderr}}` — `awaits`: envelopes it emitted and rests on; `kept`: records the step keeps in the thread's state |
 | step input | `{kind: "step", thread, step, entry, at, self: {handle, domain}, args, programs, resolved?, tip?, reply?: {envelope, body, box, sender, replyTo}, peers?, defaults?, names?}` |
-| attested | `{kind: "attested", thread, step, i, op: "wallet" \| "resolve", request, result}` — a wire frame and its answer (among them each envelope's signature and encryption), or a handle `handle@domain` and the host resolver's whole answer as dag-cbor (`{identityKey, …the resolve endpoint's response, via, checked?, unchecked?}`; `identityKey: ""` and `error`: none) |
+| oracle | `{kind: "oracle", thread, step, i, request, result}` — the one recorded call (#67, format 6): a BRC-100 wire frame and the oracle's answer; replay serves `result` and never asks a wallet |
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
 | subscriptions | origin `{kind: "subscriptions"}`, one per instance; update `{op: "add" \| "remove", sender?, box, handler, thread?, input, at}` — the genesis entry writes the seed (no `thread`), later ones are written when a step that called `subscribe` ends without error, listed in its `subscriptions`; the scheduler routes by the fold of them (docs/VM.md, "Subscriptions") |
-| emit | `{kind: "emit", to, box, body: <cid>, envelope}` — `envelope` is complete: the program signed it and encrypted `body` to `to` through the wallet import in the step (`programs/envelope`; `created` is the step's stamp); the runtime checks it, `emit` returns its signed part's CID (the message id), and the delivery provider sends it as it is after the step |
+| emitted message | `{kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, nonce, signature}` — what `emit` makes (#70, format 6): signed through the oracle BRC-169's way, listed on the step's update in `emitted`, sent after the step by the recipient's address-book transport (docs/MESSAGES.md, "Outbound") |
 
 Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
 `root` on the last) → objects-handler, which sets `main` to `root` if there is
