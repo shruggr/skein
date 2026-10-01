@@ -4,7 +4,12 @@
 // event records of docs/WALLET.md:
 //
 //   header {kind: "header", raw: bytes(80)}
-//   status {kind: "status", subject: <tx CID>, txid, txStatus, merklePath?: bytes, blockHeight?, blockHash?}
+//
+// (The broadcaster's proofs travel the same way, #65: {kind: "proof",
+// subject, txid, path, …} in box `chain`, arc.ts; its other statuses are
+// signed messages from the status provider. `statusOf` reads Arcade's JSON
+// for it: {kind: "status", subject: <tx CID>, txid, txStatus, merklePath?:
+// bytes, blockHeight?, blockHash?, extraInfo?}.)
 //
 // An instance declares its header feeds in its config (etc/config.json,
 // `feeds`), which its genesis carries:
@@ -20,9 +25,10 @@
 // queue of items not yet admitted holds at most `maxQueue` (the oldest go
 // first, logged).
 //
-// The `status` half is the host's broadcaster (#58, arc.ts): one Arcade
-// subscription for the whole host over the same SSE client (SseStream), each
-// status routed to every instance that holds the transaction. The
+// The transaction half is the host's broadcaster (#58, #65, arc.ts): one
+// Arcade subscription for the whole host over the same SSE client
+// (SseStream), each proof and status routed to every instance that holds the
+// transaction. The
 // per-instance `arc-callback` feed is gone: a genesis that still declares one
 // has it ignored.
 
@@ -92,6 +98,7 @@ export function statusOf(v: unknown): Record<string, unknown> | string {
   }
   if (typeof o.blockHeight === "number") ev.blockHeight = o.blockHeight;
   if (typeof o.blockHash === "string" && o.blockHash) ev.blockHash = o.blockHash;
+  if (typeof o.extraInfo === "string" && o.extraInfo) ev.extraInfo = o.extraInfo;
   return ev;
 }
 

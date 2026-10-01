@@ -1,157 +1,185 @@
-// Jobs (#60): the router is the clock. "Cron is a time attestation that a
-// subscription routes to whatever waits for it" (docs/VM.md): an instance's
-// genesis declares its jobs (etc/config.json `jobs`, carried like `feeds`),
+// The cron provider (#69): scheduling is a message to a provider. A program
+// that wants to be ticked emits, to the cron provider's key (the address
+// book's entry with role `cron`), box `cron`:
 //
-//   {box, body?: <map>, every: <ms> | at: <ms since the epoch>, name?}
+//   {fn: "tick", every: <ms> | at: <ms since the epoch>, box, body?: {…}, name}
+//   {fn: "stop", name}
 //
-// and when one is due the router admits a **plain event** into its box —
-// the same admission as a feed's header or a broadcaster's status
-// (Router.admitEvent): a sender-less `event` entry, stamped by the router at
-// admission (that stamp is the attestation). The event record is
+// and the provider answers it ({replyTo, name, next: <ms>} | {replyTo, name,
+// stopped: true | false} | {replyTo, error}), then sends each tick as a signed
+// message from its own identity into the named box of the instance that
+// asked:
 //
-//   {...body, kind: body.kind ?? "cron", name?, due: <ms>}
+//   {...body, kind: body.kind ?? "cron", name, due: <ms>}
 //
-// `due` is when the firing was scheduled; the entry's stamp is when it was
-// admitted. An `every` job fires once when the router first declares it (its
-// boot: `skein-host run` hydrates every enabled instance at start), then every
-// `every` ms on that grid; a firing the router was too late for is not made
-// up (one firing, then the next grid point after now): after a host restart a
-// job fires once, never a burst. An `at` job fires once — at `at`, or at the
-// next boot if the host was down then — and host.db remembers it fired
-// (`cron_fired`), so a restart does not fire it again.
+// routed there by the instance's subscription to that box (sender the cron
+// provider, or anyone). `due` is when the tick was scheduled; the message's
+// entry stamp is when it arrived. A tick request replaces the instance's
+// schedule of the same name; `stop` ends it. An `every` schedule ticks at
+// once, then every `every` ms on that grid; a tick the provider was too
+// late for is not made up (one tick, then the next grid point after now). An
+// `at` schedule ticks once — at `at`, or at once if that is past — and is
+// then gone. The schedules are the provider's state, kept across restarts
+// (the reference host: host.db `cron_schedule`); at a host start every
+// `every` schedule ticks once (a restart is a late tick), each `at` one at
+// its time.
 //
-// A job of a running instance is admitted as it is. An idle-stopped instance
-// is hydrated for a job only if its subscriptions route a sender-less event
-// in the job's box somewhere (a job is a reason to wake an instance, like
-// mail); otherwise nothing is admitted — there is nothing to wake for. A
-// program takes the event as its start signal and carries on with `deadline`
-// wakes; the next `every` firing is its retry if its thread died.
+// This module is the schedule itself (`Cron`): the provider on the reference
+// host (providers.ts, its ticks appended as `local` requests) and a remote
+// cron service (src/peers/cron.ts, its ticks delivered to the instance's
+// messagebox over BRC-103/104) both run it. Which one an instance talks to
+// is its address book's business: the same key, `local` or `mailbox`.
 
-import { createHash } from "node:crypto";
 import * as dagCbor from "@ipld/dag-cbor";
 
-/** A job as a system writes it (etc/config.json `jobs`) and a genesis carries it. */
-export interface JobSpec { box: string; body?: Record<string, unknown>; every?: number; at?: number; name?: string }
+/** A tick request's schedule: every `every` ms, or once at `at`, into `box`. */
+export interface TickSpec { every?: number; at?: number; box: string; body?: Record<string, unknown> }
 
-const SHAPE = "want {box, body?: {…}, every: <ms> | at: <ms since the epoch>, name?}";
+/** One schedule: whose (the instance the ticks go to, its key), its name and spec, the request that made it, the next tick. */
+export interface Schedule extends TickSpec { instance: string; recipient: string; name: string; request: string; next: number }
 
-/** A system's jobs, checked (genesis.ts resolveSystem): a malformed one is an error in etc/config.json. */
-export function jobsIn(js: unknown): { jobs?: JobSpec[] } {
-  if (js === undefined) return {};
-  if (!Array.isArray(js)) throw new Error("etc/config.json: jobs is a list");
-  const out: JobSpec[] = [];
-  for (const j of js as unknown[]) {
-    const why = badJob(j);
-    if (why) throw new Error(`etc/config.json: a job ${why} (${SHAPE}): ${JSON.stringify(j)}`);
-    out.push(clean(j as JobSpec));
-  }
-  return out.length ? { jobs: out } : {};
+/** A request the cron provider takes (box `cron`), checked; an error's text otherwise. */
+export type CronRequest = { fn: "tick"; name: string; spec: TickSpec } | { fn: "stop"; name: string };
+
+export const CRON_SHAPE = "the cron provider takes {fn: \"tick\", every: <ms> | at: <ms since the epoch>, box, body?: {…}, name} or {fn: \"stop\", name} in box \"cron\"";
+
+/** A body as the cron provider reads it. */
+export function cronRequestOf(b: unknown): CronRequest | string {
+  const o = b as Record<string, unknown> | null;
+  if (!o || typeof o !== "object" || Array.isArray(o) || o instanceof Uint8Array) return CRON_SHAPE;
+  if (typeof o.name !== "string" || !o.name) return `${CRON_SHAPE}: a request names its schedule (name)`;
+  if (o.fn === "stop") return { fn: "stop", name: o.name };
+  if (o.fn !== "tick") return CRON_SHAPE;
+  if (typeof o.box !== "string" || !o.box || o.box.startsWith(":")) return `${CRON_SHAPE}: box is a box name (not empty, not reserved)`;
+  if ((o.every === undefined) === (o.at === undefined)) return `${CRON_SHAPE}: one of every and at`;
+  if (o.every !== undefined && !(Number.isSafeInteger(o.every) && (o.every as number) > 0)) return `${CRON_SHAPE}: every is a positive whole number of ms`;
+  if (o.at !== undefined && !(Number.isSafeInteger(o.at) && (o.at as number) >= 0)) return `${CRON_SHAPE}: at is a whole number of ms since the epoch`;
+  if (o.body !== undefined && (!o.body || typeof o.body !== "object" || Array.isArray(o.body) || o.body instanceof Uint8Array)) return `${CRON_SHAPE}: body is a map`;
+  return { fn: "tick", name: o.name, spec: { box: o.box, ...(o.every !== undefined ? { every: o.every as number } : { at: o.at as number }), ...(o.body !== undefined ? { body: o.body as Record<string, unknown> } : {}) } };
 }
 
-/** The jobs a genesis carries; malformed ones left out. */
-export function jobsOf(g: Record<string, unknown> | null | undefined): JobSpec[] {
-  const js = g?.jobs;
-  if (!Array.isArray(js)) return [];
-  return (js as unknown[]).filter((j) => !badJob(j)).map((j) => clean(j as JobSpec));
+/** A tick's body. */
+export function tickBody(s: Pick<Schedule, "name" | "body">, due: number): Record<string, unknown> {
+  const body = s.body ?? {};
+  return { ...body, kind: body.kind ?? "cron", name: s.name, due };
 }
 
-function badJob(j: unknown): string | undefined {
-  const o = j as Record<string, unknown> | null;
-  if (!o || typeof o !== "object" || Array.isArray(o)) return "is not an object";
-  if (typeof o.box !== "string" || !o.box) return "names no box";
-  if ((o.every === undefined) === (o.at === undefined)) return "has neither or both of every and at";
-  if (o.every !== undefined && !(Number.isSafeInteger(o.every) && (o.every as number) > 0)) return "has an every that is not a positive whole number of ms";
-  if (o.at !== undefined && !(Number.isSafeInteger(o.at) && (o.at as number) >= 0)) return "has an at that is not a whole number of ms since the epoch";
-  if (o.name !== undefined && typeof o.name !== "string") return "has a name that is not a string";
-  if (o.body !== undefined && (!o.body || typeof o.body !== "object" || Array.isArray(o.body) || o.body instanceof Uint8Array)) return "has a body that is not a map";
-  return undefined;
+/** How a schedule is described in log lines. */
+const label = (s: Pick<Schedule, "name" | "box" | "every" | "at">) => `${s.name} (${s.box} ${s.every !== undefined ? `every ${s.every} ms` : `at ${new Date(s.at!).toISOString()}`})`;
+
+/** Where schedules are kept (the reference host: host.db; a test or a remote service: memory). */
+export interface ScheduleStore {
+  all(): Schedule[];
+  save(s: Schedule): void;
+  drop(instance: string, name: string): void;
 }
 
-const clean = (j: JobSpec): JobSpec => ({
-  box: j.box, ...(j.body !== undefined ? { body: j.body } : {}), ...(j.every !== undefined ? { every: j.every } : { at: j.at }), ...(j.name !== undefined ? { name: j.name } : {}),
-});
-
-/** A job's identity: the same spec is the same job across declarations and restarts (a changed one is another). */
-export function jobKey(j: JobSpec): string {
-  return createHash("sha256").update(dagCbor.encode(clean(j))).digest("hex");
+/** A store in memory. */
+export function memorySchedules(): ScheduleStore {
+  const m = new Map<string, Schedule>();
+  return {
+    all: () => [...m.values()],
+    save: (s) => { m.set(`${s.instance}\0${s.name}`, { ...s }); },
+    drop: (i, n) => { m.delete(`${i}\0${n}`); },
+  };
 }
 
-/** The event record a firing admits. */
-export function cronEvent(j: JobSpec, due: number): Record<string, unknown> {
-  const body = j.body ?? {};
-  return { ...body, kind: body.kind ?? "cron", ...(j.name !== undefined ? { name: j.name } : {}), due };
+/** host.db's `cron_schedule` as a ScheduleStore (the spec as dag-cbor). */
+export function dbSchedules(db: {
+  saveSchedule(s: { instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number }): void;
+  dropSchedule(instance: string, name: string): boolean;
+  schedules(): Array<{ instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number }>;
+}): ScheduleStore {
+  return {
+    all: () => db.schedules().map((r) => ({ instance: r.instance, name: r.name, recipient: r.recipient, request: r.request, next: r.next, ...(dagCbor.decode(r.spec) as TickSpec) })),
+    save: (s) => db.saveSchedule({ instance: s.instance, name: s.name, recipient: s.recipient, request: s.request, next: s.next, spec: dagCbor.encode({ box: s.box, ...(s.every !== undefined ? { every: s.every } : { at: s.at }), ...(s.body !== undefined ? { body: s.body } : {}) }) }),
+    drop: (i, n) => { db.dropSchedule(i, n); },
+  };
 }
-
-/** How a job is described in log lines. */
-const label = (j: JobSpec) => j.name ?? `${j.box} ${j.every !== undefined ? `every ${j.every} ms` : `at ${new Date(j.at!).toISOString()}`}`;
 
 export interface CronOptions {
-  /** The clock (ms): the router's. */
+  /** The clock (ms). */
   now(): number;
-  /** Admit a plain event into `handle`'s box (Router.admitEvent: it hydrates); the entry's CID. */
-  admit(handle: string, box: string, event: Record<string, unknown>): Promise<unknown>;
-  /** Whether `handle`'s kernel is running, stopped (an enabled row, idle), or gone (no enabled row: its jobs are dropped). */
-  state(handle: string): "running" | "stopped" | "gone";
-  /** Whether a stopped instance's subscriptions route a sender-less event in `box` to a handler. */
-  subscribed(handle: string, box: string): Promise<boolean>;
-  /** `at` jobs that already fired (host.db `cron_fired`). */
-  fired: { has(handle: string, key: string): boolean; mark(handle: string, key: string, due: number): void };
+  /** Send one tick: a signed message from the provider to `s.recipient` in `s.box`. Throws if it could not go (an `at` tick is tried again). */
+  tick(s: Schedule, body: Record<string, unknown>): Promise<void>;
+  /** Whether the instance should be woken for a tick (the reference host: running, or something in it subscribes the box); default yes. */
+  wake?(s: Schedule): Promise<boolean>;
+  /** Where the schedules are kept (default memory). */
+  store?: ScheduleStore;
   log?(source: string, line: string): void;
-  /** An `at` job whose admission failed is tried again this much later (ms; default 60 000). */
+  /** An `at` tick that could not go is tried again this much later (ms; default 60 000). */
   retryMs?: number;
 }
 
-interface Scheduled { job: JobSpec; key: string; next: number }
-
-/** setTimeout's longest delay; a job further off is looked at again then. */
+/** setTimeout's longest delay; a tick further off is looked at again then. */
 const MAX_DELAY = 2 ** 31 - 1;
 
 export class Cron {
   readonly o: CronOptions;
-  private jobs = new Map<string, Map<string, Scheduled>>();
+  private readonly store: ScheduleStore;
   private timer?: ReturnType<typeof setTimeout>;
   private ticking: Promise<void> = Promise.resolve();
   private stopped = false;
+  /** Whether this one sends ticks (start): a schedule asked of one that does not is kept for one that does. */
+  private started = false;
 
-  constructor(o: CronOptions) { this.o = o; }
+  constructor(o: CronOptions) {
+    this.o = o;
+    this.store = o.store ?? memorySchedules();
+  }
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
 
-  /**
-   * `handle`'s jobs are these (its genesis's, at hydration). A job it already
-   * had keeps its schedule (a re-hydration after an idle stop is not a boot);
-   * a new `every` job is due now; an `at` job at `at`, unless it fired.
-   */
-  declare(handle: string, specs: JobSpec[]): void {
-    if (this.stopped) return;
-    const had = this.jobs.get(handle);
+  /** Take up the kept schedules (a host start): each `every` one ticks once now (late), each `at` one at its time. */
+  start(): void {
+    this.started = true;
     const now = this.o.now();
-    const m = new Map<string, Scheduled>();
-    for (const job of specs) {
-      const key = jobKey(job);
-      if (m.has(key)) continue;
-      const old = had?.get(key);
-      if (old) m.set(key, old);
-      else if (job.at !== undefined) { if (!this.o.fired.has(handle, key)) m.set(key, { job, key, next: job.at }); }
-      else m.set(key, { job, key, next: now });
-    }
-    if (m.size) this.jobs.set(handle, m);
-    else this.jobs.delete(handle);
+    for (const s of this.store.all()) if (s.every !== undefined && s.next > now) this.store.save({ ...s, next: now });
     this.schedule();
   }
 
-  /** `handle`'s jobs and when each fires next (the host page, tests). */
-  of(handle: string): Array<{ job: JobSpec; next: number }> {
-    return [...this.jobs.get(handle)?.values() ?? []].map(({ job, next }) => ({ job, next }));
+  /**
+   * A request from `instance` (whose key is `recipient`), the message
+   * `request`: → the answer body (beside `replyTo`). A tick request replaces
+   * the schedule of its name; stop ends it.
+   */
+  request(instance: string, recipient: string, request: string, body: unknown): Record<string, unknown> {
+    if (this.stopped) return { error: "the cron provider is stopping" };
+    const r = cronRequestOf(body);
+    if (typeof r === "string") return { error: r };
+    if (r.fn === "stop") {
+      const had = this.store.all().some((s) => s.instance === instance && s.name === r.name);
+      this.store.drop(instance, r.name);
+      this.say(instance, `cron: ${r.name} stopped${had ? "" : " (it was not scheduled)"}`);
+      this.schedule();
+      return { name: r.name, stopped: had };
+    }
+    const next = r.spec.at !== undefined ? r.spec.at : this.o.now();
+    const s: Schedule = { instance, recipient, name: r.name, request, next, ...r.spec };
+    this.store.save(s);
+    this.say(instance, `cron: ${label(s)} scheduled, next ${new Date(next).toISOString()}`);
+    this.schedule();
+    return { name: r.name, next };
   }
 
-  /** Fire every job that is due (one pass at a time); then wait for the next. */
+  /** `instance`'s schedules and when each ticks next (the host page, tests). */
+  of(instance: string): Schedule[] {
+    return this.store.all().filter((s) => s.instance === instance);
+  }
+
+  /** Drop every schedule of an instance that is gone. */
+  forget(instance: string): void {
+    for (const s of this.of(instance)) this.store.drop(instance, s.name);
+    this.schedule();
+  }
+
+  /** Send every tick that is due (one pass at a time); then wait for the next. */
   tick(): Promise<void> {
     this.ticking = this.ticking.then(() => this.fire()).catch((e) => this.say("router", `cron: ${(e as Error).message}`));
     return this.ticking;
   }
 
-  /** No more firings; resolves once a pass under way has finished. */
+  /** No more ticks; resolves once a pass under way has finished. */
   async stop(): Promise<void> {
     this.stopped = true;
     clearTimeout(this.timer);
@@ -162,42 +190,34 @@ export class Cron {
   private schedule(): void {
     clearTimeout(this.timer);
     this.timer = undefined;
-    if (this.stopped) return;
+    if (this.stopped || !this.started) return;
     let next = Infinity;
-    for (const m of this.jobs.values()) for (const s of m.values()) next = Math.min(next, s.next);
+    for (const s of this.store.all()) next = Math.min(next, s.next);
     if (next === Infinity) return;
     this.timer = setTimeout(() => void this.tick(), Math.min(MAX_DELAY, Math.max(0, next - this.o.now()) + 1));
   }
 
   private async fire(): Promise<void> {
     if (this.stopped) return;
-    for (const [handle, m] of [...this.jobs]) {
-      for (const s of [...m.values()]) {
-        if (this.stopped) return;
-        const now = this.o.now();
-        if (s.next > now) continue;
-        const state = this.o.state(handle);
-        if (state === "gone") { this.jobs.delete(handle); break; }
-        const due = s.next;
-        const { job } = s;
-        // The next firing first: the grid point after now (one firing however late this one is).
-        if (job.every !== undefined) s.next = due + (Math.floor((now - due) / job.every) + 1) * job.every;
-        else m.delete(s.key);
-        if (state === "stopped" && !(await this.o.subscribed(handle, job.box).catch(() => false))) {
-          if (job.at !== undefined) this.o.fired.mark(handle, s.key, due);
-          this.say(handle, `cron: ${label(job)} due: stopped, and nothing in it subscribes ${job.box}: not woken`);
-          continue;
-        }
-        try {
-          const e = await this.o.admit(handle, job.box, cronEvent(job, due));
-          if (job.at !== undefined) this.o.fired.mark(handle, s.key, due);
-          this.say(handle, `cron: ${label(job)} → ${job.box} as ${String(e).slice(-8)}${state === "stopped" ? " (woken for it)" : ""}`);
-        } catch (e) {
-          this.say(handle, `cron: ${label(job)}: not admitted: ${(e as Error).message}`);
-          if (job.at !== undefined && !this.stopped) m.set(s.key, { ...s, next: now + (this.o.retryMs ?? 60_000) });
-        }
+    for (const s of this.store.all()) {
+      if (this.stopped) return;
+      const now = this.o.now();
+      if (s.next > now) continue;
+      const due = s.next;
+      // The next tick first: the grid point after now (one tick however late this one is); an `at` one is done.
+      if (s.every !== undefined) this.store.save({ ...s, next: due + (Math.floor((now - due) / s.every) + 1) * s.every });
+      else this.store.drop(s.instance, s.name);
+      if (this.o.wake && !(await this.o.wake(s).catch(() => false))) {
+        this.say(s.instance, `cron: ${label(s)} due: stopped, and nothing in it subscribes ${s.box}: not woken`);
+        continue;
       }
-      if (!m.size && this.jobs.get(handle) === m) this.jobs.delete(handle);
+      try {
+        await this.o.tick(s, tickBody(s, due));
+        this.say(s.instance, `cron: ${label(s)} → ${s.box}`);
+      } catch (e) {
+        this.say(s.instance, `cron: ${label(s)}: not sent: ${(e as Error).message}`);
+        if (s.at !== undefined && !this.stopped) this.store.save({ ...s, next: now + (this.o.retryMs ?? 60_000) });
+      }
     }
     this.schedule();
   }

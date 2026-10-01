@@ -109,7 +109,7 @@ export async function roster(rows: InstanceRow[], open: (row: InstanceRow) => Pr
 export interface HostRow {
   handle: string; domain: string; identity: string; status: "live" | "idle" | "not run";
   store: string; tree: string; pid?: number; restarts: number; explorer?: string;
-  /** The router's waker: the instance's earliest sleeper deadline (ms), if it has one. */
+  /** The instance's next wake (ms), if it has one: the waker's earliest, or the cron provider's next tick (#69). */
   wake?: number;
 }
 

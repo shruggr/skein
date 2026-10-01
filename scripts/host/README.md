@@ -50,7 +50,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the waker, the oracle (instance keys from `~/.skein/master.key`), the providers (#70: `fetch`, `waker`, `libp2p`, `broadcast`, each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58: `/arc/v1/tx` to the host's Arcade, one status subscription), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
+| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65: `fetch`, `waker`, `cron`, `libp2p`, `status`, each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
@@ -99,7 +99,6 @@ The router's own endpoints:
 | `GET /.well-known/metanet-handles/resolve?handle=<h>@<d>` | `{handle, domain, identityKey, messagebox}`: an agent's own identity and origin; for a mailbox instance, its owner's key and the instance's origin |
 | `GET /bsvalias/id/<handle>@<domain>` | paymail PKI (identity keys by handle) |
 | `POST /account/register {username, identityKey, signature}` | a mailbox instance for that identity: the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username, counterparty anyone, over `register <username>` → `{identityKey, username, handle, messagebox}` (409 if the name is taken) |
-| `POST /arc/v1/tx`, `GET /arc/v1/tx/<txid>` | the broadcaster (#58): a transaction to the host's Arcade, its status; Arcade's answer as is |
 | `POST /arc/callback` | Arcade's webhook (`Authorization: Bearer <SKEIN_ARC_TOKEN>`) |
 
 The instances' outbound HTTP (a messagebox delivery thread, a resolve) is a
@@ -160,7 +159,7 @@ Files:
 
 - `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities. `skein-host identity <handle>` prints one.
 - `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322). `bin/skein-host` reads `owner.identity` into `SKEIN_OWNER` and `infer.identity` into `SKEIN_INFER`, unless they are set, for `run`, `deploy`, `roster`, `peers`, `add` (so `add --boot`/`--packet` needs no `SKEIN_OWNER` by hand) and `event`.
-- `~/.skein/host.sock` — the running router's control socket (0600; there only while `run` is up): `skein-host event` admits through it.
+- `~/.skein/host.sock` — the running router's control socket (0600; there only while `run` is up): `skein-host event` sends through it.
 - `~/.skein/infer.json` — the inference peer's providers (written if absent).
 - `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
 - `~/.skein/host.db` — the instances (identity → store; `kind` agent or mailbox, a mailbox's `owner`) and the fuel ledger (`skein-host list`, `skein-host mailboxes`, `skein-host ledger`).
@@ -182,61 +181,67 @@ Feeds: an instance's `etc/config.json` may declare `feeds: [{kind:
 connection per URL (reconnecting with backoff, at most 1000 items queued per
 instance), admitting `header` entries into the box (default `chain`). The
 per-instance `arc-callback` feed is gone (#58; a config that declares one is
-refused): transaction statuses come from the broadcaster.
+refused): transaction proofs and statuses come from the broadcaster.
 
-Jobs (#60, `src/host/cron.ts`): an instance's `etc/config.json` may declare
-`jobs: [{box, body?, every: <ms> | at: <ms since the epoch>, name?}]` (the
-genesis carries them). The router is their clock: when one is due it admits
-a plain event `{kind: "cron", name, due, …body}` (the body's own `kind`
-wins) into the job's box, which a sender-less subscription on that box
-handles. An `every` job fires once when `run` starts, then every `every` ms;
-an `at` job once (host.db `cron_fired` remembers it across restarts). A
-firing missed while the host was down is made up once at the next start,
-not as a burst. An idle-stopped instance is hydrated for a job only if
-something in it subscribes the box; otherwise the firing is logged
-(`cron: … not woken`) and skipped. By hand:
+Scheduling (#69, `src/host/cron.ts`; docs/MESSAGES.md "Scheduling"): there
+are no genesis jobs (a config that declares `jobs` is refused). A program
+asks the host's **cron provider** — its address book's role `cron`, seeded
+by every new genesis — with a message (`{fn: "tick", every | at, box, body?,
+name}` in box `cron`; `{fn: "stop", name}`), and each tick comes back as a
+signed message from the provider into the named box, `{kind: "cron", name,
+due, …body}` (the body's own `kind` wins), which the instance's subscription
+on that box handles. The schedules live in host.db (`cron_schedule`): an
+`every` one ticks once when `run` starts (a restart is a late tick, never a
+burst), an `at` one once. An idle-stopped instance is hydrated for a tick
+only if something in it subscribes the box; otherwise the tick is logged
+(`cron: … not woken`) and skipped. A step's `deadline` and a shell's `sleep`
+are wake-me messages to the **waker** provider, likewise. By hand:
 
 ```
-bin/skein-host event <handle> <box> ['{"kind":"amm-p2p-timer","job":"heartbeat"}']   # default {kind: "cron", due: now}
+bin/skein-host event <handle> <box> ['{"kind":"amm-p2p-timer","job":"heartbeat"}']   # {kind: "cron" unless named, due: now}
 ```
 
-admits one such event now. While `run` is up it goes over the router's
+sends one tick now, a message from the cron provider. While `run` is upadmits one such event now. While `run` is up it goes over the router's
 control socket, `$SKEIN_HOME/host.sock` (a Unix socket, mode 0600, made when
 `run` starts and removed when it stops; no HTTP route leads to it), and the
-running router admits it with the kernel it already holds. With the host
+running router sends it with the kernel it already holds. With the host
 down it goes through a router of its own, which runs the steps it starts and
 closes. It refuses when a router answers at `SKEIN_HOST_URL` /
 `SKEIN_ROUTER_PORT` but no control socket answers under this `SKEIN_HOME`
 (another home, or a router from before the socket): that router's kernel
 holds the instance's store.
 
-The broadcaster (#58, `src/host/arc.ts`, docs/WALLET.md): one Arcade for
-the whole host. Instances broadcast by a message to the router's
-`broadcast` provider (#70: box `broadcast` `{tx}`, re-ask in box `status`
-`{txid}`; a new genesis names it in the address book, role `broadcast`,
-when the host has an Arcade), which proxies to Arcade under the host's
-callback token and answers with Arcade's answer, a signed message. The
-same Arcade is open to clients at `POST /arc/v1/tx`, `GET
-/arc/v1/tx/<txid>`. The router holds one SSE subscription to Arcade's events for the
-token (resumed with `Last-Event-ID` from host.db `stream_cursor`) and takes
-Arcade's webhooks at `POST /arc/callback` (`Authorization: Bearer <token>`);
-each status goes, as a `status` entry in box `chain`, to every instance
-whose state holds the transaction (host.db `status_seen`: each txid +
-status + block hash once). Configured from the environment or
+The broadcaster (#58, #65, `src/host/arc.ts`, docs/WALLET.md): one Arcade
+for the whole host. An instance's broadcast is an event (`{kind:
+"broadcast", tx, beef?}`), not a message: the router queues it durably in
+host.db (`broadcast_queue`), posts it to Arcade under the host's callback
+token, and retries with backoff while Arcade does not take it (a 503, no
+answer), until a day after it was queued. The router holds one SSE
+subscription to Arcade's events for the token (resumed with `Last-Event-ID`
+from host.db `stream_cursor`) and takes Arcade's webhooks at `POST
+/arc/callback` (`Authorization: Bearer <token>`). What Arcade says of a
+transaction goes to every instance whose state holds it (host.db
+`status_seen`: each txid + status + block hash once): a merkle path as a
+proof event in box `chain`; anything else — its answer to the post included
+— as a signed message from the host's **status provider** (box `status`;
+role `status` in a new genesis's address book), which an instance takes
+only if it subscribes to it (`{"sender": "$status", "box": "status",
+"handler": …}`). There is no `/arc/v1/tx` route any more.
+Configured from the environment or
 `~/.skein/host.env` (only the `SKEIN_ARC_*` lines are read from it):
 
 | variable | default | |
 |---|---|---|
-| `SKEIN_ARC_URL` | unset: no broadcaster, and a new genesis has no `broadcast` provider in its address book (nothing broadcasts) | Arcade's API (its `POST /tx`, `GET /tx/:txid`), e.g. `https://arcade.example.com` |
+| `SKEIN_ARC_URL` | unset: no broadcaster (a broadcast event is dropped, with a line), and a new genesis has no status provider in its address book | Arcade's API (its `POST /tx`), e.g. `https://arcade.example.com` |
 | `SKEIN_ARC_TOKEN` | required with the URL | the host's one callback token: `X-CallbackToken` on every submission, the scope of the SSE stream, the webhook's bearer. Arcade has no client auth: this token is what ties the host's transactions together |
 | `SKEIN_ARC_EVENTS_URL` | `<SKEIN_ARC_URL>/events` | Arcade's SSE service, which listens on a port of its own (Arcade's default 8082), e.g. `https://arcade.example.com:8082/events` |
 | `SKEIN_ARC_CALLBACK_URL` | unset: SSE only | where Arcade posts webhooks: this router's `/arc/callback` as Arcade reaches it (Arcade wants a public HTTPS URL) |
 
 `skein-host run` prints the broadcaster's line at start (`broadcaster:
-…/arc/v1/tx → Arcade …; statuses from …`, or `no Arcade`), and `host.log`
-has one line per broadcast (`[<handle>] broadcast <txid> → Arcade: HTTP 202
-RECEIVED`) and per status routed (`arcade stream: <txid> MINED (with its
-merkle path) → <handles>`).
+broadcast events → Arcade …; proofs and statuses (the status provider) from
+…`, or `no Arcade`), and `host.log` has one line per post (`[<handle>]
+broadcast <txid> → Arcade: HTTP 202 RECEIVED`) and per status routed
+(`arcade stream: <txid> MINED (a proof event) → <handles>`).
 
 libp2p (#51): an instance whose `etc/config.json` declares `libp2p:
 {topics?, protocols?, listen?}` gets a libp2p node in the router process,

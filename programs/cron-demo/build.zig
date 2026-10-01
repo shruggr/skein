@@ -1,6 +1,6 @@
-// cron-demo (#60): a small test program for jobs — a handler of a job's box
-// that takes the router's cron event as its start signal and rests on a
-// deadline. Zig 0.16.0, wasm32-wasi, over the kernel's dag-cbor
+// cron-demo (#60, #69): a small test program for the cron provider — it asks
+// the cron provider (its address book's role `cron`) for ticks into a box and rests on
+// a deadline at each tick. Zig 0.16.0, wasm32-wasi, over the kernel's dag-cbor
 // (kernel-zig/src) and the programs' shared lib (programs/lib).
 //
 //   zig build        → zig-out/bin/cron-demo.wasm (build.sh copies it here as cron-demo.wasm, committed)

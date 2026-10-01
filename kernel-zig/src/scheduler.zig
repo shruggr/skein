@@ -114,10 +114,12 @@ pub const Witness = struct {
     }
 };
 
-/// A message the host carries out (#70): its recipient's transport is
+/// What the host carries out (#70): a message whose recipient's transport is
 /// `local` (a provider on the host: `address` its name) or `libp2p` (a peer
-/// ID, or `topic:<name>`). `message` is the signed mail record's dag-cbor
-/// (its CID is the message's id), `body` its body's.
+/// ID, or `topic:<name>`) — `message` the signed mail record's dag-cbor (its
+/// CID is the message's id), `body` its body's — or (#65) an event, transport
+/// `event`, `address` its kind (`broadcast`): `message` the event record's
+/// dag-cbor, `body` the transaction's bytes.
 pub const Outgoing = struct { message: []const u8, body: []const u8, transport: []const u8, address: []const u8 };
 
 /// The peers the runtime calls out to (all optional; replay has none but the witness).
@@ -125,13 +127,12 @@ pub const Peers = struct {
     ctx: *anyopaque,
     /// A BRC-100 wire frame to the instance wallet → its result frame.
     wallet: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]u8 = null,
-    /// A message for the host to carry out (#70), handed over once the step
-    /// that emitted it is committed (and again, at a start, while the thread
-    /// that emitted it still awaits it). Nothing comes back here: the answer
-    /// is an entry. Absent (replay): nothing goes out.
+    /// A message (#70) or an event (#65) for the host to carry out, handed
+    /// over once the step that emitted it is committed (and again, at a
+    /// start, while the thread that emitted it still awaits it — the message,
+    /// or a broadcast's transaction). Nothing comes back here: the answer is
+    /// an entry. Absent (replay): nothing goes out.
     emit: ?*const fn (ctx: *anyopaque, out: Outgoing) void = null,
-    /// A thread started sleeping (the tick's cue).
-    on_sleep: ?*const fn (ctx: *anyopaque, thread: []const u8, until: i64) void = null,
     /// A request's thread (#66: the middleware stepped on a request entry)
     /// came to rest for good — finished or errored — with its answer on its
     /// last update. Called at once, mid-drain, before what its step routed
@@ -141,8 +142,6 @@ pub const Peers = struct {
     /// The host's Io (native): a call's real randomness. The browser build has none.
     io: ?std.Io = null,
 };
-
-const Sleeper = struct { origin: []u8, deadline: i128 };
 
 /// A log entry the processing of which drives a step or a shell.
 const Ctx = struct { cid: []const u8, e: Value };
@@ -165,11 +164,11 @@ pub const Runtime = struct {
 
     /// Shell threads with a run in progress or parked on a sleep (TS `live`).
     live: std.StringHashMap(void),
-    sleepers: std.array_list.Managed(Sleeper),
     stepping: std.StringHashMap(void),
     /// A field for the next program step's input (#29): `event` (a plain
-    /// entry's record, to the thread awaiting its subject) or `woke` (the
-    /// thread's deadline came). Set by process(), taken by stepBody.
+    /// entry's record, to the thread awaiting its subject), `message` (#65: a
+    /// subscribed sender's message about the subject the thread awaits) or
+    /// `woke` (the thread's deadline came). Set by process(), taken by stepBody.
     step_extra: ?cbor.Entry = null,
     /// Messages for the host to carry out (#70), handed over after the next
     /// commit (gpa-owned copies).
@@ -184,7 +183,6 @@ pub const Runtime = struct {
             .peers = peers,
             .life = std.heap.ArenaAllocator.init(gpa),
             .live = std.StringHashMap(void).init(gpa),
-            .sleepers = std.array_list.Managed(Sleeper).init(gpa),
             .stepping = std.StringHashMap(void).init(gpa),
             .outbox = std.array_list.Managed(Outgoing).init(gpa),
         };
@@ -279,9 +277,37 @@ pub const Runtime = struct {
         if (emitted != .array) return;
         for (emitted.array) |x| {
             const c = Value.cidOf(x) orelse continue;
+            const m = rt.store.getOpt(a, c) orelse continue;
+            if (isBroadcast(m)) {
+                // #65: a broadcast whose transaction the thread still awaits goes out again (a host
+                // keeps a queue; one that lost it posts it again, and Arcade answers a duplicate).
+                if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m);
+                continue;
+            }
             if (!cidIn(tip.get("awaits"), c)) continue;
             try rt.handOver(a, c, null);
         }
+    }
+
+    /// A broadcast event (#65): {kind: "broadcast", tx: <cid>, beef?: bytes}.
+    fn isBroadcast(m: Value) bool {
+        if (m != .map) return false;
+        if (!std.mem.eql(u8, Value.str(m.get("kind")) orelse "", "broadcast")) return false;
+        return Value.cidOf(m.get("tx")) != null and m.get("recipient") == null;
+    }
+
+    /// Queue an event for the host (#65): transport "event", address its kind;
+    /// `message` the record's dag-cbor, `body` the transaction's bytes.
+    fn handOverEvent(rt: *Runtime, a: std.mem.Allocator, c: []const u8, m: Value) !void {
+        if (rt.peers.emit == null) return;
+        const bytes = (try rt.store.bytes(a, c)) orelse return;
+        const tx = (try rt.store.bytes(a, Value.cidOf(m.get("tx")).?)) orelse return;
+        try rt.outbox.append(.{
+            .message = try rt.gpa.dupe(u8, bytes),
+            .body = try rt.gpa.dupe(u8, tx),
+            .transport = try rt.gpa.dupe(u8, "event"),
+            .address = try rt.gpa.dupe(u8, "broadcast"),
+        });
     }
 
     /// Queue an emitted message for the host by its recipient's transport, the
@@ -323,23 +349,9 @@ pub const Runtime = struct {
 
     pub fn stop(rt: *Runtime) void {
         rt.stopped = true;
-        rt.sleepers.clearRetainingCapacity();
         rt.live.clearRetainingCapacity();
     }
 
-    /// Every sleeper and its deadline (ms, rounded up), earliest first.
-    pub fn sleepersDue(rt: *Runtime, a: std.mem.Allocator) ![]struct { thread: []const u8, until: i64 } {
-        const T = struct { thread: []const u8, until: i64 };
-        const items = try a.dupe(Sleeper, rt.sleepers.items);
-        std.mem.sort(Sleeper, items, {}, struct {
-            fn lt(_: void, x: Sleeper, y: Sleeper) bool {
-                return x.deadline < y.deadline;
-            }
-        }.lt);
-        const out = try a.alloc(T, items.len);
-        for (items, 0..) |s, i| out[i] = .{ .thread = s.origin, .until = @intCast(@divFloor(s.deadline + 999_999, 1_000_000)) };
-        return @ptrCast(out);
-    }
 
     /// The boxes the subscriptions route plus the genesis's `collect`.
     pub fn boxes(rt: *Runtime, a: std.mem.Allocator) ![]const []const u8 {
@@ -384,7 +396,7 @@ pub const Runtime = struct {
     }
 
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !?AdmitResult {
-        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a request, mail, wake or event entry (format 5, #68)" };
+        if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a request, mail or event entry (format 7: a wake is the waker's message, #69)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
         if (Value.cidOf(entry.get("request"))) |rc| {
@@ -504,23 +516,6 @@ pub const Runtime = struct {
             return;
         }
 
-        if (Value.cidOf(e.get("wake"))) |wk| {
-            var idx: ?usize = null;
-            for (rt.sleepers.items, 0..) |s, i| if (std.mem.eql(u8, s.origin, wk)) {
-                idx = i;
-            };
-            // A shell's sleep (a program's deadline is a message to the waker, #70: its answer is mail).
-            if (idx == null or rt.sleepers.items[idx.?].deadline > time.ns()) {
-                rt.say("#{d} wake {s}: not sleeping or not due; nothing runs", .{ n, short(a, wk) });
-                return;
-            }
-            rt.say("#{d} wake → {s}", .{ n, short(a, wk) });
-            const s = rt.sleepers.orderedRemove(idx.?);
-            defer rt.gpa.free(s.origin);
-            try rt.wakeSleeper(a, try a.dupe(u8, s.origin), .{ .cid = entry, .e = e });
-            return;
-        }
-
         if (Value.cidOf(e.get("event"))) |ev| return rt.processEvent(a, n, .{ .cid = entry, .e = e }, ev, Value.str(e.get("box")).?, at);
 
         if (Value.cidOf(e.get("mail"))) |mc| return rt.processMail(a, n, .{ .cid = entry, .e = e }, mc, at);
@@ -581,6 +576,11 @@ pub const Runtime = struct {
         for (emitted) |mc| {
             if (rt.stopped) return;
             const m = rt.store.getOpt(a, mc) orelse continue;
+            if (isBroadcast(m)) {
+                // #65: an event, addressed to no one: the host's wiring carries it.
+                try rt.handOverEvent(a, mc, m);
+                continue;
+            }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
             const e = (try addressbook.lookup(a, rt.store, root, to)) orelse {
                 rt.say("message {s}: no route to {s}; not sent", .{ short(a, mc), shortKey(to) });
@@ -789,14 +789,13 @@ pub const Runtime = struct {
                         return;
                     }
                     if (rt.wakeAt(a, reply_to)) |due| {
-                        // #70: the waker's answer to a wake-me — the thread's deadline came.
+                        // #70, #69: the waker's answer to a wake-me — a step's deadline, or a shell's sleep, came.
                         if (at < due) {
                             rt.say("{s}: a wake for {s} before its time; recorded, nothing runs", .{ what, short(a, t.?) });
                             return;
                         }
                         rt.say("{s}: wake → {s}", .{ what, short(a, t.?) });
-                        rt.step_extra = .{ .key = "woke", .value = .{ .bool = true } };
-                        try rt.step(a, t.?, ctx, null, null);
+                        try rt.wakeThread(a, t.?, ctx);
                         return;
                     }
                     rt.say("{s}: reply to {s} → {s}", .{ what, short(a, reply_to), short(a, t.?) });
@@ -820,6 +819,25 @@ pub const Runtime = struct {
             rt.say("{s}: no subscription; recorded, nothing runs", .{what});
             return;
         }
+        // #65: a message about something — its `subject`, a transaction's CID — from a sender the
+        // instance subscribes to (a status provider's status) steps the thread awaiting that
+        // subject, before the subscription's handler: as an event about it would.
+        if (std.mem.eql(u8, recipient, rt.identity())) if (Value.cidOf(m.get("subject"))) |subj| {
+            for (try rt.store.awaiting(a, subj)) |t| {
+                const tip = rt.tipOf(a, t) catch null orelse continue;
+                if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), subj)) continue;
+                rt.say("{s} → {s} (awaits {s})", .{ what, short(a, t), short(a, subj) });
+                var info = cbor.MapBuilder.init(a);
+                try info.put("message", cbor.cidv(mc));
+                try info.put("body", cbor.cidv(body));
+                try info.put("box", cbor.string(box));
+                try info.put("sender", .{ .bytes = sender });
+                try info.put("subject", cbor.cidv(subj));
+                rt.step_extra = .{ .key = "message", .value = info.value() };
+                try rt.step(a, t, ctx, null, null);
+                return;
+            }
+        };
         var args = cbor.MapBuilder.init(a);
         try args.put("message", cbor.cidv(mc));
         try args.put("body", cbor.cidv(body));
@@ -1095,7 +1113,6 @@ pub const Runtime = struct {
             rt.step_extra = null;
             return;
         }
-        rt.dropSleeper(origin); // a step supersedes the deadline it rested on
         const key = try rt.gpa.dupe(u8, origin);
         try rt.stepping.put(key, {});
         var after_launched: []const []const u8 = &.{};
@@ -1469,9 +1486,10 @@ pub const Runtime = struct {
     fn hEmit(imp: *program.Imports, msg: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
         const a = st.a;
-        const want = "emit: want {to: <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}";
+        const want = "emit: want {to: <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>} or {event: \"broadcast\", tx: <cid>, beef?: bytes}";
         const m = cbor.decode(a, msg) catch return imp.failWith("emit: the message is not dag-cbor");
         if (m != .map) return imp.failWith(want);
+        if (m.get("event")) |ev| return emitEvent(st, imp, m, ev);
         const to = Value.bytesOf(m.get("to")) orelse return imp.failWith(want);
         if (!secp.isKey(to)) return imp.failWith("emit: `to` is not an identity key (33 bytes): emit to a key, not a handle (resolve the handle first)");
         const box = Value.str(m.get("box")) orelse return imp.failWith(want);
@@ -1487,6 +1505,29 @@ pub const Runtime = struct {
         const e = (try peersLookup(st, imp, to)) orelse return imp.failFmt("emit: no route to {s}: not in the address book (resolve its handle, or add it to the `peers` box)", .{try hexOf(a, to)});
         if (std.mem.eql(u8, e.transport, "mailbox") and deliveryOf(st.rt.genesis.?) == null) return imp.failFmt("emit: {s} is reached by mailbox, and the genesis has no messagebox program to deliver it", .{try hexOf(a, to)});
         return emitMessage(st, imp, to, box, blk, subject);
+    }
+
+    /// An event out (#65): unauthenticated and self-validating, addressed to
+    /// no one — the host carries it by whatever wiring it has. The one event
+    /// is `broadcast`: {event: "broadcast", tx: <a transaction's CID, held>,
+    /// beef?: bytes (its Atomic BEEF: the ancestry a broadcaster needs)} →
+    /// the record {kind: "broadcast", tx, beef?}, listed on the update with the
+    /// messages (`emitted`) and handed to the host once the step is committed.
+    /// No signature, no oracle call: the transaction proves itself.
+    fn emitEvent(st: *StepState, imp: *program.Imports, m: Value, ev: Value) program.Err![]const u8 {
+        const a = st.a;
+        const name = Value.str(ev) orelse return imp.failWith("emit: `event` is a name (the one event is \"broadcast\")");
+        if (!std.mem.eql(u8, name, "broadcast")) return imp.failFmt("emit: no event {s} (the one event is \"broadcast\")", .{try json.quoted(a, name)});
+        const tx = Value.cidOf(m.get("tx")) orelse return imp.failWith("emit: a broadcast names its transaction: {event: \"broadcast\", tx: <cid>, beef?: bytes}");
+        if (cidm.codecOf(tx) != cidm.BITCOIN_TX or !(st.rt.store.has(tx) catch false)) return imp.failFmt("emit: {s} is not a transaction in the store (put it first)", .{fmtCid(a, tx)});
+        var rec = cbor.MapBuilder.init(a);
+        try rec.put("kind", cbor.string("broadcast"));
+        try rec.put("tx", cbor.cidv(tx));
+        if (m.get("beef")) |b| if (b != .null) try rec.put("beef", .{ .bytes = Value.bytesOf(b) orelse return imp.failWith("emit: `beef` is bytes (an Atomic BEEF)") });
+        const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
+        for (st.emitted.items) |x| if (std.mem.eql(u8, x, c)) return c;
+        try st.emitted.append(c);
+        return c;
     }
 
     /// The address book as this step sees it (its own `peers` moves included): `key`'s entry.
@@ -1558,20 +1599,6 @@ pub const Runtime = struct {
             out[2 * i + 1] = digits[x & 15];
         }
         return out;
-    }
-
-    /// A program thread resting until `until` (ms) is a sleeper: the tick's wake entry steps it.
-    fn addSleeper(rt: *Runtime, origin: []const u8, until: i64) !void {
-        for (rt.sleepers.items) |s| if (std.mem.eql(u8, s.origin, origin)) return;
-        try rt.sleepers.append(.{ .origin = try rt.gpa.dupe(u8, origin), .deadline = @as(i128, until) * 1_000_000 });
-        if (rt.peers.on_sleep) |f| f(rt.peers.ctx, origin, until);
-    }
-    fn dropSleeper(rt: *Runtime, origin: []const u8) void {
-        for (rt.sleepers.items, 0..) |s, i| if (std.mem.eql(u8, s.origin, origin)) {
-            rt.gpa.free(s.origin);
-            _ = rt.sleepers.orderedRemove(i);
-            return;
-        };
     }
 
     /// An oracle call's answer, recorded (#67: the one call a step makes out
@@ -1898,9 +1925,11 @@ pub const Runtime = struct {
         state: []const u8 = "new",
         clock: syscalls.ThreadClock = .{},
         random: syscalls.Entropy = undefined,
-        /// Re-executing because of this wake entry: the sleep it reaches is woken by it.
+        /// Re-executing because of the waker's answer (#69): the sleep it reaches is woken by it.
         wake: ?Ctx = null,
         diverged: ?[]const u8 = null,
+        /// A sleep that could not ask the waker (none in the address book): the shell errors with it.
+        sleep_error: ?[]const u8 = null,
         /// The fuel of the whole run (every instance of the shell and its
         /// children); a segment per step: from a `running` update to the
         /// `waiting`/`finished`/`errored` that ends it (issue #5).
@@ -1930,7 +1959,10 @@ pub const Runtime = struct {
         try rt.shellBody(&t);
     }
 
-    fn wakeSleeper(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, c: Ctx) !void {
+    /// The waker's answer to a thread's wake-me came (#69): a program thread
+    /// steps with `woke`; a shell is re-executed from its origin and carries
+    /// on past its sleep under the answer's entry.
+    fn wakeThread(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, c: Ctx) !void {
         const p: ?Value = rt.programOf(a, try rt.getOrNotFound(a, origin)) catch null;
         if (p != null and hasWasm(p.?)) {
             rt.step_extra = .{ .key = "woke", .value = .{ .bool = true } };
@@ -1988,6 +2020,10 @@ pub const Runtime = struct {
                         rt.say("{s} DIVERGED: {s}", .{ short(a, t.origin), d });
                         break :body;
                     }
+                    if (t.sleep_error) |m| {
+                        try rt.shellErrored(t, m, &ended);
+                        break :body;
+                    }
                     if (st.fatal) |f| if (f.kind == .fuel) {
                         var em = cbor.MapBuilder.init(a);
                         try em.put("kind", cbor.string("cant-do"));
@@ -2014,7 +2050,7 @@ pub const Runtime = struct {
             };
             ended = true;
         }
-        if (parked) return; // resting on a deadline: stays live, a sleeper
+        if (parked) return; // resting on its wake-me (#69): stays live until the waker answers
         if (rt.live.fetchRemove(t.origin)) |kv| rt.gpa.free(kv.key);
         if (ended and !rt.stopped) rt.rested(a, t.origin) catch |err| rt.say("{s}: {s}", .{ short(a, t.origin), @errorName(err) });
     }
@@ -2027,7 +2063,7 @@ pub const Runtime = struct {
     }
 
     fn appendShellError(rt: *Runtime, t: *ShellRun, err_value: Value, ended: *bool) !void {
-        rt.appendShellFull(t, "errored", null, err_value, null) catch |err| {
+        rt.appendShellFull(t, "errored", null, err_value, null, &.{}) catch |err| {
             if (err == error.Diverged) {
                 rt.say("{s}: {s}", .{ short(t.a, t.origin), t.diverged.? });
                 return;
@@ -2038,17 +2074,18 @@ pub const Runtime = struct {
     }
 
     fn appendShell(rt: *Runtime, t: *ShellRun, state: []const u8, result: ?Value) !void {
-        return rt.appendShellFull(t, state, result, null, null);
+        return rt.appendShellFull(t, state, result, null, null, &.{});
     }
 
     /// Append the thread's next update, or verify it against the chain when re-executing.
-    fn appendShellFull(rt: *Runtime, t: *ShellRun, state: []const u8, result: ?Value, err_value: ?Value, until: ?i64) !void {
+    fn appendShellFull(rt: *Runtime, t: *ShellRun, state: []const u8, result: ?Value, err_value: ?Value, until: ?i64, extra: []const cbor.Entry) !void {
         const a = t.a;
         var m = cbor.MapBuilder.init(a);
         try m.put("state", cbor.string(state));
         // A step ends at waiting/finished/errored: its fuel; `running` starts the next one.
         if (std.mem.eql(u8, state, "running")) t.meter.segment() else try m.put("fuel", cbor.int(t.meter.used()));
         if (until) |u| try m.put("until", cbor.int(u));
+        for (extra) |x| try m.put(x.key, x.value);
         try m.put("result", result);
         try m.put("error", err_value);
         try m.put("input", cbor.cidv(t.ctx_input));
@@ -2101,7 +2138,13 @@ pub const Runtime = struct {
         t.random.fill(out);
     }
 
-    /// A sleep: at once if not after "now"; else rest `waiting` until it (scheduler.ts sleep).
+    /// A sleep: at once if not after "now"; else rest `waiting` until it. The
+    /// wait is a message to the waker (#69, as a step's `deadline` is):
+    /// "wake me at `until`", signed through the oracle (a recorded call),
+    /// listed on the waiting update (`emitted`) and awaited (`awaits`). The
+    /// waker's answer re-executes the shell from its origin, and it carries on
+    /// past the sleep under that answer's entry. Re-executing, the waiting
+    /// update is the one recorded (its wake-me with it).
     fn shSleep(ctx: *anyopaque, clocks: []const wasi.Clock) wasi.Stop!void {
         const t: *ShellRun = @ptrCast(@alignCast(ctx));
         const rt = t.rt;
@@ -2113,7 +2156,27 @@ pub const Runtime = struct {
         }
         if (deadline == null or deadline.? <= now) return;
         const until: i64 = @intCast(@divFloor(deadline.? + 999_999, 1_000_000));
-        rt.appendShellFull(t, "waiting", null, null, until) catch |err| return shStop(t, err);
+        var sent: ?[]const u8 = null;
+        if (t.pos < t.history.len) {
+            // Re-executing: the waiting update is recorded, and its wake-me with it.
+            const u = (rt.store.get(t.a, t.history[t.pos]) catch null) orelse return shStop(t, error.NotFound);
+            var kept: [3]cbor.Entry = undefined;
+            var k: usize = 0;
+            for ([_][]const u8{ "calls", "emitted", "awaits" }) |name| if (u.get(name)) |v| {
+                kept[k] = .{ .key = name, .value = v };
+                k += 1;
+            };
+            rt.appendShellFull(t, "waiting", null, null, until, kept[0..k]) catch |err| return shStop(t, err);
+        } else {
+            const wm = rt.shellWakeMe(t, until) catch |err| return shStop(t, err);
+            const extra = [_]cbor.Entry{
+                .{ .key = "calls", .value = (cbor.cidArray(t.a, &.{wm.call}) catch return error.OutOfMemory).? },
+                .{ .key = "emitted", .value = (cbor.cidArray(t.a, &.{wm.message}) catch return error.OutOfMemory).? },
+                .{ .key = "awaits", .value = (cbor.cidArray(t.a, &.{wm.message}) catch return error.OutOfMemory).? },
+            };
+            rt.appendShellFull(t, "waiting", null, null, until, &extra) catch |err| return shStop(t, err);
+            sent = wm.message;
+        }
         // Re-executing: the chain may already record the wake.
         if (t.pos < t.history.len) {
             const u = (rt.store.get(t.a, t.history[t.pos]) catch null) orelse return shStop(t, error.NotFound);
@@ -2124,15 +2187,81 @@ pub const Runtime = struct {
             return;
         }
         if (t.wake) |w| {
-            // This run is the wake entry's: carry on past the sleep under it.
+            // This run is the waker's answer's: carry on past the sleep under it.
             t.wake = null;
             t.drive(w);
             rt.appendShell(t, "running", null) catch |err| return shStop(t, err);
             return;
         }
-        rt.sleepers.append(.{ .origin = rt.gpa.dupe(u8, t.origin) catch return error.OutOfMemory, .deadline = deadline.? }) catch return error.OutOfMemory;
-        if (rt.peers.on_sleep) |f| f(rt.peers.ctx, t.origin, until);
+        // Resting on its wake-me: it goes to the waker once this is committed (a start hands it over again).
+        if (sent) |m| rt.handOver(t.a, m, null) catch |err| return shStop(t, err);
         return error.Park;
+    }
+
+    /// A shell's wake-me (#69): {at: until} in box `wake` to the address
+    /// book's waker, signed as `emit` signs, the oracle call recorded at
+    /// (thread, the waiting update's seq, 0) — replay serves it from the
+    /// witness. → the message's CID and the oracle record's.
+    fn shellWakeMe(rt: *Runtime, t: *ShellRun, until: i64) !struct { message: []const u8, call: []const u8 } {
+        const a = t.a;
+        const root = try rt.store.headTree(a, addressbook.HEAD);
+        const waker = (try addressbook.byRole(a, rt.store, root, "waker")) orelse {
+            t.sleep_error = "sleep: no waker in the address book (an entry with role \"waker\")";
+            return error.NoWaker;
+        };
+        var body = cbor.MapBuilder.init(a);
+        try body.put("at", cbor.int(until));
+        const blk = try cbor.block(a, body.value());
+        const seq: i64 = @intCast(t.pos + 1);
+        var rec = cbor.MapBuilder.init(a);
+        try rec.put("kind", cbor.string("mail"));
+        try rec.put("op", cbor.string("put"));
+        try rec.put("sender", .{ .bytes = rt.identity() });
+        try rec.put("recipient", .{ .bytes = waker.key });
+        try rec.put("box", cbor.string("wake"));
+        try rec.put("body", cbor.cidv(blk.cid));
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        h.update(t.origin);
+        var nb: [16]u8 = undefined;
+        std.mem.writeInt(i64, nb[0..8], seq, .big);
+        std.mem.writeInt(u64, nb[8..16], 0, .big);
+        h.update(&nb);
+        var d: [32]u8 = undefined;
+        h.final(&d);
+        try rec.put("nonce", .{ .bytes = try a.dupe(u8, d[0..16]) });
+        const frame = try oracle.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, try cbor.encode(a, rec.value()));
+        var result: []const u8 = undefined;
+        const w: ?Value = if (rt.witness) |wi| try wi.find(a, t.origin, seq, 0) else null;
+        if (w) |x| {
+            if (!std.mem.eql(u8, Value.bytesOf(x.get("request")) orelse "", frame)) {
+                t.diverged = try std.fmt.allocPrint(a, "{s} update {d} (sleep): the oracle request differs from the recorded one", .{ short(a, t.origin), seq });
+                return error.Diverged;
+            }
+            result = Value.bytesOf(x.get("result")).?;
+        } else if (rt.has_wallet) {
+            result = rt.peers.wallet.?(rt.peers.ctx, a, frame) catch |err| {
+                t.sleep_error = try std.fmt.allocPrint(a, "sleep: the oracle: {s}", .{@errorName(err)});
+                return error.NoWaker;
+            };
+        } else {
+            t.diverged = try std.fmt.allocPrint(a, "{s} update {d} (sleep): no wallet and no recorded answer", .{ short(a, t.origin), seq });
+            return error.Diverged;
+        }
+        const sig = oracle.signatureOf(result) orelse {
+            t.sleep_error = "sleep: the oracle did not sign the wake-me";
+            return error.NoWaker;
+        };
+        var rec_call = cbor.MapBuilder.init(a);
+        try rec_call.put("kind", cbor.string("oracle"));
+        try rec_call.put("thread", cbor.cidv(t.origin));
+        try rec_call.put("step", cbor.int(seq));
+        try rec_call.put("i", cbor.int(0));
+        try rec_call.put("request", .{ .bytes = frame });
+        try rec_call.put("result", .{ .bytes = result });
+        const call_cid = try rt.store.put(a, rec_call.value());
+        try rec.put("signature", .{ .bytes = sig });
+        try rt.store.putBlock(blk.cid, blk.bytes);
+        return .{ .message = try rt.store.put(a, rec.value()), .call = call_cid };
     }
 
     fn shStop(t: *ShellRun, err: anyerror) wasi.Stop {

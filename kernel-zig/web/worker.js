@@ -8,7 +8,7 @@
 // (client.js). That needs a cross-origin isolated page (COOP/COEP headers).
 //
 // Messages in: {id, method, args} → {id, result} | {id, error}.
-// Messages out: {notify: op, v} (send, sleepers, onSleep, say, panic) and
+// Messages out: {notify: op, v} (emit, say, panic) and
 // {request: op, v} (answered through the shared buffer).
 
 import { codecOf, Kernel, MemoryStore, readBundle, replayInto, writeBundle } from "./kernel.js";
@@ -64,7 +64,6 @@ const methods = {
   async start() { const r = kernel.start(); await flushAll(); return r; },
   async drain() { const r = kernel.drain(); await flushAll(); return r; },
   state() { return kernel.state(); },
-  nextDeadline() { return kernel.nextDeadline(); },
   async replay(src, dst) { const t = performance.now(); const out = replayInto(kernel, src, dst); await flushAll(); return { report: out, ms: performance.now() - t, stats: kernel.stats }; },
 };
 

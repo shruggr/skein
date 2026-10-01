@@ -147,6 +147,7 @@ Handler programs change → `scripts/build-programs.sh && scripts/pin-programs.s
 | head | origin `{kind: "head", name}`; update `{tree, thread, input, at}` — written when a step that called `advance` ends without error; the step's update lists it in `heads` |
 | subscriptions | origin `{kind: "subscriptions"}`, one per instance; update `{op: "add" \| "remove", sender?, box, handler, thread?, input, at}` — the genesis entry writes the seed (no `thread`), later ones are written when a step that called `subscribe` ends without error, listed in its `subscriptions`; the scheduler routes by the fold of them (docs/VM.md, "Subscriptions") |
 | emitted message | `{kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, nonce, signature}` — what `emit` makes (#70, format 6): signed through the oracle BRC-169's way, listed on the step's update in `emitted`, sent after the step by the recipient's address-book transport (docs/MESSAGES.md, "Outbound") |
+| broadcast event | `{kind: "broadcast", tx: <cid>, beef?: bytes}` — what `emit({event: "broadcast", …})` makes (#65, format 7): unsigned, addressed to no one, listed in `emitted`; the host carries it to the network (its broadcaster's queue). Proofs come back as events (box `chain`), statuses as a subscribed status provider's messages (docs/MESSAGES.md, "Broadcast out, proofs and statuses in") |
 
 Boxes: `objects` (`{records: [{cid, bytes}], root?}` ≤ 1 MiB, blobs first,
 `root` on the last) → objects-handler, which sets `main` to `root` if there is

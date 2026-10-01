@@ -19,18 +19,18 @@
 //   skein_admit(frame, n) → n                       serve's `admit` ({entry, body?}): the one call in that writes; not yet processed
 //   skein_start() → n                               resume what the last run left (serve's `start`)
 //   skein_drain() → n                               process everything admitted (the step loop)
-//   skein_next_deadline() → ms | -1                 the earliest sleeper's deadline (the waker)
 //   skein_state() → n                               dag-cbor {state, log, cursor}
 //   skein_call(frame, n) → n                        any other serve op: {op, v} → {ok} | {error, rejected?}
-//                                                   (tip get put append programs head genesis boxes byEnvelope sleepers)
+//                                                   (tip get put append programs head genesis boxes byEnvelope)
 //   skein_replay(src, dst) → n                      `skein-kernel replay`: the source store's log into dst, no
 //                                                   wallet; the same JSON report
 //   skein_host_call(instance, index, nargs, memlen) → 0 | 1   a program's import (engine_v8.zig)
 //
 // Imports: `skein_engine` (engine_v8.zig), `skein_store` (web_store.zig), and
 // `skein_peer`: request(op, v) → the answer (wallet: blocking, like serve's
-// requests), notify(op, v) (emit — #70: a message for the page to carry out —,
-// sleepers, onSleep, say), take. Ops include `call` (#40).
+// requests), notify(op, v) (emit — #70: a message for the page to carry out,
+// a deadline's or a sleep's wake-me among them (#69) —, say), take. Ops
+// include `call` (#40).
 const std = @import("std");
 const cbor = @import("cbor.zig");
 const cidm = @import("cid.zig");
@@ -121,7 +121,6 @@ export fn skein_host_call(inst: i32, index: u32, nargs: u32, mem_len: u32) i32 {
 var the_runner: ?*runner.Runner = null;
 var ws: ?*WebStore = null;
 var rt: ?*scheduler.Runtime = null;
-var last_sleepers: []u8 = &.{};
 var last_peer_error: []const u8 = "";
 
 fn getRunner() !*runner.Runner {
@@ -140,7 +139,7 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 6, issues #70, #67: emit, no recorded http or libp2p calls): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 7, issues #65, #69: broadcast out an event, wakes and ticks messages from the waker and cron providers): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));
@@ -148,7 +147,6 @@ export fn skein_open(store: u32) i32 {
         .ctx = @ptrCast(s),
         .wallet = pWallet,
         .emit = pEmit,
-        .on_sleep = pOnSleep,
         .say = pSay,
     }) catch |err| return fail(@errorName(err));
     return 0;
@@ -186,39 +184,8 @@ fn pEmit(_: *anyopaque, o: scheduler.Outgoing) void {
     notifyValue("emit", m.value());
 }
 
-fn pOnSleep(_: *anyopaque, _: []const u8, _: i64) void {
-    syncSleepers();
-    notifyValue("onSleep", .null);
-}
-
 fn pSay(_: *anyopaque, line: []const u8) void {
     say(line);
-}
-
-/// serve's syncSleepers: the sleepers (earliest first), told when they change.
-fn syncSleepers() void {
-    const r = rt orelse return;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const v = sleepersValue(a, r) catch return;
-    const enc = cbor.encode(a, v) catch return;
-    if (std.mem.eql(u8, enc, last_sleepers)) return;
-    if (last_sleepers.len > 0) gpa.free(last_sleepers);
-    last_sleepers = gpa.dupe(u8, enc) catch &.{};
-    peer.notify("sleepers", 8, enc.ptr, enc.len);
-}
-
-fn sleepersValue(a: std.mem.Allocator, r: *scheduler.Runtime) !Value {
-    const due = try r.sleepersDue(a);
-    var list = std.array_list.Managed(Value).init(a);
-    for (due) |d| {
-        var m = cbor.MapBuilder.init(a);
-        try m.put("thread", cbor.cidv(d.thread));
-        try m.put("until", cbor.int(d.until));
-        try list.append(m.value());
-    }
-    return .{ .array = list.items };
 }
 
 // ------------------------------------------------------------------ blocks
@@ -304,14 +271,6 @@ export fn skein_state() i32 {
     return handleOp(a, "state", .null) catch |err| reply(a, null, @errorName(err), null);
 }
 
-export fn skein_next_deadline() i64 {
-    const r = rt orelse return -1;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const due = r.sleepersDue(arena.allocator()) catch return -1;
-    return if (due.len > 0) due[0].until else -1;
-}
-
 fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     const eq = std.mem.eql;
     const r = rt orelse return reply(a, null, "no store open", null);
@@ -358,12 +317,10 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     }
     if (eq(u8, op, "start")) {
         try r.start();
-        syncSleepers();
         return reply(a, .null, null, null);
     }
     if (eq(u8, op, "drain")) {
         r.kick();
-        syncSleepers();
         return reply(a, .null, null, null);
     }
     if (eq(u8, op, "call")) {
@@ -384,7 +341,6 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
         return reply(a, m.value(), null, null);
     }
     if (eq(u8, op, "idle")) return reply(a, .null, null, null); // nothing runs between calls
-    if (eq(u8, op, "sleepers")) return reply(a, try sleepersValue(a, r), null, null);
     if (eq(u8, op, "state")) {
         var m = cbor.MapBuilder.init(a);
         try m.put("state", cbor.cidv(try ws.?.ix.stateCid(a)));

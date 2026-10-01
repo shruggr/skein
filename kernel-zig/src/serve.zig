@@ -5,14 +5,15 @@
 //
 // The kernel is this process: the store, the log, the scheduler, the
 // programs. Everything outside is the router's: it admits entries (the one
-// call in that writes: a request as received, #68, a feed's event, a wake),
+// call in that writes: a request as received, #68, a feed's event),
 // waits on a request's thread (`answer`, #66: parked here until the thread
 // comes to rest, or its bound), makes `call`s (#40: a program's function
 // over the state, for host-side reads), answers the kernel's `wallet`
-// requests (the oracle), carries out the messages the kernel tells it of
-// (`emit`, #70: a signed message for a local provider or the libp2p node;
-// the answer comes back as an entry) and keeps its earliest shell sleeper
-// deadline (`sleepers`) to wake it. Log lines go to stderr.
+// requests (the oracle), and carries out what the kernel tells it of
+// (`emit`: #70, a signed message for a local provider or the libp2p node,
+// the answer coming back as an entry; #65, a broadcast event). Nothing here
+// keeps time: a step's deadline and a shell's sleep are wake-me messages to
+// the waker provider (#69). Log lines go to stderr.
 const std = @import("std");
 const envm = @import("env.zig");
 const cbor = @import("cbor.zig");
@@ -67,7 +68,6 @@ const Server = struct {
     from_peer: ipc.Reader,
     next_id: i64 = 1,
     idle_waiters: std.array_list.Managed(i64),
-    last_sleepers: []u8 = "",
     handle: []const u8,
     domain: []const u8,
     db_path: []const u8,
@@ -334,29 +334,11 @@ const Server = struct {
         }
     }
 
-    /// After processing: the tick's view of the sleepers, and whoever waits for idle.
+    /// After processing: whoever waits for idle.
     fn afterDrain(s: *Server, a: std.mem.Allocator) void {
         if (s.rt.draining) return;
-        s.syncSleepers(a);
         for (s.idle_waiters.items) |w| s.reply(a, w, .null, null, null);
         s.idle_waiters.clearRetainingCapacity();
-    }
-
-    fn syncSleepers(s: *Server, a: std.mem.Allocator) void {
-        const due = s.rt.sleepersDue(a) catch return;
-        var list = std.array_list.Managed(Value).init(a);
-        for (due) |d| {
-            var m = cbor.MapBuilder.init(a);
-            m.put("thread", cbor.cidv(d.thread)) catch return;
-            m.put("until", cbor.int(d.until)) catch return;
-            list.append(m.value()) catch return;
-        }
-        const v = Value{ .array = list.items };
-        const enc = cbor.encode(a, v) catch return;
-        if (std.mem.eql(u8, enc, s.last_sleepers)) return;
-        s.gpa.free(s.last_sleepers);
-        s.last_sleepers = s.gpa.dupe(u8, enc) catch "";
-        s.notify(a, "sleepers", v);
     }
 
     // ------------------------------------------------------------ the runtime's peers
@@ -370,9 +352,11 @@ const Server = struct {
         return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
     }
 
-    /// A message for the host to carry out (#70), told once its step is
-    /// committed: {message: <the signed mail record>, body: bytes, transport,
-    /// address}. Nothing comes back: the answer, if any, is an entry.
+    /// A message (#70) or an event (#65) for the host to carry out, told once
+    /// its step is committed: {message: <the signed mail record | the event
+    /// record>, body: bytes, transport, address} (an event: transport
+    /// "event", address its kind, body the transaction). Nothing comes back:
+    /// the answer, if any, is an entry.
     fn pEmit(p: *anyopaque, o: scheduler.Outgoing) void {
         const s = ctx(p);
         var arena = std.heap.ArenaAllocator.init(s.gpa);
@@ -384,14 +368,6 @@ const Server = struct {
         m.put("transport", cbor.string(o.transport)) catch return;
         m.put("address", cbor.string(o.address)) catch return;
         s.notify(a, "emit", m.value());
-    }
-
-    fn pOnSleep(p: *anyopaque, _: []const u8, _: i64) void {
-        const s = ctx(p);
-        var arena = std.heap.ArenaAllocator.init(s.gpa);
-        defer arena.deinit();
-        s.syncSleepers(arena.allocator());
-        s.notify(arena.allocator(), "onSleep", null);
     }
 
     /// A request's thread came to rest (#66): its waiters are answered now, mid-drain.
@@ -452,7 +428,6 @@ pub fn main(gpa: std.mem.Allocator, process_io: std.Io) !void {
         .ctx = &server,
         .wallet = Server.pWallet,
         .emit = Server.pEmit,
-        .on_sleep = Server.pOnSleep,
         .on_answer = Server.pOnAnswer,
         .say = Server.pSay,
         .io = io,

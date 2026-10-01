@@ -212,22 +212,23 @@ them judging anything (the instance does, through its front door):
   entry (`Router.admitEvent`) through a bounded per-instance queue; SSE
   reconnects with backoff. It judges nothing: the instance's chain tracker
   validates.
-- **The broadcaster** (#58, `src/host/arc.ts`): one Arcade per host
-  (`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`). Instances broadcast through the
-  `broadcast` provider (#70: a message `{tx}` in box `broadcast`, `{txid}` in
-  box `status`) — a plain proxy to Arcade under the host's one callback
-  token whose answer is what Arcade answered (unreachable: 503, a transient
-  failure the wallet re-asks at its deadline). The router's routes `POST
-  /arc/v1/tx`, `GET /arc/v1/tx/<txid>` stay for clients outside. No queue on the
-  host: the wallet's `broadcast` record is the queue. The router holds **one
-  SSE subscription** to Arcade for the whole host (the header feeds' SSE
-  client), resumed with `Last-Event-ID` from host.db; Arcade's webhooks
-  (`POST /arc/callback`, the token as bearer) take the same path. Each
-  status is admitted as a `status` entry into **every instance whose state
-  holds the transaction** (read, never written: the kernel's `has` of the
-  tx CID, cached per txid — the asker, a sweep of every enabled instance at
-  a txid's first status, then the running ones), once per txid + status +
-  block hash (host.db).
+- **The broadcaster** (#58, #65, `src/host/arc.ts`): one Arcade per host
+  (`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`). A broadcast is an event, not a
+  message (#65): the kernel hands the router each step's `{kind:
+  "broadcast", tx, beef?}`, which goes into a durable queue (host.db
+  `broadcast_queue`) and is posted to Arcade under the host's one callback
+  token, retried with backoff while Arcade does not take it, taken up again
+  after a restart. The router holds **one SSE subscription** to Arcade for
+  the whole host (the header feeds' SSE client), resumed with
+  `Last-Event-ID` from host.db; Arcade's webhooks (`POST /arc/callback`, the
+  token as bearer) take the same path. What Arcade says of a transaction
+  goes to **every instance whose state holds it** (read, never written: the
+  kernel's `has` of the tx CID, cached per txid — the broadcasters, a sweep
+  of every enabled instance at a txid's first status, then the running
+  ones), once per txid + status + block hash (host.db): a merkle path as an
+  unsigned **proof event** in box `chain`, anything else (its answer to the
+  post included) as a signed message from the host's **status provider**,
+  which an instance admits only if it subscribes to it.
 - **The libp2p host** (#43, #51; `src/host/p2p.ts`): the runtime has no
   network, so libp2p is the router's too. One node per instance whose genesis
   carries `libp2p` (from `etc/config.json`: `topics`, `protocols`, `listen`),
@@ -269,17 +270,18 @@ them judging anything (the instance does, through its front door):
   environment failure happens at hydrate time from the log (a thread whose
   step was cut off runs again; a deterministic error is recorded and never
   retried).
-- **The waker** is the router's timer: a program's `deadline` is a message
-  to the `waker` provider, answered at its time (#70); a shell's sleep is
-  still a sleeper the kernel reports — the router keeps each instance's
-  earliest one, and when it comes it hydrates the instance and admits the
-  wake.
-- **The clock** (#60, `src/host/cron.ts`): the router admits each genesis's
-  `jobs` as plain `cron` events into their boxes when they are due (`every`
-  from the host's start, `at` once, host.db `cron_fired`; a missed firing made
-  up once, no burst), hydrating an idle-stopped instance only when something
-  in it subscribes the box. `skein-host event <handle> <box> [json]` admits
-  one by hand: over the running router's control socket
+- **The waker** is a provider (#70, #69): a program's `deadline` and a
+  shell's sleep are wake-me messages to the `waker`, answered at their time
+  (its timers; appending the answer hydrates an idle-stopped instance). At a
+  start the kernel hands the waker again whatever a waiting thread awaits.
+- **The cron provider** (#69, `src/host/cron.ts`): a schedule is a
+  program's message to it (`{fn: "tick", every | at, box, body?, name}`);
+  each tick is a signed message into the named box, kept in host.db
+  (`cron_schedule`: an `every` one ticks once at a host start, a late tick
+  once, an `at` one once), hydrating an idle-stopped instance only when
+  something in it subscribes the box. A remote cron service is the same key
+  reached by mailbox (`src/peers/cron.ts`). `skein-host event <handle> <box>
+  [json]` sends a tick due now by hand: over the running router's control socket
   (`$SKEIN_HOME/host.sock`, mode 0600, one JSON line each way,
   `src/host/control.ts`; no HTTP route), else through a router of its own
   with the host down.

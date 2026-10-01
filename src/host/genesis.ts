@@ -1,18 +1,18 @@
-// Format 6 (issues #70, #67: emit, the address book seeded; #68: requests appended as received; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
+// Format 7 (issues #65, #69: broadcast out an event, no wake entries, no jobs; format 6, #70, #67: emit, the address book seeded; #68: requests appended as received; format 3, #40; format 2, #33: unsigned entries, keys as bytes) on the
 // router's side: the genesis a new instance's log starts with, and entries.
 //
-//   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | wake | event+box}   — no `sig`: no host key
+//   entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}   — no `sig`: no host key
 //   genesis  {kind: "genesis", identity: bytes(33), owner: bytes(33), handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes(33), box?}, handler}], peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             routes?: [{path | prefix, program, fn, auth?, read?}], reads?: [{caller?: bytes(33), op}],
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
-//             jobs?: [{box, body?, every: ms | at: ms, name?}], addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
+//             addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
 //            (`addressBook`, #70: the address book's seed — the host's providers (role = their name: fetch,
-//            waker, libp2p, broadcast) and the owner's mailbox — written into the head `peers` at the genesis)
-//            (`jobs`, #60: the router is the clock — cron.ts — admitting a plain
-//            `cron` event into `box` when each is due)
+//            waker, cron, libp2p, status) and the owner's mailbox — written into the head `peers` at the genesis)
+//            (no `jobs`, #69: a schedule is a program's message to the cron provider; a genesis naming
+//            them is refused)
 //            (`libp2p`, #51: the router's libp2p host runs a node for the instance, subscribes
 //            `topics` and serves `protocols`; each message or frame is a front-door call routed
 //            by its `libp2p:<topic | protocol>` route)
@@ -38,7 +38,6 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import type { Kernel } from "./kernel.ts";
 import type { FeedSpec } from "./feeds.ts";
-import { jobsIn, type JobSpec } from "./cron.ts";
 
 /** Session expiry (#33 part 2, #40): the instance's own policy, judged against the in-memory session's stamp (a day). */
 export const SESSION_DEFAULTS: Record<string, string> = { sessionTtlMs: "86400000" };
@@ -70,7 +69,7 @@ export interface Genesis2Config {
   warn?(line: string): void;
   /** Anyone may open a `chat` (default true): the seed after the owner's boxes (code genesis only). */
   openChat?: boolean;
-  /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex) or none, a box, a handler program record. */
+  /** More seed subscriptions, after these (e.g. the wallet's boxes, #29): a sender (hex, `$owner`, or a provider's `$<name>`) or none, a box, a handler program record. */
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
   /** The front door's routes and reads for code genesis (#40; default STOCK_ROUTES, STOCK_READS). */
   routes?: RouteSpec[];
@@ -80,8 +79,6 @@ export interface Genesis2Config {
   /** Code genesis (#51): libp2p for the instance (a tree's config names its own), and extra routes after the stock ones. */
   libp2p?: Libp2pSpec;
   extraRoutes?: RouteSpec[];
-  /** Jobs the router fires for the instance (#60; code genesis — a tree's config names its own). */
-  jobs?: JobSpec[];
   /** A mailbox instance (#40): only the front door and the messagebox, keeping mail for `owner` from anyone. */
   mailbox?: boolean;
   /** The owner's messagebox URL (#40): the one peer a genesis names (`defaults.ownerMessagebox`). */
@@ -94,6 +91,14 @@ export interface Genesis2Config {
    * into the head `peers` when the genesis is processed.
    */
   addressBook?: AddressSeed[];
+  /**
+   * The host's providers by name (hex keys: fetch, waker, cron, libp2p,
+   * status), for a subscription's sender written `$<name>` (#65: `$status`,
+   * the status provider; #69: `$cron`). A subscription naming a provider this
+   * host has not is left out (a tree may subscribe statuses on a host with no
+   * Arcade).
+   */
+  providers?: Record<string, string>;
 }
 
 /** One address book entry a genesis seeds (#70): key → transport and address. */
@@ -101,7 +106,8 @@ export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" 
 
 /**
  * A subscription as a system tree writes it (etc/subscriptions.json): the
- * sender is an identity key in hex, `$owner` / `$infer` (the host's), or
+ * sender is an identity key in hex, `$owner` / `$infer` (the host's), a
+ * provider's `$<name>` (`$status`, `$cron`: Genesis2Config.providers), or
  * absent (anyone); the handler a program name (bin/<name>, or `shell`) or a
  * program record's CID.
  */
@@ -181,8 +187,6 @@ export interface ConfigSpec {
   owner?: { messagebox?: string };
   /** libp2p (#51): the topics the router subscribes for the instance, the protocols it serves, the node's own listen addresses. */
   libp2p?: Libp2pSpec;
-  /** Periodic and one-time jobs (#60, cron.ts): a plain `cron` event into `box` when each is due. */
-  jobs?: JobSpec[];
 }
 
 /**
@@ -215,8 +219,6 @@ export interface System {
   reads: Array<{ caller?: Uint8Array; op: string }>;
   /** libp2p (#51): what the router's libp2p host does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
-  /** Jobs (#60): the router admits a `cron` event into each one's box when it is due. */
-  jobs?: JobSpec[];
 }
 
 /** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those routes.json lacks). */
@@ -262,14 +264,35 @@ export function resolveRoutes(c: Pick<Genesis2Config, "owner" | "infer">, progra
   return { routes: out, reads: rs };
 }
 
-/** A key as a system writes it: hex, or `$owner` / `$infer` (the host's). */
-export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer">): Uint8Array {
+/** A key as a system writes it: hex, or `$owner` / `$infer` (the host's), or a provider's `$<name>` (Genesis2Config.providers). */
+export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer" | "providers">): Uint8Array {
   if (s === "$owner") return keyBytes(c.owner);
   if (s === "$infer") {
     if (!c.infer) throw new Error("the system names $infer, and this host has no inference peer (SKEIN_INFER)");
     return keyBytes(c.infer);
   }
+  if (s.startsWith("$")) {
+    const k = c.providers?.[s.slice(1)];
+    if (!k) throw new NoProvider(s);
+    return keyBytes(k);
+  }
   return keyBytes(s);
+}
+
+/** A subscription's `$<name>` that this host has no provider for: the subscription is left out. */
+export class NoProvider extends Error {
+  readonly provider: string;
+  constructor(provider: string) { super(`no provider ${provider} on this host`); this.provider = provider; }
+}
+
+/** A subscription's sender resolved (absent: anyone), or null when it names a provider this host has not (left out, with a warning). */
+function senderOf(sender: string | undefined, c: Genesis2Config): Uint8Array | undefined | null {
+  if (!sender) return undefined;
+  try { return keyOf(sender, c); } catch (e) {
+    if (!(e instanceof NoProvider)) throw e;
+    c.warn?.(`a subscription from ${sender} is left out: this host has no such provider`);
+    return null;
+  }
 }
 
 /** Resolve a system's subscriptions, config and programs for one instance (both genesis paths). */
@@ -279,10 +302,18 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     if (p) return p;
     try { return parseCid(h); } catch { throw new Error(`subscription handler ${JSON.stringify(h)}: no such program (bin/${h}.wasm or bin/${h}.cid) and not a CID`); }
   };
-  const subscriptions = [
-    ...subs.map((s) => ({ match: { ...(s.sender ? { sender: keyOf(s.sender, c) } : {}), ...(s.box !== undefined ? { box: s.box } : {}) }, handler: handler(s.handler) })),
-    ...(c.subscriptions ?? []).map((x) => ({ match: { ...(x.sender ? { sender: keyBytes(x.sender) } : {}), box: x.box }, handler: x.handler })),
-  ];
+  if ((config as { jobs?: unknown }).jobs !== undefined) throw new Error("etc/config.json: `jobs` are gone (#69): a schedule is a program's message to the cron provider ({fn: \"tick\", every | at, box, body?, name}, docs/MESSAGES.md)");
+  const subscriptions: System["subscriptions"] = [];
+  for (const s of subs) {
+    const sender = senderOf(s.sender, c);
+    if (sender === null) continue;
+    subscriptions.push({ match: { ...(sender ? { sender } : {}), ...(s.box !== undefined ? { box: s.box } : {}) }, handler: handler(s.handler) });
+  }
+  for (const x of c.subscriptions ?? []) {
+    const sender = senderOf(x.sender, c);
+    if (sender === null) continue;
+    subscriptions.push({ match: { ...(sender ? { sender } : {}), box: x.box }, handler: x.handler });
+  }
   let names = [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });
   if (config.names) names = config.names.map((n) => ({ identityKey: keyOf(n.identityKey, c), handle: n.handle, domain: n.domain }));
@@ -295,7 +326,6 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
-    ...(jobsIn(config.jobs ?? c.jobs)),
     ...resolveRoutes(c, programs, p2p.routes, reads),
     ...(p2p.libp2p ? { libp2p: p2p.libp2p } : {}),
   };
@@ -348,7 +378,6 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
     ...(s.routes.length ? { routes: s.routes } : {}), ...(s.reads.length ? { reads: s.reads } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}),
-    ...(s.jobs ? { jobs: s.jobs } : {}),
   };
 }
 

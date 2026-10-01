@@ -4,7 +4,8 @@
 // before authentication, because a BRC-104 handshake does not name its
 // recipient: the URL is the recipient. The router holds no auth state and no
 // mailbox: it keeps the hostname → instance map (host.db), the kernels it has
-// hydrated, the waker, the feeds, the fuel ledger.
+// hydrated, the providers (the waker and the cron provider among them), the
+// feeds, the broadcaster, the fuel ledger.
 //
 //   http://<handle>.localhost:<port>/…   an instance's origin (the Host header). The stock AuthFetch keeps one
 //                                         session per origin, and shakes hands at <origin>/.well-known/auth: this
@@ -19,13 +20,13 @@
 //   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
 //                                         signature: [2, "skein register"], key ID the username, counterparty
 //                                         anyone, over "register <username>")
-//   POST /arc/v1/tx                       the host's broadcaster (#58, arc.ts): a transaction to Arcade, under the
-//   GET  /arc/v1/tx/<txid>                host's callback token, answered with Arcade's answer; its status (the
-//                                         instances reach the same broadcaster as the `broadcast` provider, #70)
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
-// The broadcaster's one SSE subscription (arc.ts) routes each status to every
-// instance whose state holds the transaction (a `has` of its CID, cached).
+// The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
+// (a durable queue in host.db, retries, one Arcade session) and routes what
+// Arcade says of a transaction to every instance whose state holds it (a
+// `has` of its CID, cached): a proof as an unsigned event in box `chain`,
+// any other status as a signed message from the status provider.
 //
 // A request for an instance (#68, #66) is appended as received — one
 // `request` entry, verified by nothing here — and the client's connection
@@ -40,19 +41,23 @@
 // answer comes back as a signed message, a `local` request entry. The HTTP
 // proxy (`fetch`) answers a URL of this host's own in process (the same
 // path, no socket) and sends any other out; the waker keeps the instances'
-// deadlines; the broadcaster is the host's Arcade (#58); the libp2p node is
-// the instance's own (p2p.ts). Each genesis it writes names the providers'
-// keys in its address book (`addressBook`).
+// deadlines and their shells' sleeps (#69); the cron provider their
+// schedules, each tick a signed message (#69, cron.ts; host.db
+// `cron_schedule`); the status provider tells the instances that subscribe
+// to it how their transactions stand (#65); the libp2p node is the
+// instance's own (p2p.ts). Each genesis it writes names the providers' keys
+// in its address book (`addressBook`). A kernel's broadcast events go to the
+// broadcaster (#65).
 //
 // The libp2p host (#51, p2p.ts) is the router's too: one node per instance
 // whose genesis declares `libp2p`, each topic message and stream frame one
 // request entry (`p2pInbound`: the verdict or the frame's answer read off its
 // thread and handed back to GossipSub or the stream).
 //
-// The router is the instances' clock too (#60, cron.ts): each genesis's
-// `jobs`, a plain `cron` event admitted into the job's box when it is due
-// (an idle-stopped instance hydrated for one only if something in it
-// subscribes that box).
+// Nothing here is an instance's clock but its providers (#69): a schedule
+// originates in a program's step, as a message to the cron provider; an
+// idle-stopped instance is hydrated for a tick only if something in it
+// subscribes the tick's box (from the cron provider, or from anyone).
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
@@ -65,7 +70,7 @@ import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
 import { Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
-import { Cron, jobsOf, type JobSpec } from "./cron.ts";
+import { Cron, dbSchedules } from "./cron.ts";
 import { currentSubscriptions } from "../runtime/subscriptions.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { existsSync } from "node:fs";
@@ -74,7 +79,7 @@ import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
-import { Kernel, type Sleeper } from "./kernel.ts";
+import { Kernel } from "./kernel.ts";
 import { DEFAULT_LISTEN, libp2pOf, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
@@ -93,14 +98,16 @@ export interface RouterOptions {
   ownerHandle?: Named;
   inferHandle?: Named;
   fuelPerStep?: string;
-  /** A new genesis's extra seed subscriptions and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[]; jobs?: JobSpec[] };
+  /** A new genesis's extra seed subscriptions (a sender in hex, `$owner`, or a provider's `$<name>`: `$status`, `$cron`, …) and defaults (over DEFAULTS), e.g. the wallet's (#29). */
+  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
-  /** The host's Arcade (#58, arc.ts): the `broadcast` provider (#70), the broadcast route, the status subscription. Absent: no broadcaster. */
+  /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
   arc?: ArcConfig;
   /** Tests: how the broadcaster reaches Arcade. */
   arcFetch?: typeof fetch;
+  /** The broadcaster's queue: how soon a broadcast Arcade did not take is posted again (ms, doubling; default 1 000 → 300 000). */
+  arcRetry?: { min: number; max: number };
   /** The HTTP proxy's network (#70, the `fetch` provider) for URLs that are not this host's; default: SKEIN_HTTP=fetch performs them (fetchHttp), else refused. */
   http?(req: HttpRequest): Promise<HttpResponse>;
   /** Stop a kernel this long after its last call (ms); 0: never (the default: instances are not stopped until resource contention appears). */
@@ -119,9 +126,9 @@ export interface RouterOptions {
   ownerMessagebox?: string;
   /** How often the fuel ledger is written (ms); default 5000. */
   ledgerMs?: number;
-  /** Tests: the clock entries are stamped with (and jobs fall due by: cron.ts). */
+  /** Tests: the clock entries are stamped with (and ticks fall due by: cron.ts). */
   now?: () => Stamp;
-  /** The instances' jobs (#60, cron.ts): false — this router fires none (a one-shot command's router is no clock). Default true. */
+  /** The cron provider's clock (#69, cron.ts): false — this router sends no ticks (a one-shot command's router is no clock; it still keeps a schedule a step asks for, in host.db). Default true. */
   cron?: boolean;
   /** Lines, by source: an instance's handle, or "router". */
   log?(source: string, line: string): void;
@@ -133,7 +140,7 @@ export interface RouterOptions {
   peerKeyFor?(handle: string): PrivateKey;
   /**
    * A provider's key (#70, oracle.ts providerKey: the HTTP proxy `fetch`, the
-   * `waker`, `libp2p`, the `broadcast`er), which each new genesis's address
+   * `waker`, `cron`, `libp2p`, `status`), which each new genesis's address
    * book names. Absent: keys of this router's own, made fresh (a test's; a
    * restarted router would not be the providers its instances know).
    */
@@ -194,9 +201,9 @@ function errorOf(body: Uint8Array): string {
 export class Router {
   readonly o: RouterOptions;
   readonly feeds: Feeds;
-  /** The instances' jobs (#60). */
+  /** The cron provider's schedules (#69). */
   readonly cron: Cron;
-  /** The host's broadcaster (#58): present when the host has an Arcade. */
+  /** The host's broadcaster (#58, #65): present when the host has an Arcade. */
   readonly arc?: Broadcaster;
   /** The libp2p host (#51): one node per instance whose genesis declares libp2p. */
   readonly p2p?: P2PHost;
@@ -205,9 +212,6 @@ export class Router {
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   private queues = new Map<string, Promise<unknown>>();
-  /** handle → the earliest sleeper deadline (ms), kept while the kernel is stopped. */
-  readonly deadlines = new Map<string, number>();
-  private timer?: ReturnType<typeof setTimeout>;
   private idleTimer?: ReturnType<typeof setInterval>;
   private ledgerTimer?: ReturnType<typeof setInterval>;
   /** The fuel of calls not yet written to the ledger: instance\0caller\0op → {calls, fuel}. */
@@ -232,20 +236,29 @@ export class Router {
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
     });
     this.cron = new Cron({
-      now: () => stampMs(this.now()), admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
-      state: (h) => {
-        const row = this.o.db.get(h);
-        if (!row || row.status !== "enabled") return "gone";
-        const l = this.loaded.get(h);
-        return (l && !l.kernel.gone) || this.loading.has(h) ? "running" : "stopped";
+      now: () => stampMs(this.now()), store: dbSchedules(o.db), log: (s, l) => this.say(s, l),
+      tick: async (s, body) => {
+        const row = this.o.db.get(s.instance);
+        if (!row || row.status !== "enabled") { this.cron.forget(s.instance); throw new Error("the instance is gone"); }
+        await this.providers.send(s.instance, "cron", keyBytes(s.recipient), s.box, body);
       },
-      subscribed: (h, box) => this.subscribes(h, box),
-      fired: { has: (h, k) => this.o.db.jobFired(h, k), mark: (h, k, due) => this.o.db.markJobFired(h, k, due) },
+      // An idle-stopped instance is hydrated for a tick only if something in it takes the box (from the cron provider, or anyone).
+      wake: async (s) => {
+        const l = this.loaded.get(s.instance);
+        if ((l && !l.kernel.gone) || this.loading.has(s.instance)) return true;
+        return await this.subscribes(s.instance, s.box, this.providers.key("cron"));
+      },
     });
     if (o.arc) {
       this.arc = new Broadcaster({
-        arc: o.arc, db: o.db, fetch: o.arcFetch, backoff: o.feeds?.backoff, log: (s, l) => this.say(s, l),
+        arc: o.arc, db: o.db, fetch: o.arcFetch, backoff: o.feeds?.backoff, ...(o.arcRetry ? { retry: o.arcRetry } : {}), log: (s, l) => this.say(s, l),
         admit: (h, box, ev) => this.admitEvent(h, box, ev),
+        status: async (h, body, subject) => {
+          const id = this.o.db.get(h)?.identity;
+          if (!id) throw new Error("its identity is not known yet");
+          await this.providers.send(h, "status", keyBytes(id), "status", body, subject);
+        },
+        now: () => stampMs(this.now()),
         instances: () => ({ all: this.o.db.list("enabled").map((r) => r.handle), running: [...this.loaded].filter(([, l]) => !l.kernel.gone).map(([h]) => h) }),
         holds: async (h, txid) => await (await this.hydrate(h)).kernel.hasBlock(txCid(txid)),
       });
@@ -265,7 +278,8 @@ export class Router {
       keyOf: o.providerKeyFor ?? ((n) => own!.derivePrivateKey([2, "skein provider"], n, "self")),
       append: (h, pkg) => this.appendLocal(h, pkg),
       fetch: (req, from) => this.http(req, from),
-      ...(this.arc ? { broadcast: { submit: (tx: Uint8Array, from: string) => this.arc!.submit(tx, from), status: (txid: string, from: string) => this.arc!.status(txid, from) } } : {}),
+      ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
+      cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       ...(p2p ? {
         p2p: {
           publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
@@ -277,6 +291,7 @@ export class Router {
       now: () => stampMs(this.now()),
       log: (s, l) => this.say(s, l),
     });
+    if (o.cron !== false) this.cron.start();
     const idle = o.idleMs ?? 0;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
     this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
@@ -294,7 +309,7 @@ export class Router {
     return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
   }
 
-  /** Hydrate every enabled row once (recovery at hydrate time; it reports its sleepers), then let them idle out. */
+  /** Hydrate every enabled row once (recovery at hydrate time: what a waiting thread awaits is handed to the providers again), then let them idle out. */
   async start(): Promise<void> {
     for (const row of this.o.db.list("enabled")) {
       try { await this.hydrate(row.handle); } catch (e) { this.say(row.handle, `not started: ${(e as Error).message}`); }
@@ -302,8 +317,9 @@ export class Router {
   }
 
   /**
-   * Stop everything this router started (#61), once: the waker's, the
-   * idle reaper's and the ledger's timers (the owed fuel written first), its
+   * Stop everything this router started (#61), once: the providers' (the
+   * waker's, the cron provider's), the idle reaper's and the ledger's timers
+   * (the owed fuel written first), its
    * servers and their connections, the control socket (its file removed), the header feeds' and the broadcaster's
    * SSE clients, the libp2p nodes, and every kernel process it spawned — one
    * still hydrating included. Afterwards nothing of it keeps the process
@@ -321,12 +337,12 @@ export class Router {
   /**
    * Listen on the control socket at `path` ($SKEIN_HOME/host.sock for
    * `skein-host run`; mode 0600, no HTTP route): `skein-host event` sends its
-   * event here while this router runs, and it is admitted through the kernel
-   * this router holds (admitEvent). Removed by `close()`.
+   * event here while this router runs, and it reaches the instance as a tick
+   * due now (cronEvent). Removed by `close()`.
    */
   async listenControl(path: string): Promise<void> {
     if (this.stopped) throw new Error("the router is stopping");
-    const server = await listenControl(path, { event: async (h, box, ev) => (await this.admitEvent(h, box, ev)).toString() });
+    const server = await listenControl(path, { event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString() });
     this.control = { server, path };
     this.say("router", `control socket at ${path}`);
   }
@@ -339,7 +355,6 @@ export class Router {
       await Promise.all([...this.inflight].map((p) => p.catch(() => {})));
       await new Promise((r) => setTimeout(r, 50)); // their 503s written before the sockets close
     }
-    clearTimeout(this.timer);
     clearInterval(this.idleTimer);
     clearInterval(this.ledgerTimer);
     this.flushLedger();
@@ -357,10 +372,24 @@ export class Router {
   }
 
   /**
-   * A plain entry (#29): an event from a feed the router holds (a header, a
-   * proof, a transaction status), put as a record and admitted into the
-   * instance in `box`. The kernel routes it by its `subject` to the thread
-   * awaiting that record, else to a sender-less subscription on `box`.
+   * `skein-host event` (#69): a message from the cron provider into `box`, as
+   * a tick due now would be — {...event, kind: event.kind ?? "cron", due:
+   * now}, signed by the provider and appended as a `local` request; the
+   * instance takes it by its subscription to the box (from the cron provider,
+   * or from anyone). The entry's CID.
+   */
+  async cronEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
+    const row = this.o.db.get(handle);
+    if (!row || row.status !== "enabled") throw new Error(`no enabled instance ${handle}`);
+    const l = await this.hydrate(handle);
+    return await this.providers.send(handle, "cron", keyBytes(l.identity), box, { ...event, kind: event.kind ?? "cron", due: stampMs(this.now()) }) as CID;
+  }
+
+  /**
+   * A plain entry (#29, #65): a self-validating event from the host's wiring
+   * (a header feed, the broadcaster's proof), put as a record and admitted
+   * into the instance in `box`. The kernel routes it by its `subject` to the
+   * thread awaiting that record, else to a sender-less subscription on `box`.
    */
   async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
@@ -423,8 +452,9 @@ export class Router {
       await Promise.all([...this.queues.values()]);
       await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {})));
       await this.providers.idle(); // what the providers carry now (#70): its answers are entries
+      await this.arc?.idle(); // the broadcaster's posts (#65): their answers are statuses to route
       await new Promise((r) => setImmediate(r));
-      if (!this.queues.size && !this.providers.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
+      if (!this.queues.size && !this.providers.busy() && !this.arc?.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
     }
   }
 
@@ -463,7 +493,6 @@ export class Router {
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       log: (line) => this.say(handle, line),
       emit: (o) => this.providers.deliver(handle, o),
-      sleepers: (s) => this.sleepersOf(handle, s),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);
@@ -484,7 +513,6 @@ export class Router {
       if (!row.identity) this.o.db.add(row.handle, { identity });
       if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
-      if (this.o.cron !== false) this.cron.declare(handle, jobsOf(g as Record<string, unknown>));
       const p2p = libp2pOf(g as Record<string, unknown>);
       if (this.p2p && p2p) {
         // Its node, before anything it runs can publish or dial; a failure to start it is logged, not fatal.
@@ -501,17 +529,19 @@ export class Router {
   }
 
   /**
-   * Whether a stopped instance's subscriptions route a sender-less event in
-   * `box` to a handler (the kernel's rule for a plain entry no thread awaits):
-   * read from its store file, read-only, with no kernel.
+   * Whether a stopped instance's subscriptions route an entry in `box` to a
+   * handler — sender-less, or (given) from `sender` (hex): the kernel's rule
+   * for an event no thread awaits, or a message that answers nothing. Read
+   * from its store file, read-only, with no kernel.
    */
-  async subscribes(handle: string, box: string): Promise<boolean> {
+  async subscribes(handle: string, box: string, sender?: string): Promise<boolean> {
     const row = this.o.db.get(handle);
     if (!row || !existsSync(row.store)) return false;
     const s = openStoreFile(row.store, { readOnly: true });
     try {
       const rules = await currentSubscriptions(s);
-      return !!rules?.some((r) => r.match.sender == null && (r.match.box == null || r.match.box === box));
+      const from = (k: unknown) => k == null || (sender !== undefined && Buffer.from(k as Uint8Array).toString("hex") === sender);
+      return !!rules?.some((r) => from(r.match.sender) && (r.match.box == null || r.match.box === box));
     } finally { s.close(); }
   }
 
@@ -539,11 +569,12 @@ export class Router {
 
   /**
    * A new agent's address book seed (#70): this host's providers — the HTTP
-   * proxy, the waker, the libp2p node (when it runs one), the broadcaster
-   * (when it has an Arcade) — and the owner's mailbox, when it knows it.
+   * proxy, the waker, the cron provider (#69), the libp2p node (when it runs
+   * one), the status provider (#65, when it has an Arcade) — and the owner's
+   * mailbox, when it knows it.
    */
   addressSeed(): AddressSeed[] {
-    const names: ProviderName[] = ["fetch", "waker", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["broadcast" as const] : [])];
+    const names: ProviderName[] = ["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])];
     const out: AddressSeed[] = this.providers.entries(names);
     const mb = this.ownerMessagebox();
     if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
@@ -560,12 +591,12 @@ export class Router {
     const genesisDefaults = this.o.genesis?.defaults;
     const hostDefaults = { ...genesisDefaults, ...(this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : {}) };
     const warn = (l: string) => this.say(row.handle, l);
-    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed() };
+    const facts = { ownerMessagebox: this.ownerMessagebox(), resolveOrigin: this.origin(), addressBook: this.addressSeed(), providers: Object.fromEntries(this.addressSeed().filter((e) => e.role && e.transport === "local").map((e) => [e.role!, Buffer.from(e.key).toString("hex")])) };
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
         identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
-        feeds: this.o.genesis?.feeds, jobs: this.o.genesis?.jobs, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
+        feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
       };
     }
     return {
@@ -573,7 +604,7 @@ export class Router {
       // Code genesis takes DEFAULTS under the host's.
       defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
       subscriptions: this.o.genesis?.subscriptions,
-      feeds: this.o.genesis?.feeds, jobs: this.o.genesis?.jobs,
+      feeds: this.o.genesis?.feeds,
       libp2p: this.o.genesis?.libp2p, extraRoutes: this.o.genesis?.routes,
       ...facts,
     };
@@ -603,7 +634,24 @@ export class Router {
   /** The kernel counts as busy until it has processed what was just admitted (its `idle` answers after the drain). */
   private settle(l: Loaded): void { void l.kernel.idle().catch(() => {}); }
 
-  /** Stop kernels idle for `ms` with nothing queued. Their deadlines stay with the waker. */
+  /**
+   * The waker answers every wake-me due by this router's clock, and the cron
+   * provider sends every tick due (#69) — what their timers do in real time,
+   * for a clock that is not (a script clock: tests, the corpus).
+   */
+  async wake(): Promise<void> {
+    this.providers.wakeDue();
+    await this.cron.tick();
+    await this.providers.idle();
+  }
+
+  /** An instance's next wake (ms), if any (the host page): the waker's earliest, or its next tick (#69). */
+  nextWake(handle: string): number | undefined {
+    const xs = [this.providers.nextWake(handle), ...this.cron.of(handle).map((s) => s.next)].filter((x): x is number => x !== undefined);
+    return xs.length ? Math.min(...xs) : undefined;
+  }
+
+  /** Stop kernels idle for `ms` with nothing queued. Their deadlines and sleeps stay with the waker, their schedules with the cron provider. */
   private async reap(ms: number): Promise<void> {
     for (const [handle, l] of this.loaded) {
       if (l.kernel.busy > 0 || this.queues.has(handle) || Date.now() - l.kernel.last < ms) continue;
@@ -611,45 +659,6 @@ export class Router {
       this.say("router", `${handle}: idle, stopped`);
       await l.kernel.stop();
     }
-  }
-
-  // ---------------------------------------------------------------- the waker
-
-  private sleepersOf(handle: string, s: Sleeper[]): void {
-    if (s.length) this.deadlines.set(handle, s[0]!.until);
-    else this.deadlines.delete(handle);
-    this.schedule();
-  }
-
-  private schedule(): void {
-    clearTimeout(this.timer);
-    if (this.stopped || !this.deadlines.size) return;
-    const next = Math.min(...this.deadlines.values());
-    this.timer = setTimeout(() => void this.wake(), Math.max(0, next - stampMs(this.now())) + 1);
-  }
-
-  /** Hydrate every instance whose deadline has come and admit its wakes. */
-  async wake(): Promise<void> {
-    const t = this.now();
-    const due = [...this.deadlines].filter(([, until]) => until <= stampMs(t)).map(([h]) => h);
-    for (const handle of due) {
-      this.deadlines.delete(handle);
-      try {
-        await this.serial(handle, async () => {
-          const l = await this.hydrate(handle);
-          const at = this.now();
-          for (const { thread, until } of l.kernel.sleepersDue()) {
-            if (until > stampMs(at)) break;
-            const e = await admit2(l.kernel, { wake: thread }, {}, at);
-            this.say(handle, `tick: wake ${short(thread)} as ${short(e)}`);
-          }
-          this.settle(l);
-        });
-      } catch (e) {
-        this.say(handle, `wake: ${(e as Error).message}`);
-      }
-    }
-    this.schedule();
   }
 
   // ---------------------------------------------------------------- the fuel ledger
@@ -751,21 +760,15 @@ export class Router {
       const key = this.o.db.identityOf(handle!, domain);
       return key ? json(200, { bsvalias: "1.0", handle: `${handle}@${domain}`, pubkey: key }) : json(404, { error: "not found" });
     }
-    if (path === `${ARC_ROUTE}/callback` || path.startsWith(`${ARC_ROUTE}/v1/tx`)) return await this.arcRequest(req, path);
+    if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
     if (req.method === "POST" && path === "/account/register") return await this.register(req.body);
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
-  /** The broadcaster's routes (#58, arc.ts); 503 (a transient failure to a wallet) when the host has no Arcade. */
+  /** Arcade's webhook (#58, arc.ts); 404 when the host has no Arcade. */
   private async arcRequest(req: RouterRequest, path: string): Promise<RouterResponse> {
-    const tx = new RegExp(`^${ARC_ROUTE}/v1/tx(?:/([^/]+))?$`).exec(path);
-    if (!this.arc) {
-      if (tx) return json(503, { status: 503, title: "no Arcade", extraInfo: "this host has no Arcade (SKEIN_ARC_URL)" });
-      return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no Arcade" });
-    }
-    if (req.method === "POST" && path === `${ARC_ROUTE}/callback`) return await this.arc.callback(req.headers, req.body);
-    if (req.method === "POST" && tx && tx[1] === undefined) return await this.arc.submit(req.body, req.from);
-    if (req.method === "GET" && tx?.[1] !== undefined) return await this.arc.status(decodeURIComponent(tx[1]), req.from);
+    if (!this.arc) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no Arcade" });
+    if (req.method === "POST") return await this.arc.callback(req.headers, req.body);
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no ${req.method} ${path}` });
   }
 

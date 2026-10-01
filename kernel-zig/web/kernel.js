@@ -11,8 +11,8 @@
 //                  IdbStore in store.js), with begin/commit/rollback
 //   skein_peer     the host: request(op, v) answered synchronously (wallet,
 //                  resolve, http — a Worker blocks on a SharedArrayBuffer while
-//                  the page answers: worker.js), notify(op, v) (send,
-//                  sleepers, onSleep, say, panic)
+//                  the page answers: worker.js), notify(op, v) (emit: a
+//                  message or an event to carry out; say, panic)
 //
 // and wraps the kernel's exports as methods (Kernel below). Values cross as
 // dag-cbor bytes; decoding them is the caller's (the page bundles
@@ -272,7 +272,6 @@ export class Kernel {
   start() { return this.result(this.x.skein_start()); }
   drain() { return this.result(this.x.skein_drain()); }
   state() { return this.result(this.x.skein_state()); }
-  nextDeadline() { const d = this.x.skein_next_deadline(); return d < 0n ? undefined : Number(d); }
   /** `skein-kernel replay`: store `src`'s log into store `dst` (its raw blocks put there first: replayInto). The JSON report. */
   replay(src, dst) {
     return dec.decode(this.result(this.check(this.x.skein_replay(src, dst))));

@@ -39,11 +39,11 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
                                    feeds: [{kind: "headers", url, box?}]  (the router holds them, #33; statuses: the host's broadcaster, #58),
                                    owner: {messagebox: url},  (#40: the owner's messagebox, the one peer a genesis names)
                                    libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]},
-                                   (#51: the router's libp2p host runs a node for the instance),
-                                   jobs: [{box, body?: {…}, every: ms | at: ms since the epoch, name?}]}
-                                   (#60: the router admits {kind: "cron" unless body names one, name, due, …body}
-                                   as a plain event into box when each is due; docs/VM.md, "Threads, nodes, steps")
-etc/subscriptions.json   required: [{sender?: key, box?, handler}]
+                                   (#51: the router's libp2p host runs a node for the instance)}
+                                   (no `jobs`, #69: a schedule is a program's message to the cron provider,
+                                   docs/MESSAGES.md "Scheduling"; a config naming them is refused)
+etc/subscriptions.json   required: [{sender?: key, box?, handler}]   (a key: hex, $owner, $infer, or a host provider's
+                         $<name> — $status, $cron; one naming a provider the host has not is left out)
 etc/routes.json          optional (#40): the front door's routes, [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}]; default the stock routes
                          (root, index: the static handler's, #52)
 etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads

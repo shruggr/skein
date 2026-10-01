@@ -1,12 +1,14 @@
-// The input log and the record shapes the scheduler checks, in format 6
-// (issues #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
+// The input log and the record shapes the scheduler checks, in format 7
+// (issues #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
 // unsigned, identity keys as 33-byte byte strings in every record). Skein is
 // a state process: every package a transport carries in is an entry,
 // appended as received, and the instance's middleware (the front door) is
-// stepped on it; a message the host admits directly, a wake and an event
-// from a feed are the others.
+// stepped on it; a message the host admits directly and an event from the
+// host's wiring (a header feed, a proof) are the others. There is no wake
+// entry (format 7, #69): a deadline and a sleep are answered by the waker
+// provider's signed message.
 //
-//   entry    {kind: "log", prev, n, time, genesis | mail | wake | event+box | request+transport}
+//   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport}
 //   request  a package as a transport carried it in (#68), unverified: the
 //            host verifies nothing. `transport` names the middleware stepped
 //            on it (the genesis's front door for "http", "libp2p" and
@@ -36,8 +38,9 @@
 //            by subscription on (sender, box). Since #68 a message arrives
 //            inside a request and the middleware's step routes it; a host may
 //            still admit one as an entry of its own (the browser's).
-//   event    a record from a feed (#29: a header, a proof, a status), routed
-//            by its `subject` or by box
+//   event    a record from the host's wiring, self-validating (#29, #65: a
+//            header from a feed; a proof — a transaction's merkle path — from
+//            the broadcaster's Arcade session), routed by its `subject` or by box
 //   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
 //             subscriptions: [{match: {sender?: bytes, box?}, handler}], peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
@@ -73,8 +76,8 @@ pub fn isEventEntry(e: Value) bool {
     return isLogEntry(e) and e.get("event") != null;
 }
 
-/// The one entry encoding (format 5, #68): {kind: "log", prev, n, time} and
-/// exactly one of genesis | mail | wake | event (+box) | request (+transport).
+/// The one entry encoding (format 7, #69): {kind: "log", prev, n, time} and
+/// exactly one of genesis | mail | event (+box) | request (+transport).
 /// No signature on any of them.
 pub fn isLogEntry(e: Value) bool {
     if (e != .map) return false;
@@ -83,7 +86,8 @@ pub fn isLogEntry(e: Value) bool {
     if (!Value.isNumber(e.get("n"))) return false;
     if (e.get("sig") != null) return false; // format 1 (host-signed): refused
     var count: usize = 0;
-    for ([_][]const u8{ "genesis", "mail", "wake", "event", "request" }) |k| {
+    if (e.get("wake") != null) return false; // format 6: a wake entry (#69: the waker's message now)
+    for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| {
         if (e.get(k) != null) count += 1;
     }
     if (count != 1) return false;
@@ -226,6 +230,8 @@ pub fn isGenesis(x: ?Value) bool {
     if (g.get("host") != null) return false; // format 1
     // #62's attest key went with the recorded http/libp2p calls (#67, format 6).
     if (g.get("attest") != null) return false;
+    // #60's jobs went with the host's cron clock (#69, format 7): a schedule is a message to the cron provider.
+    if (g.get("jobs") != null) return false;
     // #70: the address book's seed.
     if (g.get("addressBook")) |ab| {
         if (ab != .array) return false;

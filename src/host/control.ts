@@ -8,8 +8,8 @@
 //
 //   {"op": "event", "handle": h, "box": b, "event": {…}}   → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
 //
-// `event` is `skein-host event` (cli.ts): the router admits it through
-// Router.admitEvent, as its clock admits a job's firing (cron.ts).
+// `event` is `skein-host event` (cli.ts): the router sends it as a message
+// from its cron provider, a tick due now (Router.cronEvent, #69).
 
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
@@ -19,7 +19,7 @@ export const CONTROL_SOCKET = "host.sock";
 export interface ControlRequest { op: "event"; handle: string; box: string; event: Record<string, unknown> }
 export type ControlAnswer = { ok: true; entry: string } | { ok: false; error: string };
 
-/** What the socket's owner does with a request (the router: admitEvent). */
+/** What the socket's owner does with a request (the router: cronEvent). */
 export interface ControlHandler { event(handle: string, box: string, event: Record<string, unknown>): Promise<string> }
 
 const MAX_LINE = 1 << 20;
