@@ -57,8 +57,8 @@ test("emit: a deadline is a signed wake-me to the waker, kept across a host rest
   await router.bootRow("w", { kind: "tree", root: d.root, objects: d.objects });
   await router.start();
 
-  // A job's event starts cron-demo, which rests 1.5 s.
-  await router.admitEvent("w", "tick", { kind: "cron", name: "one", due: Date.now(), rest: 1500 });
+  // A tick from the cron provider (#69: `skein-host event`'s message, a tick due now) starts cron-demo, which rests 4 s.
+  await router.cronEvent("w", "tick", { name: "one", rest: 4000 });
   await router.settled();
   const k = (await router.hydrate("w")).kernel;
   const rested = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → waiting · 1 oracle · emitted \S+ · awaits \S+$/.test(l));

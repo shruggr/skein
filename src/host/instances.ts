@@ -10,9 +10,10 @@
 // inference peer). There is no messagebox host: every identity's mailbox is
 // an instance at its own origin. Beside the rows, the **fuel ledger**: what
 // each caller's calls (#40: the front door's reads, which the log never sees)
-// cost, per instance and op. And the broadcaster's two (#58, arc.ts): the
-// last event id taken from Arcade's stream, and the statuses already routed.
-// And the router clock's one (#60, cron.ts): the one-time jobs that fired.
+// cost, per instance and op. And the broadcaster's three (#58, #65, arc.ts):
+// the last event id taken from Arcade's stream, the statuses already routed,
+// and the queue of broadcasts Arcade has not taken yet. And the cron
+// provider's one (#69, cron.ts): the schedules the instances asked for.
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -55,13 +56,27 @@ CREATE TABLE IF NOT EXISTS status_seen (
   at                TEXT NOT NULL,
   PRIMARY KEY (txid, status)
 ) WITHOUT ROWID;
--- The one-time jobs that fired (#60, cron.ts): an instance's at-job, by its key (a hash of its spec), fires once.
-CREATE TABLE IF NOT EXISTS cron_fired (
-  instance          TEXT NOT NULL,
-  job               TEXT NOT NULL,                    -- cron.ts jobKey
-  due               INTEGER NOT NULL,                 -- the job's at (ms)
-  at                TEXT NOT NULL,                    -- when it fired
-  PRIMARY KEY (instance, job)
+-- The broadcaster's queue (#58, #65, arc.ts): a transaction an instance broadcast (its broadcast event),
+-- held until Arcade answers it taken or refused, tried again with backoff while it does not.
+CREATE TABLE IF NOT EXISTS broadcast_queue (
+  txid              TEXT PRIMARY KEY,
+  body              BLOB NOT NULL,                    -- what goes to Arcade: Extended Format, or the raw transaction
+  instances         TEXT NOT NULL,                    -- JSON array: the instances that broadcast it
+  attempts          INTEGER NOT NULL DEFAULT 0,
+  next_at           INTEGER NOT NULL,                 -- ms: when it is posted (again)
+  since             INTEGER NOT NULL,                 -- ms: when it was first queued (given up a day on)
+  last_error        TEXT
+) WITHOUT ROWID;
+-- The cron provider's schedules (#69, cron.ts): what each instance asked to be ticked, by name, until it
+-- says stop (an \`at\` one until it fired).
+CREATE TABLE IF NOT EXISTS cron_schedule (
+  instance          TEXT NOT NULL,                    -- the handle the ticks go to
+  name              TEXT NOT NULL,
+  recipient         TEXT NOT NULL,                    -- its identity key (hex): the ticks' recipient
+  spec              BLOB NOT NULL,                    -- dag-cbor {every | at, box, body?}
+  request           TEXT NOT NULL,                    -- the tick request's CID
+  next              INTEGER NOT NULL,                 -- ms: the next tick
+  PRIMARY KEY (instance, name)
 ) WITHOUT ROWID;`;
 
 export type Status = "enabled" | "disabled";
@@ -212,13 +227,67 @@ export class HostDb {
     return this.db.prepare("SELECT 1 FROM status_seen WHERE txid = ? AND status = ?").get(txid, status) !== undefined;
   }
 
-  /** Whether an instance's one-time job (#60, cron.ts jobKey) has fired. */
-  jobFired(instance: string, job: string): boolean {
-    return this.db.prepare("SELECT 1 FROM cron_fired WHERE instance = ? AND job = ?").get(instance, job) !== undefined;
+  /** Queue a broadcast (#65, arc.ts), due now; one already queued keeps its schedule and gains `instance`. */
+  queueBroadcast(txid: string, body: Uint8Array, instance: string, now: number): void {
+    const had = this.db.prepare("SELECT instances FROM broadcast_queue WHERE txid = ?").get(txid) as { instances: string } | undefined;
+    if (had) {
+      const hs = new Set(JSON.parse(had.instances) as string[]);
+      hs.add(instance);
+      this.db.prepare("UPDATE broadcast_queue SET instances = ?, next_at = MIN(next_at, ?) WHERE txid = ?").run(JSON.stringify([...hs]), now, txid);
+      return;
+    }
+    this.db.prepare("INSERT INTO broadcast_queue (txid, body, instances, attempts, next_at, since) VALUES (?, ?, ?, 0, ?, ?)").run(txid, body, JSON.stringify([instance]), now, now);
   }
 
-  markJobFired(instance: string, job: string, due: number, now = new Date()): void {
-    this.db.prepare("INSERT OR IGNORE INTO cron_fired (instance, job, due, at) VALUES (?, ?, ?, ?)").run(instance, job, due, now.toISOString());
+  /** The queued broadcasts due at `now`, oldest first. */
+  dueBroadcasts(now: number): Array<{ txid: string; body: Uint8Array; instances: string[]; attempts: number; since: number }> {
+    return this.db.prepare("SELECT txid, body, instances, attempts, since FROM broadcast_queue WHERE next_at <= ? ORDER BY next_at, txid").all(now).map((r) => {
+      const x = r as { txid: string; body: Uint8Array; instances: string; attempts: number; since: number };
+      return { txid: x.txid, body: new Uint8Array(x.body), instances: JSON.parse(x.instances) as string[], attempts: Number(x.attempts), since: Number(x.since) };
+    });
+  }
+
+  /** When the next queued broadcast is due (ms), if any. */
+  nextBroadcastAt(): number | undefined {
+    const r = this.db.prepare("SELECT MIN(next_at) AS n FROM broadcast_queue").get() as { n: number | null } | undefined;
+    return r?.n == null ? undefined : Number(r.n);
+  }
+
+  /** A queued broadcast Arcade did not take: one more attempt, posted again at `next`. */
+  retryBroadcast(txid: string, next: number, error: string): void {
+    this.db.prepare("UPDATE broadcast_queue SET attempts = attempts + 1, next_at = ?, last_error = ? WHERE txid = ?").run(next, error, txid);
+  }
+
+  /** A broadcast Arcade answered (or one given up): off the queue. */
+  unqueueBroadcast(txid: string): void {
+    this.db.prepare("DELETE FROM broadcast_queue WHERE txid = ?").run(txid);
+  }
+
+  /** The queue as it stands. */
+  broadcasts(): Array<{ txid: string; attempts: number; next: number; error?: string }> {
+    return this.db.prepare("SELECT txid, attempts, next_at, last_error FROM broadcast_queue ORDER BY next_at, txid").all().map((r) => {
+      const x = r as { txid: string; attempts: number; next_at: number; last_error: string | null };
+      return { txid: x.txid, attempts: Number(x.attempts), next: Number(x.next_at), ...(x.last_error ? { error: x.last_error } : {}) };
+    });
+  }
+
+  /** Keep a cron schedule (#69): an instance's, by name (a later one replaces it). */
+  saveSchedule(s: { instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number }): void {
+    this.db.prepare("INSERT INTO cron_schedule (instance, name, recipient, spec, request, next) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (instance, name) DO UPDATE SET recipient = excluded.recipient, spec = excluded.spec, request = excluded.request, next = excluded.next")
+      .run(s.instance, s.name, s.recipient, s.spec, s.request, s.next);
+  }
+
+  /** Drop an instance's schedule; false if it had none by that name. */
+  dropSchedule(instance: string, name: string): boolean {
+    return Number(this.db.prepare("DELETE FROM cron_schedule WHERE instance = ? AND name = ?").run(instance, name).changes) > 0;
+  }
+
+  /** Every kept schedule. */
+  schedules(): Array<{ instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number }> {
+    return this.db.prepare("SELECT instance, name, recipient, spec, request, next FROM cron_schedule ORDER BY instance, name").all().map((r) => {
+      const x = r as { instance: string; name: string; recipient: string; spec: Uint8Array; request: string; next: number };
+      return { instance: x.instance, name: x.name, recipient: x.recipient, spec: new Uint8Array(x.spec), request: x.request, next: Number(x.next) };
+    });
   }
 
   /** The enabled row whose identity is `identity`. */
