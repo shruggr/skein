@@ -26,7 +26,7 @@ www/, …                  whatever it serves or needs
 At install (§3) the app's head — named after the app, `overlay`, `amm`,
 … — is advanced to that tree. The app's handler is the only writer of its
 head and keeps its state and configuration there: records it puts and
-keeps, maps it maintains, a registry (§6). The shell sees the `main` head's
+keeps, maps it maintains, its configuration (§2, §6). The shell sees the `main` head's
 tree and nothing else: app heads are outside its file system.
 
 **Reads cross heads; writes do not.** Any program can read any head
@@ -43,27 +43,42 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
 ```json
 {
   "kind": "app",
-  "name": "overlay",
-  "version": "1.2.0",
-  "program": "bin/overlay.wasm",
+  "name": "amm",
+  "version": "0.3.0",
+  "programs": {
+    "overlay":   "bin/overlay.cid",
+    "topic":     "bin/amm-topic.wasm",
+    "lookup":    "bin/amm-lookup.wasm",
+    "p2p":       "bin/amm-p2p.wasm",
+    "validator": "bin/amm-validator.wasm"
+  },
+  "handler": "validator",
+  "config": {
+    "overlay": {
+      "topics":  {"tm_amm_1": "topic"},
+      "lookups": {"ls_amm_1": {"program": "lookup", "topics": ["tm_amm_1"]}}
+    },
+    "amm": {"feeBps": 30, "tokens": ["1"]}
+  },
   "provides": [
     {
-      "interface": "overlay.topics/1",
+      "interface": "amm.pool/1",
       "functions": {
-        "add":    {"writes": true,  "args": {"topic": "string", "program": "cid"},          "answer": {"topic": "string", "program": "cid"}},
-        "remove": {"writes": true,  "args": {"topic": "string"},                            "answer": {"topic": "string"}},
-        "list":   {"writes": false, "args": {},                                             "answer": {"topics": [{"topic": "string", "program": "cid", "since": "ms"}]}}
+        "quote":  {"writes": false, "args": {"token": "string", "in": "int"},  "answer": {"out": "int", "fee": "int"}},
+        "config": {"writes": true,  "args": {"feeBps?": "int", "tokens?": ["string"]}, "answer": {"feeBps": "int", "tokens": ["string"]}}
       }
     }
   ],
   "requires": ["wallet.records/1"],
-  "boxes": ["overlay", "submit", "chain"],
+  "boxes": ["amm", "submit", "chain"],
   "routes": [
-    {"path": "/submit", "fn": "submit", "auth": "none"},
-    {"path": "/lookup", "fn": "lookup", "auth": "none"}
+    {"path": "/submit", "program": "overlay", "fn": "submit", "auth": "none"},
+    {"path": "/lookup", "program": "overlay", "fn": "lookup", "auth": "none"},
+    {"path": "libp2p:amm-proofs", "program": "p2p", "fn": "proof"},
+    {"path": "libp2p:/amm-validator/1/swap", "program": "validator", "fn": "swap"}
   ],
-  "heads": ["overlay", "ls:*"],
-  "description": "BRC-22 overlay services: topic managers and lookup services."
+  "heads": ["amm", "ls:ls_amm_1"],
+  "description": "An AMM: its own overlay (one topic manager, one lookup service), a validator, and a market UI."
 }
 ```
 
@@ -71,11 +86,13 @@ dag-json. At install it becomes the head's root record (`kind: "app"`), so
 |---|---|
 | `name` | the app's name: its box (§4) and its head |
 | `version` | semver; shown by the site, compared by `requires` |
-| `program` | the handler, relative to the tree (`bin/*.wasm` or `bin/*.cid`) |
+| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a pinned stock module such as the overlay engine); `routes[].program` and `config` refer to these names |
+| `handler` | which program handles the app's box (§4) |
+| `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, arrays, maps; `?` suffix = optional) |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
 | `boxes[]` | the boxes it asks to handle: its own name, plus any protocol boxes (`submit`, `chain`) |
-| `routes[]` | the routes it asks for, in the routes-table shape (docs/MESSAGES.md "Routes": `path | prefix`, `fn`, `auth?`, `read?`, handler-specific settings) — `program` is implied (this app) |
+| `routes[]` | the routes it asks for, in the routes-table shape (docs/MESSAGES.md "Routes": `path | prefix`, `program` (a `programs` role), `fn`, `auth?`, `read?`, handler-specific settings); libp2p topics and stream protocols are routes too (`libp2p:<topic>`, `libp2p:<protocol>`) |
 | `heads[]` | the heads it will own: its own name, and patterns for heads it creates (`ls:*` for lookup services) |
 
 **The app declares; it never installs.** Everything in `boxes`, `routes`
@@ -186,40 +203,43 @@ request is still an entry (§2).
 - **Private data is encrypted data.** Nothing in the store is unreadable
   to a program that can name its CID.
 
-## 6. Worked example: the overlay app's registry
+## 6. Worked example: an overlay is an app
 
-The overlay services app (BRC-22: topic managers and lookup services;
-docs/OVERLAY.md) is the first app to use this model. Its registry lives
-under head `overlay` and replaces the genesis defaults `overlayTopics` /
-`overlayLookups` as the source of truth (the defaults become the initial
-registry records at install — spec).
+An overlay (BRC-22: topic managers and lookup services; docs/OVERLAY.md) is
+not a service other apps register with. **It is an app**: the overlay
+engine (the pinned stock module, `bin/overlay.cid`) plus the app's own topic
+managers and lookup services, in one tree under one head, with
+`config.overlay` naming which topics and services it runs:
 
-Interface `overlay.topics/1` (box `overlay`):
+```json
+"programs": {"overlay": "bin/overlay.cid", "topic": "bin/amm-topic.wasm", "lookup": "bin/amm-lookup.wasm"},
+"config":   {"overlay": {"topics": {"tm_amm_1": "topic"},
+                         "lookups": {"ls_amm_1": {"program": "lookup", "topics": ["tm_amm_1"]}}}}
+```
 
-| fn | writes | args | answer |
-|---|---|---|---|
-| `overlay.topics.add` | yes | `{topic, program: <cid>}` — the topic manager's program record must be in the store (`objects` first) and export `identify` (docs/OVERLAY.md "The topic contract") | `{topic, program}` |
-| `overlay.topics.remove` | yes | `{topic}` — existing admittances stay; the topic judges nothing new | `{topic}` |
-| `overlay.topics.list` | no | `{}` | `{topics: [{topic, program, since}]}` |
+The engine reads that from the manifest at its head's root (spec: today it
+reads the genesis defaults `overlayTopics`/`overlayLookups`; #72 moves it to
+the manifest). Install is the three messages (§3); nothing registers with
+anything. The AMM app ships exactly this: the engine, `amm-topic`,
+`amm-lookup`, its validator and p2p programs, and its UI, one tree.
 
-Interface `overlay.lookups/1` (box `overlay`):
+**Several overlays on one instance coexist**: two heads, two apps, each
+with its own boxes and routes (`/submit` on one, `/amm/submit` on another,
+or two instances). They share the wallet's transaction records through the
+wallet library, as the engine does today; lookup state stays under each
+service's own head `ls:<service>` (§1).
 
-| fn | writes | args | answer |
-|---|---|---|---|
-| `overlay.lookups.add` | yes | `{service, program: <cid>, topics: [topic] | "*"}` — exports `admitted`/`spent`/`rejected`/`lookup` (docs/OVERLAY.md "The lookup contract"); its own head `ls:<service>` is created on first hook | `{service, program, topics}` |
-| `overlay.lookups.remove` | yes | `{service}` — its head is left (prunable) | `{service}` |
-| `overlay.lookups.list` | no | `{}` | `{lookups: [{service, program, topics, since}]}` |
+**The topic and lookup program contracts are unchanged and built**:
+`identify` for a topic manager; `admitted`/`spent`/`rejected`/`lookup` for a
+service (docs/OVERLAY.md). Authors of topic managers and lookup services
+build those now, and ship them inside their own overlay app.
 
-Registry record under head `overlay`:
-`{kind: "overlay-registry", topics: {<topic>: {program, since}}, lookups: {<service>: {program, topics, since}}}`.
-
-Installing a topic manager from outside, end to end: `objects` with the
-topic program's records (owner, or an identity the owner subscribed to
-`objects`) → a message to box `overlay` `{fn: "overlay.topics.add", args:
-{topic, program}}` from a sender the owner subscribed to `overlay`. The
-topic and lookup **program contracts are unchanged and built**: `identify`
-for a topic; the three hooks and `lookup` for a service (docs/OVERLAY.md).
-Authors of topic managers and lookup services can build now.
+**A multi-tenant overlay is a choice, not core.** An overlay app that wants
+to accept topic managers from outside may offer `overlay.topics/1`
+(`add`/`remove`/`list`, `writes` as expected) and `overlay.lookups/1` on its
+box and keep a registry under its head; the engine would consult both the
+manifest and the registry. Nothing requires it, and the stock overlay app
+does not offer it.
 
 ## 7. What is built, what is spec
 
@@ -228,8 +248,9 @@ Authors of topic managers and lookup services can build now.
 | heads; `head`/`advance`/`get`; objects, head, subscribe boxes and bodies | built |
 | routes table shape; route handler contract; synchronous answer on thread completion | built (#68/#66) |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `ls:<service>` | built (#50) |
-| manifest schema; the head's root record; `requires` check; `writes` validation | spec (#72 build 1–2) |
+| manifest schema (`programs`, `handler`, `config`, `provides`/`requires`, `boxes`, `routes`, `heads`); the head's root record; `requires` check; `writes` validation | spec (#72 build 1–2) |
 | install handler (manifest → objects + head + subscribe, approvals); `skein-host install <repo|dir>` | spec (#72 build 1, 4) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` route | spec (#72 build 2) |
-| overlay registry under head `overlay`; `overlay.topics.*`, `overlay.lookups.*`; defaults → records | spec (#72 build 3) |
+| the overlay engine reads `config.overlay` from its app's manifest (replacing genesis `overlayTopics`/`overlayLookups`) | spec (#72 build 3) |
+| a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
 | apps in their own repos; the SDK as a Zig package | #71 (after #70/#67) |
