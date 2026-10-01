@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appPath, checkManifest, ManifestError, missingInterfaces, shapeProblem } from "./manifest.ts";
+import { appPath, checkManifest, ManifestError, missingInterfaces, overlayWiring, routeKey, shapeProblem } from "./manifest.ts";
 
 const files = new Set(["bin/demo.wasm", "bin/engine.cid", "etc/app.json"]);
 const has = (p: string) => files.has(p);
@@ -68,7 +68,13 @@ test("routes are relative to /<app>/; escapes are refused", () => {
   assert.match(route({ path: "/../amm/submit" }), /segment/);
   assert.match(route({ prefix: "/%2e%2e" }), /encoded dot or slash/);
   assert.match(route({ path: "https://elsewhere/x" }), /URL or a scheme/);
-  assert.match(route({ path: "libp2p:amm-proofs" }), /libp2p routes cannot be installed yet/);
+  assert.equal(route({ path: "libp2p:amm-proofs" }), "", "a libp2p topic is a route");
+  assert.equal(route({ path: "libp2p:/amm-validator/1/swap" }), "", "a libp2p stream protocol is a route");
+  assert.match(route({ prefix: "libp2p:amm" }), /a libp2p route is a path/);
+  assert.match(route({ path: "libp2p:" }), /want libp2p:<topic>/);
+  assert.match(route({ path: "libp2p:amm proofs" }), /want libp2p:<topic>/);
+  assert.match(route({ path: "libp2p:amm-proofs", auth: "none" }), /takes no auth or read/);
+  assert.equal(routeKey("demo", { path: "libp2p:amm-proofs" }), "path libp2p:amm-proofs", "libp2p names are global: not under /<app>/");
   assert.match(route({ path: "/a", prefix: "/b" }), /path or a prefix \(one\)/);
   assert.match(route({ path: "/a", auth: "basic" }), /auth is "none" or absent/);
   assert.match(route({ path: "/a", app: "other" }), /app is set by the install/);
@@ -125,4 +131,76 @@ test("the stock apps' manifests check (skein-static, skein-workbench as of #71)"
   const w = checkManifest(wb, (p) => p.startsWith("bin/"));
   assert.deepEqual(w.manifest.heads, ["workbench", "main"]);
   assert.equal(w.handlers.chat, "loop");
+});
+
+// ---------------------------------------------------------------- an overlay app's wiring (APPS.md §6)
+
+const overlayFiles = new Set(["bin/overlay.wasm", "bin/topic-demo.wasm", "bin/lookup-demo.wasm"]);
+const overlayApp = (ov: unknown, more: Record<string, unknown> = {}) => ({
+  kind: "app", name: "overlay", version: "0.2.0",
+  programs: { overlay: "bin/overlay.wasm", "topic-demo": "bin/topic-demo.wasm", "lookup-demo": "bin/lookup-demo.wasm" },
+  config: { overlay: ov },
+  routes: [{ path: "/listTopicManagers", program: "overlay", fn: "listTopicManagers", auth: "none" }],
+  heads: ["wallet", "overlay:gossip"],
+  ...more,
+});
+const demoOverlay = { topics: { tm_demo: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }, status: "$status", gossip: { tm_demo: true } };
+const overlayProblems = (m: unknown, files = overlayFiles): string[] => {
+  try { checkManifest(m, (p) => files.has(p)); } catch (e) { if (e instanceof ManifestError) return e.problems; throw e; }
+  return [];
+};
+
+test("config.overlay derives the wiring: three libp2p routes per topic, /submit and /lookup, the submit/chain/status boxes, an ls: head per service", () => {
+  const c = checkManifest(overlayApp(demoOverlay), (p) => overlayFiles.has(p));
+  const m = c.manifest;
+  assert.deepEqual(m.routes.map((r) => `${r.path}→${r.program}.${r.fn}${r.auth ? `(${r.auth})` : ""}`), [
+    "/listTopicManagers→overlay.listTopicManagers(none)",
+    "/submit→overlay.submit(none)", "/lookup→overlay.lookup(none)",
+    "libp2p:tm_demo→overlay.submit", "libp2p:tm_demo-admit→overlay.peerAdmit", "libp2p:tm_demo-proof→overlay.peerProof",
+  ]);
+  // Events (the front door's admits, the host's chain feed) carry no sender: submit and chain take them from anyone.
+  assert.deepEqual(m.boxes, [{ box: "submit", senders: ["*"] }, { box: "chain", senders: ["*"] }, { box: "status", senders: ["$status"] }]);
+  assert.deepEqual(c.handlers, { submit: "overlay", chain: "overlay", status: "overlay" });
+  assert.deepEqual(m.handler, { submit: "overlay", chain: "overlay", status: "overlay" }, "no handler named: the record names each box's");
+  assert.deepEqual(m.heads, ["overlay", "wallet", "overlay:gossip", "ls:ls_demo"]);
+  assert.deepEqual(c.derived, {
+    boxes: ["submit", "chain", "status"],
+    routes: ["/submit", "/lookup", "libp2p:tm_demo", "libp2p:tm_demo-admit", "libp2p:tm_demo-proof"],
+    heads: ["ls:ls_demo"],
+  });
+});
+
+test("config.overlay: two topics, no status provider (admitted at the proof); what the manifest names itself wins", () => {
+  const ov = { topics: { tm_demo: "topic-demo", tm_two: "topic-demo" }, lookups: { ls_demo: "lookup-demo" } };
+  const explicit = { path: "libp2p:tm_two", program: "topic-demo", fn: "own" };
+  const c = checkManifest(overlayApp(ov, { routes: [explicit], boxes: [{ box: "chain", senders: ["$owner", "*"] }], handler: "overlay" }), (p) => overlayFiles.has(p));
+  assert.deepEqual(c.manifest.boxes.map((b) => b.box), ["chain", "submit"], "no status box: no status provider named");
+  assert.deepEqual(c.manifest.boxes[0], { box: "chain", senders: ["$owner", "*"] }, "the manifest's own box entry wins");
+  assert.equal(c.manifest.handler, "overlay", "one role handles every box: the handler stays a role");
+  const libp2p = c.manifest.routes.filter((r) => r.path?.startsWith("libp2p:")).map((r) => `${r.path}→${r.program}.${r.fn}`);
+  assert.deepEqual(libp2p, ["libp2p:tm_two→topic-demo.own", "libp2p:tm_demo→overlay.submit", "libp2p:tm_demo-admit→overlay.peerAdmit", "libp2p:tm_demo-proof→overlay.peerProof", "libp2p:tm_two-admit→overlay.peerAdmit", "libp2p:tm_two-proof→overlay.peerProof"]);
+  assert.ok(!c.derived.routes.includes("libp2p:tm_two"), "an explicit route is not derived");
+  assert.deepEqual(c.derived.boxes, ["submit"]);
+});
+
+test("config.overlay: an app whose handler is another role keeps it for its own boxes; the engine takes the derived ones", () => {
+  const files = new Set([...overlayFiles, "bin/amm.wasm"]);
+  const m = overlayApp(demoOverlay, { name: "amm", programs: { overlay: "bin/overlay.wasm", "topic-demo": "bin/topic-demo.wasm", "lookup-demo": "bin/lookup-demo.wasm", validator: "bin/amm.wasm" }, handler: "validator", boxes: [{ box: "amm", senders: ["*"] }] });
+  const c = checkManifest(m, (p) => files.has(p));
+  assert.deepEqual(c.manifest.handler, { amm: "validator", submit: "overlay", chain: "overlay", status: "overlay" });
+  assert.deepEqual(c.manifest.routes.filter((r) => r.path === "/submit").map((r) => routeKey("amm", r)), ["path /amm/submit"], "/submit is the app's: /amm/submit");
+});
+
+test("config.overlay: its problems", () => {
+  const p = (ov: unknown, more: Record<string, unknown> = {}) => overlayProblems(overlayApp(ov, more)).join("\n");
+  assert.match(p({ topics: {} }), /topics: want \{<topic>: <role>\}, at least one/);
+  assert.match(p({ topics: { tm_x: "nobody" } }), /topics\.tm_x: "nobody" is not a role/);
+  assert.match(p({ topics: { "tm x": "topic-demo" } }), /is not a topic name/);
+  assert.match(p({ topics: { tm_demo: "topic-demo" }, lookups: { ls_x: { program: "nobody" } } }), /lookups\.ls_x: program "nobody"/);
+  assert.match(p({ topics: { tm_demo: "topic-demo" }, lookups: { ls_x: { program: "lookup-demo", topics: ["tm_other"] } } }), /lookups\.ls_x\.topics/);
+  assert.match(p({ topics: { tm_demo: "topic-demo" }, status: "status" }), /status: "status" is not/);
+  assert.match(p({ topics: { tm_demo: "topic-demo" }, gossip: { tm_other: false } }), /gossip: want/);
+  assert.match(p(demoOverlay, { programs: { engine: "bin/overlay.wasm", "topic-demo": "bin/topic-demo.wasm", "lookup-demo": "bin/lookup-demo.wasm" } }), /the engine is the role "overlay"/);
+  const w = overlayWiring({ topics: { tm_a: "t" }, status: `03${"cd".repeat(32)}` }, (r) => r === "t" || r === "overlay");
+  assert.ok(!Array.isArray(w) && w.boxes.at(-1)!.senders[0] === `03${"cd".repeat(32)}`, "a remote status provider's key");
 });

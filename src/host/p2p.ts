@@ -1,8 +1,9 @@
 // The router's libp2p host (#43, #51): a router component, like the HTTP
 // proxy and the feeds. The runtime has no network; this is where the sockets
-// are. One js-libp2p node per instance that declares libp2p in its config
-// (the genesis's `libp2p`, from etc/config.json), each with its own peer key,
-// all inside the router process:
+// are. One js-libp2p node per instance that declares libp2p — in its config
+// (the genesis's `libp2p`, from etc/config.json), or by an installed route
+// (`libp2p:<topic>`, `libp2p:<protocol>` in the head `routes`, #72) — each
+// with its own peer key, all inside the router process:
 //
 //   peer key   a secp256k1 key derived from the master secret with BRC-42/43
 //              ([2, "skein instance"], key ID `libp2p:<handle>`, self — oracle.ts
@@ -13,7 +14,8 @@
 //              peer key), noise + yamux, TCP and WebSocket listeners (WSS with a
 //              certificate), Kademlia DHT off | client | server, mDNS on/off,
 //              bootstrap peers kept connected, circuit relays.
-//   topics     the instance's `libp2p.topics`: subscribed; each message is judged
+//   topics     the instance's `libp2p.topics` and its installed routes' topics
+//              (libp2pConfig): subscribed; each message is judged
 //              by the async topic validator, which makes one front-door call
 //              (`inbound`) and returns its verdict to GossipSub (accept: admit +
 //              forward; reject: drop + penalise the delivering peer; ignore: drop).
@@ -23,12 +25,17 @@
 //              With the DHT on, each topic name is a rendezvous: provide the
 //              CID v1 raw sha2-256 of the name and dial the providers found
 //              (go-libp2p's RoutingDiscovery, as go-p2p-message-bus uses it).
-//   protocols  the instance's `libp2p.protocols`: for each inbound stream the
+//   protocols  the instance's `libp2p.protocols` and its installed routes'
+//              protocols (`libp2p:/…`): for each inbound stream the
 //              router reads length-prefixed frames (unsigned varint), makes one
 //              front-door call per frame and writes the answer's body back.
 //              Every node also serves /skein/message/1.0.0 (#70): a frame there is
 //              a signed message to the instance, its package {message, body}; the
 //              front door checks and routes it, no route needed.
+//   changes    `declare` again with the instance's config as it now stands (the
+//              router does after a step moved the head `routes`): new topics are
+//              subscribed and new protocols handled; gone ones unsubscribed and
+//              unhandled; no topic or protocol left: the node stops. No restart.
 //   outbound   the `libp2p` provider's work (#70, providers.ts): publish, dial,
 //              send, close for the messages an instance emits to it, and each frame
 //              read from a dialled stream handed back (`frames`) to become a
@@ -185,6 +192,24 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
   return { topics: strs(c.topics), protocols: strs(c.protocols), ...(listen.length ? { listen } : {}) };
 }
 
+/**
+ * An instance's libp2p config as it stands (#72): the genesis's (libp2pOf),
+ * plus the topics and protocols its installed routes name (the head
+ * `routes`: `libp2p:<topic>`, `libp2p:/<protocol>`). Undefined: no node — the
+ * genesis declares none and no installed route needs one.
+ */
+export function libp2pConfig(g: Record<string, unknown> | null | undefined, installed: Array<Record<string, unknown>>): P2PInstanceConfig | undefined {
+  const base = libp2pOf(g);
+  const names = installed.map((r) => r.path).filter((p): p is string => typeof p === "string" && p.startsWith("libp2p:") && p.length > 7).map((p) => p.slice(7));
+  if (!base && !names.length) return undefined;
+  const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
+  return {
+    topics: add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))),
+    protocols: add(base?.protocols ?? [], names.filter((n) => n.startsWith("/"))),
+    ...(base?.listen ? { listen: base.listen } : {}),
+  };
+}
+
 // ---------------------------------------------------------------- the host
 /** A stream an instance dialled (the libp2p provider's). */
 interface OpenStream { stream: Stream; lp: LengthPrefixedStream }
@@ -207,7 +232,8 @@ const u64 = (n: bigint): Uint8Array => { const b = new Uint8Array(8); new DataVi
 export class P2PHost {
   readonly o: P2POptions;
   private nodes = new Map<string, Node>();
-  private starting = new Map<string, Promise<Node | undefined>>();
+  /** Each instance's declares, in order (one at a time). */
+  private starting = new Map<string, Promise<unknown>>();
   private stopped = false;
 
   constructor(o: P2POptions) { this.o = o; }
@@ -225,19 +251,58 @@ export class P2PHost {
 
   /**
    * `handle`'s libp2p config is this: its node started (once) with its peer key,
-   * its topics subscribed with the validator, its protocols handled. No config:
-   * no node (an existing one is stopped).
+   * its topics subscribed with the validator, its protocols handled. Declared
+   * again, the running node is brought to the new config (reconfigure). No
+   * config: no node (an existing one is stopped).
    */
   async declare(handle: string, config: P2PInstanceConfig | undefined): Promise<void> {
     if (this.stopped) return;
-    if (!config) { await this.drop(handle); return; }
-    let p = this.starting.get(handle);
-    if (!p) {
-      p = this.nodes.has(handle) ? Promise.resolve(this.nodes.get(handle)) : this.start(handle, config);
-      this.starting.set(handle, p);
-      void p.finally(() => this.starting.delete(handle));
-    }
-    await p;
+    const prev = this.starting.get(handle) ?? Promise.resolve();
+    const next = prev.catch(() => {}).then(async () => {
+      if (this.stopped) return;
+      if (!config) return this.drop(handle);
+      const n = this.nodes.get(handle);
+      if (n) return this.reconfigure(n, config);
+      await this.start(handle, config);
+    });
+    this.starting.set(handle, next);
+    void next.catch(() => {}).finally(() => { if (this.starting.get(handle) === next) this.starting.delete(handle); });
+    await next;
+  }
+
+  /** The topics and protocols an instance's node serves now. */
+  served(handle: string): { topics: string[]; protocols: string[] } | undefined {
+    const n = this.nodes.get(handle);
+    return n && { topics: [...n.config.topics], protocols: [...n.config.protocols] };
+  }
+
+  /** Bring a running node to `config`: subscribe and handle what is new, unsubscribe and unhandle what is gone. */
+  private async reconfigure(n: Node, config: P2PInstanceConfig): Promise<void> {
+    const was = n.config;
+    const ps = this.pubsub(n);
+    const added = config.topics.filter((t) => !was.topics.includes(t));
+    const removed = was.topics.filter((t) => !config.topics.includes(t));
+    const addedP = config.protocols.filter((p) => !was.protocols.includes(p) && p !== MESSAGE_PROTOCOL);
+    const removedP = was.protocols.filter((p) => !config.protocols.includes(p) && p !== MESSAGE_PROTOCOL);
+    if (!added.length && !removed.length && !addedP.length && !removedP.length) { n.config = { ...config, listen: was.listen }; return; }
+    for (const t of removed) { ps.unsubscribe(t); ps.topicValidators.delete(t); }
+    for (const t of added) this.subscribe(n, t);
+    for (const p of removedP) await n.node.unhandle(p);
+    for (const p of addedP) await this.handleProtocol(n, p);
+    n.config = { ...config, listen: was.listen };
+    const list = (xs: string[]) => xs.join(", ") || "none";
+    this.say(n.handle, `libp2p: topics ${list(config.topics)} (+${list(added)} −${list(removed)}); protocols ${list(config.protocols)} (+${list(addedP)} −${list(removedP)})`);
+    if (added.length) setTimeout(() => void this.discover(n).catch(() => {}), 200);
+  }
+
+  private subscribe(n: Node, topic: string): void {
+    const ps = this.pubsub(n);
+    ps.topicValidators.set(topic, (from: PeerId, msg: { type: string }) => this.validate(n, topic, from, msg as never));
+    ps.subscribe(topic);
+  }
+
+  private async handleProtocol(n: Node, protocol: string): Promise<void> {
+    await n.node.handle(protocol, (stream, connection) => { void this.serve(n, protocol, stream, connection.remotePeer); }, { runOnLimitedConnection: true });
   }
 
   private async start(handle: string, config: P2PInstanceConfig): Promise<Node | undefined> {
@@ -280,14 +345,8 @@ export class P2PHost {
     if (this.stopped) { await node.stop(); return undefined; }
     this.nodes.set(handle, n);
     if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch(() => {}); });
-    const ps = this.pubsub(n);
-    for (const topic of config.topics) {
-      ps.topicValidators.set(topic, (from: PeerId, msg: { type: string }) => this.validate(n, topic, from, msg as never));
-      ps.subscribe(topic);
-    }
-    for (const protocol of [...config.protocols, ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) {
-      await node.handle(protocol, (stream, connection) => { void this.serve(n, protocol, stream, connection.remotePeer); }, { runOnLimitedConnection: true });
-    }
+    for (const topic of config.topics) this.subscribe(n, topic);
+    for (const protocol of [...config.protocols, ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) await this.handleProtocol(n, protocol);
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
     const discover = () => void this.discover(n).catch((e) => this.say(handle, `libp2p: discovery: ${(e as Error).message}`));
     setTimeout(discover, 200);

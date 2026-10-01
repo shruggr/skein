@@ -3,7 +3,8 @@
 // loopback — a topic message judged by the validator (the front-door call is
 // a stand-in here), a stream round trip (the libp2p provider's publish, dial,
 // send, close; #70) whose frames come back through `frames`, and a frame on
-// /skein/message/1.0.0, which every node serves.
+// /skein/message/1.0.0, which every node serves; a node declared again
+// following its instance's config (#72: the routes an install adds and removes).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,7 +14,7 @@ import { join } from "node:path";
 import { PrivateKey, ProtoWallet } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Oracle } from "./oracle.ts";
-import { hostP2PConfig, keyOfPeerId, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -108,5 +109,51 @@ test("p2p: two nodes — a topic message through the validator, a stream round t
   await a.send("alpha", m, new TextEncoder().encode("a package"));
   await until(() => calls.find((c) => c.call.protocol === MESSAGE_PROTOCOL), "beta's front door gets the message frame");
   await a.close("alpha", m);
+});
+
+test("p2p: an instance's config as its installed routes ask (#72), and a node declared again follows it — subscribed, unsubscribed, handled, unhandled, stopped — with no restart", async (t) => {
+  assert.equal(libp2pConfig({}, []), undefined, "no libp2p in the genesis, no installed libp2p route: no node");
+  const routes = [{ path: "/overlay/submit" }, { path: "libp2p:tm_demo" }, { path: "libp2p:tm_demo-admit" }, { path: "libp2p:/amm/1/swap" }, { prefix: "libp2p:x" }];
+  assert.deepEqual(libp2pConfig({}, routes), { topics: ["tm_demo", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "installed routes alone start a node");
+  assert.deepEqual(libp2pConfig({ libp2p: { topics: ["tm_demo", "g"], listen: ["/ip4/127.0.0.1/tcp/1"] } }, routes), { topics: ["tm_demo", "g", "tm_demo-admit"], protocols: ["/amm/1/swap"], listen: ["/ip4/127.0.0.1/tcp/1"] }, "the genesis's, then the routes', once each");
+
+  const o = new Oracle(PrivateKey.fromHex("45".repeat(32)));
+  const calls: InboundCall[] = [];
+  const mk = (bootstrap: string[] = []) => new P2PHost({
+    host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap, dht: "off", relays: [], mdns: false },
+    keyOf: (h) => o.peerKey(h), inbound: async (_h, call) => { calls.push(call); return { verdict: "accept" }; }, discoveryMs: 300,
+  });
+  const a = mk();
+  t.after(() => a.stop());
+  await a.declare("alpha", { topics: ["one"], protocols: [] });
+  const b = mk(a.addrs("alpha"));
+  t.after(() => b.stop());
+  await b.declare("beta", { topics: ["one"], protocols: [] });
+  const subs = (h: P2PHost, x: string, topic: string) => (h.node(x)!.services as { pubsub: { getSubscribers(t: string): unknown[] } }).pubsub.getSubscribers(topic).length;
+  await until(() => subs(a, "alpha", "one") > 0, "alpha sees beta on one");
+  const node = b.node("beta");
+
+  // Declared again: `two` subscribed and a protocol handled, on the same node.
+  await b.declare("beta", { topics: ["one", "two"], protocols: ["/p/1"] });
+  assert.equal(b.node("beta"), node, "the same node: no restart");
+  assert.deepEqual(b.served("beta"), { topics: ["one", "two"], protocols: ["/p/1"] });
+  await until(() => subs(a, "alpha", "two") > 0, "alpha sees beta on two");
+  await sleep(1200); // a heartbeat: beta in alpha's mesh for two
+  await a.publish("alpha", "two", new TextEncoder().encode("on two"));
+  await until(() => calls.find((c) => c.topic === "two"), "beta's validator is called on two");
+  const s = await a.dial("alpha", b.peerId("beta"), "/p/1", () => {});
+  await a.send("alpha", s, new TextEncoder().encode("frame"));
+  await until(() => calls.find((c) => c.protocol === "/p/1"), "beta serves /p/1");
+  await a.close("alpha", s).catch(() => {});
+
+  // Declared again without them: unsubscribed, unhandled.
+  await b.declare("beta", { topics: ["one"], protocols: [] });
+  assert.deepEqual(b.served("beta"), { topics: ["one"], protocols: [] });
+  await until(() => subs(a, "alpha", "two") === 0, "alpha sees beta leave two");
+  await assert.rejects(a.dial("alpha", b.peerId("beta"), "/p/1", () => {}), "/p/1 is no longer served");
+
+  // No config: the node stops.
+  await b.declare("beta", undefined);
+  assert.equal(b.node("beta"), undefined);
 });
 

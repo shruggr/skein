@@ -20,8 +20,10 @@
 //               the path is relative to /<app>/ (a leading "/" too): "/submit" →
 //               "/<app>/submit", "/" → "/<app>/". A ".." or "." segment, an encoded
 //               dot or slash (%2e, %2f), a backslash, a NUL or a URL is refused: no
-//               route reaches outside the app's prefix. libp2p routes are refused for
-//               now (the host's node subscribes only its genesis's topics)
+//               route reaches outside the app's prefix. `libp2p:<topic>` and
+//               `libp2p:/<protocol>` are paths too, global, not namespaced (no prefix,
+//               auth or read): the host's libp2p node subscribes and serves what the
+//               installed routes name (p2p.ts, router.ts)
 //   heads[]     names or patterns (`ls:*`); the app's own name is always included;
 //               `peers`, `sessions` and `routes` are refused
 //   provides[]  {interface: "<name>/<major>", functions: {<fn>: {writes: bool, args?, answer?}}}
@@ -30,6 +32,12 @@
 //   requires[]  "<name>/<major>"
 //   start, stop {body: {…}}; `start` needs the owner admitted to the app's box
 //   config      a map (the programs read it from the head's root record)
+//   config.overlay   an overlay app (APPS.md §6): {topics: {<topic>: <role>}, lookups:
+//               {<service>: <role> | {program: <role>, topics?: [<topic>]}}, status?:
+//               "$<provider>" | <key hex>, gossip?: {<topic>: bool}}; the engine is the
+//               role `overlay`. Its wiring is derived (overlayWiring) and added to the
+//               boxes, routes and heads the manifest names itself — an explicit entry
+//               (the same box, the same route path) wins
 
 export interface RouteIn { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; [setting: string]: unknown }
 export interface BoxIn { box: string; senders?: string[] }
@@ -58,10 +66,12 @@ export type ProgramSource = { kind: "wasm" | "cid"; path: string; name: string }
 
 /** A manifest checked: the fields as installed, boxes normalised, the app's head among `heads`, the program sources. */
 export interface Checked {
-  manifest: Manifest & { boxes: Array<{ box: string; senders: string[] }>; heads: string[]; provides: Provide[]; requires: string[]; routes: RouteIn[] };
+  manifest: Omit<Manifest, "boxes"> & { boxes: Array<{ box: string; senders: string[] }>; heads: string[]; provides: Provide[]; requires: string[]; routes: RouteIn[] };
   sources: Record<string, ProgramSource>;
   /** box → the role that handles it. */
   handlers: Record<string, string>;
+  /** What `config.overlay` added (APPS.md §6). */
+  derived: Derived;
 }
 
 export class ManifestError extends Error {
@@ -166,8 +176,10 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     if (!isMap(r)) { bad.push(`routes[${i}]: not a map`); continue; }
     const at = r.path ?? r.prefix;
     if ((r.path === undefined) === (r.prefix === undefined) || typeof at !== "string") { bad.push(`routes[${i}]: want a path or a prefix (one)`); continue; }
-    if (at.startsWith("libp2p:")) { bad.push(`routes[${i}]: ${at}: libp2p routes cannot be installed yet (the host's node subscribes only the genesis's topics and protocols)`); continue; }
-    try { appPath(name || "app", at); } catch (e) { bad.push(`routes[${i}]: ${(e as Error).message}`); continue; }
+    if (at.startsWith("libp2p:")) {
+      const why = libp2pProblem(r);
+      if (why) { bad.push(`routes[${i}]: ${why}`); continue; }
+    } else try { appPath(name || "app", at); } catch (e) { bad.push(`routes[${i}]: ${(e as Error).message}`); continue; }
     if (!isRole(r.program)) bad.push(`routes[${i}]: program ${JSON.stringify(r.program)} is not a role in programs`);
     if (typeof r.fn !== "string" || !r.fn) bad.push(`routes[${i}]: fn is not text`);
     if (r.auth !== undefined && r.auth !== "none") bad.push(`routes[${i}]: auth is "none" or absent (BRC-104)`);
@@ -175,7 +187,7 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     if (r.app !== undefined) bad.push(`routes[${i}]: app is set by the install`);
     routes.push(r as RouteIn);
   }
-  const keys = routes.map((r) => `${r.path !== undefined ? "path" : "prefix"} ${appPath(name || "app", (r.path ?? r.prefix)!)}`);
+  const keys = routes.map((r) => routeKey(name || "app", r));
   for (const [i, k] of keys.entries()) if (keys.indexOf(k) !== i) bad.push(`routes[${i}]: ${k} twice`);
 
   // heads
@@ -220,9 +232,105 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     else if (!own.senders.includes("*") && !own.senders.includes("$owner")) bad.push(`start/stop are the owner's: box ${name} must admit "$owner" or "*"`);
   }
 
+  // config.overlay: the overlay app's wiring, derived (APPS.md §6), under what the manifest names itself.
+  const derived: Derived = { boxes: [], routes: [], heads: [] };
+  let handler = m.handler;
+  const ov = isMap(m.config) ? m.config.overlay : undefined;
+  if (ov !== undefined) {
+    const w = overlayWiring(ov, (r) => isRole(r));
+    if (typeof w === "string" || Array.isArray(w)) bad.push(...[w].flat().map((p) => `config.overlay: ${p}`));
+    else {
+      for (const b of w.boxes) if (!boxes.some((x) => x.box === b.box)) { boxes.push(b); handlers[b.box] = OVERLAY_ROLE; derived.boxes.push(b.box); }
+      const have = new Set(routes.map((r) => routeKey(name || "app", r)));
+      for (const r of w.routes) if (!have.has(routeKey(name || "app", r))) { routes.push(r); derived.routes.push(r.path!); }
+      for (const h of w.heads) if (!heads.includes(h)) { heads.push(h); derived.heads.push(h); }
+      // A single handler role no longer covers every box: the record names each box's.
+      if (derived.boxes.length && Object.values(handlers).some((r) => r !== handler)) handler = { ...handlers };
+    }
+  }
+
   if (bad.length) throw new ManifestError(bad);
-  const out = { ...(m as Manifest), boxes, heads, provides, requires, routes };
-  return { manifest: out, sources, handlers };
+  const out = { ...(m as Manifest), ...(handler !== undefined ? { handler } : {}), boxes, heads, provides, requires, routes };
+  return { manifest: out, sources, handlers, derived };
+}
+
+/** A route's key as the routes table knows it: `path /<app>/x`, `prefix /<app>/x`, or `path libp2p:<name>`. */
+export function routeKey(app: string, r: { path?: string; prefix?: string }): string {
+  return `${r.path !== undefined ? "path" : "prefix"} ${routePath(app, (r.path ?? r.prefix)!)}`;
+}
+
+/** A route's path as served: a libp2p topic or protocol as written (global), anything else under /<app>/ (appPath). */
+export function routePath(app: string, p: string): string {
+  return p.startsWith("libp2p:") ? p : appPath(app, p);
+}
+
+/** Why a `libp2p:` route is not one: `libp2p:<topic>` or `libp2p:/<protocol>`, a path, no auth or read. */
+function libp2pProblem(r: Record<string, unknown>): string | undefined {
+  const at = String(r.path ?? r.prefix);
+  if (r.path === undefined) return `${at}: a libp2p route is a path (a topic or a protocol), not a prefix`;
+  const name = at.slice("libp2p:".length);
+  if (!name || /[\s\0]/.test(name)) return `${at}: want libp2p:<topic> or libp2p:/<protocol>`;
+  if (r.auth !== undefined || r.read !== undefined) return `${at}: a libp2p route takes no auth or read (GossipSub messages are signed; streams are Noise)`;
+  return undefined;
+}
+
+// ---------------------------------------------------------------- an overlay app's wiring (APPS.md §6)
+
+/** The role of an overlay app's engine (its `config.overlay` is the engine's). */
+export const OVERLAY_ROLE = "overlay";
+
+/** What the install derived from `config.overlay` (box names, route paths, heads), for the prompt. */
+export interface Derived { boxes: string[]; routes: string[]; heads: string[] }
+
+/** An overlay app's wiring. */
+export interface OverlayWiring { boxes: Array<{ box: string; senders: string[] }>; routes: RouteIn[]; heads: string[]; topics: string[] }
+
+const TOPIC = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+/**
+ * The wiring `config.overlay` asks for (APPS.md §6), or its problems. For
+ * each topic: the routes `libp2p:<topic>` → submit, `libp2p:<topic>-admit` →
+ * peerAdmit, `libp2p:<topic>-proof` → peerProof; and `/submit`, `/lookup`
+ * (open); the boxes `submit` and `chain` from anyone (the front door's and
+ * the host feeds' entries carry no sender); `status` from the status
+ * provider `config.overlay.status` names, if it names one (none: admitted at
+ * the proof, #73); a head `ls:<service>` per lookup service. All to the
+ * role `overlay`, the engine. `isRole` tells which roles the manifest has.
+ */
+export function overlayWiring(ov: unknown, isRole: (role: string) => boolean): OverlayWiring | string[] {
+  const bad: string[] = [];
+  if (!isMap(ov)) return ["want {topics, lookups?, status?, gossip?}"];
+  if (!isRole(OVERLAY_ROLE)) bad.push(`the engine is the role "${OVERLAY_ROLE}": programs has none`);
+  const topics: string[] = [];
+  if (!isMap(ov.topics) || !Object.keys(ov.topics).length) bad.push("topics: want {<topic>: <role>}, at least one");
+  else for (const [t, role] of Object.entries(ov.topics)) {
+    if (!TOPIC.test(t)) bad.push(`topics: ${JSON.stringify(t)} is not a topic name`);
+    else if (typeof role !== "string" || !isRole(role)) bad.push(`topics.${t}: ${JSON.stringify(role)} is not a role in programs`);
+    else topics.push(t);
+  }
+  const heads: string[] = [];
+  if (ov.lookups !== undefined && !isMap(ov.lookups)) bad.push("lookups: want {<service>: <role> | {program: <role>, topics?: [<topic>]}}");
+  for (const [service, l] of Object.entries(isMap(ov.lookups) ? ov.lookups : {})) {
+    if (!TOPIC.test(service)) { bad.push(`lookups: ${JSON.stringify(service)} is not a service name`); continue; }
+    const role = typeof l === "string" ? l : isMap(l) ? l.program : undefined;
+    if (typeof role !== "string" || !isRole(role)) bad.push(`lookups.${service}: program ${JSON.stringify(role)} is not a role in programs`);
+    if (isMap(l) && l.topics !== undefined && (!Array.isArray(l.topics) || l.topics.some((t) => typeof t !== "string" || !isMap(ov.topics) || !(t in ov.topics)))) bad.push(`lookups.${service}.topics: want a list of the topics the overlay serves`);
+    heads.push(`ls:${service}`);
+  }
+  const status = ov.status;
+  if (status !== undefined && status !== null && (typeof status !== "string" || !(/^\$[a-z][a-z0-9_-]*$/.test(status) || KEY.test(status)))) bad.push(`status: ${JSON.stringify(status)} is not "$<provider>" or an identity key (hex)`);
+  if (ov.gossip !== undefined && (!isMap(ov.gossip) || Object.entries(ov.gossip).some(([t, on]) => typeof on !== "boolean" || !topics.includes(t)))) bad.push("gossip: want {<topic the overlay serves>: true | false}");
+  if (bad.length) return bad;
+  const route = (path: string, fn: string, open = false): RouteIn => ({ path, program: OVERLAY_ROLE, fn, ...(open ? { auth: "none" as const } : {}) });
+  return {
+    topics,
+    boxes: [{ box: "submit", senders: ["*"] }, { box: "chain", senders: ["*"] }, ...(typeof status === "string" ? [{ box: "status", senders: [status] }] : [])],
+    routes: [
+      route("/submit", "submit", true), route("/lookup", "lookup", true),
+      ...topics.flatMap((t) => [route(`libp2p:${t}`, "submit"), route(`libp2p:${t}-admit`, "peerAdmit"), route(`libp2p:${t}-proof`, "peerProof")]),
+    ],
+    heads,
+  };
 }
 
 /** The interfaces `requires` names that no installed app provides. */

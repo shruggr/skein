@@ -50,9 +50,14 @@
 // broadcaster (#65).
 //
 // The libp2p host (#51, p2p.ts) is the router's too: one node per instance
-// whose genesis declares `libp2p`, each topic message and stream frame one
-// request entry (`p2pInbound`: the verdict or the frame's answer read off its
-// thread and handed back to GossipSub or the stream).
+// whose genesis declares `libp2p` or whose installed routes name a libp2p
+// topic or protocol (#72: the head `routes`), each topic message and stream
+// frame one request entry (`p2pInbound`: the verdict or the frame's answer
+// read off its thread and handed back to GossipSub or the stream). The node
+// follows the head `routes`: once the kernel has processed what the router
+// handed it (`settle`), the router reads the head (a kernel read), and when
+// it moved, declares the instance's libp2p config again — an install's
+// topics subscribed, an uninstall's unsubscribed, live (`syncP2p`).
 //
 // Nothing here is an instance's clock but its providers (#69): a schedule
 // originates in a program's step, as a message to the cron provider; an
@@ -80,7 +85,7 @@ import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type 
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
-import { DEFAULT_LISTEN, libp2pOf, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
+import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
@@ -149,7 +154,12 @@ export interface RouterOptions {
   libp2pDiscoveryMs?: number;
 }
 
-interface Loaded { row: InstanceRow; kernel: Kernel; identity: string; wallet: WalletInterface }
+interface Loaded {
+  row: InstanceRow; kernel: Kernel; identity: string; wallet: WalletInterface;
+  /** The genesis (its `libp2p`), and the head `routes` as the libp2p node last followed it (#72). */
+  genesis: Record<string, unknown>;
+  routesRoot?: string;
+}
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
 export interface RouterRequest { method: string; url: string; headers: Record<string, string>; body: Uint8Array; /** The instance whose `http` this is (none for a socket's). */ from?: string }
@@ -212,6 +222,8 @@ export class Router {
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   private queues = new Map<string, Promise<unknown>>();
+  /** The libp2p nodes following their head `routes` (#72: syncP2p after a settle). */
+  private syncing = new Set<Promise<unknown>>();
   private idleTimer?: ReturnType<typeof setInterval>;
   private ledgerTimer?: ReturnType<typeof setInterval>;
   /** The fuel of calls not yet written to the ledger: instance\0caller\0op → {calls, fuel}. */
@@ -453,8 +465,9 @@ export class Router {
       await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {})));
       await this.providers.idle(); // what the providers carry now (#70): its answers are entries
       await this.arc?.idle(); // the broadcaster's posts (#65): their answers are statuses to route
+      await Promise.all([...this.syncing]); // the libp2p nodes following their head `routes` (#72)
       await new Promise((r) => setImmediate(r));
-      if (!this.queues.size && !this.providers.busy() && !this.arc?.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
+      if (!this.syncing.size && !this.queues.size && !this.providers.busy() && !this.arc?.busy() && [...this.loaded.values()].every((l) => l.kernel.busy === 0)) return;
     }
   }
 
@@ -498,13 +511,14 @@ export class Router {
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);
       },
     });
+    let g: { identity?: unknown } | null;
     try {
       if (!(await kernel.store.log.tip())) {
         // No tree was loaded into this store (`skein-host add --boot/--packet` does that): the stock system, through the same loader.
         const b = await boot(kernel, { kind: "code" }, this.genesisConfig(row, identity), this.now());
         this.say(handle, `genesis ${b.entry}`);
       }
-      const g = await kernel.genesis() as { identity?: unknown } | null;
+      g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
       if (keyHex(g.identity) !== identity) throw new Error(`the oracle (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
@@ -513,16 +527,13 @@ export class Router {
       if (!row.identity) this.o.db.add(row.handle, { identity });
       if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
-      const p2p = libp2pOf(g as Record<string, unknown>);
-      if (this.p2p && p2p) {
-        // Its node, before anything it runs can publish or dial; a failure to start it is logged, not fatal.
-        await this.p2p.declare(handle, p2p).catch((e) => this.say(handle, `libp2p: not started: ${(e as Error).message}`));
-      }
     } catch (e) {
       await kernel.stop(1000);
       throw e;
     }
-    const l: Loaded = { row, kernel, identity, wallet };
+    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown> };
+    // Its node (the genesis's libp2p and the installed routes'), before anything it runs can publish or dial.
+    await this.syncP2p(l, true);
     this.loaded.set(handle, l);
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
@@ -631,8 +642,35 @@ export class Router {
     return row;
   }
 
-  /** The kernel counts as busy until it has processed what was just admitted (its `idle` answers after the drain). */
-  private settle(l: Loaded): void { void l.kernel.idle().catch(() => {}); }
+  /**
+   * The kernel counts as busy until it has processed what was just admitted
+   * (its `idle` answers after the drain); then the libp2p node follows the
+   * head `routes` (#72).
+   */
+  private settle(l: Loaded): void {
+    const p = l.kernel.idle().then(() => this.syncP2p(l)).catch(() => {});
+    this.syncing.add(p);
+    void p.finally(() => this.syncing.delete(p));
+  }
+
+  /**
+   * The instance's libp2p node as its genesis and its installed routes ask
+   * (#72, p2p.ts libp2pConfig): read the head `routes` (a kernel read); when
+   * it moved since the node last followed it (or `first`), declare the config
+   * again — the node started, reconfigured (topics subscribed and
+   * unsubscribed, protocols handled and unhandled) or stopped. A failure is
+   * logged, not fatal.
+   */
+  private async syncP2p(l: Loaded, first = false): Promise<void> {
+    if (!this.p2p || l.kernel.gone) return;
+    const root = await l.kernel.call("head", "routes").catch(() => undefined) as CID | null | undefined;
+    if (root === undefined) return;
+    const key = root ? root.toString() : "";
+    if (!first && key === (l.routesRoot ?? "")) return;
+    l.routesRoot = key;
+    const installed = root ? ((await l.kernel.store.get(root).catch(() => ({})) as { routes?: Array<Record<string, unknown>> }).routes ?? []) : [];
+    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, installed)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+  }
 
   /**
    * The waker answers every wake-me due by this router's clock, and the cron

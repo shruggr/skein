@@ -49,7 +49,7 @@ import type { Store } from "../runtime/store.ts";
 import { currentSubscriptions } from "../runtime/subscriptions.ts";
 import { programRecord, RAW, rawCid, wasmKind, type Objects } from "./boot.ts";
 import { addressBook, type AddressEntry } from "./deploy.ts";
-import { appPath, checkManifest, missingInterfaces, type Checked, type Provide, type RouteIn } from "./manifest.ts";
+import { checkManifest, missingInterfaces, routePath, type Checked, type Derived, type Provide, type RouteIn } from "./manifest.ts";
 
 const textOf = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -167,6 +167,8 @@ export interface Plan {
   requires: string[];
   heads: string[];
   publishes: string[];
+  /** What `config.overlay` added to the boxes, routes and heads (APPS.md §6). */
+  derived: Derived;
   notes: string[];
 }
 
@@ -199,7 +201,7 @@ export function wiring(record: AppRecord, view: InstanceView): { subscriptions: 
   }
   const routes: Route[] = record.routes.map((r: RouteIn) => {
     const { path, prefix, program, ...rest } = r;
-    const at = appPath(record.name, (path ?? prefix)!);
+    const at = routePath(record.name, (path ?? prefix)!);
     return { op: "add", route: { ...rest, ...(path !== undefined ? { path: at } : { prefix: at }), program: record.programs[program]!, app: record.name } };
   });
   return { subscriptions, routes };
@@ -237,7 +239,8 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
     }
     const metaPath = join(t.dir, "bin", `${src.name}.json`);
     const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) as { inputs?: unknown; services?: string[]; description?: string } : {};
-    const b = encode(programRecord(src.name, module, meta));
+    // `app`: the program knows its app (its head) from its own record (APPS.md §2).
+    const b = encode({ ...programRecord(src.name, module, meta), app: t.checked.manifest.name });
     programs[role] = b.cid;
     records.push({ cid: b.cid, bytes: b.bytes });
   }
@@ -326,7 +329,7 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   return {
     app: m.name, version: m.version, record, recordCid: app.cid, records: all, ...(routesBox ? { routesBox } : {}),
     subscriptions: sendSubs, routes: sendRoutes, ...(m.start ? { start: m.start.body } : {}),
-    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, heads: m.heads, publishes, notes,
+    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, heads: m.heads, publishes, derived: t.checked.derived, notes,
   };
 }
 
@@ -343,14 +346,17 @@ function gossipOf(config: Record<string, unknown> | undefined): string[] {
 export function describe(p: Plan, record = p.record): string[] {
   const out: string[] = [];
   out.push(`${p.upgrade ? "upgrade" : "install"} ${p.app} ${p.version}${p.upgrade ? ` (installed: ${p.upgrade})` : ""}${record.description ? ` — ${record.description}` : ""}`);
+  const d = p.derived ?? { boxes: [], routes: [], heads: [] };
+  const from = (yes: boolean) => (yes ? " (derived: config.overlay)" : "");
   out.push(`  head      ${p.heads.join(", ")} → the app record ${p.recordCid} (tree ${record.tree})`);
+  if (d.heads.length) out.push(`  heads     ${d.heads.join(", ")}${from(true)}`);
   for (const b of record.boxes) {
     const role = typeof record.handler === "string" ? record.handler : record.handler?.[b.box];
-    out.push(`  box       ${b.box} → ${role}, from ${b.senders.join(", ")}`);
+    out.push(`  box       ${b.box} → ${role}, from ${b.senders.join(", ")}${from(d.boxes.includes(b.box))}`);
   }
   for (const r of record.routes) {
-    const at = appPath(record.name, (r.path ?? r.prefix)!);
-    out.push(`  route     ${r.path !== undefined ? at : `${at}*`} → ${r.program}.${r.fn}${r.auth === "none" ? " (open: no session)" : ""}${r.read ? ` (read ${r.read})` : ""}`);
+    const at = routePath(record.name, (r.path ?? r.prefix)!);
+    out.push(`  route     ${r.path !== undefined ? at : `${at}*`} → ${r.program}.${r.fn}${r.auth === "none" ? " (open: no session)" : ""}${r.read ? ` (read ${r.read})` : ""}${from(r.path !== undefined && d.routes.includes(r.path))}`);
   }
   if (record.start) out.push(`  start     ${JSON.stringify(record.start.body)} into ${p.app}`);
   if (record.stop) out.push(`  stop      ${JSON.stringify(record.stop.body)} (at uninstall)`);
