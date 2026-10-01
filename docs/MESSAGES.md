@@ -593,12 +593,12 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
   beside webhook and SSE): an instance would subscribe to Arcade's key
   instead, and nothing on its side changes.
 
-**The overlay's gate** (`defaults.overlayAdmitOn`, docs/OVERLAY.md):
-
-| `overlayAdmitOn` | with a status provider (role `status`) | without one |
-|---|---|---|
-| `"status"` (default) | admitted on its first status that is not a rejection; a rejection rejects it | admitted at once, on validation; settled by its proof — a competing proof, a rejection or abandonment unwinds it through `admits` |
-| `"proof"` | admitted on its proof; statuses are noted (a rejection still rejects it) | admitted on its proof |
+**The overlay's gate** (docs/OVERLAY.md, #73): there is no setting. A
+submission is admitted on the **first** of a status provider's word that the
+network has it (its first status that is not a rejection) or a validated
+proof; a rejection status rejects it either way. With no status provider
+subscribed (role `status`), no status ever arrives, so an instance admits at
+the proof. Admission on validation alone is not a mode.
 
 ### Scheduling: the waker and the cron provider (#69)
 

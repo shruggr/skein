@@ -31,23 +31,28 @@
 // (but for each step's own time), `byTopic` map and lookup storage as the
 // POST /submit path produced, and a redelivery of the message is recorded and
 // ignored, nothing else changed.
-// The broadcast gate (#57, #65), against the host's broadcaster (#58) in
-// front of a fake Arcade (src/host/fake-arcade.ts): every unproven submission
-// is broadcast as an event by the step, which the host queues and posts to
-// Arcade (Extended Format), and admitted (overlayAdmitOn "status", the
-// instances subscribing to the host's status provider) once Arcade's answer —
-// a RECEIVED status message — says Arcade took it: the GossipSub one too
-// (Arcade's duplicate answer, sent to its broadcaster); the three tokens'
-// SEEN statuses (messages) and MINED proofs (events, with their merkle paths)
-// come back over Arcade's SSE stream, and the proofs prove them; a
-// resubmission answers the STEAK from the state; a mined submission (its BEEF
-// proves it) is admitted with no POST; Arcade's 400 (a REJECTED status)
-// rejects one (400, nothing admitted). A third instance meets Arcade's 503:
-// the host keeps the transaction queued, the client waits on the submission's
-// thread until the router's bound (503 + Retry-After, nothing admitted), a
-// resubmission waits on the same thread (503 again); then the queue's retry
-// is taken, and two clients waiting on the thread both get the STEAK.
-// All three stores replay to themselves exactly.
+// The broadcast gate (#57, #65, #73), against the host's broadcaster (#58) in
+// front of a fake Arcade (src/host/fake-arcade.ts): there is no setting —
+// every unproven submission is broadcast as an event by the step, which the
+// host queues and posts to Arcade (Extended Format), and admitted (the
+// instances subscribing to the host's status provider) on the first of
+// Arcade's answer — a RECEIVED status message — saying Arcade took it, or its
+// proof: the GossipSub one too (Arcade's duplicate answer, sent to its
+// broadcaster); the three tokens' SEEN statuses (messages) and MINED proofs
+// (events, with their merkle paths) come back over Arcade's SSE stream, and
+// the proofs just prove them (no second admission); a resubmission answers
+// the STEAK from the state; a mined submission (its BEEF proves it) is
+// admitted with no POST; Arcade's 400 (a REJECTED status) rejects one (400,
+// nothing admitted). A third instance meets Arcade's 503: the host keeps the
+// transaction queued, the client waits on the submission's thread until the
+// router's bound (503 + Retry-After, nothing admitted), a resubmission waits
+// on the same thread (503 again); then the queue's retry is taken, and two
+// clients waiting on the thread both get the STEAK. A fourth instance, on a
+// host with no Arcade (so no status provider is seeded in its address book):
+// nothing is admitted before its proof, fed directly as the headers are
+// (overlay unit test.zig covers the status-first and proof-first orderings
+// and that a later signal never admits twice). All stores replay to
+// themselves exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
 
@@ -176,6 +181,17 @@ async function until<T>(what: string, f: () => Promise<T | undefined>, ms = 30_0
     await sleep(100);
   }
 }
+// #73: a fourth instance, on a router with no Arcade — no status provider is seeded in its address
+// book, so no status ever arrives.
+const noarcDb = join(home, "instances/noarc/runtime.db");
+const noarcHostDb = new HostDb(join(home, "noarc-host.db"));
+noarcHostDb.add("noarc", { store: noarcDb });
+const noarcRouter = new Router({
+  db: noarcHostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
+  answerWaitMs: 300,
+  kernel: { command: kernel, env: { SKEIN_HOME: home } },
+  log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [noarc:${s}] ${l}\n`); },
+});
 
 try {
   // Listening first (the instances' origins name the port).
@@ -622,6 +638,67 @@ try {
     busy, steak: ok, statuses: retried, submissions: await submissions(), queued: router.arc!.queued().some((q) => q.txid === gid), posts: posted(gid).length,
     state: (await settledOf("gate", [gid]))[0], live: gLive.outputs.map((o) => [Transaction.fromBEEF(o.beef).id("hex") === gid, o.outputIndex]),
   };
+
+  // #73: the fourth instance (no Arcade, no status provider in its address book): a token is broadcast
+  // (the event is dropped — this host has no Arcade — a line in its log) and the submission's thread
+  // rests, no status ever able to reach it; the client waits out the router's bound and gets 503,
+  // nothing admitted. Its proof, fed directly (as headers are above, #73's own gate otherwise needs a
+  // live Arcade to race): admits it — "with no status provider, nothing before the proof".
+  await noarcRouter.listen(0);
+  await noarcRouter.bootRow("noarc", { kind: "tree", root: src.root, objects: src.objects });
+  const noarcBase = noarcRouter.originOf("noarc");
+  // As `settledOf` above, over `noarcRouter` instead of `router`: [proven, still awaiting, rejected].
+  const nMapKeys = async (name: string): Promise<Set<string>> => {
+    const k = (await noarcRouter.hydrate("noarc")).kernel;
+    const st = await k.store.get(await k.call("head", "wallet") as CID) as unknown as { maps: Record<string, CID | null> };
+    const out = new Set<string>();
+    const walk = async (c: CID | null | undefined): Promise<void> => {
+      if (!c) return;
+      const [left, es] = await k.store.get(c) as unknown as [CID | null, Array<[Uint8Array, CID, CID | null]>];
+      await walk(left);
+      for (const [key, , right] of es) { out.add(Buffer.from(key).toString("hex")); await walk(right); }
+    };
+    await walk(st.maps[name]);
+    return out;
+  };
+  const nSettled = async (txid: string) => {
+    const [proofs, awaiting, rejected] = await Promise.all(["proofs", "awaiting", "rejected"].map((m) => nMapKeys(m)));
+    const k = internal(txid).toString("hex");
+    return [proofs.has(k), awaiting.has(k), rejected.has(k)];
+  };
+  const bob = key("5555");
+  const nFund = new Transaction();
+  nFund.addInput({ sourceTXID: "33".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
+  nFund.addOutput({ lockingScript: new P2PKH().lock(bob.toPublicKey().toHash()), satoshis: 20_000 });
+  const nFundTxid = nFund.id("hex");
+  const nCb = "cb".repeat(32);
+  nFund.merklePath = new MerklePath(1, [[{ offset: 0, hash: nCb }, { offset: 1, hash: nFundTxid, txid: true }]]);
+  const nRoot1 = sha256d(Buffer.concat([internal(nCb), internal(nFundTxid)]));
+  const nH1 = mine(sha256d(REGTEST_GENESIS), nRoot1, 1_790_010_000);
+  await noarcRouter.admitEvent("noarc", "chain", { kind: "header", raw: nH1 });
+  await noarcRouter.settled();
+  const nTok = new Transaction();
+  nTok.addInput({ sourceTransaction: nFund, sourceOutputIndex: 0, unlockingScriptTemplate: new P2PKH().unlock(bob), sequence: 0xffffffff });
+  nTok.addOutput({ lockingScript: tokenScript(bob), satoshis: 1 });
+  nTok.addOutput({ lockingScript: new P2PKH().lock(bob.toPublicKey().toHash()), satoshis: 19_000 });
+  await nTok.sign();
+  const nTokId = nTok.id("hex");
+  const noarcLive = async () => {
+    const r = new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [noarcBase] } });
+    const a = await r.query({ service: "ls_demo", query: { topic: "tm_demo" } }) as { outputs: unknown[] };
+    return a.outputs.length;
+  };
+  const nSub = await fetch(`${noarcBase}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(nTok.toAtomicBEEF()) });
+  await noarcRouter.settled();
+  report.noProviderPending = { status: nSub.status, state: await nSettled(nTokId), live: await noarcLive() };
+  const nFiller = "f7".repeat(32);
+  const nH2 = mine(sha256d(nH1), sha256d(Buffer.concat([internal(nFiller), internal(nTokId)])), 1_790_010_600);
+  const nPath = new MerklePath(2, [[{ offset: 0, hash: nFiller }, { offset: 1, hash: nTokId, txid: true }]]);
+  await noarcRouter.admitEvent("noarc", "chain", { kind: "header", raw: nH2 });
+  await noarcRouter.admitEvent("noarc", "chain", { kind: "proof", subject: txCid(nTokId), txid: nTokId, path: Uint8Array.from(nPath.toBinary()) });
+  await noarcRouter.settled();
+  report.noProviderProven = { state: await nSettled(nTokId), live: await noarcLive() };
+
   report.ok = true;
 } catch (e) {
   report.error = (e as Error).stack ?? String(e);
@@ -629,6 +706,8 @@ try {
 await router.stop();
 await arcade.close();
 hostDb.close();
+await noarcRouter.stop();
+noarcHostDb.close();
 // #42 (decided 2026-09-30): the merkle nodes the BUMPs revealed are kept 64-byte bitcoin-tx blocks that
 // contribute no edges (nor does the header): no token is a `child` edge target, and no edge in the map is
 // `child` / `prev` / `merkleroot`. The nodes still link forward: the root's two children, n23's two
@@ -698,6 +777,12 @@ check(eq(report.mined, { status: 200, steak: { tm_demo: { outputsToAdmit: [0], c
   check(!!t && eq(t.busy.again, [503, "5"]) && t.busy.submissions === 1, `#66: a resubmission while pending launches no second submission: it waits on the same thread, 503 again at the bound (${JSON.stringify(t?.busy)})`);
   check(!!t && eq(t.steak, [[200, steak], [200, steak]]) && t.submissions === 1 && !t.queued && t.posts >= 2 && eq(t.state, [false, true, false]) && eq(t.live, [[true, 0]]), `#57, #66, #65: Arcade takes it: the queue's next post — RECEIVED, admitted, finished, off the queue; two clients waiting on it both get the STEAK from the state (${JSON.stringify(t)})`);
 }
+{
+  const p = report.noProviderPending as { status: number; state: boolean[]; live: number } | undefined;
+  check(!!p && p.status === 503 && eq(p.state, [false, true, false]) && p.live === 0, `#73: a fourth instance with no Arcade (no status provider seeded in its address book): the submission is broadcast (the event dropped — this host has no Arcade to post it to) and left pending; the client waited out the router's bound, 503; nothing admitted (${JSON.stringify(p)})`);
+  const v = report.noProviderProven as { state: boolean[]; live: number } | undefined;
+  check(!!v && eq(v.state, [true, false, false]) && v.live === 1, `#73: its proof, fed directly (as the headers are, #73's own gate otherwise needs a status that can never arrive here): admits it — "status" with no provider subscribed is exactly "nothing before the proof" (${JSON.stringify(v)})`);
+}
 check(eq(report.edges, { sameRoot: true, children: [false, false, false], noNodeEdges: true, forward: true }), `#42: kept merkle nodes and headers contribute no edges (no token is a \`child\` edge target), the nodes still link forward to their children; the TS reader derives the kernel's edges map, same root (${JSON.stringify(report.edges)})`);
 
 const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db], { encoding: "utf8" });
@@ -712,6 +797,10 @@ const rt = spawnSync("node", ["--experimental-strip-types", "--no-warnings", joi
 process.stdout.write(rt.stdout);
 if (rt.status !== 0) process.stdout.write(rt.stderr);
 check(rt.status === 0 && /identical .*the source store reproduced exactly/.test(rt.stdout), "#57: the gate instance's store (its waits on Arcade, its RECEIVED) replays to itself exactly");
+const rn = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), noarcDb], { encoding: "utf8" });
+process.stdout.write(rn.stdout);
+if (rn.status !== 0) process.stdout.write(rn.stderr);
+check(rn.status === 0 && /identical .*the source store reproduced exactly/.test(rn.stdout), "#73: the no-Arcade instance's store (its 503, its proof fed directly) replays to itself exactly");
 
 if (process.env.KEEP) process.stdout.write(`kept ${home}\n`); else rmSync(home, { recursive: true, force: true });
 process.stdout.write(failures ? `overlay: ${failures} FAILED\n` : "overlay: all ok\n");
