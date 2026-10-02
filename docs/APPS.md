@@ -25,7 +25,7 @@ An app ships as a tree — a directory, a git repository, a packet:
 
 ```
 bin/<name>.wasm          the program (a WASI preview1 module or a WASI 0.2 component)
-bin/<name>.cid           or: the CID of a module the instance already has (a pinned stock module)
+bin/<name>.cid           or: the CID of a module the instance already has (a module the kernel pins)
 etc/app.json             the manifest (§2)
 www/, …                  whatever it serves or needs
 ```
@@ -106,7 +106,7 @@ src/host/install.ts.)
 |---|---|
 | `name` | the app's name: its box (§4), and the prefix of every head it writes (`<name>/app` its root). Unique on the instance: the name is the app's identity |
 | `version` | semver; shown by the site, compared by `requires` |
-| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a pinned stock module such as the overlay engine; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), or a bare name: a program the instance already has by that name in its genesis (the workbench's `"shell": "shell"`); `dispatch[].program` and `config` refer to these names. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it, and a program finds its app (its head `<name>/app`, the app record) from its own record (#72, #77, built) |
+| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a module the instance already holds; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), or a bare name: a program the instance already has by that name in its genesis (skein-workbench's `"shell": "shell"`); `dispatch[].program` and `config` refer to these names. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it, and a program finds its app (its head `<name>/app`, the app record) from its own record (#72, #77, built) |
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
@@ -123,7 +123,7 @@ top-level grants exist for apps. The protocol endpoints are unaffected:
 BRC-22's `/submit` and BRC-24's `/lookup` are relative to the overlay's
 **base URL**, which BRC-23's advertisement carries (a host base URL, not a
 bare domain), so an overlay app advertises `https://<host>/<handle>/amm`
-and the stock clients call `${baseUrl}/submit`. The root belongs to skein's
+and standard clients call `${baseUrl}/submit`. The root belongs to skein's
 boundary programs (the messagebox rows, the BRC-103 well-known path), which
 are not apps. libp2p topic names are global by nature and are not
 namespaced. Boxes follow the same rule: an app's box is its name.
@@ -420,7 +420,7 @@ mailbox `overlay` from `event` and `$self`, http `/overlay/submit` and
 to accept topic managers from outside may offer `overlay.topics/1`
 (`add`/`remove`/`list`, `writes` as expected) and `overlay.lookups/1` on its
 box and keep a registry under its head; the engine would consult both the
-manifest and the registry. Nothing requires it, and the stock overlay app
+manifest and the registry. Nothing requires it, and skein-overlay
 does not offer it.
 
 ## 6a. Worked example: the chain module (#78)
@@ -474,7 +474,7 @@ more: one program, two rows, one interface.
 Installed: `skein-host install https://github.com/shruggr/skein-chain
 --instance <h>`; at boot: `bin/chain.wasm` in the system tree and its
 rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
-under the stock scope). kernel-zig/equiv/chain.ts does both.
+under its default scope). kernel-zig/equiv/chain.ts does both.
 
 ## 7. What is built, what is spec
 
@@ -490,6 +490,6 @@ under the stock scope). kernel-zig/equiv/chain.ts does both.
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
 | the overlay engine reads `config.overlay` from its app record `<app>/app`, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72, #79: skein-overlay 0.3.0 `src/config.zig`) |
 | the chain under `chain/` (one chain module, shruggr/skein-chain: ingest, broadcast, answers on each state change); `optional` rows; no open box (`event`, `$self`, `$owner`) | built (#78, #79: §6a; skein-chain 0.2.0; skein-sdk 0.4.0 `chain`) |
-| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message; two overlay apps on one instance; stock manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0, skein-workbench 0.2.0) |
+| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message; two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0, skein-workbench 0.2.0) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
 | apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-workbench, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |
