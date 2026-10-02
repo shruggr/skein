@@ -25,7 +25,7 @@ export const MODULES = {
   brush: CID.parse("bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4"),
   coreutils: CID.parse("bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese"),
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreicpy5jpjaybnxzjg2zbyfgmxfixjhvgwmsc74mmmerrelbuqvmmca"),
+  "wallet": CID.parse("bafkreihjdj7o75mnffyk362rzabszndywo4yoyjq4r7yvtmu3cv4ff3qhq"),
   // The toolset of issue #13 — single-purpose WASI programs the shell runs
   // beyond brush/coreutils. find/xargs are two binaries from one build
   // (uutils/findutils); diff and cmp are two names for the one

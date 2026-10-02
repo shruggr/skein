@@ -310,18 +310,25 @@ const Wallet = struct {
 
     const OutputView = struct { txid: [32]u8, vout: u32, satoshis: u64, locking_script: []const u8, spendable: bool, status: Status, record: Value };
 
-    /// A basket's live outputs (their transactions not rejected), spendable ones only unless `include_spent`.
+    /// A basket's live outputs (their transactions not rejected), spendable ones only unless
+    /// `include_spent`. The order is the one the wallet always listed in: the spendable ones first,
+    /// then (with `include_spent`) the spent ones, each in outpoint order (the `byBasket` map's key
+    /// order). Spent-ness is read from the chain state now, not a key prefix, so it takes two passes;
+    /// in one pass the order would follow the txids alone, which differ from run to run (a change key
+    /// is drawn from the thread's random).
     fn listOutputs(self: *Wallet, basket: []const u8, include_spent: bool) ![]OutputView {
         const a = self.a;
         var out: std.ArrayList(OutputView) = .empty;
         const prefix = try w.store.nameKey(a, basket, &.{});
-        for (try self.map("byBasket").prefixed(prefix)) |kv| {
+        const kvs = try self.map("byBasket").prefixed(prefix);
+        for ([_]bool{ false, true }) |pass_spent| for (kvs) |kv| {
+            if (pass_spent and !include_spent) break;
             const o = try w.store.outpointOf(kv.key[prefix.len..]);
             const st = try self.status(o.txid);
             if (st == .rejected) continue;
             const op = w.store.outpointKey(o.txid, o.vout);
             const spent = try self.isSpent(op);
-            if (spent and !include_spent) continue;
+            if (spent != pass_spent) continue;
             const raw = (try self.txRaw(o.txid)) orelse return error.BadRecord;
             const tx = try Transaction.parse(a, raw);
             if (o.vout >= tx.outputs.len) return error.BadRecord;
@@ -335,7 +342,7 @@ const Wallet = struct {
                 .status = st,
                 .record = try self.record(rc),
             });
-        }
+        };
         return out.items;
     }
 
