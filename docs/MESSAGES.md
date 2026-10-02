@@ -1,26 +1,18 @@
 # Messages
 
-How messages enter and leave a skein instance. Settled with David on
-2026-09-25/26, revised by issue #33 (the router) and rewritten for issue #40:
-**the instance is an HTTP server; BRC-169 is discovery; BRC-103/104 is the
-network; messages are state.** This replaces the BRC-169 envelopes of the
-core flow, the kernel's `emit` and `resolve` imports, the host's `auth.ts`,
-the router's mailbox keeping, outcome entries and peer seeding. Revised for
-#68 and #66 (2026-10-01): **skein is a state process** — every package a
+How messages enter and leave a skein instance, as built at log format 8.
+**The instance is an HTTP server; BRC-169 is discovery; BRC-103/104 is the
+network; messages are state.** Skein is a state process: every package a
 transport carries in is appended as received and the front door is stepped
-on it; sessions are state; a synchronous client waits on the thread.
-Revised for #70 and #67 (2026-10-02): **one way out, and external
-communication is a thread** — a step `emit`s a signed message to a key the
-address book names and ends waiting; the answer is an entry. The `http` and
-`libp2p` imports and the host's attestations are gone (log format 6).
-Revised for #65 and #69 (log format 7): **broadcast out and proof in are
-unauthenticated, self-validating events** through specific wiring (an
-optional status provider reports statuses as signed messages), and
-**scheduling is a message to a provider** (the waker, the cron provider); the
-genesis `jobs` and the `wake` entry are gone. Revised for #77 (log format
-8): **the kernel is the machine, four tables and the oracle** — objects,
-heads with their owner, one dispatch table (routes, subscriptions and libp2p
-topics are its rows), the address book; the admin operations are the
+on it; sessions are state; a synchronous client waits on the thread. There
+is **one way out**: a step `emit`s a signed message to a key the address
+book names and ends waiting, and the answer is an entry. **Broadcast out and
+proof in are unauthenticated, self-validating events** through specific
+wiring (an optional status provider reports statuses as signed messages),
+and **scheduling is a message to a provider** (the waker, the cron
+provider). **The kernel is the machine, four tables and the oracle**:
+objects, heads with their owner, one dispatch table (routes, boxes and
+libp2p topics are its rows), the address book; the admin operations are the
 kernel's own, on messages from the owner or a delegate; an app writes only
 heads under its own name. The host is transports + providers + store +
 oracle; it routes nothing ("The dispatch table", below).
@@ -101,9 +93,9 @@ Each instance is an HTTP server at an origin of its own. Its **front door**
 the raw request as a `request` entry and the kernel steps the front door on
 it; the host holds the client's connection until that thread has come to
 rest and returns its answer as the HTTP response (#66, "A synchronous
-client waits on the thread", below). The host (`src/host/router.ts`) is the
-HTTP transport: it picks the instance by URL and appends; it holds no mail
-and no sessions, and verifies nothing.
+client waits on the thread", below). The host's HTTP transport (`src/host/router.ts`)
+picks the instance by URL and appends; it holds no mail and no sessions,
+and verifies nothing.
 
 ```
 request {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
@@ -142,7 +134,7 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
   - **Lookup and expiry.** A request's session is found by its `yourNonce`.
     Expiry: `defaults.sessionTtlMs` (a day) from `created`, judged by the
     request entry's time. An unknown or expired session gets a plain 401,
-    and the stock client shakes hands again by itself.
+    and the standard client shakes hands again by itself.
   - **Bounds and replay.** A handshake drops the expired sessions and, past
     1024, the oldest. A replayed initialRequest (the peer and initial nonce
     of a session held) is refused. A replayed signed request verifies (its
@@ -155,7 +147,7 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
   settings}`, exact addresses first, then the longest prefix. `sender`
   `"*"` is an open route (no session: an overlay's submit and lookup);
   `"session"` needs a BRC-104 session, any identity; a key needs a session
-  proving that identity (another's is 403). The genesis seeds the stock
+  proving that identity (another's is 403). The genesis seeds the default
   rows; an app's install adds its rows under `/<app>/` through the kernel's
   `dispatch` operation (docs/APPS.md §3); the front door reads the table as
   it stands on every request. The handler is an in-VM call of `program`'s
@@ -177,7 +169,7 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
 - **Reads** (the genesis's `reads`, from `etc/reads.json`): `[{caller?: <key>,
   op}]`. A route with `read: op` answers only a caller the table allows (no
   caller: anyone); others get 403, signed — a refusal, recorded on the
-  request's thread. The stock reads: the owner may `explore`.
+  request's thread. The default reads: the owner may `explore`.
 
 ### Route handlers: the program-facing contract (#68, #66)
 
@@ -232,8 +224,7 @@ It answers (dag-cbor on stdout), one of:
   `replyTo`, else by its `mailbox` row on `(sender, box)`; an event by its
   `subject`, else the first `mailbox` row from anyone on `box`). A message is
   admitted once (its record's CID in the `unique` map): the same message
-  again is recorded with its request and routed nowhere. There is no
-  `then`.
+  again is recorded with its request and routed nowhere.
 - **Waiting: how it names the thread the client waits on.** A handler whose
   answer depends on more steps — a broadcast to be accepted, a peer's
   reply — starts the work as a thread of its own with the `launch` import
@@ -283,12 +274,12 @@ A request's thread steps on `callFuelLimit` (the budget the front door had
 as a call, default 10^10), not `fuelPerStep`; a thread it launches steps on
 `fuelPerStep` like any other.
 
-The **stock routes**: the BRC-33 messagebox (`/sendMessage`,
+The **default routes**: the BRC-33 messagebox (`/sendMessage`,
 `/listMessages`, `/acknowledgeMessage`, at the root and under `/messagebox`)
 and the explorer (`/explore…`, read op `explore`: the log, threads, a thread,
 a head, a record, as DAG-JSON; `programs/frontdoor/explore.zig`).
 
-**The stock AuthFetch** (`@bsv/sdk`, and the `@bsv/message-box-client` over it)
+**The standard AuthFetch** (`@bsv/sdk`, and the `@bsv/message-box-client` over it)
 keeps one session per origin and shakes hands at `<origin>/.well-known/auth`.
 It is served by the host-name form: one origin per instance, so one session
 per instance. The `/@<handle>` form works for a client that sends its
@@ -310,7 +301,7 @@ mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 ```
 
 Entries are unsigned (#9): the sender signed its request, `prev` fixes the
-order, `time` is the router's clock at admission (#10). A `request` names
+order, `time` is the host's clock at admission (#10). A `request` names
 the package as received and its transport, whose middleware the kernel
 steps on it (the genesis's front door for `http`, `libp2p` and `local`; a
 genesis may name others in `middleware: {<transport>: <program>}`). A
@@ -357,8 +348,7 @@ has the shapes).
 - **Wakes and ticks are messages** (#69): a step's `deadline` and a shell's
   `sleep` are wake-me messages to the waker, whose answer routes as a reply
   (`woke`); a schedule is a message to the cron provider, whose ticks are
-  messages into the box it names. There is no `wake` entry and no genesis
-  `jobs`; `skein-host event` sends a tick from the cron provider by hand.
+  messages into the box it names. `skein-host event` sends a tick from the cron provider by hand.
 
 ## The messagebox
 
@@ -401,7 +391,7 @@ the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
 - `skein-host add <handle> --mailbox --owner <key>` makes one; `skein-host
   mailboxes` lists them.
-- `POST /account/register {username, identityKey, signature}` on the router
+- `POST /account/register {username, identityKey, signature}` on the host
   makes one for the caller: `signature` (hex) under `[2, "skein register"]`,
   key ID the username, counterparty anyone, over `register <username>` —
   proof that the key's holder asked. The answer: `{identityKey, username,
@@ -524,7 +514,7 @@ The address book is one of the kernel's four tables (#77). Who writes it:
   the table (#79: no program reaches a kernel table): it emits `{op: "add",
   key, transport: "mailbox", address, handle, domain, source}` in box
   `peers` to the instance itself (the host's loopback), admitted by the
-  stock system's delegate row `{peers, sender: $self, program: kernel, fn:
+  default system's delegate row `{peers, sender: $self, program: kernel, fn:
   peers}` (where resolve is wired), and the kernel answers the thread
   awaiting that message (input `admin`) once the entry is written. Every
   program of the instance emits as the instance, so that row lets any of
@@ -612,7 +602,7 @@ request. **Every unproven transaction at rest has a registered broadcast**
 (a record in the chain state's `broadcasts`); proof triggering is the answer
 to that broadcast — the chain app's thread awaits the transaction's CID —
 not separate wiring. Its rows (its manifest; or a system tree's
-`etc/dispatch.json` with `bin/chain.wasm`, writing under the stock scope
+`etc/dispatch.json` with `bin/chain.wasm`, writing under its default scope
 `chain/`) — specific wiring, not an open box (#79):
 
 ```
@@ -831,7 +821,7 @@ URL. It is a program, not the core: the resolve program's thread fetches
 and its answer the next step, and writes `{transport: "mailbox", address:
 <messagebox>}` (source `resolve`). The instance's own domain is looked up at
 `defaults.resolveOrigin` (a dev host). The BRC-52 certificate is recorded,
-not checked (`unchecked`). The router publishes the manifest and the resolve
+not checked (`unchecked`). The host publishes the manifest and the resolve
 endpoint for its instances (`{handle, domain, identityKey, messagebox}`),
 and the paymail PKI (`/bsvalias/id`). An emitted message is signed the way
 BRC-169 signs an envelope (above), so a BRC-169 peer can check it.
@@ -920,7 +910,7 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   handler (#57: persistence is not a transport concern; an overlay's
   `submit` on a `libp2p:<topic>` route persists what `POST /submit`
   persists). The kernel routes them after the step, in order. The request
-  entry re-verifies from the log alone, with no router: the publisher's key
+  entry re-verifies from the log alone, with no host: the publisher's key
   is in `from`, and the signature covers topic, seqno, from and body — the
   same guarantee as a mail record's sender, 104 signature and nonces. The
   `p2p` event routes as any event: the thread awaiting its `subject` (none
@@ -1025,8 +1015,8 @@ message {to: "@handle@domain", text}
 - **One at a time.** A step waits on threads or on replies, not both: several
   tool calls in one completion run in order, each `bash` a shell thread and
   each `message` a reply-await.
-- **Inbound.** A new `chat` (no `replyTo`) is routed by subscription; the stock
-  genesis seeds `{box: "chat"}` with no sender, so other agents can open one.
+- **Inbound.** A new `chat` (no `replyTo`) is routed by the dispatch table; the default
+  genesis seeds a `chat` row with sender `*`, so other agents can open one.
 
 ## Inside the instance
 
@@ -1135,7 +1125,7 @@ with `replyTo` (above), and it still closes the turn. Beside it, the loop can
 send the opener ordinary messages in its **`turn`** box: one per event, a
 dag-cbor record with a `kind`, sent in the step where it happens, in order,
 and never awaited (a failure to send one is ignored). The front end (easel,
-#16) subscribes to it.
+#16) reads it.
 
 **Config** (genesis `defaults`, strings; both off by default):
 

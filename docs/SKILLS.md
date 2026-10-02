@@ -12,15 +12,17 @@ Categories:
 
 - **A** — runs as is today.
 - **B** — runs after a trivial edit (named).
-- **C** — needs only HTTP: `wasi:http` (#15). The TypeScript ones are plain JS
+- **C** — needs only HTTP: a message to the fetch provider (the web proxy,
+  docs/MESSAGES.md "The providers"), which no script runtime in the shell
+  exposes yet. The TypeScript ones are plain JS
   plus type annotations; they also need their types stripped, since
   qjs does not run `.ts` (strip at install, or add a strip step to `node`).
 - **D** — needs third-party npm/pip packages bundled into the tree (pure JS/
   Python, so bundling works); network as noted.
 - **E** — needs a peer: a native binary (`curl`, `gh`, `git`, `ffmpeg`,
   `sharp`, a browser, `codeql`…), a running service, or an API-key service.
-  Shell scripts that call `curl` are here, not C: `wasi:http` serves
-  programs, and no `curl` exists in the shell until one is built over it.
+  Shell scripts that call `curl` are here, not C: no `curl` exists in the
+  shell until one is built over the fetch provider.
 - **other** — something else in the runtime (named).
 
 | skill | lang | agents | cat | why |
@@ -100,8 +102,8 @@ D 6, E 20); shell 25 — A 5 (+ visual-coordinator), B 1, rest E; Python 14 —
 A 2 (+ visual-coordinator), C 1, D 1, other 1, E 8.
 
 What would move the most rows: an HTTP client for shell scripts over
-`wasi:http` (#15) plus the API-key peers (the `curl` + key rows: x-*,
-paperclip, check-version…); a TypeScript strip step plus #15 (all of C);
+the fetch provider plus the API-key peers (the `curl` + key rows: x-*,
+paperclip, check-version…); a TypeScript strip step plus that client (all of C);
 bundling `@bsv/sdk` / `@1sat/*` into the tree (most of D, which then also
-needs #15 and, for signing, the wallet binding); `sqlite3` in the Python
+needs the fetch provider and, for signing, the wallet binding); `sqlite3` in the Python
 build (remind).

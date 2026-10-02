@@ -1,7 +1,6 @@
 # The wallet in the VM
 
-What is built for issue #29 (phase 1 merged; phase 2 on branch
-`worktree-agent-aff20e1c30a3be594`). The design is the issue body ("Decided
+What is built for issue #29 and re-split by #79 (both merged). The design is the issue body ("Decided
 (2026-09-28)", "Browser with Yours") as revised in its comments (Q3/Q5, "drop
 the checkpoint op", "no messagebox for ARC or ChainTracks"); this file
 describes what exists. A wallet is two things: a **root key**, which stays
@@ -36,8 +35,8 @@ transactions are `bitcoin-tx` blocks; it uses the kernel's `emit` and
   frames, and its `chain` module (re-exported as `chainstate`) to read the
   chain state; its own records are the program's (`programs/wallet/main.zig`).
   The SDK's `wallet.Wallet` (the chain, the wallet's records and an overlay's
-  maps in one state record) is no longer what the stock program runs: for
-  David to review whether it moves to this shape in the SDK.
+  maps in one state record) is not used by skein's programs since #79;
+  the wallet program's own shape has not moved into the SDK.
 - the SDK's `wallet/vectors/` — the test-vector corpus (issue #14's rule): made by
   `gen-go` from go-sdk (fixtures snapshotted into `inputs/`, mainnet headers
   fetched from WhatsOnChain once), cross-checked by `gen-ts` against
@@ -290,7 +289,7 @@ the preview1 and component builds emit the same messages
 ## The program: the `wallet` box
 
 A handler (`WALLET`), on a row for the owner's `wallet` box; a genesis-wired
-program named `wallet` writes `wallet/…` (the stock scope). Each step loads
+program named `wallet` writes `wallet/…` (its default write scope). Each step loads
 `wallet/state` and `chain/state`, applies the input, saves new map nodes and
 a new `wallet-state`, advances `wallet/state`, puts a `wallet-result`, keeps
 it, and prints its CID. An error ends the step `errored`; no head moves.
@@ -341,7 +340,5 @@ cross-check: 458. The wasm build is reproducible.
 
 ## Open
 
-- The plain-entry shape and the unsigned admission predate #33's entry
-  reshape (format 2); the router's side is #33.
 - Certificates, labels as their own index, relinquish, caller-supplied
   inputs, output randomization: not built.
