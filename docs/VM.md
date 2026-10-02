@@ -1,17 +1,15 @@
 # Skein as a virtual machine
 
-The model as of 2026-09-25 morning, after the first build and one correction.
-It supersedes `MODEL.md` where the two differ; `MODEL.md` remains what the v1
-code implements until the code is reshaped to this. Reasoning is in the design
-doc (https://claude.ai/code/artifact/25e9f57d-b1b0-452c-a523-96429fb1c64e),
-the voice session it records, and the easel sessions of 2026-09-24/25.
+The machine as built at log format 8. `ARCH.md` is the one-page picture,
+`MESSAGES.md` the wire. (The v1 model this replaced is
+historical.)
 
 ## One sentence
 
 A skein instance is a deterministic virtual machine: its storage is a
 content-addressed graph, its programs execute inside it over an immutable
-filesystem, its only inputs are an ordered log of signed messages, and its
-only outputs are messages. A host feeds it inputs and carries out its
+filesystem, its only inputs are an ordered log of entries (packages as received), and
+its only outputs are messages and broadcast events. A host feeds it inputs and carries out its
 outputs; nothing the host does is part of the machine's state.
 
 ## The correction this version makes
@@ -31,7 +29,7 @@ Everything durable is a **record**: one IPLD object identified by its CID.
 blocks.) Two families:
 
 - **Skein records**: dag-cbor maps under CIDv1 (dag-cbor, sha2-256). Origins
-  and updates, chains and tips, as in `MODEL.md`: a pointer to an origin
+  and updates, chains and tips: a pointer to an origin
   means "as it is now", a pointer to an update means "exactly this version",
   and the tip index is a rebuildable local convenience.
 - **Filesystem records**: git-shaped objects — a blob is a git blob object, a
@@ -181,9 +179,9 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
 
 - **The genesis carries the seed.** Every genesis gets the owner's four admin
   rows first — `{mailbox, objects | head | dispatch | peers, $owner, kernel}`
-  — then its own `dispatch` (src/host/genesis.ts; the stock seed: the
+  — then its own `dispatch` (src/host/genesis.ts; the default seed: the
   owner's `run` and `chat`, `chat` from anyone, the reserved box the host
-  admits into, `:ack` → the messagebox, and the stock HTTP rows; a mailbox
+  admits into, `:ack` → the messagebox, and the default HTTP rows; a mailbox
   instance's: `:ack` and `*` → the messagebox), written as the chain's first
   updates when the genesis entry is processed (no `thread`). A genesis
   naming `subscriptions` or `routes` is refused. Sessions are state, but no
@@ -208,7 +206,7 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
   `skein-host peers` send them. No reply — except to the instance itself
   (#79): an admin message one of its own programs sent (admitted by a
   delegate row from the instance's key) steps the thread awaiting it with
-  `admin: {message, op, done: true}` or `{message, op, error}`. The stock
+  `admin: {message, op, done: true}` or `{message, op, error}`. The default
   system has one such delegate row, `{peers, $self, kernel, fn: peers}`,
   where the resolve program is wired: a resolved handle enters the address
   book through the kernel's operation (the resolve program writes no head).
@@ -242,12 +240,12 @@ these imports:
 - `wasi:filesystem`, backed by the current tree (reads resolve blobs, writes
   build new trees; the new root CID is part of the result);
 - stdio (stdin from the pipeline, stdout and stderr captured);
-- the record store, read-only, by CID (`get`), gated by reachability;
+- the record store, read-only, by CID (`get`): global, holding a CID is the permission;
 - the connected wallet's BRC-100 operations (sign, verify, encrypt, decrypt,
   derive): the oracle, answered synchronously and recorded;
 - **`emit`** (#70): a signed message to a recipient the address book names —
   the one way out (below, "emit");
-- a **time attestation** (below).
+- the entry's time stamp, advanced by fuel (below, "The clock inside a step runs on fuel").
 
 Not provided: wall clock, random, threads, network, host filesystem. A WASI
 program with only these imports is deterministic by construction, so replay
@@ -548,10 +546,10 @@ its own — the same costs, accounting points and checks as wasmtime's
 counter. The fuel on an update does not depend on where the step ran: the
 corpus replays in Chrome with identical updates and state.
 
-Billing is a query over the log: the sum of `fuel` per thread, instance or
+Fuel accounting is a query over the log: the sum of `fuel` per thread, instance or
 period (`skein-kernel fuel <db> [--since n]`), verifiable by anyone who
 replays the log. Fuel does not cover host time outside the VM (oracle,
-peers) or the router; storage and messages are visible in the log already.
+peers, providers); storage and messages are visible in the log already.
 
 ### The clock inside a step runs on fuel
 
@@ -622,49 +620,42 @@ format is refused (start a new store).
 
 ## Time
 
-Time cannot be computed inside, so it is an input. Every time value is a host
-**attestation** bound to the state it applied to:
+Time cannot be computed inside, so it is an input: the host stamps each
+entry when it appends it, and inside a step the clock is that stamp plus
+the fuel burnt so far ("The clock inside a step runs on fuel", above).
+Sleep and deadlines are messages to the waker provider, whose answer is an
+entry. A gib checkpoint can bind a state hash to a block time, which anyone
+can verify.
 
-```
-{ time, state: <tip of the log>, sig }
-```
+## Threads and steps
 
-A scheduling tick and a program's request for "now" are the same shape; an
-unbound clock reading would have no place in replay. A gib checkpoint is the
-same attestation with the chain as witness: the head's outpoint binds the
-state hash to a block time, and that one anyone can verify.
-
-## Threads, nodes, steps
-
-As in `MODEL.md`: a thread is the unit the scheduler acts on (origin = which
-program with which args and who launched it; updates = stop shapes); a node
-is a request plus its typed emissions; a step is one model call's node; a
-turn is a run of steps. Two changes from v1:
+A thread is the unit the scheduler acts on (origin = which program with
+which args and who launched it; updates = where each step stopped). A step
+is one run of the program on one input.
 
 - **Every thread is launched by a record**: a step (a tool call, a subagent,
   a model call) or an inbound message (a person's opening line, a message,
   a cron event). "Top-level" means launched by a message.
-- **There is no `david` runner.** A thread that needs a person waits on *a
-  message from that identity* (the `await` import on the message it sent). The dispatch table is what makes David's
-  messages resolve waiting threads while a stranger's are routed to a
+- **A person is an identity.** A thread that needs a person waits on *a
+  message from that identity* (the `await` import on the message it sent).
+  A `replyTo` is what makes their messages resume waiting threads while a stranger's are routed to a
   handler program or refused. **Scheduling is a message to a provider**
-  (#69, superseding #60's genesis `jobs` and the router's clock): a program
+  (#69): a program
   that wants ticks emits `{fn: "tick", every: <ms> | at: <ms>, box, body?,
   name}` to the cron provider (the address book's `cron`) and each tick comes
   back as a signed message from the provider's identity into `box`, routed
   by the instance's row for it; `{fn: "stop", name}` ends it. The
-  message's entry stamp is the attestation, `due` which tick it is. The
+  message's entry stamp is its time, `due` which tick it is. The
   contract (shapes, answers, errors, local or remote) is docs/MESSAGES.md,
   "Scheduling". `skein-host event <handle> <box> [json]` sends a tick due
   now from the host's cron provider by hand.
 
-A transaction is a thread whose state chain is its finality (created,
-broadcast, mined with merkle path, rejected, reorged), each transition an
-inbound message. A rejection moves heads and never deletes: records that
-depended on the transaction (transitively via `depends-on`) are marked
-dropped and their threads' heads move back; the dead branch stays. The
-expected pattern is a thread that waits for the finality it needs before
-dependent work continues; optimistic versus gated is policy, deferred.
+A transaction's chain state (accepted, proven, rejected) is the chain
+app's, under `chain/state`; every reader computes settlement from it at
+read time, and a rejection is what a read sees once the chain state holds
+it. Nothing is deleted: history stays, and a thread that depended on a
+transaction reads its state again when the chain app answers (WALLET.md,
+"Settlement").
 
 ## Routing
 
@@ -676,33 +667,13 @@ recorded, nothing runs.
 
 ## Host
 
-> Superseded by `ARCH.md`: there is no host layer beside the runtime.
-> Everything outside is a peer reached by messages; clock and random are
-> peers too. The table below is kept only to show what those peers cover.
-
-Everything that is not the machine is the host. Its surfaces into the
-machine are exactly three: **messages** (in and out), the **wallet** (BRC-100,
-keys never enter), and **time attestations**. Its services behind those:
-
-| service    | delivers in                            | carries out                    |
-|------------|----------------------------------------|--------------------------------|
-| store      | the shared record store                | —                              |
-| inference  | model completions, signed              | model calls                    |
-| wallet     | results                                | sign, broadcast, derive        |
-| messages   | envelopes (BRC-33), a person's lines   | BRC-169 sends                  |
-| chain      | finality events with merkle paths      | —                              |
-| clock      | time attestations                      | —                              |
-
-There is no execution service: commands run inside. The host's own
-configuration — which endpoint `ripper` names, credentials for a service that
-does not speak wallet auth — is host-side and invisible to the instance; a
-provider name in a message is a routing label. In the target state the
-wallet is the only secret.
-
-The host/machine boundary is a **wire protocol** (signed dag-cbor messages,
-WASI imports), not a language interface, so the host can be reimplemented
-(Go, another machine) without the machine noticing. The first host is
-Node/TypeScript; programs are Rust or anything else that targets WASI.
+Everything that is not the machine is the host: transports + providers +
+store + oracle (`ARCH.md`, "The host"). Its surfaces into the machine are
+the kernel's frames: admit, answer and call in; `wallet` (the signer) and
+`emit` out. There is no execution service: commands run inside. The
+boundary is a wire protocol (dag-cbor frames, WASI imports), not a language
+interface, so a host can be reimplemented (the browser host is one)
+without the machine noticing.
 
 ## Identity
 
@@ -719,10 +690,10 @@ Node/TypeScript; programs are Rust or anything else that targets WASI.
 
 ## The shared store
 
-The host keeps one record store shared by every instance on it. An
-instance's graph is what is reachable from its own chains; it can read a
-record only by naming its CID and can never enumerate the store, so gating is
-by reachability. Instances talk to each other only by messages.
+Each instance has its own store (on the node host, one SQLite file per
+instance). A program reads a record by naming its CID and can never
+enumerate the store; holding a CID is the permission. Instances talk to
+each other only by messages.
 
 ## What is stored
 
@@ -865,14 +836,3 @@ gib head. The head's outpoint timestamps the whole instance on chain;
 rebuilding at any checkpoint is replay to there. gib's git↔chain mapping is
 reused between the host's store and real repositories. Checkpointing is the
 irreversible-sharing line.
-
-## From v1 to this
-
-v1 (`MODEL.md`, `main`) has the record store, chains and tips, the tree
-store, signed messages, identities through a real BRC-100 wallet, and a
-scheduler with runners. To reach this model, in order: the wasm shell over
-the tree-backed filesystem (brush + uutils under a WASI host in Node); the
-runtime as a message-log consumer with programs as step functions;
-subscriptions; time attestations; replay that re-executes. An interrupted
-attempt at the runtime part is on branch `wip/runtime-v2`; its execution
-service ran host bash and is superseded by the shell.

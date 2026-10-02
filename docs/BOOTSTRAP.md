@@ -18,14 +18,14 @@ The objects come from one of two sources. Both go through the same code:
   `skein-host add <h> --packet <file> [--scope <cid>] [--proofs roots.json]`.
 
 An instance with no tree (a plain `skein-host add`, and so the live agents)
-gets the **stock system in code** through the same writer
+gets the **default system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
 `STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
 hydration of an empty store calls `boot` with this source. A **mailbox
 instance** (#40, `skein-host add <h> --mailbox --owner <key>`) is code genesis
 too, with only the kernel's `frontdoor` and `messagebox` programs,
 `MAILBOX_DISPATCH` (`:ack` → messagebox, every message from anyone in any
-box (`*`) → messagebox), the stock http rows and reads, and no peers or
+box (`*`) → messagebox), the default http rows and reads, and no peers or
 names. **Every genesis carries the owner's four admin rows** first (the
 kernel's `objects`, `head`, `dispatch`, `peers` operations): a bare genesis
 is the four tables and those rows; a bundle adds what its apps ask for.
@@ -38,18 +38,16 @@ bin/<name>.cid           the CID (raw, bafkrei…) of a module the source or the
 bin/<name>.json          optional: the program record's {inputs, services, description}
                          (default: the handler inputs {envelope, body, box, sender}, no services)
 etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, names: [{identityKey, handle, domain}], collect: [box],
-                                   feeds: [{kind: "headers", url, box?}]  (the host holds them, #33; statuses: the host's broadcaster, #58),
+                                   feeds: [{kind: "headers", url, box?}]  (the host holds them; proofs and statuses come from its broadcaster),
                                    owner: {messagebox: url},  (#40: the owner's messagebox, the one peer a genesis names)
                                    libp2p: {topics?: [topic], protocols?: {protocol: program | {program, fn?}}, listen?: [multiaddr]},
                                    (#51: the host's libp2p node runs for the instance)
                                    scopes: {<program name>: [<head name | prefix/>]}}
-                                   (#77: the heads a genesis-wired program may advance, over the stock
-                                   scopes — frontdoor/, mailbox + outbound, wallet/, and chain/ for a
+                                   (#77: the heads a genesis-wired program may advance, over the default
+                                   scopes: frontdoor/, mailbox + outbound, wallet/, and chain/ for a
                                    program named chain (#78: the chain module); a genesis-wired
                                    overlay engine and its lookup service programs need overlay/
                                    (#79: an overlay writes only under its name; kernel-zig/equiv/overlay.ts)
-                                   (no `jobs`, #69: a schedule is a program's message to the cron provider,
-                                   docs/MESSAGES.md "Scheduling"; a config naming them is refused)
 etc/dispatch.json        the dispatch rows (#77): [{transport?: mailbox | http | libp2p, address, prefix?: true,
                          sender?: "*" | "session" | key, program, fn?, …settings}] — a box, an HTTP path or a libp2p
                          topic / "/<protocol>"; the sender a key (hex, $owner, $infer, or a host provider's $<name> —
@@ -59,8 +57,8 @@ etc/dispatch.json        the dispatch rows (#77): [{transport?: mailbox | http |
 etc/subscriptions.json   the form before #77, still read: [{sender?: key, box?, handler}], each a mailbox row
 etc/routes.json          the form before #77, still read (#40): [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}],
                          each an http row (auth none → sender "*", else "session") or, for a `libp2p:` path, a
-                         libp2p row; default the stock http rows (root, index: the static handler's, #52)
-etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default the stock reads
+                         libp2p row; default: the default http rows (root, index: the static handler's, #52)
+etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default: the default reads
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
 
@@ -76,13 +74,13 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   or a prefix (exact first, then the longest prefix), the program and
   function the front door calls with the request, sender `"*"` for an open
   route (an overlay's, docs/OVERLAY.md), `"session"` for BRC-104, and
-  `read` an op the reads table must allow the caller. The stock http rows
+  `read` an op the reads table must allow the caller. The default http rows
   are the BRC-33 messagebox — `sendMessage`, `listMessages`,
   `acknowledgeMessage` at the root and under `/messagebox` (program
   `messagebox`) — and the explorer, prefix `/explore` (program `frontdoor`,
-  fn `explore`, `read: "explore"`). The stock reads are
+  fn `explore`, `read: "explore"`). The default reads are
   `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
-  writes `etc/routes.json` replaces the stock http rows whole (include them
+  writes `etc/routes.json` replaces the default http rows whole (include them
   to keep the messagebox); likewise `etc/reads.json`.
 - **Static files** (#52): an app, shruggr/skein-static (#71), not pinned:
   a tree that serves files wires it — `bin/static.wasm` (copied from that
@@ -101,8 +99,9 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
   fills it. It is the only peer a genesis names: the address book
   (head `peers`, one of the kernel's tables) is written by the kernel's
-  `peers` operation on the owner's messages (`skein-host peers`) and, to
-  review, by the resolve program's lookups.
+  `peers` operation on the owner's messages (`skein-host peers`) and on the
+  resolve program's, which the instance sends itself (the delegate row
+  `{peers, $self, kernel}`).
 - **`libp2p`** (#51) becomes the genesis's `libp2p: {topics, protocols,
   listen?}`: the host's libp2p node runs for the instance (its own peer key,
   derived from the master secret, key ID `libp2p:<handle>`), subscribes
@@ -127,10 +126,10 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   kernel's runner tells them apart when it runs one (`runner.zig`). Anything
   else is refused.
 - **Defaults** come from the tree. They stack in this order, later over
-  earlier: `DEFAULTS`, the host's defaults (the router's `genesis.defaults`),
+  earlier: `DEFAULTS`, the host's defaults (`genesis.defaults`),
   which only fill what the tree leaves unset, then the tree's `defaults`. An
   instance's behaviour comes from its tree. The one exception is an explicit
-  dev override, `SKEIN_FUEL_PER_STEP`: it wins over the tree, and the router
+  dev override, `SKEIN_FUEL_PER_STEP`: it wins over the tree, and the host
   logs a warning when it replaces a value the tree set.
 - `peers` and `names`, when the tree omits them, are the host's (as in code
   genesis). `collect` defaults to `["completions"]`.
@@ -138,13 +137,13 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   `log.zig isGenesis`. The head `main` moves at the genesis with no thread
   (`thread` is absent from that head update).
 
-`skein-host system <dir>` writes the stock system as such a tree:
+`skein-host system <dir>` writes the default system as such a tree:
 `bin/*.cid` + `bin/*.json` taken from the kernel's own records, plus `etc/`
-(`config.json` with the stock `scopes`, `dispatch.json`, `reads.json`).
+(`config.json` with the default `scopes`, `dispatch.json`, `reads.json`).
 Booting from it unchanged gives the same programs and rows as code genesis,
 plus the tree.
 
-The stock `etc/dispatch.json` has no `register` box (#40): registration —
+The default `etc/dispatch.json` has no `register` box (#40): registration —
 a sender entering itself in the address book — is **application wiring**, not
 core. An application that wants it adds its own row, with its own rules on
 who may call it: e.g. `{"address": "register", "program": "resolve"}` (anyone;
@@ -163,9 +162,9 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 
 | repo | what | in a tree |
 |---|---|---|
-| shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset (0.2.0: the #77 manifest, rows `run`/`chat` from the owner) | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
+| shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset (0.2.0: the #77 manifest, rows `run`/`chat` from the owner) | nothing to install today: the default genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md); installing 0.2.0 into such an instance is refused (its rows clash) until #83 splits it into the shell app and the chat app and takes `run`/`chat` out of the default genesis |
 | shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
-| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the stock scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
+| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
 | shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>` (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
@@ -270,11 +269,11 @@ pointer onto the record. The index is **read, not rebuilt**. `restore` only
 works on an empty store, and only for this kernel's format. Old spine nodes and
 state records (the index history) are left behind. `pack <handle> --checkpoint`
 writes one. The restored instance keeps its identity: it must be served by the
-same master key and handle (the router checks the oracle against the genesis).
+same master key and handle (the host checks the oracle against the genesis).
 
 ### Writing packets
 
-A checkpoint of a stock-system instance is large: about 88 MB in the test.
+A checkpoint of a default-system instance is large: about 88 MB in the test.
 The state record reaches the shell's program record, and so its pinned
 modules and python's standard library (`python314.zip`). All of these are in
 the closure.
@@ -297,7 +296,7 @@ are read the same way once their carrier shape is mapped onto
 ## Commands
 
 ```
-skein-host system <dir>                                   the stock system tree
+skein-host system <dir>                                   the default system tree
 skein-host add <h> --boot <dir>                           Source A
 skein-host add <h> --boot <tree-cid> [--from store.db]    a tree already in a store
 skein-host add <h> --packet <file> [--scope cid] [--proofs roots.json]   Source B (tree or checkpoint)
@@ -306,9 +305,9 @@ skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpo
 
 `add --boot/--packet` runs the loader when the row is added, on its new, empty
 store (`Router.bootRow` → `bootStore`: a kernel started, `boot`, stopped). The
-router then hydrates the instance like any other store, and the kernel
+host then hydrates the instance like any other store, and the kernel
 processes the genesis at that first start. The owner is `SKEIN_OWNER` (`bin/skein-host` fills it from `$SKEIN_HOME/owner.identity`). The
-command is a one-shot (#61): the router it boots through is closed
+command is a one-shot (#61): the host it boots through is closed
 (`Router.close()`: its timers, clients, libp2p nodes and kernels) once the
 boot is written, and the process exits 0.
 
@@ -323,7 +322,7 @@ boot is written, and the process exits 0.
 ## Tests
 
 - `src/host/manifest.test.ts`: the manifest's checks (the rows, the http
-  address escapes, the senders, the form before #77 converted, shapes,
+  address escapes, the senders, the form before #77 refused, shapes,
   `requires`); `kernel-zig/equiv/install.ts`
   (in `run.sh`): `skein-host install` of shruggr/skein-static and
   programs/test/app-demo into a running instance, driven, uninstalled,
