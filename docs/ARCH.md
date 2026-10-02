@@ -1,420 +1,256 @@
 # Architecture
 
-The one-page picture, as settled with David on 2026-09-25 and revised by
-issue #40: **the instance is an HTTP server; BRC-169 is discovery;
-BRC-103/104 is the network; messages are state.** Where `VM.md` talks about a
-"host" with services beside the runtime, this note supersedes it: there is no
-such layer. Revised for the boundary rework's first build (#68, #66): skein
-is a **state process** — every package a transport carries in is appended
-as received and the instance's front door is stepped on it; sessions are
-state; a synchronous client waits on the thread. The host is a light router
-that verifies nothing (the tracker, #31, "The boundary rework", has the rest
-of the rework: #70, #67, #65, #69).
+The one-page picture. **The instance is an HTTP server; BRC-103/104 is the
+network; BRC-169 is discovery; messages are state.** Skein is a state
+process: every package a transport carries in is appended to the log as
+received, every step is recorded, and the log is the only input. The
+detail lives in `VM.md` (the machine), `MESSAGES.md` (the wire), `APPS.md`
+(apps) and `BOOTSTRAP.md` (genesis).
 
-## The runtime is the whole system
+Three layers:
 
-The skein runtime is the only thing that communicates into or out of an
-instance. Its edges are:
+1. **The kernel** (`kernel-zig/`): the machine, its four tables, and the
+   `wallet` import that reaches the host's signer (the oracle).
+2. **Apps**: everything else, each a tree of WASI programs installed under
+   its own name.
+3. **Hosts**: whatever drives a kernel from outside. The node host
+   (`src/host/`, `skein-host`) and the browser host (`web/kernel/`) exist.
 
-1. **Messages** — in through the instance's front door (BRC-33 on a
-   BRC-103/104 session, or a message signed by its sender), out by `emit`
-   (#70): a signed message to a key the address book names. This is the
-   only channel for another party's word.
-2. **The wallet** — the instance's oracle, for signing, verifying,
-   encrypting, decrypting and deriving. Keys never enter the runtime.
+## The kernel
 
-The network is not an edge of its own (#67: external communication is a
-thread): a program reaches it by emitting to a **provider** — the HTTP
-proxy, the libp2p node, the waker, the broadcaster — a recipient with an
-identity whose answer is a signed message like any other.
+The kernel is a WASI machine: its import table is its system-call surface,
+and the userland is anything compiled to plain WASI (Zig, Rust
+`wasm32-wasip1`, wasi-sdk C/C++, Go `wasip1`, interpreters as modules).
+Programs run as WASI preview1 modules or WASI 0.2 components over wasmtime.
 
-Everything else that looks like an input — a model completion, a tree of
-files, a person's line — is a message from another identity, proven by its
-session.
+Inside:
 
-The host's side of these edges is small: it appends every package a
-transport carries in as received (#68: an HTTP request, a GossipSub message,
-a stream frame — the front door is stepped on it inside), feeds (headers,
-proofs, statuses) and wakes; it answers `wallet`; it runs the providers
-and carries out what a step emitted, once the step is committed; it holds a
-synchronous client's connection until the request's thread has come to rest
-(#66). It verifies nothing. `MESSAGES.md` has the message path end to end.
+- the **store**: records by CID (skein's dag-cbor records, git objects,
+  Bitcoin structures), chains, and the index (one Merkle search tree per
+  query, one state record holding every root; `VM.md`, "The index");
+- the **scheduler**: consumes the log in order, one entry and one step at a
+  time, and routes by the dispatch table;
+- **programs**: stepped by the scheduler, with imports for the virtual
+  filesystem, reads by CID, heads, threads (`launch`, `await`, `deadline`,
+  `call`), the signer (`wallet`) and `emit`;
+- **requests**: every package a transport carries in is an entry, and the
+  instance's front door (a program) is stepped on it as the request's own
+  thread (`VM.md`, "Requests");
+- **calls**: a program function run over current state with no entry and no
+  writes, for host-side reads that are not requests (the explorer's;
+  `VM.md`, "Calls");
+- the **virtual filesystem**: trees from the store, seen through WASI. The
+  shell and its tools run over it. It is the only filesystem there is.
 
-Time and randomness are different: they are not another party's statement
-inside a message. When the host admits an input it reads its clock and writes
-the time into that log entry ("this arrived at *t*"; `MESSAGES.md`; since
-#33 the entry is not signed: the stamp is the environment's word, and the
-sequence is the order).
-Inside the machine, "now" is the entry's time plus the fuel the step has
-burnt so far at one nanosecond per unit, and never the same value twice
-(so time always moves forward and never backwards; issue #38),
-and random bytes are a stream keyed by the entry's CID — no seed is recorded,
-because a recorded seed is exactly as visible as a derived one. Nothing
-inside the machine may use that randomness for secrets; the wallet does
-that, with real entropy, on the other side of the boundary. A program
-that sleeps rests until an input stamped at or after its deadline arrives.
-Nothing inside ever asks outside for time. Replay reads the stamps back, so
-it is exact; the checkpoint signature covers them all at once. (An earlier
-version of this note had a signed clock peer; it was signing the runtime's
-own word, and is gone.)
+**The four tables.** Objects (blocks by CID); heads (name → root, each with
+an owner, the app its name is under); the dispatch table (rows of
+transport, address, sender condition, program: boxes, HTTP paths and libp2p
+topics alike, first match wins, a row is the permission); the address book
+(key → transport and address; providers are `local` rows). Each has one
+admin operation, `objects`, `head`, `dispatch`, `peers`, which the kernel
+performs itself on a message at an admin row from the owner or a delegate.
+No program writes a kernel table. (`VM.md`, "The dispatch table, and the
+kernel's four tables".)
 
-Inside the runtime:
+**Write scope by name, reads by CID.** An app's programs `advance` only
+heads under the app's name (`chain/state`, `wallet/state`,
+`overlay/ls_demo`). Any program reads any record whose CID it holds. A
+program that needs a pointer it does not hold calls the owning app, and
+calls hand back CIDs, not data.
 
-- the **store**: records (skein records, git-shaped file objects), chains,
-  the tip index;
-- the **scheduler**: consumes the message log in order, routes by
-  subscription (the subscriptions chain), steps programs;
-- **programs**: WASI modules stepped by the scheduler, with imports only for
-  the virtual filesystem, the store by CID, heads, the wallet, `call`
-  (another program's function, in the VM) and `emit` (#70: the one way
-  out — a signed message, sent when the step ends; its answer an entry);
-- **requests** (#68): every package a transport carries in is an entry,
-  and the transport's middleware (the front door) is stepped on it as the
-  request's own thread (`docs/VM.md`, "Requests");
-- **calls**: a program's function run over the current state with no entry
-  and no writes — for host-side reads that are not requests (the answer of a
-  route that reads live state, the explorer's; `docs/VM.md`, "Calls");
-- the **virtual filesystem**: trees from the store, seen through WASI; the
-  wasm shell and its tools run over it. It is the only filesystem the runtime
-  has.
+**Syscalls.** Pure ones (files, pipes, spawn, stdio, clock, random) are
+answered inside, deterministically, and never recorded. The one recorded
+call is the signer (`wallet`): its request and answer are written on the
+step, and replay serves them from there. Everything that leaves is `emit`:
+a signed message to a key in the address book, or a broadcast event, sent
+by the host after the step commits. The answer is a new entry, signed by
+whoever answered. A program waiting on an answer is a thread at rest; the
+scheduler steps it again when the answer arrives, and a restart re-executes
+it from the log.
 
-The runtime has no access to a disk, a network, a clock or a process table.
-Nothing in its code imports `node:fs`, `node:child_process` or `fetch`
-(the network is reached by messages to the host's providers, #70). The
-"WASI host" — the code that satisfies a module's imports — is *inside* the
-runtime; it is not a host in any other sense.
+**Time and randomness** are not inputs. The host stamps each entry when it
+appends it. Inside a step, now is `max(last + 1, stamp + fuel)`: one
+nanosecond per unit of fuel, never repeating, never going back, recomputed
+exactly on replay. Random bytes are a stream keyed by the entry's and the
+thread's CIDs; nothing may use them for secrets, which the signer makes.
+Sleep and deadlines are messages to the waker provider.
+
+**Fuel** is on for every step and summed across everything in it; running
+out ends the step errored, deterministically, and it is never retried.
+
+The kernel has no disk, network, clock or process table. The "WASI host"
+that satisfies a module's imports is inside the kernel.
+
+## Apps
+
+Everything outside the kernel is an app under its own name: the front door
+(the BRC-103/104 middleware), the messagebox, resolve, the wallet, the
+chain app, static sites, overlays, the shell, chat, and anything else. An
+instance runs only the apps its genesis wires or its owner installs. An app
+is a tree with `etc/app.json`: its programs, configuration, the interfaces
+it provides and requires, the dispatch rows it asks for, and optional
+start and stop messages. Install sends the kernel's admin operations as the
+owner. `APPS.md` is the specification.
+
+| app | where | what |
+|---|---|---|
+| front door | `programs/frontdoor` | BRC-103/104 on every request, sessions under `frontdoor/sessions`, the HTTP and libp2p rows, signed answers |
+| messagebox | `programs/messagebox` | BRC-33 send/list/ack; delivery threads to other instances' messageboxes |
+| resolve | `programs/resolve` | BRC-169 handle lookup; writes the address book through the kernel's `peers` operation |
+| wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`) |
+| chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
+| overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
+| static | shruggr/skein-static | files from an app's tree under `/<app>/` |
+| shell and chat | shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop); to be split into the shell app and the chat app (#83) |
+
+**The chain app.** The chain state is one head, `chain/state`, owned by
+the chain app; nobody else writes it. Its interface is ingest a BEEF: what
+arrives proven (its BUMPs verify against the headers) is recorded and the
+caller answered at once; what arrives unproven is recorded, broadcast, and
+the caller answered on each state change (`accepted`, `proven`,
+`rejected`). Every unproven transaction it holds has a broadcast
+registered, so the proof is the answer to that broadcast. Headers and
+proofs arrive as events, statuses as messages from the status provider.
+The wallet and each overlay keep their own records under their own names
+and read `chain/state` by CID; spent, live and settled are computed at read
+time. Today an answer set ends at `proven` or `rejected`; the decided
+direction (#31, 2026-10-02) is that a reference to a transaction is a
+subscription for the transaction's life, so a reorg or a proven
+conflicting spend reaches every registrant.
+
+**Overlays.** An overlay is the engine (shruggr/skein-overlay) plus its own
+topic managers and lookup services, installed under one name, wired from
+`config.overlay`. It serves `/<handle>/<app>/submit` and `/lookup`. Submit
+decodes the BEEF once into the step's write cache, asks the topic managers
+to judge it by CID, and hands it to the chain app; the submission is
+admitted on the chain app's first `accepted` or `proven` answer. Nothing
+persists unless a topic takes it, apart from the request. Lookup services
+keep their own maps under `<app>/ls_<service>`. Two overlays run on one
+instance over the one `chain/state`.
 
 ## Everything outside is a peer
 
-Anything that acts on the world is a **peer**: an identity that exchanges
-messages with the runtime, proven by its BRC-104 session. The runtime cannot tell, and does not care,
-whether a peer is a process on the same machine or a service across the
-network. Peers include:
+Anything that acts on the world is a peer: an identity that exchanges
+messages with the instance, proven by its session or its signature.
+Peers include a person's client (`bin/skein`, the bopen-skein front end),
+the inference peer (`bin/skein-infer`), other instances on any host, and
+the providers.
 
-- **David's client** — runs as David on his desktop. It scans a directory
-  into tree objects and *sends* the tree to the instance's front door; sends
-  his prompts; reads pages and spoken lines from his mailbox instance; signs
-  with his wallet. It is a peer, not part of skein.
-- **inference** — a peer that turns a prompt message into a completion
-  message (ripper's vLLM behind it).
-- **a machine** — a peer that receives "run this on the host" and answers
-  with the signed result. This is the sysadmin path and the toolchain path
-  (`go build`, `npm test`): the command runs outside, the result is a
-  recorded input.
-- **mailbox instances** — an identity outside the host (David's wallet, the
-  inference peer, a browser tab) has its mail kept by an instance of its own
-  with only the front door and the messagebox (`MESSAGES.md`, "Mailbox
-  instances").
-- **other instances** — peers like any other, on this host or another.
+**The address book** says who an instance can reach and how: key →
+`{transport: mailbox | libp2p | local, address, role?, handle?}`. The
+genesis seeds it (the host's providers by role, the owner's mailbox); after
+that it changes only through the kernel's `peers` operation, from the owner
+(`skein-host peers`) or from the instance itself (the resolve program,
+admitted by the delegate row `{peers, $self, kernel}`). Nothing registers
+itself. A key in no address book is "no route": the emit fails.
 
-Who an instance can reach, and how, is its **address book** (head `peers`:
-key → `{transport: mailbox | libp2p | local, address, role?, handle?}`,
-#70). The genesis seeds it once (`addressBook`: the host's providers, by
-role, and the owner's mailbox); after that only the instance's own programs
-write it: a BRC-169 resolve (the resolve program), or the owner as admin
-(box `peers`: configuration, `skein-host peers`; up.sh and the roster step
-write the inference peer and the other agents into every agent). Receiving
-is separate: the key authenticates, the subscriptions decide. Nothing
-registers itself — no claims in the core; a registration flow (a `register`
-box wired to the resolve program's claim handler, or to a program with its
-own rules) is application wiring (MESSAGES.md, "Outbound"). A key in no
-address book is "no route": the emit fails, permanently.
+**Mailbox instances.** An identity outside the host (a person's wallet, the
+inference peer, a browser tab) has its mail kept by an instance of its own
+with only the front door and the messagebox.
 
-A peer may be a thin proxy that receives messages and runs things on a real
-host; what makes that acceptable is that its result is signed by the peer's
-identity and enters the log as a message. The runtime's record of the world
-is exactly the set of messages peers sent it.
+## The host
 
-## How a file gets in and out
+A host is **transports + providers + store + oracle**. It verifies nothing
+and routes nothing: transports append whole packages as received, the
+instance's front door verifies them, and the kernel's dispatch table
+routes. A transport may ignore a package whose content the store already
+holds (deduplication by hash is not verification). The kernel's surface is
+five frames: in, **admit** (append an entry and run the steps it drives),
+**answer** (wait until a request's thread comes to rest), **call** (run a
+function, no entry, no writes); out, **wallet** (signing requests) and
+**emit** (what a committed step sent).
 
-In: a peer (the client) hashes a directory into git blob and tree objects,
-sends them (box `objects`), and sends a message naming the root CID. The runtime stores the
-objects and the message; a thread's working tree is that CID. A message that
-names no tree starts from the instance's `main` head, which only an explicit
-act moves (`VM.md`, "Heads").
+The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 
-Out: a thread's result names a tree CID. A peer that wants bytes on a disk
-fetches the objects and materializes them, or pushes them as a git commit
-through gib. The runtime never writes to a disk.
+- **The HTTP transport.** Each instance has its own origin,
+  `http://<handle>.localhost:<port>` or `/@<handle>` on the host's origin.
+  The host picks the instance by the URL (a handshake does not name its
+  recipient), appends the request as a `request` entry, and holds the
+  connection until the thread comes to rest; past `answerWaitMs` (two
+  minutes) or at shutdown, 503 + Retry-After. Sessions are the front door's
+  records under `frontdoor/sessions`, so they survive a restart. Every
+  request is an entry; a read moves nothing.
+- **The libp2p node** (`src/host/p2p.ts`): one js-libp2p node per instance
+  whose genesis config declares `libp2p` or whose installed apps added
+  libp2p rows; it follows the dispatch table live as apps install and
+  uninstall. Its peer key is a secp256k1 child of the master secret, never a
+  wallet root. GossipSub with StrictSign, noise + yamux, TCP and WebSocket,
+  optional Kademlia DHT with topic rendezvous, mDNS, bootstrap peers,
+  circuit relays. Each topic message or stream frame is appended as a
+  request; the front door's verdict (accept, reject, ignore) is GossipSub's.
+- **The providers** (`src/host/providers.ts`): recipients of what an
+  instance emits, each with a key of its own (a child of the master secret)
+  and a `local` row in the address book. `fetch` (the web proxy), `waker`
+  (deadlines and sleeps), `cron` (`{fn: "tick", every | at, box, body?,
+  name}`; schedules in host.db), `libp2p` (publish, dial, send, close),
+  `status` (Arcade's word on a transaction). Each answer is a signed
+  message appended as a `local` request. A provider may also be remote (a
+  cron service reached by mailbox, `src/peers/cron.ts`). A message the
+  instance sends itself loops back through the host as transport `local`,
+  address `self`.
+- **The broadcaster** (`src/host/arc.ts`): one Arcade per host
+  (`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`). A broadcast is an unsigned event
+  (`{kind: "broadcast", tx, beef?}`), queued durably in host.db and posted
+  under the host's callback token, retried with backoff. One SSE
+  subscription to Arcade (resumed with `Last-Event-ID`) and its webhooks
+  (`POST /arc/callback`) bring statuses back. What Arcade says of a
+  transaction goes to every instance whose store holds it: a merkle path as
+  a proof event in box `chain`, anything else as a signed message from the
+  status provider, which an instance takes only through a `$status` row.
+- **Feeds** (`src/host/feeds.ts`): SSE header streams an instance declares
+  in its config, one connection per URL, each header appended as an event
+  (box `chain` by default). The chain app validates.
+- **The store**: one SQLite file per instance
+  (`$SKEIN_HOME/instances/<handle>/runtime.db`), written by the kernel
+  process.
+- **The oracle** (`src/host/oracle.ts`): one master secret
+  (`$SKEIN_HOME/master.key`); each instance's root key is a BRC-42 child of
+  it (key ID = the handle), answered by a ProtoWallet in the host process.
+  The kernel and programs see only public keys and the signatures they ask
+  for. Entries are not signed: the sender signed its request, `prev` fixes
+  the order, and the stamp is the host's word.
+- **Kernels**: `skein-kernel serve` per instance (`src/host/kernel.ts`,
+  length-prefixed dag-cbor frames on stdin/stdout), started on demand and
+  not stopped unless `SKEIN_IDLE_MS` is set. Recovery after a crash is
+  replay at hydrate time: a step that was cut off runs again.
+- **Discovery**: the host publishes BRC-169 for its instances
+  (`/manifest.json`, `/.well-known/metanet-handles/resolve`) and the paymail
+  PKI.
+- **The fuel ledger**: a request's fuel is on its thread's updates in the
+  log; the host's own kernel calls (the explorer's reads) are charged in
+  host.db (`skein-host ledger`).
+- **The control socket** (`$SKEIN_HOME/host.sock`): `skein-host event`
+  sends a cron tick by hand through the running host.
 
-## The router (issues #33, #40)
+`scripts/host/README.md` has the commands, ports and environment.
 
-The host is a **router**: a reverse proxy in front of instances that are HTTP
-servers. The kernel's surface is small: out go `wallet` (the signing oracle)
-and what a committed step emitted (#70, the serve frame `emit`); in come
-**admit an entry and run the step**,
-**answer** (#66: wait on the thread a request entry launched), and **call a
-function** (no entry, no writes: host-side reads).
+## The browser host
 
-The router's components, each the sockets for one kind of traffic, none of
-them judging anything (the instance does, through its front door):
+The same kernel compiled for `wasm32-freestanding` (`zig build web`) runs
+in a Worker, programs on V8 with fuel counted by instrumentation (the same
+numbers as wasmtime's), the store in IndexedDB, preview1 modules only
+(`web/kernel/host.ts`). One instance whose identity is the connected
+wallet's: `wallet` goes to the page's BRC-100 wallet, `emit` to the page's
+own providers (fetch, waker). In: the page's chat, a poll of the page
+identity's mailbox instance, and the waker's timers. Nothing runs while the
+tab is closed. Logs cross between browser and native in both directions.
 
-- the **HTTP proxy** — instances' origins, each request appended and waited
-  on;
-- the **providers** — fetch, waker, libp2p, broadcast: recipients of the
-  instances' emitted messages (below);
-- the **feeds** — SSE headers and ARC callbacks, admitted as plain entries
-  (below);
-- the **libp2p host** (#43, #51; `src/host/p2p.ts`) — one js-libp2p node per
-  instance that declares `libp2p` in its config, inside the router process
-  (below).
+## Genesis
 
-- **Transport** ends at the instance: each has an origin of its own,
-  `http://<handle>.localhost:<port>` (or `/@<handle>` on the router's own
-  origin, for our clients). The router picks the instance by the URL — routing
-  comes before authentication, because a handshake does not name its
-  recipient — and appends the request as received (#68), a `request` entry;
-  the kernel steps the instance's **front door** (`programs/frontdoor`) on
-  it, which runs BRC-103/104 against the instance's session table, routes
-  by its routes table (`etc/routes.json`), checks its reads table
-  (`etc/reads.json`), calls the handler and signs the answer. The router
-  holds the client's connection until that thread comes to rest (#66) and
-  returns its answer; past `answerWaitMs` (default two minutes) or at
-  shutdown, 503 + Retry-After. The router keeps no mail and no sessions.
-  The stock AuthFetch (one session per origin, handshake at
-  `<origin>/.well-known/auth`) is served by the host-name form.
-- **Sessions are state** (#68): records under the head `sessions`, written
-  by the handshake's step and read by each signed request's; they survive a
-  restart. `MESSAGES.md`, "Sessions are state".
-- **Writes and reads.** Every request is an entry; a handler that writes
-  admits what the kernel routes (a message, an acknowledgement) or starts a
-  thread; a read moves nothing — a poll costs its entry, as an access log
-  records a GET. `MESSAGES.md`, "The persistence rule".
-- **Mailbox instances**: an identity outside the host gets an instance of its
-  own for its mail (`skein-host add <h> --mailbox --owner <key>`, or a signed
-  `POST /account/register {username, identityKey, signature}`).
-- **Delivery** is the instance's: a message to a `mailbox` recipient gets a
-  delivery thread (the messagebox program), on the instance's own BRC-104
-  session with the recipient's front door, its HTTP through the fetch
-  provider. The router answers a URL of its own in process (no socket) and
-  sends any other out.
-- **The providers** (#70, `src/host/providers.ts`): `fetch` (the HTTP
-  proxy), `waker` (a `deadline`'s wake-me), `libp2p` (publish, dial, send,
-  close) and `broadcast` (Arcade), each with a key of its own (a child of
-  the master secret). The genesis seeds them in the instance's address book
-  (`addressBook`, role = the name). The kernel hands the router what a
-  committed step emitted to a `local` or `libp2p` recipient (the serve frame
-  `emit`); each answer is a signed message appended as a `local` request,
-  which the front door checks. Their whole contract: docs/MESSAGES.md,
-  "Outbound".
-- **Discovery.** The router publishes BRC-169 for its instances
-  (`/manifest.json`, `/.well-known/metanet-handles/resolve`: `{identityKey,
-  messagebox}`) and the paymail PKI; an instance looks others up with its
-  resolve program. BRC-169 is discovery only.
-- **The fuel ledger**: a request's fuel is on its thread's updates, in the
-  log (#68); the kernel calls the router makes (a read after a request, the
-  explorer's) are charged to (instance, caller, op) in host.db
-  (`fuel_ledger`; `skein-host ledger`).
-- **Feeds** (`src/host/feeds.ts`): the router holds long-lived subscriptions
-  an instance declares in its config (`etc/config.json` `feeds`, carried by
-  the genesis) — an SSE header stream (`{kind: "headers", url}`), one
-  connection per URL fanned out — and admits each item as a plain `header`
-  entry (`Router.admitEvent`) through a bounded per-instance queue; SSE
-  reconnects with backoff. It judges nothing: the instance's chain tracker
-  validates.
-- **The broadcaster** (#58, #65, `src/host/arc.ts`): one Arcade per host
-  (`SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`). A broadcast is an event, not a
-  message (#65): the kernel hands the router each step's `{kind:
-  "broadcast", tx, beef?}`, which goes into a durable queue (host.db
-  `broadcast_queue`) and is posted to Arcade under the host's one callback
-  token, retried with backoff while Arcade does not take it, taken up again
-  after a restart. The router holds **one SSE subscription** to Arcade for
-  the whole host (the header feeds' SSE client), resumed with
-  `Last-Event-ID` from host.db; Arcade's webhooks (`POST /arc/callback`, the
-  token as bearer) take the same path. What Arcade says of a transaction
-  goes to **every instance whose state holds it** (read, never written: the
-  kernel's `has` of the tx CID, cached per txid — the broadcasters, a sweep
-  of every enabled instance at a txid's first status, then the running
-  ones), once per txid + status + block hash (host.db): a merkle path as an
-  unsigned **proof event** in box `chain`, anything else (its answer to the
-  post included) as a signed message from the host's **status provider**,
-  which an instance admits only if it subscribes to it.
-- **The libp2p host** (#43, #51; `src/host/p2p.ts`): the runtime has no
-  network, so libp2p is the router's too. One node per instance whose genesis
-  carries `libp2p` (from `etc/config.json`: `topics`, `protocols`, `listen`),
-  started at hydration, all in the router process, each with its **own peer
-  key**: a secp256k1 child of the master secret (`[2, "skein instance"]`, key
-  ID `libp2p:<handle>`, self — never a wallet root); the peer ID is the
-  identity multihash of the compressed key, so the key reads out of the peer
-  ID and `skein-host list` / `identity --peer` print it for every row.
-  GossipSub with StrictSign, noise + yamux, TCP and WebSocket listeners (WSS
-  with a certificate; plain WS on loopback for dev), Kademlia DHT `off |
-  client | server` with topic-name rendezvous (provide and find the CID v1 raw
-  sha2-256 of the topic name, as go-p2p-message-bus does), mDNS, bootstrap
-  peers kept connected, circuit relays — host-wide from `SKEIN_LIBP2P_*`
-  (scripts/host/README.md).
-  - **Inbound through the front door.** Each GossipSub message on a
-    subscribed topic is judged by GossipSub's async topic validator, which
-    appends the message as received (#68: a `request` entry, `{kind: "p2p",
-    topic, from, seqno, signature, body}`) and waits on the thread the front
-    door is stepped on (#66); the front door verifies the signature, routes
-    by `libp2p:<topic>`, and its handler answers accept | reject | ignore.
-    The verdict is GossipSub's (accept: forward; reject: drop, the
-    delivering peer penalised; ignore: drop). Accept admits the message as
-    a `p2p` event, routed after the step (docs/MESSAGES.md, "libp2p");
-    reject and ignore are recorded refusals. Inbound streams: per protocol,
-    the router reads length-prefixed frames, appends each the same way
-    (`{kind: "p2p-frame", protocol, from, body}`, no signature: the stream
-    is Noise's) and writes the answer back.
-  - **Outbound, the `libp2p` provider** (#70): publish, dial, send, close
-    are messages to it, answered as signed messages; a dialed stream's
-    frames come back in box `frame`. A message to an address book entry
-    with `transport: "libp2p"` goes as a signed package, on the topic or as
-    a frame on `/skein/message/1.0.0` (which every node serves).
-- **Hydration**: an instance is a kernel the router can load
-  (`src/host/kernel.ts`: `skein-kernel serve` over the instance's store,
-  length-prefixed dag-cbor frames on stdin/stdout). The router starts it on
-  demand and, by default, never stops it: instances are not stopped until
-  resource contention appears. `SKEIN_IDLE_MS` > 0 stops one idle that long
-  (its sessions are records: its clients go on); recovery after an
-  environment failure happens at hydrate time from the log (a thread whose
-  step was cut off runs again; a deterministic error is recorded and never
-  retried).
-- **The waker** is a provider (#70, #69): a program's `deadline` and a
-  shell's sleep are wake-me messages to the `waker`, answered at their time
-  (its timers; appending the answer hydrates an idle-stopped instance). At a
-  start the kernel hands the waker again whatever a waiting thread awaits.
-- **The cron provider** (#69, `src/host/cron.ts`): a schedule is a
-  program's message to it (`{fn: "tick", every | at, box, body?, name}`);
-  each tick is a signed message into the named box, kept in host.db
-  (`cron_schedule`: an `every` one ticks once at a host start, a late tick
-  once, an `at` one once), hydrating an idle-stopped instance only when
-  something in it subscribes the box. A remote cron service is the same key
-  reached by mailbox (`src/peers/cron.ts`). `skein-host event <handle> <box>
-  [json]` sends a tick due now by hand: over the running router's control socket
-  (`$SKEIN_HOME/host.sock`, mode 0600, one JSON line each way,
-  `src/host/control.ts`; no HTTP route), else through a router of its own
-  with the host down.
-- **Closing** (#61): `Router.close()` stops everything the router started —
-  the waker's, reaper's and ledger's timers (the owed fuel written), its
-  servers, the feeds' and the broadcaster's SSE clients, the libp2p nodes and
-  every kernel it spawned. `skein-host run`'s shutdown ends with it, and so
-  does every one-shot command that builds a router (`add --boot/--packet`),
-  which then exits.
-- **The oracle** (#18): one master secret (`$SKEIN_HOME/master.key`), a
-  per-instance root key derived from it with BRC-42/43 (`[2, "skein
-  instance"]`, key ID = the handle, self), a ProtoWallet each
-  (`src/host/oracle.ts`) answering the kernel's `wallet` import in process.
-  Provisioning an instance is picking a handle (`skein-host add`).
-- **No host key** (#9): entries are unsigned — the sender signed its request
-  (kept in the mail record), `prev` fixes its place, the stamp is the
-  environment's word. Time (#10): the router stamps each entry at admission;
-  the sequence is the order.
-- **Format 3** (#40): `{kind: "log", prev, n, time, genesis | mail | wake |
-  event+box}`; a message is its mail record, and the record's CID is the
-  message's id. `kernel-zig/src/log.zig` has the shapes.
-- **Format 4** (#62): entries as format 3; every recorded `http`/`libp2p`
-  call carries the host's attestation, and the genesis names the host's
-  attest key (`attest`). Superseded by format 6.
-- **Format 5** (#68): every package a transport carries in is a `request`
-  entry (`{request: <record>, transport}`), the front door stepped on it;
-  sessions are records (head `sessions`); what a request's step admits is
-  routed by the kernel, a message once (the `unique` map). A format-4 store
-  is refused for running (re-genesis). docs/VM.md ("Requests").
-- **Format 6** (#70, #67): no `http` or `libp2p` calls and no attestations
-  (format 4's are gone; a genesis naming `attest` is refused); the only
-  recorded call is the oracle's (`{kind: "oracle", thread, step, i,
-  request, result}`); an update lists what the step `emitted`, signed mail
-  records (`nonce`, `signature`, `subject?`); the genesis seeds the address
-  book (`addressBook`); requests gain the `local` transport (a provider's
-  answer). A format-5 store is refused for running (re-genesis).
+An instance boots from a system tree (`bin/*.wasm` or `.cid`,
+`etc/config.json`, `etc/dispatch.json`, `etc/reads.json`, its own files) or
+a chain packet (a BEEF bag plus a scope, verified offline). The genesis
+names the tree and seeds the dispatch table: the owner's four admin rows
+first, then the tree's. Without a tree the host writes its default system
+in code through the same writer. A packet whose scope is a state record is
+a checkpoint. `BOOTSTRAP.md` has the detail.
 
-## Bootstrap (issue #4)
+## Files in and out
 
-An instance boots from a **system tree**: `bin/*.wasm` handlers (or their
-CIDs), `etc/config.json` and `etc/subscriptions.json`, and its own files. The
-loader (`src/host/boot.ts`) pre-fills the store with the tree's objects and
-writes the genesis from it. The genesis names the tree, and processing it sets
-`main` there. The front door's routes and reads come from `etc/routes.json`
-and `etc/reads.json` (else the stock ones). There is one loader and it takes two sources: a directory
-(`skein-host add <h> --boot <dir>`) or a chain packet, which is a BEEF bag plus
-a scope, verified offline (`--packet`, `src/host/packet.ts`). A packet whose
-scope is a state record is a checkpoint: it is restored, and its index is not
-rebuilt. Rows without a tree get the stock system in code, through the same
-writer. See `docs/BOOTSTRAP.md`.
+In: a peer hashes a directory into git blobs and trees and sends them to
+the kernel's `objects` operation; a message names the root CID. A thread's
+working tree is that CID; a message that names none starts from `main`,
+which only an explicit act moves (`VM.md`, "Heads").
 
-## The browser as a host (issue #35)
-
-The same Zig kernel compiled to wasm (`kernel-zig`, `zig build web`) runs in a
-browser tab: in a Worker, programs on V8 with fuel counted by instrumentation
-(the same numbers as wasmtime's), the store in IndexedDB. A browser deployment
-is a skein host with a front end (#16): the page is the instance's router, for
-one instance whose identity is the connected wallet's (Yours) — user, instance
-and host are the same identity on three separate interfaces
-(`web/kernel/host.ts`):
-
-- **out**: `wallet` → the page's BRC-100 wallet; `emit` → the page's own
-  providers (fetch, waker; a page-local key): the instance's messagebox
-  program delivers its messages itself (a BRC-104 client) and its resolve
-  program looks handles up, both through the page's fetch.
-- **in**, the same one call: the page's chat (a message from the user,
-  admitted directly), a poll of the page identity's mailbox instance on the
-  host (registered by the page, `listMessages` on a BRC-104 session, each
-  message admitted, acknowledged once durable), and a timer for wakes.
-- **intermittent**: nothing runs while the tab is closed; inbound waits in the
-  mailbox instance and wakes fire late, when the page is next open.
-
-The proof page is `web/kernel/` (no framework; `node web/kernel/serve.ts`,
-cross-origin isolated). Easel (#16) builds on this.
-
-## Overlay services (issue #36)
-
-An instance can be a BRC-22/24 overlay node, served by its own front door:
-its `etc/routes.json` names the overlay engine's route handlers (`POST
-/submit`, `POST /lookup`, overlay-express's listing and documentation
-routes, all open). A submit is the one write (#50): the handler, in the
-front door's step on the request, decodes the BEEF once into records in the
-step's write cache, checks it against the held headers and calls the topic
-managers on the transaction's CID. Only if a topic takes it does it launch
-the submission's thread — the `overlay` program on the submit record, which
-holds the records, broadcasts, records the judgements and calls the lookup
-services' hooks — and the request waits on that thread (#66); when it
-finishes the handler answers the STEAK from the state. A lookup is a read: an in-VM call of the lookup
-service's program, which answers from its own maps (head `ls:<service>`),
-written only through its hooks. What topics admit is kept as index maps in
-the same state record as the wallet's (the SDK's wallet library, `wallet/src/overlay.zig`, shruggr/skein-sdk), so a
-transaction's settlement (#37) is one thing for both: a rejection makes its
-admittances vanish, and the services are told. See `docs/OVERLAY.md`.
-
-## Processes on David's machines, today
-
-- `skein-host run` — the router on `127.0.0.1:8100` (each instance at
-  `http://<handle>.localhost:8100`), a- `1sat serve wallet-api` — the clients' wallets only: the dev owner (3322)
-  and the inference peer (3323). No wallet per instance, no host wallet, no
-  `1sat serve` messagebox (their scripts are kept, marked legacy).
-- a **client** — David's terminal (`bin/skein`, raw BRC-33 on a BRC-104
-  session) or the bopen-skein front end (Yours wallet): scans, prompts,
-  renders, signs as David; sends to the instance's front door and reads his
-  mailbox instance.
-- **peers** — inference (`bin/skein-infer`, ripper behind it), each with its
-  own identity and a mailbox instance here.
-
-The v1 daemon glued a runtime and a local client into one process and let
-the "skein" CLI read the disk. That is the thing this note corrects.
-
-## The kernel, in one paragraph (added later on 2026-09-25)
-
-Skein is a WASI machine: the runtime's import table is its kernel, and the
-userland is anything compiled to plain WASI (Rust `wasm32-wasip1`, wasi-sdk
-C/C++, Go `wasip1`, interpreters as modules). Programs target WASI, never
-skein. (The stock programs — the handlers, the loop, the messagebox, the
-front door — are all Zig since #54; Go `wasip1` remains a userland target
-for third-party programs.) Syscalls are of two kinds. **Pure** ones — files, pipes, spawn, stdio
-— are answered inside, deterministically, and never recorded. The one
-**recorded** syscall is the oracle (`wallet`): its answer is a signature
-already. Everything that leaves the runtime is a message (#70, #67): a step
-`emit`s a signed message — to a peer (inference, run-on-machine) or to a
-provider (a fetch, a publish, a wake, a broadcast) — and the answer comes
-back as a message, an entry of its own, signed by whoever answered. Time
-and random are pure: they derive from the stamp the runtime wrote on the
-current log entry. Request/response is a pair of messages; peers and
-providers all look the same from inside. (Format 4's host attestations of
-recorded `http`/`libp2p` calls, #62, went with the calls: a provider's
-answer is its own signed statement.) A
-program waiting on an answer is an ordinary thread at rest: the
-suspended instance is its transient handle, the scheduler wakes it when the
-reply arrives, and a restart re-executes it from the log. Pipeline stages are
-threads too; their records are recomputable cache. Which syscall is bound to
-what — inside, or routed out — is instance configuration in the log, so a
-mock is just a binding to a bundle, and replay uses the binding the original
-run used.
+Out: a result names a tree CID. A peer that wants bytes on a disk fetches
+the objects and materialises them. The kernel never writes to a disk.
