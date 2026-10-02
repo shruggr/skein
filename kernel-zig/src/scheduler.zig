@@ -319,16 +319,29 @@ pub const Runtime = struct {
         });
     }
 
-    /// How a message to `to` goes out: its address book entry (`root`); else,
-    /// for the instance's own identity (#79: one app of the instance messaging
-    /// another — the wallet or an overlay asking the chain app), the host's
-    /// loopback: transport `local`, address `self` — the host appends it back
-    /// into this instance as a `local` request, signed by the instance, routed
-    /// like any message (a dispatch row from the instance's own key). Null: no route.
-    fn routeTo(rt: *Runtime, a: std.mem.Allocator, root: ?[]const u8, to: []const u8) !?addressbook.Entry {
-        if (try addressbook.lookup(a, rt.store, root, to)) |e| return e;
-        if (std.mem.eql(u8, to, rt.identity())) return addressbook.Entry{ .key = to, .transport = "local", .address = addressbook.SELF };
-        return null;
+    /// How a message to `to` goes out: its address book entry (`root`). A
+    /// message to the instance's own identity (#79: one app of the instance
+    /// asking another — the wallet or an overlay asking the chain app, resolve
+    /// asking the kernel's `peers`) goes by the host's loopback: transport
+    /// `local`, address `self` — the host appends it back into this instance as
+    /// a `local` request, signed by the instance, routed like any message (a
+    /// dispatch row from the instance's own key). One exception: an answer
+    /// (`is_reply`: its body names `replyTo`) to the instance's own key goes
+    /// where the address book says that key is reached, when it says so — an
+    /// instance that is its own owner (the browser page, #16) names its own
+    /// mailbox there, and its answers to its owner are for the person, not a
+    /// program. Null: no route.
+    fn routeTo(rt: *Runtime, a: std.mem.Allocator, root: ?[]const u8, to: []const u8, is_reply: bool) !?addressbook.Entry {
+        if (std.mem.eql(u8, to, rt.identity())) {
+            if (is_reply) if (try addressbook.lookup(a, rt.store, root, to)) |e| return e;
+            return addressbook.Entry{ .key = to, .transport = "local", .address = addressbook.SELF };
+        }
+        return addressbook.lookup(a, rt.store, root, to);
+    }
+
+    /// Whether a message record's body names `replyTo` (an answer).
+    fn isReply(rt: *Runtime, a: std.mem.Allocator, m: Value) bool {
+        return rt.replyToOf(a, Value.cidOf(m.get("body"))) != .none;
     }
 
     /// Queue an emitted message for the host by its recipient's transport, the
@@ -339,7 +352,7 @@ pub const Runtime = struct {
         const m = rt.store.getOpt(a, mc) orelse return;
         const to = Value.bytesOf(m.get("recipient")) orelse return;
         const root = peers_root orelse try rt.store.headTree(a, addressbook.HEAD);
-        const e = (try rt.routeTo(a, root, to)) orelse {
+        const e = (try rt.routeTo(a, root, to, rt.isReply(a, m))) orelse {
             rt.say("message {s}: no route to {s} any more; not sent", .{ short(a, mc), shortKey(to) });
             return;
         };
@@ -601,7 +614,7 @@ pub const Runtime = struct {
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
-            const e = (try rt.routeTo(a, root, to)) orelse {
+            const e = (try rt.routeTo(a, root, to, rt.isReply(a, m))) orelse {
                 rt.say("message {s}: no route to {s}; not sent", .{ short(a, mc), shortKey(to) });
                 continue;
             };
@@ -1699,7 +1712,7 @@ pub const Runtime = struct {
     /// The address book as this step sees it (its own `peers` moves included): `key`'s entry.
     fn peersLookup(st: *StepState, imp: *program.Imports, key: []const u8) program.Err!?addressbook.Entry {
         const root = (try hHead(imp, addressbook.HEAD));
-        return st.rt.routeTo(st.a, root, key) catch imp.failWith("emit: the address book cannot be read");
+        return st.rt.routeTo(st.a, root, key, false) catch imp.failWith("emit: the address book cannot be read");
     }
 
     /// Sign, put and list one message from this instance (#70): {kind: "mail",

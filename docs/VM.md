@@ -342,7 +342,11 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   `local` request signed by the instance, and routes like any message: a
   dispatch row from the instance's own key (a manifest's `$self`) admits
   it; the answer, from the instance to the instance, steps the thread
-  awaiting it by `replyTo`.
+  awaiting it by `replyTo`. (An answer — a body naming `replyTo` — to the
+  instance's own key goes where the address book says that key is reached
+  when it says so: an instance that is its own owner, the browser page, #16,
+  names its own mailbox there, and its answers to its owner are for the
+  person. To review.)
   `box` is not empty and does not start with `:`. `body` is the canonical
   dag-cbor of the body record. `subject` names what the message is about
   (a transaction's CID); a provider's answer carries it back.
