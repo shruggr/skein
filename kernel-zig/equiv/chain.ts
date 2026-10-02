@@ -1,11 +1,14 @@
 // The chain module (#78) end to end: shruggr/skein-chain at a pinned commit
 // (or $SKEIN_CHAIN_DIR), installed with `skein-host install --approve-all`
 // into an instance of the stock system on a router with an Arcade (so a
-// broadcaster and a `$status` provider), called by an identity with a
-// mailbox of its own on the same host:
+// broadcaster and a `$status` provider), called by the instance's owner (a
+// mailbox of its own on the same host; #79: the chain app takes calls from
+// `$owner` and `$self`, not from anyone):
 //
-//   - the install asks for the rows `chain` from anyone and `status` from
-//     $status (optional), and the head chain/app; chain/state is its writes;
+//   - the install asks for the rows `chain` from `event` (the host's events),
+//     from `$self` and from `$owner`, and `status` from $status (optional),
+//     and the head chain/app; chain/state is its writes; a stranger's call
+//     routes nowhere;
 //   - the host's chain feed (a `header` event in box chain) reaches it;
 //   - ingest proven ({fn: "ingest", args: {beef}} in box chain): recorded,
 //     answered at once (state proven, the block's CID);
@@ -43,7 +46,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = "73857810517222abf0ff751e3787ed2cb4fd36b8";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "9668965821fb50cfa0853519834f319983ab7f53";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -70,7 +73,9 @@ function mine(prev: Uint8Array, merkleRoot: Uint8Array, time: number): Uint8Arra
 
 const arcade = await FakeArcade.start();
 const afters: Array<() => unknown> = [];
-const h = await testHost({ after: (f) => afters.push(f) }, { genesis: { defaults: { walletNetwork: "regtest" } }, arc: { url: arcade.url, token: "the-chain-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 } });
+// The caller is the instance's owner (#79: the chain app's rows admit $owner and $self).
+const callerKey = PrivateKey.fromRandom(), callerId = callerKey.toPublicKey().toString();
+const h = await testHost({ after: (f) => afters.push(f) }, { ownerKey: callerKey, genesis: { defaults: { walletNetwork: "regtest" } }, arc: { url: arcade.url, token: "the-chain-arcade-token", events: arcade.eventsUrl }, arcRetry: { min: 300, max: 1000 } });
 let store = "";
 const bootStores: string[] = [];
 /** The app's checkout at the pinned commit (for its bin/chain.wasm in a system tree). */
@@ -83,7 +88,6 @@ function cloneChain(home: string): string {
   return dir;
 }
 try {
-  const callerKey = PrivateKey.fromRandom(), callerId = callerKey.toPublicKey().toString();
   const callerWallet = ephemeralWallet(callerKey);
   h.mailbox("caller", callerId);
   const inst = h.agent("ch");
@@ -114,11 +118,14 @@ try {
   const spec = process.env.SKEIN_CHAIN_DIR ?? `${CHAIN_REPO}#${CHAIN_REV}`;
   const code = await cli("install", spec, "--instance", "ch", "--approve-all");
   check(code === 0, `skein-host install skein-chain: exit ${code} ${err.join(" ")}`);
-  check(out.some((l) => l.includes("row       mailbox chain from anyone → chain")) && out.some((l) => /row {7}mailbox status from \$status .*→ chain/.test(l)), `the prompt shows its rows: ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
+  check(["event", "$self", "$owner"].every((who) => out.some((l) => l.includes(`row       mailbox chain from ${who} → chain`))) && out.some((l) => /row {7}mailbox status from \$status .*→ chain/.test(l)) && !out.some((l) => l.includes("mailbox chain from anyone")), `the prompt shows its rows (#79: no open box): ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && !app.legacy && !app.grants, "the head chain/app is the app record (the #77 shape: no grants, not legacy)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.2.0", "the head chain/app is the app record (0.2.0)");
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
-  check(rows.length === 2 && rows.every((r) => r.transport === "mailbox" && !("optional" in r)) && rows.map((r) => r.address).join(",") === "chain,status", `its rows in the dispatch table (optional not carried): ${rows.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
+  const senderOf = (r: Record<string, unknown>) => r.sender instanceof Uint8Array ? Buffer.from(r.sender).toString("hex") : String(r.sender);
+  check(rows.length === 4 && rows.every((r) => r.transport === "mailbox" && !("optional" in r)) && rows.map((r) => r.address).join(",") === "chain,chain,chain,status"
+    && senderOf(rows[0]!) === "event" && senderOf(rows[1]!) === inst && senderOf(rows[2]!) === callerId,
+  `its rows in the dispatch table (event; $self → the instance's key; $owner; optional not carried): ${rows.map((r) => `${r.transport} ${r.address} ${senderOf(r).slice(0, 10)}`).join(", ")}`);
 
   // ------------------------------------------------ the chain: block 1 holds the funding alone
   const alice = PrivateKey.fromRandom();
@@ -144,6 +151,11 @@ try {
   const answersTo = async (id: string) => (await mine_.list("chain")).map((x) => x.value as Answer).filter((v) => String(v.request) === id);
   const send = async (body: Record<string, unknown>) => (await callerBox.send(inst, "chain", body)).id.toString();
   const answers = async (id: string, n: number, what: string) => await until(what, async () => { await h.router.settled(); const a = await answersTo(id); return a.length >= n ? a : undefined; }, 30_000);
+
+  // A stranger's call is refused at the door (no open box, #79): the messagebox admits only a sender a row takes.
+  const strangerWallet = ephemeralWallet(PrivateKey.fromRandom());
+  const refused = await new RawBox(strangerWallet, `${h.base}/@ch`).send(inst, "chain", { fn: "status", args: { txid: "00".repeat(32) } }).then(() => "sent", (e: Error) => e.message);
+  check(/ERR_NOT_SUBSCRIBED/.test(refused), `a stranger's call to the chain app is refused: no row admits it (${refused})`);
 
   // Proven in: answered at once.
   const postsBefore = arcade.posts.length;
@@ -233,7 +245,7 @@ try {
   check(JSON.stringify(conf.scopes?.chain) === '["chain/"]', `the stock scopes name chain/ for a genesis-wired chain program (${JSON.stringify(conf.scopes?.chain)})`);
   writeFileSync(join(sys, "etc/config.json"), JSON.stringify(conf));
   const rowsAt = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8")) as unknown[];
-  rowsAt.push({ address: "chain", program: "chain" }, { address: "status", sender: "$status", program: "chain" });
+  rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain" }, { address: "chain", sender: "$owner", program: "chain" }, { address: "status", sender: "$status", program: "chain" });
   writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(rowsAt));
   const bootId = h.agent("boot");
   const src = await dirSource(sys);

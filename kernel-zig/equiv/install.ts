@@ -1,11 +1,11 @@
-// Installing apps (#72, #76) end to end, through `skein-host install` and
+// Installing apps (#72, #76, #79) end to end, through `skein-host install` and
 // `uninstall` (src/host/cli.ts, install.ts) as the owner, into an instance of
 // the stock system on a router:
 //
 //   skein-static (shruggr/skein-static at a pinned commit, cloned by the
-//   install itself; or $SKEIN_STATIC_DIR): the head `static/app` is the app
-//   record (the manifest as installed, linking the tree; `static` an alias for
-//   its pre-#77 manifest), its rows are served under /static/ (the files from
+//   install itself; or $SKEIN_STATIC_DIR; 0.2.0, the #77 shape): the head
+//   `static/app` is the app record (the manifest as installed, linking the
+//   tree; no alias head), its rows are served under /static/ (the files from
 //   `main`) out of the kernel's dispatch table; uninstalled, its rows are gone.
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
@@ -35,7 +35,7 @@ import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 const STATIC_REPO = "https://github.com/shruggr/skein-static";
-const STATIC_REV = "a6ea46e069487bee2ebe891953bda0e9eaefd488";
+const STATIC_REV = process.env.SKEIN_STATIC_REV ?? "1d6f7d3cef4eeec23696556d277bd09d295ddf77";
 const here = dirname(fileURLToPath(import.meta.url));
 const demoDir = join(here, "../../programs/test/app-demo");
 let failures = 0;
@@ -95,7 +95,7 @@ try {
   code = await cli("install", staticSpec, "--instance", "inst", "--approve-all");
   check(code === 0, `skein-host install skein-static: exit ${code} ${err.join(" ")}`);
   const st = await record("static/app");
-  check(st?.kind === "app" && st.name === "static" && !!st.tree && !!(st.programs as Record<string, unknown>)?.static && (await record("static"))?.kind === "app", `the head static/app is the app record, linking the tree and the program record; static its alias (${JSON.stringify(st && { kind: st.kind, name: st.name, grants: st.grants, legacy: st.legacy })})`);
+  check(st?.kind === "app" && st.name === "static" && !!st.tree && !!(st.programs as Record<string, unknown>)?.static && st.version === "0.2.0" && (await record("static")) === undefined, `the head static/app is the app record (0.2.0), linking the tree and the program record; no alias head \`static\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
   const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
   check((await appRows("static")).join(",") === "http /static/site*,http /static/", `the dispatch table has static's rows: ${(await appRows("static")).join(", ")}`);
   let r = await get("/static/");

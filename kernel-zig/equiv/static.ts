@@ -30,7 +30,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test (#71): SKEIN_STATIC_DIR names a checkout, else this commit is cloned.
 const STATIC_REPO = "https://github.com/shruggr/skein-static";
-const STATIC_REV = "a6ea46e069487bee2ebe891953bda0e9eaefd488";
+const STATIC_REV = process.env.SKEIN_STATIC_REV ?? "1d6f7d3cef4eeec23696556d277bd09d295ddf77";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const wasm = join(here, "../../wasm");

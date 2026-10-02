@@ -69,7 +69,7 @@ else
   echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1
 fi
 
-echo "== the wallet in the VM (#29): oracle signing, plain entries, broadcast events through the host's broadcaster (#58, #65) to a fake Arcade, statuses and proofs to every holder, a restart resumed; replayed"
+echo "== the wallet in the VM (#29, #79): its own records under wallet/state over the chain app (shruggr/skein-chain at wallet.ts's pinned commit, or \$SKEIN_CHAIN_DIR): oracle signing, every transaction ingested by a message to the instance itself, the chain app broadcasting to a fake Arcade and answering accepted/proven/rejected; settlement and a reorg read from chain/state; replayed"
 # Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
 if command -v wasm-tools > /dev/null; then
   (cd "$kz/../programs/wallet" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
@@ -84,7 +84,7 @@ echo "== a component's emit (#15, #70): the fetch component through the router's
 echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip (over the libp2p provider, #70); replayed natively and in the browser; a live step with no oracle in the browser"
 "${node[@]}" "$kz/equiv/libp2p.ts" || status=1
 
-echo "== overlay services (#36): the app shruggr/skein-overlay (#71: cloned at overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) in a tree; submit/lookup through the router with the stock SDK clients; the gate; the gossip; replayed"
+echo "== overlay services (#36, #79): the app shruggr/skein-overlay (#71: cloned at overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) and the chain app in a tree; submit/lookup through the router with the stock SDK clients; the gate (the chain app's answer); the gossip; replayed"
 "${node[@]}" "$kz/equiv/overlay.ts" || status=1
 
 echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static.ts's pinned commit, or \$SKEIN_STATIC_DIR) in a tree; its files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); each request an entry, no head moved; replayed"
@@ -93,7 +93,7 @@ echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static
 echo "== apps (#72, #76): skein-host install of shruggr/skein-static (its routes under /static/, the head its app record) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
 "${node[@]}" "$kz/equiv/install.ts" || status=1
 
-echo "== an overlay installed as an app (#72): shruggr/skein-overlay (install-overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) by skein-host install into an instance with no overlay config and no libp2p; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router judged by the manifest's topic; a reinstall with a second topic read without a restart; uninstall unsubscribes; replayed"
+echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by skein-host install, the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
 
 echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by skein-host install, on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
