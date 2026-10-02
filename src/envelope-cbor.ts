@@ -3,7 +3,7 @@
 // strings and `content` the BRC-78 bytes; the signature over SHA-256 of the
 // dag-cbor of the map without `content` and `signature` (no canonicalisation
 // step: dag-cbor is deterministic). Same signing key as §7.2 (skein's: [2,
-// "metanet handles envelope"], key "1", counterparty anyone). A signature is
+// "metanet handles envelope"], key "send", counterparty anyone). A signature is
 // over the encoding it was made in, so a relay delivers an envelope in the
 // encoding it was submitted in and never transcodes; the kernel keeps each in
 // its own form (kernel-zig/src/envelope.zig). A message's id is the CID of its

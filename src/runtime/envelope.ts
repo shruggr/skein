@@ -9,7 +9,7 @@ import type { WalletProtocol } from "@bsv/sdk";
 import { verifyAnyone } from "./identity.ts";
 
 export const ENVELOPE_PROTOCOL: [2, "metanet handles envelope"] = [2, "metanet handles envelope"];
-export const ENVELOPE_KEY_ID = "1";
+export const ENVELOPE_KEY_ID = "send";
 export const MESSAGE_ENCRYPTION: WalletProtocol = [2, "message encryption"];
 export const BRC78_VERSION = Uint8Array.of(0x42, 0x42, 0x10, 0x33);
 
