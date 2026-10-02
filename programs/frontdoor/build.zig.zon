@@ -5,8 +5,8 @@
     .fingerprint = 0xc672a902e6c48f2e,
     .dependencies = .{
         .skein_sdk = .{
-            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.3.0.tar.gz",
-            .hash = "skein_sdk-0.3.0-YroFBKQDGAAPcVh3sUGnCelPwE-VO9an7D9pmzFJZje6",
+            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.4.0.tar.gz",
+            .hash = "skein_sdk-0.4.0-YroFBDfGGADreMJWF41zqUyuS71zsF4uG8GNoPswWhek",
         },
     },
     .paths = .{
