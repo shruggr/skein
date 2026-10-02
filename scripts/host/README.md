@@ -1,13 +1,13 @@
-# Host setup on David's machine
+# The dev host
 
 What runs where so the clients (`bin/skein`, the bopen-skein front end, the
-inference peer) reach the instances (docs/ARCH.md, "The router"). Everything
+inference peer) reach the instances (docs/ARCH.md, "The host"). Everything
 here is dev-only: the keys are throwaway, generated on this machine, and hold
 no funds.
 
 ```
 bin/skein-host add martha                   # a row: identity derived from ~/.skein/master.key (made on first use), no wallet process
-scripts/host/up.sh                          # wallets, mailbox instances, the router on :8100, grants — in that order (idempotent)
+scripts/host/up.sh                          # wallets, mailbox instances, the host on :8100, grants, address books, in that order (idempotent)
 ```
 
 ### Bring-up order
@@ -23,11 +23,11 @@ So `up.sh` goes:
 2. **The mailbox instances** of the owner (`david`) and of the inference peer
    (`infer`): `skein-host add <h> --mailbox --owner <key>`, unless the key has
    one already (whatever its handle). `~/.skein/mailbox.url` names the
-   owner's. No registration (`register.ts`) is needed for keys this machine
+   owner's. No registration (`POST /account/register`) is needed for keys this machine
    knows: the rows are what a registration would make.
-3. **The router** (`skein-host run`, if nothing listens on :8100). It
+3. **The host** (`skein-host run`, if nothing listens on :8100). It
    hydrates every enabled row, so the agents' geneses happen here, naming the
-   owner's mailbox instance (the router's default for
+   owner's mailbox instance (the host's default for
    `SKEIN_OWNER_MESSAGEBOX`; `run` prints which at start, and a WARNING if
    there is none).
 4. **The grants** (`grants.sh`), toward every row's front-door key from
@@ -50,48 +50,45 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| router `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the reverse proxy (#40): each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65: `fetch`, `waker`, `cron`, `libp2p`, `status`, each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p host (#51: a node per instance whose config declares `libp2p`, below) | `~/.skein/logs/host.log` |
+| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65: `fetch`, `waker`, `cron`, `libp2p`, `status`, each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
 
-Gone since the router (#33), scripts kept and marked legacy: the `1sat serve`
-messagebox (`messagebox.sh`, `messagebox-migrate.mjs`), the instance wallet
-3321 and the host wallet 3324 (`wallets.sh` with no arguments starts them all),
-one wallet-api per instance on 3401+ (`instance.sh`), their grants
-(`grants-legacy.sh`). Gone since #40: the router's shared `/messagebox`, its
-mailbox keeping and its BRC-104 server. Instances need no grants: the
-router's oracle signs for them.
+The scripts `messagebox.sh`, `messagebox-migrate.mjs`, `instance.sh`,
+`grants-legacy.sh`, `register.ts` and `web.sh`, and `wallets.sh` with no
+arguments (which also starts an instance wallet on 3321 and a host wallet on
+3324), belong to the layout before #33 and are not used. Instances need no
+wallet and no grants: the host's oracle signs for them.
 
-## The router: a reverse proxy (#40)
+## The HTTP transport
 
-The router picks the instance a request is for and forwards it; it holds no
-mail, and of auth only each running kernel's in-memory session table, which
-it never reads. Routing comes before authentication, because a BRC-104
-handshake does not name its recipient: the URL is the recipient.
+The host picks the instance a request is for and appends it; it holds no
+mail and no sessions, and verifies nothing. The URL picks the instance,
+because a BRC-104 handshake does not name its recipient.
 
 - **By host name**: `http://<handle>.localhost:8100/…` (the `Host` header;
   `SKEIN_INSTANCE_ORIGIN` sets another template, default
-  `http://{handle}.localhost:{port}`). The stock `AuthFetch` keeps one session
-  per origin and shakes hands at `<origin>/.well-known/auth`, so this is the
-  form the stock `@bsv/message-box-client` and the SDK's overlay clients use.
-  `*.localhost` resolves to ::1: the router listens on 127.0.0.1 and ::1.
+  `http://{handle}.localhost:{port}`). The standard `AuthFetch` keeps one
+  session per origin and shakes hands at `<origin>/.well-known/auth`, so
+  this is the form `@bsv/message-box-client` uses. `*.localhost` resolves
+  to ::1: the host listens on 127.0.0.1 and ::1.
 - **By path prefix**: `http://127.0.0.1:8100/@<handle>/…` (a dev form). The
-  router strips the prefix for the routes; the client signs the path it sent,
+  host strips the prefix for the routes; the client signs the path it sent,
   and its handshake goes under the prefix (`src/client/raw.ts`, `RawBox`).
 
 A request for an instance is appended as received (#68: a `request` entry)
 and its front door (`programs/frontdoor`) is stepped on it: BRC-103/104
-against the instance's session records, the routes table, the handler, the
-signed answer. The router holds the client until that thread comes to rest
+against the instance's session records, the dispatch table's http rows, the
+handler, the signed answer. The host holds the client until that thread comes to rest
 (#66) — past `SKEIN_ANSWER_WAIT_MS` (default 120000) or at shutdown, 503 +
 Retry-After. Every request is an entry (a poll too: an access log); a read
 moves nothing. A request's fuel is on its thread's updates; the kernel
-calls the router makes (the explorer's reads) are charged to the **fuel
+calls the host makes (the explorer's reads) are charged to the **fuel
 ledger** (host.db `fuel_ledger`, by instance, caller and route; `skein-host
 ledger [handle]`).
 
-The router's own endpoints:
+The host's own endpoints:
 
 | | |
 |---|---|
@@ -102,7 +99,7 @@ The router's own endpoints:
 | `POST /arc/callback` | Arcade's webhook (`Authorization: Bearer <SKEIN_ARC_TOKEN>`) |
 
 The instances' outbound HTTP (a messagebox delivery thread, a resolve) is a
-message to the router's `fetch` provider (#70; docs/MESSAGES.md,
+message to the host's `fetch` provider (#70; docs/MESSAGES.md,
 "Outbound"): a URL of this host's is answered in process (the same path, no
 socket), any other goes out (`SKEIN_HTTP=fetch`). Every delivery
 (a `POST …/sendMessage`) is one line in `host.log`, so a lost reply shows
@@ -132,12 +129,12 @@ bin/skein-host peers martha list        # key, transport, address, role, handle@
 `--transport` defaults to `mailbox` (the address a messagebox URL); `libp2p`
 takes a peer ID or `topic:<name>`, `local` a provider's name on this host.
 
-Nothing registers itself: the core sends no claims and the stock genesis
+Nothing registers itself: the core sends no claims and the default genesis
 takes none. A key outside the host — a person using the bopen page, say —
 gets answers from an agent only once the admin adds its key and mailbox URL
 here (or an application wires its own `register` box: docs/BOOTSTRAP.md).
 Until then its chats are still admitted (the key authenticates, the
-subscription decides), and the agent's answer fails once, logged on the
+dispatch table decides), and the agent's answer fails once, logged on the
 step's line in host.log: `stderr: loop: could not deliver the answer: … no
 route to <key>: not in the address book`. `up.sh` writes the owner, the
 inference peer and every other agent; `deploy` and `roster --deploy` write
@@ -147,7 +144,7 @@ the other agents.
 instance of its own with only the front door and the messagebox, keeping
 every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
 --mailbox --owner <key>` makes one; so does a signed registration
-(`register.ts`: the front end's Register, for a key this machine does not
+(`POST /account/register`: the front end's Register, for a key this machine does not
 know). `up.sh` makes `david`'s and `infer`'s with `add`. `skein-host mailboxes` lists them (whose, the key their front door signs
 sessions with, and where); `skein-host list` prints that key for every row
 (its fifth column), which is what `grants.sh` grants toward. The
@@ -157,43 +154,42 @@ owner's mailbox instance here), the one peer a genesis names.
 
 Files:
 
-- `~/.skein/master.key` — the router's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities. `skein-host identity <handle>` prints one.
+- `~/.skein/master.key` — the host's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities. `skein-host identity <handle>` prints one.
 - `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322). `bin/skein-host` reads `owner.identity` into `SKEIN_OWNER` and `infer.identity` into `SKEIN_INFER`, unless they are set, for `run`, `deploy`, `roster`, `peers`, `add` (so `add --boot`/`--packet` needs no `SKEIN_OWNER` by hand) and `event`.
-- `~/.skein/host.sock` — the running router's control socket (0600; there only while `run` is up): `skein-host event` sends through it.
+- `~/.skein/host.sock` — the running host's control socket (0600; there only while `run` is up): `skein-host event` sends through it.
 - `~/.skein/infer.json` — the inference peer's providers (written if absent).
 - `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
 - `~/.skein/host.db` — the instances (identity → store; `kind` agent or mailbox, a mailbox's `owner`) and the fuel ledger (`skein-host list`, `skein-host mailboxes`, `skein-host ledger`).
 
 Sessions are state (#68): a handshake is a request like any other, and
 the front door's step on it writes the session under the instance's head
-`sessions`; every later request is verified against it. Sessions expire by
+`frontdoor/sessions`; every later request is verified against it. Sessions expire by
 the instance's `defaults.sessionTtlMs` (a day) from the handshake entry's
-time; an unknown or expired one is a plain 401, and the stock client shakes
-hands again by itself. A restarted router or kernel keeps them: clients go
+time; an unknown or expired one is a plain 401, and the standard client shakes
+hands again by itself. A restarted host or kernel keeps them: clients go
 on without a new handshake. Instances are not stopped when idle
 (`SKEIN_IDLE_MS` default 0: never); `SKEIN_IDLE_MS=<ms>` turns the idle
 stop on. **Switching a live stack**: stores
-from before #40 (log format 2) are refused; they need a new genesis
-(`skein-host add <h> --derive` with a new `--store`).
+in a log format before 8 are refused; they need a new genesis (move
+`runtime.db` aside and start the host again).
 
 Feeds: an instance's `etc/config.json` may declare `feeds: [{kind:
-"headers", url, box?}]` (the genesis carries them): the router holds one SSE
+"headers", url, box?}]` (the genesis carries them): the host holds one SSE
 connection per URL (reconnecting with backoff, at most 1000 items queued per
-instance), admitting `header` entries into the box (default `chain`). The
-per-instance `arc-callback` feed is gone (#58; a config that declares one is
-refused): transaction proofs and statuses come from the broadcaster.
+instance), admitting each header as an event into the box (default `chain`,
+the chain app's). Transaction proofs and statuses come from the
+broadcaster.
 
-Scheduling (#69, `src/host/cron.ts`; docs/MESSAGES.md "Scheduling"): there
-are no genesis jobs (a config that declares `jobs` is refused). A program
+Scheduling (#69, `src/host/cron.ts`; docs/MESSAGES.md "Scheduling"): a program
 asks the host's **cron provider** — its address book's role `cron`, seeded
 by every new genesis — with a message (`{fn: "tick", every | at, box, body?,
 name}` in box `cron`; `{fn: "stop", name}`), and each tick comes back as a
 signed message from the provider into the named box, `{kind: "cron", name,
-due, …body}` (the body's own `kind` wins), which the instance's subscription
-on that box handles. The schedules live in host.db (`cron_schedule`): an
+due, …body}` (the body's own `kind` wins), which the instance's dispatch row
+for that box handles. The schedules live in host.db (`cron_schedule`): an
 `every` one ticks once when `run` starts (a restart is a late tick, never a
 burst), an `at` one once. An idle-stopped instance is hydrated for a tick
-only if something in it subscribes the box; otherwise the tick is logged
+only if a dispatch row in it takes the box; otherwise the tick is logged
 (`cron: … not woken`) and skipped. A step's `deadline` and a shell's `sleep`
 are wake-me messages to the **waker** provider, likewise. By hand:
 
@@ -201,22 +197,22 @@ are wake-me messages to the **waker** provider, likewise. By hand:
 bin/skein-host event <handle> <box> ['{"kind":"amm-p2p-timer","job":"heartbeat"}']   # {kind: "cron" unless named, due: now}
 ```
 
-sends one tick now, a message from the cron provider. While `run` is upadmits one such event now. While `run` is up it goes over the router's
-control socket, `$SKEIN_HOME/host.sock` (a Unix socket, mode 0600, made when
-`run` starts and removed when it stops; no HTTP route leads to it), and the
-running router sends it with the kernel it already holds. With the host
-down it goes through a router of its own, which runs the steps it starts and
-closes. It refuses when a router answers at `SKEIN_HOST_URL` /
-`SKEIN_ROUTER_PORT` but no control socket answers under this `SKEIN_HOME`
-(another home, or a router from before the socket): that router's kernel
-holds the instance's store.
+sends one tick now, a message from the cron provider. While `run` is up it
+goes over the host's control socket, `$SKEIN_HOME/host.sock` (a Unix
+socket, mode 0600, made when `run` starts and removed when it stops; no
+HTTP route leads to it), and the running host sends it with the kernel it
+already holds. With the host down it goes through a host of its own, which
+runs the steps it starts and closes. It refuses when a host answers at
+`SKEIN_HOST_URL` / `SKEIN_ROUTER_PORT` but no control socket answers under
+this `SKEIN_HOME` (another home): that host's kernel holds the instance's
+store.
 
-The broadcaster (#58, #65, `src/host/arc.ts`, docs/WALLET.md): one Arcade
+The broadcaster (#58, #65, `src/host/arc.ts`, docs/MESSAGES.md): one Arcade
 for the whole host. An instance's broadcast is an event (`{kind:
-"broadcast", tx, beef?}`), not a message: the router queues it durably in
+"broadcast", tx, beef?}`), not a message: the host queues it durably in
 host.db (`broadcast_queue`), posts it to Arcade under the host's callback
 token, and retries with backoff while Arcade does not take it (a 503, no
-answer), until a day after it was queued. The router holds one SSE
+answer), until a day after it was queued. The host holds one SSE
 subscription to Arcade's events for the token (resumed with `Last-Event-ID`
 from host.db `stream_cursor`) and takes Arcade's webhooks at `POST
 /arc/callback` (`Authorization: Bearer <token>`). What Arcade says of a
@@ -225,8 +221,8 @@ transaction goes to every instance whose state holds it (host.db
 proof event in box `chain`; anything else — its answer to the post included
 — as a signed message from the host's **status provider** (box `status`;
 role `status` in a new genesis's address book), which an instance takes
-only if it subscribes to it (`{"sender": "$status", "box": "status",
-"handler": …}`). There is no `/arc/v1/tx` route any more.
+only through a dispatch row from `$status` (the chain app's optional
+`{address: "status", sender: "$status", program: "chain"}`).
 Configured from the environment or
 `~/.skein/host.env` (only the `SKEIN_ARC_*` lines are read from it):
 
@@ -235,7 +231,7 @@ Configured from the environment or
 | `SKEIN_ARC_URL` | unset: no broadcaster (a broadcast event is dropped, with a line), and a new genesis has no status provider in its address book | Arcade's API (its `POST /tx`), e.g. `https://arcade.example.com` |
 | `SKEIN_ARC_TOKEN` | required with the URL | the host's one callback token: `X-CallbackToken` on every submission, the scope of the SSE stream, the webhook's bearer. Arcade has no client auth: this token is what ties the host's transactions together |
 | `SKEIN_ARC_EVENTS_URL` | `<SKEIN_ARC_URL>/events` | Arcade's SSE service, which listens on a port of its own (Arcade's default 8082), e.g. `https://arcade.example.com:8082/events` |
-| `SKEIN_ARC_CALLBACK_URL` | unset: SSE only | where Arcade posts webhooks: this router's `/arc/callback` as Arcade reaches it (Arcade wants a public HTTPS URL) |
+| `SKEIN_ARC_CALLBACK_URL` | unset: SSE only | where Arcade posts webhooks: this host's `/arc/callback` as Arcade reaches it (Arcade wants a public HTTPS URL) |
 
 `skein-host run` prints the broadcaster's line at start (`broadcaster:
 broadcast events → Arcade …; proofs and statuses (the status provider) from
@@ -244,7 +240,8 @@ broadcast <txid> → Arcade: HTTP 202 RECEIVED`) and per status routed
 (`arcade stream: <txid> MINED (a proof event) → <handles>`).
 
 libp2p (#51): an instance whose `etc/config.json` declares `libp2p:
-{topics?, protocols?, listen?}` gets a libp2p node in the router process,
+{topics?, protocols?, listen?}`, or whose installed apps added libp2p rows,
+gets a libp2p node in the host process,
 with its own peer key (a child of `~/.skein/master.key`, key ID
 `libp2p:<handle>`). `skein-host list` prints every row's peer ID (last
 column) and `skein-host identity <handle> --peer` prints one; it is the
@@ -264,114 +261,32 @@ The host-wide settings, from the environment or `~/.skein/host.env` (only the
 | `SKEIN_LIBP2P_RELAYS` | none | circuit relays (multiaddrs with `/p2p/<id>`): each node also listens at `<relay>/p2p-circuit` |
 | `SKEIN_LIBP2P_MDNS` | `off` | `on`: mDNS discovery on the LAN; discovered peers are dialled |
 
-The sections below describe the pre-router layout (the `1sat serve`
-messagebox, a wallet-api per instance, host-signed entries, BRC-169
-envelopes) where they talk about those processes; `skein-host deploy`,
-`dispatch` and the roster work the same against the router, speaking raw
-BRC-33 to the row's front door (`SKEIN_HOST_URL`/@<handle>) as the owner.
+## The client wallets
 
-## The messagebox (legacy: `1sat serve`)
-
-`1sat serve` (1sat CLI 0.0.121) is the unified host: wallet storage RPC,
-accounts, paymail and `@bopen-io/messagebox-server` behind one BRC-103/104
-`authMiddleware` (one `/.well-known/auth` handshake covers every route). The
-stock `@bsv/message-box-client` (2.5.4) works against it unchanged:
-`sendMessage` / `listMessages(Lite)` / `acknowledgeMessage` with the host
-`http://127.0.0.1:8100/messagebox`, verified with two ephemeral ProtoWallets
-and in `src/client/client.test.ts`. The reference TS and Go servers were not
-needed.
-
-Two things `1sat serve` needs that it does not do by itself:
-
-1. **Migrations.** It mounts the messagebox routes but never runs their knex
-   migrations; the first `sendMessage` fails `500 SQLITE_ERROR`.
-   `messagebox-migrate.mjs` applies them to
-   `~/.skein/host-home/.1sat/cli/data/messagebox-main.db` with the knex and
-   migration files inside the installed CLI. `messagebox.sh` runs it on every
-   start (idempotent).
-2. **Accounts.** It stores messages only for recipients with an account on the
-   host (`403 ERR_ACCOUNT_REQUIRED`). `register.ts` does `POST /account/register`
-   over AuthFetch through each identity's wallet: `david` (owner) and `skein`
-   (instance), `infer` (the inference peer). The host also issues a BRC-52 handle certificate
-   (`certifier` = host identity), so `skein@localhost` is a real handle here.
-   `up.sh` can only register the owner through the dev owner wallet (3322); if
-   `owner.identity` names some other key (e.g. the Yours wallet), it prints a
-   one-line notice instead and that key must register itself from `web/` (Register).
-
-Host config, written once by `messagebox.sh` under `HOME=~/.skein/host-home`:
+The owner's and the inference peer's wallets are `1sat serve wallet-api`
+processes (any BRC-100 wallet over HTTP works). The 1sat CLI has no flag or
+env var for its config dir (`CONFIG_DIR` is `join(homedir(), ".1sat",
+"cli")`), so each runs with its own `HOME`; the port is
+`ONESAT_DAPP_PORT`. `wallets.sh owner infer` starts whichever is not
+listening and writes the `.identity` files.
 
 ```
-1sat config set server.host 127.0.0.1
-1sat config set server.port 8100
-1sat config set server.paymail.baseUrl http://localhost:8100   # paymail accepts https, or http only for "localhost"
-1sat config set server.paymail.userDomain localhost
-1sat config set server.monitor.enabled false                   # plus ONESAT_MONITOR=false in the env
-```
-
-Client code must always pass the host explicitly (`sendMessage(msg, host)`,
-`listMessagesLite({host})`); otherwise the message-box-client looks recipients
-up on the mainnet overlay.
-
-## The two wallets
-
-The 1sat CLI has no flag or env var for its config dir: `CONFIG_DIR` is
-`join(homedir(), ".1sat", "cli")`. The owner wallet therefore runs with its own
-`HOME`. The port is `ONESAT_DAPP_PORT`.
-
-```
-# instance (already the runtime's wallet; see ~/.skein/README-wallet.md)
-set -a; . ~/.skein/dev-wallet.env; set +a; 1sat serve wallet-api
-# owner
 set -a; . ~/.skein/owner-wallet.env; set +a; HOME=~/.skein/owner-home ONESAT_DAPP_PORT=3322 1sat serve wallet-api
+set -a; . ~/.skein/infer-wallet.env; set +a; HOME=~/.skein/infer-home ONESAT_DAPP_PORT=3323 1sat serve wallet-api
 ```
 
-`wallets.sh` starts whichever is not listening (in the background) and writes
-both `.identity` files.
-
-## Grants
-
-wallet-api denies by default and names the grant that would allow a refused
-call. Each grant below answers one refusal. `grants.sh` writes them all
-(`$HOST`, `$INST`, `$OWNER` = the three identity files):
-
-```
-# owner wallet, origin skein-client (HOME=~/.skein/owner-home)
-1sat permissions grant skein-client --protocol "identity key retrieval" --level 1
-1sat permissions grant skein-client --protocol "metanet handles envelope" --level 2 --counterparty anyone  # envelope signature
-1sat permissions grant skein-client --protocol "message encryption" --level 2 --counterparty $INST        # BRC-78 content
-1sat permissions grant skein-client --protocol "messagebox" --level 1                                      # messageId HMAC
-1sat permissions grant skein-client --protocol "server hmac" --level 2 --counterparty self                 # BRC-104 nonces
-1sat permissions grant skein-client --protocol "auth message signature" --level 2 --counterparty $HOST     # BRC-104 with the host
-
-# instance wallet, origin skein (default HOME): the same transport set, envelope ones toward the owner
-1sat permissions grant skein --protocol "identity key retrieval" --level 1
-1sat permissions grant skein --protocol "server hmac" --level 2 --counterparty self
-1sat permissions grant skein --protocol "auth message signature" --level 2 --counterparty $HOST
-1sat permissions grant skein --protocol "messagebox" --level 1
-1sat permissions grant skein --protocol "metanet handles envelope" --level 2 --counterparty anyone
-1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty $OWNER
-1sat permissions grant skein --protocol "message encryption" --level 2 --counterparty $INFER
-
-# host wallet, origin skein-host (HOME=~/.skein/host-wallet-home): it signs every log entry
-1sat permissions grant skein-host --protocol "identity key retrieval" --level 1
-1sat permissions grant skein-host --protocol "skein log" --level 2 --counterparty anyone
-
-# infer peer wallet, origin skein-infer (HOME=~/.skein/infer-home): transport, and envelopes to/from the instance
-1sat permissions grant skein-infer --protocol "identity key retrieval" --level 1
-1sat permissions grant skein-infer --protocol "server hmac" --level 2 --counterparty self
-1sat permissions grant skein-infer --protocol "auth message signature" --level 2 --counterparty $HOST
-1sat permissions grant skein-infer --protocol "messagebox" --level 1
-1sat permissions grant skein-infer --protocol "metanet handles envelope" --level 2 --counterparty anyone
-1sat permissions grant skein-infer --protocol "message encryption" --level 2 --counterparty $INST
-```
-
-A level-2 grant without `--counterparty` means `self`, which is never what an
-envelope needs.
+wallet-api denies by default and names the grant that would allow a
+refused call. `grants.sh` writes the owner's (origin `skein-client`) and
+the inference peer's (origin `skein-infer`): identity key retrieval, `skein
+register`, `messagebox`, `server hmac` toward self, and `auth message
+signature` and `message encryption` toward every enabled instance's
+front-door key. Run it again after `skein-host add`. A level-2 grant
+without `--counterparty` means `self`.
 
 ## Instances
 
 Every instance is a row in the host's management database, `~/.skein/host.db`
-(src/host/instances.ts), and runs on the Zig kernel behind the router:
+(src/host/instances.ts), and runs on the Zig kernel under the host:
 
 | column | |
 |---|---|
@@ -380,7 +295,7 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 | `kind` | `agent`, or `mailbox` (a mailbox instance, #40: the front door and the messagebox, keeping mail for `owner`) |
 | `owner` | a mailbox instance's: the identity (hex) whose mailbox it is |
 | `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the oracle's, BRC-42 child, key ID the handle) |
-| `wallet_url`, `wallet_originator` | legacy (a wallet-api per instance, `instance.sh`); unused by the router |
+| `wallet_url`, `wallet_originator` | unused (the layout before #33) |
 | `store` | its store file (default `~/.skein/instances/<handle>/runtime.db`) |
 | `tree` | the root CID of the directory last deployed into it (`skein-host deploy`) |
 | `source` | that directory, which `deploy --all` sends again |
@@ -393,7 +308,7 @@ bin/skein-host add <handle> [--domain d] [--identity hex] [--store path] [--tree
 bin/skein-host add <handle> --mailbox --owner <hex>   # a mailbox instance for an identity outside the host
 bin/skein-host knows <handle> [a,b | --all | --none]   # who its ROSTER.md lists; no list: print it
 bin/skein-host list | mailboxes | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store
-bin/skein-host run                    # the router, the host page and roster, an explorer each
+bin/skein-host run                    # the host, the host page and roster, an explorer each
 bin/skein-host deploy <handle> <dir> [--only glob,glob]
 bin/skein-host deploy --all [--only glob,glob]   # every enabled row, from its `source`
 bin/skein-host roster                 # the roster JSON, printed
@@ -403,7 +318,7 @@ bin/skein-host roster --deploy        # redeploy every enabled row whose ROSTER.
 
 ### Running them: `skein-host run`
 
-`skein-host run` is the router (above, and docs/ARCH.md "The router"): it
+`skein-host run` is the host (above, and docs/ARCH.md "The host"): it
 hydrates every enabled row once at start — a row's genesis is written at its
 first hydration — then starts each kernel (`skein-kernel serve` over the
 row's store) on demand and, with `SKEIN_IDLE_MS`, stops it when idle. Beside
@@ -414,7 +329,7 @@ it runs a supervisor (src/host/supervisor.ts) for one read-only
   `[handle explore]`.
 - **Restarts**: an explorer that exits is started again after 1 s, doubling
   to at most 60 s; one that ran 30 s or more starts again at 1 s.
-- **Stopping**: SIGINT/SIGTERM closes the router (`Router.close()`, #61:
+- **Stopping**: SIGINT/SIGTERM closes the host (`Router.close()`, #61:
   its timers, feeds, broadcaster, libp2p nodes and kernels) and sends every
   explorer SIGTERM (SIGKILL after 10 s). An explorer whose supervisor is killed stops
   by itself (its IPC channel closes).
@@ -423,7 +338,7 @@ it runs a supervisor (src/host/supervisor.ts) for one read-only
 
 | | |
 |---|---|
-| `SKEIN_ROUTER_PORT` (default 8100) | the router |
+| `SKEIN_ROUTER_PORT` (default 8100) | the host's HTTP transport |
 | `SKEIN_HOST_PORT` (default 4600) | `/`: the host page; `/roster.json`: the roster |
 | `SKEIN_EXPLORE_BASE_PORT` (default 4610; `off`: none) | row *i*'s explorer on base + *i*, *i* its place among the enabled rows (`list` order) |
 
@@ -457,8 +372,7 @@ bin/skein-host dispatch martha add --sender <key> run run-handler
 bin/skein-host dispatch martha remove --sender <key> run run-handler
 ```
 
-**Stores from before the dispatch table** (a genesis with `subscriptions`
-or `routes`, before format 8) are not read by this kernel. Move the
+**Stores before format 8** are not read by this kernel. Move the
 runtime.db aside, restart `skein-host run` on this build, and `deploy`
 again; host.db is untouched.
 
@@ -469,22 +383,22 @@ skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | -
 skein-host uninstall <app> --instance <handle> [--approve-all]
 ```
 
-An app (docs/APPS.md, #72/#76) is a tree with `etc/app.json`. `install`
-clones the repo (a `#<rev>` checks that commit out) or reads the
-directory (leaving out `.git`, `node_modules`, `zig-out`, `.zig-cache`,
-`zig-pkg`), checks the manifest (src/host/manifest.ts) and the instance
-(its store, read only: `requires` provided by an installed app, routes and
-heads nobody else has, `$<provider>` senders in the address book), prints
-what the app asks for — heads, each box with its handler and senders, each
-route under `/<app>/`, start/stop, requires/provides, the messages — and,
-approved (`--approve-all`, or "y" at a terminal; `--dry-run` stops at the
-prompt), sends as the owner through the owner's wallet to the row's front
-door (as `deploy` does): `objects` (the tree, modules, program records,
-the app record), `head` `{name: <app>, tree: <app record>}`, `subscribe`
-per (box, sender), `routes` per route, then `start`. Installing it again is
-the upgrade (state kept, what it no longer asks for removed, start sent
-again). `uninstall` sends `stop`, then removes the app's subscriptions and
-routes; the head is left. Exit 0 sent, 1 refused or failed, 2 usage.
+An app (docs/APPS.md) is a tree with `etc/app.json`. `install` clones the
+repo (a `#<rev>` checks that commit out) or reads the directory (leaving out
+`.git`, `node_modules`, `zig-out`, `.zig-cache`, `zig-pkg`), checks the
+manifest (src/host/manifest.ts) and the instance (its store, read only:
+`requires` provided by an installed app, the name free, no row whose key
+another app or the genesis has, `$<provider>` senders in the address book,
+`optional` rows left out when the provider is missing), prints what the app
+asks for (the head `<app>/app`, each dispatch row, start/stop,
+requires/provides, the messages) and, approved (`--approve-all`, or "y" at
+a terminal; `--dry-run` stops at the prompt), sends as the owner through
+the owner's wallet to the row's front door (as `deploy` does): `objects`
+(the tree, modules, program records, the app record), `head` `{name:
+"<app>/app", tree: <app record>}`, `dispatch` per row, then `start`.
+Installing it again is the upgrade (state kept, rows it no longer asks for
+removed, start sent again). `uninstall` sends `stop`, then removes the
+app's rows; the heads are left. Exit 0 sent, 1 refused or failed, 2 usage.
 
 ```
 skein-host install https://github.com/shruggr/skein-static --instance martha --approve-all   # /static/… from main's www/
@@ -504,8 +418,8 @@ sent as the **owner** — the identity the genesis's dispatch rows take `objects
 (`SKEIN_OWNER_WALLET`, default http://127.0.0.1:3322, origin
 `SKEIN_ORIGINATOR`, default `skein-client`); it refuses if that wallet is not
 `SKEIN_OWNER` or not the store's genesis owner. Each bundle is one message
-to the instance's front door (the router starts its kernel if it is not
-running), admitted as one `mail` entry.
+to the instance's front door (the host starts its kernel if it is not
+running), admitted as one request entry.
 
 - **First deploy**: the kernel's `objects` operation makes the root `main` (there is none yet).
 - **Redeploy of a changed directory**: only the records the instance's store
@@ -587,28 +501,7 @@ bin/skein-host roster --for kurt
 bin/skein-host roster --deploy
 ```
 
-The loop reads `ROSTER.md` at the next *new* conversation — but only the
-loop built with #27 does: the loop wasm was re-pinned, and a genesis names
-its handlers by CID, fixed for the store's life (docs/OPEN.md items 30, 41).
-An instance whose genesis predates it keeps the old loop, which ignores
-`ROSTER.md`; it needs a new genesis (move its runtime.db aside, restart
-`skein-host run` on this build, `deploy` again — `knows` survives in
-host.db).
-
-Two limits of the legacy layout (the `1sat serve` messagebox and per-instance wallets; neither applies to the router), not of skein:
-
-- **The open subscription needs a grant per sender.** wallet-api has no
-  any-counterparty grant, so a `chat` from an identity the instance's wallet
-  has no "message encryption" grant for is refused at decryption ("permission
-  denied … run `1sat permissions grant skein --protocol "message encryption"
-  --level 2 --counterparty <sender>`"), logged as rejected and acknowledged.
-  Provisioned instances, the owner and the infer peer are granted.
-- **A reply needs the recipient's account.** The messagebox stores messages
-  only for registered identities (`403 ERR_ACCOUNT_REQUIRED`). That refusal is
-  permanent: the delivery reports it into the instance as a `failed` outcome
-  entry and never sends it again (docs/MESSAGES.md, "Outcomes"); a `message`
-  to such an agent becomes an error result for the model, an answer to such
-  a sender ends the thread.
+The loop reads `ROSTER.md` at the next *new* conversation.
 
 ## The client
 

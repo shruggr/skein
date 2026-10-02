@@ -17,10 +17,10 @@ received). `import` names the root tree on its last bundle; the instance makes i
 
 ```
 skein whoami
-skein import <dir>                                   # tree objects -> box objects; prints the tree CID
+skein import <dir>                                   # tree objects -> the kernel's objects operation; prints the tree CID
 skein run [--tree <cid>] [--cwd p] [--env K=V]... -- '<cmd>'   # no --tree: the instance's `main` head
-skein head <name> <cid>                              # box head: "<name> is now <cid>"
-skein subscribe add|remove [--sender <key>] <box> <handler>   # box subscribe; handler: a program record CID (skein-host subscribe also takes a name the genesis gives)
+skein head <name> <cid>                              # the kernel's head operation: "<name> is now <cid>"
+skein dispatch add|remove [--sender <key>] <box> <handler>    # the kernel's dispatch operation: a mailbox row; handler: a program record CID (skein-host dispatch also takes a name the genesis gives)
 skein inbox [--wait] [--timeout s] [--no-ack] [--json]
 skein chat "<text>" [--tree <cid>] [--model ripper/qwen38] [--new] [--wait] [--timeout s]
 skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
@@ -33,8 +33,8 @@ skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
 | `chat` | david → instance | `{ text, tree?: CID, model?: string, replyTo?: CID }` |
 | `chat` | instance → david | `{ text, page?: markdown, tree?: CID, thread?: CID, replyTo: CID }` — a reply (replyTo = the id of the message it answers); the answer at the end of a turn names tree and thread |
 | `results` | instance → david | `{ exitCode, stdout, stderr, tree, replyTo }` (answers a `run`) |
-| `head` | david → instance | `{ name, tree: CID }` — moves the named head; no reply |
-| `subscribe` | david → instance | `{ op: "add" \| "remove", sender?: identity, box, handler: CID }` — adds or removes the subscription (sender, box) → handler (no sender: anyone); no reply |
+| `head` | owner → instance | `{ name, tree: CID }`: the kernel's `head` operation, moves the named head; no reply |
+| `dispatch` | owner → instance | `{ op: "add" \| "remove", row }`: the kernel's `dispatch` operation, adds or removes a row; no reply |
 
 - `chat` continues the conversation: `replyTo` = the CID of the instance's
   last `chat` reply in `conversation.json`, and `--tree` defaults to its `tree`
