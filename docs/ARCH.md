@@ -100,7 +100,7 @@ owner. `APPS.md` is the specification.
 | wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`) |
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
 | overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
-| static | shruggr/skein-static | files from an app's tree under `/<app>/` |
+| static | shruggr/skein-static | files from the `main` head's tree, at the http rows pointed at it |
 | shell and chat | shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop); to be split into the shell app and the chat app (#83) |
 
 **The chain app.** The chain state is one head, `chain/state`, owned by

@@ -195,7 +195,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-sdk](https://github.com/shruggr/skein-sdk) | the Zig package every program is written against: the `skein` imports, codecs, `app`, `chain`, wallet library, WIT | v0.4.0 |
 | [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.2.0 |
 | [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.3.0 |
-| [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from an app's tree under `/<app>/` | v0.2.0 |
+| [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
 | [shruggr/skein-workbench](https://github.com/shruggr/skein-workbench) | the shell and chat loop (run-handler, loop, the shell's toolset), to be split into the shell app and the chat app by #83 | v0.2.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
