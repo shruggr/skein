@@ -566,7 +566,7 @@ bytes}` (txid and block hash hex, display order).
 
 `sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
 awaits it; the reply's body is the answer. A broadcast is not a message to
-anyone (#65, below); the wallet and the overlay's gate emit it as an event.
+anyone (#65, below); the chain app (#78) emits it as an event — and, until #79, the stock wallet and the overlay's gate.
 
 **How a host obtains its providers' keys is its own business**, not core:
 the reference host derives them from its master secret (`src/host/oracle.ts`
@@ -581,6 +581,37 @@ out.
 A transaction is self-validating, so neither its broadcast nor its proof is
 a signed message to or from anyone. Only how it *stands* on the network
 (Arcade's word) needs an attestation, and that is optional.
+
+**The chain app is the recipient of all three** (#78): an instance's chain
+state — headers, transactions, proofs, spends, settlement, broadcasts — is
+global to it and has one writer, the chain module
+([shruggr/skein-chain](https://github.com/shruggr/skein-chain), its
+contract that repo's docs/CHAIN.md), under `chain/state`. It takes the
+host's header feeds and the broadcaster's proofs (events in box `chain`),
+the status provider's messages (box `status`, its optional row from
+`$status`), and is the only thing that emits the broadcast event. Anything
+else that needs a transaction on the chain sends it a BEEF —
+`{fn: "ingest", args: {beef}}` in box `chain` — and is answered at its
+address: at once when it arrives proven, else on each state change
+(`accepted` on the first status that is not a rejection, `proven` on its
+proof, `rejected`), several `{fn, request, replyTo, result}` answers to one
+request. **Every unproven transaction at rest has a registered broadcast**
+(a record in the chain state's `broadcasts`); proof triggering is the answer
+to that broadcast — the chain app's thread awaits the transaction's CID —
+not separate wiring. Its rows (its manifest; or a system tree's
+`etc/dispatch.json` with `bin/chain.wasm`, writing under the stock scope
+`chain/`):
+
+```
+{"address": "chain",  "sender": "*",       "program": "chain"}                     callers and the host's events
+{"address": "status", "sender": "$status", "program": "chain", "optional": true}   the status provider (left out without one)
+```
+
+Until #79, the stock wallet program and the pinned overlay engine still
+take these events and broadcast on their own when an instance wires them
+(the wallet equiv's genesis rows; the overlay's derived `chain`/`status`
+rows, which clash with the chain app's: the install refuses a row another
+app has). The rest of this section is the wire contract all of them share.
 
 **Broadcast out is an event.**
 
@@ -641,7 +672,7 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
 
 - **Taking statuses** is a row `{transport: "mailbox", address: "status",
   sender: <the provider's key>, program}` (a system tree writes
-  `{"address": "status", "sender": "$status", "program": "wallet"}`), and
+  `{"address": "status", "sender": "$status", "program": "chain"}`, #78), and
   the provider in the address book (role `status`), which the genesis seeds
   when the host has one — how a program knows one speaks to it. The message
   steps the thread awaiting the transaction (input `message`), else the

@@ -109,7 +109,7 @@ src/host/install.ts.)
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
-| `dispatch[]` | **the rows it asks for** (#77): each `{transport?, address, prefix?, sender, program, fn?, …settings}` in the kernel's row shape (docs/VM.md "The dispatch table"). `transport` defaults to `mailbox`: the address is a box — the app's own name (its public face, §4), or a protocol box (`submit`, `chain`, `status` for an overlay: derived, §6). An `http` row's address is a path **relative to `/<name>/`** (a leading `/` too: `"/submit"` is `/amm/submit`, `"/"` is `/amm/`; `prefix: true` for a prefix; `fn` the handler's function; the rest the handler's own settings, carried to it as `match`). A `libp2p` row's address is a pubsub topic or `/<protocol>` — global, not namespaced; sender `*`. `sender` says who the row admits: `"*"` anyone, `"session"` (http only) any BRC-103/104 session, `"$owner"` the owner, `"$cron"`/`"$status"`/`"$<provider>"` the key the instance's address book gives that role, or an identity key in hex. The install resolves each and sends it to the kernel's `dispatch` operation with `app: <name>` (§3). The same key (transport, address, prefix, sender) twice is refused |
+| `dispatch[]` | **the rows it asks for** (#77): each `{transport?, address, prefix?, sender, program, fn?, …settings}` in the kernel's row shape (docs/VM.md "The dispatch table"). `transport` defaults to `mailbox`: the address is a box — the app's own name (its public face, §4), or a protocol box (`submit`, `chain`, `status` for an overlay: derived, §6). An `http` row's address is a path **relative to `/<name>/`** (a leading `/` too: `"/submit"` is `/amm/submit`, `"/"` is `/amm/`; `prefix: true` for a prefix; `fn` the handler's function; the rest the handler's own settings, carried to it as `match`). A `libp2p` row's address is a pubsub topic or `/<protocol>` — global, not namespaced; sender `*`. `sender` says who the row admits: `"*"` anyone, `"session"` (http only) any BRC-103/104 session, `"$owner"` the owner, `"$cron"`/`"$status"`/`"$<provider>"` the key the instance's address book gives that role, or an identity key in hex. The install resolves each and sends it to the kernel's `dispatch` operation with `app: <name>` (§3). The same key (transport, address, prefix, sender) twice is refused. `optional: true` (only on a row from a `$<provider>`, #78): the install leaves the row out, with a note in the prompt, when the instance's address book has no such provider — as a genesis leaves out a row from a provider its host has not; it never reaches the kernel |
 | `start` | optional: a message the owner sends into the app's box as the **last install message**, after the rows, so a program whose first act is to schedule something (a heartbeat tick from `$cron`) actually runs; nothing else starts an app. Sending it again is the restart after a reconfiguration (a new manifest + head advance): an install over an installed version sends it again. It needs a row admitting the owner to the app's box (`"$owner"` or `"*"`). (#76, built) |
 | `stop` | optional: a message the owner sends into the app's box at uninstall, before its rows are removed, so the app can cancel what it scheduled. (#76, built) |
 
@@ -442,6 +442,50 @@ box and keep a registry under its head; the engine would consult both the
 manifest and the registry. Nothing requires it, and the stock overlay app
 does not offer it.
 
+## 6a. Worked example: the chain module (#78)
+
+The chain state — headers, transactions, proofs, spends, settlement,
+broadcasts — is global to an instance and has one writer, the app
+[shruggr/skein-chain](https://github.com/shruggr/skein-chain) (its
+docs/CHAIN.md is the contract). Its manifest is the #77 shape and nothing
+more: one program, two rows, one interface.
+
+```json
+{
+  "kind": "app", "name": "chain", "version": "0.1.0",
+  "programs": {"chain": "bin/chain.wasm"},
+  "config":   {"chain": {}},
+  "provides": [{"interface": "chain/1", "functions": {
+    "ingest": {"writes": true,  "args": {"beef": "any"},     "answer": {"txid": "string", "tx": "cid", "state": "string", "…": "…"}},
+    "status": {"writes": false, "args": {"txid": "string"}, "answer": {"txid": "string", "state": "string", "…": "…"}},
+    "proof":  {"writes": false, "args": {"txid": "string"}, "answer": {"block": "cid", "height": "int", "depth": "int", "position": "int", "…": "…"}}}}],
+  "dispatch": [
+    {"address": "chain",  "sender": "*",       "program": "chain"},
+    {"address": "status", "sender": "$status", "program": "chain", "optional": true}
+  ]
+}
+```
+
+- The `chain` row from anyone takes the callers' `{fn, args}` and the
+  host's events (a feed's `header`, the broadcaster's `proof`: no sender,
+  so only a row from anyone takes them, docs/MESSAGES.md "Events").
+- The `status` row takes the status provider's messages; `optional`, so a
+  host with no status provider installs it without (statuses are optional,
+  #65).
+- Its only head is `chain/state` (the name rule; the app record is
+  `chain/app`). Readers hold its CID: `head("chain/state")`, `get`, and the
+  SDK's chain library (skein-sdk ≥ 0.4.0, `chain.state.State`) reads the
+  maps. A reader that wants a pointer calls `status` / `proof` and gets
+  CIDs back.
+- `ingest` answers several times to one request (`accepted`, then
+  `proven` or `rejected`), each `{fn, request, replyTo, result}` at the
+  caller's address — the shape of §4 with more than one answer.
+
+Installed: `skein-host install https://github.com/shruggr/skein-chain
+--instance <h>`; at boot: `bin/chain.wasm` in the system tree and the two
+rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
+under the stock scope). kernel-zig/equiv/chain.ts does both.
+
 ## 7. What is built, what is spec
 
 | part | status |
@@ -455,6 +499,7 @@ does not offer it.
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt; its transitional grants | built (#72, #77: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
 | the overlay engine reads `config.overlay` from its app record, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72: skein-overlay 0.2.0 `src/config.zig`; reads the alias `overlay` until #79) |
-| the chain under `chain/` (one chain module); the wallet and each overlay under their own names; stock manifests in the #77 shape | #78, #79 |
+| the chain under `chain/` (one chain module, shruggr/skein-chain: ingest, broadcast, answers on each state change); `optional` rows | built (#78: §6a; skein-sdk 0.4.0 `chain`) |
+| the wallet and each overlay under their own names, reading `chain/…`; stock manifests in the #77 shape | #79 |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
-| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.3.0 since #77), shruggr/skein-workbench, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |
+| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-workbench, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |

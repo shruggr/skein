@@ -44,7 +44,8 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
                                    (#51: the host's libp2p node runs for the instance)
                                    scopes: {<program name>: [<head name | prefix/>]}}
                                    (#77: the heads a genesis-wired program may advance, over the stock
-                                   scopes — frontdoor/, mailbox + outbound, peers, wallet; a genesis-wired
+                                   scopes — frontdoor/, mailbox + outbound, peers, wallet, and chain/ for a
+                                   program named chain (#78: the chain module); a genesis-wired
                                    overlay engine needs wallet, overlay:gossip, and each lookup service
                                    program its own ls:<service>: kernel-zig/equiv/overlay.ts)
                                    (no `jobs`, #69: a schedule is a program's message to the cron provider,
@@ -164,6 +165,7 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 |---|---|---|
 | shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
 | shruggr/skein-static | the static file handler (#52) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its routes under `/static/`; or at boot, `bin/static.wasm` and a route (above, "Static files") |
+| shruggr/skein-chain | the chain module (#78): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from anyone and `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those two rows in `etc/dispatch.json` (the stock scope `chain: ["chain/"]` covers its writes) |
 | shruggr/skein-overlay | the overlay services engine (#36) and its demo topic manager and lookup service | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>`: its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig

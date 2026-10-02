@@ -118,7 +118,7 @@ writes the same chain. A name never moved has no chain.
   install) writes `<app>/…` and nothing else; a program the genesis wired
   (no app record) writes only what the genesis's `scopes` list under its
   name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox", "outbound"],
-  resolve: ["peers"], wallet: ["wallet"]}` by default) — a bare head name,
+  resolve: ["peers"], wallet: ["wallet"], chain: ["chain/"]}` by default; `chain` since #78, the chain module wired at boot) — a bare head name,
   or a prefix ending in `/`. An in-VM callee writes in its own scope, not its
   caller's. A program record may also list `heads` it may write: a
   transitional grant the install writes for an app built before its heads

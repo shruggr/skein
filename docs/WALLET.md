@@ -18,7 +18,8 @@ imports the same `emit` from `skein:kernel/skein`.
 ## Pieces
 
 - The library: the SDK's `wallet` module (shruggr/skein-sdk, #71; a sibling
-  repo, `wallet/src/`, a Zig package dependency by URL+hash, #75), Zig 0.16.0,
+  repo, `wallet/src/`, a Zig package dependency by URL+hash, #75; over its
+  `chain` module, `chain/src/`, since 0.4.0, #78), Zig 0.16.0,
   over **bsvz** (the SDK's lazy URL+hash dependency: shruggr/bsvz branch
   `skein-sdk`). The index maps are the Merkle search trees of the SDK's `mst`
   module, the kernel's own, shared, not copied.
@@ -291,6 +292,20 @@ The wallet's own result records name the transactions they are about as
 (docs/VM.md, "Edges").
 
 ## The chain tracker
+
+**The chain state has its own app now (#78):** the chain module,
+[shruggr/skein-chain](https://github.com/shruggr/skein-chain) (its
+docs/CHAIN.md is the contract), is the one writer of an instance's
+headers, transactions, proofs, spends, settlement and broadcasts, under
+`chain/state`; anyone else reads it by CID and sends it BEEF to ingest
+(docs/MESSAGES.md, "Broadcast out, proofs and statuses in"). The tracker,
+merkle paths, BEEF, SPV and the record store moved from the SDK's `wallet`
+module into its `chain` module (skein-sdk 0.4.0: `chain/src/`, with
+`state.zig`, the chain app's records); `wallet` imports it and re-exports
+it under the same names (`chainstate` the chain state), so this program
+builds byte-identical. Until #79 the stock wallet program still keeps its
+own copy of the chain in the `wallet` head as described here; #79 moves it
+to reading `chain/…` and calling the chain app.
 
 The anchor is the **network's genesis header**, a constant in the program
 (`main`, `test`, `regtest`; genesis `defaults.walletNetwork`, default
