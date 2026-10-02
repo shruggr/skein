@@ -118,13 +118,13 @@ writes the same chain. A name never moved has no chain.
   install) writes `<app>/…` and nothing else; a program the genesis wired
   (no app record) writes only what the genesis's `scopes` list under its
   name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox", "outbound"],
-  resolve: ["peers"], wallet: ["wallet"], chain: ["chain/"]}` by default; `chain` since #78, the chain module wired at boot) — a bare head name,
-  or a prefix ending in `/`. An in-VM callee writes in its own scope, not its
-  caller's. A program record may also list `heads` it may write: a
-  transitional grant the install writes for an app built before its heads
-  moved under its name (the pinned overlay engine's `wallet`,
-  `overlay:gossip`, `ls:<service>`; the alias `<app>`), to go with #79.
-  Anything else is `advance: <name> is outside the write scope of <program>`.
+  wallet: ["wallet/"], chain: ["chain/"]}` by default; `chain` since #78, the
+  chain module wired at boot; `wallet/` since #79) — a bare head name, or a
+  prefix ending in `/`. An in-VM callee writes in its own scope, not its
+  caller's. There are no other grants (#79: the transitional `heads` on
+  program records, the alias head `<app>` and the resolve program's
+  `peers` scope are gone). Anything else is `advance: <name> is outside the
+  write scope of <program>`.
 - The owner moves one by sending `{name, tree}` to the admin box `head`
   (`skein head <name> <tree>`): the kernel's own `head` operation (below,
   "The dispatch table") advances it — no program runs. The app's root head
@@ -155,7 +155,7 @@ the rows the updates folded in order (`kernel-zig/src/dispatch.zig`;
 
 ```
 {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+ sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 ```
 
 A route, a subscription and a libp2p topic or protocol differ only in where
@@ -163,9 +163,13 @@ the address comes from: a `mailbox` row's address is a box (`*`: any box, a
 mailbox instance's catch-all); an `http` row's a path (`prefix: true` for a
 prefix; exact paths match first, then the longest prefix); a `libp2p` row's
 a pubsub topic, or `/<protocol>` for a stream protocol. `sender` is who the
-row admits: `*` anyone (an open route; the box an event lands in), a key
-that identity (a message's sender, or the BRC-104 session's), `session`
-(http only) any identity with a session. `program` is the handler, or the
+row admits: `*` anyone (an open route; it takes events too), `event`
+(mailbox only, #79) events and never a message — the host's wiring into a
+box (a feed's header, the broadcaster's proof, a route's admit), so a box
+that takes events need not be open; a key that identity (a message's
+sender, or the BRC-104 session's; the instance's own key admits its own
+programs' messages, below "emit"), `session` (http only) any identity with
+a session. `program` is the handler, or the
 string `kernel`: an admin row, `fn` its operation. The rest is the
 handler's own (static's `root` and `index`, a route's `read` op, the
 install's `app`), carried to it as `match`. A row's key is (transport,
@@ -197,10 +201,17 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
   - `dispatch` — `{op: "add" | "remove", row}`: the table changed (a program
     row's record and module must be in the store).
   - `peers` — `{op: "add", key, transport?, address? | url?, role?, handle?,
-    domain?}` | `{op: "remove", key}`: the address book.
+    domain?, source?}` | `{op: "remove", key}`: the address book (`source`
+    "admin", or "resolve" / "claim" from the resolve program).
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
   [--sender key] <box> <handler>` / `skein-host dispatch <handle> …`,
-  `skein-host peers` send them. No reply.
+  `skein-host peers` send them. No reply — except to the instance itself
+  (#79): an admin message one of its own programs sent (admitted by a
+  delegate row from the instance's key) steps the thread awaiting it with
+  `admin: {message, op, done: true}` or `{message, op, error}`. The stock
+  system has one such delegate row, `{peers, $self, kernel, fn: peers}`,
+  where the resolve program is wired: a resolved handle enters the address
+  book through the kernel's operation (the resolve program writes no head).
 - **A row is the permission.** Who may administer is whoever an admin row
   admits: the genesis writes the owner's; delegating is the owner adding a
   row with the same operation and another sender, through `dispatch` —
@@ -322,7 +333,16 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
 - `to` is the recipient's identity key — never a handle (resolve it first:
   the resolve program, docs/MESSAGES.md "BRC-169 is discovery") — and it
   must have an entry in the **address book** (the head `peers`, as this
-  step leaves it: a step that resolved a handle may emit to it at once).
+  step leaves it: a step that resolved a handle may emit to it at once) —
+  or be the instance's own identity (`self.identity` in the step's input),
+  which needs none (#79): **one app of an instance asks another** this way
+  (the wallet or an overlay app sending the chain app an `ingest`, the
+  resolve program sending the kernel a `peers` operation). It goes out by
+  the host's loopback (transport `local`, address `self`), comes back as a
+  `local` request signed by the instance, and routes like any message: a
+  dispatch row from the instance's own key (a manifest's `$self`) admits
+  it; the answer, from the instance to the instance, steps the thread
+  awaiting it by `replyTo`.
   `box` is not empty and does not start with `:`. `body` is the canonical
   dag-cbor of the body record. `subject` names what the message is about
   (a transaction's CID); a provider's answer carries it back.
@@ -347,9 +367,9 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   emits are dropped), by the recipient's transport (docs/MESSAGES.md, "The
   address book"): a `mailbox` recipient's by the instance's own delivery
   thread (the messagebox program, launched by the kernel: the instance holds
-  its own BRC-103/104 sessions), a `local` provider's or a `libp2p`
-  recipient's handed to the host once the step is committed (the serve
-  frame `emit`). At a start the kernel hands over again what a waiting
+  its own BRC-103/104 sessions), a `local` provider's, a `libp2p`
+  recipient's or the instance's own (the loopback, `local` to `self`)
+  handed to the host once the step is committed (the serve frame `emit`). At a start the kernel hands over again what a waiting
   thread still awaits (a host restart loses nothing a provider had); a host
   acts on a message once. Replay re-signs from the recorded oracle answer
   and sends nothing.
@@ -399,8 +419,10 @@ nothing wakes from it.)
 step's `emitted` — unsigned, addressed to no one — and the host carries it
 (serve frame `emit`, transport `event`); the step awaits the transaction's
 CID. Its proof comes back as an event (box `chain`), its statuses as a
-subscribed status provider's messages (input `message`). docs/MESSAGES.md,
-"Broadcast out, proofs and statuses in".
+subscribed status provider's messages (input `message`). Since #79 the one
+program that does this is the chain app's (shruggr/skein-chain); the
+wallet and the overlay apps send it an `ingest` instead and await its
+answers. docs/MESSAGES.md, "Broadcast out, proofs and statuses in".
 
 **Components** (WASI 0.2) import `emit` from `skein:kernel/skein` like
 every other call; the world has no `wasi:http`. `kernel-zig/test/components/

@@ -44,10 +44,10 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
                                    (#51: the host's libp2p node runs for the instance)
                                    scopes: {<program name>: [<head name | prefix/>]}}
                                    (#77: the heads a genesis-wired program may advance, over the stock
-                                   scopes — frontdoor/, mailbox + outbound, peers, wallet, and chain/ for a
+                                   scopes — frontdoor/, mailbox + outbound, wallet/, and chain/ for a
                                    program named chain (#78: the chain module); a genesis-wired
-                                   overlay engine needs wallet, overlay:gossip, and each lookup service
-                                   program its own ls:<service>: kernel-zig/equiv/overlay.ts)
+                                   overlay engine and its lookup service programs need overlay/
+                                   (#79: an overlay writes only under its name; kernel-zig/equiv/overlay.ts)
                                    (no `jobs`, #69: a schedule is a program's message to the cron provider,
                                    docs/MESSAGES.md "Scheduling"; a config naming them is refused)
 etc/dispatch.json        the dispatch rows (#77): [{transport?: mailbox | http | libp2p, address, prefix?: true,
@@ -163,10 +163,10 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 
 | repo | what | in a tree |
 |---|---|---|
-| shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
-| shruggr/skein-static | the static file handler (#52) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its routes under `/static/`; or at boot, `bin/static.wasm` and a route (above, "Static files") |
-| shruggr/skein-chain | the chain module (#78): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from anyone and `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those two rows in `etc/dispatch.json` (the stock scope `chain: ["chain/"]` covers its writes) |
-| shruggr/skein-overlay | the overlay services engine (#36) and its demo topic manager and lookup service | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>`: its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
+| shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset (0.2.0: the #77 manifest, rows `run`/`chat` from the owner) | nothing to install today: the stock genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md) |
+| shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
+| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the stock scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
+| shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>` (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
 package dependency by URL+hash (#75), not a path in this tree. Developing
@@ -176,8 +176,8 @@ There are two ways to install an app.
 
 - **At boot**, an app is part of a system tree. Copy the repo's `bin/`
   entries the tree needs into its `bin/`, its rows into `etc/dispatch.json`
-  and, for the heads it writes outside its name, its `scopes` into
-  `etc/config.json`. Then `skein-host add <h> --boot <dir>` (above).
+  and, since a genesis-wired program has no app record, the heads it writes
+  (its name's prefix, `<name>/`) as `scopes` in `etc/config.json`. Then `skein-host add <h> --boot <dir>` (above).
 - **Into a running instance** (#72, #76, built): `skein-host install`.
 
   ```
@@ -190,7 +190,7 @@ There are two ways to install an app.
   `requires` interface provided by an installed app's `*/app` head; the
   name free; no row with a key the genesis or another app has; every
   `$<provider>` sender in the address book), and prints the permission
-  prompt: the head `<app>/app`, the grants, each row (`row <transport>
+  prompt: the head `<app>/app`, each row (`row <transport>
   <address> from <who> → <role>.<fn>`: an http address under `/<app>/`, a
   libp2p topic or protocol as it is), `start`/`stop`, `requires`/`provides`,
   what an overlay publishes, and the messages it will send. An overlay
@@ -201,11 +201,10 @@ There are two ways to install an app.
   operation on an admin box (docs/APPS.md §3, src/host/install.ts):
 
   1. `objects`: the tree's git objects, its `bin/*.wasm` modules, a program
-     record per program (with `app: <name>` and the transitional grants as
-     `heads`), and the **app record**, ≤ 1 MiB per message, no root named
+     record per program (with `app: <name>`), and the **app record**, ≤ 1 MiB per message, no root named
      (an app never becomes `main`);
-  2. `head` `{name: "<app>/app", tree: <the app record>}` (a manifest in
-     the form before #77: the alias `{name: "<app>", tree}` too);
+  2. `head` `{name: "<app>/app", tree: <the app record>}` (#79: no alias head;
+     a manifest in the form before #77 is refused);
   3. `dispatch` `{op: "add", row}` per row, the sender resolved, an http
      address under `/<app>/`, `app: <name>` on the row. The host's libp2p
      node follows the dispatch table: an installed libp2p topic is

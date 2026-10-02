@@ -27,8 +27,12 @@ protocols), the admin operations (objects, head, dispatch, peers) are the
 kernel's own on messages from the owner or a delegate — no handler
 programs, no `subscribe` import — and a program advances only heads in its
 write scope (an app's `<app>/…`; a genesis-wired program's genesis
-`scopes`) (format 8). The host is transports + providers + store + oracle;
-it routes nothing.
+`scopes`) (format 8); since #79 a row may take events only (sender
+`event`), a message to the instance's own identity goes out by the host's
+loopback (one app of the instance asking another: the wallet or an overlay
+sending the chain app an `ingest`), and an admin message the instance sent
+itself is answered to the thread awaiting it (still format 8). The host is
+transports + providers + store + oracle; it routes nothing.
 
 ## Build
 
@@ -149,7 +153,7 @@ any printed mid-step time.
 
 ## For the wallet (issue #29)
 
-What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's wallet library, docs/WALLET.md).
+What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's wallet and chain libraries, docs/WALLET.md) and the chain app (shruggr/skein-chain), which since #79 holds the chain state the wallet reads.
 
 - **Bitcoin codecs** (`cid.zig`, `bitcoin.zig`, #42): `putblock` accepts
   `bitcoin-tx` (0xb1) and `bitcoin-block` (0xb0, 80 bytes) with
@@ -550,11 +554,12 @@ machine, four tables and the oracle.
 - **The dispatch table** (`dispatch.zig`): one chain, origin `{kind:
   "dispatch"}`, updates `{op: "add" | "remove", row, thread?, input, at}`,
   rows `{transport: mailbox | http | libp2p | local, address, prefix?,
-  sender: "*" | "session" | bytes(33), program: <cid> | "kernel", fn?, …}`
+  sender: "*" | "event" | "session" | bytes(33), program: <cid> | "kernel", fn?, …}`
   folded in order by key (transport, address, prefix, sender). It replaces
   the subscriptions chain, the genesis's `routes` and the head `routes`:
   `processMail` routes by `forMail` (a kernel row → `kernelOp`, else the
-  row's program launched), `processEvent` by `forEvent`; a request thread's
+  row's program launched), `processEvent` by `forEvent` (a row from `event`
+  or `*`; `forMail` never takes an `event` row, #79); a request thread's
   input and a call's context carry the rows as `dispatch`. The genesis
   carries `dispatch` (its seed) and `scopes`; one naming `subscriptions` or
   `routes` is refused (`log.isGenesis`).
@@ -565,18 +570,27 @@ machine, four tables and the oracle.
   `thread: null`); a refusal is a log line and nothing written. No program
   runs: `objects-handler`, `head-handler`, `subscribe-handler` and the
   front door's `routes` box are gone, as is the `subscribe` import
-  (preview1 and WIT; skein-sdk 0.3.0).
+  (preview1 and WIT; skein-sdk 0.3.0). An admin message whose sender is the
+  instance itself (a delegate row from its own key) is answered (#79,
+  `adminDone`): the thread awaiting the message steps with `admin: {message,
+  op, done: true | error}`.
+- **The loopback** (#79, `routeTo`): `emit` to the instance's own identity
+  needs no address book entry; the message goes to the host as transport
+  `local`, address `self`, and the host appends it back as a `local`
+  request (src/host/providers.ts).
 - **Write scope** (`hAdvance`, `inScope`): `advance(name)` only when the
   running program (the thread's, or the in-VM callee's: `StepState.progs`)
   may write it — its record's `app` makes `<app>/…` its scope; a program
   with no `app` has the genesis's `scopes[<its name>]` (exact names, or
-  prefixes ending in `/`); a record's `heads` list is a transitional grant.
+  prefixes ending in `/`); nothing else (#79: the `heads` grants on
+  program records are gone).
   A head update carries `owner` (`heads.ownerOf`: the name's text before
   the first `/`), and `dump` lists `[name, tree, owner]`.
 - **The address book's `peers` operation** is `addressbook.write` (the
-  resolve program's writePeer, moved into the kernel; the resolve program
-  still writes its lookups under a `scopes` grant, to review). Sessions
-  are the head `frontdoor/sessions`.
+  resolve program's writePeer, moved into the kernel; since #79 the resolve
+  program records a lookup through it — a message to itself, the stock
+  delegate row `{peers, $self, kernel}` — with `source` resolve or claim,
+  and writes no head). Sessions are the head `frontdoor/sessions`.
 
 ### Format 7 (issues #65, #69)
 
@@ -832,7 +846,7 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `equiv/shell.ts` | host-go's 64 shell cases plus 7 for the script runtimes (#25; `equiv/shell-cases.ts`) through `skein-kernel shell`, against the results recorded from the TypeScript shell before it was deleted (`equiv/shell-expected.json`, #55): stdout, stderr, exit code, tree CID (none of which carries fuel). Then (#34) the same cases with every plain preview1 tool (coreutils, find, diff/cmp, jq, grep, tree, awk, sed, qjs/node, python/python3) made a component with the preview1 adapter, against the modules | 71/71 identical; as components 66/71 identical, the other 5 differing only in a printed exit status above 1 (the adapter's ok/err) |
 | `equiv/git.ts` | git (`wasm/git.wasm`) in the shell on this kernel, 15 verbs over one tree; a second run gives identical trees and output | all ok |
 | `equiv/replays.ts` over `equiv/corpus.ts` | 18 logs: 10 agents (the kernel's objects/head/dispatch operations (#77), the run handler, the shell with writes, cwd, failures, sleeps and wakes, the loop with bash and message tools, replies, resolutions, a failed delivery, a refused infer, a stranger's run, two agents, and `gen-fuel`: `fuelPerStep` 4·10^6, where a step runs out) and the 8 owner's mailbox instances they delivered into (`<name>-david`), each replayed by the Zig kernel into z1, and z1's log replayed into z2. Since #40 the corpus is written by the Zig kernel as the router drives it (format 6 since #70/#67: every message out an `emit`, signed through the recorded oracle; on a script clock, the owner over raw BRC-33 on BRC-104 sessions, the inference peer on its own mailbox instance, the instances delivering by their own delivery threads through the router's `fetch` provider, whose signed answers are `local` requests in the log), so each source is also reproduced exactly by its replay | 18/18 identical, sources reproduced |
-| `equiv/wallet.ts` | the router drives `serve` with the instance's oracle (a ProtoWallet) and a fake Arcade behind the router's broadcaster (#65); the wallet program (#29) subscribed to an owner's box, a sender-less `chain` box and the status provider's `status` box — headers from regtest's genesis (an owner's message, then plain `header` event entries admitted by the router), a BRC-29 payment internalized, a spend signed through the oracle and broadcast as an event (the host's queue posts it; the posted BEEF's scripts verify under @bsv/sdk), Arcade's RECEIVED and later statuses as status messages to the awaiting thread and the payee, MINED as a proof event, a rejected broadcast dropping its action, a draft signed by `signAction`, a 503 retried by the host's queue, a host restart resuming the stream; then the store replayed Zig against Zig | all ok; the store reproduced exactly |
+| `equiv/wallet.ts` (#29, #79) | on a test host with a fake Arcade behind its broadcaster and a fake SSE header feed, the chain app (shruggr/skein-chain) installed into two instances and the wallet program on the owner's `wallet` box: the feed's headers reach the chain app (the wallet takes none); a BRC-29 payment internalized (SPV against `chain/state`) and ingested; a spend signed through the oracle whose step emits one `ingest` message to the instance itself and no broadcast — the chain app broadcasts it (Extended Format, the host's token), Arcade's RECEIVED answers the wallet's thread `accepted`, MINED `proven`; the payee internalizes it and is answered the same; a rejected broadcast gives the balance back; a draft signed by `signAction`; settlement at the chain app (A rejected, B input-rejected, both threads answered, the coins read back); a reorg run re-broadcast by the chain app and the change listed unproven; the heads `wallet/state` and `chain/state`; both stores replayed | all ok; both reproduced exactly |
 | `equiv/boot.ts` (#4) | `skein-host system` → a system tree (one handler as .wasm bytes, a SOUL.md, a config default); `add --boot <dir>` and `add --packet` of a mined ordfs-form packet of it (`--proofs`); a wrong `--scope` refused; both genesis name the tree, `main` is it, programs from bin/; each chatted with (the loop reads SOUL.md from main) and run over main; the wallet's component build (#34) as `bin/wallet.wasm` answering a `list`; `pack --checkpoint` restored on a second host (same master key): `dump` identical, still answering; both booted stores replayed Zig against Zig | all ok; both reproduced exactly |
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains and log lines; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly |
 | `equiv/wallet.ts` (#34 part) | after the preview1 scenario: `equiv/abi.ts` replays its log with the wallet's component build in the module's place (`SKEIN_REPLAY_MODULE`), and the scenario runs again through the router with the component as the wallet program | no DIVERGED; the same chains and log lines; every update identical but for `fuel` and `prev` (the CID of the update before); the component's replay reproduces itself; the component run reports exactly what the module's did, and its store replays to itself exactly. Since #65 both builds broadcast by emitting the same event, so this also shows the two ABIs emit byte-identical records |
@@ -842,8 +856,9 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `equiv/browser.ts` (#35) | the corpus replayed by the wasm kernel in headless Chrome into IndexedDB, read back, against the native replay: report and dump | 18/18 identical |
 | `equiv/browser-live.ts` (#35) | an instance in Chrome chats an agent on a scratch router; the reply admitted; its store replayed natively | all ok |
 | older-format refusal | a store in sqlite.ts's tables with a host-signed genesis (`equiv/old-store.ts`: format 1, no fuel) opened for running (`skein-kernel shell`) | refused, with the message |
-| `equiv/overlay.ts` (#36, #40) | an overlay node served by its own front door (routes.json): the stock `TopicBroadcaster` and `LookupResolver` at its host-name origin; submit the one write, lookups, dupes, refusals and listings none; then replayed | all ok; reproduced exactly |
-| `equiv/chain.ts` (#78) | the chain module, shruggr/skein-chain at a pinned commit (or `$SKEIN_CHAIN_DIR`), installed by `skein-host install` on a router with a fake Arcade (its broadcaster and `$status` provider) and called by an identity with a mailbox on the same host: the feed's headers; `ingest` proven → answered at once; `ingest` unproven → broadcast (the Arcade gets it) → `accepted` (the status provider's RECEIVED) → `proven` (Arcade's MINED proof, its header first), each an answer to the same request, a second watcher told too; refused by Arcade → `rejected`; `status`/`proof` reads by message and as a kernel call; then the same app at boot from a system tree (the stock files, `bin/chain.wasm`, its two rows, the stock scope `chain/`); both stores replayed | all ok; both reproduced exactly |
+| `equiv/overlay.ts` (#36, #40, #79) | overlay nodes booted from system trees carrying skein-overlay's and skein-chain's modules and their #77 rows: the stock `TopicBroadcaster` and `LookupResolver` at the host-name origin; a submission ingested at the chain app and admitted on its first `accepted`/`proven` answer; GossipSub the same state; lookups, dupes, refusals, listings; a spend rejected at the chain app unwound by the overlay's watch; proofs as IPLD nodes; the busy gate; no Arcade (admitted at the proof); the three-router gossip (#74); all replayed | all ok; reproduced exactly |
+| `equiv/install-overlay.ts` (#72, #79) | skein-chain and skein-overlay 0.3.0 installed by `skein-host install` (the overlay refused without the chain app: `requires chain/1`); its derived rows (its box from `event` and `$self`, /submit, /lookup, the libp2p topics) and no grants; a gossiped token admitted once the chain app answers; two overlay apps on one instance (the same tree as `overlay2`), each writing only its own heads over one `chain/state`; reinstall, uninstall; replayed | all ok; reproduced exactly |
+| `equiv/chain.ts` (#78) | the chain module, shruggr/skein-chain at a pinned commit (or `$SKEIN_CHAIN_DIR`), installed by `skein-host install` on a router with a fake Arcade (its broadcaster and `$status` provider) and called by its owner (#79: its rows take `event`, `$self` and `$owner`; a stranger is refused): the feed's headers; `ingest` proven → answered at once; `ingest` unproven → broadcast (the Arcade gets it) → `accepted` (the status provider's RECEIVED) → `proven` (Arcade's MINED proof, its header first), each an answer to the same request, a second watcher told too; refused by Arcade → `rejected`; `status`/`proof` reads by message and as a kernel call; then the same app at boot from a system tree (the stock files, `bin/chain.wasm`, its rows, the stock scope `chain/`); both stores replayed | all ok; both reproduced exactly |
 | `equiv/serve.ts` | `serve` as the router drives it, the owner (raw BRC-33, and a signed `/account/register`) and the inference peer on BRC-104 sessions with the instances' front doors and their mailbox instances: genesis, a run, a chat through the inference peer, an idle stop mid-sleep and the waker's hydration that finishes it, a router restart mid-sleep, mail surviving it; (#38) 50 ms busy-waits on the in-step clock (qjs, python) ending on their own under a 10^9 fuel limit; a second instance with `SKEIN_FUEL_PER_STEP=10^9` where `while :; do :; done` runs out (run-handler replies `fuel exhausted`; `skein-kernel fuel` shows the shell's step at exactly the limit); then both stores replayed Zig against Zig | all ok; both stores reproduced exactly by their replays |
 
 A replay comparison (`equiv/replays.ts`) requires z1 and z2 to be the

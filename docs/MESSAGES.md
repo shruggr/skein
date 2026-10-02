@@ -64,11 +64,12 @@ the **address book**. The dispatch table is one chain of rows
 
 ```
 {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+ sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 ```
 
 — a box, an HTTP path (prefix or exact), a libp2p topic or `/<protocol>`;
-who may send there; which program is stepped or called, or which of the
+who may send there (`event`, #79: events only — the host's wiring and a
+route's admits, never a message); which program is stepped or called, or which of the
 kernel's own operations runs. A route and a subscription differ only in
 where the address comes from; first match wins (docs/VM.md, "The dispatch
 table", for the full rules). A program never writes the table: there is no
@@ -197,9 +198,8 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
   body:        bytes
   contentType: text            the media type alone
   session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes
-  match:       the dispatch row that matched (a handler's own settings: static's root, index; the install's app),
-               plus the pre-#77 keys for handlers built before it — `path: <address>` (exact), `prefix: <address>`
-               (text, a prefix row), `path: "libp2p:<address>"` (a libp2p row) — until #79 moves the stock apps
+  match:       the dispatch row that matched, as the table holds it (`address`, `prefix: true` for a prefix row;
+               a handler's own settings: static's root, index; the install's app). #79: no pre-#77 keys
   request:     <cid>           the request record: the package as received (its entry is `step.entry`)
   resolved?:   [{thread, state: "finished" | "errored", result?, error?}]   called again: the thread it waited on
   event?, reply?, woke?        called again: what else woke the request's thread (an awaited subject, a reply, a deadline) }
@@ -519,9 +519,17 @@ The address book is one of the kernel's four tables (#77). Who writes it:
   [--handle h@d]` / `remove <key>` / `list`; `scripts/host/up.sh` writes the
   owner and the inference peer into every agent this way, and the roster
   step (`skein-host deploy`, `roster --deploy`) the other agents;
-- **the resolve program**, from a BRC-169 lookup (source `resolve`; below)
-  — transitional: a program writing a kernel table, under the genesis's
-  `scopes` (`resolve: ["peers"]`), for David to review.
+- **the resolve program**, from a BRC-169 lookup (source `resolve` or
+  `claim`; below) — through the kernel's `peers` operation, not by writing
+  the table (#79: no program reaches a kernel table): it emits `{op: "add",
+  key, transport: "mailbox", address, handle, domain, source}` in box
+  `peers` to the instance itself (the host's loopback), admitted by the
+  stock system's delegate row `{peers, sender: $self, program: kernel, fn:
+  peers}` (where resolve is wired), and the kernel answers the thread
+  awaiting that message (input `admin`) once the entry is written. Every
+  program of the instance emits as the instance, so that row lets any of
+  them write the address book (the other tables stay the owner's): for
+  David to review.
 
 A later record for the same key replaces it (a party that moved hosts).
 `sk.peers`, `sk.peerOf(key)` and `sk.peerByHandle(handle, domain)` read it.
@@ -566,7 +574,7 @@ bytes}` (txid and block hash hex, display order).
 
 `sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
 awaits it; the reply's body is the answer. A broadcast is not a message to
-anyone (#65, below); the chain app (#78) emits it as an event — and, until #79, the stock wallet and the overlay's gate.
+anyone (#65, below); the chain app (#78) is the one program that emits it (#79: the wallet and the overlay apps send the chain app an `ingest` instead).
 
 **How a host obtains its providers' keys is its own business**, not core:
 the reference host derives them from its master secret (`src/host/oracle.ts`
@@ -592,7 +600,12 @@ the status provider's messages (box `status`, its optional row from
 `$status`), and is the only thing that emits the broadcast event. Anything
 else that needs a transaction on the chain sends it a BEEF —
 `{fn: "ingest", args: {beef}}` in box `chain` — and is answered at its
-address: at once when it arrives proven, else on each state change
+address. The wallet and the overlay apps are programs of the same
+instance: they emit the ingest to the instance itself (docs/VM.md "emit":
+the host's loopback), admitted by the chain app's row from `$self`, end
+their step awaiting that message, and each answer steps them again (#79).
+The owner may call it too (its row from `$owner`); nobody else can. The
+answers come at once when it arrives proven, else on each state change
 (`accepted` on the first status that is not a rejection, `proven` on its
 proof, `rejected`), several `{fn, request, replyTo, result}` answers to one
 request. **Every unproven transaction at rest has a registered broadcast**
@@ -600,18 +613,18 @@ request. **Every unproven transaction at rest has a registered broadcast**
 to that broadcast — the chain app's thread awaits the transaction's CID —
 not separate wiring. Its rows (its manifest; or a system tree's
 `etc/dispatch.json` with `bin/chain.wasm`, writing under the stock scope
-`chain/`):
+`chain/`) — specific wiring, not an open box (#79):
 
 ```
-{"address": "chain",  "sender": "*",       "program": "chain"}                     callers and the host's events
+{"address": "chain",  "sender": "event",   "program": "chain"}                     the host's events (feeds, the broadcaster's proofs)
+{"address": "chain",  "sender": "$self",   "program": "chain"}                     the instance's own apps (the wallet, the overlay apps)
+{"address": "chain",  "sender": "$owner",  "program": "chain"}                     the owner
 {"address": "status", "sender": "$status", "program": "chain", "optional": true}   the status provider (left out without one)
 ```
 
-Until #79, the stock wallet program and the pinned overlay engine still
-take these events and broadcast on their own when an instance wires them
-(the wallet equiv's genesis rows; the overlay's derived `chain`/`status`
-rows, which clash with the chain app's: the install refuses a row another
-app has). The rest of this section is the wire contract all of them share.
+Neither the wallet nor an overlay app takes these events or broadcasts
+(#79). The rest of this section is the wire contract between the host and
+the chain app.
 
 **Broadcast out is an event.**
 
@@ -649,7 +662,7 @@ event (box "chain")  {kind: "proof", subject: <tx CID>, txid (hex), path: bytes 
   status carrying the BUMP, by SSE or webhook), the same way it admits a
   header from a feed, into **every instance whose state holds the
   transaction** (a `has` read of its CID). It steps the thread awaiting the
-  transaction (input `event`), else the first `mailbox` row from anyone on `chain`.
+  transaction (input `event`), else the first `mailbox` row on `chain` from `event` (or anyone): the chain app's.
 - The VM records a proof only when its root is the header's at that height
   in the instance's own chain (a header not held yet leaves it pending).
   Nothing is signed; nothing needs to be.
@@ -692,12 +705,17 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
   beside webhook and SSE): an instance would subscribe to Arcade's key
   instead, and nothing on its side changes.
 
-**The overlay's gate** (docs/OVERLAY.md, #73): there is no setting. A
-submission is admitted on the **first** of a status provider's word that the
-network has it (its first status that is not a rejection) or a validated
-proof; a rejection status rejects it either way. With no status provider
-subscribed (role `status`), no status ever arrives, so an instance admits at
-the proof. Admission on validation alone is not a mode.
+**The overlay's gate** (shruggr/skein-overlay docs/OVERLAY.md, #73, #79):
+there is no setting, and the overlay holds no chain state. A submission is
+handed to the chain app (`ingest`) and admitted on the chain app's
+**first** admitting answer — `accepted` (a status provider's first status
+that is not a rejection) or `proven` (a validated proof) — and never on
+`rejected`. With no status provider subscribed (role `status`), no status
+ever arrives, so the chain app answers only at the proof and the overlay
+admits there. Admission on validation alone is not a mode. A submission
+admitted on `accepted` keeps listening (the overlay's watch of the same
+ingest message): `proven` publishes its `-proof`, a later `rejected`
+removes its judgements.
 
 ### Scheduling: the waker and the cron provider (#69)
 
