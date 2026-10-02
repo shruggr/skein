@@ -96,6 +96,9 @@ echo "== apps (#72, #76): skein-host install of shruggr/skein-static (its routes
 echo "== an overlay installed as an app (#72): shruggr/skein-overlay (install-overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) by skein-host install into an instance with no overlay config and no libp2p; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router judged by the manifest's topic; a reinstall with a second topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
 
+echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by skein-host install, on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
+"${node[@]}" "$kz/equiv/chain.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 
