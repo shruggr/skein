@@ -492,7 +492,7 @@ The head `peers` — who the instance can reach, and how:
 `cron`, `libp2p`, `status`: how a program finds a provider (`sk.provider(a,
 role)`; `deadline` and a shell's sleep find the waker). Receiving needs none of this: a
 sender is authenticated by its key (a BRC-104 session or the message's own
-signature) and admitted by subscription, whether or not the instance can
+signature) and admitted by a dispatch row, whether or not the instance can
 answer it.
 
 The address book is one of the kernel's four tables (#77). Who writes it:
@@ -952,7 +952,7 @@ package. Messagebox delivery stays HTTP.
 ## Fuel
 
 Every request's fuel is on its thread's updates, in the log (#68), like
-every step's: billing is a query over the log. The host's **fuel ledger**
+every step's: fuel accounting is a query over the log. The host's **fuel ledger**
 (host.db `fuel_ledger`: instance, caller, op, calls, fuel; `skein-host
 ledger`) keeps what is not in the log: the kernel calls it makes (a read
 after a request's thread, op `<route> (read)`).
@@ -993,7 +993,7 @@ message {to: "@handle@domain", text}
   tree: trees do not cross instances.
 - **The other side.** A chat with `replyTo` is a reply: it resumes the thread
   whose tip awaits that message (sent to the replying sender) before any
-  subscription, in any box; a reply nothing awaits is recorded and nothing
+  dispatch row, in any box; a reply nothing awaits is recorded and nothing
   runs. A resumed thread that rests on a `message` takes the reply as that
   call's result, `{of: <their chat>, role: "tool", call, to, sent: <our chat>,
   text}`; one that rests on its answer takes it as the next user turn.

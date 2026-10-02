@@ -1,5 +1,10 @@
 # The browser client (`web/`)
 
+> Historical: this page client is from the envelope era (before #40) and
+> is not maintained; `scripts/host/web.sh` is a leftover. The browser
+> host, the kernel in a tab, is `web/kernel/` (docs/ARCH.md, "The browser
+> host"; kernel-zig/README.md, "The browser build").
+
 The CLI client (`bin/skein`, src/client) as one page, signing with David's own
 wallet — the Yours browser extension — instead of the dev owner wallet-api.
 Same boxes, same envelopes, same bodies (src/client/README.md, docs/MESSAGES.md).

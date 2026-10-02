@@ -100,7 +100,7 @@ is recorded and replayed like any other field.
   answers. (wasmtime checks fuel at function entries and loop headers; a run
   may overshoot its budget by the few instructions after its last check,
   in which case its `fuel` is the limit without a trap.)
-- **Billing is a query over the log**: `skein-kernel fuel <db> [--since n]`
+- **Fuel accounting is a query over the log**: `skein-kernel fuel <db> [--since n]`
   sums the updates' fuel per thread (in thread order, with the program's
   name) and in total, over the steps whose input entry is n or later;
   `skein-kernel dump` lists each update's fuel and the per-thread sums.
@@ -788,7 +788,7 @@ re-genesis when they move to this build).
 | `scheduler.zig` | the scheduler (deleted) |
 | `serve.zig`, `ipc.zig` | the kernel as the host drives it (`src/host/kernel.ts`, issue #33) |
 | `replay.zig`, `cmd_shell.zig` | `skein-kernel replay` (was `skein-dev replay`); the shell test driver |
-| `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (billing as a query over the log); the fuel unit tests (issue #5) |
+| `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (fuel accounting as a query over the log); the fuel unit tests (issue #5) |
 | `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
 | `addressbook.zig` | the address book (#70, #77): the head `peers`, lookup by key and by role, the genesis's seed, the kernel's `peers` operation (`write`) |
 | `oracle.zig` | the oracle's signature of an emitted message (#70): the BRC-100 `createSignature` frame, its answer |
