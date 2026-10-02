@@ -24,7 +24,9 @@
 //               the handler's function; a libp2p row's a topic or "/<protocol>" (global, not
 //               namespaced; sender "*"; fn required). "session" is for http rows only. `app` is
 //               set by the install. The same key (transport, address, prefix, sender) twice is
-//               refused.
+//               refused. `optional: true` (a row from a `$<provider>` only, #78): left out by the
+//               install when the instance's address book has no such provider (a note in the
+//               prompt), as a genesis leaves out a row from a provider its host has not.
 //   provides[]  {interface: "<name>/<major>", functions: {<fn>: {writes: bool, args?, answer?}}}
 //               — `writes` required; `args`/`answer` shapes: a type name (string, int,
 //               ms, bytes, cid, bool, map, any), [shape], or {key[?]: shape}
@@ -51,7 +53,7 @@
 //   A legacy app also gets the head `<name>` as an alias of `<name>/app` (its SDK reads and
 //   moves the bare name) — a grant too. All of it is for David to review (#77, #79).
 
-export interface RowIn { transport?: "mailbox" | "http" | "libp2p"; address: string; prefix?: boolean; sender: string; program: string; fn?: string; [setting: string]: unknown }
+export interface RowIn { transport?: "mailbox" | "http" | "libp2p"; address: string; prefix?: boolean; sender: string; program: string; fn?: string; optional?: true; [setting: string]: unknown }
 export interface RouteIn { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; [setting: string]: unknown }
 export interface BoxIn { box: string; senders?: string[] }
 export interface FunctionDecl { writes: boolean; args?: unknown; answer?: unknown }
@@ -175,6 +177,8 @@ function rowProblem(app: string, r: unknown, isRole: (role: unknown) => role is 
   if (!isRole(r.program)) return `program ${JSON.stringify(r.program)} is not a role in programs`;
   if (r.fn !== undefined && (typeof r.fn !== "string" || !r.fn)) return "fn is not text";
   if (r.app !== undefined) return "app is set by the install";
+  if (r.optional !== undefined && r.optional !== true) return "optional is true or absent";
+  if (r.optional === true && !(typeof r.sender === "string" && r.sender.startsWith("$") && r.sender !== "$owner")) return "optional is for a row from a $<provider> (left out when the address book has none)";
   return undefined;
 }
 

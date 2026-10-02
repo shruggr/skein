@@ -186,16 +186,27 @@ function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"
   return { sender: keyBytes(s), label: `${s.slice(0, 10)}…` };
 }
 
-/** The rows an app record asks for, resolved against the instance (as the kernel takes them). */
-export function wiring(record: AppRecord, view: InstanceView): RowOp[] {
-  return record.dispatch.map((r: Row) => {
-    const { transport, address, prefix, sender, program, fn, ...settings } = r;
+/**
+ * The rows an app record asks for, resolved against the instance (as the kernel takes them). A row
+ * marked `optional: true` whose sender is a `$<provider>` the instance's address book lacks is left
+ * out (#78: the chain app's `status` row on a host with no status provider), as a genesis leaves out
+ * a row from a provider its host has not; `skipped` says which. `optional` never reaches the kernel.
+ */
+export function wiring(record: AppRecord, view: InstanceView, skipped: string[] = []): RowOp[] {
+  const out: RowOp[] = [];
+  for (const r of record.dispatch as Row[]) {
+    const { transport, address, prefix, sender, program, fn, optional, ...settings } = r;
     const cid = record.programs[program];
     if (!cid) throw new Error(`row ${rowKey(record.name, r)}: no program for role ${program}`);
+    if (optional === true && sender.startsWith("$") && sender !== "$owner" && !view.addressBook.some((x) => x.role === sender.slice(1))) {
+      skipped.push(`${transport} ${rowAddress(record.name, r)} from ${sender}: no ${sender.slice(1)} provider in the address book (optional; left out)`);
+      continue;
+    }
     const who = senderOf(sender, view);
     const row: DispatchRow & { app: string } = { ...settings, transport, address: rowAddress(record.name, r), ...(prefix ? { prefix: true } : {}), sender: who.sender, program: cid, ...(fn ? { fn } : {}), app: record.name };
-    return { op: "add", row, label: who.label, role: program };
-  });
+    out.push({ op: "add", row, label: who.label, role: program });
+  }
+  return out;
 }
 
 /** A row's key as the kernel's table knows it (the resolved row). */
@@ -274,7 +285,9 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   if (before?.record.state) record.state = before.record.state;
   const app = encode(record as never);
 
-  const want = wiring(record, view);
+  const skipped: string[] = [];
+  const want = wiring(record, view, skipped);
+  for (const s of skipped) notes.push(`row ${s}`);
   // No row may take a key the genesis or another app has.
   const taken = new Map<string, string>();
   for (const r of view.dispatch) if ((r as { app?: string }).app !== m.name) taken.set(keyOf(r), (r as { app?: string }).app ? `app ${String((r as { app?: string }).app)}` : "the genesis");

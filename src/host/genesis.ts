@@ -188,6 +188,9 @@ export const STOCK_SCOPES: Record<string, string[]> = {
   messagebox: ["mailbox", "outbound"],
   resolve: ["peers"],
   wallet: ["wallet"],
+  // #78: the chain module (shruggr/skein-chain) wired at boot by a system tree as `bin/chain.wasm`:
+  // its heads are `chain/…`, as an installed chain app's are by the name rule.
+  chain: ["chain/"],
 };
 
 /**

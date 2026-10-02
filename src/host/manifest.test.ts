@@ -213,3 +213,12 @@ test("config.overlay: its problems", () => {
   const w = overlayWiring({ topics: { tm_a: "t" }, status: `03${"cd".repeat(32)}` }, (r) => r === "t" || r === "overlay");
   assert.ok(!Array.isArray(w) && w.rows.find((r) => r.address === "status")!.sender === `03${"cd".repeat(32)}`, "a remote status provider's key");
 });
+
+test("optional rows (#78): only from a $<provider>; kept in the manifest as written", () => {
+  const m = { ...base(), dispatch: [...base().dispatch, { address: "status", sender: "$status", program: "demo", optional: true }] };
+  const c = checkManifest(m, has);
+  assert.deepEqual(c.manifest.dispatch.at(-1), { transport: "mailbox", address: "status", sender: "$status", program: "demo", optional: true });
+  assert.ok(problems({ ...base(), dispatch: [{ address: "demo", sender: "*", program: "demo", optional: true }] }).some((p) => /optional is for a row from a \$<provider>/.test(p)));
+  assert.ok(problems({ ...base(), dispatch: [{ address: "demo", sender: "$owner", program: "demo", optional: true }] }).some((p) => /optional is for a row from a \$<provider>/.test(p)));
+  assert.ok(problems({ ...base(), dispatch: [{ address: "status", sender: "$status", program: "demo", optional: "yes" }] }).some((p) => /optional is true or absent/.test(p)));
+});
