@@ -9,8 +9,10 @@
 //                                  "/<protocol>"; local: a provider's name
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
 //                                  then the longest prefix)
-//          sender: "*" | "session" | bytes(33),
-//                                  "*": anyone (an open route; an event's box); "session": an HTTP
+//          sender: "*" | "event" | "session" | bytes(33),
+//                                  "*": anyone (an open route; an event's box too); "event": events
+//                                  only (#79: the host's wiring — a feed's header, a broadcaster's
+//                                  proof, a route's admit — never a message); "session": an HTTP
 //                                  route that needs a BRC-103/104 session, any identity; a key:
 //                                  that identity — a message's sender, or the session's identity
 //          program: <cid> | "kernel",
@@ -42,7 +44,7 @@ pub const transports = [_][]const u8{ "mailbox", "http", "libp2p", "local" };
 /// The kernel's admin operations, one per table (#77).
 pub const kernel_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
 
-pub const Sender = union(enum) { any, session, key: []const u8 };
+pub const Sender = union(enum) { any, event, session, key: []const u8 };
 
 pub const Row = struct {
     transport: []const u8,
@@ -91,6 +93,7 @@ fn senderOf(v: ?Value) ?Sender {
     const x = v orelse return null;
     if (Value.str(x)) |s| {
         if (std.mem.eql(u8, s, "*")) return .any;
+        if (std.mem.eql(u8, s, "event")) return .event;
         if (std.mem.eql(u8, s, "session")) return .session;
         return null;
     }
@@ -111,8 +114,9 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
         if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
         if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http row has one");
     }
-    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"session\" (http) or an identity key (33 bytes)");
+    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" (http) or an identity key (33 bytes)");
     if (sender == .session and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"session\": only an http row (a BRC-103/104 session)");
+    if (sender == .event and !std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "sender \"event\": only a mailbox row (a box events are admitted into)");
     const prog = v.get("program") orelse return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
     if (Value.str(prog)) |s| {
         if (!std.mem.eql(u8, s, "kernel")) return try std.fmt.allocPrint(a, "program {s}: want a program record's CID, or \"kernel\"", .{try json.quoted(a, s)});
@@ -149,6 +153,7 @@ pub fn rowOf(v: Value) ?Row {
 fn senderEq(x: Sender, y: Sender) bool {
     return switch (x) {
         .any => y == .any,
+        .event => y == .event,
         .session => y == .session,
         .key => |k| y == .key and std.mem.eql(u8, k, y.key),
     };
@@ -228,25 +233,25 @@ pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, v: Value, by: By) !
 }
 
 /// A message's row: the first `mailbox` row whose address is the box (or any
-/// box) and whose sender takes `sender` (anyone, or that key; a `session`
-/// sender takes no message).
+/// box) and whose sender takes `sender` (anyone, or that key; a `session` or
+/// an `event` sender takes no message).
 pub fn forMail(rows: []const Row, sender: []const u8, box: []const u8) ?Row {
     for (rows) |r| {
         if (!std.mem.eql(u8, r.transport, "mailbox")) continue;
         if (!std.mem.eql(u8, r.address, "*") and !std.mem.eql(u8, r.address, box)) continue;
         switch (r.sender) {
             .any => return r,
-            .session => continue,
+            .session, .event => continue,
             .key => |k| if (std.mem.eql(u8, k, sender)) return r,
         }
     }
     return null;
 }
 
-/// An event's row: the first `mailbox` row from anyone whose address is the box (or any box).
+/// An event's row: the first `mailbox` row from `event` or anyone whose address is the box (or any box).
 pub fn forEvent(rows: []const Row, box: []const u8) ?Row {
     for (rows) |r| {
-        if (!std.mem.eql(u8, r.transport, "mailbox") or r.sender != .any) continue;
+        if (!std.mem.eql(u8, r.transport, "mailbox") or (r.sender != .any and r.sender != .event)) continue;
         if (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box)) return r;
     }
     return null;
@@ -291,6 +296,13 @@ test "fold: add replaces by key, remove deletes, first match wins" {
     try std.testing.expect(forMail(rows, &k1, "run") != null);
     try std.testing.expect(forMail(rows, &k2, "run") == null);
     try std.testing.expect(forEvent(rows, "run") == null);
+    // #79: an `event` row takes events, never a message.
+    const r3 = try row(a, "mailbox", "chain", cbor.string("event"), cbor.cidv(cid1), null);
+    try std.testing.expect((try problem(a, r3)) == null);
+    try std.testing.expect((try problem(a, try row(a, "http", "/x", cbor.string("event"), cbor.cidv(cid1), null))) != null);
+    const rows3 = try fold(a, &.{try up(a, "add", r3)});
+    try std.testing.expect(forEvent(rows3, "chain") != null);
+    try std.testing.expect(forMail(rows3, &k1, "chain") == null);
     const rows2 = try fold(a, &.{ try up(a, "add", r2), try up(a, "add", r1) });
     try std.testing.expect(forMail(rows2, &k2, "run").?.program == null);
     try std.testing.expectEqualStrings("objects", forEvent(rows2, "run").?.op.?);

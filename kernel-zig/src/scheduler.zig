@@ -319,6 +319,18 @@ pub const Runtime = struct {
         });
     }
 
+    /// How a message to `to` goes out: its address book entry (`root`); else,
+    /// for the instance's own identity (#79: one app of the instance messaging
+    /// another — the wallet or an overlay asking the chain app), the host's
+    /// loopback: transport `local`, address `self` — the host appends it back
+    /// into this instance as a `local` request, signed by the instance, routed
+    /// like any message (a dispatch row from the instance's own key). Null: no route.
+    fn routeTo(rt: *Runtime, a: std.mem.Allocator, root: ?[]const u8, to: []const u8) !?addressbook.Entry {
+        if (try addressbook.lookup(a, rt.store, root, to)) |e| return e;
+        if (std.mem.eql(u8, to, rt.identity())) return addressbook.Entry{ .key = to, .transport = "local", .address = addressbook.SELF };
+        return null;
+    }
+
     /// Queue an emitted message for the host by its recipient's transport, the
     /// address book as `peers_root` names it (null: as it stands). A `mailbox`
     /// recipient's is the instance's own to deliver (launchDelivery): not handed over.
@@ -327,7 +339,7 @@ pub const Runtime = struct {
         const m = rt.store.getOpt(a, mc) orelse return;
         const to = Value.bytesOf(m.get("recipient")) orelse return;
         const root = peers_root orelse try rt.store.headTree(a, addressbook.HEAD);
-        const e = (try addressbook.lookup(a, rt.store, root, to)) orelse {
+        const e = (try rt.routeTo(a, root, to)) orelse {
             rt.say("message {s}: no route to {s} any more; not sent", .{ short(a, mc), shortKey(to) });
             return;
         };
@@ -360,7 +372,6 @@ pub const Runtime = struct {
         rt.stopped = true;
         rt.live.clearRetainingCapacity();
     }
-
 
     /// The boxes the dispatch table's `mailbox` rows route ("*" aside) plus the genesis's `collect`.
     pub fn boxes(rt: *Runtime, a: std.mem.Allocator) ![]const []const u8 {
@@ -590,7 +601,7 @@ pub const Runtime = struct {
                 continue;
             }
             const to = Value.bytesOf(m.get("recipient")) orelse continue;
-            const e = (try addressbook.lookup(a, rt.store, root, to)) orelse {
+            const e = (try rt.routeTo(a, root, to)) orelse {
                 rt.say("message {s}: no route to {s}; not sent", .{ short(a, mc), shortKey(to) });
                 continue;
             };
@@ -872,20 +883,43 @@ pub const Runtime = struct {
     ///   head      {name, tree | root}: the head advanced to the record (in the store); owner = its name's app
     ///   dispatch  {op: "add" | "remove", row}: the table changed (dispatch.zig; a program row's record
     ///             and module must be in the store)
-    ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?} | {op: "remove", key}:
-    ///             the address book (addressbook.zig write, source "admin")
+    ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?, source?} | {op: "remove", key}:
+    ///             the address book (addressbook.zig write; source "admin", or "resolve" / "claim" as the body says)
+    /// An admin message the instance sent itself (#79: a program of its own,
+    /// admitted by a delegate row from the instance's key — the resolve
+    /// program's `peers`) is answered to the thread awaiting it: it steps with
+    /// `admin: {message, op, done: true}` or `{message, op, error}`, under this entry.
     fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, op: []const u8, mc: []const u8, m: Value, what: []const u8, at: i64) !void {
+        _ = n;
         const body = rt.store.getOpt(a, Value.cidOf(m.get("body")).?) orelse {
             rt.say("{s}: kernel {s}: the body is not in the store; nothing done", .{ what, op });
-            return;
+            return rt.adminDone(a, ctx, mc, m, op, "the body is not in the store");
         };
         const by = heads.By{ .thread = null, .input = ctx.cid, .at = at };
-        _ = mc;
-        _ = n;
         rt.kernelOpBody(a, op, body, by) catch |err| switch (err) {
-            error.Refused => rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error }),
+            error.Refused => {
+                rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error });
+                return rt.adminDone(a, ctx, mc, m, op, last_error);
+            },
             else => return err,
         };
+        return rt.adminDone(a, ctx, mc, m, op, null);
+    }
+
+    /// The answer to an admin message the instance sent itself (kernelOp): the threads awaiting it step.
+    fn adminDone(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, mc: []const u8, m: Value, op: []const u8, err: ?[]const u8) !void {
+        if (!std.mem.eql(u8, Value.bytesOf(m.get("sender")).?, rt.identity())) return;
+        for (try rt.store.awaiting(a, mc)) |t| {
+            const tip = rt.tipOf(a, t) catch null orelse continue;
+            if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), mc)) continue;
+            var info = cbor.MapBuilder.init(a);
+            try info.put("message", cbor.cidv(mc));
+            try info.put("op", cbor.string(op));
+            if (err) |e| try info.put("error", cbor.string(e)) else try info.put("done", .{ .bool = true });
+            rt.say("kernel {s}: answered to {s}", .{ op, short(a, t) });
+            rt.step_extra = .{ .key = "admin", .value = info.value() };
+            try rt.step(a, t, ctx, null, null);
+        }
     }
 
     fn refuse(a: std.mem.Allocator, comptime f: []const u8, args: anytype) error{ Refused, OutOfMemory } {
@@ -954,7 +988,10 @@ pub const Runtime = struct {
             if (!logm.isTransport(transport)) return refuse(a, "transport is mailbox, libp2p or local", .{});
             const address = Value.str(body.get("address")) orelse Value.str(body.get("url")) orelse return refuse(a, "add wants an address (a mailbox's url, a peer ID or topic:<name>, a provider's name)", .{});
             if (address.len == 0) return refuse(a, "add wants an address", .{});
-            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), "admin", by);
+            // #79: a delegate's lookup (the resolve program's, by RESOLVE_DELEGATE) says where the entry came from.
+            const src = Value.str(body.get("source")) orelse "admin";
+            if (!std.mem.eql(u8, src, "admin") and !std.mem.eql(u8, src, "resolve") and !std.mem.eql(u8, src, "claim")) return refuse(a, "source is admin, resolve or claim", .{});
+            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), src, by);
             rt.say("kernel peers: add {s} by {s} {s}", .{ shortKey(key), transport, address });
             return;
         }
@@ -1568,9 +1605,8 @@ pub const Runtime = struct {
     }
     /// `advance` (#77): only a head in the running program's write scope. An app's program (its
     /// record's `app`) writes `<app>/…`; a genesis-wired program writes what the genesis's `scopes`
-    /// list under its name (an exact name, or a prefix ending in `/`); a program record may also
-    /// list `heads` it may write (a transitional grant the install writes for an app built before
-    /// its heads moved under its name, to review). Nothing else.
+    /// list under its name (an exact name, or a prefix ending in `/`). Nothing else (#79: the
+    /// transitional `heads` grants on program records are gone).
     fn hAdvance(imp: *program.Imports, name: []const u8, t: []const u8) program.Err!void {
         const st = stepOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("advance: bad head name {s}", .{try json.quoted(st.a, name)});
@@ -1596,7 +1632,6 @@ pub const Runtime = struct {
         } else if (genesis) |g| if (g.get("scopes")) |sc| if (sc == .map) if (Value.str(prog.get("name"))) |pname| if (sc.get(pname)) |list| if (list == .array) {
             for (list.array) |e| if (Value.str(e)) |s| if (scopeMatch(s, name)) return true;
         };
-        if (prog.get("heads")) |hs| if (hs == .array) for (hs.array) |h| if (Value.str(h)) |s| if (scopeMatch(s, name)) return true;
         return false;
     }
     fn hWallet(imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
@@ -1664,7 +1699,7 @@ pub const Runtime = struct {
     /// The address book as this step sees it (its own `peers` moves included): `key`'s entry.
     fn peersLookup(st: *StepState, imp: *program.Imports, key: []const u8) program.Err!?addressbook.Entry {
         const root = (try hHead(imp, addressbook.HEAD));
-        return addressbook.lookup(st.a, st.rt.store, root, key) catch imp.failWith("emit: the address book cannot be read");
+        return st.rt.routeTo(st.a, root, key) catch imp.failWith("emit: the address book cannot be read");
     }
 
     /// Sign, put and list one message from this instance (#70): {kind: "mail",

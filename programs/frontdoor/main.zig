@@ -369,20 +369,6 @@ fn isPrefix(r: Value) bool {
     return p == .bool and p.bool;
 }
 
-/// The row as a handler built before #77 reads it (skein-static 0.1.0, the
-/// pinned overlay): the row, plus the pre-#77 route keys — `path: <address>`
-/// for an exact row, `prefix: <address>` (text) for a prefix row, `path:
-/// "libp2p:<address>"` for a libp2p row. A handler on skein-sdk >= 0.3.0
-/// reads `address`; the old keys go with #79 (to review).
-pub fn legacyMatch(a: Allocator, r: Value) !Value {
-    const addr = Value.str(r.get("address")) orelse return r;
-    var m = cbor.MapBuilder.init(a);
-    for (r.map) |e| if (!eql(u8, e.key, "prefix") or !isPrefix(r)) try m.put(e.key, e.value);
-    const t = Value.str(r.get("transport")) orelse "";
-    if (eql(u8, t, "libp2p")) try m.put("path", cbor.string(try std.fmt.allocPrint(a, "libp2p:{s}", .{addr}))) else if (isPrefix(r)) try m.put("prefix", cbor.string(addr)) else try m.put("path", cbor.string(addr));
-    return m.value();
-}
-
 fn mayRead(in: Value, caller: []const u8, op: []const u8) bool {
     const rs = in.get("reads") orelse return false;
     if (rs != .array) return false;
@@ -408,7 +394,7 @@ fn invoke(a: Allocator, in: Value, r: Value, rc: []const u8, req: Value, v: ?Ver
     try h.put("contentType", cbor.string(std.mem.trim(u8, ct[0 .. std.mem.indexOfScalar(u8, ct, ';') orelse ct.len], " ")));
     if (v) |x| try h.put("session", x.proof);
     // #52: the dispatch row that matched (a handler's own settings: static's root, index; the install's app).
-    try h.put("match", try legacyMatch(a, r));
+    try h.put("match", r);
     try h.put("request", cbor.cidv(rc));
     for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     return sk.callValue(a, prog, func, h.value());

@@ -13,7 +13,10 @@
 // match wins, in table order.
 //
 //   row  {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
-//         sender: "*" | "session" | bytes(33), program: <cid> | "kernel", fn?, …settings}
+//         sender: "*" | "event" | "session" | bytes(33), program: <cid> | "kernel", fn?, …settings}
+//
+//   sender "event" (#79): the row takes events only (a feed's header, a broadcaster's proof, a route's
+//   admit), never a message — the host's wiring into a box, not an open box.
 //
 // The kernel writes the chain (kernel-zig/src/dispatch.zig): the genesis's
 // `dispatch` as its first updates (no `thread`), then a change whenever its
@@ -29,7 +32,7 @@ import type { Ms } from "./types.ts";
 export type DispatchOrigin = { kind: "dispatch" };
 export type Op = "add" | "remove";
 export type Transport = "mailbox" | "http" | "libp2p" | "local";
-export type Sender = "*" | "session" | Uint8Array;
+export type Sender = "*" | "event" | "session" | Uint8Array;
 /** A row as the kernel holds it; `program` a program record's CID, or "kernel" (an admin operation named by `fn`). */
 export type DispatchRow = { transport: Transport; address: string; prefix?: boolean; sender: Sender; program: CID | "kernel"; fn?: string; [setting: string]: unknown };
 export type DispatchUpdate = { op: Op; row: DispatchRow; origin: CID; prev: CID; seq: number; thread?: CID; input: CID; at: Ms };
@@ -43,7 +46,7 @@ export const dispatchOrigin = (): CID => encode(ORIGIN).cid;
 export const senderText = (s: Sender | undefined): string => s === undefined ? "*" : typeof s === "string" ? s : Buffer.from(s).toString("hex");
 
 /** A sender as the kernel's row carries it: `*`, `session`, or the key's 33 bytes (hex text from the reader turned back). */
-export const senderBytes = (s: Sender | string): Sender => typeof s === "string" && /^0[23][0-9a-f]{64}$/.test(s) ? Uint8Array.from(Buffer.from(s, "hex")) : s;
+export const senderBytes = (s: Sender | string): Sender => typeof s === "string" && /^0[23][0-9a-f]{64}$/.test(s) ? Uint8Array.from(Buffer.from(s, "hex")) : s as Sender;
 
 /** A row's key: (transport, address, prefix, sender). */
 export const rowKey = (r: { transport: string; address: string; prefix?: boolean; sender?: Sender }): string => `${r.transport} ${r.address}${r.prefix ? "*" : ""} ${senderText(r.sender)}`;
@@ -78,12 +81,12 @@ export async function currentDispatch(store: Store): Promise<DispatchRow[] | und
 export function takesMail(r: DispatchRow, sender: string, box: string): boolean {
   if (r.transport !== "mailbox" || (r.address !== "*" && r.address !== box)) return false;
   if (r.sender === "*") return true;
-  if (r.sender === "session") return false;
+  if (r.sender === "session" || r.sender === "event") return false;
   return senderText(r.sender) === sender;
 }
 
 /** Whether a mailbox row takes an event (no sender) in `box` (dispatch.zig forEvent). */
-export const takesEvent = (r: DispatchRow, box: string): boolean => r.transport === "mailbox" && r.sender === "*" && (r.address === "*" || r.address === box);
+export const takesEvent = (r: DispatchRow, box: string): boolean => r.transport === "mailbox" && (r.sender === "*" || r.sender === "event") && (r.address === "*" || r.address === box);
 
 /** The first row a message from `sender` (hex) in `box` routes to, with its index, or undefined. */
 export function forMail(rows: DispatchRow[], sender: string, box: string): { i: number; row: DispatchRow } | undefined {

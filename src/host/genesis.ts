@@ -12,7 +12,7 @@
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
 //             addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
 //   row      {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
-//             sender: "*" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+//             sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 //            (`dispatch`, #77: the seed of the kernel's dispatch table, docs/MESSAGES.md "The dispatch
 //            table" — the admin rows (boxes objects, head, dispatch, peers → the kernel, from the owner),
 //            the boxes programs take (a subscription of old), the HTTP paths and libp2p topics and
@@ -129,8 +129,10 @@ export interface SubscriptionSpec { sender?: string; box?: string; handler: stri
  * A dispatch row as a system writes it (etc/dispatch.json, #77): `transport`
  * defaults to `mailbox`; `address` a box (`*`: any box), an HTTP path (with
  * `prefix: true` for a prefix), a libp2p topic or `/<protocol>`; `sender`
- * `*` (default), `session` (an HTTP row needing a BRC-103/104 session), a key
- * in hex, `$owner`, `$infer` or a provider's `$<name>`; `program` a program
+ * `*` (default), `event` (#79: events only — the host's wiring, never a
+ * message), `session` (an HTTP row needing a BRC-103/104 session), a key
+ * in hex, `$owner`, `$self` (#79: the instance's own identity — another of
+ * its programs, by the host's loopback), `$infer` or a provider's `$<name>`; `program` a program
  * name (bin/<name>, `shell`), a program record's CID, or `kernel` (an admin
  * row: `fn` the operation — objects, head, dispatch, peers); `fn` a handler's
  * function; anything else a handler's own setting (static's `root`, `index`;
@@ -150,6 +152,17 @@ export const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
 export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, sender: "$owner", program: "kernel", fn: op }));
 
 /**
+ * The delegate row the stock system adds where the resolve program is wired
+ * (#79): the instance's own identity may send the kernel's `peers` operation —
+ * how a BRC-169 lookup's result enters the address book now that no program
+ * writes a kernel table (resolve emits `{op: "add", key, …, source: "resolve"}`
+ * to the instance itself and awaits the kernel's answer). Any program of the
+ * instance can emit as the instance, so this row lets every one of them write
+ * the address book (not the other tables): for David to review.
+ */
+export const RESOLVE_DELEGATE: DispatchSpec = { address: "peers", sender: "$self", program: "kernel", fn: "peers" };
+
+/**
  * The stock seed (#77), after the admin rows: the owner's `run` and `chat`;
  * `chat` from anyone; the reserved box the host admits into, `:ack` (the
  * messagebox moves a reader's pointer); and the stock HTTP rows (STOCK_HTTP).
@@ -164,6 +177,9 @@ export const STOCK_DISPATCH: DispatchSpec[] = [
   { address: "chat", sender: "$owner", program: "loop" },
   { address: "chat", program: "loop" },
   { address: ":ack", program: "messagebox" },
+  // #79: the resolve program records a resolved handle through the kernel's `peers` operation — a
+  // message the instance sends itself, admitted by this delegate row (only where resolve is wired).
+  RESOLVE_DELEGATE,
 ];
 
 /**
@@ -179,15 +195,15 @@ export const MAILBOX_DISPATCH: DispatchSpec[] = [
 /**
  * The write scopes of the stock genesis-wired programs (#77): the heads each
  * may advance, by program name. The front door's sessions; the messagebox's
- * lists and outbound sessions; the wallet's state; and, transitional (to
- * review), the resolve program's writes into the address book (a resolved
- * handle's record) — the kernel's `peers` operation is the admin path.
+ * lists and outbound sessions; the wallet's records (#79: `wallet/…`, its
+ * coins, actions, drafts and outputs — the chain is the chain app's). The
+ * resolve program writes no head (#79: a resolved handle goes into the
+ * address book through the kernel's `peers` operation, RESOLVE_DELEGATE).
  */
 export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
   messagebox: ["mailbox", "outbound"],
-  resolve: ["peers"],
-  wallet: ["wallet"],
+  wallet: ["wallet/"],
   // #78: the chain module (shruggr/skein-chain) wired at boot by a system tree as `bin/chain.wasm`:
   // its heads are `chain/…`, as an installed chain app's are by the name rule.
   chain: ["chain/"],
@@ -295,9 +311,13 @@ export function libp2pIn(spec: Libp2pSpec | undefined, routes: RouteSpec[]): { l
   return { libp2p: { topics, protocols: Object.keys(ps), ...(listen.length ? { listen } : {}) }, routes: out };
 }
 
-/** A key as a system writes it: hex, or `$owner` / `$infer` (the host's), or a provider's `$<name>` (Genesis2Config.providers). */
-export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer" | "providers">): Uint8Array {
+/** A key as a system writes it: hex, or `$owner` / `$self` / `$infer` (the host's), or a provider's `$<name>` (Genesis2Config.providers). */
+export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer" | "providers"> & { identity?: string }): Uint8Array {
   if (s === "$owner") return keyBytes(c.owner);
+  if (s === "$self") {
+    if (!c.identity) throw new Error("$self: no instance identity here");
+    return keyBytes(c.identity);
+  }
   if (s === "$infer") {
     if (!c.infer) throw new Error("the system names $infer, and this host has no inference peer (SKEIN_INFER)");
     return keyBytes(c.infer);
@@ -316,10 +336,11 @@ export class NoProvider extends Error {
   constructor(provider: string) { super(`no provider ${provider} on this host`); this.provider = provider; }
 }
 
-/** A row's sender resolved (`*` anyone, `session`, a key), or null when it names a provider this host has not (left out, with a warning). */
+/** A row's sender resolved (`*` anyone, `event`, `session`, a key), or null when it names a provider this host has not (left out, with a warning). */
 function senderOf(sender: string | undefined, c: Genesis2Config): Sender | null {
   if (!sender || sender === "*") return "*";
   if (sender === "session") return "session";
+  if (sender === "event") return "event";
   try { return keyOf(sender, c); } catch (e) {
     if (!(e instanceof NoProvider)) throw e;
     c.warn?.(`a dispatch row from ${sender} is left out: this host has no such provider`);
@@ -473,7 +494,7 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
     const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined, subscriptions: undefined, dispatch: undefined }, mine, [], { peers: {}, names: [] }, undefined, STOCK_HTTP, STOCK_READS, MAILBOX_DISPATCH);
     return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
   }
-  const specs = STOCK_DISPATCH.filter((s) => (s.address !== "chat" || s.sender || c.openChat !== false) && programs[s.program]);
+  const specs = STOCK_DISPATCH.filter((s) => (s.address !== "chat" || s.sender || c.openChat !== false) && (s === RESOLVE_DELEGATE ? programs.resolve : programs[s.program]));
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
   return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, [], {}, undefined, c.routes ?? STOCK_HTTP, c.reads ?? STOCK_READS, specs), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }

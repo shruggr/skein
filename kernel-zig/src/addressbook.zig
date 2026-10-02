@@ -15,10 +15,10 @@
 // finds a provider (`deadline` finds the waker). One of the kernel's four
 // tables (#77): written by the genesis (`addressBook`: the host's providers,
 // the owner's mailbox; source "genesis") and by the kernel's `peers`
-// operation on an admin message (source "admin"; `write` below). The resolve
-// program still writes a resolved handle's record itself (source "resolve" /
-// "claim": a transitional grant in the genesis's `scopes`, to review); the
-// kernel reads it for `emit`.
+// operation on an admin message (source "admin"; `write` below) — including a
+// resolved handle's record, which the resolve program sends the kernel as the
+// instance itself (#79: a delegate row from the instance's key; source
+// "resolve" / "claim"). No program writes it. The kernel reads it for `emit`.
 const std = @import("std");
 const cbor = @import("cbor");
 const heads = @import("heads.zig");
@@ -27,6 +27,10 @@ const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
 pub const HEAD = "peers";
+
+/// The address of the host's loopback (#79): a message to the instance's own
+/// identity, with no entry of its own, goes out as transport `local` to `self`.
+pub const SELF = "self";
 
 pub const Entry = struct { key: []const u8, transport: []const u8, address: []const u8, role: ?[]const u8 = null };
 

@@ -4,7 +4,11 @@
 // serve frame `emit`: {message, body, transport, address}) and this module
 // delivers it by the address book's transport:
 //
-//   local    the provider named `address` on this host — handed over directly
+//   local    the provider named `address` on this host — handed over directly;
+//            `self` (#79): a message the instance sent itself (one of its apps to
+//            another: the wallet or an overlay to the chain app, resolve to the
+//            kernel's `peers` operation) — appended back into the same instance
+//            as a `local` request, as it is (signed by the instance)
 //   libp2p   the instance's libp2p node: `topic:<name>` publishes the
 //            package, a peer ID gets it as one frame on /skein/message/1.0.0;
 //            the libp2p provider answers {replyTo, seqno, recipients} | {replyTo, sent: true}
@@ -187,6 +191,12 @@ export class Providers {
   private async carry(handle: string, id: CID, out: Outgoing): Promise<void> {
     if (out.transport === "libp2p") return await this.libp2pRecipient(handle, id, out);
     if (out.transport !== "local") throw new Error(`no transport ${out.transport} here`);
+    // #79: the loopback — the instance's message to itself, appended back as it is (its front door checks it).
+    if (out.address === "self") {
+      if (hex(out.message.sender) !== hex(out.message.recipient)) throw new Error("a loopback message is the instance's to itself");
+      await this.o.append(handle, { kind: "message", message: out.message, body: out.body });
+      return;
+    }
     const name = out.address as ProviderName;
     if (!PROVIDERS.includes(name)) throw new Error(`no provider ${out.address} on this host`);
     if (hex(out.message.recipient) !== this.key(name)) throw new Error(`the message is not for the ${name} provider`);

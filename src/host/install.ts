@@ -1,4 +1,4 @@
-// Installing an app (#72, #76, #77; docs/APPS.md §3): the owner's client. An
+// Installing an app (#72, #76, #77, #79; docs/APPS.md §3): the owner's client. An
 // app is a tree (a directory or a git repository) with etc/app.json;
 // installing it into an instance is owner-signed messages to the kernel's
 // admin boxes — the kernel's own operations on its four tables — nothing else:
@@ -8,11 +8,11 @@
 //                 — ≤ 1 MiB bundles; no bundle names a root (an app never
 //                 becomes `main`)
 //   2. head       {name: "<app>/app", tree: <the app record>}: the app's root head, under its
-//                 own name (owner = the app). A manifest in the form before #77 (its SDK reads
-//                 and moves the bare name) gets the alias {name: "<app>", tree} too.
+//                 own name (owner = the app).
 //   3. dispatch   one per row the manifest asks for (#77): {op: "add", row: {transport, address,
 //                 prefix?, sender, program: <the role's program record>, fn?, …settings, app}} —
-//                 the sender "*" (anyone), "session", "$owner" → the owner's key, "$<provider>"
+//                 the sender "*" (anyone), "event" (events only), "session", "$owner" → the
+//                 owner's key, "$self" → the instance's own (#79: its other apps), "$<provider>"
 //                 → the key the instance's address book gives that role, a hex key itself; an
 //                 http address under /<app>/, a libp2p topic or protocol as written.
 //   4. start      the manifest's `start.body`, into the app's box
@@ -22,7 +22,6 @@
 //
 //   {kind: "app", name, version, programs: {<role>: <program record CID>},
 //    config?, provides, requires, dispatch: [<row as the manifest wrote it: relative addresses, roles>],
-//    grants?: [<head names outside <app>/ the app may write: transitional, #77>], legacy?: true,
 //    start?, stop?, description?, tree: <the app's git tree>, state?: <the app's own state>}
 //
 // `state` is the app's: its handler advances the head to the record with
@@ -31,12 +30,9 @@
 // the new one does not, and sends `start` again (the restart). Uninstall:
 // `stop`, then every row removed; the heads are left.
 //
-// **Write scope** (#77): an app's programs write only heads under `<app>/`
-// (the kernel's rule, by the program record's `app`). The grants — a legacy
-// manifest's `heads`, the bare alias `<app>`, and what `config.overlay`
-// implies while the pinned engine writes `wallet`, `overlay:gossip` and
-// `ls:<service>` (until #79) — go on each program record as `heads`, which
-// the kernel honours as a transitional allowance. For David to review.
+// **Write scope** (#77, #79): an app's programs write only heads under
+// `<app>/` (the kernel's rule, by the program record's `app`). There are no
+// grants, no alias head, no form before #77.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
@@ -101,8 +97,9 @@ export function fetchApp(spec: string): string {
 /** What the install reads of the instance (its store, read only). */
 export interface InstanceView {
   store: Store;
-  /** The genesis owner (hex) and programs (name → program record). */
+  /** The genesis owner and the instance's identity (hex), and programs (name → program record). */
   owner: string;
+  identity: string;
   programs: Record<string, CID>;
   addressBook: AddressEntry[];
   /** Every head and its root (the store's index). */
@@ -123,6 +120,7 @@ export async function instanceView(store: Store): Promise<InstanceView> {
   return {
     store,
     owner: String(g.owner),
+    identity: g.identity instanceof Uint8Array ? Buffer.from(g.identity).toString("hex") : String(g.identity),
     programs: (g.programs ?? {}) as Record<string, CID>,
     addressBook: await addressBook(store),
     heads,
@@ -149,7 +147,7 @@ export type AppRecord = Omit<Checked["manifest"], "programs"> & { programs: Reco
 
 /** A dispatch change the install sends: the row as the kernel takes it (sender resolved, program a CID, address as served, `app`), and how to show it. */
 export interface RowOp { op: "add" | "remove"; row: DispatchRow & { app: string }; label: string; role?: string }
-export interface HeadOp { name: string; tree: CID; alias?: boolean }
+export interface HeadOp { name: string; tree: CID }
 
 /** What an install sends, in order, and what it shows. */
 export interface Plan {
@@ -166,7 +164,6 @@ export interface Plan {
   upgrade?: string;
   /** For the prompt only. */
   requires: string[];
-  grants: string[];
   publishes: string[];
   /** What `config.overlay` added (APPS.md §6). */
   derived: Derived;
@@ -177,7 +174,9 @@ export interface Plan {
 function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"]; label: string } {
   if (s === "*") return { sender: "*", label: "anyone" };
   if (s === "session") return { sender: "session", label: "a session" };
+  if (s === "event") return { sender: "event", label: "events" };
   if (s === "$owner") return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
+  if (s === "$self") return { sender: keyBytes(view.identity), label: `the instance itself (${view.identity.slice(0, 10)}…)` };
   if (s.startsWith("$")) {
     const e = view.addressBook.find((x) => x.role === s.slice(1));
     if (!e) throw new Error(`sender ${s}: the instance's address book has no ${s.slice(1)} provider (an entry with role "${s.slice(1)}")`);
@@ -198,7 +197,7 @@ export function wiring(record: AppRecord, view: InstanceView, skipped: string[] 
     const { transport, address, prefix, sender, program, fn, optional, ...settings } = r;
     const cid = record.programs[program];
     if (!cid) throw new Error(`row ${rowKey(record.name, r)}: no program for role ${program}`);
-    if (optional === true && sender.startsWith("$") && sender !== "$owner" && !view.addressBook.some((x) => x.role === sender.slice(1))) {
+    if (optional === true && sender.startsWith("$") && sender !== "$owner" && sender !== "$self" && !view.addressBook.some((x) => x.role === sender.slice(1))) {
       skipped.push(`${transport} ${rowAddress(record.name, r)} from ${sender}: no ${sender.slice(1)} provider in the address book (optional; left out)`);
       continue;
     }
@@ -218,7 +217,6 @@ const showRow = (r: RowOp) => `${r.row.transport} ${r.row.address}${r.row.prefix
 async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promise<{ programs: Record<string, CID>; records: Rec[] }> {
   const programs: Record<string, CID> = {};
   const records: Rec[] = [];
-  const grants = t.checked.manifest.grants;
   for (const [role, src] of Object.entries(t.checked.sources)) {
     if (src.kind === "instance") {
       const p = view.programs[src.name];
@@ -244,9 +242,8 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
     }
     const metaPath = join(t.dir, "bin", `${src.name}.json`);
     const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) as { inputs?: unknown; services?: string[]; description?: string } : {};
-    // `app`: the program knows its app (its heads under `<app>/`) from its own record (APPS.md §2);
-    // `heads`: the transitional grants (#77), honoured by the kernel's write-scope check.
-    const b = encode({ ...programRecord(src.name, module, meta), app: t.checked.manifest.name, ...(grants.length ? { heads: grants } : {}) });
+    // `app`: the program knows its app (its heads under `<app>/`) from its own record (APPS.md §2).
+    const b = encode({ ...programRecord(src.name, module, meta), app: t.checked.manifest.name });
     programs[role] = b.cid;
     records.push({ cid: b.cid, bytes: b.bytes });
   }
@@ -269,17 +266,10 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   // The name is identity (#77): its root head is an app record or nothing.
   const before = await appRecordOf(view.store, m.name);
   if (!before && view.heads.some((h) => h.name === appHead(m.name))) throw new Error(`head ${appHead(m.name)} exists and its root is not an app record: another use of the name`);
-  for (const g of m.grants) {
-    if (g === m.name) continue;
-    if (g === "main") notes.push("grant main: the shell's file system — the app asks to write it");
-    else notes.push(`grant ${g}: a head outside ${m.name}/ the app writes (transitional, #77)`);
-  }
   const { programs, records: progRecords } = await programsOf(t, view, o.modules);
   const { programs: _paths, ...rest } = m;
   void _paths;
   const record: AppRecord = JSON.parse(JSON.stringify({ ...rest, programs: {}, tree: null })) as AppRecord;
-  if (!record.grants.length) delete (record as { grants?: string[] }).grants;
-  if (!record.legacy) delete (record as { legacy?: boolean }).legacy;
   record.programs = programs;
   record.tree = t.root;
   if (before?.record.state) record.state = before.record.state;
@@ -321,12 +311,12 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
     seen.add(k);
     if (!(await view.store.has(r.cid))) all.push(r);
   }
-  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }, ...(m.legacy ? [{ name: m.name, tree: app.cid, alias: true }] : [])];
+  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }];
   const publishes = gossipOf(m.config);
   return {
     app: m.name, version: m.version, record, recordCid: app.cid, records: all, heads,
     rows: sendRows, ...(m.start ? { start: m.start.body } : {}),
-    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, grants: m.grants, publishes, derived: t.checked.derived, notes,
+    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, publishes, derived: t.checked.derived, notes,
   };
 }
 
@@ -343,10 +333,9 @@ function gossipOf(config: Record<string, unknown> | undefined): string[] {
 export function describe(p: Plan, record = p.record): string[] {
   const out: string[] = [];
   out.push(`${p.upgrade ? "upgrade" : "install"} ${p.app} ${p.version}${p.upgrade ? ` (installed: ${p.upgrade})` : ""}${record.description ? ` — ${record.description}` : ""}`);
-  const d = p.derived ?? { rows: [], grants: [] };
+  const d = p.derived ?? { rows: [] };
   const from = (yes: boolean) => (yes ? " (derived: config.overlay)" : "");
-  for (const h of p.heads) out.push(`  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})${h.alias ? " (alias: a manifest in the form before #77)" : ""}`);
-  if (p.grants.length) out.push(`  grants    ${p.grants.join(", ")} (heads outside ${p.app}/ the app may write: transitional, #77)${from(d.grants.some((g) => p.grants.includes(g)))}`);
+  for (const h of p.heads) out.push(`  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})`);
   const keyed = (r: Row) => rowKey(record.name, r);
   for (const r of record.dispatch) {
     const who = r.sender === "*" ? "anyone" : r.sender;

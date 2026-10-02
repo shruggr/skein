@@ -25,13 +25,13 @@ pub const modules = [_]Module{
     .{ .name = "run-handler", .cid = "bafkreicd63a4ffjozgou3axes5p5tymfoi72ne2dpeqnhij33uqgvpdyle" },
     .{ .name = "loop", .cid = "bafkreihbfmv6az4esnmf7wk5lmljvjzvt5f5xtef2b2asrtbam53bclmgy" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreib4oifx2cc7s3u6y44higdtlbov2j6aahrprrhwghyygxpc7x7krq" },
+    .{ .name = "wallet", .cid = "bafkreicpy5jpjaybnxzjg2zbyfgmxfixjhvgwmsc74mmmerrelbuqvmmca" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreif55a4bpzojvvdi7i2ezexjvvimdbikjawvgr4wj4gu2riw32avqa" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreihhfgpg24tm5bxbsr2pyy64sbvi55tvlokakosinewokuvxlfiyla" },
+    .{ .name = "frontdoor", .cid = "bafkreifz27lievgnxzxxo6nwsrmlnjmkhiqcqti5dila62rkqfuu3sazka" },
     // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
-    .{ .name = "resolve", .cid = "bafkreicx5n7iespjs2nhixdrrjzxtwl5ssaresvhi7ywfh7sp3ruh3s62u" },
+    .{ .name = "resolve", .cid = "bafkreif6c3licjxn6jnt4fy7olssr365wi6p25otkbqpj37l4k27ekrl34" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },

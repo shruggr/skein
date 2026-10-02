@@ -1,4 +1,4 @@
-// The app manifest (#72, #76, #77; docs/APPS.md §2): `etc/app.json` in an
+// The app manifest (#72, #76, #77, #79; docs/APPS.md §2): `etc/app.json` in an
 // app's tree, checked and normalised here for the install client (install.ts,
 // `skein-host install`). Pure: the tree is asked only whether a path exists.
 //
@@ -15,14 +15,17 @@
 //               "shell")
 //   dispatch[]  the rows the app asks for (#77; the kernel's dispatch table, docs/MESSAGES.md):
 //               {transport?: "mailbox" (default) | "http" | "libp2p", address, prefix?: true,
-//                sender: "*" | "session" | "$owner" | "$<provider>" | <key hex>, program: <role>,
+//                sender: "*" | "event" | "session" | "$owner" | "$self" | "$<provider>" | <key hex>, program: <role>,
 //                fn?, …settings}. A mailbox row's address is a box (the app's own name, or a
 //               protocol box); an http row's a path relative to /<name>/ (a leading "/" too:
 //               "/submit" → "/<name>/submit", "/" → "/<name>/"; a ".." or "." segment, an
 //               encoded dot or slash (%2e, %2f), a backslash, a NUL or a URL is refused: no row
 //               reaches outside the app's prefix), with `prefix: true` for a prefix and `fn`
 //               the handler's function; a libp2p row's a topic or "/<protocol>" (global, not
-//               namespaced; sender "*"; fn required). "session" is for http rows only. `app` is
+//               namespaced; sender "*"; fn required). "session" is for http rows only; "event"
+//               (#79) for mailbox rows only: the box takes events (the host's wiring, a route's
+//               admit), never a message; "$self" is the instance's own identity (another of its
+//               apps, by the host's loopback: an overlay's own watch, the chain app's callers). `app` is
 //               set by the install. The same key (transport, address, prefix, sender) twice is
 //               refused. `optional: true` (a row from a `$<provider>` only, #78): left out by the
 //               install when the instance's address book has no such provider (a note in the
@@ -34,28 +37,14 @@
 //   start, stop {body: {…}}; `start` needs a row admitting the owner (or anyone) to the app's box
 //   config      a map (the programs read it from the head's root record)
 //   config.overlay   an overlay app (APPS.md §6): {topics: {<topic>: <role>}, lookups:
-//               {<service>: <role> | {program: <role>, topics?: [<topic>]}}, status?:
-//               "$<provider>" | <key hex>, gossip?: {<topic>: bool}}; the engine is the
-//               role `overlay`. Its wiring is derived (overlayWiring) and added to the rows the
-//               manifest names itself — an explicit row with the same key wins — and, while the
-//               pinned engine (skein-overlay 0.2.0) still writes `wallet`, `overlay:gossip` and
-//               `ls:<service>`, those heads are transitional grants (below).
+//               {<service>: <role> | {program: <role>, topics?: [<topic>]}}, gossip?: {<topic>:
+//               bool}}; the engine is the role `overlay`. Its wiring is derived (overlayWiring) and
+//               added to the rows the manifest names itself — an explicit row with the same key wins.
 //
-//   The form before #77 (an app built on skein-sdk < 0.3.0: shruggr/skein-static,
-//   shruggr/skein-overlay 0.2.0) is still read and converted — `legacy` in the result:
-//   handler     a role, or {<box>: <role>}; every requested box has one
-//   boxes[]     a name, or {box, senders: [...]}: one mailbox row per sender (a bare name: the owner)
-//   routes[]    {path | prefix, program, fn, auth?: "none", read?, …settings}: an http row
-//               (sender "*" when auth is "none", else "session") or, for a `libp2p:` path, a
-//               libp2p row
-//   heads[]     the heads the app writes outside its own name: transitional grants (`ls:*`
-//               expands to config.overlay's lookup services; `peers`, `sessions`, `routes` refused)
-//   A legacy app also gets the head `<name>` as an alias of `<name>/app` (its SDK reads and
-//   moves the bare name) — a grant too. All of it is for David to review (#77, #79).
+//   The form before #77 (`handler`, `boxes`, `routes`, `heads`) is refused (#79): an app names
+//   dispatch rows, and writes only heads under its own name.
 
 export interface RowIn { transport?: "mailbox" | "http" | "libp2p"; address: string; prefix?: boolean; sender: string; program: string; fn?: string; optional?: true; [setting: string]: unknown }
-export interface RouteIn { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; [setting: string]: unknown }
-export interface BoxIn { box: string; senders?: string[] }
 export interface FunctionDecl { writes: boolean; args?: unknown; answer?: unknown }
 export interface Provide { interface: string; functions: Record<string, FunctionDecl> }
 
@@ -71,11 +60,6 @@ export interface Manifest {
   start?: { body: Record<string, unknown> };
   stop?: { body: Record<string, unknown> };
   description?: string;
-  /** The form before #77, converted. */
-  handler?: string | Record<string, string>;
-  boxes?: Array<string | BoxIn>;
-  routes?: RouteIn[];
-  heads?: string[];
 }
 
 /** Where a role's program comes from. */
@@ -86,9 +70,9 @@ export type Row = RowIn & { transport: "mailbox" | "http" | "libp2p" };
 
 /** A manifest checked: the fields as installed. */
 export interface Checked {
-  manifest: Omit<Manifest, "dispatch" | "handler" | "boxes" | "routes" | "heads"> & { dispatch: Row[]; provides: Provide[]; requires: string[]; grants: string[]; legacy: boolean };
+  manifest: Omit<Manifest, "dispatch"> & { dispatch: Row[]; provides: Provide[]; requires: string[] };
   sources: Record<string, ProgramSource>;
-  /** What `config.overlay` added (APPS.md §6): row keys (rowKey) and grants. */
+  /** What `config.overlay` added (APPS.md §6): row keys (rowKey). */
   derived: Derived;
 }
 
@@ -98,8 +82,8 @@ export class ManifestError extends Error {
 }
 
 export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "subscribe", "routes", "main", "sessions", "run", "chat", "wallet", "kernel", "frontdoor", "messagebox", "resolve", "shell"];
-/** Heads a legacy manifest may not ask for: the kernel's and the front door's own. */
-export const RESERVED_HEADS = ["peers", "sessions", "routes", "frontdoor/sessions"];
+/** The fields of the form before #77, refused (#79). */
+const LEGACY_FIELDS = ["handler", "boxes", "routes", "heads"];
 const NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const INTERFACE = /^[a-z0-9][a-z0-9._-]*\/\d+$/;
@@ -108,7 +92,7 @@ const TYPES = ["string", "int", "ms", "bytes", "cid", "bool", "map", "any"];
 
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const isBox = (b: unknown): b is string => typeof b === "string" && b.length > 0 && !b.startsWith(":") && !/[\s\0]/.test(b);
-const isSender = (s: unknown): s is string => typeof s === "string" && (s === "*" || s === "session" || /^\$[a-z][a-z0-9_-]*$/.test(s) || KEY.test(s));
+const isSender = (s: unknown): s is string => typeof s === "string" && (s === "*" || s === "event" || s === "session" || /^\$[a-z][a-z0-9_-]*$/.test(s) || KEY.test(s));
 
 /** Why `shape` is not a shape (APPS.md §2), or undefined. */
 export function shapeProblem(shape: unknown, at: string): string | undefined {
@@ -145,14 +129,6 @@ export function rowKey(app: string, r: { transport: string; address: string; pre
   return `${r.transport} ${rowAddress(app, r)}${r.prefix ? "*" : ""} ${r.sender}`;
 }
 
-/** The row of a route in the form before #77. */
-export function rowOfRoute(r: RouteIn): Row {
-  const { path, prefix, program, fn, auth, ...rest } = r;
-  const at = (path ?? prefix)!;
-  if (at.startsWith("libp2p:")) return { ...rest, transport: "libp2p", address: at.slice("libp2p:".length), sender: "*", program, fn };
-  return { ...rest, transport: "http", address: at, ...(prefix !== undefined ? { prefix: true } : {}), sender: auth === "none" ? "*" : "session", program, fn };
-}
-
 /** Why a row is not one (checked against the roles and the app's name), or undefined. */
 function rowProblem(app: string, r: unknown, isRole: (role: unknown) => role is string): string | undefined {
   if (!isMap(r)) return "not a map";
@@ -172,13 +148,14 @@ function rowProblem(app: string, r: unknown, isRole: (role: unknown) => role is 
     if (typeof r.fn !== "string" || !r.fn) return "fn is not text (a libp2p row names its handler's function)";
     if (r.sender !== undefined && r.sender !== "*") return "a libp2p row's sender is \"*\" (GossipSub messages are signed; streams are Noise)";
   }
-  if (!isSender(r.sender)) return `sender ${JSON.stringify(r.sender)} is not "*", "session", "$owner", "$<provider>" or an identity key (hex)`;
+  if (!isSender(r.sender)) return `sender ${JSON.stringify(r.sender)} is not "*", "event", "session", "$owner", "$self", "$<provider>" or an identity key (hex)`;
   if (r.sender === "session" && t !== "http") return "sender \"session\" is for http rows";
+  if (r.sender === "event" && t !== "mailbox") return "sender \"event\" is for mailbox rows (a box events are admitted into)";
   if (!isRole(r.program)) return `program ${JSON.stringify(r.program)} is not a role in programs`;
   if (r.fn !== undefined && (typeof r.fn !== "string" || !r.fn)) return "fn is not text";
   if (r.app !== undefined) return "app is set by the install";
   if (r.optional !== undefined && r.optional !== true) return "optional is true or absent";
-  if (r.optional === true && !(typeof r.sender === "string" && r.sender.startsWith("$") && r.sender !== "$owner")) return "optional is for a row from a $<provider> (left out when the address book has none)";
+  if (r.optional === true && !(typeof r.sender === "string" && r.sender.startsWith("$") && r.sender !== "$owner" && r.sender !== "$self")) return "optional is for a row from a $<provider> (left out when the address book has none)";
   return undefined;
 }
 
@@ -209,9 +186,8 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   }
   const isRole = (r: unknown): r is string => typeof r === "string" && r in sources;
 
-  const legacy = m.boxes !== undefined || m.routes !== undefined || m.heads !== undefined || m.handler !== undefined;
+  for (const f of LEGACY_FIELDS) if (m[f] !== undefined) bad.push(`${f}: the form before #77 is gone (#79): name dispatch rows, and write only heads under the app's name`);
   const rows: Row[] = [];
-  const grants: string[] = [];
   const addRow = (r: Row, at: string) => {
     const k = rowKey(app, r);
     if (rows.some((x) => rowKey(app, x) === k)) { bad.push(`${at}: ${k} twice`); return; }
@@ -225,57 +201,6 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     if (why) { bad.push(`dispatch[${i}]: ${why}`); continue; }
     const row = r as RowIn;
     addRow({ ...row, transport: row.transport ?? "mailbox" }, `dispatch[${i}]`);
-  }
-
-  // The form before #77: boxes (+ handler), routes, heads.
-  if (legacy) {
-    const boxes: Array<{ box: string; senders: string[] }> = [];
-    if (m.boxes !== undefined && !Array.isArray(m.boxes)) bad.push("boxes: not a list");
-    for (const [i, b] of (Array.isArray(m.boxes) ? m.boxes : []).entries()) {
-      const box = typeof b === "string" ? b : isMap(b) ? (b as BoxIn).box : undefined;
-      if (!isBox(box)) { bad.push(`boxes[${i}]: want a box name or {box, senders}`); continue; }
-      const senders = typeof b === "string" || (b as BoxIn).senders === undefined ? ["$owner"] : (b as BoxIn).senders;
-      if (!Array.isArray(senders) || !senders.length) { bad.push(`boxes[${i}] (${box}): senders is a non-empty list`); continue; }
-      for (const s of senders) if (!isSender(s) || s === "session") bad.push(`boxes[${i}] (${box}): sender ${JSON.stringify(s)} is not "*", "$<provider>" or an identity key (hex)`);
-      if (boxes.some((x) => x.box === box)) bad.push(`boxes[${i}]: ${box} twice`);
-      boxes.push({ box, senders: [...new Set(senders as string[])] });
-    }
-    const handlers: Record<string, string> = {};
-    if (typeof m.handler === "string") {
-      if (!isRole(m.handler)) bad.push(`handler: ${m.handler} is not a role in programs`);
-      else for (const b of boxes) handlers[b.box] = m.handler;
-    } else if (isMap(m.handler)) {
-      for (const [box, role] of Object.entries(m.handler)) {
-        if (!isRole(role)) bad.push(`handler.${box}: ${JSON.stringify(role)} is not a role in programs`);
-        else if (!boxes.some((b) => b.box === box)) bad.push(`handler.${box}: not a box the app asks for`);
-        else handlers[box] = role;
-      }
-    } else if (m.handler !== undefined) bad.push("handler: a role, or {box: role}");
-    if (boxes.length && m.handler === undefined) bad.push("handler: required (the app asks for boxes)");
-    else if (isMap(m.handler)) for (const b of boxes) if (!(b.box in m.handler)) bad.push(`handler: no role for box ${b.box}`);
-    for (const b of boxes) {
-      const role = handlers[b.box];
-      if (!role) continue;
-      for (const s of b.senders) addRow({ transport: "mailbox", address: b.box, sender: s, program: role }, `boxes (${b.box})`);
-    }
-    if (m.routes !== undefined && !Array.isArray(m.routes)) bad.push("routes: not a list");
-    for (const [i, r] of (Array.isArray(m.routes) ? m.routes : []).entries()) {
-      if (!isMap(r) || (r.path === undefined) === (r.prefix === undefined) || typeof (r.path ?? r.prefix) !== "string") { bad.push(`routes[${i}]: want a path or a prefix (one)`); continue; }
-      if (r.auth !== undefined && r.auth !== "none") { bad.push(`routes[${i}]: auth is "none" or absent (BRC-104)`); continue; }
-      const row = rowOfRoute(r as unknown as RouteIn);
-      const why = rowProblem(app, row, isRole);
-      if (why) { bad.push(`routes[${i}]: ${why}`); continue; }
-      addRow(row, `routes[${i}]`);
-    }
-    if (m.heads !== undefined && !Array.isArray(m.heads)) bad.push("heads: not a list");
-    for (const h of Array.isArray(m.heads) ? m.heads : []) {
-      if (typeof h !== "string" || !h || /[\s\0]/.test(h)) bad.push(`heads: ${JSON.stringify(h)} is not a head name`);
-      else if (RESERVED_HEADS.includes(h)) bad.push(`heads: ${h} is the instance's own`);
-      else if (h === "ls:*") continue; // expanded below from config.overlay
-      else if (h !== name && !h.startsWith(`${name}/`) && !grants.includes(h)) grants.push(h);
-    }
-    // The alias head `<name>` (the pre-#77 SDK reads and moves it): a grant.
-    if (name && !grants.includes(name)) grants.unshift(name);
   }
 
   // provides, requires
@@ -300,15 +225,14 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   }
 
   // config.overlay: the overlay app's wiring, derived (APPS.md §6), under what the manifest names itself.
-  const derived: Derived = { rows: [], grants: [] };
+  const derived: Derived = { rows: [] };
   const ov = isMap(m.config) ? m.config.overlay : undefined;
   if (ov !== undefined) {
-    const w = overlayWiring(ov, (r) => isRole(r));
+    const w = overlayWiring(app, ov, (r) => isRole(r));
     if (Array.isArray(w)) bad.push(...w.map((p) => `config.overlay: ${p}`));
     else {
       const have = new Set(rows.map((r) => rowKey(app, r)));
       for (const r of w.rows) if (!have.has(rowKey(app, r))) { rows.push(r); derived.rows.push(rowKey(app, r)); }
-      for (const h of w.grants) if (!grants.includes(h)) { grants.push(h); derived.grants.push(h); }
     }
   }
 
@@ -324,9 +248,9 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   }
 
   if (bad.length) throw new ManifestError(bad);
-  const { dispatch: _d, handler: _h, boxes: _b, routes: _r, heads: _hs, ...rest } = m as Manifest;
-  void _d; void _h; void _b; void _r; void _hs;
-  const out = { ...rest, dispatch: rows, provides, requires, grants, legacy };
+  const { dispatch: _d, ...rest } = m as Manifest;
+  void _d;
+  const out = { ...rest, dispatch: rows, provides, requires };
   return { manifest: out, sources, derived };
 }
 
@@ -335,29 +259,28 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
 /** The role of an overlay app's engine (its `config.overlay` is the engine's). */
 export const OVERLAY_ROLE = "overlay";
 
-/** What the install derived from `config.overlay` (row keys and grants), for the prompt. */
-export interface Derived { rows: string[]; grants: string[] }
+/** What the install derived from `config.overlay` (row keys), for the prompt. */
+export interface Derived { rows: string[] }
 
 /** An overlay app's wiring. */
-export interface OverlayWiring { rows: Row[]; grants: string[]; topics: string[] }
+export interface OverlayWiring { rows: Row[]; topics: string[] }
 
 const TOPIC = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 /**
- * The wiring `config.overlay` asks for (APPS.md §6), or its problems. For
+ * The wiring `config.overlay` asks for (APPS.md §6, #79), or its problems. For
  * each topic: the libp2p rows `<topic>` → submit, `<topic>-admit` →
  * peerAdmit, `<topic>-proof` → peerProof; the open http rows `/submit`,
- * `/lookup`; the mailbox rows `submit` and `chain` from anyone (the front
- * door's and the host feeds' entries carry no sender); `status` from the
- * status provider `config.overlay.status` names, if it names one (none:
- * admitted at the proof, #73). All to the role `overlay`, the engine. The
- * grants: the heads the pinned engine writes outside the app's name —
- * `wallet`, `overlay:gossip`, `ls:<service>` per lookup service (until #79).
- * `isRole` tells which roles the manifest has.
+ * `/lookup`; and the app's own box `<app>` twice: from `event` (what its
+ * libp2p routes admit — a gossiped submission, a peer's admit) and from
+ * `$self` (its own watch of a submission the chain app has accepted, sent by
+ * the host's loopback). All to the role `overlay`, the engine. No `chain` or
+ * `status` box (the chain app's), no grants: the engine writes `<app>/…`
+ * only. `isRole` tells which roles the manifest has.
  */
-export function overlayWiring(ov: unknown, isRole: (role: string) => boolean): OverlayWiring | string[] {
+export function overlayWiring(app: string, ov: unknown, isRole: (role: string) => boolean): OverlayWiring | string[] {
   const bad: string[] = [];
-  if (!isMap(ov)) return ["want {topics, lookups?, status?, gossip?}"];
+  if (!isMap(ov)) return ["want {topics, lookups?, gossip?}"];
   if (!isRole(OVERLAY_ROLE)) bad.push(`the engine is the role "${OVERLAY_ROLE}": programs has none`);
   const topics: string[] = [];
   if (!isMap(ov.topics) || !Object.keys(ov.topics).length) bad.push("topics: want {<topic>: <role>}, at least one");
@@ -366,30 +289,26 @@ export function overlayWiring(ov: unknown, isRole: (role: string) => boolean): O
     else if (typeof role !== "string" || !isRole(role)) bad.push(`topics.${t}: ${JSON.stringify(role)} is not a role in programs`);
     else topics.push(t);
   }
-  const grants: string[] = ["wallet", "overlay:gossip"];
   if (ov.lookups !== undefined && !isMap(ov.lookups)) bad.push("lookups: want {<service>: <role> | {program: <role>, topics?: [<topic>]}}");
   for (const [service, l] of Object.entries(isMap(ov.lookups) ? ov.lookups : {})) {
     if (!TOPIC.test(service)) { bad.push(`lookups: ${JSON.stringify(service)} is not a service name`); continue; }
     const role = typeof l === "string" ? l : isMap(l) ? l.program : undefined;
     if (typeof role !== "string" || !isRole(role)) bad.push(`lookups.${service}: program ${JSON.stringify(role)} is not a role in programs`);
     if (isMap(l) && l.topics !== undefined && (!Array.isArray(l.topics) || l.topics.some((t) => typeof t !== "string" || !isMap(ov.topics) || !(t in ov.topics)))) bad.push(`lookups.${service}.topics: want a list of the topics the overlay serves`);
-    grants.push(`ls:${service}`);
   }
-  const status = ov.status;
-  if (status !== undefined && status !== null && (typeof status !== "string" || !(/^\$[a-z][a-z0-9_-]*$/.test(status) || KEY.test(status)))) bad.push(`status: ${JSON.stringify(status)} is not "$<provider>" or an identity key (hex)`);
+  if (ov.status !== undefined) bad.push("status: gone (#79): statuses are the chain app's (its `status` row); the overlay admits on the chain app's answer");
   if (ov.gossip !== undefined && (!isMap(ov.gossip) || Object.entries(ov.gossip).some(([t, on]) => typeof on !== "boolean" || !topics.includes(t)))) bad.push("gossip: want {<topic the overlay serves>: true | false}");
   if (bad.length) return bad;
   const http = (address: string, fn: string): Row => ({ transport: "http", address, sender: "*", program: OVERLAY_ROLE, fn });
   const p2p = (address: string, fn: string): Row => ({ transport: "libp2p", address, sender: "*", program: OVERLAY_ROLE, fn });
-  const box = (address: string, sender: string): Row => ({ transport: "mailbox", address, sender, program: OVERLAY_ROLE });
+  const box = (sender: string): Row => ({ transport: "mailbox", address: app, sender, program: OVERLAY_ROLE });
   return {
     topics,
     rows: [
-      box("submit", "*"), box("chain", "*"), ...(typeof status === "string" ? [box("status", status)] : []),
+      box("event"), box("$self"),
       http("/submit", "submit"), http("/lookup", "lookup"),
       ...topics.flatMap((t) => [p2p(t, "submit"), p2p(`${t}-admit`, "peerAdmit"), p2p(`${t}-proof`, "peerProof")]),
     ],
-    grants,
   };
 }
 

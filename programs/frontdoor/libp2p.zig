@@ -116,9 +116,9 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     }
     try h.put("body", .{ .bytes = body });
     try h.put("request", cbor.cidv(rc));
-    // The dispatch row that matched (as HTTP's handlers get it, main.zig invoke, with the pre-#77 keys): an
-    // installed row's `program` and `app` tell a handler which app it runs as (#72).
-    try h.put("match", try main.legacyMatch(a, route));
+    // The dispatch row that matched (as HTTP's handlers get it, main.zig invoke): an installed row's
+    // `program` and `app` tell a handler which app it runs as (#72).
+    try h.put("match", route);
     for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     const out = sk.callValue(a, prog, func, h.value()) catch |err| {
         if (err == error.ImportFailed) return verdict(a, "ignore", try std.fmt.allocPrint(a, "the handler failed: {s}", .{sk.lastError()}));
