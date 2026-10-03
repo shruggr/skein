@@ -10,7 +10,7 @@
 //   cbor  §7.3 / BRC-231: identityKey bstr(33), contentHash bstr(32),
 //         signature bstr (DER), content bstr (BRC-78); signed over the
 //         dag-cbor of the map without `content` and `signature`.
-// Both are signed under [2, "metanet handles envelope"], key "1", anyone.
+// Both are signed under [2, "metanet handles envelope"], key "send" (BRC-169 §7.2, #17), anyone.
 //   session  a reply on a BRC-104 session with the recipient's native
 //         messagebox (the router, #33): the compact §7.3 form {type: "reply",
 //         replyTo, body} on the wire, kept as {type: "reply", replyTo, sender:
@@ -253,13 +253,13 @@ pub fn verify(alloc: std.mem.Allocator, env: Value) bool {
         .json => {
             const text = canonical(alloc, env) catch return false;
             const sig = hexDecode(alloc, Value.str(env.get("signature")).?) catch return false;
-            return secp.verifyAnyoneKey(key, 2, "metanet handles envelope", "1", text, sig);
+            return secp.verifyAnyoneKey(key, 2, "metanet handles envelope", "send", text, sig);
         },
         .session => unreachable,
         .cbor => {
             const rest = cbor.without(alloc, cbor.without(alloc, env, "content") catch return false, "signature") catch return false;
             const pre = cbor.encode(alloc, rest) catch return false;
-            return secp.verifyAnyoneKey(key, 2, "metanet handles envelope", "1", pre, Value.bytesOf(env.get("signature")).?);
+            return secp.verifyAnyoneKey(key, 2, "metanet handles envelope", "send", pre, Value.bytesOf(env.get("signature")).?);
         },
     }
 }

@@ -2147,7 +2147,13 @@ pub const Runtime = struct {
                 break :body;
             }
             var msg: []const u8 = "";
-            const mods = shell.loadModules(rt.runner, rt.store, rt.life.allocator(), &msg) catch |err| {
+            // #83: the thread's program record names the shell's modules (the shell app's install wrote it).
+            const pc = Value.cidOf(t.o.get("program")) orelse return error.NotFound;
+            const prog = rt.store.getOpt(a, pc) orelse {
+                try rt.shellErrored(t, "shell program: not a record in this store", &ended);
+                break :body;
+            };
+            const mods = shell.loadModules(rt.runner, rt.store, rt.life.allocator(), prog, pc, &msg) catch |err| {
                 try rt.shellErrored(t, if (msg.len > 0) msg else @errorName(err), &ended);
                 break :body;
             };

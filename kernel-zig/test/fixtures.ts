@@ -1,7 +1,7 @@
 // Fixtures for the Zig kernel's unit tests (src/tests.zig), made by the
 // TypeScript formats (src/runtime): dag-cbor encodings and CIDs, the canonical
 // form of non-canonical input, "anyone" signatures (log entries, envelopes),
-// JCS, the entropy stream, the shell's program record, the fixed origins
+// JCS, the entropy stream, a shell program record's shape (#83), the fixed origins
 // (#77: the dispatch chain's). Regenerate with
 //   node --experimental-strip-types --no-warnings kernel-zig/test/fixtures.ts > kernel-zig/test/fixtures.json
 // (the keys are fixed, so the output is stable).
@@ -14,7 +14,7 @@ import { canonical, jcs, verify } from "../../src/runtime/envelope.ts";
 import { sign } from "../../src/envelope.ts";
 import { signAnyone, verifyAnyone } from "../../src/runtime/identity.ts";
 import { entryBytes, LOG_KEY_ID, LOG_PROTOCOL } from "../../src/runtime/log.ts";
-import { MODULES, SHELL_CID, SHELL_PROGRAM, WALLET } from "../../src/runtime/programs.ts";
+import { MODULES, WALLET } from "../../src/runtime/programs.ts";
 import { headOrigin } from "../../src/runtime/heads.ts";
 import { dispatchOrigin } from "../../src/runtime/dispatch.ts";
 import { entropy } from "../../src/runtime/syscalls.ts";
@@ -23,11 +23,21 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
+// A shell program record's shape (#83: the shell app's install writes one; src/host/install.ts shellProgram), over a stand-in module.
+const SHELL_PROGRAM = {
+  kind: "program", name: "shell", code: { ts: "shell" },
+  modules: { brush: MODULES.wallet, coreutils: MODULES.wallet, node: MODULES.wallet },
+  support: { python: { mount: "/opt/skein/python", files: { "lib/python314.zip": MODULES.wallet }, env: { PYTHONHOME: "/opt/skein/python", PYTHONDONTWRITEBYTECODE: "1" } } },
+  inputs: { cmd: "string", tree: "cid", cwd: "string?", env: "map?" }, services: [],
+  description: "Run a bash command in the wasm shell over a tree; result {exitCode, stdout, stderr, tree}.", app: "shell",
+};
+const SHELL_CID = encode(SHELL_PROGRAM).cid;
+
 const values: unknown[] = [
   null, true, false, 0, 1, -1, 23, 24, 255, 256, 65535, 65536, 2 ** 32, 2 ** 53 - 1, -(2 ** 53) + 1, 1.5, -0.25, 1e300, 2 ** 53, 0.1,
   "", "a", "héllo ☃ 𝄞", new Uint8Array([0, 1, 2, 255]), [1, [2, [3]]], {},
   { b: 1, a: 2, aa: 3, "": 4, "é": 5, z: { y: [null, "x"] } },
-  { kind: "log", prev: null, n: 0, time: [1_790_000_000, 250_000_000], genesis: MODULES.brush, sig: new Uint8Array([48, 1]) },
+  { kind: "log", prev: null, n: 0, time: [1_790_000_000, 250_000_000], genesis: MODULES.wallet, sig: new Uint8Array([48, 1]) },
   SHELL_PROGRAM, WALLET,
 ];
 
@@ -79,7 +89,6 @@ const e1 = CID.parse("bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52z
 const ent = { entry: e1.toString(), thread: SHELL_CID.toString(), bytes: hex(entropy(e1, SHELL_CID)(100)) };
 
 const cids = {
-  shell: SHELL_CID.toString(),
   headMain: headOrigin("main").toString(),
   dispatch: dispatchOrigin().toString(),
   emptyTree: EMPTY_TREE.toString(),

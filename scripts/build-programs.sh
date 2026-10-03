@@ -8,10 +8,10 @@
 # library and bsvz; the install handlers went with #77: those are kernel
 # operations), plus the wire-probe test program.
 #
-# The apps' modules are built in their own repos (#71): run-handler and loop
-# in shruggr/skein-workbench (their built modules stay pinned here, moved in by
-# scripts/update-workbench.sh), static in shruggr/skein-static, the overlay
-# engine in shruggr/skein-overlay.
+# The apps' modules are built in their own repos (#71, #83) and installed
+# with them, never pinned here: the shell and run-handler in
+# shruggr/skein-shell, the chat loop in shruggr/skein-chat, static in
+# shruggr/skein-static, the overlay engine in shruggr/skein-overlay.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 programs=(messagebox frontdoor resolve wallet)

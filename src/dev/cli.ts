@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import type { CID } from "multiformats/cid";
 import { fmt, isCID, parse } from "../runtime/cid.ts";
 import { readLog } from "../runtime/log.ts";
-import { FILES, MODULES, rawCid } from "../runtime/programs.ts";
+import { MODULES, rawCid } from "../runtime/programs.ts";
 import type { SqliteStore } from "../runtime/sqlite.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import type { Ref, ThreadOrigin, ThreadUpdate } from "../runtime/types.ts";
@@ -70,10 +70,10 @@ function jsonify(v: unknown): unknown {
   return v;
 }
 
-/** Put the shell's wasm modules into the store under their pinned CIDs. */
+/** Put the pinned wasm modules into the store under their CIDs (the shell's are the shell app's, #83: installed with it). */
 export async function install(store: Pick<SqliteStore, "has" | "putBlock">): Promise<string[]> {
   const out: string[] = [];
-  const all = [...Object.entries(MODULES).map(([n, c]) => [`${n}.wasm`, c] as const), ...Object.entries(FILES)];
+  const all = Object.entries(MODULES).map(([n, c]) => [`${n}.wasm`, c] as const);
   for (const [file, cid] of all) {
     const name = file.replace(/\.wasm$/, "");
     if (await store.has(cid)) continue;

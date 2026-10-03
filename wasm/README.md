@@ -1,11 +1,10 @@
 # wasm/
 
-The modules the kernel pins (`kernel-zig/src/programs.zig`; the shell's and
-the wallet's also in `src/runtime/programs.ts`) and installs into every
-store (`skein-kernel serve`/`replay`, `skein-dev install`; `$SKEIN_WASM_DIR`
+The modules the kernel pins (`kernel-zig/src/programs.zig`; the wallet's
+also in `src/runtime/programs.ts`) and installs into every store
+(`skein-kernel serve`/`replay`, `skein-dev install`; `$SKEIN_WASM_DIR`
 overrides where they are read from). Each is checked against its pinned raw
-CID (CIDv1, raw, sha2-256) when it is installed. Since #71 they come from
-two places.
+CID (CIDv1, raw, sha2-256) when it is installed.
 
 ## Built here
 
@@ -20,28 +19,16 @@ a Zig package dependency by URL+hash, #75 — not a path in this tree).
 `scripts/build-programs.sh` builds them and `scripts/pin-programs.sh` rewrites
 the pins. The builds are reproducible.
 
-## From shruggr/skein-workbench
-
-`run-handler.wasm` and `loop.wasm` are skein-workbench's two Zig programs (the shell's `run` and the chat loop; #83 splits them into the shell app and the chat app).
-The rest is the shell's toolset: `brush.wasm` and `coreutils.wasm` (the
-shell), `find`, `xargs`, `diff`/`cmp`, `jq`, `which`, `grep`, `tree`, `awk`,
-`sed`, `git`, `qjs` (also `node`), `python` (also `python3`) and
-`python314.zip` (the stdlib, a support file, not a module).
-
-Their sources, patches and build (`scripts/build-toolset.sh`) live in
-skein-workbench, and `toolset/README.md` there says where each one comes from. The
-built modules are committed here because the default genesis wires `run` and
-`chat` to them and the kernel's shell program names the toolset.
-`scripts/update-workbench.sh <skein-workbench checkout>` copies its build
-in, rewrites the pins, and writes the workbench commit to `WORKBENCH`.
-
 ## Not here
 
-Apps outside the default genesis ship their own modules in their trees
-(docs/APPS.md). Static files are shruggr/skein-static (`bin/static.wasm`).
-The overlay engine is shruggr/skein-overlay (`bin/overlay.wasm`, with its
-demo topic manager and lookup service), the chain app shruggr/skein-chain
-(`bin/chain.wasm`).
+Apps ship their own modules in their trees (docs/APPS.md), and the install
+sends them. The shell app (shruggr/skein-shell) carries `run` and the shell
+itself: brush, coreutils and the toolset, with python's stdlib as a support
+file (#83: the kernel pins none of them; a genesis has no shell). The chat
+app (shruggr/skein-chat) carries the chat loop. Static files are
+shruggr/skein-static (`bin/static.wasm`). The overlay engine is
+shruggr/skein-overlay (`bin/overlay.wasm`, with its demo topic manager and
+lookup service), the chain app shruggr/skein-chain (`bin/chain.wasm`).
 
 Go `wasip1`, Rust, C and so on remain valid targets for third-party programs.
 The `skein` imports are the ABI (the SDK's `wit/skein.wit`), not a language.

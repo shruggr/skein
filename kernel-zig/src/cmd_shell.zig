@@ -1,24 +1,43 @@
-// `skein-kernel shell <db>`: the Zig side of the shell equivalence test
-// (equiv/shell.ts; host-go/node/run-shell.ts is the TypeScript side). A case
-// is {cmd, tree, cwd?, env?: [[k, v]…], stdin?: base64, time?, seed?}; a
-// result {exitCode, stdout, stderr (base64), tree} or {error}.
+// `skein-kernel shell <db> [<program>]`: the Zig side of the shell equivalence
+// test (equiv/shell.ts; host-go/node/run-shell.ts is the TypeScript side). The
+// shell is a program record in the store (#83): <program> its CID, else the
+// shell app's (the app record at the head `shell/app`, its `programs.shell`).
+// A case is {cmd, tree, cwd?, env?: [[k, v]…], stdin?: base64, time?, seed?};
+// a result {exitCode, stdout, stderr (base64), tree} or {error}.
 const std = @import("std");
 const envm = @import("env.zig");
 const cidm = @import("cid");
+const cbor = @import("cbor");
+const Value = cbor.Value;
 const shell = @import("shell.zig");
-const programs = @import("programs.zig");
 const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
 
-pub fn main(gpa: std.mem.Allocator, io: std.Io, db: []const u8) !void {
+pub fn main(gpa: std.mem.Allocator, io: std.Io, db: []const u8, program: ?[]const u8) !void {
     const ss = try SqliteStore.open(gpa, io, db);
     defer ss.close();
     const s = ss.store();
     const r = try runner.Runner.init(gpa);
     var arena0 = std.heap.ArenaAllocator.init(gpa);
+    const a0 = arena0.allocator();
+    const pc = if (program) |p| try cidm.parse(a0, p) else blk: {
+        const root = (try s.headTree(a0, "shell/app")) orelse {
+            std.debug.print("no shell program: no head shell/app (install the shell app) and none named\n", .{});
+            return error.NoShell;
+        };
+        const app = (try s.get(a0, root)) orelse return error.NotFound;
+        break :blk Value.cidOf((app.get("programs") orelse return error.NoShell).get("shell")) orelse {
+            std.debug.print("shell/app: its app record names no shell program\n", .{});
+            return error.NoShell;
+        };
+    };
+    const prog = (try s.get(a0, pc)) orelse {
+        std.debug.print("{s}: not a record in the store\n", .{try cidm.format(a0, pc)});
+        return error.NotFound;
+    };
     var msg: []const u8 = "";
-    const mods = shell.loadModules(r, s, arena0.allocator(), &msg) catch |e| {
+    const mods = shell.loadModules(r, s, a0, prog, pc, &msg) catch |e| {
         std.debug.print("{s}: {s}\n", .{ @errorName(e), msg });
         return e;
     };
@@ -85,6 +104,8 @@ fn useComponents(gpa: std.mem.Allocator, io: std.Io, r: *runner.Runner, mods: *s
     try names.append("coreutils");
     var it = mods.extra.keyIterator();
     while (it.next()) |k| try names.append(k.*);
+    // A module under two names (`node` is qjs): the component found for one serves both.
+    var swapped = std.AutoHashMap(*runner.Compiled, *runner.Compiled).init(gpa);
     for (names.items) |n| {
         const path = try std.fmt.allocPrint(gpa, "{s}/{s}.wasm", .{ dir, n });
         const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 30)) catch continue;
@@ -93,7 +114,13 @@ fn useComponents(gpa: std.mem.Allocator, io: std.Io, r: *runner.Runner, mods: *s
             std.debug.print("{s}: {s}\n", .{ path, em });
             return e;
         };
-        if (std.mem.eql(u8, n, "coreutils")) mods.coreutils = comp else try mods.extra.put(n, comp);
+        if (std.mem.eql(u8, n, "coreutils")) mods.coreutils = comp else {
+            try swapped.put(mods.extra.get(n).?, comp);
+            try mods.extra.put(n, comp);
+        }
     }
-    for (programs.tool_aliases) |t| try mods.extra.put(t.name, mods.extra.get(t.of).?);
+    var vit = mods.extra.valueIterator();
+    while (vit.next()) |v| if (swapped.get(v.*)) |c| {
+        v.* = c;
+    };
 }

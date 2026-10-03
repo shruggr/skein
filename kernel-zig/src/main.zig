@@ -2,7 +2,7 @@
 //
 //   skein-kernel serve                         the runtime process the router spawns (serve.zig)
 //   skein-kernel replay <source.db> <out.db>   replay a store's log into a fresh store, no wallet (replay.zig)
-//   skein-kernel shell <store.db> < cases.json  run shell cases (host-go's format) and print results as JSON
+//   skein-kernel shell <store.db> [<program>] < cases.json  run shell cases (host-go's format) and print results as JSON
 //   skein-kernel dump <store.db>               the derived state read through the index, as JSON (dump.zig)
 //   skein-kernel fuel <store.db> [--since n]   fuel per thread and in total, from the updates (fuel.zig, issue #5)
 const std = @import("std");
@@ -17,7 +17,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len < 2) return usage();
     const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "shell") and args.len == 3) return shellcmd.main(gpa, io, args[2]);
+    if (std.mem.eql(u8, cmd, "shell") and (args.len == 3 or args.len == 4)) return shellcmd.main(gpa, io, args[2], if (args.len == 4) args[3] else null);
     if (std.mem.eql(u8, cmd, "replay") and args.len == 4) return std.process.exit(try replay.main(gpa, io, args[2], args[3]));
     if (std.mem.eql(u8, cmd, "dump") and args.len == 3) return std.process.exit(try @import("dump.zig").main(gpa, io, args[2]));
     if (std.mem.eql(u8, cmd, "fuel") and (args.len == 3 or (args.len == 5 and std.mem.eql(u8, args[3], "--since")))) {
@@ -33,7 +33,7 @@ fn usage() void {
         \\usage:
         \\  skein-kernel serve                         the runtime process (the router spawns it)
         \\  skein-kernel replay <source.db> <out.db>   replay a log into a fresh store with no wallet
-        \\  skein-kernel shell <store.db> < cases.json  run shell cases, print results
+        \\  skein-kernel shell <store.db> [<program>] < cases.json  run shell cases (the shell app's shell, or <program>), print results
         \\  skein-kernel dump <store.db>               the derived state (the index) as JSON
         \\  skein-kernel fuel <store.db> [--since n]   fuel per thread and in total (steps from log entry n on)
         \\

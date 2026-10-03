@@ -195,9 +195,9 @@ export fn skein_modules() i32 {
     defer arena.deinit();
     const a = arena.allocator();
     var list = std.array_list.Managed(Value).init(a);
-    for (programsm.modules ++ programsm.files, 0..) |m, i| {
+    for (programsm.modules) |m| {
         var e = cbor.MapBuilder.init(a);
-        const file = if (i < programsm.modules.len) std.fmt.allocPrint(a, "{s}.wasm", .{m.name}) catch return -1 else m.name;
+        const file = std.fmt.allocPrint(a, "{s}.wasm", .{m.name}) catch return -1;
         e.put("name", cbor.string(m.name)) catch return -1;
         e.put("file", cbor.string(file)) catch return -1;
         e.put("cid", cbor.cidv(cidm.parse(a, m.cid) catch return -1)) catch return -1;

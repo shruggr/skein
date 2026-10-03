@@ -7,50 +7,89 @@ const wasi = @import("wasi.zig");
 const vfsm = @import("vfs.zig");
 const tree = @import("tree.zig");
 const cidm = @import("cid");
-const programs = @import("programs.zig");
+const cbor = @import("cbor");
+const Value = cbor.Value;
 const runner = @import("runner.zig");
 const syscalls = @import("syscalls.zig");
 const Store = @import("store.zig").Store;
 
+/// What a command needs besides its module (the record's `support`): files
+/// mounted read-only at `mount` for that command only, and env defaults the
+/// caller's env overrides (python's stdlib, #25).
+pub const SupportFile = struct { name: []const u8, bytes: []const u8 };
+pub const Support = struct {
+    mount: []const u8,
+    files: []const SupportFile, // path under mount → bytes
+    env: []const [2][]const u8,
+};
+
 pub const Modules = struct {
     brush: *runner.Compiled,
     coreutils: *runner.Compiled,
+    /// Every other command of the record's `modules` (two names may share a module: `node` is qjs).
     extra: std.StringHashMap(*runner.Compiled),
     utils: std.StringHashMap(void),
-    /// FILES by name → bytes (python's stdlib zip), for programs.Support mounts.
-    files: std.StringHashMap([]const u8),
+    support: std.StringHashMap(Support),
 };
 
-/// A support file from the store (programs.ts loadFile), checked against its CID.
-fn loadFile(gpa: std.mem.Allocator, s: Store, a: std.mem.Allocator, name: []const u8, msg: *[]const u8) ![]const u8 {
-    const text = programs.fileText(name);
-    const c = try cidm.parse(a, text);
+/// A support file from the store, checked against its CID.
+fn loadFile(gpa: std.mem.Allocator, s: Store, a: std.mem.Allocator, c: []const u8, msg: *[]const u8) ![]const u8 {
     const b = (s.bytes(gpa, c) catch null) orelse {
-        msg.* = try std.fmt.allocPrint(a, "file not in store: {s} (skein-dev install puts it there)", .{text});
+        msg.* = try std.fmt.allocPrint(a, "shell program: file not in store: {s}", .{try cidm.format(a, c)});
         return error.NotInStore;
     };
     if (!std.mem.eql(u8, try cidm.ofRaw(a, b), c)) {
-        msg.* = try std.fmt.allocPrint(a, "file {s}: bytes do not match the CID", .{text});
+        msg.* = try std.fmt.allocPrint(a, "shell program: file {s}: bytes do not match the CID", .{try cidm.format(a, c)});
         return error.BadHash;
     }
     return b;
 }
 
-var cached: ?*Modules = null;
+/// Loaded shells by program record CID (text).
+var cached: ?std.StringHashMap(*Modules) = null;
 
-/// The shell's modules from the store (programs.ts loadShellModules), and the
-/// utilities the coreutils build lists (`coreutils --list`, fixed clock, zero random).
-pub fn loadModules(r: *runner.Runner, s: Store, a: std.mem.Allocator, msg: *[]const u8) !*Modules {
-    if (cached) |m| return m;
-    const brush = try r.load(s, a, try programs.moduleCid(a, "brush"), msg);
-    const coreutils = try r.load(s, a, try programs.moduleCid(a, "coreutils"), msg);
+fn bad(a: std.mem.Allocator, msg: *[]const u8, comptime f: []const u8, args: anytype) error{ BadShellProgram, OutOfMemory } {
+    msg.* = try std.fmt.allocPrint(a, "shell program: " ++ f, args);
+    return error.BadShellProgram;
+}
+
+/// A shell program's modules (#83: the record names them — `modules`
+/// {<command>: <raw module CID>}, brush and coreutils among them, and
+/// `support` {<command>: {mount, files: {<path>: <raw CID>}, env}}; the
+/// shell app's install writes it from its manifest), loaded from the store,
+/// and the utilities the coreutils build lists (`coreutils --list`, fixed
+/// clock, zero random). Cached by the record's CID `pc`.
+pub fn loadModules(r: *runner.Runner, s: Store, a: std.mem.Allocator, prog: Value, pc: []const u8, msg: *[]const u8) !*Modules {
+    if (cached == null) cached = std.StringHashMap(*Modules).init(r.gpa);
+    const key = try cidm.format(a, pc);
+    if (cached.?.get(key)) |m| return m;
+    const ms = prog.get("modules") orelse return bad(a, msg, "no modules", .{});
+    if (ms != .map) return bad(a, msg, "modules is not a map", .{});
+    var brush: ?*runner.Compiled = null;
+    var coreutils: ?*runner.Compiled = null;
     var extra = std.StringHashMap(*runner.Compiled).init(r.gpa);
-    for (programs.tool_names) |t| try extra.put(t, try r.load(s, a, try programs.moduleCid(a, t), msg));
-    for (programs.tool_aliases) |t| try extra.put(t.name, extra.get(t.of).?);
-    var files = std.StringHashMap([]const u8).init(r.gpa);
-    for (programs.files) |f| try files.put(f.name, try loadFile(r.gpa, s, a, f.name, msg));
+    for (ms.map) |e| {
+        const c = Value.cidOf(e.value) orelse return bad(a, msg, "module {s} is not a CID", .{e.key});
+        const m = try r.load(s, a, c, msg);
+        if (std.mem.eql(u8, e.key, "brush")) brush = m else if (std.mem.eql(u8, e.key, "coreutils")) coreutils = m else try extra.put(try r.gpa.dupe(u8, e.key), m);
+    }
+    if (brush == null or coreutils == null) return bad(a, msg, "modules names no brush or no coreutils", .{});
+    var support = std.StringHashMap(Support).init(r.gpa);
+    if (prog.get("support")) |sm| if (sm == .map) for (sm.map) |e| {
+        const mount = Value.str(e.value.get("mount")) orelse return bad(a, msg, "support {s}: no mount", .{e.key});
+        var files = std.array_list.Managed(SupportFile).init(r.gpa);
+        if (e.value.get("files")) |fs| if (fs == .map) for (fs.map) |f| {
+            const c = Value.cidOf(f.value) orelse return bad(a, msg, "support {s}: file {s} is not a CID", .{ e.key, f.key });
+            try files.append(.{ .name = try r.gpa.dupe(u8, f.key), .bytes = try loadFile(r.gpa, s, a, c, msg) });
+        };
+        var env = std.array_list.Managed([2][]const u8).init(r.gpa);
+        if (e.value.get("env")) |es| if (es == .map) for (es.map) |kv| {
+            try env.append(.{ try r.gpa.dupe(u8, kv.key), try r.gpa.dupe(u8, Value.str(kv.value) orelse return bad(a, msg, "support {s}: env {s} is not text", .{ e.key, kv.key })) });
+        };
+        try support.put(try r.gpa.dupe(u8, e.key), .{ .mount = try r.gpa.dupe(u8, mount), .files = files.items, .env = env.items });
+    };
     const m = try r.gpa.create(Modules);
-    m.* = .{ .brush = brush, .coreutils = coreutils, .extra = extra, .utils = std.StringHashMap(void).init(r.gpa), .files = files };
+    m.* = .{ .brush = brush.?, .coreutils = coreutils.?, .extra = extra, .utils = std.StringHashMap(void).init(r.gpa), .support = support };
 
     var arena = std.heap.ArenaAllocator.init(r.gpa);
     defer arena.deinit();
@@ -62,10 +101,10 @@ pub fn loadModules(r: *runner.Runner, s: Store, a: std.mem.Allocator, msg: *[]co
     var fixed = Fixed{ .ns = 0, .zero = true };
     var svc = wasi.Services{ .ctx = &fixed, .state = &st, .clock = Fixed.clock, .random = Fixed.random };
     const stdio = [3]*wasi.Desc{ try wasi.nullDesc(aa, v), try wasi.pipeDesc(aa, v, out, true), try wasi.nullDesc(aa, v) };
-    _ = r.runModule(aa, coreutils, v, &.{ "coreutils", "--list" }, &.{}, stdio, &svc, null) catch {};
+    _ = r.runModule(aa, m.coreutils, v, &.{ "coreutils", "--list" }, &.{}, stdio, &svc, null) catch {};
     var it = std.mem.tokenizeAny(u8, out.read(out.size()), " \t\n\r\x0b\x0c");
     while (it.next()) |u| try m.utils.put(try r.gpa.dupe(u8, u), {});
-    cached = m;
+    try cached.?.put(try r.gpa.dupe(u8, key), m);
     return m;
 }
 
@@ -129,7 +168,7 @@ fn lastPart(p: []const u8) []const u8 {
 
 /// A read-only directory tree holding a program's support files, outside the
 /// Vfs's root (shell.ts mountDir; inode numbers from the descriptor range, in the same order).
-fn mountDir(a: std.mem.Allocator, v: *vfsm.Vfs, mods: *Modules, sup: *const programs.Support) !*vfsm.Node {
+fn mountDir(a: std.mem.Allocator, v: *vfsm.Vfs, sup: *const Support) !*vfsm.Node {
     const newMap = struct {
         fn f(al: std.mem.Allocator) !*std.StringHashMap(*vfsm.Node) {
             const m = try al.create(std.StringHashMap(*vfsm.Node));
@@ -139,9 +178,9 @@ fn mountDir(a: std.mem.Allocator, v: *vfsm.Vfs, mods: *Modules, sup: *const prog
     }.f;
     const root = try a.create(vfsm.Node);
     root.* = .{ .kind = .dir, .entries = try newMap(a), .readonly = true, .ino = v.nextDescIno() };
-    const sorted = try a.dupe(programs.Module, sup.files);
-    std.mem.sort(programs.Module, sorted, {}, struct {
-        fn lt(_: void, x: programs.Module, y: programs.Module) bool {
+    const sorted = try a.dupe(SupportFile, sup.files);
+    std.mem.sort(SupportFile, sorted, {}, struct {
+        fn lt(_: void, x: SupportFile, y: SupportFile) bool {
             return std.mem.lessThan(u8, x.name, y.name);
         }
     }.lt);
@@ -160,7 +199,7 @@ fn mountDir(a: std.mem.Allocator, v: *vfsm.Vfs, mods: *Modules, sup: *const prog
             };
             dir = next;
         }
-        const bytes = mods.files.get(f.cid).?;
+        const bytes = f.bytes;
         const node = try a.create(vfsm.Node);
         node.* = .{ .kind = .file, .data = @constCast(bytes), .cap = bytes.len, .ino = v.nextDescIno(), .parent = dir, .name = name };
         try dir.entries.?.put(name, node);
@@ -267,7 +306,7 @@ const Run = struct {
             }
         }
         try args.appendSlice(rest);
-        const sup = if (name) |n| programs.supportOf(n) else null;
+        const sup = if (name) |n| run.mods.support.getPtr(n) else null;
         if (sup == null) return .{ .code = try run.r.runModule(a, file, run.v, args.items, env.items, req.stdio, &run.svc, null) };
         // Environment defaults the caller's env overrides; the support files mounted for this process only.
         for (sup.?.env) |kv| {
@@ -278,7 +317,7 @@ const Run = struct {
             if (!has) try env.append(try std.fmt.allocPrint(a, "{s}={s}", .{ kv[0], kv[1] }));
         }
         const mounts = try a.alloc(wasi.Mount, 1);
-        mounts[0] = .{ .path = sup.?.mount, .dir = try mountDir(a, run.v, run.mods, sup.?) };
+        mounts[0] = .{ .path = sup.?.mount, .dir = try mountDir(a, run.v, sup.?) };
         var svc = run.svc;
         svc.mounts = mounts;
         return .{ .code = try run.r.runModule(a, file, run.v, args.items, env.items, req.stdio, &svc, null) };

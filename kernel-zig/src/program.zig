@@ -252,8 +252,9 @@ pub const RunError = error{ Fatal, OutOfMemory };
 /// A step's stdout (and stderr) bound. A step's stdout is its answer, and the
 /// front door's carries what it admits: a message's body, and its mail record
 /// with the BRC-104 session proof, whose signed payload is the request again
-/// (#72: an app's 1 MiB `objects` bundle is ~2 MiB of answer). 16 MiB.
-pub const STEP_OUTPUT_LIMIT: usize = 16 << 20;
+/// (#72: an app's 1 MiB `objects` bundle is ~2 MiB of answer; #83: the shell app's install sends
+/// a module whole — coreutils, python's stdlib, ~10 MB each — so ~21 MB of answer). 64 MiB.
+pub const STEP_OUTPUT_LIMIT: usize = 64 << 20;
 
 /// One step: a plain WASI command with the skein imports, over an empty tree,
 /// stdin null, stdout/stderr captured (STEP_OUTPUT_LIMIT each), the thread's clock and random.

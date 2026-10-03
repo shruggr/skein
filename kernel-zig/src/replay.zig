@@ -38,17 +38,17 @@ pub fn wasmDir(gpa: std.mem.Allocator, io: std.Io) ![]const u8 {
     return std.fs.path.join(gpa, &.{ exe, "..", "..", "..", "wasm" });
 }
 
-/// skein-dev install: the pinned modules and support files (FILES) from the wasm directory, checked against their CIDs.
+/// skein-dev install: the pinned modules from the wasm directory, checked against their CIDs.
 pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: *SqliteStore, say: ?*const fn (line: []const u8) void) !void {
     const s = ss.store();
     const dir = try wasmDir(gpa, io);
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    for (programs.modules ++ programs.files, 0..) |m, i| {
+    for (programs.modules) |m| {
         const c = try cidm.parse(a, m.cid);
         if (try s.has(c)) continue;
-        const file = if (i < programs.modules.len) try std.fmt.allocPrint(a, "{s}.wasm", .{m.name}) else m.name;
+        const file = try std.fmt.allocPrint(a, "{s}.wasm", .{m.name});
         const path = try std.fmt.allocPrint(a, "{s}/{s}", .{ dir, file });
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
         if (!std.mem.eql(u8, try cidm.ofRaw(a, bytes), c)) {

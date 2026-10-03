@@ -12,18 +12,13 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 /// sources build only the messagebox, the front door, resolve and the wallet
 /// (programs/, over the SDK, shruggr/skein-sdk, #75); the install handlers
 /// (objects, head, subscribe) went with #77: those are the kernel's own
-/// operations on admin messages (scheduler.zig kernelOp). The shell's modules (brush, coreutils, the toolset), run-handler
-/// and loop are the workbench's (shruggr/skein-workbench): built there, their
-/// modules committed in wasm/ and pinned here because the stock genesis and the
-/// stock shell program name them (scripts/update-workbench.sh moves a build in;
-/// wasm/WORKBENCH is its commit). Apps outside the stock genesis are not pinned:
-/// static is shruggr/skein-static (a tree carries bin/static.wasm), the overlay
-/// engine shruggr/skein-overlay (bin/overlay.wasm).
+/// operations on admin messages (scheduler.zig kernelOp). Since #83 nothing
+/// else is pinned: the shell (its modules: brush, coreutils, the toolset),
+/// `run` and the chat loop are apps — shruggr/skein-shell and
+/// shruggr/skein-chat — installed like any other (a tree carries its
+/// modules), as are static (shruggr/skein-static) and the overlay engine
+/// (shruggr/skein-overlay).
 pub const modules = [_]Module{
-    .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
-    .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
-    .{ .name = "run-handler", .cid = "bafkreicd63a4ffjozgou3axes5p5tymfoi72ne2dpeqnhij33uqgvpdyle" },
-    .{ .name = "loop", .cid = "bafkreig6ug7eadgh66dfcb65x52jz7uymvlakqpjvyv7twaz2wzd4mw4am" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreihjdj7o75mnffyk362rzabszndywo4yoyjq4r7yvtmu3cv4ff3qhq" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
@@ -32,64 +27,7 @@ pub const modules = [_]Module{
     .{ .name = "frontdoor", .cid = "bafkreifz27lievgnxzxxo6nwsrmlnjmkhiqcqti5dila62rkqfuu3sazka" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreidpvi7hm4u6r4v6xhhj25dq4jcsme3qduarlgmyqhvzq7fa4optby" },
-    .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
-    .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
-    .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
-    .{ .name = "cmp", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
-    .{ .name = "jq", .cid = "bafkreih226yv4dcowahyziroqms5r6h4k7mliutf2kpjp3klofcskdg56e" },
-    .{ .name = "which", .cid = "bafkreicdmerbpermjjw5x26pjokqhwbwbsncfqgdw63zo2e2g6tmm43iye" },
-    .{ .name = "grep", .cid = "bafkreihbm7x5gatusjkpo7oxwkh43ltpv7osaw4jaiia46hzl7ua64dvye" },
-    .{ .name = "tree", .cid = "bafkreiaubyrhpjhf2n6owdq4xtdemxfu6bbfzs3dcsssjhxnoovsw67yh4" },
-    .{ .name = "awk", .cid = "bafkreibop3tyl52wkntqcxwgy5ub2ybfs2hwl725tiixxtinrxlmblhlju" },
-    .{ .name = "sed", .cid = "bafkreidwtqxsblyapruappd2uuffd633ti6zgizh5giwiscl34lbuctzcy" },
-    .{ .name = "git", .cid = "bafkreiak3i7snop2xhiyilewrhcm5jgdjpfwuzk5awjqhd2hafzttwwrxe" },
-    // Script runtimes (issue #25): QuickJS-ng (also `node`) and CPython (also `python3`).
-    .{ .name = "qjs", .cid = "bafkreig4lw4ceuhl5qvzr43ketajajhkexgqmg6et2rpjlx66dvavw6zwe" },
-    .{ .name = "python", .cid = "bafkreid5irpih6ehtwxvg2jf556f4bupz2p54c5n746i5r5spxpta2i42m" },
 };
-
-/// FILES: support files the shell's programs read (raw blocks, like the
-/// modules), each committed as wasm/<name>; installed with the modules.
-pub const files = [_]Module{
-    .{ .name = "python314.zip", .cid = "bafkreigogn32gek27rar2k5pacj2knivlobbjc6tip25qki3hjr3d2v5ce" },
-};
-
-/// The shell's extra single-purpose tools (programs.ts TOOL_NAMES).
-pub const tool_names = [_][]const u8{ "find", "xargs", "diff", "cmp", "jq", "which", "grep", "tree", "awk", "sed", "git", "qjs", "python" };
-
-/// TOOL_ALIASES: more command names for a module in tool_names (`node` is qjs
-/// with its node shim, chosen by argv[0]).
-pub const Alias = struct { name: []const u8, of: []const u8 };
-pub const tool_aliases = [_]Alias{ .{ .name = "node", .of = "qjs" }, .{ .name = "python3", .of = "python" } };
-
-/// What an extra program needs besides its module (shell.ts Support):
-/// files mounted read-only at `mount` for that program only, and env
-/// defaults the caller's env overrides. Python's stdlib (programs.ts PYTHON_*).
-pub const Support = struct {
-    mount: []const u8,
-    files: []const Module, // path under mount → FILES name
-    env: []const [2][]const u8,
-};
-pub const python_home = "/opt/skein/python";
-const python_support = Support{
-    .mount = python_home,
-    .files = &.{.{ .name = "lib/python314.zip", .cid = "python314.zip" }},
-    .env = &.{ .{ "PYTHONHOME", python_home }, .{ "PYTHONDONTWRITEBYTECODE", "1" } },
-};
-pub const supported = [_]struct { name: []const u8, support: Support }{
-    .{ .name = "python", .support = python_support },
-    .{ .name = "python3", .support = python_support },
-};
-
-pub fn supportOf(name: []const u8) ?*const Support {
-    for (&supported) |*x| if (std.mem.eql(u8, x.name, name)) return &x.support;
-    return null;
-}
-
-pub fn fileText(name: []const u8) []const u8 {
-    for (files) |f| if (std.mem.eql(u8, f.name, name)) return f.cid;
-    unreachable;
-}
 
 pub fn moduleText(name: []const u8) []const u8 {
     for (modules) |m| if (std.mem.eql(u8, m.name, name)) return m.cid;
@@ -116,54 +54,19 @@ const call_inputs = [_]cbor.Entry{
 const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
 const handlers = [_]Handler{
-    .{ .name = "run-handler", .services = &.{}, .description = "The `run` box: read the body {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), run the shell over it, reply in `results`." },
-    .{ .name = "loop", .services = &.{"infer"}, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs. Everything it sends goes through the messagebox's `send` (#40)." },
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
     .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that keeps the handle's record under its own head (`resolve/peers`, #87) and finishes with the record's CID; the messagebox's delivery reads it for a key the address book does not name. A `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The address book is written only by the kernel's `peers` operation, on an owner-signed message (#77, #87)." },
     .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door (#68): the instance's middleware, stepped on every request a transport carries in (http: BRC-103/104 against its session records, head frontdoor/sessions; libp2p: the GossipSub signature; local: a provider's signed message), routed by the kernel's dispatch rows for its transport, the handler an in-VM call, the answer signed on the session. Called (fn read) for a route whose answer is a read of live state." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
-pub const program_names = [_][]const u8{ "shell", "run-handler", "loop", "messagebox", "frontdoor", "resolve" };
+pub const program_names = [_][]const u8{ "messagebox", "frontdoor", "resolve" };
 
 /// A program record as a value.
 pub fn program(alloc: std.mem.Allocator, name: []const u8) !Value {
     var m = cbor.MapBuilder.init(alloc);
     try m.put("kind", cbor.string("program"));
     try m.put("name", cbor.string(name));
-    if (std.mem.eql(u8, name, "shell")) {
-        var code = cbor.MapBuilder.init(alloc);
-        try code.put("ts", cbor.string("shell"));
-        try m.put("code", code.value());
-        var mods = cbor.MapBuilder.init(alloc);
-        try mods.put("brush", cbor.cidv(try moduleCid(alloc, "brush")));
-        try mods.put("coreutils", cbor.cidv(try moduleCid(alloc, "coreutils")));
-        for (tool_names) |t| try mods.put(t, cbor.cidv(try moduleCid(alloc, t)));
-        for (tool_aliases) |t| try mods.put(t.name, cbor.cidv(try moduleCid(alloc, t.of)));
-        try m.put("modules", mods.value());
-        var sup = cbor.MapBuilder.init(alloc);
-        for (supported) |x| {
-            var one = cbor.MapBuilder.init(alloc);
-            try one.put("mount", cbor.string(x.support.mount));
-            var fs = cbor.MapBuilder.init(alloc);
-            for (x.support.files) |f| try fs.put(f.name, cbor.cidv(try cidm.parse(alloc, fileText(f.cid))));
-            try one.put("files", fs.value());
-            var env = cbor.MapBuilder.init(alloc);
-            for (x.support.env) |kv| try env.put(kv[0], cbor.string(kv[1]));
-            try one.put("env", env.value());
-            try sup.put(x.name, one.value());
-        }
-        try m.put("support", sup.value());
-        var inputs = cbor.MapBuilder.init(alloc);
-        try inputs.put("cmd", cbor.string("string"));
-        try inputs.put("tree", cbor.string("cid"));
-        try inputs.put("cwd", cbor.string("string?"));
-        try inputs.put("env", cbor.string("map?"));
-        try m.put("inputs", inputs.value());
-        try m.put("services", .{ .array = &.{} });
-        try m.put("description", cbor.string("Run a bash command in the wasm shell over a tree; result {exitCode, stdout, stderr, tree}."));
-        return m.value();
-    }
     for (handlers) |h| if (std.mem.eql(u8, h.name, name)) {
         var code = cbor.MapBuilder.init(alloc);
         try code.put("wasm", cbor.cidv(try moduleCid(alloc, name)));
@@ -182,7 +85,9 @@ pub fn programCid(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
     return cbor.cidOfValue(alloc, try program(alloc, name));
 }
 
-/// records.ts isProgram.
+/// records.ts isProgram. A program the kernel runs itself has `code: {ts:
+/// "shell"}` (#83: the shell app's shell program, its record written by that
+/// app's install; shell.zig loadModules reads its `modules` and `support`).
 pub fn isProgram(x: ?Value) bool {
     const v = x orelse return false;
     if (v != .map) return false;
