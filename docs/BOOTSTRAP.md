@@ -44,18 +44,34 @@ images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
   bin/static.wasm                         shruggr/skein-static v0.2.0's module
   bin/*.json                              the program records' inputs and descriptions
-  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; static at `/` (root www)
-  etc/routes.json, etc/reads.json         empty: no explorer route (there is no owner to give it to at genesis)
+  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; the explorer at `/explore` (a
+                                          session, read op `explore`); static at `/` and under `/site/` (root www)
+  etc/reads.json                          [{op: "explore", owner: true}]: the explorer is the owner's, whoever claims it (#92)
+  etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  www/index.html                          the management site (#92); a placeholder page until it exists
+  www/                                    the management site: shruggr/skein-site v0.1.0's tree, copied (the same git tree)
+  apps/git/                               the git app: shruggr/skein-git v0.1.0's tree, copied, not wired
 ```
 
 It has the four tables and the apps needed to be reachable and to install
 more: the front door, the messagebox and the static app serving the
-management site. Nothing else — no wallet, no chain app, no shell, no chat:
-the owner installs those afterwards. The front door, the messagebox and
+management site (shruggr/skein-site, #92). Nothing else is installed — no
+git app, no wallet, no chain app, no shell, no chat: the owner installs those
+afterwards, from the management page. The front door, the messagebox and
 static are wired by the genesis (no app records), as any system tree wires
 its programs.
+
+- **The explorer** is a route in the image (`/explore`, the front door's
+  `explore`, `read: "explore"`) with the read rule `{op: "explore", owner:
+  true}`: the front door admits the caller whose session proves the
+  instance's owner as the step sees it — the genesis's, else the key in the
+  head `claim`. Before the claim it answers nobody (403).
+- **The git app's tree** is in the image (`apps/git`), so its blocks are in
+  every such store; it is not wired. The management page installs it from
+  there as the owner: the plan over that subtree (`readStoredApp` +
+  `planInstall`) sends `objects` with what the store lacks (the module as a
+  raw block, the program and app records), then `head`, the `dispatch` row
+  and `start`. Every other app is then deployed by hash through it.
 
 The image's genesis is written by `skein-host add <h> --image <spec>`:
 
@@ -323,8 +339,13 @@ There are three ways to install an app.
      + `planInstall`: its CID must be the answer's `app`), shows the prompt,
      and the owner sends `head`, the `dispatch` rows and `start`.
 
-  The page that does this is #92's; kernel-zig/equiv/git-clone.ts drives
-  both steps against a repository served by `git http-backend`.
+  The management page (shruggr/skein-site, #92) does this: it sends the
+  clone as a message to box `git` and reads the answer from the thread that
+  message launched (the explorer's `/explore/edges/<message>?rel=launched-by`,
+  then `/explore/thread/<origin>` until it rests), plans in the browser with
+  the same code (src/host/plan.ts), and shows the prompt.
+  kernel-zig/equiv/git-clone.ts drives both steps against a repository served
+  by `git http-backend`; kernel-zig/equiv/site.ts does it from the page.
 
 ## Packets
 
@@ -445,13 +466,15 @@ boot is written, and the process exits 0.
   refusals.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
 - `src/host/boot.test.ts` also resolves the default image: no owner, no
-  admin rows, the claim row its one kernel row, no explorer route;
+  admin rows, the claim row its one kernel row, the explorer route with the
+  read rule `{op: "explore", owner: true}`, the site at `/` and `/site/`;
   `$owner` in an image refused.
 - `kernel-zig/equiv/claim.ts` (in `run.sh`): an instance from the default
-  image serves the placeholder and refuses the owner's admin messages;
-  `skein-host claim` over the control socket writes the owner's admin rows,
-  removes the claim row, sets the head `claim` and the owner's address-book
-  entry; a second claim and a stranger's are refused; the owner installs
+  image serves the management site, answers nobody's explorer read and
+  refuses the owner's admin messages; `skein-host claim` over the control
+  socket writes the owner's admin rows, removes the claim row, sets the head
+  `claim` and the owner's address-book entry, and the owner reads the
+  explorer (another key does not); a second claim and a stranger's are refused; the owner installs
   app-demo and calls it; an owned instance refuses a claim; `add --image
   default` and the refused outpoint form; both stores replayed.
 - `src/host/manager.test.ts`: the instance manager (#90) on signed
@@ -469,6 +492,11 @@ boot is written, and the process exits 0.
   install client rebuilds the same app record from the stored tree, `head`
   + `dispatch` + `start` install it and it runs; a hash not held, another
   commit's pack, a bad URL, no repository and no manifest refused; replayed.
+- `kernel-zig/equiv/site.ts` (in `run.sh`, #92): the management site in
+  headless Chrome on a host skein — create from the page, the locator in the
+  wallet's basket, the git app installed from the image's `apps/git`,
+  app-demo deployed by hash from the page, the explorer, the host skein's
+  children; replayed.
 - `src/host/http.test.ts`: the fetch provider's network (`fetchHttp`): a
   request, its `timeoutMs`, its `maxBytes` (#91).
 - `kernel-zig/equiv/boot.ts` (in `run.sh`): two instances, one booted from a

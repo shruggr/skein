@@ -11,7 +11,7 @@ import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import { anyOf, dirSource, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
-import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
+import { genesisRecord, keyHex, resolveReads, resolveSystem } from "./genesis.ts";
 
 const MODULE = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
 const key = () => PrivateKey.fromRandom().toPublicKey().toString();
@@ -77,9 +77,11 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   assert.equal(g.owner, undefined, "no owner in it");
   assert.deepEqual(g.dispatch.filter((r: { program: unknown }) => r.program === "kernel"), [{ transport: "mailbox", address: "claim", sender: "*", program: "kernel", fn: "claim" }], "the one kernel row: the claim row, from anyone");
   assert.deepEqual(g.names, [], "no names");
-  assert.deepEqual(g.reads ?? [], [], "no reads (no owner to give the explorer to)");
-  assert.ok(!g.dispatch.some((r: { address: string }) => r.address === "/explore"), "no explorer route");
+  assert.deepEqual(g.reads, [{ owner: true, op: "explore" }], "#92: the explorer is the owner's, whoever claims it (the front door reads the owner at the request)");
+  assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; sender: unknown; read?: string }) => r.transport === "http" && r.address === "/explore" && r.prefix === true && r.sender === "session" && r.read === "explore"), "#92: the explorer route, behind the read op");
   assert.ok(g.dispatch.some((r: { transport: string; address: string; root?: string }) => r.transport === "http" && r.address === "/" && r.root === "www"), "the static app at /");
+  assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; root?: string }) => r.transport === "http" && r.address === "/site" && r.prefix === true && r.root === "www"), "#92: and the site's files under /site/");
+  assert.throws(() => resolveReads(c, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);
   // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
   for (const n of ["frontdoor", "messagebox"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
   assert.throws(() => resolveSystem(c, programs, [{ sender: "$owner", box: "x", handler: "static" }]), /an image names no owner/);

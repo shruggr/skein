@@ -4,7 +4,7 @@
 #   router    skein-host run  (background)    127.0.0.1:8100  the reverse proxy to every instance's front door
 #                                                              (http://<handle>.localhost:8100 or /@<handle>, #40), the
 #                                                              instances' oracle and kernels (started on demand), the waker;
-#                                              127.0.0.1:4600  host page and /roster.json; 4610+ one explorer per instance
+#                                              127.0.0.1:4600  host page and /roster.json
 #   owner     1sat serve wallet-api            127.0.0.1:3322  the dev owner's wallet (a client)
 #   infer     1sat serve wallet-api            127.0.0.1:3323  the inference peer's wallet (a client)
 #

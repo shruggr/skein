@@ -15,7 +15,7 @@
 //   connection: the onboarding app's thread asked the instance manager, which
 //   created alice from the default image and delivered the client's claim
 //   (alice's first entry after its genesis) before publishing her hostname.
-//   alice serves the placeholder at her URL, is claimed for the client's key,
+//   alice serves the management site at her URL, is claimed for the client's key,
 //   and the client installs programs/test/app-demo into her and calls it. The
 //   host skein records her under onboard/instances/alice (the manager's
 //   answer record). A second create of "alice" is refused (409, the
@@ -63,7 +63,7 @@ const clientKey = PrivateKey.fromRandom(), clientId = clientKey.toPublicKey().to
 const client = ephemeralWallet(clientKey);
 const base = `http://127.0.0.1:${port}`;
 const vars: Env["vars"] = {
-  SKEIN_HOME: home, HOME: home, SKEIN_ROUTER_PORT: String(port), SKEIN_HOST_PORT: "0", SKEIN_EXPLORE_BASE_PORT: "off",
+  SKEIN_HOME: home, HOME: home, SKEIN_ROUTER_PORT: String(port), SKEIN_HOST_PORT: "0",
   // An instance's origin in the /@<handle> form: what the manager answers as its url, fetchable here.
   SKEIN_INSTANCE_ORIGIN: "http://127.0.0.1:{port}/@{handle}",
 };
@@ -129,7 +129,7 @@ try {
   check(first[0]?.transport === "local", "the claim is alice's first entry after her genesis: her hostname was published after it");
   check(!(await genesisBook("alice")).includes("manager"), "alice's address book has no instance manager");
   const page = await fetch(`${res?.url}/`);
-  check(page.status === 200 && /management site will be here/.test(await page.text()), `alice answers at her url: GET ${res?.url}/ → ${page.status}`);
+  check(page.status === 200 && (await page.text()).includes('src="site/app.js"'), `alice answers at her url with the management site: GET ${res?.url}/ → ${page.status}`);
   const rec = await (await k("host")).call("head", "onboard/instances/alice") as CID | null;
   const answer = rec ? await (await k("host")).store.get(rec) as { handle?: string; identity?: unknown; url?: string; replyTo?: unknown } : undefined;
   check(answer?.handle === "alice" && hex(answer.identity) === res?.identity && answer.url === res?.url && !!answer.replyTo, "the host skein records her: onboard/instances/alice → the instance manager's answer record");

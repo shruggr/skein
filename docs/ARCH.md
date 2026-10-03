@@ -272,7 +272,8 @@ on that thread (#66). The thread applies the policy (free and ungated
 today), emits `create` to the instance manager with the session's key as
 the owner, and rests. On the answer it points `onboard/instances/<handle>`
 at the manager's answer record and finishes, and the page gets `{handle,
-identity, url}`. The management site (#92) is what calls it.
+identity, url}`. The management page calls it (shruggr/skein-site, #92:
+docs/APPS.md §3 "The management page"), served by the host skein itself.
 
 ## The browser host
 

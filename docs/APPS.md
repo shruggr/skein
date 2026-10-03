@@ -6,7 +6,8 @@ dispatch rows, its writes are heads under its own name; and by #79: the
 wallet and the overlay apps under their own names over the chain app, the
 form before #77 gone; and by #83: the shell and the chat loop are apps,
 shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
-by #91: deploy by hash, the git app cloning in the VM, §3). Status of each
+by #91: deploy by hash, the git app cloning in the VM, §3; and by #92: the
+management page, §3). Status of each
 part is marked **built** or **spec**. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
@@ -243,6 +244,31 @@ instance, and there are two ways:
   provider's answer that carries it is an entry, as every provider answer
   is). Not yet: `push` (publishing from a skein), refs or tags as the
   `hash`, sha256 repositories.
+
+**The management page** (built, #92). Every skein from the default image
+serves the management site — shruggr/skein-site, a static app's files in the
+image's `www/`, at `/` and `/site/` — and that page is the installer (there
+is no installer program). Connected to the owner's wallet, it reads the
+skein through its explorer (`/explore`, the owner's read, docs/MESSAGES.md),
+which gives it what the plan needs: the heads, the genesis, the claim, the
+address book, the dispatch table (the chain `{kind: "dispatch"}`) and any
+record by CID. It plans with the same code as the CLI (src/host/plan.ts,
+bundled into the site) and shows the plan as the prompt; on approval it
+sends the messages, signed by the wallet on a BRC-104 session.
+
+- **The git app first.** The default image carries the git app's tree
+  (`apps/git`, not wired). With no `git/app` head, the page plans the
+  install over that subtree: `objects` carries what the store lacks (the
+  module as a raw block, the program and app records), then `head`, the one
+  `dispatch` row (box `git` from the owner) and `start`.
+- **Every other app by hash.** The page sends `{fn: "git.clone", args: {url,
+  hash}}` to box `git` and reads the answer from the thread that message
+  launched: `/explore/edges/<message>?rel=launched-by` names it,
+  `/explore/thread/<origin>` is read until its last update is `finished` or
+  `errored`, and the result's stdout is the answer `{tree, app}`. The page
+  then runs step 2 above in the browser and compares its record with `app`.
+- **Uninstall** and the address book (a `peers` message per change) the
+  same way: the change shown, then sent as the owner.
 
 Who can install is whoever the kernel's admin rows admit to `objects`,
 `head` and `dispatch`: the owner, by every genesis that names one; a
@@ -621,6 +647,7 @@ bounded at 64 MiB).
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
 | install client (manifest → objects + head + dispatch + start, approvals); `skein-host install <repo|dir>` / `uninstall`; `start`/`stop`, row senders | built (#72, #76, #77) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
+| the management page: the site in the default image; install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92: §3; shruggr/skein-site 0.1.0) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncP2p`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |

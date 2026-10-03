@@ -54,7 +54,8 @@ bin/skein-host run                                    # the host on :8100; marth
 
 The default image (`images/default`, docs/BOOTSTRAP.md) is the same for
 everyone: the front door, the messagebox, the static app serving the
-management site at `/` (a placeholder until #92), and one row to the kernel,
+management site at `/` (shruggr/skein-site), the explorer for whoever
+claims it, the git app's tree (not installed), and one row to the kernel,
 `claim`, from anyone. `skein-host claim` is that claim, sent by the host's
 instance manager; with the host running it goes through its control socket.
 `--messagebox <url>` names where the instance reaches its owner (default:
@@ -77,8 +78,9 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
 - The full dev stack (owner and inference wallets, mailbox instances, address
   books, the inference peer) is `scripts/host/up.sh`; see
   `scripts/host/README.md`.
-- The host page is http://127.0.0.1:4600, a read-only explorer per instance
-  on :4610 and up. `bin/skein-dev log | ls | show <cid>` and
+- The host page is http://127.0.0.1:4600 (every instance, a link to its
+  origin). A skein from the default image serves its management page, the
+  explorer included, at its origin. `bin/skein-dev log | ls | show <cid>` and
   `kernel-zig/zig-out/bin/skein-kernel dump | replay | fuel <store>` read a
   store from the command line.
 
@@ -105,8 +107,18 @@ bin/skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instanc
   connection, is `{handle, identity, url}`: a new instance from the default
   image, owned by the session's key, already claimed when its URL first
   answers. Its owner installs apps into it from there (next sections). A
-  handle that is taken is refused (409). The management site (#92) will be
-  the page that does this.
+  handle that is taken is refused (409).
+- **The management page.** Open the host skein's origin
+  (`http://host.localhost:8100/`) with a BRC-100 wallet in the browser: it
+  creates a skein for your key through that route, writes a **locator** (an
+  output in your wallet, basket `skein-locators`: the skein's identity, URL
+  and handle) and opens the new skein's own copy of the page. There it reads
+  the skein through its explorer and installs apps: the git app from the
+  image, then any app by repository URL and commit id — you see the rows each
+  asks for before your wallet signs. Deploy by hash needs the host to carry
+  requests beyond itself: run it with `SKEIN_HTTP=fetch`. Every skein from
+  the default image serves the same page (shruggr/skein-site); one page
+  manages skeins on many hosts, each through its locator.
 - `scripts/host/up.sh` does all three for the dev stack.
 
 ## Talk to it
@@ -126,6 +138,10 @@ bin/skein inbox --wait                           # the answer, from your mailbox
 bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs the inference peer, bin/skein-infer)
 ```
 
+- In a browser: a skein from the default image serves the management page
+  at its origin (`/`). It talks to that skein, and to every skein your
+  wallet keeps a locator for, with the same requests as the commands below,
+  signed by your wallet.
 - Messages are BRC-33 (`/sendMessage`, `/listMessages`,
   `/acknowledgeMessage`) on a BRC-104 session, bodies dag-cbor
   (`application/cbor`, BRC-231) or JSON. A message's id is the CID of its
@@ -256,20 +272,21 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager | v0.1.0 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
+| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site every skein from the default image serves: locators in your wallet, create a skein, install apps, the explorer | v0.1.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:
 
 ```
 kernel-zig/      the kernel: skein-kernel serve | replay | shell | dump | fuel; equiv/ (the equivalence suite)
-images/default/  the default image (#89): a system tree with no owner and the claim row
+images/default/  the default image (#89): a system tree with no owner and the claim row; the site in www/, the git app's tree in apps/git (#92)
 programs/        frontdoor, messagebox, resolve, wallet (Zig over skein-sdk); test/ (fixtures, app-demo)
 wasm/            the committed modules the kernel pins (kernel-zig/src/programs.zig), see wasm/README.md
 src/host/        the node host: skein-host (cli.ts), the HTTP transport, providers, feeds, broadcaster, libp2p node, oracle, install
 src/runtime/     the formats and a store reader in TypeScript (no machine)
 src/client/      bin/skein: import, run, chat, inbox, dispatch
 src/peers/       bin/skein-infer (the inference peer), a remote cron provider
-src/dev/         bin/skein-dev, bin/skein-explore (a read-only explorer)
+src/dev/         bin/skein-dev (log, ls, show over a store file)
 web/             the browser host (web/kernel/) and a front-end demo
 scripts/         program builds and pins, sdk-local.sh; host/ (the dev stack)
 ```

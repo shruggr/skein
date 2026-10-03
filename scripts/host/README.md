@@ -68,7 +68,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65, #90: `fetch`, `waker`, `cron`, `libp2p`, `status`, the instance manager `manager` (the host skein's only), each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
+| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600 | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65, #90: `fetch`, `waker`, `cron`, `libp2p`, `status`, the instance manager `manager` (the host skein's only), each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
@@ -326,7 +326,7 @@ bin/skein-host add <handle> [--domain d] [--identity hex] [--store path] [--tree
 bin/skein-host add <handle> --mailbox --owner <hex>   # a mailbox instance for an identity outside the host
 bin/skein-host knows <handle> [a,b | --all | --none]   # who its ROSTER.md lists; no list: print it
 bin/skein-host list | mailboxes | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store
-bin/skein-host run                    # the host, the host page and roster, an explorer each
+bin/skein-host run                    # the host, the host page and roster
 bin/skein-host deploy <handle> <dir> [--only glob,glob]
 bin/skein-host deploy --all [--only glob,glob]   # every enabled row, from its `source`
 bin/skein-host roster                 # the roster JSON, printed
@@ -339,18 +339,12 @@ bin/skein-host roster --deploy        # redeploy every enabled row whose ROSTER.
 `skein-host run` is the host (above, and docs/ARCH.md "The host"): it
 hydrates every enabled row once at start — a row's genesis is written at its
 first hydration — then starts each kernel (`skein-kernel serve` over the
-row's store) on demand and, with `SKEIN_IDLE_MS`, stops it when idle. Beside
-it runs a supervisor (src/host/supervisor.ts) for one read-only
-`bin/skein-explore <port>` per enabled row:
-
-- **Lines**: every line an explorer writes is the host's, prefixed
-  `[handle explore]`.
-- **Restarts**: an explorer that exits is started again after 1 s, doubling
-  to at most 60 s; one that ran 30 s or more starts again at 1 s.
-- **Stopping**: SIGINT/SIGTERM closes the host (`Router.close()`, #61:
-  its timers, feeds, broadcaster, libp2p nodes and kernels) and sends every
-  explorer SIGTERM (SIGKILL after 10 s). An explorer whose supervisor is killed stops
-  by itself (its IPC channel closes).
+row's store) on demand and, with `SKEIN_IDLE_MS`, stops it when idle.
+SIGINT/SIGTERM closes the host (`Router.close()`, #61: its timers, feeds,
+broadcaster, libp2p nodes and kernels). There is no host-side explorer any
+more (#92): a skein's explorer is its own route (`/explore`, its owner's),
+and the management page a skein from the default image serves at its origin
+renders it.
 
 **Ports** (127.0.0.1):
 
@@ -358,13 +352,11 @@ it runs a supervisor (src/host/supervisor.ts) for one read-only
 |---|---|
 | `SKEIN_ROUTER_PORT` (default 8100) | the host's HTTP transport |
 | `SKEIN_HOST_PORT` (default 4600) | `/`: the host page; `/roster.json`: the roster |
-| `SKEIN_EXPLORE_BASE_PORT` (default 4610; `off`: none) | row *i*'s explorer on base + *i*, *i* its place among the enabled rows (`list` order) |
 
-**The host page** (`http://127.0.0.1:4600/`, read-only, #23 "Host
-explorer"): one line per enabled instance — handle, identity, status
-(`live` while its kernel runs, else `idle`), pid, store path, deployed tree —
-and a link to its explorer (src/dev/explore) over the row's store. This is
-the host operator's view, not the end-user UI.
+**The host page** (`http://127.0.0.1:4600/`, read-only, #23): one line per
+enabled instance — handle, identity, status (`live` while its kernel runs,
+else `idle`), pid, store path, deployed tree — and a link to its origin.
+This is the host operator's view; the user's is the management page (#92).
 
 ### Changing an instance's dispatch table: `skein-host dispatch`
 
@@ -381,7 +373,7 @@ kernel performs it (an admin operation, not a program): the body is
 `<handler>` is a program the instance's genesis names (`resolve`,
 `messagebox`, …: resolved to its record's CID from the row's store) or a
 program record's CID (its record and module go in through `objects` first).
-No reply; the change shows on the explorer's `/s`. Nothing in host.db maps
+No reply; the change shows on the management page's dispatch table (the explorer's read of the chain `{kind: "dispatch"}`). Nothing in host.db maps
 to rows yet (`knows` is only ROSTER.md), so nothing sends these
 automatically.
 

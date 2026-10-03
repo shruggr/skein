@@ -97,7 +97,7 @@ echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static
 echo "== apps (#72, #76): skein-host install of shruggr/skein-static (its routes under /static/, the head its app record) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
 "${node[@]}" "$kz/equiv/install.ts" || status=1
 
-echo "== the default image and the claim (#89): an instance from images/default (no owner, the claim row, the site's placeholder at /); skein-host claim → the owner's admin rows, the claim row gone; a second claim refused; the owner installs app-demo; an owned instance refuses a claim; add --image; replayed"
+echo "== the default image and the claim (#89): an instance from images/default (no owner, the claim row, the management site at / and /site/, the explorer nobody's until the claim); skein-host claim → the owner's admin rows, the claim row gone, the owner reads the explorer; a second claim refused; the owner installs app-demo; an owned instance refuses a claim; add --image; replayed"
 "${node[@]}" "$kz/equiv/claim.ts" || status=1
 
 echo "== the host skein, the instance manager and the onboarding app (#90): skein-host init (the host skein from the default image, claimed for the operator, the instance manager in its address book); shruggr/skein-onboard (src/testapps.ts's pinned commit, or \$SKEIN_ONBOARD_DIR) installed in it; a client's session creates alice (claimed for the client before her hostname is published), she answers at her url and the client installs app-demo in her; a second create refused; replayed"
@@ -105,6 +105,13 @@ echo "== the host skein, the instance manager and the onboarding app (#90): skei
 
 echo "== deploy by hash (#91): the git app (shruggr/skein-git, src/testapps.ts's pinned commit, or \$SKEIN_GIT_DIR) clones one commit of a local repository served over smart HTTP (git http-backend) through the fetch provider — protocol v2, one shallow pack, checked against the hash — and answers {tree, app}; the manifest read by CID, the record rebuilt by the install client (the same CID), head + dispatch + start, the app runs; a hash not held, another commit's pack, a bad URL, no repository, no manifest refused; replayed"
 "${node[@]}" "$kz/equiv/git-clone.ts" || status=1
+
+if [ "${SKEIN_EQUIV_BROWSER:-1}" = "0" ] || ! command -v playwright > /dev/null || [ ! -x "${SKEIN_CHROMIUM:-/usr/bin/chromium}" ]; then
+  echo "== the management site (#92): skipped (SKEIN_EQUIV_BROWSER=0, or no playwright on PATH or no Chromium at ${SKEIN_CHROMIUM:-/usr/bin/chromium})"
+else
+  echo "== the management site (#92): the page the host skein serves, in headless Chrome with a wallet in the tab (a stand-in for the 1sat services funds it); create alice from the page (the onboarding app), her locator written to the wallet's basket skein-locators, the page opens her copy of the site; the git app installed from her image's tree, then app-demo by hash through the git app (a local repository over git http-backend), the prompt approved, app-demo runs; the explorer renders her log and dispatch table, another key refused; the host skein's page lists alice; replayed"
+  "${node[@]}" "$kz/equiv/site.ts" || status=1
+fi
 
 echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by skein-host install, the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1

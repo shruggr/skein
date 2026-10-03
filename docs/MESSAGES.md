@@ -171,9 +171,13 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
   outside the root is served); 405 for another method (`Allow: GET, HEAD`).
   A read: its request's entry, and no head moves.
 - **Reads** (the genesis's `reads`, from `etc/reads.json`): `[{caller?: <key>,
-  op}]`. A route with `read: op` answers only a caller the table allows (no
-  caller: anyone); others get 403, signed — a refusal, recorded on the
-  request's thread. The default reads: the owner may `explore`.
+  op}]` or `[{owner: true, op}]`. A route with `read: op` answers only a
+  caller the table allows (no caller: anyone; `owner: true`, #92: the
+  instance's owner as the step sees it — the genesis's, else the key in the
+  head `claim` — so nobody before a claim); others get 403, signed — a
+  refusal, recorded on the request's thread. The default reads: the owner may
+  `explore` (code genesis names the key; the default image says `owner:
+  true`).
 
 ### Route handlers: the program-facing contract (#68, #66)
 
@@ -281,7 +285,11 @@ as a call, default 10^10), not `fuelPerStep`; a thread it launches steps on
 The **default routes**: the BRC-33 messagebox (`/sendMessage`,
 `/listMessages`, `/acknowledgeMessage`, at the root and under `/messagebox`)
 and the explorer (`/explore…`, read op `explore`: the log, threads, a thread,
-a head, a record, as DAG-JSON; `programs/frontdoor/explore.zig`).
+a head, a record, what points at a record (`/explore/edges/<cid>?rel=`, #92),
+as DAG-JSON; `programs/frontdoor/explore.zig`). The default image adds the
+management site (static, at `/` and `/site/`), which reads a skein through
+these routes (docs/APPS.md §3, "The management page"); each read is a
+request entry, nothing else written.
 
 **The standard AuthFetch** (`@bsv/sdk`, and the `@bsv/message-box-client` over it)
 keeps one session per origin and shakes hands at `<origin>/.well-known/auth`.

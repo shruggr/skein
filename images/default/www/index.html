@@ -1,5 +1,19 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>skein</title>
-<h1>skein</h1>
-<p>This is a skein. Its management site will be here (shruggr/skein#92): connect a wallet, see the skeins you hold, install apps.</p>
+<link rel="stylesheet" href="site/style.css">
+<script type="module" src="site/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <a class="home" href="#/">skein</a>
+  <span id="who" class="mut small">no wallet connected</span>
+  <button id="connect" type="button">Connect a wallet</button>
+</header>
+<main id="main"><p class="mut">Loading.</p></main>
+<footer class="mut small">The management page of a skein (shruggr/skein-site). It talks to each skein directly, signed by your wallet.</footer>
+</body>
+</html>

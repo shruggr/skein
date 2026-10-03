@@ -2,8 +2,9 @@
 //
 //   an instance booted from the default image (images/default) — its genesis
 //   names no owner and has no admin rows, only the claim row (box `claim`,
-//   from anyone, to the kernel); it serves the management site's placeholder
-//   at `/` (the static app) and takes no owner's message in an admin box.
+//   from anyone, to the kernel); it serves the management site at `/` and
+//   `/site/` (the static app, #92), its explorer answers nobody, and it takes
+//   no owner's message in an admin box.
 //
 //   `skein-host claim` (through the router's control socket) delivers the
 //   owner's claim as a `local` request from the host's instance manager: in one
@@ -85,7 +86,11 @@ try {
   check((await kernelRows()).join(",") === "claim<-*", `the only kernel row is the claim row, from anyone: ${(await kernelRows()).join(", ")}`);
   const home = await fetch(`${h.base}/@inst/`);
   const page = await home.text();
-  check(home.status === 200 && /management site will be here/.test(page), `GET / : the management site's placeholder, served by the static app (${home.status})`);
+  check(home.status === 200 && page.includes('src="site/app.js"'), `GET / : the management site, served by the static app (${home.status})`);
+  const js = await fetch(`${h.base}/@inst/site/app.js`);
+  check(js.status === 200 && /javascript/.test(js.headers.get("content-type") ?? "") && (await js.text()).includes("skein-locators"), `GET /site/app.js: the site's files under /site/ (${js.status})`);
+  const unread = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore`, { method: "GET" });
+  check(unread.status === 403, `before the claim, the explorer answers nobody: its read is the owner's (${unread.status})`);
   const before = await new RawBox(h.owner, `${h.base}/@inst`).send(inst, "objects", { records: [] }).then(() => "sent", (e: Error) => e.message);
   check(/403 ERR_NOT_SUBSCRIBED/.test(before), `before the claim, the owner's message to \`objects\` is refused: no admin row (${before})`);
 
@@ -102,6 +107,11 @@ try {
   const peers = await (await k()).call("head", "peers") as CID | null;
   const book = peers ? await Promise.all((((await (await k()).store.get(peers)) as { peers?: Array<{ peer: CID }> }).peers ?? []).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array; address: string; source: string })) : [];
   check(book.some((p) => hex(p.key) === h.ownerId && p.address === h.origin("david") && p.source === "claim"), "the owner's messagebox is in the address book (source claim)");
+  // #92: the image's read rule {op: explore, owner: true} — the owner as the front door sees it now, the claim's.
+  const ex = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore/head/claim`, { method: "GET" });
+  check(ex.status === 200 && (await ex.text()).includes(claimRoot!.toString()), `after the claim the owner reads the explorer: GET /explore/head/claim → ${ex.status}`);
+  const other = await new RawBox(ephemeralWallet(PrivateKey.fromRandom()), `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore`, { method: "GET" });
+  check(other.status === 403, `and another key does not (${other.status})`);
 
   // ------------------------------------------------ a second claim
   const stranger = PrivateKey.fromRandom(), strangerId = stranger.toPublicKey().toString();
