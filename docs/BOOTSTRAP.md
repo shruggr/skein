@@ -249,12 +249,13 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 | shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
 | shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
 | shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>` (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
+| shruggr/skein-git | the git app (#91): `git.clone {url, hash}` from the owner, box `git` — one commit fetched through the fetch provider, checked against the hash, kept in the store, its app record built and answered (deploy by hash, below) | `skein-host install https://github.com/shruggr/skein-git --instance <h>` |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
 package dependency by URL+hash (#75), not a path in this tree. Developing
 both at once: `scripts/sdk-local.sh` (README.md).
 
-There are two ways to install an app.
+There are three ways to install an app.
 
 - **At boot**, an app is part of a system tree. Copy the repo's `bin/`
   entries the tree needs into its `bin/`, its rows into `etc/dispatch.json`
@@ -303,6 +304,27 @@ There are two ways to install an app.
   `skein head`, `skein dispatch add [--sender <key>] <box> <handler>` /
   `skein-host dispatch <h> add …` (a mailbox row; http and libp2p rows
   through `install`).
+
+  `install` clones the repository host-side, on the machine it runs on: a
+  coding-session tool, not the user's path.
+- **By hash, from a page** (#91, built): the clone happens in the VM. With
+  the git app installed, two owner-signed steps:
+
+  1. `{fn: "git.clone", args: {url, hash}}` to box `git`. The git app
+     fetches that one commit through the fetch provider (git smart HTTP,
+     protocol version 2: the advertisement, then one shallow pack), checks
+     every object against the hash, puts the commit, its trees and blobs as
+     git-raw blocks, builds the app record (and its program records and
+     modules) from `etc/app.json` exactly as `install` would, and answers
+     `{tree, app}`. It moves no head.
+  2. The install as above, without `objects`: the client reads the manifest
+     out of the stored tree by CID (reads are open), checks it and the
+     instance, rebuilds the app record (src/host/install.ts `readStoredApp`
+     + `planInstall`: its CID must be the answer's `app`), shows the prompt,
+     and the owner sends `head`, the `dispatch` rows and `start`.
+
+  The page that does this is #92's; kernel-zig/equiv/git-clone.ts drives
+  both steps against a repository served by `git http-backend`.
 
 ## Packets
 
@@ -442,6 +464,13 @@ boot is written, and the process exits 0.
   alice through it, alice claimed for the client and answering at her url,
   the client installs app-demo in her; a second create refused; both stores
   replayed.
+- `kernel-zig/equiv/git-clone.ts` (in `run.sh`, #91): deploy by hash — the
+  git app clones a commit of a repository served by `git http-backend`, the
+  install client rebuilds the same app record from the stored tree, `head`
+  + `dispatch` + `start` install it and it runs; a hash not held, another
+  commit's pack, a bad URL, no repository and no manifest refused; replayed.
+- `src/host/http.test.ts`: the fetch provider's network (`fetchHttp`): a
+  request, its `timeoutMs`, its `maxBytes` (#91).
 - `kernel-zig/equiv/boot.ts` (in `run.sh`): two instances, one booted from a
   directory and one from a packet of it (mined, proofs checked). Each is
   chatted with over `main` and runs over it. Then a checkpoint is restored on a

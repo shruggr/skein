@@ -153,6 +153,15 @@ owner: `objects` (the tree and program records), `head` (`<app>/app` → the
 app record), one `dispatch` per row, and the app's `start` message.
 Installing again is the upgrade. docs/APPS.md §3.
 
+That command clones the repository on your machine (a coding-session tool).
+**Deploy by hash** is the other path, the one a page uses: with the git app
+([shruggr/skein-git](https://github.com/shruggr/skein-git)) installed, the
+owner sends `{fn: "git.clone", args: {url, hash}}` to box `git`; the app
+fetches that one commit through the host's fetch provider, checks it against
+the hash, keeps its tree in the store and answers `{tree, app}` (the app
+record, built in the VM). The owner then sends `head`, the `dispatch` rows
+and `start` — no `objects`: the blocks are already there.
+
 ## Build an app
 
 An app is a tree with `etc/app.json`. A complete minimal one is
@@ -222,9 +231,11 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
   `npm test` fail with "kernel probe: exited (1)" and can hang the host
   suite. Run `zig build` first.
 - `equiv/run.sh` clones the pinned sibling apps (skein-chain, skein-overlay,
-  skein-static, skein-shell, skein-chat); `SKEIN_CHAIN_DIR`,
-  `SKEIN_OVERLAY_DIR`, `SKEIN_STATIC_DIR`, `SKEIN_SHELL_DIR`,
-  `SKEIN_CHAT_DIR` point it at local checkouts. `npm test` installs the
+  skein-static, skein-shell, skein-chat, skein-onboard, skein-git);
+  `SKEIN_CHAIN_DIR`, `SKEIN_OVERLAY_DIR`, `SKEIN_STATIC_DIR`,
+  `SKEIN_SHELL_DIR`, `SKEIN_CHAT_DIR`, `SKEIN_ONBOARD_DIR`, `SKEIN_GIT_DIR`
+  point it at local checkouts. The git app's case (`git-clone.ts`) serves a
+  local repository with `git http-backend`. `npm test` installs the
   shell app and the chat app where a test runs them (src/testapps.ts: the
   same pins, fetched once into `$TMPDIR/skein-apps`). The browser cases need Playwright and
   Chromium, else they are skipped with a note.
@@ -244,6 +255,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.1.0 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager | v0.1.0 |
+| [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:

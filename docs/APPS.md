@@ -5,7 +5,8 @@ The specification for applications on a skein instance (issue #72, decided
 dispatch rows, its writes are heads under its own name; and by #79: the
 wallet and the overlay apps under their own names over the chain app, the
 form before #77 gone; and by #83: the shell and the chat loop are apps,
-shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell). Status of each
+shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
+by #91: deploy by hash, the git app cloning in the VM, §3). Status of each
 part is marked **built** or **spec**. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
@@ -202,6 +203,46 @@ app").
 4. **`start`** (if the manifest has one) — the owner sends the declared body
    into the app's box. The app's handler runs its first step: scheduling
    ticks with `$cron`, announcing itself, whatever it declared. (Built, #76.)
+
+**Two paths to the tree** (#91). Step 1 is how the tree reaches the
+instance, and there are two ways:
+
+- **The CLI clones host-side.** `skein-host install <repo-url[#rev] | dir>`
+  clones the repository (or reads the directory) on the machine it runs on
+  and sends everything by `objects`. A coding-session tool, not the user's
+  path.
+- **The git app clones in the VM, by hash** (built, #91). With
+  [shruggr/skein-git](https://github.com/shruggr/skein-git) installed (name
+  `git`, box `git` from `$owner`, interface `git/1`), a page needs two
+  owner-signed steps and no `objects`:
+  1. `{fn: "git.clone", args: {url, hash}}` to box `git` — `hash` a commit
+     id, the user's intent. The git app asks the fetch provider (the host's
+     HTTP transport, docs/MESSAGES.md "The providers") for the repository's
+     advertisement and then one shallow pack of that commit (git smart HTTP,
+     protocol version 2; at most 32 MiB, `maxBytes`), unpacks it (ofs- and
+     ref-deltas), finds the commit by the id it computes and walks its tree —
+     every object must be in the pack, so what is kept is what the hash
+     commits to — puts the commit, trees and blobs as git-raw blocks, builds
+     the **app record** from `etc/app.json` with its program records and
+     modules, byte for byte the record step 1 above would send, and answers
+     `{fn, request, replyTo, result: {tree, app}}` (or `error: {code,
+     message}`: `bad-args`, `unreachable`, `not-git`, `not-found`,
+     `too-large`, `mismatch`, `no-manifest`, `bad-manifest`). Blocks are
+     content-addressed and unscoped: keeping them grants nothing and mounts
+     nothing. It moves no head (it writes only `git/…`, and uses none) and
+     never acts as the owner.
+  2. The install as above from step 2: the page reads the manifest out of
+     the stored tree by CID (reads are open), checks it and the instance as
+     in step 0, rebuilds the app record (src/host/install.ts `readStoredApp`
+     + `planInstall`) and compares its CID with the answer's `app`, shows the
+     prompt, and the owner signs `head` (`<app>/app` → that record), the
+     `dispatch` rows and `start`. Only that head message makes the tree an
+     app.
+
+  The pack is not stored, only the objects the commit reaches (the fetch
+  provider's answer that carries it is an entry, as every provider answer
+  is). Not yet: `push` (publishing from a skein), refs or tags as the
+  `hash`, sha256 repositories.
 
 Who can install is whoever the kernel's admin rows admit to `objects`,
 `head` and `dispatch`: the owner, by every genesis that names one; a
@@ -579,6 +620,7 @@ bounded at 64 MiB).
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `<app>/ls_<service>`; the contract as a Zig module | built (#50, #79: skein-overlay 0.3.0) |
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
 | install client (manifest → objects + head + dispatch + start, approvals); `skein-host install <repo|dir>` / `uninstall`; `start`/`stop`, row senders | built (#72, #76, #77) |
+| deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncP2p`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |

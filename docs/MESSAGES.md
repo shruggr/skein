@@ -563,7 +563,7 @@ message routes by `replyTo` to the thread awaiting it.
 
 | role | box | body | answer body (beside `replyTo`) |
 |---|---|---|---|
-| `fetch` | `fetch` | `{method, url, headers?: {name: value}, body?: bytes, timeoutMs?}` | `{status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`) |
+| `fetch` | `fetch` | `{method, url, headers?: {name: value}, body?: bytes, timeoutMs?, maxBytes?}` | `{status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`). `maxBytes` (#91): a response body over it is not carried in, and the answer is `{error}` (the git app bounds its pack this way) |
 | `waker` | `wake` | `{at: ms}` | `{at}`, at `at` (#69, below) |
 | `cron` | `cron` | `{fn: "tick", every: ms \| at: ms, box, body?, name}` · `{fn: "stop", name}` | `{name, next}` · `{name, stopped}`; then each tick, a message of its own into `box` (#69, below) |
 | `libp2p` | `publish` | `{topic, body: bytes}` | `{seqno: bytes(8), recipients}` |
