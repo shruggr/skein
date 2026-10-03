@@ -57,8 +57,9 @@ A genesis needs an owner: `SKEIN_OWNER`, else `~/.skein/owner.identity`
   fuel ledger), `instances/<handle>/runtime.db` (each instance's store),
   `logs/host.log`.
 - An instance's genesis is written at its first start: the owner, the
-  owner's admin rows, the default programs and rows, and the host's
-  providers in its address book. `skein-host add <h> --boot <dir>` boots
+  owner's admin rows, the boundary programs (front door, messagebox,
+  resolve) and their rows, and the host's providers in its address book.
+  It has no shell and no chat loop: those are apps, installed next. `skein-host add <h> --boot <dir>` boots
   from a system tree instead (docs/BOOTSTRAP.md). A new log format means a
   new store: move `runtime.db` aside and start again.
 - The full dev stack (owner and inference wallets, mailbox instances, address
@@ -77,11 +78,13 @@ inside the VM; the host holds the connection until the request's thread
 comes to rest, and the answer is signed on the session.
 
 ```
+bin/skein-host install https://github.com/shruggr/skein-shell --instance martha   # the shell app: box run
+bin/skein-host install https://github.com/shruggr/skein-chat --instance martha    # the chat app: box chat
 bin/skein whoami
 bin/skein import ~/some/dir                      # tree objects into the kernel's objects operation; prints the tree CID
-bin/skein run --tree <cid> -- 'ls | head -3'     # box run (the shell over a tree)
+bin/skein run --tree <cid> -- 'ls | head -3'     # box run (the shell app: the shell over a tree)
 bin/skein inbox --wait                           # the answer, from your mailbox instance
-bin/skein chat --new --wait 'what is here?'      # box chat (needs the inference peer, bin/skein-infer)
+bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs the inference peer, bin/skein-infer)
 ```
 
 - Messages are BRC-33 (`/sendMessage`, `/listMessages`,
@@ -180,8 +183,11 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
   `npm test` fail with "kernel probe: exited (1)" and can hang the host
   suite. Run `zig build` first.
 - `equiv/run.sh` clones the pinned sibling apps (skein-chain, skein-overlay,
-  skein-static); `SKEIN_CHAIN_DIR`, `SKEIN_OVERLAY_DIR`, `SKEIN_STATIC_DIR`
-  point it at local checkouts. The browser cases need Playwright and
+  skein-static, skein-shell, skein-chat); `SKEIN_CHAIN_DIR`,
+  `SKEIN_OVERLAY_DIR`, `SKEIN_STATIC_DIR`, `SKEIN_SHELL_DIR`,
+  `SKEIN_CHAT_DIR` point it at local checkouts. `npm test` installs the
+  shell app and the chat app where a test runs them (src/testapps.ts: the
+  same pins, fetched once into `$TMPDIR/skein-apps`). The browser cases need Playwright and
   Chromium, else they are skipped with a note.
 - The programs here: `scripts/build-programs.sh && scripts/pin-programs.sh`.
   Developing against a local skein-sdk: clone it next to this checkout and
@@ -196,7 +202,8 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.2.0 |
 | [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.3.0 |
 | [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
-| [shruggr/skein-workbench](https://github.com/shruggr/skein-workbench) | the shell and chat loop (run-handler, loop, the shell's toolset), to be split into the shell app and the chat app by #83 | v0.2.0 |
+| [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.1.0 |
+| [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:

@@ -980,7 +980,7 @@ conversation has no `replyTo`; everything after it is a `chat` **reply**
 one sender, one recipient, `replyTo` one parent — and a thread is one party's
 participation in one conversation.
 
-The loop (`programs/loop`) gives the model a `message` tool beside `bash`:
+The loop (the chat app, shruggr/skein-chat `programs/loop`, #83) gives the model a `message` tool beside `bash`:
 
 ```
 message {to: "@handle@domain", text}
@@ -1029,9 +1029,13 @@ message {to: "@handle@domain", text}
   plain answer at the end of his turn replies to her latest too.
 - **One at a time.** A step waits on threads or on replies, not both: several
   tool calls in one completion run in order, each `bash` a shell thread and
-  each `message` a reply-await.
-- **Inbound.** A new `chat` (no `replyTo`) is routed by the dispatch table; the default
-  genesis seeds a `chat` row with sender `*`, so other agents can open one.
+  each `message` a reply-await. The shell is the shell app's (#83): the
+  loop launches the shell program its app record names (head `shell/app`);
+  an instance without the shell app answers a `bash` call with exit 127,
+  "the shell app is not installed".
+- **Inbound.** A new `chat` (no `replyTo`) is routed by the dispatch table; the chat
+  app asks for a `chat` row with sender `*` beside the owner's (#83: the
+  genesis has none), so other agents can open one.
 
 ## Inside the instance
 
@@ -1041,7 +1045,7 @@ message {to: "@handle@domain", text}
   only by the kernel's `dispatch` operation on the owner's (or a
   delegate's) messages. A row may admit anyone (`*`) and take any box (`*`;
   the mailbox instance's catch-all). The program is the **box's program**:
-  `(owner, run) → run-handler`; a kernel row is the kernel's own operation.
+  `(owner, run) → run-handler` (the shell app's row, #83); a kernel row is the kernel's own operation.
 - **The handler** knows the box's message shape; its arguments name the
   message record and the body; it reads the body and launches the next thread.
 - **A handler that errors** ends its thread `errored`, and that is all: no
@@ -1056,7 +1060,7 @@ message {to: "@handle@domain", text}
 
 ## The infer protocol
 
-Between the loop (`programs/loop`) and the inference peer (`src/peers/infer.ts`,
+Between the loop (shruggr/skein-chat `programs/loop`) and the inference peer (`src/peers/infer.ts`,
 `bin/skein-infer`), as decided in issue #12. The peer is **stateful**: it
 holds each sender's conversation graph; the engine behind it (an
 OpenAI-compatible endpoint) is not. Requests go in the peer's `infer` box (its
@@ -1079,7 +1083,7 @@ before it:
 
 so a conversation is a chain of nodes keyed by CID, and a fork or a revert is
 nothing more than a node naming an earlier parent. What each role carries is
-listed in `programs/loop/main.go`.
+listed in shruggr/skein-chat `programs/loop/main.zig`.
 
 **Request** (`infer`):
 

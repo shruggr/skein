@@ -4,7 +4,7 @@ The bopen.ai agents reference 280 skills (#22, scope comment); 68 bundle
 scripts. This is where each of those stands now that the shell has `qjs` /
 `node` (QuickJS-ng + a file/stdio shim) and `python3` (CPython 3.14, stdlib
 only) — issue #25; what each runtime does and does not provide is in
-`wasm/README.md`, "Script runtimes". Audit of 2026-09-27, read from the
+the shell app's `toolset/README.md` (shruggr/skein-shell), "Script runtimes". Audit of 2026-09-27, read from the
 skill sources (none were run on a host); `content-scorer`,
 `experiment-stats` and `remind` were also run inside the VM.
 

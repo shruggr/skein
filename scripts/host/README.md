@@ -43,6 +43,13 @@ So `up.sh` goes:
    reads it, again whenever it changes). An add identical to what the store
    has is not sent, so this is idempotent. Run `up.sh` again after adding an
    agent.
+6. **The apps** (#83). A genesis has no shell and no chat loop: every
+   enabled agent gets the shell app (`run`) and the chat app (`chat`) by
+   `skein-host install … --approve-all` as the owner, from
+   `SKEIN_SHELL_APP` / `SKEIN_CHAT_APP` (default the two repos at
+   `#v0.1.0`). Installing what an instance already has sends only the head
+   again. The shell app's first install is the slow step: its modules are
+   ~50 MB of messages.
 
 An agent whose genesis names no owner messagebox is logged at every
 hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
@@ -360,16 +367,16 @@ kernel performs it (an admin operation, not a program): the body is
 `{op, row}`, the row `{transport: "mailbox", address: <box>, sender: "*" |
 <key bytes>, program: <handler>}`; `add` replaces the row with the same
 (transport, address, prefix, sender) or appends it, `remove` deletes it.
-`<handler>` is a program the instance's genesis names (`loop`,
-`run-handler`, …: resolved to its record's CID from the row's store) or a
+`<handler>` is a program the instance's genesis names (`resolve`,
+`messagebox`, …: resolved to its record's CID from the row's store) or a
 program record's CID (its record and module go in through `objects` first).
 No reply; the change shows on the explorer's `/s`. Nothing in host.db maps
 to rows yet (`knows` is only ROSTER.md), so nothing sends these
 automatically.
 
 ```
-bin/skein-host dispatch martha add --sender <key> run run-handler
-bin/skein-host dispatch martha remove --sender <key> run run-handler
+bin/skein-host dispatch martha add --sender <key> register resolve
+bin/skein-host dispatch martha remove --sender <key> register resolve
 ```
 
 **Stores before format 8** are not read by this kernel. Move the
@@ -521,7 +528,8 @@ bin/skein inbox --wait                               # until a result with reply
   mailbox instance, `SKEIN_MAILBOX_URL`, else `~/.skein/mailbox.url`, else
   `$SKEIN_HOST_URL/@david`.
 - Boxes: `objects` (bundles `{records: [{cid, bytes}]}`, dag-cbor, ≤ 1 MiB;
-  blobs first, the root tree last), `run` (`{cmd, tree: CID, cwd?, env?}`),
+  blobs first, the root tree last), `run` (`{cmd, tree: CID, cwd?, env?}`;
+  the shell app's box, #83),
   and David's own `results` (`{replyTo, exitCode, stdout, stderr, tree}`).
   Bodies are dag-cbor, sent as `application/cbor` (BRC-231). No envelope and
   no encryption layer: the session proves the sender.

@@ -55,7 +55,7 @@ machine state and is unreachable from inside.
 ### The synthetic object directory
 
 A repository in the tree is an ordinary git repository: `git` (real git,
-compiled to WASI; `wasm/README.md`, "git") runs in the shell over a project
+compiled to WASI; the shell app's `toolset/README.md`, shruggr/skein-shell) runs in the shell over a project
 directory, and its `.git/` — `HEAD`, refs, `index`, `config` — is a set of
 ordinary files in the tree. The exception is `.git/objects`. Each loose
 object git keeps there is a git object the store already holds natively:
@@ -128,8 +128,8 @@ writes the same chain. A name never moved has no chain.
   (`skein head <name> <tree>`): the kernel's own `head` operation (below,
   "The dispatch table") advances it — no program runs. The app's root head
   `<app>/app` is created this way at install.
-- `main` is the default: `run` with no tree, and a new `chat` with no tree,
-  start from `main`'s tree (the empty tree if there is no `main`). The loop
+- `main` is the default: `run` with no tree, and a new `chat` with no tree
+  (the shell app's and the chat app's, #83), start from `main`'s tree (the empty tree if there is no `main`). The loop
   records that tree in the opening turn it keeps.
 - An import sets `main` when the instance has none: the client names the root
   on the last `objects` bundle, and the kernel's `objects` operation advances
@@ -181,8 +181,9 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
 - **The genesis carries the seed.** Every genesis gets the owner's four admin
   rows first — `{mailbox, objects | head | dispatch | peers, $owner, kernel}`
   — then its own `dispatch` (src/host/genesis.ts; the default seed: the
-  owner's `run` and `chat`, `chat` from anyone, the reserved box the host
-  admits into, `:ack` → the messagebox, and the default HTTP rows; a mailbox
+  reserved box the host admits into, `:ack` → the messagebox, and the
+  default HTTP rows — no `run`, no `chat`: those are the shell app's and
+  the chat app's rows, #83; a mailbox
   instance's: `:ack` and `*` → the messagebox), written as the chain's first
   updates when the genesis entry is processed (no `thread`). A genesis
   naming `subscriptions` or `routes` is refused. Sessions are state, but no
@@ -256,14 +257,18 @@ compiled to WASI (brush) running programs that are themselves WASI modules
 (uutils coreutils and whatever else is registered), all over the tree-backed
 filesystem. Agents keep writing ordinary shell commands; what runs them is
 inside the machine and limited to the tools the instance has registered.
-That is the "deterministic container with a limited toolset".
+That is the "deterministic container with a limited toolset". The kernel
+runs it (kernel-zig/src/shell.zig) from a **shell program record** —
+`code: {ts: "shell"}`, its `modules` and `support` by raw CID — which the
+shell app's install writes (#83; docs/APPS.md §6b): the modules are that
+app's, and an instance without the shell app has no shell.
 
-Script runtimes are two of those programs (issue #25; `wasm/README.md`,
+Script runtimes are two of those programs (issue #25; the shell app's `toolset/README.md`,
 "Script runtimes"; the skills audit in `docs/SKILLS.md`): `qjs` (QuickJS-ng,
 also `node` with a small file + stdio shim) and `python`/`python3` (CPython
 3.14). A `#!` script in the tree runs under its interpreter when that is a
 registered program. Python's stdlib is a support file of the shell program
-(a raw block, like the modules), mounted read-only for python processes only
+(a raw block, like the modules; the record's `support.python`), mounted read-only for python processes only
 at `/opt/skein/python`; it is not part of the tree and never committed.
 
 A step function is the same idea one level up: the turn loop is a program

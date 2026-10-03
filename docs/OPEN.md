@@ -18,9 +18,10 @@ disagree, the issue is right.
 
 ## The shell (2026-09-25)
 
-The shell is the kernel's (`kernel-zig/src/shell.zig`): brush and uutils
-coreutils as WASI modules over the tree; the toolset is built in
-shruggr/skein-workbench.
+The kernel runs the shell (`kernel-zig/src/shell.zig`): brush and uutils
+coreutils as WASI modules over the tree. The modules and the toolset are
+the shell app's (shruggr/skein-shell, #83), named by its shell program
+record.
 
 1. **Pipelines run stage by stage.** Every external command runs to
    completion before the next starts; pipes are in-memory buffers capped at

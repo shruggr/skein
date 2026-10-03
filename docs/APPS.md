@@ -4,7 +4,8 @@ The specification for applications on a skein instance (issue #72, decided
 2026-10-01; revised by #77, the kernel's four tables: an app's wiring is
 dispatch rows, its writes are heads under its own name; and by #79: the
 wallet and the overlay apps under their own names over the chain app, the
-form before #77 gone). Status of each
+form before #77 gone; and by #83: the shell and the chat loop are apps,
+shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell). Status of each
 part is marked **built** or **spec**. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
@@ -106,7 +107,7 @@ src/host/install.ts.)
 |---|---|
 | `name` | the app's name: its box (§4), and the prefix of every head it writes (`<name>/app` its root). Unique on the instance: the name is the app's identity |
 | `version` | semver; shown by the site, compared by `requires` |
-| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a module the instance already holds; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), or a bare name: a program the instance already has by that name in its genesis (skein-workbench's `"shell": "shell"`); `dispatch[].program` and `config` refer to these names. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it, and a program finds its app (its head `<name>/app`, the app record) from its own record (#72, #77, built) |
+| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a module the instance already holds; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), a bare name: a program the instance already has by that name in its genesis, or a map `{code: "shell", modules, support?}`: a shell program whose modules are files of the tree (§6b, "A shell program"; #83); `dispatch[].program` and `config` refer to these names. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it, and a program finds its app (its head `<name>/app`, the app record) from its own record (#72, #77, built) |
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
@@ -133,8 +134,8 @@ approves (§3): the install prompt is the rows read aloud. A manifest asking
 for a row the owner did not approve is refused at install.
 
 **The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
-(#79): skein-static 0.2.0, skein-overlay 0.3.0 and skein-workbench 0.2.0
-are in this shape. There are no grants: an app writes only `<name>/…`.
+(#79): skein-static 0.2.0, skein-overlay 0.3.0, skein-shell and skein-chat
+0.1.0 are in this shape. There are no grants: an app writes only `<name>/…`.
 
 **The app record** — the root of `<name>/app`, written by the install
 (built):
@@ -312,7 +313,7 @@ failing stands: check first, write last.
   that can name its CID.
 - **The shell cannot reach app heads.** A shell tool that needs an app's
   data asks the app (a call), or a later shell feature mounts heads as
-  directories (shruggr/skein-workbench#1) — a shell concern, not an app's.
+  directories (the shell app's `mount`, shruggr/skein-shell#1) — a shell concern, not an app's.
 - **A manifest is a request.** Rows are granted by the owner at install;
   http addresses are confined to `/<app>/`; a function marked `writes:
   false` that writes through the SDK's helper is refused (`read-only`,
@@ -478,6 +479,77 @@ Installed: `skein-host install https://github.com/shruggr/skein-chain
 rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
 under its default scope). kernel-zig/equiv/chain.ts does both.
 
+## 6b. Worked example: the shell app and the chat app (#83)
+
+A skein has no userland of its own: the genesis wires the boundary
+programs (front door, messagebox, resolve) and nothing else. The shell and
+the chat loop are two apps, each installed when an instance wants it: an
+agent's skein needs the chat loop and no shell, a developer's the shell and
+no chat loop, an overlay's neither.
+
+**The shell app** ([shruggr/skein-shell](https://github.com/shruggr/skein-shell),
+name `shell`, heads `shell/…`) is the whole userland: `run` (the box `run`
+from `$owner`: a command over a tree, the answer in the sender's `results`)
+and the shell itself — brush, uutils coreutils, the toolset (find, xargs,
+diff, cmp, jq, which, grep, tree, awk, sed, git, qjs as `node`, python as
+`python3`) and python's standard library, all files of its tree. Interface
+`shell/1`.
+
+**The chat app** ([shruggr/skein-chat](https://github.com/shruggr/skein-chat),
+name `chat`, heads `chat/…`) is the turn loop: box `chat` from `$owner`
+and from anyone (another agent's `message`; remove that row with
+`skein-host dispatch` to take chats from the owner only). Interface `chat/1`.
+It requires nothing: a `bash` tool call runs the shell app's shell when the
+instance has it — the loop reads the app record at the head `shell/app`
+and launches its `programs.shell` as a thread, as `run` does — and
+otherwise its result is exit 127, "the shell app is not installed". No
+loopback row is involved: reading another app's head is open, and
+launching a program record needs no grant.
+
+### A shell program
+
+The kernel runs a shell itself (a program record with `code: {ts:
+"shell"}`; kernel-zig/src/shell.zig): it loads the modules the record
+names and runs brush over coreutils and the other commands, each a WASI
+preview1 module, over a tree. An app declares one in `programs` as a map:
+
+```json
+"shell": {
+  "code": "shell",
+  "modules": {"brush": "bin/brush.wasm", "coreutils": "bin/coreutils.wasm", "jq": "bin/jq.wasm",
+              "qjs": "bin/qjs.wasm", "node": "bin/qjs.wasm", "python": "bin/python.wasm", "python3": "bin/python.wasm"},
+  "support": {"python": {"mount": "/opt/skein/python",
+                         "files": {"lib/python314.zip": "lib/python314.zip"},
+                         "env": {"PYTHONHOME": "/opt/skein/python", "PYTHONDONTWRITEBYTECODE": "1"}}}
+}
+```
+
+- `modules`: command name → `bin/<x>.wasm` in the tree; `brush` and
+  `coreutils` are required, every other name is a command the shell runs
+  (two names may share a module: qjs checks `argv[0]` for `node`).
+- `support` (optional), per command of `modules`: files mounted read-only
+  at the absolute `mount` for that command only (`files`: path under the
+  mount → a file of the tree), and environment defaults the caller's env
+  overrides.
+- `description` (optional): the record's.
+
+The install (src/host/install.ts `shellProgram`) sends each module and
+support file as a raw block, and writes the record the kernel runs:
+
+```
+{kind: "program", name: <role>, code: {ts: "shell"},
+ modules: {<command>: <raw CID>}, support: {<command>: {mount, files: {<path>: <raw CID>}, env}},
+ inputs: {cmd: "string", tree: "cid", cwd: "string?", env: "map?"}, services: [], description, app}
+```
+
+A shell thread is launched with that record and `{cmd, tree, cwd?, env?}`;
+the kernel loads its modules from the store by their CIDs (cached by the
+record's CID). A module is sent whole: the shell app's install is
+`objects` messages of up to ~10 MB (coreutils, the stdlib zip), each
+carried on the owner's BRC-104 session (the client leaves the payload's
+size to the transport) and stepped by the front door (its answer is
+bounded at 64 MiB).
+
 ## 7. What is built, what is spec
 
 | part | status |
@@ -492,6 +564,7 @@ under its default scope). kernel-zig/equiv/chain.ts does both.
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
 | the overlay engine reads `config.overlay` from its app record `<app>/app`, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72, #79: skein-overlay 0.3.0 `src/config.zig`) |
 | the chain under `chain/` (one chain module, shruggr/skein-chain: ingest, broadcast, answers on each state change); `optional` rows; no open box (`event`, `$self`, `$owner`) | built (#78, #79: §6a; skein-chain 0.2.0; skein-sdk 0.4.0 `chain`) |
-| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message; two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0, skein-workbench 0.2.0) |
+| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message; two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0; skein-shell and skein-chat 0.1.0 since #83) |
+| the shell and the chat loop as apps (shruggr/skein-shell, shruggr/skein-chat); a shell program declared in a manifest, its modules files of the tree; no shell in a genesis | built (#83: §6b) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
-| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-workbench, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |
+| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-shell, shruggr/skein-chat, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |

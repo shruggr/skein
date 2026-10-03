@@ -119,9 +119,9 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   (scripts/host/README.md).
 - **Programs.** The genesis `programs` are one record per `bin/` module
   (`{kind: "program", name, code: {wasm}, inputs, services, description}`),
-  plus the kernel's `shell`. The shell is the VM's own program: its modules
-  (brush, coreutils, the tools) stay the kernel's pinned ones. Handler modules
-  no longer enter through the pinned table: their CIDs come from the tree.
+  plus the kernel's front door when the tree brings none. There is no shell
+  (#83): the shell is the shell app, installed on top. Handler modules no
+  longer enter through the pinned table: their CIDs come from the tree.
 - A `.wasm` is accepted by its preamble: a core module (version 1) or a
   component (version 0x0d, layer 1). Either is stored as a raw block, and the
   kernel's runner tells them apart when it runs one (`runner.zig`). Anything
@@ -164,7 +164,8 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 
 | repo | what | in a tree |
 |---|---|---|
-| shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop), and the shell's toolset (0.2.0: the #77 manifest, rows `run`/`chat` from the owner) | nothing to install today: the default genesis already wires `run` → run-handler and `chat` → loop, and their modules are pinned here (wasm/README.md); installing 0.2.0 into such an instance is refused (its rows clash) until #83 splits it into the shell app and the chat app and takes `run`/`chat` out of the default genesis |
+| shruggr/skein-shell | the shell app (#83): `run` (a command over a tree, row `run` from the owner) and the shell itself — brush, coreutils, the toolset, python's stdlib, each a file of its tree, declared as a shell program in its manifest (docs/APPS.md §6b) | `skein-host install https://github.com/shruggr/skein-shell --instance <h>`. A genesis has no shell: an instance runs commands only once this is installed |
+| shruggr/skein-chat | the chat app (#83): the turn loop, rows `chat` from the owner and from anyone; its `bash` calls run the shell app's shell when the instance has the shell app | `skein-host install https://github.com/shruggr/skein-chat --instance <h>` |
 | shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
 | shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
 | shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>` (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
@@ -275,10 +276,13 @@ same master key and handle (the host checks the oracle against the genesis).
 
 ### Writing packets
 
-A checkpoint of a default-system instance is large: about 88 MB in the test.
-The state record reaches the shell's program record, and so its pinned
-modules and python's standard library (`python314.zip`). All of these are in
-the closure.
+A checkpoint is every block the state record reaches. An instance with the
+shell app installed is large: the app record reaches the shell's program
+record, and so its modules and python's standard library, and the log
+reaches the install's messages that carried them — hundreds of MB, more than
+`pack --checkpoint` holds in memory today (it fails with "Invalid array
+length"; kernel-zig/equiv/boot.ts checkpoints an instance with the chat app
+only).
 
 `skein-host pack <handle|dir|tree-cid> <out>` writes a packet with these options:
 

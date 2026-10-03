@@ -101,7 +101,8 @@ owner. `APPS.md` is the specification.
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
 | overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
 | static | shruggr/skein-static | files from the `main` head's tree, at the http rows pointed at it |
-| shell and chat | shruggr/skein-workbench | `run` (the shell over a tree) and `chat` (the turn loop); to be split into the shell app and the chat app (#83) |
+| shell | shruggr/skein-shell | `run` (a command over a tree), and the shell itself: brush, coreutils and the toolset as modules of its tree, run by the kernel (#83); a userland is this app, not something every skein has |
+| chat | shruggr/skein-chat | `chat`: the turn loop; its `bash` calls run the shell app's shell when the instance has it (#83) |
 
 **The chain app.** The chain state is one head, `chain/state`, owned by
 the chain app; nobody else writes it. Its interface is ingest a BEEF: what
