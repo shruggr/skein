@@ -15,6 +15,7 @@ import { RawBox } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { testHost, until } from "./testhost.ts";
+import { CHAT_APP } from "../testapps.ts";
 
 type Obj = Record<string, unknown>;
 const link = (v: unknown) => (v as { "/": string })["/"];
@@ -24,6 +25,7 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
   h.mailbox("david", h.ownerId);
   h.agent("alpha");
   await h.router.start();
+  await h.install("alpha", [CHAT_APP]); // #83: the chat loop is an app
   const alpha = h.db.get("alpha")!.identity!;
   // Something to look at: a chat, answered into david's mailbox.
   await new RawBox(h.owner, h.origin("alpha")).send(alpha, "chat", { text: "hi" });

@@ -1,8 +1,8 @@
 // The app manifest's checks (#72, #76, #77, #79; manifest.ts): the fields, the
 // dispatch rows (addresses relative to /<app>/, the escapes, the senders —
 // `event` and `$self` since #79), the form before #77 refused (#79), an
-// overlay app's derived wiring, and `requires` against what the installed
-// apps provide.
+// overlay app's derived wiring, a shell program's form (#83), and `requires`
+// against what the installed apps provide.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -35,10 +35,10 @@ test("a good manifest: its rows normalised (transport mailbox by default)", () =
 });
 
 test("programs: files in the tree, a pinned .cid, or an instance program by name", () => {
-  const m = { ...base(), programs: { demo: "bin/demo.wasm", engine: "bin/engine.cid", shell: "shell" } };
+  const m = { ...base(), programs: { demo: "bin/demo.wasm", engine: "bin/engine.cid", door: "frontdoor" } };
   const c = checkManifest(m, has);
   assert.deepEqual(c.sources.engine, { kind: "cid", path: "bin/engine.cid", name: "engine" });
-  assert.deepEqual(c.sources.shell, { kind: "instance", name: "shell" });
+  assert.deepEqual(c.sources.door, { kind: "instance", name: "frontdoor" });
   assert.match(problems({ ...base(), programs: { demo: "bin/missing.wasm" } }).join("\n"), /bin\/missing\.wasm is not in the tree/);
   assert.match(problems({ ...base(), programs: { demo: "../x.wasm" } }).join("\n"), /is not bin\/<x>\.wasm/);
 });
@@ -115,7 +115,7 @@ test("the form before #77 (handler, boxes, routes, heads) is refused", () => {
   }
 });
 
-test("the stock apps' manifests check in the #77 shape (skein-static, skein-workbench, #79)", () => {
+test("the stock apps' manifests check in the #77 shape (skein-static, #79; skein-chat, #83)", () => {
   const stat = {
     kind: "app", name: "static", version: "0.2.0", programs: { static: "bin/static.wasm" },
     provides: [{ interface: "static.files/1", functions: { get: { writes: false, args: { "method?": "string", "route?": "string", "path?": "string", "query?": "string", "headers?": "map", "match?": "map" }, answer: { status: "int", type: "string", headers: "map", body: "bytes" } } } }],
@@ -127,14 +127,44 @@ test("the stock apps' manifests check in the #77 shape (skein-static, skein-work
   };
   const c = checkManifest(stat, (p) => p === "bin/static.wasm");
   assert.deepEqual(c.manifest.dispatch.map((r) => rowKey("static", r)), ["http /static/site* *", "http /static/ *"]);
-  const wb = {
-    kind: "app", name: "workbench", version: "0.2.0",
-    programs: { run: "bin/run-handler.wasm", loop: "bin/loop.wasm", shell: "shell" },
-    provides: [], requires: [],
-    dispatch: [{ address: "run", sender: "$owner", program: "run" }, { address: "chat", sender: "$owner", program: "loop" }],
+  // #83: the chat app — and the shell app, whose shell program is a map (below); app names `shell` and `chat` are free.
+  const chat = {
+    kind: "app", name: "chat", version: "0.1.0", programs: { loop: "bin/loop.wasm" }, provides: [], requires: [],
+    dispatch: [{ address: "chat", sender: "$owner", program: "loop" }, { address: "chat", sender: "*", program: "loop" }],
   };
-  const w = checkManifest(wb, (p) => p.startsWith("bin/"));
-  assert.deepEqual(w.manifest.dispatch.map((r) => `${rowKey("workbench", r)} → ${r.program}`), ["mailbox run $owner → run", "mailbox chat $owner → loop"]);
+  const w = checkManifest(chat, (p) => p.startsWith("bin/"));
+  assert.deepEqual(w.manifest.dispatch.map((r) => `${rowKey("chat", r)} → ${r.program}`), ["mailbox chat $owner → loop", "mailbox chat * → loop"]);
+});
+
+// ---------------------------------------------------------------- a shell program (#83)
+
+const shellFiles = new Set(["bin/run-handler.wasm", "bin/brush.wasm", "bin/coreutils.wasm", "bin/qjs.wasm", "bin/python.wasm", "lib/python314.zip"]);
+const shellApp = (shell: unknown) => ({
+  kind: "app", name: "shell", version: "0.1.0", programs: { run: "bin/run-handler.wasm", shell },
+  dispatch: [{ address: "run", sender: "$owner", program: "run" }],
+});
+const PY = { mount: "/opt/skein/python", files: { "lib/python314.zip": "lib/python314.zip" }, env: { PYTHONHOME: "/opt/skein/python" } };
+const goodShell = () => ({ code: "shell", modules: { brush: "bin/brush.wasm", coreutils: "bin/coreutils.wasm", qjs: "bin/qjs.wasm", node: "bin/qjs.wasm", python: "bin/python.wasm" }, support: { python: PY } });
+const shellProblems = (shell: unknown) => { try { checkManifest(shellApp(shell), (p) => shellFiles.has(p)); } catch (e) { if (e instanceof ManifestError) return e.problems.join("\n"); throw e; } return ""; };
+
+test("a shell program: its modules and support files in the tree, two names for one module", () => {
+  const c = checkManifest(shellApp(goodShell()), (p) => shellFiles.has(p));
+  assert.deepEqual(c.sources.shell, { kind: "shell", modules: goodShell().modules, support: { python: { ...PY } } });
+  assert.deepEqual(c.sources.run, { kind: "wasm", path: "bin/run-handler.wasm", name: "run-handler" });
+});
+
+test("a shell program: refusals", () => {
+  assert.match(shellProblems({ ...goodShell(), code: "wasm" }), /a program given as a map is a shell program/);
+  assert.match(shellProblems({ ...goodShell(), modules: { coreutils: "bin/coreutils.wasm" } }), /no brush/);
+  assert.match(shellProblems({ ...goodShell(), modules: { ...goodShell().modules, jq: "bin/jq.wasm" } }), /bin\/jq\.wasm is not in the tree/);
+  assert.match(shellProblems({ ...goodShell(), modules: { ...goodShell().modules, jq: "lib/python314.zip" } }), /is not bin\/<x>\.wasm/);
+  assert.match(shellProblems({ ...goodShell(), modules: { ...goodShell().modules, "a b": "bin/qjs.wasm" } }), /is not a command name/);
+  assert.match(shellProblems({ ...goodShell(), support: { ruby: PY } }), /ruby is not a command in modules/);
+  assert.match(shellProblems({ ...goodShell(), support: { python: { ...PY, mount: "opt" } } }), /mount: not an absolute path/);
+  assert.match(shellProblems({ ...goodShell(), support: { python: { ...PY, files: { "../x": "lib/python314.zip" } } } }), /is not a relative path/);
+  assert.match(shellProblems({ ...goodShell(), support: { python: { ...PY, files: { "lib/x.zip": "lib/missing.zip" } } } }), /is not a file in the tree/);
+  assert.match(shellProblems({ ...goodShell(), support: { python: { ...PY, env: { "1X": "y" } } } }), /env\.1X: want a name and text/);
+  assert.match(shellProblems({ ...goodShell(), extra: 1 }), /extra: not a field of a shell program/);
 });
 
 // ---------------------------------------------------------------- an overlay app's wiring (APPS.md §6)

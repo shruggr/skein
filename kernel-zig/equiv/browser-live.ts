@@ -3,7 +3,11 @@
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
 // with an agent on the native kernel and a scripted inference peer. The page
 // identity (a ProtoWallet here; Yours in use) registers its mailbox
-// instance on the router and chats its instance; the instance's loop asks the
+// instance on the router; the chat app is installed into both instances (#83:
+// a genesis has no chat loop) — the agent's by `skein-host install`, the
+// browser instance's by the install client's plan (src/host/install.ts
+// planInstall, over a copy of the browser's store) sent as the page
+// identity, its owner, through the page; the page chats its instance; the instance's loop asks the
 // inference peer (its messagebox program's delivery thread, on a BRC-104
 // session, its requests emitted to the page's HTTP proxy provider — #70: the
 // page's fetch, each answer a signed message admitted as a `local` request),
@@ -28,6 +32,10 @@ import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
+import { instanceView, planInstall, readApp, sendInstall } from "../../src/host/install.ts";
+import { wasmDirObjects } from "../../src/host/boot.ts";
+import { openStoreFile } from "../../src/runtime/index-store.ts";
+import { appCheckout, CHAT_APP, installApps } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { buildPage, servePage } from "../../web/kernel/serve.ts";
 import { chromium, playwright, writeStore } from "./browser.ts";
@@ -74,6 +82,8 @@ keys.set("agent", key());
 db.add("agent", { store: join(home, "agent.db"), identity: keys.get("agent")!.toPublicKey().toString() });
 await router.hydrate("agent");
 const agentId = keys.get("agent")!.toPublicKey().toString();
+// #83: the agent's chat loop is the chat app, installed by its owner.
+await installApps({ home, port: router.port, owner: ephemeralWallet(ownerKey), settled: () => router.settled() }, "agent", [CHAT_APP]);
 await new RawBox(ephemeralWallet(ownerKey), `${base}/@agent`).send(agentId, "peers", { op: "add", key: pageId, url: router.originOf("page"), handle: "page", domain: "localhost" });
 await router.settled();
 const iw = ephemeralWallet(inferKey);
@@ -109,6 +119,14 @@ try {
   const failed = await page.evaluate(() => (window as unknown as { failed?: string }).failed);
   if (failed) throw new Error(`page: ${failed}`);
   check(true, "the page started its instance (genesis in IndexedDB, modules installed, mailbox registered)");
+  // The chat app into the browser instance (#83): the install's plan over a copy of its store, sent as its owner (the page identity) through the page.
+  const copy = join(home, "browser-before-install.db");
+  writeStore(Uint8Array.from(await page.evaluate(async () => Array.from(await (window as unknown as { skein: { kernel: { kw: { call(m: string, ...a: unknown[]): Promise<Uint8Array> } } } }).skein.kernel.kw.call("bundle", 1, true)))), copy);
+  const view = openStoreFile(copy, { readOnly: true });
+  const plan = await planInstall(await readApp(appCheckout(CHAT_APP)), await instanceView(view), { modules: wasmDirObjects(join(here, "../../wasm")) });
+  await view.close();
+  await sendInstall(plan, async (b, body) => await page.evaluate(async ([box, bytes]) => await (window as unknown as { skein: { send(b: string, x: Uint8Array): Promise<string> } }).skein.send(box as string, Uint8Array.from(bytes as number[])), [b, Array.from(body)] as const));
+  check(true, `the chat app installed into the browser instance (${plan.records.length} records, ${plan.rows.length} rows), as its owner`);
   const t0 = Date.now();
   await page.evaluate(async () => { await (window as unknown as { skein: { chat(t: string): Promise<unknown> } }).skein.chat("ask the agent about the blue one"); });
   const events = () => page.evaluate(() => (window as unknown as { skein: { events: unknown[] } }).skein.events) as Promise<Ev[]>;

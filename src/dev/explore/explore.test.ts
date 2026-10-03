@@ -44,11 +44,13 @@ test("explore: overview, log, entry, threads, the loop's conversation, the shell
 
   const home = await get("/");
   assert.equal(home.status, 200);
-  for (const s of ["alpha@localhost", "peer infer", root.toString(), "<h2>dispatch</h2>", "kernel: objects", "kernel: dispatch", "run-handler", "anyone", "owner main", "owner frontdoor", "format 2"]) assert.ok(home.text.includes(s), `overview: ${s}`);
+  for (const s of ["alpha@localhost", "peer infer", root.toString(), "<h2>dispatch</h2>", "kernel: objects", "kernel: dispatch", "app shell", "app chat", "anyone", "owner main", "owner frontdoor", "format 2"]) assert.ok(home.text.includes(s), `overview: ${s}`);
   assert.ok(home.text.includes(`href="/s"`), "the overview links the chain");
 
   const log = await get("/log");
-  for (const s of ["genesis", "frontdoor", "loop", "shell", "launched"]) assert.ok(log.text.includes(s), `log: ${s}`);
+  for (const s of ["frontdoor", "loop", "shell", "launched"]) assert.ok(log.text.includes(s), `log: ${s}`);
+  // The genesis is the oldest page's (#83: the apps' installs came after it).
+  assert.ok((await get("/log?before=1")).text.includes("genesis"), "log: genesis");
 
   const e = await get("/e/0");
   assert.equal(e.status, 200);
@@ -82,7 +84,7 @@ test("explore: overview, log, entry, threads, the loop's conversation, the shell
   for (const s of [root.toString(), "owner main", "a kernel operation"]) assert.ok(head.text.includes(s), `head: ${s}`);
 
   const d = await get("/s");
-  for (const s of ["dispatch table changes", "genesis seed", "add", "mailbox", "kernel: objects", "run-handler", "owner", "anyone", "session"]) assert.ok(d.text.includes(s), `dispatch: ${s}`);
+  for (const s of ["dispatch table changes", "genesis seed", "add", "mailbox", "kernel: objects", "app shell", "owner", "anyone", "session"]) assert.ok(d.text.includes(s), `dispatch: ${s}`);
   const w0 = await load(store);
   const origin = (await store.get(w0.dispatch![0]!.cid) as { origin: import("multiformats/cid").CID }).origin;
   assert.ok((await get(`/r/${origin}`)).text.includes("the dispatch table's origin"));

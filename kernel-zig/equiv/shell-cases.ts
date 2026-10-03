@@ -7,8 +7,8 @@
 
 import * as fs from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { install } from "../../src/dev/cli.ts";
 import { scan } from "../../src/dev/scan.ts";
+import { putShellProgram } from "../../src/testapps.ts";
 import { openStore } from "../../src/runtime/sqlite.ts";
 
 // statusAbove1: the case prints a tool's exit status above 1 — which the
@@ -17,8 +17,13 @@ import { openStore } from "../../src/runtime/sqlite.ts";
 export interface Case { cmd: string; tree: string; cwd?: string; env?: Array<[string, string]>; stdin?: string; time?: number; seed?: number; statusAbove1?: boolean }
 export interface Out { exitCode?: number; stdout?: string; stderr?: string; tree?: string; error?: string }
 
-/** Write the trees into `dir`, a store at `dir`/store.db holding them and the shell's modules; the cases over them. */
-export async function shellCases(dir: string): Promise<{ db: string; cases: Case[] }> {
+/**
+ * Write the trees into `dir`, a store at `dir`/store.db holding them and the
+ * shell app's shell program (#83: shruggr/skein-shell at src/testapps.ts's
+ * pinned commit, or $SKEIN_SHELL_DIR; its record and modules as its install
+ * writes them); the cases over them, and the program's CID.
+ */
+export async function shellCases(dir: string): Promise<{ db: string; program: string; cases: Case[] }> {
   const db = join(dir, "store.db");
   const tree = join(dir, "tree");
   const files: Record<string, string> = { "a.txt": "one\ntwo\nthree\n", "sub/b.txt": "bee\n", "sub/deep/c.txt": "sea\n" };
@@ -28,7 +33,7 @@ export async function shellCases(dir: string): Promise<{ db: string; cases: Case
   }
   await fs.symlink("a.txt", join(tree, "link"));
   const store = openStore(db);
-  await install(store);
+  const program = (await putShellProgram(store)).toString();
   const tr = (await scan(store, tree)).toString();
   const big = Buffer.alloc(2 << 20);
   for (let i = 0; i < big.length; i++) big[i] = (i * 7919) & 0xff;
@@ -98,7 +103,7 @@ export async function shellCases(dir: string): Promise<{ db: string; cases: Case
     ...scriptCases(tr, c, hi, b64),
   ];
   await store.close();
-  return { db, cases };
+  return { db, program, cases };
 }
 
 function scriptCases(tr: string, c: (cmd: string) => Case, hi: (k: Case) => Case, b64: (s: string) => string): Case[] {

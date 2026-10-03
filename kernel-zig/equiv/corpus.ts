@@ -3,7 +3,11 @@
 // instance an HTTP server — its front door — messages admitted as `mail`
 // entries, acknowledgements as events (sessions are in memory, never in the
 // log), delivery over http from
-// the VM, wakes by the waker), on a script clock. It exercises the shell
+// the VM, wakes by the waker), on a script clock. The shell and the chat loop
+// are apps (#83): each instance that runs them has the shell app and/or the
+// chat app installed first by `skein-host install` (src/testapps.ts: their
+// pinned commits, or $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR) — the installs are in
+// the corpus too. It exercises the shell
 // under run-handler (writes, cwd, failures, sleeps and their wakes), the
 // script runtimes, the kernel's objects/head/dispatch operations (#77), the loop with bash and
 // message tools, replies, resolves (no claims, #40), delivery failures, inference
@@ -25,6 +29,7 @@ import { Router } from "../../src/host/router.ts";
 import { Oracle } from "../../src/host/oracle.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { DEFAULTS } from "../../src/runtime/log.ts";
+import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
 import { bundlesOf, scriptClock } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -115,6 +120,8 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     db, router, clock, owner, ownerKey, ownerId, add, mailbox, base,
     /** Let every kernel finish what it was given. */
     settle: () => router.settled(),
+    /** Install apps into an agent as the owner (#83), by `skein-host install`. */
+    install: (name: string, apps: PinnedApp[]) => installApps({ home, port: router.port, owner, settled: () => router.settled() }, name, apps),
     later(sec: number) { const [s0, ns] = clock.now(); clock.set([s0 + sec, ns + 1000]); },
     /** Advance the clock and let the waker admit what is due. */
     async tick(sec: number) { h.later(sec); await router.wake(); await router.settled(); },
@@ -160,6 +167,7 @@ const mailboxes: string[] = [];
 {
   const h = await host();
   const i = await h.add("gen-run");
+  await h.install("gen-run", [SHELL_APP]);
   const dir = await fixture({ "README": "hello\n", "src/a.txt": "alpha\n", "src/b.txt": "beta\n", "notes/x.md": "# x\n" });
   const { root, bundles } = await bundlesOf(dir, 700);
   for (const b of bundles) await h.send(i, "objects", b);
@@ -185,60 +193,57 @@ const mailboxes: string[] = [];
   await h.send(i, "run", { cmd: "sleep 1; echo one; sleep 1; echo two", tree: root });
   await h.tick(3);
   await h.tick(3);
-  await fs.rm(dir, { recursive: true, force: true });
-  await h.done();
-  made.push("gen-run");
-}
-
-// ---------------------------------------------------------------- scripts: qjs/node and python in a thread (issue #25)
-{
-  const h = await host();
-  const i = await h.add("gen-scripts");
+  // Scripts: qjs/node and python in a thread (issue #25), on the same instance (#83: one shell app install for both).
   const js = "#!/usr/bin/env node\nconst fs = require('fs');\nfs.writeFileSync('out.txt', fs.readFileSync('src/a.txt', 'utf8').toUpperCase());\nconsole.log(process.argv.slice(2), Date.now() > 1.7e12, Math.random());\nprocess.exitCode = 2;\n";
   const py = "#!/usr/bin/env python3\nimport sys, time, random, os, uuid, json\nprint(sys.argv[1:], time.time() > 1.7e9, random.random(), os.urandom(4).hex(), hash('x'), uuid.uuid4())\njson.dump(sorted(os.listdir('src')), open('ls.json', 'w'))\n";
-  const dir = await fixture({ "src/a.txt": "alpha\n", "src/b.txt": "beta\n", "t.js": js, "t.py": py });
-  const { root, bundles } = await bundlesOf(dir, 700);
-  for (const b of bundles) await h.send(i, "objects", b);
+  const sdir = await fixture({ "src/a.txt": "alpha\n", "src/b.txt": "beta\n", "t.js": js, "t.py": py });
+  const s = await bundlesOf(sdir, 700);
+  for (const b of s.bundles) await h.send(i, "objects", b);
+  const sroot = s.root;
   const cmds = [
     "node t.js a b; echo \"exit=$?\"; ./t.js c; cat out.txt",
     "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now().year)'",
     "qjs -e 'console.log(scriptArgs, Date.now() > 1.7e12)'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
   ];
-  for (const cmd of cmds) { h.later(1); await h.send(i, "run", { cmd, tree: root }); }
+  for (const cmd of cmds) { h.later(1); await h.send(i, "run", { cmd, tree: sroot }); }
   // A sleep inside a runtime: python's time.sleep and a qjs timer rest the thread until the waker wakes it.
   h.later(1);
-  await h.send(i, "run", { cmd: "python3 -c 'import time; t = time.time(); time.sleep(2); print(time.time() - t >= 2)'; node -e 'const t = Date.now(); setTimeout(() => console.log(\"later\", Date.now() - t >= 1000), 1000)'", tree: root });
+  await h.send(i, "run", { cmd: "python3 -c 'import time; t = time.time(); time.sleep(2); print(time.time() - t >= 2)'; node -e 'const t = Date.now(); setTimeout(() => console.log(\"later\", Date.now() - t >= 1000), 1000)'", tree: sroot });
   await h.tick(3);
   await h.tick(3);
+  await fs.rm(sdir, { recursive: true, force: true });
   await fs.rm(dir, { recursive: true, force: true });
   await h.done();
-  made.push("gen-scripts");
+  made.push("gen-run");
 }
 
 // ---------------------------------------------------------------- heads and the dispatch table (#77: kernel operations)
 {
   const h = await host();
   const i = await h.add("gen-subs");
+  await h.install("gen-subs", [CHAT_APP]);
   const stranger = key();
   const sw = ephemeralWallet(stranger), sid = stranger.toPublicKey().toString();
   const dir = await fixture({ "a.txt": "a\n" });
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await h.send(i, "objects", b);
-  const handler = (await h.router.loaded.get("gen-subs")!.kernel.call("programs") as Record<string, unknown>)["run-handler"];
+  // The chat app's loop (#83): its app record's, at the head chat/app — the row below wires it to a box of its own, `ask`.
+  const k = h.router.loaded.get("gen-subs")!.kernel;
+  const handler = (await k.store.get(await k.call("head", "chat/app") as CID) as unknown as { programs: Record<string, CID> }).programs.loop;
   await h.send(i, "chat", { text: "hello?" }, sw, sid);
   // The kernel's `dispatch` operation (#77): a row's sender is bytes; the same row again changes nothing; a hex sender is refused.
-  const row = { transport: "mailbox", address: "run", sender: Uint8Array.from(Buffer.from(sid, "hex")), program: handler };
+  const row = { transport: "mailbox", address: "ask", sender: Uint8Array.from(Buffer.from(sid, "hex")), program: handler };
   await h.send(i, "dispatch", { op: "add", row });
   await h.send(i, "dispatch", { op: "add", row }); // no change
   await h.send(i, "dispatch", { op: "add", row: { ...row, sender: sid } }); // refused: the sender is not a key
   h.later(1);
-  await h.send(i, "run", { cmd: "ls; echo stranger", tree: root }, sw, sid); // run; its result has nowhere to go (no peer record)
+  await h.send(i, "ask", { text: "what is here?", tree: root }, sw, sid); // the loop; no inference peer here: it answers so, and the answer has nowhere to go (no peer record)
   await h.send(i, "dispatch", { op: "remove", row });
-  await h.send(i, "run", { cmd: "echo again", tree: root }, sw, sid).catch(() => {}); // no row: refused, nothing written
+  await h.send(i, "ask", { text: "again" }, sw, sid).catch(() => {}); // no row: refused, nothing written
   await h.send(i, "dispatch", { op: "bogus", row });
   await h.send(i, "head", { name: "work", tree: root });
   await h.send(i, "head", { name: "bad name", tree: root });
-  await h.send(i, "run", { cmd: "echo x > y; ls" });
+  await h.send(i, "run", { cmd: "echo x > y; ls" }); // no shell app here (#83): no row takes `run`; recorded, nothing runs
   await fs.rm(dir, { recursive: true, force: true });
   await h.done();
   made.push("gen-subs");
@@ -256,6 +261,7 @@ const mailboxes: string[] = [];
     { status: 500, text: "upstream down" },
   ]);
   const i = await h.add("gen-chat");
+  await h.install("gen-chat", [SHELL_APP, CHAT_APP]);
   const poll = async () => { await peer.poll(); await h.settle(); };
   const dir = await fixture({ "README": "hello\n", "src/a.txt": "alpha\n", "SOUL.md": "Be brief.\n" });
   const { root, bundles } = await bundlesOf(dir);
@@ -299,7 +305,9 @@ const mailboxes: string[] = [];
     answer({ content: "Blue is 5." }), // martha
   ]);
   const martha = await h.add("gen-martha");
+  await h.install("gen-martha", [CHAT_APP]); // no shell app (#83): her `bash` call answers that there is none
   await h.add("gen-kurt");
+  await h.install("gen-kurt", [CHAT_APP]);
   await h.send(martha, "chat", { text: "ask kurt about the blue one" });
   for (let n = 0; n < 12; n++) { if (await peer.poll() === 0) break; await h.settle(); }
   await h.done();
@@ -315,6 +323,7 @@ const mailboxes: string[] = [];
     answer({ content: "Bob cannot be reached." }),
   ]);
   const i = await h.add("gen-outcome");
+  await h.install("gen-outcome", [CHAT_APP]);
   await h.send(i, "peers", { op: "add", key: Uint8Array.from(Buffer.from(bob, "hex")), url: `${h.base}/@gone`, handle: "bob", domain: "localhost" });
   await h.send(i, "chat", { text: "ask bob" });
   for (let n = 0; n < 4; n++) { await peer.poll(); await h.settle(); }
@@ -325,6 +334,7 @@ const mailboxes: string[] = [];
   // The inference peer has no mailbox anywhere: its handle does not resolve; an inference error to the opener.
   const h = await host({ infer: key() });
   const i = await h.add("gen-refused");
+  await h.install("gen-refused", [CHAT_APP]);
   await h.send(i, "chat", { text: "hello" });
   await h.done();
   made.push("gen-refused");
@@ -335,6 +345,7 @@ const mailboxes: string[] = [];
   const h = await host({ infer: inferKey });
   const peer = inferPeer(h, inferKey, [answer({ content: "Hello, stranger." })]);
   const i = await h.add("gen-stranger");
+  await h.install("gen-stranger", [CHAT_APP]);
   const sk = key();
   await h.send(i, "chat", { text: "hi" }, ephemeralWallet(sk), sk.toPublicKey().toString());
   for (let n = 0; n < 4; n++) { await peer.poll(); await h.settle(); }
@@ -343,18 +354,21 @@ const mailboxes: string[] = [];
 }
 
 // ---------------------------------------------------------------- fuel: a low fuelPerStep (issue #5)
-// The Zig handlers (#54) are small: the objects handler (~0.1M) and run-handler's
-// first step (~0.12M, the shell launched) fit in 10^6; the shell's `ls` (~2.6M)
-// runs out: errored, "fuel exhausted" — and run-handler's second step, the
-// error delivered over http (~1.07M), runs out too.
+// A fuelPerStep the shell app's install fits in (#83: the front door steps on
+// each install message, a module whole — ~10 MB — among them; 10^6, as this
+// case was before, admits none), and run-handler's steps; the shell spinning
+// runs out: errored, "fuel exhausted", and run-handler delivers the error.
 {
-  const h = await host({ defaults: { ...DEFAULTS, fuelPerStep: "1000000" } });
+  const h = await host({ defaults: { ...DEFAULTS, fuelPerStep: "1000000000" } });
   const i = await h.add("gen-fuel");
+  await h.install("gen-fuel", [SHELL_APP]);
   const dir = await fixture({ "a.txt": "a\n" });
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await h.send(i, "objects", b);
   h.later(1);
   await h.send(i, "run", { cmd: "ls", tree: root });
+  h.later(1);
+  await h.send(i, "run", { cmd: "echo start; while :; do :; done", tree: root });
   await fs.rm(dir, { recursive: true, force: true });
   await h.done();
   made.push("gen-fuel");

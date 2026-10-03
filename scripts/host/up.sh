@@ -38,6 +38,10 @@
 #      writes the other agents' keys and origins. The inference peer's own
 #      address book (every agent's key and origin) is the file
 #      ~/.skein/infer-peers.json, which bin/skein-infer reads.
+#   6. the apps (#83): a genesis has no shell and no chat loop, so every enabled
+#      agent gets the shell app and the chat app (`skein-host install`, as the
+#      owner, at the tags SKEIN_SHELL_APP / SKEIN_CHAT_APP name). Installing
+#      what an instance has sends only the head again.
 #
 # Nothing is registered, and nothing registers itself: the mailbox rows of
 # step 2 are what a registration (register.ts, POST /account/register) would
@@ -118,4 +122,12 @@ if [ "${#agents[@]}" -gt 1 ]; then host roster --deploy || echo "roster --deploy
   echo ""
   echo "}"
 } > "$skein/infer-peers.json.tmp" && mv "$skein/infer-peers.json.tmp" "$skein/infer-peers.json"
+
+# 6. The apps (#83): the shell app (`run`) and the chat app (`chat`) into every enabled agent.
+for a in "${agents[@]}"; do
+  h="${a%%$'\t'*}"
+  for app in "${SKEIN_SHELL_APP:-https://github.com/shruggr/skein-shell#v0.1.0}" "${SKEIN_CHAT_APP:-https://github.com/shruggr/skein-chat#v0.1.0}"; do
+    host install "$app" --instance "$h" --approve-all > /dev/null || echo "install $app into $h failed (above)" >&2
+  done
+done
 echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer knows them ($skein/infer-peers.json)"

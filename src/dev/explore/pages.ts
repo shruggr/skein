@@ -160,7 +160,7 @@ function programOf(w: World, c: CID): string {
 /** A row's sender: anyone, a session, or a key. */
 const senderCell = (w: World, r: DispatchRow) => r.sender === "*" ? `<span class="mut">anyone</span>` : r.sender === "session" ? "session" : key(w, senderText(r.sender));
 /** A row's program: a program link, or the kernel operation. */
-const programCell = (w: World, r: DispatchRow) => r.program === "kernel" ? `kernel: ${esc(r.fn ?? "?")}` : `${link(w, r.program, programOf(w, r.program))}${r.fn ? ` <span class="mut small">${esc(r.fn)}</span>` : ""}`;
+const programCell = (w: World, r: DispatchRow) => r.program === "kernel" ? `kernel: ${esc(r.fn ?? "?")}` : `${link(w, r.program, programOf(w, r.program))}${r.fn ? ` <span class="mut small">${esc(r.fn)}</span>` : ""}${typeof (r as { app?: unknown }).app === "string" ? ` <span class="mut small">app ${esc(String((r as { app?: unknown }).app))}</span>` : ""}`;
 const rowCells = (w: World, r: DispatchRow) =>
   `<td>${esc(r.transport)}</td><td>${esc(r.address)}${r.prefix ? ` <span class="mut small">(prefix)</span>` : ""}</td><td>${senderCell(w, r)}</td><td>${programCell(w, r)}</td>`;
 

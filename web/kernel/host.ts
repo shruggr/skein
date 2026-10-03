@@ -318,6 +318,18 @@ export class BrowserHost {
 
   // ---------------------------------------------------------------- the call in: the page
 
+  /**
+   * A message from this identity — the instance's owner — in `box`, admitted
+   * directly: what an install client sends (#83: the kernel's `objects`,
+   * `head`, `dispatch` operations). The admission's outcome, as `chat`'s.
+   */
+  async send(box: string, body: Uint8Array): Promise<string> {
+    const r = await this.admitMessage(this.identity, box, body);
+    this.log(`${box}: ${r}`);
+    if (!r.startsWith("admitted")) throw new Error(r);
+    return r;
+  }
+
   /** The user's chat to the instance: a message from this identity, admitted directly (#16). Its id (what a reply names). */
   async chat(text: string, replyTo?: CID): Promise<string> {
     const body = dagCbor.encode(replyTo ? { text, replyTo } : { text });

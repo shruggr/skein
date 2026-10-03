@@ -3,8 +3,9 @@
 // installing it into an instance is owner-signed messages to the kernel's
 // admin boxes — the kernel's own operations on its four tables — nothing else:
 //
-//   1. objects    the tree's git objects, the modules its bin/*.wasm carry,
-//                 a program record per program, and the **app record** (below)
+//   1. objects    the tree's git objects, the modules its bin/*.wasm carry (a
+//                 shell program's modules and support files too, #83), a program
+//                 record per program, and the **app record** (below)
 //                 — ≤ 1 MiB bundles; no bundle names a root (an app never
 //                 becomes `main`)
 //   2. head       {name: "<app>/app", tree: <the app record>}: the app's root head, under its
@@ -50,7 +51,7 @@ import type { IndexStore } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
 import { programRecord, RAW, rawCid, wasmKind, type Objects } from "./boot.ts";
 import { addressBook, type AddressEntry } from "./deploy.ts";
-import { checkManifest, missingInterfaces, rowAddress, rowKey, type Checked, type Derived, type Provide, type Row } from "./manifest.ts";
+import { checkManifest, missingInterfaces, rowAddress, rowKey, type Checked, type Derived, type Provide, type Row, type ShellSource } from "./manifest.ts";
 
 const textOf = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -218,6 +219,14 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
   const programs: Record<string, CID> = {};
   const records: Rec[] = [];
   for (const [role, src] of Object.entries(t.checked.sources)) {
+    if (src.kind === "shell") {
+      const { record, blocks } = shellProgram(t.dir, role, src, t.checked.manifest.name);
+      records.push(...blocks);
+      const b = encode(record as never);
+      programs[role] = b.cid;
+      records.push({ cid: b.cid, bytes: b.bytes });
+      continue;
+    }
     if (src.kind === "instance") {
       const p = view.programs[src.name];
       if (!p) throw new Error(`programs.${role}: the instance has no program ${src.name} (its genesis names ${Object.keys(view.programs).join(", ")})`);
@@ -248,6 +257,38 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
     records.push({ cid: b.cid, bytes: b.bytes });
   }
   return { programs, records };
+}
+
+/** The inputs of a shell program record (the kernel's shell thread takes {cmd, tree, cwd?, env?}). */
+export const SHELL_INPUTS = { cmd: "string", tree: "cid", cwd: "string?", env: "map?" } as const;
+const SHELL_DESCRIPTION = "Run a bash command in the wasm shell over a tree; result {exitCode, stdout, stderr, tree}.";
+
+/**
+ * A shell program's record (#83; docs/APPS.md "A shell program") from the
+ * manifest's form, and the raw blocks it names: `{kind: "program", name:
+ * <role>, code: {ts: "shell"}, modules: {<command>: <raw module CID>},
+ * support: {<command>: {mount, files: {<path>: <raw CID>}, env}}, inputs,
+ * services: [], description, app}` — the shape the kernel's shell runs
+ * (kernel-zig/src/shell.zig loadModules), each module and support file a raw
+ * block of the tree's file.
+ */
+export function shellProgram(dir: string, role: string, src: ShellSource, app: string): { record: Record<string, unknown>; blocks: Rec[] } {
+  const blocks = new Map<string, Rec>();
+  const raw = (path: string, module: boolean): CID => {
+    const bytes = new Uint8Array(readFileSync(join(dir, path)));
+    if (module && wasmKind(bytes) !== "module") throw new Error(`${path}: not a wasm module (a shell program runs WASI preview1 modules)`);
+    const cid = rawCid(bytes);
+    blocks.set(cid.toString(), { cid, bytes });
+    return cid;
+  };
+  const modules = Object.fromEntries(Object.entries(src.modules).map(([cmd, path]) => [cmd, raw(path, true)]));
+  const support = Object.fromEntries(Object.entries(src.support).map(([cmd, s]) => [cmd, {
+    mount: s.mount, files: Object.fromEntries(Object.entries(s.files).map(([under, path]) => [under, raw(path, false)])), env: s.env,
+  }]));
+  return {
+    record: { kind: "program", name: role, code: { ts: "shell" }, modules, support, inputs: SHELL_INPUTS, services: [], description: src.description ?? SHELL_DESCRIPTION, app },
+    blocks: [...blocks.values()],
+  };
 }
 
 /** Plan the install of `t` into the instance `view` reads: every check (APPS.md §3 step 0), then what to send. */

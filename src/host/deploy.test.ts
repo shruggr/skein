@@ -21,10 +21,12 @@ import { openStoreFile } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
 import { currentDispatch, senderText } from "../runtime/dispatch.ts";
 import { gitCid, readFile, readTree, walk } from "../runtime/tree.ts";
+import { CHAT_APP } from "../testapps.ts";
 import { collect, iso, T0 } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
 import { DEFAULT_ONLY, deploy, deployFiles, onlyIgnore } from "./deploy.ts";
+import { appRecordOf } from "./install.ts";
 import { HostDb, type InstanceRow } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { parseIdentity, roster, rosterFor, serveRoster } from "./roster.ts";
@@ -178,13 +180,15 @@ test("deploy: the filtered tree through `objects` as the owner sets main; the sa
   await mainIs(s, d3.root);
   assert.deepEqual(await boxes(s), ["objects", "objects", "head"]);
 
-  // A new conversation (no tree: main's) gets the new prompt.
+  // A new conversation (no tree: main's) gets the new prompt — the chat app installed for it (#83: the genesis has no chat loop).
+  await h.install("martha", [CHAT_APP]);
   await owner.box(row).send(row.identity!, "chat", { text: "who are you?" });
   await until("the inference request", async () => { await peer.poll(); return requests.length ? true : undefined; });
   const system = String((requests[0]!.messages as Json[])[0]!.content);
   assert.ok(system.includes("You are Martha, now at the back office.") && system.includes(IDENTITY), system);
   await h.router.settled();
-  assert.equal((await collect(s.edges.query({ kind: "thread", program: (await programsOf(s)).loop }))).length, 1);
+  const loop = (await appRecordOf(s, "chat"))!.record.programs.loop!;
+  assert.equal((await collect(s.edges.query({ kind: "thread", program: loop }))).length, 1);
 });
 
 test("deploy: before the store is asked (none given), a second deploy queued behind the first moves main by `head` once both are admitted", { skip }, async (t) => {
@@ -237,22 +241,22 @@ test("skein-host dispatch: a message to box `dispatch` as the owner changes a ru
   const cli = (...argv: string[]) => main(argv, e.env);
   const genesis = (await collect(s.log.entries(0)))[0]!.cid;
   const before = await until("the genesis processed (its seed rows)", () => currentDispatch(s));
-  const runHandler = (await programsOf(s))["run-handler"]!;
+  const resolve = (await programsOf(s)).resolve!;
   const peer = PrivateKey.fromRandom().toPublicKey().toString();
   const last = async () => (await currentDispatch(s))!.at(-1)!;
 
-  assert.equal(await cli("dispatch", "martha", "add", "--sender", peer, "run", "run-handler"), 0, e.err.join("\n"));
+  assert.equal(await cli("dispatch", "martha", "add", "--sender", peer, "register", "resolve"), 0, e.err.join("\n"));
   await until("the new row", async () => senderText((await last()).sender) === peer ? true : undefined);
   const row = await last();
-  assert.deepEqual([row.transport, row.address, senderText(row.sender), String(row.program)], ["mailbox", "run", peer, String(runHandler)]);
-  assert.equal(await cli("dispatch", "martha", "remove", "--sender", peer, "run", String(runHandler)), 0);
+  assert.deepEqual([row.transport, row.address, senderText(row.sender), String(row.program)], ["mailbox", "register", peer, String(resolve)]);
+  assert.equal(await cli("dispatch", "martha", "remove", "--sender", peer, "register", String(resolve)), 0);
   await until("the row removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
   assert.deepEqual(await currentDispatch(s), before, "removed: the rows as they were");
   assert.ok((await collect(s.log.entries(0)))[0]!.cid.equals(genesis), "the same genesis");
 
-  assert.equal(await cli("dispatch", "martha", "swap", "run", "loop"), 2);
-  assert.equal(await cli("dispatch", "nobody", "add", "run", "loop"), 1);
-  assert.equal(await cli("dispatch", "martha", "add", "run", "no-such-program"), 1);
+  assert.equal(await cli("dispatch", "martha", "swap", "register", "resolve"), 2);
+  assert.equal(await cli("dispatch", "nobody", "add", "register", "resolve"), 1);
+  assert.equal(await cli("dispatch", "martha", "add", "register", "no-such-program"), 1);
   assert.match(e.err.at(-1)!, /not a CID or a program name/);
 });
 

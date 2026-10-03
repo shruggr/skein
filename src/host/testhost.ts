@@ -13,6 +13,7 @@ import { dirBundles } from "../client/client.ts";
 import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
+import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../testapps.ts";
 import { HostDb } from "./instances.ts";
 import { Router } from "./router.ts";
 import { Oracle } from "./oracle.ts";
@@ -85,6 +86,15 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     mailbox(handle: string, whose: string) { router.addMailbox(handle, whose); db.add(handle, { identity: keyOf(handle).toPublicKey().toString() }); },
     origin: (handle: string) => router.originOf(handle),
     storeSize(handle: string) { const p = db.get(handle)!.store; return statSync(p).size + (existsSync(`${p}-wal`) ? statSync(`${p}-wal`).size : 0); },
+    /**
+     * Install apps into an instance as the owner (#83: a genesis has no shell,
+     * no `run`, no `chat`): by default the shell app and the chat app, through
+     * `skein-host install` (src/testapps.ts). Hydrates the instance first.
+     */
+    async install(handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP]) {
+      await router.hydrate(handle);
+      await installApps({ home, port: router.port, owner, settled: () => router.settled() }, handle, apps);
+    },
     async entries(handle: string) { const k = (await router.hydrate(handle)).kernel; return (await k.store.get((await k.store.log.tip())!) as unknown as { n: number }).n + 1; },
   };
   return h;
@@ -93,8 +103,9 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
 
 /**
  * A small world on a test host (the explorer's and the store reader's tests):
- * the owner's mailbox, the inference peer's, and agent `alpha`; `dir`
- * imported into alpha (objects → `main`); a chat whose turn makes one bash
+ * the owner's mailbox, the inference peer's, and agent `alpha` with the shell
+ * app and the chat app installed (#83); `dir` imported into alpha (objects →
+ * `main`); a chat whose turn makes one bash
  * tool call (`ls | head -3`) and answers "README and **src**." into the
  * owner's mailbox. The peer answers from a script, over its raw transport.
  */
@@ -105,6 +116,7 @@ export async function chatWorld(t: { after(f: () => unknown): void }, dir: strin
   h.mailbox("infer", inferId);
   const alpha = h.agent("alpha");
   await h.router.start();
+  await h.install("alpha");
   const reply = (message: Record<string, unknown>) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" }), { status: 200 });
   const script = [
     reply({ content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "bash", arguments: JSON.stringify({ cmd: "ls | head -3" }) } }] }),

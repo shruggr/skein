@@ -1,4 +1,4 @@
-// git inside the VM on the Zig kernel (issue #2): real git (wasm/git.wasm)
+// git inside the VM on the Zig kernel (issue #2): real git (the shell app's bin/git.wasm, #83)
 // run by the wasm shell over a tree, its `.git/objects` the kernel's
 // synthetic object directory. Checks that
 //   - the verbs work (init add rm mv status diff commit log show branch
@@ -20,7 +20,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
 import { CID } from "multiformats/cid";
-import { install } from "../../src/dev/cli.ts";
+import { putShellProgram } from "../../src/testapps.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { scan } from "../../src/dev/scan.ts";
 import { openStore } from "../../src/runtime/sqlite.ts";
@@ -41,12 +41,13 @@ await fs.writeFile(join(src, "proj", "README.md"), "# proj\n");
 await fs.writeFile(join(src, "proj", "src", "main.txt"), "one\ntwo\nthree\n");
 await fs.writeFile(join(src, ".gitconfig"), "[user]\n\tname = Martha\n\temail = martha@skein\n");
 const store = openStore(db);
-await install(store);
+// #83: the shell is the shell app's (shruggr/skein-shell at src/testapps.ts's pin, or $SKEIN_SHELL_DIR).
+const program = (await putShellProgram(store)).toString();
 const tree0 = (await scan(store, src)).toString();
 await store.close();
 
 function run(cases: Case[]): Out[] {
-  const r = spawnSync(kernel, ["shell", db], { input: JSON.stringify(cases), maxBuffer: 1 << 28 });
+  const r = spawnSync(kernel, ["shell", db, program], { input: JSON.stringify(cases), maxBuffer: 1 << 28 });
   if (r.status !== 0) throw new Error(`skein-kernel shell: ${r.status}\n${r.stderr}`);
   return JSON.parse(r.stdout.toString());
 }

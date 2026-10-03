@@ -73,10 +73,10 @@ test("kernel call: a function over the state, no entry and no writes, fuel repor
   assert.equal(spin.ok ? "" : spin.error, "fuel exhausted");
   assert.equal(spin.fuel, 5_000_000);
 
-  // A call within a call; by name from the genesis's programs too (the loop is one).
+  // A call within a call; by name from the genesis's programs too (resolve is one).
   const nest = await k.invoke(probe, "nest", probe.bytes);
   assert.equal(new TextDecoder().decode(nest.ok ? nest.result : undefined), "nested");
-  const byName = await k.invoke("loop", "anything", new Uint8Array());
+  const byName = await k.invoke("resolve", "anything", new Uint8Array());
   assert.equal(byName.ok, false, "a program that is not written for calls fails, and nothing breaks");
 
   // The input: the call, the caller, the instance.

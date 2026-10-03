@@ -242,22 +242,22 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
     await k.restore(src.state);
     return { state: src.state, objects: src.blocks.length, programs: [] };
   }
-  // A tree takes from the kernel only the shell and, unless its bin/ has one, the front door (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them).
+  // A tree takes from the kernel only the front door, unless its bin/ has one (#70: the middleware every provider's answer comes in through, as `local`); the other pinned records would sit in the store unreferenced (a replay would not reproduce them). No shell (#83): the shell is an app.
   if (src.kind === "code") {
     const kernelPrograms = await k.call("programs", c.mailbox ? ["frontdoor", "messagebox"] : undefined) as Record<string, CID>;
     const entry = await writeSystemGenesis(k, c, codeSystem(c, kernelPrograms), time);
     return { entry, objects: 0, programs: Object.keys(kernelPrograms) };
   }
   const t = await readSystemTree(src.objects, src.root);
-  const kernelPrograms = await k.call("programs", t.programs.some((p) => p.name === "frontdoor") ? ["shell"] : ["shell", "frontdoor"]) as Record<string, CID>;
+  const kernelPrograms = t.programs.some((p) => p.name === "frontdoor") ? {} : await k.call("programs", ["frontdoor"]) as Record<string, CID>;
   let n = 0;
   for (const o of t.objects) if (!(await k.hasBlock(o.cid))) { await k.putBlock(o.cid, o.bytes); n++; }
   for (const m of t.modules) {
     if (m.bytes) { if (!(await k.hasBlock(m.cid))) { await k.putBlock(m.cid, m.bytes); n++; } }
     else if (!(await k.hasBlock(m.cid))) throw new Error(`incomplete: bin/${m.name}.cid names ${m.cid}, which neither the source nor the kernel holds`);
   }
-  // The shell is the VM's own program (its modules are the kernel's), and so is the front door when the tree brings none; every handler comes from bin/
-  const programs: Record<string, CID> = { ...(kernelPrograms.shell ? { shell: kernelPrograms.shell } : {}), ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
+  // The front door is the kernel's when the tree brings none; every handler comes from bin/
+  const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
   const s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
   const entry = await writeSystemGenesis(k, c, s, time);
@@ -272,7 +272,6 @@ export async function stockSystemFiles(k: Kernel): Promise<Record<string, string
   const programs = await k.call("programs") as Record<string, CID>;
   const files: Record<string, string> = {};
   for (const [name, cid] of Object.entries(programs)) {
-    if (name === "shell") continue;
     const r = await k.store.get(cid) as unknown as { code: { wasm: CID }; inputs: unknown; services: string[]; description: string };
     files[`${BIN}/${name}.cid`] = `${r.code.wasm.toString()}\n`;
     files[`${BIN}/${name}.json`] = `${JSON.stringify({ inputs: r.inputs, services: r.services, description: r.description }, null, 2)}\n`;

@@ -7,12 +7,16 @@
 //   kind        "app"
 //   name        lower-case [a-z0-9][a-z0-9._-]*: the app's box, and the prefix of every head it
 //               writes (`<name>/app` its root); not a stock box, head or program name (objects,
-//               head, dispatch, peers, main, run, chat, wallet, kernel, frontdoor, messagebox,
-//               resolve, shell; nor the pre-#77 subscribe, routes, sessions)
+//               head, dispatch, peers, main, wallet, kernel, frontdoor, messagebox, resolve; nor
+//               the pre-#77 subscribe, routes, sessions)
 //   version     semver
-//   programs    role → "bin/<x>.wasm" | "bin/<x>.cid" (a file in the tree), or a bare
-//               name: a program the instance already has by name (the workbench's
-//               "shell")
+//   programs    role → "bin/<x>.wasm" | "bin/<x>.cid" (a file in the tree), a bare name: a
+//               program the instance already has by name in its genesis, or (#83) a shell
+//               program: {code: "shell", modules: {<command>: "bin/<x>.wasm"} (brush and
+//               coreutils among them), support?: {<command>: {mount: <absolute path>, files:
+//               {<path under mount>: <a file in the tree>}, env?: {<name>: <text>}}},
+//               description?} — the record the kernel's shell runs (docs/APPS.md, "A shell
+//               program"), its modules and support files this tree's
 //   dispatch[]  the rows the app asks for (#77; the kernel's dispatch table, docs/MESSAGES.md):
 //               {transport?: "mailbox" (default) | "http" | "libp2p", address, prefix?: true,
 //                sender: "*" | "event" | "session" | "$owner" | "$self" | "$<provider>" | <key hex>, program: <role>,
@@ -52,7 +56,7 @@ export interface Manifest {
   kind: "app";
   name: string;
   version: string;
-  programs: Record<string, string>;
+  programs: Record<string, string | Record<string, unknown>>;
   config?: Record<string, unknown>;
   provides?: Provide[];
   requires?: string[];
@@ -62,8 +66,13 @@ export interface Manifest {
   description?: string;
 }
 
+/** A shell program's support for one command (#25, #83): files mounted read-only at `mount` for that command only, env defaults. */
+export interface ShellSupport { mount: string; files: Record<string, string>; env: Record<string, string> }
+/** A shell program as the manifest names it (#83): its modules and support files, paths in the tree. */
+export interface ShellSource { kind: "shell"; modules: Record<string, string>; support: Record<string, ShellSupport>; description?: string }
+
 /** Where a role's program comes from. */
-export type ProgramSource = { kind: "wasm" | "cid"; path: string; name: string } | { kind: "instance"; name: string };
+export type ProgramSource = { kind: "wasm" | "cid"; path: string; name: string } | { kind: "instance"; name: string } | ShellSource;
 
 /** A row normalised: transport set, the address as written (relative for http), the sender as written, the program a role. */
 export type Row = RowIn & { transport: "mailbox" | "http" | "libp2p" };
@@ -81,7 +90,7 @@ export class ManifestError extends Error {
   constructor(problems: string[]) { super(`etc/app.json:\n  ${problems.join("\n  ")}`); this.problems = problems; }
 }
 
-export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "subscribe", "routes", "main", "sessions", "run", "chat", "wallet", "kernel", "frontdoor", "messagebox", "resolve", "shell"];
+export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "messagebox", "resolve"];
 /** The fields of the form before #77, refused (#79). */
 const LEGACY_FIELDS = ["handler", "boxes", "routes", "heads"];
 const NAME = /^[a-z0-9][a-z0-9._-]*$/;
@@ -175,14 +184,20 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
 
   // programs
   const sources: Record<string, ProgramSource> = {};
-  if (!isMap(m.programs)) bad.push("programs: want {role: \"bin/<x>.wasm\" | \"bin/<x>.cid\" | <an instance program's name>}");
+  if (!isMap(m.programs)) bad.push("programs: want {role: \"bin/<x>.wasm\" | \"bin/<x>.cid\" | <an instance program's name> | {code: \"shell\", modules, support?}}");
   else for (const [role, p] of Object.entries(m.programs)) {
+    if (isMap(p)) {
+      const sh = shellSource(p, has, `programs.${role}`);
+      if (Array.isArray(sh)) bad.push(...sh);
+      else sources[role] = sh;
+      continue;
+    }
     const file = typeof p === "string" ? /^bin\/([A-Za-z0-9._-]+)\.(wasm|cid)$/.exec(p) : null;
     if (file) {
       if (!has(p as string)) bad.push(`programs.${role}: ${p} is not in the tree`);
       sources[role] = { kind: file[2] as "wasm" | "cid", path: p as string, name: file[1]! };
     } else if (typeof p === "string" && /^[a-z0-9][a-z0-9_-]*$/.test(p)) sources[role] = { kind: "instance", name: p };
-    else bad.push(`programs.${role}: ${JSON.stringify(p)} is not bin/<x>.wasm, bin/<x>.cid or a program name`);
+    else bad.push(`programs.${role}: ${JSON.stringify(p)} is not bin/<x>.wasm, bin/<x>.cid, a program name or a shell program`);
   }
   const isRole = (r: unknown): r is string => typeof r === "string" && r in sources;
 
@@ -252,6 +267,62 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   void _d;
   const out = { ...rest, dispatch: rows, provides, requires };
   return { manifest: out, sources, derived };
+}
+
+// ---------------------------------------------------------------- a shell program (#83; APPS.md "A shell program")
+
+const COMMAND = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+/** A path in the tree: relative, no "." or ".." segment, no backslash or NUL. */
+const isTreePath = (p: unknown): p is string => typeof p === "string" && p.length > 0 && !p.startsWith("/") && !/[\\\0]/.test(p) && p.split("/").every((x) => x !== "" && x !== "." && x !== "..");
+
+/**
+ * A shell program as the manifest names it (#83), checked: `code: "shell"`;
+ * `modules` command → bin/<x>.wasm in the tree, brush and coreutils among
+ * them (every other name a command the shell runs; two names may share a
+ * module: `node` is qjs); `support` per command of `modules`: an absolute
+ * `mount`, `files` (path under the mount → a file in the tree), `env` text →
+ * text. The install turns it into the record the kernel's shell runs.
+ */
+export function shellSource(p: Record<string, unknown>, has: (path: string) => boolean, at: string): ShellSource | string[] {
+  const bad: string[] = [];
+  if (p.code !== "shell") return [`${at}: a program given as a map is a shell program: {code: "shell", modules, support?}`];
+  for (const k of Object.keys(p)) if (!["code", "modules", "support", "description"].includes(k)) bad.push(`${at}.${k}: not a field of a shell program (code, modules, support, description)`);
+  if (p.description !== undefined && typeof p.description !== "string") bad.push(`${at}.description: not text`);
+  const modules: Record<string, string> = {};
+  if (!isMap(p.modules)) bad.push(`${at}.modules: want {<command>: "bin/<x>.wasm"}`);
+  else {
+    for (const [cmd, path] of Object.entries(p.modules)) {
+      if (!COMMAND.test(cmd)) bad.push(`${at}.modules: ${JSON.stringify(cmd)} is not a command name`);
+      else if (typeof path !== "string" || !/^bin\/[A-Za-z0-9._-]+\.wasm$/.test(path)) bad.push(`${at}.modules.${cmd}: ${JSON.stringify(path)} is not bin/<x>.wasm`);
+      else if (!has(path)) bad.push(`${at}.modules.${cmd}: ${path} is not in the tree`);
+      else modules[cmd] = path;
+    }
+    for (const need of ["brush", "coreutils"]) if (!(need in p.modules)) bad.push(`${at}.modules: no ${need} (the shell is brush over coreutils)`);
+  }
+  const support: Record<string, ShellSupport> = {};
+  if (p.support !== undefined && !isMap(p.support)) bad.push(`${at}.support: want {<command>: {mount, files, env?}}`);
+  for (const [cmd, x] of Object.entries(isMap(p.support) ? p.support : {})) {
+    const where = `${at}.support.${cmd}`;
+    if (!isMap(p.modules) || !(cmd in p.modules)) { bad.push(`${where}: ${cmd} is not a command in modules`); continue; }
+    if (!isMap(x)) { bad.push(`${where}: want {mount, files, env?}`); continue; }
+    if (typeof x.mount !== "string" || !x.mount.startsWith("/") || x.mount.split("/").some((s) => s === "." || s === "..")) bad.push(`${where}.mount: not an absolute path`);
+    const files: Record<string, string> = {};
+    if (!isMap(x.files)) bad.push(`${where}.files: want {<path under the mount>: <a file in the tree>}`);
+    else for (const [under, path] of Object.entries(x.files)) {
+      if (!isTreePath(under)) bad.push(`${where}.files: ${JSON.stringify(under)} is not a relative path`);
+      else if (!isTreePath(path) || !has(path)) bad.push(`${where}.files.${under}: ${JSON.stringify(path)} is not a file in the tree`);
+      else files[under] = path;
+    }
+    const env: Record<string, string> = {};
+    if (x.env !== undefined && !isMap(x.env)) bad.push(`${where}.env: want {<name>: <text>}`);
+    for (const [k, v] of Object.entries(isMap(x.env) ? x.env : {})) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || typeof v !== "string") bad.push(`${where}.env.${k}: want a name and text`);
+      else env[k] = v;
+    }
+    support[cmd] = { mount: String(x.mount), files, env };
+  }
+  if (bad.length) return bad;
+  return { kind: "shell", modules, support, ...(typeof p.description === "string" ? { description: p.description } : {}) };
 }
 
 // ---------------------------------------------------------------- an overlay app's wiring (APPS.md §6)

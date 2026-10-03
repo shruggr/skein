@@ -13,20 +13,21 @@ import { homedir, tmpdir } from "node:os";
 import { existsSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appCheckout, SHELL_APP } from "../../src/testapps.ts";
 import { shellCases, type Out } from "./shell-cases.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.argv[2] ?? join(here, "../zig-out/bin/skein-kernel");
 
 const dir = await fs.mkdtemp(join(tmpdir(), "skein-kz-shell-"));
-const { db, cases } = await shellCases(dir);
+const { db, program, cases } = await shellCases(dir);
 const expected = JSON.parse(readFileSync(join(here, "shell-expected.json"), "utf8")) as Array<{ cmd: string } & Out>;
 if (expected.length !== cases.length || expected.some((e, i) => e.cmd !== cases[i]!.cmd)) {
   throw new Error("shell-expected.json does not list shell-cases.ts's cases in order: a case changed after the recording");
 }
 
 let t0 = Date.now();
-const z = spawnSync(kernel, ["shell", db], { input: JSON.stringify(cases), maxBuffer: 1 << 30 });
+const z = spawnSync(kernel, ["shell", db, program], { input: JSON.stringify(cases), maxBuffer: 1 << 30 });
 const zigMs = Date.now() - t0;
 if (z.status !== 0) { process.stderr.write(z.stderr); throw new Error(`skein-kernel shell exited ${z.status}`); }
 const zig = JSON.parse(z.stdout.toString()) as Out[];
@@ -45,13 +46,13 @@ if (haveTools) {
   await fs.mkdir(cdir);
   const made: string[] = [];
   for (const t of ["coreutils", "find", "xargs", "diff", "jq", "which", "grep", "tree", "awk", "sed", "git", "qjs", "python"]) {
-    const src = join(here, "../../wasm", `${t}.wasm`);
+    const src = join(appCheckout(SHELL_APP), "bin", `${t}.wasm`);
     const r = spawnSync(wasmTools, ["component", "new", src, "--adapt", `wasi_snapshot_preview1=${adapter}`, "-o", join(cdir, `${t}.wasm`)]);
     if (r.status === 0) made.push(t);
   }
   if (made.includes("diff")) await fs.copyFile(join(cdir, "diff.wasm"), join(cdir, "cmp.wasm")); // one module, two names
   t0 = Date.now();
-  const zc = spawnSync(kernel, ["shell", db], { input: JSON.stringify(cases), maxBuffer: 1 << 30, env: { ...process.env, SKEIN_SHELL_COMPONENTS: cdir } });
+  const zc = spawnSync(kernel, ["shell", db, program], { input: JSON.stringify(cases), maxBuffer: 1 << 30, env: { ...process.env, SKEIN_SHELL_COMPONENTS: cdir } });
   const compMs = Date.now() - t0;
   if (zc.status !== 0) { process.stderr.write(zc.stderr); throw new Error(`skein-kernel shell (components) exited ${zc.status}`); }
   const comp = JSON.parse(zc.stdout.toString()) as Out[];

@@ -3,8 +3,13 @@
 // (`skein-host system`), one handler carried as a .wasm file, a SOUL.md;
 //   alpha   booted from the directory (`add --boot <dir>`)
 //   beta    booted from a packet of it (`pack <dir>` in the ordfs form, mined; `add --packet --proofs`)
-// Each is chatted with — no tree named, so the loop reads `main`, the system
-// tree — and runs a command over `main`. Then alpha is checkpointed (`pack
+// A genesis has no shell and no chat loop (#83): each instance has apps
+// installed on top (`skein-host install`, src/testapps.ts) — alpha the chat
+// app, beta the chat app and the shell app — then is chatted with — no tree
+// named, so the loop reads `main`, the system tree — and beta runs a command
+// over `main`. (alpha has no shell so that its checkpoint stays small: a
+// checkpoint is every block of the store, and the shell app's modules make
+// that hundreds of MB, more than `pack --checkpoint` holds in memory.) Then alpha is checkpointed (`pack
 // --checkpoint`) and restored into a second host with the same master key
 // (`add --packet`): the restored store's derived state is the source's, and
 // it goes on answering. Finally the booted stores are replayed Zig against
@@ -33,6 +38,7 @@ import { rawCid } from "../../src/host/boot.ts";
 import { decode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { WALLET } from "../../src/runtime/programs.ts";
+import { CHAT_APP, installApps, SHELL_APP } from "../../src/testapps.ts";
 import { collect } from "../../src/testkit.ts";
 import { CID } from "multiformats/cid";
 import { existsSync } from "node:fs";
@@ -80,8 +86,13 @@ const routerFor = (h: string, db: HostDb) => {
   });
 };
 
-async function talk(r: Router, handles: string[]): Promise<void> {
+/** The instances the shell app is installed into (#83); the others have the chat app only. */
+const withShell = new Set(["beta"]);
+
+async function talk(r: Router, handles: string[], install?: string): Promise<void> {
   await r.listen(port);
+  // The apps on top of the booted system (#83), from the host at `install`'s SKEIN_HOME; a restored checkpoint has them already.
+  if (install) for (const h of handles) { await r.hydrate(h); await installApps({ home: install, port, owner, settled: () => r.settled() }, h, withShell.has(h) ? [SHELL_APP, CHAT_APP] : [CHAT_APP]); }
   const base = `http://127.0.0.1:${port}`;
   const iw = ephemeralWallet(inferKey);
   const peer = new InferPeer({ log: (l) => lines.push(`infer: ${l}`), wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
@@ -107,10 +118,12 @@ async function talk(r: Router, handles: string[]): Promise<void> {
     const [a] = await until(`${h}'s chat answer`, async () => { await peer.poll(); const x = await inbox("chat"); return x.length ? x : undefined; });
     check(a!.body.text === "I was booted from a system tree.", `${h}: a chat answered, the loop reading SOUL.md from main (the system tree) (${String(a!.body.text).slice(0, 80)})`);
     await box.ack([a!.id]);
-    await send("run", { cmd: "cat etc/config.json | head -c 1; ls bin | head -3; cat SOUL.md" });
+    if (withShell.has(h)) {
+      await send("run", { cmd: "cat etc/config.json | head -c 1; ls bin | head -3; cat SOUL.md" });
     const [x] = await until(`${h}'s run`, async () => { const y = await inbox("results"); return y.length ? y : undefined; });
     check(text(x!.body.stdout).includes("booted from a system tree") && text(x!.body.stdout).includes("frontdoor.cid"), `${h}: a run over main sees the system tree (${JSON.stringify(text(x!.body.stdout)).slice(0, 100)})`);
     await box.ack([x!.id]);
+    }
     if (!withComponent) continue;
     // The component handler from bin/ (#34): an owner's `list` to its box, answered by the component.
     const g = await r.loaded.get(h)!.kernel.genesis() as { programs: Record<string, CID> };
@@ -133,13 +146,15 @@ async function talk(r: Router, handles: string[]): Promise<void> {
       check(out.result?.op === "list" && Array.isArray(out.result.outputs), `${h}: the component handler ran and answered the list (${JSON.stringify(out).slice(0, 120)})`);
     } finally { view.close(); }
   }
+  // Everything admitted is processed before the router stops: a store stopped mid-delivery replays a step it never ran.
+  await r.settled();
 }
 
 try {
   // The stock system as a tree, one handler as its module bytes, a soul.
   check((await cli(home, "system", sys)).code === 0, "skein-host system writes the stock system tree");
-  await fs.rm(join(sys, "bin/run-handler.cid"));
-  copyFileSync(join(here, "../../wasm/run-handler.wasm"), join(sys, "bin/run-handler.wasm"));
+  await fs.rm(join(sys, "bin/resolve.cid"));
+  copyFileSync(join(here, "../../wasm/resolve.wasm"), join(sys, "bin/resolve.wasm"));
   await fs.writeFile(join(sys, "SOUL.md"), "You were booted from a system tree.\n");
   const config = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8"));
   config.defaults.model = "ripper/booted";
@@ -179,10 +194,10 @@ try {
     const g = await k.genesis() as { tree?: { toString(): string }; defaults: Record<string, string>; programs: Record<string, unknown>; dispatch: unknown[] };
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
-    check(Object.keys(g.programs).sort().join() === `frontdoor,loop,messagebox,resolve,run-handler,shell${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s (+ the VM's shell) (${Object.keys(g.programs)})`);
+    check(Object.keys(g.programs).sort().join() === `frontdoor,messagebox,resolve${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s, no shell (#83: an app) (${Object.keys(g.programs)})`);
     check(keyHex((await k.genesis() as { owner: Uint8Array }).owner) === ownerId, `${h}: $owner is the host's owner`);
   }
-  await talk(router, ["alpha", "beta"]);
+  await talk(router, ["alpha", "beta"], home);
   await router.stop();
   router = undefined;
 

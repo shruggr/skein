@@ -2,7 +2,10 @@
 // issue #33) drives it — frames on its stdin/stdout, hydrated on demand,
 // stopped when idle — each instance an HTTP server (its front door, #40),
 // the owner and the inference peer speaking raw BRC-33 on BRC-104 sessions,
-// each with its mailbox instance on the same router. Checks a run and a chat answered end to end, a sleep woken by the
+// each with its mailbox instance on the same router. The shell and the chat
+// loop are apps (#83): each instance that runs them has the shell app and/or
+// the chat app installed first (`skein-host install`, src/testapps.ts).
+// Checks a run and a chat answered end to end, a sleep woken by the
 // waker provider (#69: the shell's sleep is a wake-me message), an idle stop mid-sleep and the hydration that finishes it,
 // and (issue #5) a shell that never ends running out of fuel under a low
 // fuelPerStep, and (issue #38) 50 ms busy-waits on the in-step clock (qjs,
@@ -29,6 +32,7 @@ import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
 import { Oracle } from "../../src/host/oracle.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
+import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
 import { bundlesOf } from "../../src/testkit.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -81,6 +85,8 @@ const sendTo = async (to: string, handle: string, b: string, body: unknown) => {
 const box = { ack: (ids: string[]) => boxFor("david").ack(ids) };
 const inbox = async (b: string) => (await boxFor("david").list(b)).map((m) => ({ id: m.messageId, body: m.value as Record<string, unknown> }));
 let waited: { exitCode?: number; stdout?: string } | undefined;
+/** Install apps into an instance as the owner (#83). */
+const install = async (handle: string, apps: PinnedApp[]) => { await router.hydrate(handle); await installApps({ home, port, owner, settled: () => router.settled() }, handle, apps); };
 const results = (n: number, b = "results", ms = 30_000) => until(`${n} in ${b}`, async () => { const x = await inbox(b); return x.length >= n ? x : undefined; }, ms);
 
 try {
@@ -89,6 +95,7 @@ try {
   await fs.writeFile(join(dir, "src/a.txt"), "alpha\n");
   await fs.writeFile(join(dir, "README"), "hello\n");
   const { root, bundles } = await bundlesOf(dir);
+  await install("zigtest", [SHELL_APP, CHAT_APP]);
   for (const b of bundles) await sendTo(zig, "zigtest", "objects", b);
   await sendTo(zig, "zigtest", "run", { cmd: "cat README; ls; echo $RANDOM", tree: root });
   const [r1] = await results(1);
@@ -138,6 +145,7 @@ try {
   await listen(router);
   await router.start();
   const ft = db.get("fueltest")!.identity!;
+  await install("fueltest", [SHELL_APP]); // the install's steps fit the limit (#83); the spinning shell does not
   for (const b of bundles) await sendTo(ft, "fueltest", "objects", b);
   await sendTo(ft, "fueltest", "run", { cmd: "echo start; while :; do :; done", tree: root });
   const [s] = await results(1, "results", 60_000);
@@ -149,6 +157,7 @@ try {
   db.add("clocktest", { store: join(home, "instances/clocktest/runtime.db") });
   await router.hydrate("clocktest");
   const ct = db.get("clocktest")!.identity!;
+  await install("clocktest", [SHELL_APP]);
   for (const b of bundles) await sendTo(ct, "clocktest", "objects", b);
   const clockCmd = [
     "qjs -e 'const t0 = Date.now(); let n = 0; while (Date.now() - t0 < 50) n++; console.log(\"qjs\", Date.now() - t0, n > 100)'",

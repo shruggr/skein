@@ -8,7 +8,10 @@
 # Run from anywhere; needs node (26) and the repo's node_modules; for the
 # component cases (issue #34) wasm-tools and the preview1 adapter (README,
 # "Components"), else those are skipped with a note. Never
-# touches the stores under $SKEIN_HOME: they predate fuel.
+# touches the stores under $SKEIN_HOME: they predate fuel. The shell and the
+# chat loop are apps (#83): the drivers that run them install shruggr/skein-shell
+# and shruggr/skein-chat at src/testapps.ts's pinned commits (fetched once into
+# $TMPDIR/skein-apps), or $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR (checkouts).
 #
 #   kernel-zig/equiv/run.sh
 set -euo pipefail
@@ -23,7 +26,7 @@ status=0
 echo "== build and unit tests"
 (cd "$kz" && mise exec -- zig build --release && mise exec -- zig build test --summary all 2>&1 | grep "Build Summary")
 
-echo "== shell: host-go's cases"
+echo "== shell: host-go's cases (the shell app's shell program, #83)"
 "${node[@]}" "$kz/equiv/shell.ts" || status=1
 
 echo "== git in the VM: the verbs, the synthetic object directory (issue #2)"
@@ -41,6 +44,7 @@ for db in "${gen[@]}"; do
   a="$("$kz/zig-out/bin/skein-kernel" replay "$work/$n.fi.db" "$work/$n.fa.db")"
   b="$(SKEIN_FUEL_MODE=instrument "$kz/zig-out/bin/skein-kernel" replay "$work/$n.fi.db" "$work/$n.fb.db")"
   if [ "$a" = "$b" ]; then echo "ok   $n: the same report, fuel included"; else echo "FAIL $n: instrumented fuel differs from wasmtime's"; status=1; fi
+  rm -f "$work/$n".f[iab].db* # a store with the shell app is hundreds of MB (#83); the work dir is often tmpfs
 done
 
 # The browser build (issue #35): the same corpus replayed by the wasm kernel in

@@ -12,6 +12,7 @@ import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { fetchHttp } from "./router.ts";
 import { testHost, until } from "./testhost.ts";
+import { SHELL_APP } from "../testapps.ts";
 
 test("remote delivery: an admin peer record; the run's result delivered over http to the owner's mailbox on another host; the peer removed", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   // Host B keeps the owner's mailbox; host A runs the agent. The same owner.
@@ -25,6 +26,7 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
   const alpha = a.agent("alpha");
   await a.router.start();
   await b.router.start();
+  await a.install("alpha", [SHELL_APP]); // #83: `run` is the shell app's
   const toAlpha = new RawBox(a.owner, a.origin("alpha"));
 
   // The owner, as admin, tells alpha where the owner's mailbox is.

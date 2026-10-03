@@ -20,6 +20,7 @@ test("router: the stock client by host name, our client by path prefix; the answ
   h.mailbox("david", h.ownerId);
   const alpha = h.agent("alpha");
   await h.router.start();
+  await h.install("alpha"); // #83: `run` and `chat` are the shell app's and the chat app's
 
   // The stock client, by host name (one BRC-104 session per origin: the instance's).
   const mb = new MessageBoxClient({ host: h.origin("alpha"), walletClient: h.owner });

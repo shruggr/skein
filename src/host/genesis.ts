@@ -76,8 +76,6 @@ export interface Genesis2Config {
   /** Explicit host overrides (dev: SKEIN_FUEL_PER_STEP) that win even over a tree's config; `warn` says so when they do. */
   overrides?: Record<string, string>;
   warn?(line: string): void;
-  /** Anyone may open a `chat` (default true): the seed after the owner's boxes (code genesis only). */
-  openChat?: boolean;
   /** More seed rows for boxes, after these (e.g. the wallet's boxes, #29): a sender (hex, `$owner`, or a provider's `$<name>`) or none (anyone), a box, a handler program record. */
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
   /** More seed rows of any transport (#77), after these: the row as a system writes it (handler names resolved against the programs). */
@@ -120,7 +118,7 @@ export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" 
  * A box's row as a system tree wrote it before #77 (etc/subscriptions.json),
  * still read: the sender is an identity key in hex, `$owner` / `$infer` (the
  * host's), a provider's `$<name>` (`$status`, `$cron`: Genesis2Config.providers),
- * or absent (anyone); the handler a program name (bin/<name>, or `shell`) or a
+ * or absent (anyone); the handler a program name (bin/<name>) or a
  * program record's CID. It becomes a `mailbox` row.
  */
 export interface SubscriptionSpec { sender?: string; box?: string; handler: string }
@@ -133,7 +131,7 @@ export interface SubscriptionSpec { sender?: string; box?: string; handler: stri
  * message), `session` (an HTTP row needing a BRC-103/104 session), a key
  * in hex, `$owner`, `$self` (#79: the instance's own identity — another of
  * its programs, by the host's loopback), `$infer` or a provider's `$<name>`; `program` a program
- * name (bin/<name>, `shell`), a program record's CID, or `kernel` (an admin
+ * name (bin/<name>), a program record's CID, or `kernel` (an admin
  * row: `fn` the operation — objects, head, dispatch, peers); `fn` a handler's
  * function; anything else a handler's own setting (static's `root`, `index`;
  * a route's `read` op).
@@ -152,19 +150,17 @@ export const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
 export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, sender: "$owner", program: "kernel", fn: op }));
 
 /**
- * The stock seed (#77), after the admin rows: the owner's `run` and `chat`;
- * `chat` from anyone; the reserved box the host admits into, `:ack` (the
- * messagebox moves a reader's pointer); and the stock HTTP rows (STOCK_HTTP).
- * No `register` box (#40): registration is application wiring — an
- * application that wants senders to enter themselves in the address book
- * writes its own row (e.g. `{address: "register", program: "resolve"}`, the
- * resolve program's claim handler, or a program of its own with its own
- * rules) in its etc/dispatch.json.
+ * The stock seed (#77), after the admin rows: the reserved box the host
+ * admits into, `:ack` (the messagebox moves a reader's pointer); and the
+ * stock HTTP rows (STOCK_HTTP). No `run`, no `chat` (#83): the shell and the
+ * chat loop are apps (shruggr/skein-shell, shruggr/skein-chat), installed
+ * like any other; a genesis has no shell. No `register` box (#40):
+ * registration is application wiring — an application that wants senders to
+ * enter themselves in the address book writes its own row (e.g. `{address:
+ * "register", program: "resolve"}`, the resolve program's claim handler, or a
+ * program of its own with its own rules) in its etc/dispatch.json.
  */
 export const STOCK_DISPATCH: DispatchSpec[] = [
-  { address: "run", sender: "$owner", program: "run-handler" },
-  { address: "chat", sender: "$owner", program: "loop" },
-  { address: "chat", program: "loop" },
   { address: ":ack", program: "messagebox" },
 ];
 
@@ -483,7 +479,7 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
     const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined, subscriptions: undefined, dispatch: undefined }, mine, [], { peers: {}, names: [] }, undefined, STOCK_HTTP, STOCK_READS, MAILBOX_DISPATCH);
     return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
   }
-  const specs = STOCK_DISPATCH.filter((s) => (s.address !== "chat" || s.sender || c.openChat !== false) && programs[s.program]);
+  const specs = STOCK_DISPATCH.filter((s) => programs[s.program]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
   return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, [], {}, undefined, c.routes ?? STOCK_HTTP, c.reads ?? STOCK_READS, specs), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }

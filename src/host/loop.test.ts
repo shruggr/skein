@@ -21,6 +21,7 @@ import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { KERNEL_BIN } from "./kernel.ts";
+import { CHAT_APP } from "../testapps.ts";
 import { testHost, until } from "./testhost.ts";
 
 type Json = Record<string, unknown>;
@@ -48,6 +49,9 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
   const alpha = h.agent("alpha");
   const beta = h.agent("beta");
   await h.router.start();
+  // #83: the chat loop is an app; the genesis has none.
+  await h.install("alpha", [CHAT_APP]);
+  await h.install("beta", [CHAT_APP]);
   const boxes = watchBoxes(h);
   // The admin's configuration: alpha in beta's address book (the owner, through beta's `peers` box).
   await new RawBox(h.owner, `${h.base}/@beta`).send(beta, "peers", { op: "add", key: alpha, url: h.origin("alpha"), handle: "alpha", domain: "localhost" });
@@ -109,6 +113,7 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   h.mailbox("infer", inferId);
   const alpha = h.agent("alpha");
   await h.router.start();
+  await h.install("alpha", [CHAT_APP]);
   const boxes = watchBoxes(h);
 
   const asked: Json[] = [];
@@ -151,6 +156,8 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
   const alpha = h.agent("alpha");
   h.agent("beta");
   await h.router.start();
+  await h.install("alpha", [CHAT_APP]);
+  await h.install("beta", [CHAT_APP]);
 
   // alpha in beta's address book (the admin's), so beta can answer it.
   await new RawBox(h.owner, `${h.base}/@beta`).send(h.db.get("beta")!.identity!, "peers", { op: "add", key: alpha, url: h.origin("alpha") });

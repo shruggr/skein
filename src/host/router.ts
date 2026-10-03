@@ -871,6 +871,11 @@ export class Router {
     const list = Array.isArray(hosts) ? hosts : [hosts];
     for (const [i, host] of list.entries()) {
       const server = createServer(this.handler());
+      // A client's idle socket is the client's to close (undici: 4 s): a server that closes first races a
+      // client whose event loop was busy past the server's 5 s default — a large install message (#83:
+      // a module whole) is seconds of the SDK's per-byte checks — and the client's next request is reset.
+      server.keepAliveTimeout = 65_000;
+      server.headersTimeout = 66_000;
       try {
         await new Promise<void>((resolve, reject) => {
           server.once("error", reject);

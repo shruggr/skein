@@ -11,7 +11,7 @@
 //   await mb.list("chat")                           → [{messageId, sender, body, value}]
 //   await mb.ack([messageId])
 
-import { AuthFetch, type WalletInterface } from "@bsv/sdk";
+import { AuthFetch, Peer, SimplifiedFetchTransport, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 
@@ -31,6 +31,10 @@ const hexOf = (b: Uint8Array): string => Buffer.from(b).toString("hex");
 export class RawBox {
   readonly url: string;
   readonly af: AuthFetch;
+  private readonly fetchFn: typeof fetch;
+  private readonly wallet: WalletInterface;
+  private readonly originator?: string;
+  private peer?: Promise<void>;
 
   constructor(wallet: WalletInterface, url: string, o: { fetch?: typeof fetch; originator?: string } = {}) {
     this.url = url.replace(/\/+$/, "");
@@ -48,9 +52,33 @@ export class RawBox {
         }) as typeof fetch
       : base;
     this.af = new AuthFetch(wallet, undefined, undefined, o.originator, {}, f);
+    this.fetchFn = f;
+    this.wallet = wallet;
+    this.originator = o.originator;
+  }
+
+  /**
+   * The session's peer, made here rather than by AuthFetch (#83): the stock
+   * AuthFetch's peer keeps the SDK's default cap on a message's payload
+   * (16 MiB counted at four per byte: about 4 MiB), and an install's
+   * `objects` message carries a module whole (the shell's coreutils is
+   * 10 MB). The peer takes `maxGeneralPayloadBytes: null`, the SDK's own
+   * option for leaving the capacity to the transport; the receiving front
+   * door judges what it takes. Such a request takes seconds to check and
+   * send, so it waits up to five minutes (the SDK's default is 30 s).
+   */
+  private ensurePeer(wallet: WalletInterface, originator?: string): Promise<void> {
+    this.peer ??= (async () => {
+      const origin = new URL(this.url).origin;
+      const peer = new Peer(wallet, new SimplifiedFetchTransport(origin, this.fetchFn, { requestTimeoutMs: 300_000 }), undefined, undefined, undefined, originator, { maxGeneralPayloadBytes: null });
+      await peer.ready;
+      (this.af.peers as Record<string, unknown>)[origin] = { peer, pendingCertificateRequests: [] };
+    })();
+    return this.peer;
   }
 
   private async post(path: string, body: Record<string, unknown>): Promise<{ status: number; v: Record<string, unknown> }> {
+    await this.ensurePeer(this.wallet, this.originator);
     const r = await this.af.fetch(`${this.url}${path}`, { method: "POST", headers: { "content-type": "application/cbor" }, body: dagCbor.encode(body) as unknown as BodyInit });
     const bytes = new Uint8Array(await r.arrayBuffer());
     let v: Record<string, unknown> = {};

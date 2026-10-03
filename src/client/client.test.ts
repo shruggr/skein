@@ -15,6 +15,7 @@ import { parseCli } from "./cli.ts";
 import type { ClientConfig } from "./config.ts";
 import { KERNEL_BIN } from "../host/kernel.ts";
 import { testHost, until } from "../host/testhost.ts";
+import { SHELL_APP } from "../testapps.ts";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "skein-client-"));
 
@@ -101,6 +102,7 @@ test("bin/skein on a host (#40): run to the instance's front door, the result re
   h.mailbox("david", h.ownerId);
   const alpha = h.agent("alpha");
   await h.router.start();
+  await h.install("alpha", [SHELL_APP]); // #83: `run` is the shell app's
   const cfg: ClientConfig = {
     home: tmp(), walletUrl: "unused", originator: "skein-client-test",
     instanceUrl: `${h.base}/@alpha`, mailboxUrl: h.origin("david"),
