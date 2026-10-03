@@ -45,7 +45,10 @@
 // schedules, each tick a signed message (#69, cron.ts; host.db
 // `cron_schedule`); the status provider tells the instances that subscribe
 // to it how their transactions stand (#65); the libp2p node is the
-// instance's own (p2p.ts). Each genesis it writes names the providers' keys
+// instance's own (p2p.ts); the instance manager (#90) creates, starts and
+// stops instances for the host skein alone (host.db `host_settings`:
+// `skein-host init` made it; createInstance claims a new instance before
+// its row is enabled, which publishes its hostname). Each genesis it writes names the providers' keys
 // in its address book (`addressBook`). A kernel's broadcast events go to the
 // broadcaster (#65).
 //
@@ -80,7 +83,7 @@ import { currentDispatch, takesEvent, takesMail } from "../runtime/dispatch.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
-import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
+import { boot, bootStore, imageSource, type BootSource, type Booted } from "./boot.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
 import type { HostDb, InstanceRow } from "./instances.ts";
@@ -167,6 +170,8 @@ export interface RouterResponse { status: number; headers: Record<string, string
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
+/** A handle as an instance's hostname label (#90: what the instance manager creates). */
+export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
 
 /**
@@ -223,6 +228,8 @@ export class Router {
   readonly providers: Providers;
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
+  /** Rows being created (#90): hydrated before their hostname is published (disabled until claimed). */
+  private unpublished = new Set<string>();
   private queues = new Map<string, Promise<unknown>>();
   /** The libp2p nodes following their dispatch tables (#72: syncP2p after a settle). */
   private syncing = new Set<Promise<unknown>>();
@@ -294,6 +301,11 @@ export class Router {
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
+      // #90: the instance manager acts for the host skein alone.
+      manager: {
+        from: () => { const r = this.o.db.hostSkein(); return r?.identity ? { handle: r.handle, identity: r.identity } : undefined; },
+        request: (box, body) => this.manage(box, body),
+      },
       ...(p2p ? {
         p2p: {
           publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
@@ -507,7 +519,7 @@ export class Router {
   private async load(handle: string): Promise<Loaded> {
     if (this.stopped) throw new Error("the router is stopping");
     const row = this.o.db.get(handle);
-    if (!row || row.status !== "enabled") throw new Error(`no enabled instance ${handle}`);
+    if (!row || (row.status !== "enabled" && !this.unpublished.has(handle))) throw new Error(`no enabled instance ${handle}`);
     const wallet = await this.o.walletFor(row);
     const identity = await rootIdentity(wallet);
     if (row.identity && row.identity !== identity) throw new Error(`its oracle is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
@@ -568,13 +580,14 @@ export class Router {
    * Boot a row's empty store from a system tree or a checkpoint (issue #4,
    * boot.ts) before its first hydration; the row's identity is its oracle's.
    */
-  async bootRow(handle: string, src: BootSource, o: { image?: boolean } = {}): Promise<Booted> {
+  async bootRow(handle: string, src: BootSource, o: { image?: boolean; manager?: boolean } = {}): Promise<Booted> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
     if (this.loaded.has(handle)) throw new Error(`${handle} is loaded: boot only an empty store`);
     if (o.image && src.kind !== "tree") throw new Error("an image is a system tree");
+    if (o.manager && !o.image) throw new Error("the instance manager is the host skein's, and the host skein is an image");
     const identity = await rootIdentity(await this.o.walletFor(row));
-    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : o.image ? this.imageConfig(row, identity) : this.genesisConfig(row, identity, src.kind === "code");
+    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : o.image ? this.imageConfig(row, identity, { manager: o.manager }) : this.genesisConfig(row, identity, src.kind === "code");
     const b = await bootStore({ db: row.store, handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
@@ -606,10 +619,12 @@ export class Router {
    * the instance's identity, handle and domain, its providers in the address
    * book, where its domain resolves, the host's defaults. No owner, no
    * owner's mailbox, no inference peer, no names: the image is the same for
-   * everyone, and the owner comes with the claim (`claim`).
+   * everyone, and the owner comes with the claim (`claim`). `manager`
+   * (#90): the host skein's — the instance manager in its address book too
+   * (no other instance's book names it).
    */
-  imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string): Genesis2Config {
-    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])]);
+  imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
+    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const] : [])]);
     return {
       identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.role, Buffer.from(e.key).toString("hex")])),
@@ -637,9 +652,89 @@ export class Router {
     const body = { owner: key, ...(mb ? { messagebox: mb } : {}), ...(o.handle ? { handle: o.handle, domain: o.domain ?? "localhost" } : {}) };
     const entry = await this.providers.send(handle, "manager", keyBytes(l.identity), "claim", body) as CID;
     await this.settled();
+    return { entry, claimed: await this.claimedBy(l, owner) };
+  }
+
+  /** Whether `owner` holds the instance's admin rows (its `dispatch` row): claimed by that key. */
+  private async claimedBy(l: Loaded, owner: string): Promise<boolean> {
     const rows = (await l.kernel.dispatch()).rows;
-    const claimed = rows.some((r) => r.program === "kernel" && r.fn === "dispatch" && r.sender instanceof Uint8Array && Buffer.from(r.sender).toString("hex") === owner);
-    return { entry, claimed };
+    return rows.some((r) => r.program === "kernel" && r.fn === "dispatch" && r.sender instanceof Uint8Array && Buffer.from(r.sender).toString("hex") === owner);
+  }
+
+  /**
+   * A new instance from an image, owned by `owner` (#90: the instance
+   * manager's `create`; `skein-host init` for the host skein). In this order:
+   * the row, disabled (no hostname: nothing reaches it); its identity
+   * derived (the oracle's, key ID = the handle) and its store booted from the
+   * image (only `default`, the default image, so far); its kernel started
+   * unpublished; the owner's claim delivered as a `local` request from the
+   * instance manager, and processed — the owner's admin rows written, the
+   * claim row removed; only then (`publish`, default true) the row enabled,
+   * which publishes its hostname. No request can reach the claim row first.
+   * `host`: the host skein — the instance manager in its address book, and
+   * recorded as the host skein (host.db). A refusal throws (a bad or taken
+   * handle, a bad key, another image, a refused claim: the row is left
+   * disabled, its store kept for a look).
+   */
+  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean } = {}): Promise<{ handle: string; identity: string; url: string }> {
+    if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
+    if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
+    if (o.image !== undefined && o.image !== "default") throw new Error(`image ${JSON.stringify(o.image)}: this host has only the default image`);
+    if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
+    const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
+    if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
+    this.o.db.add(handle, { store, status: "disabled" });
+    this.unpublished.add(handle);
+    try {
+      await this.bootRow(handle, await imageSource(), { image: true, manager: o.host });
+      const l = await this.hydrate(handle);
+      const entry = await this.providers.send(handle, "manager", keyBytes(l.identity), "claim", { owner: keyBytes(owner), ...this.ownerMailbox(owner) }) as CID;
+      await this.queues.get(handle);
+      await l.kernel.idle();
+      if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
+      if (o.host) this.o.db.setSetting("host_skein", handle);
+      if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
+      this.say("router", `created ${handle} (${short(l.identity)}) from the default image, claimed by ${short(owner)}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      return { handle, identity: l.identity, url: this.originOf(handle) };
+    } finally {
+      this.unpublished.delete(handle);
+    }
+  }
+
+  /** The owner's mailbox instance on this host, as a claim's `messagebox` (none: {}). */
+  private ownerMailbox(owner: string): { messagebox?: string } {
+    const m = this.o.db.mailboxOf(owner);
+    return m ? { messagebox: this.originOf(m.handle) } : {};
+  }
+
+  /**
+   * The instance manager's work (#90; providers.ts `manager`): a message from
+   * the host skein in box `create`, `start` or `stop` → the answer body. A
+   * refusal throws (the provider answers {error}).
+   */
+  private async manage(box: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const handle = typeof b.handle === "string" ? b.handle : "";
+    if (box === "create") {
+      const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : "";
+      if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
+      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined });
+      return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
+    }
+    if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
+    const row = this.o.db.get(handle);
+    if (!row) throw new Error(`no instance ${handle}`);
+    if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein: it is not started or stopped by a message from itself`);
+    if (box === "start") {
+      this.o.db.setStatus(handle, "enabled");
+      await this.hydrate(handle);
+      this.say("router", `${handle}: started by the instance manager`);
+      return { handle, started: true, url: this.originOf(handle) };
+    }
+    this.o.db.setStatus(handle, "disabled");
+    const l = this.loaded.get(handle);
+    if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
+    this.say("router", `${handle}: stopped by the instance manager`);
+    return { handle, stopped: true };
   }
 
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */

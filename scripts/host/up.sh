@@ -20,6 +20,10 @@
 #      hydration and names the owner's messagebox (`defaults.ownerMessagebox`,
 #      the router's default: the owner's mailbox instance) — an agent genesised
 #      earlier can never deliver its answers to him (it needs a new store).
+#   2b. the host skein (#90): `skein-host init --owner <the owner's key>` — the
+#      operator's own instance (handle `host`), from the default image,
+#      claimed for the owner, the instance manager in its address book. Once:
+#      run again, it only says which instance it is
 #   3. the router, if nothing listens on :8100 (it hydrates every enabled row:
 #      the agents' geneses happen here, the owner's mailbox already there).
 #      Its broadcaster (#58) is the host's Arcade: SKEIN_ARC_URL and
@@ -42,6 +46,9 @@
 #      agent gets the shell app and the chat app (`skein-host install`, as the
 #      owner, at the tags SKEIN_SHELL_APP / SKEIN_CHAT_APP name). Installing
 #      what an instance has sends only the head again.
+#   7. the onboarding app (#90) into the host skein (SKEIN_ONBOARD_APP, default
+#      shruggr/skein-onboard#v0.1.0): POST /@host/onboard/call creates a
+#      skein for any wallet with a session, through the instance manager.
 #
 # Nothing is registered, and nothing registers itself: the mailbox rows of
 # step 2 are what a registration (register.ts, POST /account/register) would
@@ -83,6 +90,11 @@ theirs="$(mailbox infer "$infer")"
 echo "mailbox instances: the owner ${owner:0:8}… at @$mine, infer ${infer:0:8}… at @$theirs"
 echo "http://127.0.0.1:$port/@$mine" > "$skein/mailbox.url"
 [ -f "$skein/infer.json" ] || printf '%s\n' '{ "ripper": { "baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm" } }' > "$skein/infer.json"
+
+# 2b. The host skein (#90): once; claimed for the owner (its mailbox instance above in the claim).
+[ -x "$root/kernel-zig/zig-out/bin/skein-kernel" ] || (cd "$root/kernel-zig" && mise exec -- zig build --release)
+host init --owner "$owner"
+hostskein="$(host list | awk -F'\t' '$2 == "host" { sub(/@.*/, "", $1); print $1; exit }')"
 
 # 3. The router: a new agent's genesis names the owner's mailbox instance (its default).
 listening() { ss -ltn "sport = :$1" 2>/dev/null | grep -q LISTEN; }
@@ -131,3 +143,10 @@ for a in "${agents[@]}"; do
   done
 done
 echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer knows them ($skein/infer-peers.json)"
+
+# 7. The onboarding app (#90) into the host skein.
+if [ -n "$hostskein" ]; then
+  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.1.0}"
+  host install "$onboard" --instance "$hostskein" --approve-all > /dev/null || echo "install $onboard into $hostskein failed (above)" >&2
+  echo "the host skein: @$hostskein, the onboarding app at $(origin "$hostskein")/onboard/call"
+fi

@@ -55,11 +55,23 @@
 //              from it in box `status`, `subject` the transaction's CID, body
 //              {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?};
 //              an instance admits it only if it subscribes to this key in `status`
-//   manager    takes no messages (#89): it speaks first. The instance manager's
-//              claim — a message in box `claim`, body {owner, messagebox?, handle?,
-//              domain?}, into an image the host started (Router.claim, `skein-host
-//              claim`); the image's claim row admits anyone, so its key is in no
-//              address book. #90 grows the instance manager around it
+//   manager    the instance manager (#89, #90): it creates, starts and stops this
+//              host's instances. It takes messages from the host skein only (the
+//              operator's instance, `skein-host init`): its entry is in the host
+//              skein's address book alone, and a message from any other instance
+//              or key is not acted on and not answered (a line in the host's log).
+//              create {handle, owner, image?}   → {handle, identity: bytes(33), url}:
+//                     the identity derived, the instance booted from the image
+//                     (`default`, the only one so far), the owner's claim delivered,
+//                     then — claimed — its hostname published and it started
+//                     (Router.createInstance). Refused (an answer {error}): a bad or
+//                     taken handle, a bad owner key, another image, a refused claim
+//              start {handle}   → {handle, started: true, url}: published and started
+//              stop {handle}    → {handle, stopped: true}: unpublished and stopped
+//              (`list` later.) It also speaks first: the claim — a message in box
+//              `claim`, body {owner, messagebox?, handle?, domain?}, into an image
+//              (Router.claim, `skein-host claim`, and create's own); the image's
+//              claim row admits anyone
 //
 // How this host obtains the providers' keys is its own business (oracle.ts:
 // children of its master secret); the instance knows them from its address
@@ -103,6 +115,15 @@ export interface ProvidersOptions {
   broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
+  /**
+   * The instance manager (#90, Router): `from()` names the host skein (its
+   * handle and identity, hex) — the one sender it acts for (none: it acts for
+   * nobody); `request` does a create, start or stop → the answer body.
+   */
+  manager?: {
+    from(): { handle: string; identity: string } | undefined;
+    request(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
+  };
   /** The libp2p host, when there is one: the instance's node does the work. */
   p2p?: {
     publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }>;
@@ -206,6 +227,11 @@ export class Providers {
     if (!PROVIDERS.includes(name)) throw new Error(`no provider ${out.address} on this host`);
     if (hex(out.message.recipient) !== this.key(name)) throw new Error(`the message is not for the ${name} provider`);
     if (!(await this.signed(out))) throw new Error("the message's signature does not verify: not acted on");
+    if (name === "manager") {
+      // #90: the host skein's alone — any other sender's message is not acted on, and not answered.
+      const host = this.o.manager?.from();
+      if (!host || handle !== host.handle || hex(out.message.sender) !== host.identity) throw new Error("the instance manager takes messages from the host skein only: not acted on");
+    }
     let body: Record<string, unknown>;
     try { body = dagCbor.decode(out.body) as Record<string, unknown>; } catch { return await this.answer(handle, name, out.message, id, { error: "the body is not dag-cbor" }); }
     const box = out.message.box;
@@ -216,7 +242,7 @@ export class Providers {
         case "libp2p": return await this.p2p(handle, out.message, id, box, body);
         case "cron": return await this.cron(handle, out.message, id, box, body);
         case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"status\")" });
-        case "manager": return await this.answer(handle, "manager", out.message, id, { error: "the instance manager takes no messages from an instance: it speaks first (a claim, #89)" });
+        case "manager": return await this.answer(handle, "manager", out.message, id, await this.o.manager!.request(box, body));
       }
     } catch (e) {
       await this.answer(handle, name, out.message, id, { error: (e as Error).message });
