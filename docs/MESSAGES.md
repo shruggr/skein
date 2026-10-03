@@ -80,8 +80,8 @@ kernel itself performs — no program is stepped:
 Every genesis that names an owner seeds the owner's four admin rows
 (`sender` the owner, `program` `kernel`); an image (the default image,
 docs/BOOTSTRAP.md) names none and seeds the claim row instead, which the
-host's instance manager takes with the owner's key as a `local` request
-(`skein-host claim`) before the instance is published. Delegating administration is the owner adding a row
+host's instance manager delivers the owner's claim to as a `local` request
+(`skein-host claim`, or its `create`, #90) before the instance is published. Delegating administration is the owner adding a row
 with the same operation and another sender. A refused operation (a bad
 body, a record not in the store) is a log line and nothing written. The
 client commands: `skein import` (objects), `skein head`, `skein dispatch`,
@@ -549,8 +549,9 @@ BRC-169 envelope's sender — only if it resolves to the sender, source
 ### The providers
 
 A provider is a recipient with an identity of its own that carries a
-message out and answers. The reference host runs five
-(`src/host/providers.ts`): `fetch`, `waker`, `cron`, `libp2p` and `status`; their
+message out and answers. The reference host runs six
+(`src/host/providers.ts`): `fetch`, `waker`, `cron`, `libp2p`, `status` and
+`manager` (the instance manager, #90: the host skein's only); their
 keys are the host's business (children of its master secret), the instance
 knows them from its address book. Every answer is a signed message from
 the provider to the instance — the same record an `emit` makes, signed the
@@ -570,6 +571,9 @@ message routes by `replyTo` to the thread awaiting it.
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
 | `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `status` (#65, below) |
+| `manager` | `create` | `{handle, owner: bytes(33), image?}` | `{handle, identity: bytes(33), url}`: a new instance from the image (only `default`), claimed for `owner` before its hostname is published, then started (#90, below) |
+| | `start` | `{handle}` | `{handle, started: true, url}`: published and started |
+| | `stop` | `{handle}` | `{handle, stopped: true}`: unpublished and stopped |
 
 The overlay's gossip (#74, docs/OVERLAY.md "Gossip") is `publish`
 messages, not awaited (the answer is recorded and runs nothing): on
@@ -581,6 +585,22 @@ bytes}` (txid and block hash hex, display order).
 `sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
 awaits it; the reply's body is the answer. A broadcast is not a message to
 anyone (#65, below); the chain app (#78) is the one program that emits it (#79: the wallet and the overlay apps send the chain app an `ingest` instead).
+
+**The instance manager** (#90) is in the host skein's address book alone
+(`skein-host init` writes that genesis; no other instance's book names it),
+and it acts only on a message from the host skein's identity, sent from
+the host skein: any other is not acted on and not answered (a line in the
+host's log). A refusal is an answer: `{error}` for a handle that is not a
+hostname label or is taken, an owner that is not a key, another image, a
+refused claim; `start`/`stop` of the host skein itself. It also speaks
+first: the claim (#89), a message in box `claim`, body `{owner,
+messagebox?, handle?, domain?}`, into an image (`create`'s own, and
+`skein-host claim`). In `create` the row exists disabled until the kernel
+has processed the claim (the owner's admin rows written, the claim row
+removed), and only then is it enabled, which publishes the hostname: the
+claim is the instance's first entry after its genesis. The onboarding app
+(shruggr/skein-onboard) is the host skein's program that asks it
+(docs/ARCH.md, "The host skein").
 
 **How a host obtains its providers' keys is its own business**, not core:
 the reference host derives them from its master secret (`src/host/oracle.ts`

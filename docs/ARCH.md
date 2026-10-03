@@ -188,7 +188,8 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   and a `local` row in the address book. `fetch` (the web proxy), `waker`
   (deadlines and sleeps), `cron` (`{fn: "tick", every | at, box, body?,
   name}`; schedules in host.db), `libp2p` (publish, dial, send, close),
-  `status` (Arcade's word on a transaction). Each answer is a signed
+  `status` (Arcade's word on a transaction), `manager` (the instance
+  manager: below, "The host skein"). Each answer is a signed
   message appended as a `local` request. A provider may also be remote (a
   cron service reached by mailbox, `src/peers/cron.ts`). A message the
   instance sends itself loops back through the host as transport `local`,
@@ -225,9 +226,53 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   log; the host's own kernel calls (the explorer's reads) are charged in
   host.db (`skein-host ledger`).
 - **The control socket** (`$SKEIN_HOME/host.sock`): `skein-host event`
-  sends a cron tick by hand through the running host.
+  sends a cron tick by hand through the running host, `skein-host claim` an
+  owner's claim into an image.
 
 `scripts/host/README.md` has the commands, ports and environment.
+
+### The host skein (#90)
+
+The host runs one instance of its own: the **host skein**, the operator's.
+`skein-host init --owner <key>` creates it (handle `host` by default) from
+the default image and claims it for the operator's key, and host.db
+records which row it is (`skein-host list` shows it as kind `host`). It is
+an ordinary instance under the same transports, with one difference: its
+address book, and no other, has an entry for the **instance manager**.
+What about the host is state or conversation belongs in it (today: the
+onboarding app and the instances it created); the HTTP transport and the
+libp2p node stay native, and host.db keeps its side tables (instances, the
+fuel ledger, cron, the broadcast queue).
+
+The **instance manager** (provider `manager`, a key of its own like the
+others) creates, starts and stops this host's instances. It acts only for
+the host skein: its entry exists in the host skein's address book alone,
+and a message from any other sender is not acted on and not answered. Each
+message is answered with a signed message:
+
+- `create {handle, owner, image?}` → `{handle, identity, url}`. The row is
+  added disabled (no hostname), the identity derived from the master
+  secret, the store booted from the image (`default`, the only one so far),
+  the kernel started, and the owner's claim delivered as a `local` request
+  from the manager. Only once the kernel has written the owner's admin rows
+  is the row enabled, which publishes the hostname: no request can reach
+  the claim row first. `url` is the instance's origin
+  (`SKEIN_INSTANCE_ORIGIN`, default `http://<handle>.localhost:<port>`).
+- `start {handle}` → `{handle, started: true, url}`; `stop {handle}` →
+  `{handle, stopped: true}`: published and started, or unpublished and
+  stopped. Not the host skein itself.
+- A refusal is an answer `{error}`: a handle that is not a hostname label
+  or is taken, an owner that is not a key, another image, a refused claim.
+
+The **onboarding app** (shruggr/skein-onboard), installed in the host
+skein, is how a stranger gets a skein: `POST /onboard/call {fn:
+"onboard.create", args: {handle, image?}}` over any BRC-104 session. Its
+handler records the request and launches a thread, and the client waits
+on that thread (#66). The thread applies the policy (free and ungated
+today), emits `create` to the instance manager with the session's key as
+the owner, and rests. On the answer it points `onboard/instances/<handle>`
+at the manager's answer record and finishes, and the page gets `{handle,
+identity, url}`. The management site (#92) is what calls it.
 
 ## The browser host
 
