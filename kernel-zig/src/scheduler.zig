@@ -551,7 +551,9 @@ pub const Runtime = struct {
             }
             // #70: the address book's seed (the host's providers, the owner's mailbox).
             try addressbook.seed(a, rt.store, g, .{ .thread = null, .input = entry, .at = at });
-            rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} dispatch rows", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(Value.bytesOf(g.get("owner")).?), rows.len });
+            if (Value.bytesOf(g.get("owner"))) |o| {
+                rt.say("#{d} genesis: {s}@{s}, owner {s}, {d} dispatch rows", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, shortKey(o), rows.len });
+            } else rt.say("#{d} genesis: {s}@{s}, no owner (an image: the owner comes with the claim), {d} dispatch rows", .{ n, Value.str(g.get("handle")).?, Value.str(g.get("domain")).?, rows.len });
             return;
         }
 
@@ -853,8 +855,8 @@ pub const Runtime = struct {
             rt.say("{s}: no dispatch row; recorded, nothing runs", .{what});
             return;
         };
-        // #77: an admin box — the kernel's own operation, no program.
-        if (row.program == null) return rt.kernelOp(a, n, ctx, row.op.?, m, what, at);
+        // #77: an admin box — the kernel's own operation, no program (#89: or the claim).
+        if (row.program == null) return rt.kernelOp(a, n, ctx, row, m, what, at);
         // #65: a message about something — its `subject`, a transaction's CID — from a sender the
         // instance subscribes to (a status provider's status) steps the thread awaiting that
         // subject, before the subscription's handler: as an event about it would.
@@ -905,17 +907,27 @@ pub const Runtime = struct {
     ///             and module must be in the store)
     ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?} | {op: "remove", key}:
     ///             the address book (addressbook.zig write; source "admin")
+    ///   claim     {owner, messagebox?, handle?, domain?} (#89): an image's one wildcard row. In
+    ///             one step: the owner's four admin rows (objects, head, dispatch, peers from
+    ///             `owner`) added, the claim row removed, the head `claim` → this body (what was
+    ///             claimed: the owner of an instance whose genesis names none), and, with a
+    ///             `messagebox`, the owner's address-book entry (source "claim"). Refused when
+    ///             the genesis names an owner or the table has an admin row already.
     /// Only a sender a row admits reaches here: the owner, or a key the owner
     /// added as a sender (#87: no program reaches a kernel table — a
-    /// program's message to an admin box finds no row and runs nothing).
-    fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, op: []const u8, m: Value, what: []const u8, at: i64) !void {
+    /// program's message to an admin box finds no row and runs nothing); the
+    /// claim row admits anyone, until it is taken.
+    fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, row: dispatch.Row, m: Value, what: []const u8, at: i64) !void {
         _ = n;
-        const body = rt.store.getOpt(a, Value.cidOf(m.get("body")).?) orelse {
+        const op = row.op.?;
+        const bc = Value.cidOf(m.get("body")).?;
+        const body = rt.store.getOpt(a, bc) orelse {
             rt.say("{s}: kernel {s}: the body is not in the store; nothing done", .{ what, op });
             return;
         };
         const by = heads.By{ .thread = null, .input = ctx.cid, .at = at };
-        rt.kernelOpBody(a, op, body, by) catch |err| switch (err) {
+        const done = if (std.mem.eql(u8, op, "claim")) rt.claim(a, row, bc, body, by) else rt.kernelOpBody(a, op, body, by);
+        done catch |err| switch (err) {
             error.Refused => {
                 rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error });
                 return;
@@ -995,6 +1007,47 @@ pub const Runtime = struct {
             return;
         }
         return refuse(a, "no such operation", .{});
+    }
+
+    /// The head the claim leaves (#89): its root is the claim's body, `owner` the claimed key.
+    pub const CLAIM_HEAD = "claim";
+
+    /// The claim (#89): validated whole, then written under the entry.
+    fn claim(rt: *Runtime, a: std.mem.Allocator, row: dispatch.Row, body_cid: []const u8, body: Value, by: heads.By) !void {
+        if (body != .map) return refuse(a, "the body is not a map", .{});
+        const owner = keyOf(a, body.get("owner")) orelse return refuse(a, "want {{owner: <identity key>, messagebox?, handle?, domain?}}", .{});
+        if (rt.genesis.?.get("owner") != null) return refuse(a, "the genesis names its owner: this instance is not an image", .{});
+        const now = (try dispatch.current(a, rt.store)) orelse &.{};
+        if (dispatch.hasAdminRow(now)) return refuse(a, "the instance has admin rows already: it is owned", .{});
+        const mb: ?[]const u8 = if (body.get("messagebox")) |x| switch (x) {
+            .null => null,
+            else => Value.str(x) orelse return refuse(a, "messagebox: want the owner's messagebox URL", .{}),
+        } else null;
+        if (mb) |u| if (u.len == 0) return refuse(a, "messagebox: empty", .{});
+        const d = dispatch.By{ .thread = null, .input = by.input, .at = by.at };
+        for (dispatch.admin_ops) |o| {
+            var r = cbor.MapBuilder.init(a);
+            try r.put("transport", cbor.string("mailbox"));
+            try r.put("address", cbor.string(o));
+            try r.put("sender", .{ .bytes = owner });
+            try r.put("program", cbor.string("kernel"));
+            try r.put("fn", cbor.string(o));
+            _ = try dispatch.apply(a, rt.store, "add", r.value(), d);
+        }
+        _ = try dispatch.apply(a, rt.store, "remove", row.value, d);
+        _ = try heads.advanceHead(a, rt.store, CLAIM_HEAD, body_cid, by);
+        if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, null, Value.str(body.get("handle")), Value.str(body.get("domain")), "claim", by);
+        rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers; the claim row removed{s}", .{ shortKey(owner), if (mb != null) "; the owner's messagebox in the address book" else "" });
+    }
+
+    /// The instance's owner (#89): the genesis's, else the claimed key (the head `claim`), else null (an unclaimed image).
+    pub fn ownerOf(rt: *Runtime, a: std.mem.Allocator) !?Value {
+        const g = rt.genesis orelse return null;
+        if (g.get("owner")) |o| return o;
+        const root = (try rt.store.headTree(a, CLAIM_HEAD)) orelse return null;
+        const b = rt.store.getOpt(a, root) orelse return null;
+        const k = keyOf(a, b.get("owner")) orelse return null;
+        return .{ .bytes = k };
     }
 
     /// An identity key given as bytes or hex (a JSON-era client's).
@@ -1349,7 +1402,7 @@ pub const Runtime = struct {
         try self.put("domain", g.get("domain"));
         try self.put("identity", g.get("identity"));
         try input.put("self", self.value());
-        try input.put("owner", g.get("owner"));
+        try input.put("owner", try rt.ownerOf(a));
         try input.put("args", o.get("args"));
         try input.put("programs", g.get("programs"));
         if (resolved) |rs| try input.put("resolved", .{ .array = rs });
@@ -1875,7 +1928,7 @@ pub const Runtime = struct {
         try self.put("domain", g.get("domain"));
         try self.put("identity", g.get("identity"));
         try m.put("self", self.value());
-        try m.put("owner", g.get("owner"));
+        try m.put("owner", try rt.ownerOf(a));
         try m.put("programs", g.get("programs"));
         try m.put("peers", g.get("peers"));
         try m.put("defaults", g.get("defaults"));

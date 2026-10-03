@@ -184,6 +184,8 @@ export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
  * fail, since nothing else tells it where his mailbox is. Undefined if it names one.
  */
 export function noOwnerMessagebox(genesis: Record<string, unknown> | null | undefined): string | undefined {
+  // An image (#89) names no owner: the claim brings the owner's messagebox (into the address book).
+  if (genesis && genesis.owner === undefined) return undefined;
   const d = genesis?.defaults as Record<string, unknown> | undefined;
   if (typeof d?.ownerMessagebox === "string" && d.ownerMessagebox) return undefined;
   return "WARNING: its genesis names no owner messagebox (defaults.ownerMessagebox): nothing it sends the owner (its answers) can be delivered. " +
@@ -354,7 +356,14 @@ export class Router {
    */
   async listenControl(path: string): Promise<void> {
     if (this.stopped) throw new Error("the router is stopping");
-    const server = await listenControl(path, { event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString() });
+    const server = await listenControl(path, {
+      event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString(),
+      claim: async (h, owner, o) => {
+        const [name, domain] = (o.name ?? "").replace(/^@/, "").split("@");
+        const c = await this.claim(h, owner, { messagebox: o.messagebox, ...(name ? { handle: name, domain: domain || "localhost" } : {}) });
+        return { entry: c.entry.toString(), claimed: c.claimed };
+      },
+    });
     this.control = { server, path };
     this.say("router", `control socket at ${path}`);
   }
@@ -559,12 +568,13 @@ export class Router {
    * Boot a row's empty store from a system tree or a checkpoint (issue #4,
    * boot.ts) before its first hydration; the row's identity is its oracle's.
    */
-  async bootRow(handle: string, src: BootSource): Promise<Booted> {
+  async bootRow(handle: string, src: BootSource, o: { image?: boolean } = {}): Promise<Booted> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
     if (this.loaded.has(handle)) throw new Error(`${handle} is loaded: boot only an empty store`);
+    if (o.image && src.kind !== "tree") throw new Error("an image is a system tree");
     const identity = await rootIdentity(await this.o.walletFor(row));
-    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : this.genesisConfig(row, identity, src.kind === "code");
+    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : o.image ? this.imageConfig(row, identity) : this.genesisConfig(row, identity, src.kind === "code");
     const b = await bootStore({ db: row.store, handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
@@ -589,6 +599,47 @@ export class Router {
     const mb = this.ownerMessagebox();
     if (this.o.owner && mb) out.push({ key: keyBytes(this.o.owner), transport: "mailbox", address: mb, ...(this.o.ownerHandle ?? {}) });
     return out;
+  }
+
+  /**
+   * What this host brings to an image's genesis (#89): only its own facts —
+   * the instance's identity, handle and domain, its providers in the address
+   * book, where its domain resolves, the host's defaults. No owner, no
+   * owner's mailbox, no inference peer, no names: the image is the same for
+   * everyone, and the owner comes with the claim (`claim`).
+   */
+  imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string): Genesis2Config {
+    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : [])]);
+    return {
+      identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), addressBook: seed,
+      providers: Object.fromEntries(seed.map((e) => [e.role, Buffer.from(e.key).toString("hex")])),
+      feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
+      warn: (l) => this.say(row.handle, l),
+    };
+  }
+
+  /**
+   * The claim (#89): the instance manager's signed message into an image's
+   * claim row — box `claim`, body {owner, messagebox?, handle?, domain?} —
+   * appended as a `local` request. The kernel writes the owner's admin rows
+   * and removes the claim row in one step, or refuses (no row any more; an
+   * instance owned already). Without a messagebox, the owner's mailbox
+   * instance on this host, if it has one. What happened: the entry, and
+   * whether the instance is now claimed by `owner` (its `dispatch` admin row
+   * from that key).
+   */
+  async claim(handle: string, owner: string, o: { messagebox?: string; handle?: string; domain?: string } = {}): Promise<{ entry: CID; claimed: boolean }> {
+    const row = this.o.db.get(handle);
+    if (!row || row.status !== "enabled") throw new Error(`no enabled instance ${handle}`);
+    const key = keyBytes(owner);
+    const mb = o.messagebox ?? (() => { const m = this.o.db.mailboxOf(owner); return m ? this.originOf(m.handle) : undefined; })();
+    const l = await this.hydrate(handle);
+    const body = { owner: key, ...(mb ? { messagebox: mb } : {}), ...(o.handle ? { handle: o.handle, domain: o.domain ?? "localhost" } : {}) };
+    const entry = await this.providers.send(handle, "manager", keyBytes(l.identity), "claim", body) as CID;
+    await this.settled();
+    const rows = (await l.kernel.dispatch()).rows;
+    const claimed = rows.some((r) => r.program === "kernel" && r.fn === "dispatch" && r.sender instanceof Uint8Array && Buffer.from(r.sender).toString("hex") === owner);
+    return { entry, claimed };
   }
 
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */

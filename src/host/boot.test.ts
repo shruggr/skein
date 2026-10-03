@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
-import { dirSource, rawCid, readSystemTree } from "./boot.ts";
+import { anyOf, dirSource, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
 import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
 
 const MODULE = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]);
@@ -64,6 +64,25 @@ test("system tree: bin/ programs (.wasm bytes, .cid, .json), config and subscrip
   assert.equal(keyHex(g.dispatch[0].sender), c.owner);
   assert.deepEqual(g.scopes.frontdoor, ["frontdoor/"], "the stock scopes");
   assert.deepEqual(g.collect, ["x"]);
+});
+
+test("an image (#89): the default image resolves into a genesis with no owner, no admin rows, the claim row first", async (t) => {
+  void t;
+  const { root, objects } = await dirSource(join(import.meta.dirname, "../../images/default"));
+  const s = await readSystemTree(anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm"))), root);
+  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "messagebox", "static"]);
+  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
+  const c = { identity: key(), handle: "a", domain: "localhost" };
+  const g = genesisRecord(c, resolveSystem(c, programs, [], s.config, root, s.routes, s.reads, s.dispatch)) as Record<string, any>;
+  assert.equal(g.owner, undefined, "no owner in it");
+  assert.deepEqual(g.dispatch.filter((r: { program: unknown }) => r.program === "kernel"), [{ transport: "mailbox", address: "claim", sender: "*", program: "kernel", fn: "claim" }], "the one kernel row: the claim row, from anyone");
+  assert.deepEqual(g.names, [], "no names");
+  assert.deepEqual(g.reads ?? [], [], "no reads (no owner to give the explorer to)");
+  assert.ok(!g.dispatch.some((r: { address: string }) => r.address === "/explore"), "no explorer route");
+  assert.ok(g.dispatch.some((r: { transport: string; address: string; root?: string }) => r.transport === "http" && r.address === "/" && r.root === "www"), "the static app at /");
+  // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
+  for (const n of ["frontdoor", "messagebox"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
+  assert.throws(() => resolveSystem(c, programs, [{ sender: "$owner", box: "x", handler: "static" }]), /an image names no owner/);
 });
 
 test("system tree: refusals — no dispatch rows, a bad .cid, a handler that is no program, $infer on a host without one", async (t) => {

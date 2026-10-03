@@ -5,6 +5,7 @@ import { existsSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
@@ -14,11 +15,14 @@ import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../testapps.ts";
+import { anyOf, dirSource, wasmDirObjects } from "./boot.ts";
 import { HostDb } from "./instances.ts";
 import { Router } from "./router.ts";
 import { Oracle } from "./oracle.ts";
 
-export const until = async <T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> => {
+const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
+
+export const until =async <T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> => {
   for (const end = Date.now() + ms; Date.now() < end;) {
     const v = await f();
     if (v) return v;
@@ -83,6 +87,16 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     home, db, router, base, owner, ownerKey, ownerId, lines, keyOf,
     /** An agent row (its genesis at first hydration: the owner's mailbox must exist first to be named in it). */
     agent(handle: string) { db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); return keyOf(handle).toPublicKey().toString(); },
+    /**
+     * An instance booted from an image (#89; default: the default image,
+     * images/default): no owner in its genesis, the claim row. Claim it with
+     * `router.claim(handle, ownerId)` (or `skein-host claim`).
+     */
+    async image(handle: string, dir = join(ROOT, "images/default")) {
+      db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() });
+      const d = await dirSource(dir);
+      return await router.bootRow(handle, { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(join(ROOT, "wasm"))) }, { image: true });
+    },
     mailbox(handle: string, whose: string) { router.addMailbox(handle, whose); db.add(handle, { identity: keyOf(handle).toPublicKey().toString() }); },
     origin: (handle: string) => router.originOf(handle),
     storeSize(handle: string) { const p = db.get(handle)!.store; return statSync(p).size + (existsSync(`${p}-wal`) ? statSync(`${p}-wal`).size : 0); },

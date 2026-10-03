@@ -139,7 +139,7 @@ export async function overview(w: World): Promise<string> {
 ${kv([
     ["identity", ident(hexKey(g.identity) ?? "")],
     ["host", g.host ? ident(hexKey(g.host) ?? "") : `<span class="mut small">none (format 2)</span>`],
-    ["owner", ident(hexKey(g.owner) ?? "")],
+    ["owner", g.owner ? ident(hexKey(g.owner) ?? "") : `<span class="mut small">none in the genesis (an image, #89: the head <a href="/h/claim">claim</a> names the claimed owner)</span>`],
     ...Object.entries(g.peers ?? {}).map(([r, id]): [string, string] => [`peer ${r}`, ident(hexKey(id) ?? "")]),
     ["state hash", tip ? link(w, tip.cid, tip.cid.toString()) : "(empty)"],
     ["log", `${w.log.length} entries · processed ${w.cursor} · <a href="/log">log</a>`],

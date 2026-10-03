@@ -62,7 +62,12 @@ type Named = { handle: string; domain: string };
 /** What the host brings to a genesis: the instance's own facts and the parties it knows. */
 export interface Genesis2Config {
   identity: string;
-  owner: string;
+  /**
+   * The owner (hex). Absent: an image (#89) — a genesis with no owner, no
+   * admin rows and no `$owner` anywhere; its dispatch rows carry the claim
+   * row, and the owner comes with the claim.
+   */
+  owner?: string;
   handle: string;
   domain: string;
   infer?: string;
@@ -148,6 +153,18 @@ export interface DispatchSpec { transport?: Transport; address: string; prefix?:
  */
 export const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
 export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, sender: "$owner", program: "kernel", fn: op }));
+/** What a kernel row may name: the admin operations, and the claim (#89). */
+export const KERNEL_OPS = [...ADMIN_OPS, "claim"] as const;
+
+/**
+ * The claim row (#89): an image's one wildcard row to the kernel. A message
+ * in box `claim`, from anyone, whose body names the owner key: in one step
+ * the kernel writes that key's four admin rows and removes this row (a
+ * second claim finds no row). The host delivers it as a `local` request
+ * (Router.claim, `skein-host claim`) before the instance's hostname is
+ * published.
+ */
+export const CLAIM_ROW: DispatchSpec = { address: "claim", sender: "*", program: "kernel", fn: "claim" };
 
 /**
  * The stock seed (#77), after the admin rows: the reserved box the host
@@ -298,7 +315,10 @@ export function libp2pIn(spec: Libp2pSpec | undefined, routes: RouteSpec[]): { l
 
 /** A key as a system writes it: hex, or `$owner` / `$self` / `$infer` (the host's), or a provider's `$<name>` (Genesis2Config.providers). */
 export function keyOf(s: string, c: Pick<Genesis2Config, "owner" | "infer" | "providers"> & { identity?: string }): Uint8Array {
-  if (s === "$owner") return keyBytes(c.owner);
+  if (s === "$owner") {
+    if (!c.owner) throw new Error("$owner: an image names no owner (#89: the owner comes with the claim)");
+    return keyBytes(c.owner);
+  }
   if (s === "$self") {
     if (!c.identity) throw new Error("$self: no instance identity here");
     return keyBytes(c.identity);
@@ -385,7 +405,7 @@ export function rowsOf(specs: DispatchSpec[], c: Genesis2Config, programs: Recor
     if (!["mailbox", "http", "libp2p", "local"].includes(transport)) throw new Error(`etc/dispatch.json: row ${s.address}: transport ${JSON.stringify(transport)} is not mailbox, http, libp2p or local`);
     const program = programOf(s.program, programs, "row");
     if (!program) continue;
-    if (program === "kernel" && (typeof s.fn !== "string" || !(ADMIN_OPS as readonly string[]).includes(s.fn))) throw new Error(`etc/dispatch.json: row ${s.address}: a kernel row's fn is one of ${ADMIN_OPS.join(", ")}`);
+    if (program === "kernel" && (typeof s.fn !== "string" || !(KERNEL_OPS as readonly string[]).includes(s.fn))) throw new Error(`etc/dispatch.json: row ${s.address}: a kernel row's fn is one of ${KERNEL_OPS.join(", ")}`);
     const sender = senderOf(s.sender, c);
     if (sender === null) continue;
     const { transport: _t, address, prefix, sender: _s, program: _p, fn, ...settings } = s;
@@ -418,7 +438,8 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
   if ((config as { jobs?: unknown }).jobs !== undefined) throw new Error("etc/config.json: `jobs` are gone (#69): a schedule is a program's message to the cron provider ({fn: \"tick\", every | at, box, body?, name}, docs/MESSAGES.md)");
   if (config.scopes !== undefined && (typeof config.scopes !== "object" || Array.isArray(config.scopes) || Object.values(config.scopes).some((v) => !Array.isArray(v) || v.some((h) => typeof h !== "string" || !h)))) throw new Error("etc/config.json: scopes is {<program name>: [<head name | prefix/>]}");
   const p2p = libp2pIn(config.libp2p ?? c.libp2p, [...routes, ...(c.extraRoutes ?? [])]);
-  const admin = rowsOf(ADMIN_ROWS, c, programs);
+  // An image (#89: no owner) has no admin rows: its claim row brings them.
+  const admin = c.owner ? rowsOf(ADMIN_ROWS, c, programs) : [];
   const dispatch: DispatchRow[] = [...admin];
   for (const r of [
     ...rowsOf(specs, c, programs),
@@ -430,7 +451,7 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     if (admin.some((a) => rowKey(a) === rowKey(r))) { if (r.program !== "kernel") c.warn?.(`a dispatch row for the admin box ${r.address} is left out: the kernel's ${r.address} operation keeps it`); continue; }
     dispatch.push(r);
   }
-  let names = [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }];
+  let names: System["names"] = c.owner ? [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }] : [];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });
   if (config.names) names = config.names.map((n) => ({ identityKey: keyOf(n.identityKey, c), handle: n.handle, domain: n.domain }));
   const peers = config.peers
@@ -487,7 +508,7 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
 /** The genesis record: who the instance is, and its system. */
 export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "handle" | "domain" | "addressBook">, s: System): Record<string, unknown> {
   return {
-    kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, owner: keyBytes(c.owner),
+    kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, ...(c.owner ? { owner: keyBytes(c.owner) } : {}),
     ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.role ? { role: e.role } : {}), ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
     programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),

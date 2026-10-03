@@ -1,0 +1,11 @@
+[
+  { "address": "claim", "sender": "*", "program": "kernel", "fn": "claim" },
+  { "address": ":ack", "program": "messagebox" },
+  { "transport": "http", "address": "/sendMessage", "sender": "session", "program": "messagebox", "fn": "sendMessage" },
+  { "transport": "http", "address": "/listMessages", "sender": "session", "program": "messagebox", "fn": "listMessages" },
+  { "transport": "http", "address": "/acknowledgeMessage", "sender": "session", "program": "messagebox", "fn": "acknowledgeMessage" },
+  { "transport": "http", "address": "/messagebox/sendMessage", "sender": "session", "program": "messagebox", "fn": "sendMessage" },
+  { "transport": "http", "address": "/messagebox/listMessages", "sender": "session", "program": "messagebox", "fn": "listMessages" },
+  { "transport": "http", "address": "/messagebox/acknowledgeMessage", "sender": "session", "program": "messagebox", "fn": "acknowledgeMessage" },
+  { "transport": "http", "address": "/", "sender": "*", "program": "static", "fn": "get", "root": "www" }
+]

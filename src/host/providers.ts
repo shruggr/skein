@@ -55,6 +55,11 @@
 //              from it in box `status`, `subject` the transaction's CID, body
 //              {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?};
 //              an instance admits it only if it subscribes to this key in `status`
+//   manager    takes no messages (#89): it speaks first. The instance manager's
+//              claim — a message in box `claim`, body {owner, messagebox?, handle?,
+//              domain?}, into an image the host started (Router.claim, `skein-host
+//              claim`); the image's claim row admits anyone, so its key is in no
+//              address book. #90 grows the instance manager around it
 //
 // How this host obtains the providers' keys is its own business (oracle.ts:
 // children of its master secret); the instance knows them from its address
@@ -81,7 +86,7 @@ export interface MailRecord {
 export interface Outgoing { message: MailRecord; body: Uint8Array; transport: string; address: string }
 
 /** The stock providers' names (and the roles the address book gives them). */
-export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status"] as const;
+export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager"] as const;
 export type ProviderName = typeof PROVIDERS[number];
 
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number };
@@ -142,7 +147,7 @@ export class Providers {
   }
 
   /** The address book entries a genesis seeds for this host's providers (role = name). */
-  entries(names: readonly ProviderName[] = PROVIDERS): Array<{ key: Uint8Array; transport: "local"; address: string; role: string }> {
+  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => n !== "manager")): Array<{ key: Uint8Array; transport: "local"; address: string; role: string }> {
     return names.map((n) => ({ key: Uint8Array.from(Buffer.from(this.key(n), "hex")), transport: "local" as const, address: n, role: n }));
   }
 
@@ -211,6 +216,7 @@ export class Providers {
         case "libp2p": return await this.p2p(handle, out.message, id, box, body);
         case "cron": return await this.cron(handle, out.message, id, box, body);
         case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"status\")" });
+        case "manager": return await this.answer(handle, "manager", out.message, id, { error: "the instance manager takes no messages from an instance: it speaks first (a claim, #89)" });
       }
     } catch (e) {
       await this.answer(handle, name, out.message, id, { error: (e as Error).message });

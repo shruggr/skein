@@ -97,6 +97,9 @@ echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static
 echo "== apps (#72, #76): skein-host install of shruggr/skein-static (its routes under /static/, the head its app record) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
 "${node[@]}" "$kz/equiv/install.ts" || status=1
 
+echo "== the default image and the claim (#89): an instance from images/default (no owner, the claim row, the site's placeholder at /); skein-host claim → the owner's admin rows, the claim row gone; a second claim refused; the owner installs app-demo; an owned instance refuses a claim; add --image; replayed"
+"${node[@]}" "$kz/equiv/claim.ts" || status=1
+
 echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by skein-host install, the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
 

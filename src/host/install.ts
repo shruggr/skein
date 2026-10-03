@@ -120,7 +120,7 @@ export async function instanceView(store: Store): Promise<InstanceView> {
   const heads = typeof (store as Partial<IndexStore>).heads === "function" ? (store as IndexStore).heads() : [];
   return {
     store,
-    owner: String(g.owner),
+    owner: await ownerOf(store, g),
     identity: g.identity instanceof Uint8Array ? Buffer.from(g.identity).toString("hex") : String(g.identity),
     programs: (g.programs ?? {}) as Record<string, CID>,
     addressBook: await addressBook(store),
@@ -128,6 +128,20 @@ export async function instanceView(store: Store): Promise<InstanceView> {
     // The reader shows a 33-byte sender as hex; the kernel's rows carry bytes (a remove sends the row back).
     dispatch: ((await currentDispatch(store)) ?? []).map((r) => ({ ...r, sender: senderBytes(r.sender) })),
   };
+}
+
+/**
+ * The instance's owner (hex): its genesis's, else — an image (#89) — the key
+ * its claim named (the head `claim` → the claim's body), else "" (an image
+ * not claimed yet: nobody may install into it).
+ */
+export async function ownerOf(store: Store, genesis: Record<string, unknown>): Promise<string> {
+  const hex = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "";
+  if (genesis.owner !== undefined) return hex(genesis.owner);
+  const root = await headTree(store, "claim");
+  if (!root) return "";
+  const b = await store.get(root).catch(() => undefined) as { owner?: unknown } | undefined;
+  return hex(b?.owner);
 }
 
 /** The app's root head (#77): `<name>/app`. */
@@ -176,7 +190,10 @@ function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"
   if (s === "*") return { sender: "*", label: "anyone" };
   if (s === "session") return { sender: "session", label: "a session" };
   if (s === "event") return { sender: "event", label: "events" };
-  if (s === "$owner") return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
+  if (s === "$owner") {
+    if (!view.owner) throw new Error("sender $owner: the instance has no owner yet (an image not claimed, #89: skein-host claim)");
+    return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
+  }
   if (s === "$self") return { sender: keyBytes(view.identity), label: `the instance itself (${view.identity.slice(0, 10)}…)` };
   if (s.startsWith("$")) {
     const e = view.addressBook.find((x) => x.role === s.slice(1));

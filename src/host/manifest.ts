@@ -90,7 +90,7 @@ export class ManifestError extends Error {
   constructor(problems: string[]) { super(`etc/app.json:\n  ${problems.join("\n  ")}`); this.problems = problems; }
 }
 
-export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "messagebox", "resolve"];
+export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "claim", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "messagebox", "resolve"];
 /** The fields of the form before #77, refused (#79). */
 const LEGACY_FIELDS = ["handler", "boxes", "routes", "heads"];
 const NAME = /^[a-z0-9][a-z0-9._-]*$/;

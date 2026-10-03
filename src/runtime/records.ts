@@ -131,8 +131,8 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
   return isCID(x.program) && (x.fn === undefined || x.fn === null || typeof x.fn === "string");
 }
 
-/** The kernel's admin operations: a kernel row's `fn`. */
-export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers"];
+/** What a kernel row may name (its `fn`): the admin operations, and the claim (#89: an image's one row; the owner's admin rows written, the row removed). */
+export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers", "claim"];
 
 // ---------------------------------------------------------------- genesis
 
@@ -152,7 +152,8 @@ export type Genesis = {
   identity: Identity;
   handle: string;
   domain: string;
-  owner: Identity;
+  /** Absent in an image (#89): the owner comes with the claim (the head `claim`). */
+  owner?: Identity;
   host?: Identity;
   programs: Record<string, CID>;
   dispatch: DispatchRow[];
@@ -168,7 +169,7 @@ export type Genesis = {
 };
 
 export function isGenesis(x: unknown): x is Genesis {
-  return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && isIdentity(x.owner) && (x.host === undefined || isIdentity(x.host))
+  return isObj(x) && x.kind === "genesis" && isIdentity(x.identity) && (x.owner === undefined || isIdentity(x.owner)) && (x.host === undefined || isIdentity(x.host))
     && typeof x.handle === "string" && typeof x.domain === "string"
     && isObj(x.programs) && Object.values(x.programs).every(isCID)
     && Array.isArray(x.dispatch) && x.dispatch.every(isDispatchRow)

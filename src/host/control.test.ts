@@ -82,6 +82,9 @@ test("skein-host event over the control socket while the router runs; a router o
   assert.equal(live[0]!.sender, host.router.providers.key("cron"), "from the cron provider's key");
   // The router's refusal comes back as the command's error.
   assert.deepEqual(await controlRequest(sock, { op: "event", handle: "nope", box: "tick", event: {} }), { ok: false, error: "no enabled instance nope" });
+  // #89: a claim goes the same way (kernel-zig/equiv/claim.ts claims an image through it); its shape is checked first.
+  assert.deepEqual(await controlRequest(sock, { op: "claim", handle: "nope", owner: "02" + "ab".repeat(32) }), { ok: false, error: "no enabled instance nope" });
+  assert.deepEqual(await controlRequest(sock, { op: "claim", handle: "evt", owner: "not a key" }), { ok: false, error: "a claim names its instance (handle) and the owner's key (hex)" });
 
   // Closed: the socket is gone, and `event` goes through a router of its own.
   await host.stop();

@@ -34,7 +34,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
-import { codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
+import { CLAIM_ROW, codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const RAW = 0x55;
@@ -260,6 +260,8 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
   const s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
+  // An image (#89): no owner, so it must be claimable — its rows carry the claim row.
+  if (!c.owner && !s.dispatch.some((r) => r.program === "kernel" && r.fn === "claim")) throw new Error(`an image (a genesis with no owner) needs a claim row in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
   const entry = await writeSystemGenesis(k, c, s, time);
   return { entry, tree: t.root, objects: n, programs: Object.keys(programs) };
 }

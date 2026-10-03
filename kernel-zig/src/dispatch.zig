@@ -17,7 +17,8 @@
 //                                  that identity — a message's sender, or the session's identity
 //          program: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
-//                                  itself: an admin operation (`fn`: objects | head | dispatch | peers)
+//                                  itself: an admin operation (`fn`: objects | head | dispatch | peers),
+//                                  or the claim (#89: an image's one row, from anyone)
 //          fn?: text,              http/libp2p: the handler's function; kernel: the operation
 //          …}                      a handler's own settings, carried to it as `match` (static's
 //                                  `root`, `index`; a route's `read` op; the install's `app`)
@@ -42,7 +43,11 @@ const Value = cbor.Value;
 
 pub const transports = [_][]const u8{ "mailbox", "http", "libp2p", "local" };
 /// The kernel's admin operations, one per table (#77).
-pub const kernel_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
+pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
+/// What a kernel row may name (#89): the admin operations, and the claim —
+/// an image's wildcard row, taken once: the claimed owner's admin rows
+/// written and the claim row removed (scheduler.zig kernelOp).
+pub const kernel_ops = admin_ops ++ [_][]const u8{"claim"};
 
 pub const Sender = union(enum) { any, event, session, key: []const u8 };
 
@@ -67,6 +72,17 @@ pub fn isTransport(t: []const u8) bool {
 
 pub fn isKernelOp(op: []const u8) bool {
     for (kernel_ops) |x| if (std.mem.eql(u8, x, op)) return true;
+    return false;
+}
+
+pub fn isAdminOp(op: []const u8) bool {
+    for (admin_ops) |x| if (std.mem.eql(u8, x, op)) return true;
+    return false;
+}
+
+/// Whether the table has an admin row (a kernel row for objects, head, dispatch or peers): the instance is owned (#89).
+pub fn hasAdminRow(rows: []const Row) bool {
+    for (rows) |r| if (r.op) |op| if (isAdminOp(op)) return true;
     return false;
 }
 
@@ -120,8 +136,8 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     const prog = v.get("program") orelse return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
     if (Value.str(prog)) |s| {
         if (!std.mem.eql(u8, s, "kernel")) return try std.fmt.allocPrint(a, "program {s}: want a program record's CID, or \"kernel\"", .{try json.quoted(a, s)});
-        const op = Value.str(v.get("fn")) orelse return try a.dupe(u8, "fn: a kernel row names its operation (objects, head, dispatch or peers)");
-        if (!isKernelOp(op)) return try std.fmt.allocPrint(a, "fn {s}: a kernel row's operation is objects, head, dispatch or peers", .{try json.quoted(a, op)});
+        const op = Value.str(v.get("fn")) orelse return try a.dupe(u8, "fn: a kernel row names its operation (objects, head, dispatch, peers or claim)");
+        if (!isKernelOp(op)) return try std.fmt.allocPrint(a, "fn {s}: a kernel row's operation is objects, head, dispatch, peers or claim", .{try json.quoted(a, op)});
         if (!std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "a kernel row is a mailbox row (an admin box)");
     } else if (prog != .cid) return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
     if (v.get("fn")) |f| if (f != .string and f != .null) return try a.dupe(u8, "fn: want text");

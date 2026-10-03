@@ -18,12 +18,21 @@
 //   skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]
 //   skein-host uninstall <app> --instance <handle> [--approve-all]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
+//   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>
+//   skein-host claim <handle> <owner-key> [--messagebox url] [--handle h@d]
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
 // store: its objects pre-filled, its genesis from the system tree (or a
 // checkpoint restored). `system` writes the stock system as such a tree;
 // `pack` writes a packet (packet.ts: synthetic transactions, never broadcast).
+// `add --image` (#89) boots the new row from an image: a system tree whose
+// genesis names no owner and carries the claim row (`default`: the repo's
+// images/default, the default image; an outpoint is refused until the ORDFS
+// app exists). `claim` delivers the owner's claim into it as a `local`
+// request from the host's instance manager (Router.claim): the kernel writes
+// the owner's admin rows and removes the claim row; like `event`, through the
+// running router's control socket, else a router of its own.
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the oracle's (oracle.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
@@ -154,6 +163,8 @@ const USAGE = `usage:
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
+  skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row (#89)
+  skein-host claim <handle> <owner-key> [--messagebox url] [--handle h@d]      the owner's claim into an image: the owner's admin rows, the claim row removed
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]`;
 
@@ -172,7 +183,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
           args: rest, allowPositionals: true,
           options: {
             domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" },
-            boot: { type: "string" }, from: { type: "string" }, packet: { type: "string" }, scope: { type: "string" }, proofs: { type: "string" },
+            boot: { type: "string" }, from: { type: "string" }, packet: { type: "string" }, scope: { type: "string" }, proofs: { type: "string" }, image: { type: "string" },
             mailbox: { type: "boolean" }, owner: { type: "string" },
           },
         });
@@ -190,17 +201,19 @@ export async function main(argv: string[], env: Env): Promise<number> {
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
         // The identity is the oracle's (#18): derived from the master secret, key ID = the handle.
         if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Oracle(masterKey(env.vars, home)).identity(handle);
-        if (v.boot && v.packet) { env.err("skein-host add: --boot or --packet, not both"); return 2; }
+        if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
+        if (v.image !== undefined && v.mailbox) { env.err("skein-host add: --image is not a mailbox instance"); return 2; }
+        if (v.image !== undefined && isOutpoint(v.image)) { env.err(`skein-host add --image ${v.image}: an image by outpoint is read through the ORDFS app, which is not built yet; give a directory or a tree CID`); return 2; }
         const r = db.add(handle, f);
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
-        if (v.boot || v.packet) {
+        if (v.boot || v.packet || v.image !== undefined) {
           // The loader (#4): pre-fill the new store and write its genesis from the tree (or restore a checkpoint).
           // A one-shot (#61): the router it boots through is closed before `add` returns, so the process exits.
           const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
           try {
-            const src = await bootSourceOf(v, r);
-            const b = await router.bootRow(handle, src);
-            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}`);
+            const src = await bootSourceOf(v.image !== undefined ? { boot: v.image === "default" ? DEFAULT_IMAGE : v.image, from: v.from } : v, r);
+            const b = await router.bootRow(handle, src, { image: v.image !== undefined });
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein-host claim)" : ""}`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
@@ -255,6 +268,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await peersCmd(db, rest, env);
       case "event":
         return await eventCmd(db, rest, env);
+      case "claim":
+        return await claimCmd(db, rest, env);
       case "install":
         return await installCmd(db, rest, env);
       case "uninstall":
@@ -442,6 +457,59 @@ async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     return 0;
   } catch (e) {
     env.err(`skein-host event ${handle}: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await router.close();
+  }
+}
+
+/** An outpoint as an image is named on chain: `<txid>_<vout>` (or `.`/`:`). */
+const isOutpoint = (s: string) => /^[0-9a-f]{64}[_.:][0-9]+$/.test(s);
+
+/**
+ * `skein-host claim <handle> <owner-key>` (#89): the owner's claim into an
+ * image (Router.claim: the instance manager's message in box `claim`,
+ * appended as a `local` request). Through the running router's control
+ * socket when `run` is up (its kernel holds the store), else a router of
+ * this command's own, closed afterwards — as `event`.
+ */
+async function claimCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [handle, owner, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { messagebox: { type: "string" }, handle: { type: "string" } } });
+  if (!handle || !owner || more.length) { env.err(USAGE); return 2; }
+  if (!/^0[23][0-9a-f]{64}$/.test(owner)) { env.err(`skein-host claim: ${owner} is not an identity key (hex)`); return 2; }
+  if (v.messagebox !== undefined && !/^https?:\/\/[^/]/.test(v.messagebox)) { env.err(`skein-host claim: ${v.messagebox} is not an http(s) URL`); return 2; }
+  const row = db.get(handle);
+  if (!row) { env.err(`skein-host claim: no instance ${handle}`); return 1; }
+  if (row.kind === "mailbox") { env.err(`skein-host claim: ${handle} is a mailbox instance`); return 1; }
+  const said = (c: { entry: string; claimed?: boolean }, by: string) => {
+    if (c.claimed) { env.out(`${handle}: claimed by ${short(owner)} (${c.entry}${by}): the owner's admin rows written, the claim row removed`); return 0; }
+    env.err(`${handle}: the claim ${c.entry} was refused (no claim row: claimed already, or not an image) — the instance's log says why`);
+    return 1;
+  };
+  const sock = join(homeOf(env.vars), CONTROL_SOCKET);
+  let answer;
+  try {
+    answer = await controlRequest(sock, { op: "claim", handle, owner, ...(v.messagebox ? { messagebox: v.messagebox } : {}), ...(v.handle ? { name: v.handle } : {}) });
+  } catch (e) {
+    env.err(`skein-host claim ${handle}: the router's control socket: ${(e as Error).message}`);
+    return 1;
+  }
+  if (answer) {
+    if (!answer.ok) { env.err(`skein-host claim ${handle}: ${answer.error}`); return 1; }
+    return said(answer, ", by the running router");
+  }
+  const running = await routerAt(env.vars);
+  if (running) {
+    env.err(`skein-host claim: a router serves this host at ${running}, but no control socket answers at ${sock}: its kernel holds ${handle}'s store, and a second one must not write it. Run this with the router's SKEIN_HOME, or restart the router`);
+    return 1;
+  }
+  const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
+  try {
+    const [name, domain] = (v.handle ?? "").replace(/^@/, "").split("@");
+    const c = await router.claim(handle, owner, { messagebox: v.messagebox, ...(name ? { handle: name, domain: domain || "localhost" } : {}) });
+    return said({ entry: c.entry.toString(), claimed: c.claimed }, "");
+  } catch (e) {
+    env.err(`skein-host claim ${handle}: ${(e as Error).message}`);
     return 1;
   } finally {
     await router.close();
@@ -743,6 +811,8 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
 // ---------------------------------------------------------------- bootstrap (#4)
 
 const WASM_DIR = join(ROOT, "wasm");
+/** The default image (#89): one genesis for everyone, no owner in it, a claim row. */
+export const DEFAULT_IMAGE = join(ROOT, "images/default");
 
 /** The source `add --boot/--packet` names (boot.ts): a directory, a tree CID in a store, or a packet file. */
 async function bootSourceOf(v: { boot?: string; from?: string; packet?: string; scope?: string; proofs?: string }, row: InstanceRow): Promise<BootSource> {

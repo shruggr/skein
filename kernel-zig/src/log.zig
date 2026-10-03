@@ -41,7 +41,7 @@
 //   event    a record from the host's wiring, self-validating (#29, #65: a
 //            header from a feed; a proof — a transaction's merkle path — from
 //            the broadcaster's Arcade session), routed by its `subject` or by box
-//   genesis  {kind: "genesis", identity: bytes, owner: bytes, handle, domain, programs,
+//   genesis  {kind: "genesis", identity: bytes, owner?: bytes, handle, domain, programs,
 //             dispatch: [<row>], scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
 //             reads?: [{caller?: bytes, op}],
@@ -59,6 +59,10 @@
 //            `addressBook` (#70): the address book's seed (the host's providers,
 //            the owner's mailbox), written into the head `peers` when the
 //            genesis is processed.
+//            No `owner` (#89): an image. The default image is one genesis
+//            for everyone; its dispatch rows carry a `claim` row to the
+//            kernel, and the owner comes with the claim (scheduler.zig
+//            kernelOp, "claim"; the head `claim` keeps what was claimed).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -222,9 +226,9 @@ pub fn isGenesis(x: ?Value) bool {
     const g = x orelse return false;
     if (g != .map) return false;
     if (!std.mem.eql(u8, Value.str(g.get("kind")) orelse return false, "genesis")) return false;
-    for ([_][]const u8{ "identity", "owner" }) |k| {
-        if (!secp.isKey(Value.bytesOf(g.get(k)) orelse return false)) return false;
-    }
+    if (!secp.isKey(Value.bytesOf(g.get("identity")) orelse return false)) return false;
+    // #89: an image names no owner (the claim brings it); a genesis that names one names a key.
+    if (g.get("owner")) |o| if (!secp.isKey(Value.bytesOf(o) orelse return false)) return false;
     if (g.get("host") != null) return false; // format 1
     // #62's attest key went with the recorded http/libp2p calls (#67, format 6).
     if (g.get("attest") != null) return false;
