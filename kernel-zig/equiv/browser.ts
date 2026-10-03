@@ -11,9 +11,17 @@
 //
 // Needs Playwright (mise: `playwright` on PATH, or SKEIN_PLAYWRIGHT=<its package
 // dir>) and Chromium (SKEIN_CHROMIUM, default /usr/bin/chromium).
+//
+// A store larger than SKEIN_BROWSER_MAX_MB (default 256) is skipped, with a
+// note: a tab holds the store's bundle, its blocks and the wasm kernel's
+// memory at once, and Chrome crashes on one of hundreds of MB. Since #83 every
+// store with the shell app installed is that large (its install messages carry
+// the shell's ~50 MB of modules, and the log records each several times over),
+// so the corpus's shell runs (gen-run, gen-chat, gen-fuel) are replayed
+// natively only.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, normalize } from "node:path";
@@ -138,6 +146,8 @@ function firstDiff(a: string, b: string, what: string): string {
   return `${what}: differs`;
 }
 
+const MAX_MB = Number(process.env.SKEIN_BROWSER_MAX_MB ?? 256);
+
 async function main(sources: string[]): Promise<number> {
   const work = mkdtempSync(join(tmpdir(), "skein-kz-browser-"));
   const results = new Map<string, Uint8Array>();
@@ -163,6 +173,8 @@ async function main(sources: string[]): Promise<number> {
     let shown = false;
     for (const src of sources) {
       const name = basename(src, ".db");
+      const mb = (statSync(src).size + (existsSync(`${src}-wal`) ? statSync(`${src}-wal`).size : 0)) / 2 ** 20;
+      if (mb > MAX_MB) { console.log(`skip ${name}: ${Math.round(mb)} MB, more than the browser build replays in one tab (SKEIN_BROWSER_MAX_MB ${MAX_MB}; #83: the shell app's install)`); continue; }
       // Copy the source (with its -wal) first; never open it in place.
       const copy = join(work, `${name}.src.db`);
       copyFileSync(src, copy);

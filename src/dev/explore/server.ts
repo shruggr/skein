@@ -20,19 +20,19 @@ import { openStoreFile } from "../../runtime/index-store.ts";
 import { NotFound, type Store } from "../../runtime/store.ts";
 import { dbPath, resolveCid } from "../cli.ts";
 import { entryPage, errorPage, headPage, logPage, overview, recordPage, dispatchPage, threadBody, threadPage, threadsPage, tipOf } from "./pages.ts";
-import { load } from "./view.ts";
+import { load, type World } from "./view.ts";
 
 export interface Response { status: number; type: string; body: string }
 
 const html = (body: string, status = 200): Response => ({ status, type: "text/html; charset=utf-8", body });
 
 /** One GET, rendered. Separate from HTTP so tests can call it on a memory store. */
-export async function render(store: Store, url: URL): Promise<Response> {
+export async function render(store: Store, url: URL, world?: World): Promise<Response> {
   const p = url.pathname;
   const q = (k: string) => url.searchParams.get(k) ?? undefined;
   let g: RegExpMatchArray | null;
   try {
-    const w = await load(store);
+    const w = world ?? await load(store);
     const cidOf = async (s: string): Promise<CID> => {
       try { return parse(s); } catch { /* a suffix, where the store can look one up */ }
       if ("findByPrefix" in store) return resolveCid(store as Store & { findByPrefix(p: string): Promise<CID[]> }, s);

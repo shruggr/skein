@@ -86,12 +86,13 @@ async function explorerDiff(p: string, q: string): Promise<string | undefined> {
   const x = openStoreFile(p, { readOnly: true }), y = openStoreFile(q, { readOnly: true });
   try {
     if (!("state" in x) || !("state" in y)) return "explorer: a Zig store did not open through the index";
-    const w = await load(x);
+    // One world per store for every page (#83: a store with the shell app holds records of tens of MB; loading it per page is minutes).
+    const w = await load(x), wy = await load(y);
     const pages = ["/", "/log", "/s", "/threads", "/h/main"];
     for (const t of w.threads) pages.push(`/t/${t.cid}`, `/r/${t.cid}`, ...t.updates.map(({ cid }) => `/r/${cid}`));
     for (const { cid } of w.log) pages.push(`/e/${cid}`);
     for (const pg of pages) {
-      const a = await render(x, new URL(pg, "http://x")), b = await render(y, new URL(pg, "http://x"));
+      const a = await render(x, new URL(pg, "http://x"), w), b = await render(y, new URL(pg, "http://x"), wy);
       if (a.status !== b.status || a.body !== b.body) return `explorer: ${pg} differs (status ${a.status} vs ${b.status})`;
       if (a.status >= 500) return `explorer: ${pg} fails (${a.status})`;
     }

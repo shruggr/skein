@@ -113,7 +113,9 @@ export class Kernel {
   // ---------------------------------------------------------------- kernel memory
 
   get mem() { return new Uint8Array(this.x.memory.buffer); }
-  bytesAt(ptr, len) { return new Uint8Array(this.x.memory.buffer, ptr, len); }
+  // A wasm32 address arrives in JS as a signed i32: above 2 GiB it is negative (#83: a store with the
+  // shell app's modules takes the kernel past it). `>>> 0` reads every address and length unsigned.
+  bytesAt(ptr, len) { return new Uint8Array(this.x.memory.buffer, ptr >>> 0, len >>> 0); }
   str(ptr, len) { return dec.decode(this.bytesAt(ptr, len)); }
   /** Copy bytes into a fresh kernel buffer: [ptr, len]; free with release. */
   push(bytes) {
@@ -151,8 +153,8 @@ export class Kernel {
         release(inst) { k.instances.delete(inst); },
         fuel_get(inst) { return guest(inst).exports.__skein_fuel.value; },
         fuel_set(inst, v) { guest(inst).exports.__skein_fuel.value = v; },
-        mem_read(inst, at, len, p) { k.bytesAt(p, len).set(new Uint8Array(guest(inst).exports.memory.buffer, at, len)); },
-        mem_write(inst, at, len, p) { new Uint8Array(guest(inst).exports.memory.buffer, at, len).set(k.bytesAt(p, len)); },
+        mem_read(inst, at, len, p) { k.bytesAt(p, len).set(new Uint8Array(guest(inst).exports.memory.buffer, at >>> 0, len >>> 0)); },
+        mem_write(inst, at, len, p) { new Uint8Array(guest(inst).exports.memory.buffer, at >>> 0, len >>> 0).set(k.bytesAt(p, len)); },
         error_len() { return enc.encode(k.engineError).length; },
         error_take(p) { const b = enc.encode(k.engineError); k.bytesAt(p, b.length).set(b); },
       },
@@ -202,7 +204,7 @@ export class Kernel {
       const index = i, result = kind.result;
       const f = function (...args) {
         const x = k.x;
-        const a = new BigInt64Array(x.memory.buffer, x.skein_args(), 16);
+        const a = new BigInt64Array(x.memory.buffer, x.skein_args() >>> 0, 16);
         const n = Math.min(args.length, 16);
         for (let j = 0; j < n; j++) a[j] = typeof args[j] === "bigint" ? args[j] : BigInt(Math.trunc(args[j]));
         const g = k.instances.get(id);
@@ -211,7 +213,7 @@ export class Kernel {
         k.stats.hostCalls++;
         try { r = x.skein_host_call(id, index, n, memLen); } catch (e) { throw new KernelFault(e); }
         if (r !== 0) throw new Abort("skein: abort");
-        const v = new BigInt64Array(x.memory.buffer, x.skein_args(), 1)[0];
+        const v = new BigInt64Array(x.memory.buffer, x.skein_args() >>> 0, 1)[0];
         return result === 2 ? v : result === 1 ? Number(BigInt.asIntN(32, v)) : undefined;
       };
       fns[i] = f;

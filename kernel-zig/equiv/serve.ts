@@ -137,6 +137,9 @@ try {
   const [r3] = await results(1, "results", 20_000);
   check(text(r3!.body.stdout) === "again\n", "a router restart mid-sleep: hydrated at start, the wake still fires");
   await box.ack([r3!.id]);
+  // Everything admitted is processed before the router stops: the result's delivery thread still takes the
+  // fetch provider's answer after the owner has the result, and a store stopped then replays a step it never ran.
+  await router.settled();
   await router.stop();
 
   // Fuel (issue #5): a shell that never ends, under a low fuelPerStep, runs out; the step is recorded.
@@ -194,6 +197,7 @@ try {
   const next = router.cron.of("crontest")[0]?.next ?? 0;
   check(next - Date.now() > 3_500_000, "the next tick is an hour on, not a burst");
   await fs.rm(tree, { recursive: true, force: true });
+  await router.settled();
   await router.stop();
   await fs.rm(dir, { recursive: true, force: true });
 } catch (e) {
