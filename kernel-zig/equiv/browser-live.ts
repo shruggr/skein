@@ -2,7 +2,7 @@
 // the wasm kernel in a Worker over IndexedDB, the page as its host
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
 // with an agent on the native kernel and a scripted inference peer. The page
-// identity (a ProtoWallet here; Yours in use) registers its mailbox
+// identity (a wallet in the tab over a test key here; Yours in use) registers its mailbox
 // instance on the router; the chat app is installed into both instances (#83:
 // a genesis has no chat loop) — the agent's by `skein-host install`, the
 // browser instance's by the install client's plan (src/host/install.ts

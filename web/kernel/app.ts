@@ -6,12 +6,15 @@
 //   host         the skein host, the router (default http://127.0.0.1:8100): this identity's mailbox instance is registered there
 //   handle       this instance's name there (default "me")
 //   infer        the inference peer's identity (hex), inferHandle its handle@domain
-//   key          tests only: a private key (hex) for a ProtoWallet instead of Yours
+//   key          tests only: a private key (hex) — a wallet in this tab over that key
+//                (@1sat/wallet-browser's createWebWallet: a BRC-100 wallet over
+//                IndexedDB, as the 1sat-sdk test-app boots one) instead of Yours
 //
 // window.skein is the host, for the tests (equiv/browser-live.ts).
 
 import { connectWallet } from "@1sat/connect";
-import { PrivateKey, ProtoWallet, WalletClient, type WalletInterface } from "@bsv/sdk";
+import { createWebWallet } from "@1sat/wallet-browser";
+import { PrivateKey, WalletClient, type WalletInterface } from "@bsv/sdk";
 import { BrowserHost } from "./host.ts";
 
 const q = new URLSearchParams(location.search);
@@ -34,7 +37,16 @@ function say(who: string, text: string, cls: string): void {
 
 async function wallet(): Promise<WalletInterface> {
   const key = q.get("key");
-  if (key) return new ProtoWallet(PrivateKey.fromHex(key));
+  if (key) {
+    const privateKey = PrivateKey.fromHex(key);
+    const web = await createWebWallet({
+      privateKey,
+      chain: "main",
+      storageIdentityKey: privateKey.toPublicKey().toString(),
+      skipInitialMonitor: true,
+    });
+    return web.wallet;
+  }
   let reason: unknown;
   const r = await connectWallet({
     autoDetect: false,

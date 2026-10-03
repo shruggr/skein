@@ -5,7 +5,7 @@
 // is the user, the instance and the host; three interfaces, wired apart).
 //
 //   the imports out   wallet  → the page's BRC-100 wallet (Yours through
-//                               @1sat/connect; a ProtoWallet in tests), over the
+//                               @1sat/connect; a wallet in the tab over a test key in tests), over the
 //                               BRC-100 wire (WalletWireProcessor)
 //   what it carries   emit    → the page is the host's providers (#70,
 //                               src/host/providers.ts): the HTTP proxy `fetch`

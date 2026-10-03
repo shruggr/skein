@@ -705,8 +705,9 @@ are refused.
 
 **The host in the browser** (`web/kernel/host.ts`, #16): one instance whose
 identity is the connected wallet's; the page is its host. `wallet` → the
-page's BRC-100 wallet over the wire (Yours via @1sat/connect; a ProtoWallet in
-tests); `emit` → the page's own providers (#70: `fetch`, `waker`, keys from
+page's BRC-100 wallet over the wire (Yours via @1sat/connect; in tests a
+wallet in the tab over a test key, @1sat/wallet-browser's `createWebWallet`,
+as the 1sat-sdk test-app boots one); `emit` → the page's own providers (#70: `fetch`, `waker`, keys from
 a page-local master), by which the instance's own programs deliver its
 messages (the messagebox's delivery threads, a BRC-104 client through the
 `fetch` provider) and resolve handles (the resolve program). The call in: the page's chat (a message from the user,
