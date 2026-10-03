@@ -1,10 +1,11 @@
-// The shell app and the chat app for tests and equivs (#83), and the
-// onboarding app (#90). A genesis has no shell, no `run`, no `chat`: a test
-// that runs them installs the apps first, through the real install path
-// (`skein-host install`, src/host/install.ts), from a checkout at the commit
-// pinned here — $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR / $SKEIN_ONBOARD_DIR name
-// a checkout instead, $SKEIN_SHELL_REV / $SKEIN_CHAT_REV /
-// $SKEIN_ONBOARD_REV another commit. A pinned commit is fetched once into
+// The shell app and the chat app for tests and equivs (#83), the
+// onboarding app (#90) and the git app (#91). A genesis has no shell, no
+// `run`, no `chat`: a test that runs them installs the apps first, through
+// the real install path (`skein-host install`, src/host/install.ts), from a
+// checkout at the commit pinned here — $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR /
+// $SKEIN_ONBOARD_DIR / $SKEIN_GIT_DIR name a checkout instead,
+// $SKEIN_SHELL_REV / $SKEIN_CHAT_REV / $SKEIN_ONBOARD_REV / $SKEIN_GIT_REV
+// another commit. A pinned commit is fetched once into
 // <tmpdir>/skein-apps/<name>-<rev> and reused. Not part of anything that runs.
 
 import { spawnSync } from "node:child_process";
@@ -35,6 +36,12 @@ export const CHAT_APP: PinnedApp = {
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
   rev: process.env.SKEIN_ONBOARD_REV ?? "e142f8ea203a5846ac2de9d4c319669c59463af9", dir: process.env.SKEIN_ONBOARD_DIR,
+};
+
+/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered. */
+export const GIT_APP: PinnedApp = {
+  name: "git", repo: "https://github.com/shruggr/skein-git",
+  rev: process.env.SKEIN_GIT_REV ?? "b571f42fe80fc348206bea65ac810f02a162c511", dir: process.env.SKEIN_GIT_DIR,
 };
 
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */
@@ -88,7 +95,7 @@ export async function putShellProgram(store: Pick<Store, "put" | "putBlock" | "h
   const t = await readApp(dir);
   const src = t.checked.sources.shell;
   if (src?.kind !== "shell") throw new Error(`${dir}: etc/app.json has no shell program`);
-  const { record, blocks } = shellProgram(dir, "shell", src, t.checked.manifest.name);
+  const { record, blocks } = shellProgram(t.read, "shell", src, t.checked.manifest.name);
   for (const b of blocks) if (!(await store.has(b.cid))) await store.putBlock(b.cid, b.bytes);
   return await store.put(record as never);
 }

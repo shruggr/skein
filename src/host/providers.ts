@@ -34,10 +34,13 @@
 // The stock providers (box → body → answer body; every answer has `replyTo`,
 // and a failure is {replyTo, error}):
 //
-//   fetch      fetch {method, url, headers?, body?, timeoutMs?}
+//   fetch      fetch {method, url, headers?, body?, timeoutMs?, maxBytes?}
 //              → {status, headers, body}: the HTTP proxy. A URL of this host's own
 //              is answered in process (no socket); any other goes out when the host
-//              allows it (SKEIN_HTTP=fetch, or the router's `http` option)
+//              allows it (SKEIN_HTTP=fetch, or the router's `http` option). `body`
+//              is bytes either way. `maxBytes` (#91): a response body over it is
+//              not carried in — the answer is {error} (SKEIN_HTTP=fetch stops
+//              reading at the limit)
 //   waker      wake {at: ms}  → at `at`: {at}. What the kernel's `deadline`, and a shell's
 //              sleep, emit (#69)
 //   cron       cron {fn: "tick", every | at, box, body?, name} → {name, next};
@@ -101,7 +104,7 @@ export interface Outgoing { message: MailRecord; body: Uint8Array; transport: st
 export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager"] as const;
 export type ProviderName = typeof PROVIDERS[number];
 
-export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number };
+export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number; maxBytes?: number };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 
 export interface ProvidersOptions {
@@ -137,6 +140,9 @@ export interface ProvidersOptions {
 }
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+
+/** The fetch provider's refusal of a response over the request's `maxBytes` (#91). */
+export const tooLarge = (max: number) => `the response is larger than maxBytes (${max} bytes): not carried in`;
 
 export class Providers {
   readonly o: ProvidersOptions;
@@ -286,15 +292,17 @@ export class Providers {
 
   private async fetch(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): Promise<void> {
     if (box !== "fetch") return await this.answer(handle, "fetch", m, id, { error: `the fetch provider takes box "fetch", not ${box}` });
-    if (typeof b.method !== "string" || typeof b.url !== "string") return await this.answer(handle, "fetch", m, id, { error: "fetch wants {method, url, headers?, body?, timeoutMs?}" });
+    if (typeof b.method !== "string" || typeof b.url !== "string") return await this.answer(handle, "fetch", m, id, { error: "fetch wants {method, url, headers?, body?, timeoutMs?, maxBytes?}" });
+    const maxBytes = typeof b.maxBytes === "number" && b.maxBytes >= 0 ? b.maxBytes : undefined;
     const headers: Record<string, string> = {};
     if (b.headers && typeof b.headers === "object") for (const [k, v] of Object.entries(b.headers as Record<string, unknown>)) if (typeof v === "string") headers[k.toLowerCase()] = v;
     let r: HttpResponse;
     try {
-      r = await this.o.fetch({ method: b.method, url: b.url, headers, ...(b.body instanceof Uint8Array ? { body: b.body } : {}), ...(typeof b.timeoutMs === "number" ? { timeoutMs: b.timeoutMs } : {}) }, handle);
+      r = await this.o.fetch({ method: b.method, url: b.url, headers, ...(b.body instanceof Uint8Array ? { body: b.body } : {}), ...(typeof b.timeoutMs === "number" ? { timeoutMs: b.timeoutMs } : {}), ...(maxBytes !== undefined ? { maxBytes } : {}) }, handle);
     } catch (e) {
       return await this.answer(handle, "fetch", m, id, { error: (e as Error).message });
     }
+    if (maxBytes !== undefined && r.body.length > maxBytes) return await this.answer(handle, "fetch", m, id, { error: tooLarge(maxBytes) });
     await this.answer(handle, "fetch", m, id, { status: r.status, headers: r.headers, body: r.body });
   }
 

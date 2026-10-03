@@ -90,7 +90,7 @@ import type { HostDb, InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
 import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
-import { Providers, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
+import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import * as Digest from "multiformats/hashes/digest";
 
@@ -176,11 +176,28 @@ export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
 
 /**
  * SKEIN_HTTP=fetch: the HTTP proxy's requests (#70, the `fetch` provider)
- * performed for real; `timeoutMs` (default 30 000) bounds the whole exchange.
+ * performed for real; `timeoutMs` (default 30 000) bounds the whole exchange,
+ * `maxBytes` (#91) the response body: reading stops past it, and the request
+ * fails.
  */
 export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
-  const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: AbortSignal.timeout(req.timeoutMs ?? 30_000) });
-  return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new Error(`timed out after ${req.timeoutMs ?? 30_000} ms`)), req.timeoutMs ?? 30_000);
+  try {
+    const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: ac.signal });
+    const headers = Object.fromEntries(r.headers.entries());
+    if (req.maxBytes === undefined || !r.body) return { status: r.status, headers, body: new Uint8Array(await r.arrayBuffer()) };
+    const chunks: Uint8Array[] = [];
+    let n = 0;
+    for await (const c of r.body as unknown as AsyncIterable<Uint8Array>) {
+      n += c.length;
+      if (n > req.maxBytes) { ac.abort(); throw new Error(tooLarge(req.maxBytes)); }
+      chunks.push(c);
+    }
+    return { status: r.status, headers, body: new Uint8Array(Buffer.concat(chunks)) };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**

@@ -34,6 +34,15 @@
 // **Write scope** (#77, #79): an app's programs write only heads under
 // `<app>/` (the kernel's rule, by the program record's `app`). There are no
 // grants, no alias head, no form before #77.
+//
+// **Two paths to the tree** (#91; docs/APPS.md §3). This client reads it from
+// a directory or clones a repository itself (`readApp`, `fetchApp`:
+// `skein-host install`, a coding-session tool). Or the instance already holds
+// it: the git app (shruggr/skein-git) cloned one commit into the store by
+// hash and answered {tree, app}; `readStoredApp` reads that tree out of the
+// store (reads are open), and the same `planInstall` rebuilds the app record
+// — whose CID must be the git app's `app` — with nothing left to send but
+// `head`, `dispatch` and `start`.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
@@ -47,6 +56,7 @@ import { defaultIgnore } from "../dev/scan.ts";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
 import { currentDispatch, rowKey as kernelRowKey, senderBytes, senderText, type DispatchRow } from "../runtime/dispatch.ts";
 import { headTree } from "../runtime/heads.ts";
+import { readBlob, readTree } from "../runtime/tree.ts";
 import type { IndexStore } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
 import { programRecord, RAW, rawCid, wasmKind, type Objects } from "./boot.ts";
@@ -61,18 +71,60 @@ export function appIgnore(rel: string): boolean {
   return defaultIgnore(rel) || base === "zig-out" || base === ".zig-cache" || base === "zig-pkg";
 }
 
-/** An app's tree: its directory, its git objects, its manifest checked. */
-export interface AppTree { dir: string; root: CID; records: Rec[]; checked: Checked }
+/** A file of an app's tree by its path ("bin/x.wasm"), or undefined: the install reads nothing else. */
+export type ReadFile = (rel: string) => Uint8Array | undefined;
+
+/**
+ * An app's tree: its root, the git objects to send (none for a tree the
+ * instance holds), its manifest checked, and its files as the install reads
+ * them.
+ */
+export interface AppTree { root: CID; records: Rec[]; checked: Checked; read: ReadFile }
 
 /** Read and check the app in `dir`. */
 export async function readApp(dir: string): Promise<AppTree> {
   const p = join(dir, "etc/app.json");
   if (!existsSync(p)) throw new Error(`${dir}: no etc/app.json (an app is a tree with a manifest: docs/APPS.md §2)`);
-  let json: unknown;
-  try { json = JSON.parse(readFileSync(p, "utf8")); } catch (e) { throw new Error(`etc/app.json: ${(e as Error).message}`); }
-  const checked = checkManifest(json, (rel) => existsSync(join(dir, rel)) && statSync(join(dir, rel)).isFile());
+  const json = parseManifest(readFileSync(p, "utf8"));
+  const isFile = (rel: string) => existsSync(join(dir, rel)) && statSync(join(dir, rel)).isFile();
+  const checked = checkManifest(json, isFile);
   const { root, records } = await hashDir(dir, { ignore: appIgnore });
-  return { dir, root, records, checked };
+  return { root, records, checked, read: (rel) => (isFile(rel) ? new Uint8Array(readFileSync(join(dir, rel))) : undefined) };
+}
+
+function parseManifest(text: string): unknown {
+  try { return JSON.parse(text); } catch (e) { throw new Error(`etc/app.json: ${(e as Error).message}`); }
+}
+
+/**
+ * Read and check the app whose tree the instance's store holds (#91: the
+ * git app's clone; reads are open by CID). Only the files the install reads
+ * are fetched out of the store: the manifest, and what its programs name.
+ */
+export async function readStoredApp(store: Pick<Store, "bytes" | "has" | "putBlock">, tree: CID): Promise<AppTree> {
+  const files = new Map<string, CID>();
+  const walk = async (t: CID, at: string): Promise<void> => {
+    for (const e of await readTree(store, t)) {
+      const path = at ? `${at}/${e.name}` : e.name;
+      if (e.mode === "40000") await walk(e.cid, path);
+      else if (e.mode === "100644" || e.mode === "100755") files.set(path, e.cid);
+    }
+  };
+  await walk(tree, "");
+  const m = files.get("etc/app.json");
+  if (!m) throw new Error(`${tree}: no etc/app.json (an app is a tree with a manifest: docs/APPS.md §2)`);
+  const checked = checkManifest(parseManifest(new TextDecoder().decode(await readBlob(store, m))), (rel) => files.has(rel));
+  const wanted = new Set<string>();
+  for (const src of Object.values(checked.sources)) {
+    if (src.kind === "wasm" || src.kind === "cid") { wanted.add(src.path); wanted.add(`bin/${src.name}.json`); }
+    if (src.kind === "shell") {
+      for (const p of Object.values(src.modules)) wanted.add(p);
+      for (const x of Object.values(src.support)) for (const p of Object.values(x.files)) wanted.add(p);
+    }
+  }
+  const bytes = new Map<string, Uint8Array>();
+  for (const p of wanted) { const c = files.get(p); if (c) bytes.set(p, await readBlob(store, c)); }
+  return { root: tree, records: [], checked, read: (rel) => bytes.get(rel) };
 }
 
 /**
@@ -237,7 +289,7 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
   const records: Rec[] = [];
   for (const [role, src] of Object.entries(t.checked.sources)) {
     if (src.kind === "shell") {
-      const { record, blocks } = shellProgram(t.dir, role, src, t.checked.manifest.name);
+      const { record, blocks } = shellProgram(t.read, role, src, t.checked.manifest.name);
       records.push(...blocks);
       const b = encode(record as never);
       programs[role] = b.cid;
@@ -251,13 +303,14 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
       continue;
     }
     let module: CID;
+    const file = (path: string) => { const b = t.read(path); if (!b) throw new Error(`${path}: not in the tree`); return b; };
     if (src.kind === "wasm") {
-      const bytes = new Uint8Array(readFileSync(join(t.dir, src.path)));
+      const bytes = file(src.path);
       if (!wasmKind(bytes)) throw new Error(`${src.path}: not a wasm module or component`);
       module = rawCid(bytes);
       records.push({ cid: module, bytes });
     } else {
-      const text = readFileSync(join(t.dir, src.path), "utf8").trim();
+      const text = new TextDecoder().decode(file(src.path)).trim();
       try { module = parseCid(text); } catch { throw new Error(`${src.path}: not a CID: ${JSON.stringify(text)}`); }
       if (module.code !== RAW) throw new Error(`${src.path}: ${module} is not a raw module CID`);
       if (!(await view.store.has(module))) {
@@ -266,8 +319,8 @@ async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promi
         records.push({ cid: module, bytes });
       }
     }
-    const metaPath = join(t.dir, "bin", `${src.name}.json`);
-    const meta = existsSync(metaPath) ? JSON.parse(readFileSync(metaPath, "utf8")) as { inputs?: unknown; services?: string[]; description?: string } : {};
+    const metaFile = t.read(`bin/${src.name}.json`);
+    const meta = metaFile ? JSON.parse(new TextDecoder().decode(metaFile)) as { inputs?: unknown; services?: string[]; description?: string } : {};
     // `app`: the program knows its app (its heads under `<app>/`) from its own record (APPS.md §2).
     const b = encode({ ...programRecord(src.name, module, meta), app: t.checked.manifest.name });
     programs[role] = b.cid;
@@ -289,10 +342,11 @@ const SHELL_DESCRIPTION = "Run a bash command in the wasm shell over a tree; res
  * (kernel-zig/src/shell.zig loadModules), each module and support file a raw
  * block of the tree's file.
  */
-export function shellProgram(dir: string, role: string, src: ShellSource, app: string): { record: Record<string, unknown>; blocks: Rec[] } {
+export function shellProgram(read: ReadFile, role: string, src: ShellSource, app: string): { record: Record<string, unknown>; blocks: Rec[] } {
   const blocks = new Map<string, Rec>();
   const raw = (path: string, module: boolean): CID => {
-    const bytes = new Uint8Array(readFileSync(join(dir, path)));
+    const bytes = read(path);
+    if (!bytes) throw new Error(`${path}: not in the tree`);
     if (module && wasmKind(bytes) !== "module") throw new Error(`${path}: not a wasm module (a shell program runs WASI preview1 modules)`);
     const cid = rawCid(bytes);
     blocks.set(cid.toString(), { cid, bytes });

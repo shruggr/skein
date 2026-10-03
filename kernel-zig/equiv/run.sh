@@ -103,6 +103,9 @@ echo "== the default image and the claim (#89): an instance from images/default 
 echo "== the host skein, the instance manager and the onboarding app (#90): skein-host init (the host skein from the default image, claimed for the operator, the instance manager in its address book); shruggr/skein-onboard (src/testapps.ts's pinned commit, or \$SKEIN_ONBOARD_DIR) installed in it; a client's session creates alice (claimed for the client before her hostname is published), she answers at her url and the client installs app-demo in her; a second create refused; replayed"
 "${node[@]}" "$kz/equiv/host.ts" || status=1
 
+echo "== deploy by hash (#91): the git app (shruggr/skein-git, src/testapps.ts's pinned commit, or \$SKEIN_GIT_DIR) clones one commit of a local repository served over smart HTTP (git http-backend) through the fetch provider — protocol v2, one shallow pack, checked against the hash — and answers {tree, app}; the manifest read by CID, the record rebuilt by the install client (the same CID), head + dispatch + start, the app runs; a hash not held, another commit's pack, a bad URL, no repository, no manifest refused; replayed"
+"${node[@]}" "$kz/equiv/git-clone.ts" || status=1
+
 echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by skein-host install, the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
 
