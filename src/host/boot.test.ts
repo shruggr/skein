@@ -81,7 +81,7 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; sender: unknown; read?: string }) => r.transport === "http" && r.address === "/explore" && r.prefix === true && r.sender === "session" && r.read === "explore"), "#92: the explorer route, behind the read op");
   assert.ok(g.dispatch.some((r: { transport: string; address: string; root?: string }) => r.transport === "http" && r.address === "/" && r.root === "www"), "the static app at /");
   assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; root?: string }) => r.transport === "http" && r.address === "/site" && r.prefix === true && r.root === "www"), "#92: and the site's files under /site/");
-  assert.throws(() => resolveReads(c, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);
+  assert.throws(() => resolveReads({}, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);
   // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
   for (const n of ["frontdoor", "messagebox"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
   assert.throws(() => resolveSystem(c, programs, [{ sender: "$owner", box: "x", handler: "static" }]), /an image names no owner/);
