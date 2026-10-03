@@ -297,7 +297,9 @@ failing stands: check first, write last.
 - **The admin operations are the kernel's.** `objects`, `head`, `dispatch`
   and `peers` are kernel operations on admin messages from the owner (every
   genesis) or a delegate (a row the owner added) — no program, elevated or
-  otherwise. Granting another identity the right to install or reconfigure
+  otherwise. Every program emits as the instance, and no default row
+  admits the instance's own key to an admin box (#87), so a program's
+  admin message finds no row: recorded, nothing runs. Granting another identity the right to install or reconfigure
   is a `dispatch` row by the owner — explicit, logged.
 - **An app writes only heads under its own name.** That is the whole
   write-scope rule: `advance` is allowed when the head's name is

@@ -24,7 +24,8 @@
 // node (handed to the host, Peers.emit, once the state is committed), or a
 // `mailbox` over BRC-103/104, which the instance does itself: the mailbox
 // transport's middleware (the messagebox program) is launched as the
-// message's delivery thread. The answer comes back as an entry that steps
+// message's delivery thread. A key the address book does not name goes to
+// that middleware too (#87): it reads the resolve program's record of it. The answer comes back as an entry that steps
 // the thread awaiting it; nothing outside is asked mid-step but the oracle.
 //
 // A shell thread that sleeps is not parked mid-instance (there is no JSPI
@@ -321,22 +322,28 @@ pub const Runtime = struct {
 
     /// How a message to `to` goes out: its address book entry (`root`). A
     /// message to the instance's own identity (#79: one app of the instance
-    /// asking another — the wallet or an overlay asking the chain app, resolve
-    /// asking the kernel's `peers`) goes by the host's loopback: transport
-    /// `local`, address `self` — the host appends it back into this instance as
-    /// a `local` request, signed by the instance, routed like any message (a
-    /// dispatch row from the instance's own key). One exception: an answer
+    /// asking another — the wallet or an overlay asking the chain app) goes by
+    /// the host's loopback: transport `local`, address `self` — the host
+    /// appends it back into this instance as a `local` request, signed by the
+    /// instance, routed like any message (a dispatch row from the instance's
+    /// own key; none admits it to an admin box, #87). One exception: an answer
     /// (`is_reply`: its body names `replyTo`) to the instance's own key goes
     /// where the address book says that key is reached, when it says so — an
     /// instance that is its own owner (the browser page, #16) names its own
     /// mailbox there, and its answers to its owner are for the person, not a
-    /// program. Null: no route.
+    /// program. A key the address book does not name goes to the `mailbox`
+    /// transport's middleware when the genesis has one (#87: the delivery
+    /// thread looks for the resolve program's record of the key, `resolve/…`,
+    /// and fails "no route" when there is none); `address` is then empty.
+    /// Null: no route.
     fn routeTo(rt: *Runtime, a: std.mem.Allocator, root: ?[]const u8, to: []const u8, is_reply: bool) !?addressbook.Entry {
         if (std.mem.eql(u8, to, rt.identity())) {
             if (is_reply) if (try addressbook.lookup(a, rt.store, root, to)) |e| return e;
             return addressbook.Entry{ .key = to, .transport = "local", .address = addressbook.SELF };
         }
-        return addressbook.lookup(a, rt.store, root, to);
+        if (try addressbook.lookup(a, rt.store, root, to)) |e| return e;
+        if (rt.genesis) |g| if (deliveryOf(g) != null) return addressbook.Entry{ .key = to, .transport = "mailbox", .address = "" };
+        return null;
     }
 
     /// Whether a message record's body names `replyTo` (an answer).
@@ -847,7 +854,7 @@ pub const Runtime = struct {
             return;
         };
         // #77: an admin box — the kernel's own operation, no program.
-        if (row.program == null) return rt.kernelOp(a, n, ctx, row.op.?, mc, m, what, at);
+        if (row.program == null) return rt.kernelOp(a, n, ctx, row.op.?, m, what, at);
         // #65: a message about something — its `subject`, a transaction's CID — from a sender the
         // instance subscribes to (a status provider's status) steps the thread awaiting that
         // subject, before the subscription's handler: as an event about it would.
@@ -896,43 +903,25 @@ pub const Runtime = struct {
     ///   head      {name, tree | root}: the head advanced to the record (in the store); owner = its name's app
     ///   dispatch  {op: "add" | "remove", row}: the table changed (dispatch.zig; a program row's record
     ///             and module must be in the store)
-    ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?, source?} | {op: "remove", key}:
-    ///             the address book (addressbook.zig write; source "admin", or "resolve" / "claim" as the body says)
-    /// An admin message the instance sent itself (#79: a program of its own,
-    /// admitted by a delegate row from the instance's key — the resolve
-    /// program's `peers`) is answered to the thread awaiting it: it steps with
-    /// `admin: {message, op, done: true}` or `{message, op, error}`, under this entry.
-    fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, op: []const u8, mc: []const u8, m: Value, what: []const u8, at: i64) !void {
+    ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?} | {op: "remove", key}:
+    ///             the address book (addressbook.zig write; source "admin")
+    /// Only a sender a row admits reaches here: the owner, or a key the owner
+    /// added as a sender (#87: no program reaches a kernel table — a
+    /// program's message to an admin box finds no row and runs nothing).
+    fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, op: []const u8, m: Value, what: []const u8, at: i64) !void {
         _ = n;
         const body = rt.store.getOpt(a, Value.cidOf(m.get("body")).?) orelse {
             rt.say("{s}: kernel {s}: the body is not in the store; nothing done", .{ what, op });
-            return rt.adminDone(a, ctx, mc, m, op, "the body is not in the store");
+            return;
         };
         const by = heads.By{ .thread = null, .input = ctx.cid, .at = at };
         rt.kernelOpBody(a, op, body, by) catch |err| switch (err) {
             error.Refused => {
                 rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error });
-                return rt.adminDone(a, ctx, mc, m, op, last_error);
+                return;
             },
             else => return err,
         };
-        return rt.adminDone(a, ctx, mc, m, op, null);
-    }
-
-    /// The answer to an admin message the instance sent itself (kernelOp): the threads awaiting it step.
-    fn adminDone(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, mc: []const u8, m: Value, op: []const u8, err: ?[]const u8) !void {
-        if (!std.mem.eql(u8, Value.bytesOf(m.get("sender")).?, rt.identity())) return;
-        for (try rt.store.awaiting(a, mc)) |t| {
-            const tip = rt.tipOf(a, t) catch null orelse continue;
-            if (!stateIs(tip, "waiting") or !cidIn(tip.get("awaits"), mc)) continue;
-            var info = cbor.MapBuilder.init(a);
-            try info.put("message", cbor.cidv(mc));
-            try info.put("op", cbor.string(op));
-            if (err) |e| try info.put("error", cbor.string(e)) else try info.put("done", .{ .bool = true });
-            rt.say("kernel {s}: answered to {s}", .{ op, short(a, t) });
-            rt.step_extra = .{ .key = "admin", .value = info.value() };
-            try rt.step(a, t, ctx, null, null);
-        }
     }
 
     fn refuse(a: std.mem.Allocator, comptime f: []const u8, args: anytype) error{ Refused, OutOfMemory } {
@@ -1001,10 +990,7 @@ pub const Runtime = struct {
             if (!logm.isTransport(transport)) return refuse(a, "transport is mailbox, libp2p or local", .{});
             const address = Value.str(body.get("address")) orelse Value.str(body.get("url")) orelse return refuse(a, "add wants an address (a mailbox's url, a peer ID or topic:<name>, a provider's name)", .{});
             if (address.len == 0) return refuse(a, "add wants an address", .{});
-            // #79: a delegate's lookup (the resolve program's, by RESOLVE_DELEGATE) says where the entry came from.
-            const src = Value.str(body.get("source")) orelse "admin";
-            if (!std.mem.eql(u8, src, "admin") and !std.mem.eql(u8, src, "resolve") and !std.mem.eql(u8, src, "claim")) return refuse(a, "source is admin, resolve or claim", .{});
-            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), src, by);
+            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), "admin", by);
             rt.say("kernel peers: add {s} by {s} {s}", .{ shortKey(key), transport, address });
             return;
         }
@@ -1659,8 +1645,8 @@ pub const Runtime = struct {
 
     /// The `emit` import (#70): dag-cbor {to: bytes(33), box, body: bytes (a
     /// dag-cbor record, canonical), subject?: <cid>} → the message's CID. The
-    /// recipient must be in the address book (as this step leaves it); the
-    /// message is signed through the oracle (a recorded call), put, and
+    /// recipient must have a route (routeTo: the address book as this step
+    /// leaves it, else the mailbox transport's delivery thread); the message is signed through the oracle (a recorded call), put, and
     /// listed on the update; it goes out when the step ends without error.
     fn hEmit(imp: *program.Imports, msg: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
@@ -1681,7 +1667,7 @@ pub const Runtime = struct {
         if (m.get("subject")) |s| if (s != .null) {
             subject = Value.cidOf(s) orelse return imp.failWith("emit: `subject` is not a CID");
         };
-        const e = (try peersLookup(st, imp, to)) orelse return imp.failFmt("emit: no route to {s}: not in the address book (resolve its handle, or add it to the `peers` box)", .{try hexOf(a, to)});
+        const e = (try peersLookup(st, imp, to)) orelse return imp.failFmt("emit: no route to {s}: not in the address book, and the genesis has no messagebox program to deliver it", .{try hexOf(a, to)});
         if (std.mem.eql(u8, e.transport, "mailbox") and deliveryOf(st.rt.genesis.?) == null) return imp.failFmt("emit: {s} is reached by mailbox, and the genesis has no messagebox program to deliver it", .{try hexOf(a, to)});
         return emitMessage(st, imp, to, box, blk, subject);
     }

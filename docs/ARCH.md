@@ -96,7 +96,7 @@ owner. `APPS.md` is the specification.
 |---|---|---|
 | front door | `programs/frontdoor` | BRC-103/104 on every request, sessions under `frontdoor/sessions`, the HTTP and libp2p rows, signed answers |
 | messagebox | `programs/messagebox` | BRC-33 send/list/ack; delivery threads to other instances' messageboxes |
-| resolve | `programs/resolve` | BRC-169 handle lookup; writes the address book through the kernel's `peers` operation |
+| resolve | `programs/resolve` | BRC-169 handle lookup; keeps what it finds under `resolve/peers` and answers with the record's CID (never the address book) |
 | wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`) |
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
 | overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
@@ -139,10 +139,14 @@ the providers.
 **The address book** says who an instance can reach and how: key →
 `{transport: mailbox | libp2p | local, address, role?, handle?}`. The
 genesis seeds it (the host's providers by role, the owner's mailbox); after
-that it changes only through the kernel's `peers` operation, from the owner
-(`skein-host peers`) or from the instance itself (the resolve program,
-admitted by the delegate row `{peers, $self, kernel}`). Nothing registers
-itself. A key in no address book is "no route": the emit fails.
+that it changes only through the kernel's `peers` operation, on a message
+signed by the owner (`skein-host peers`) or by a key the owner added as a
+sender on the `peers` row. No program writes it: every program emits as the
+instance, and no row admits the instance's own key to an admin box. The
+resolve program keeps what a BRC-169 lookup finds under its own name
+(`resolve/peers`); a message to a key the address book does not name goes to
+the messagebox's delivery thread, which reads that record. Nothing registers
+itself. A key in neither is "no route": the delivery fails.
 
 **Mailbox instances.** An identity outside the host (a person's wallet, the
 inference peer, a browser tab) has its mail kept by an instance of its own

@@ -23,15 +23,15 @@ pub const modules = [_]Module{
     .{ .name = "brush", .cid = "bafkreiemwcli2372geseu7l527ivxwjodogng7zoltixf6pfh5ujnpauc4" },
     .{ .name = "coreutils", .cid = "bafkreidohpuc5gyi4xroxlhc367ry5hkpixtabc7sln2tidedeqbwcgese" },
     .{ .name = "run-handler", .cid = "bafkreicd63a4ffjozgou3axes5p5tymfoi72ne2dpeqnhij33uqgvpdyle" },
-    .{ .name = "loop", .cid = "bafkreihbfmv6az4esnmf7wk5lmljvjzvt5f5xtef2b2asrtbam53bclmgy" },
+    .{ .name = "loop", .cid = "bafkreig6ug7eadgh66dfcb65x52jz7uymvlakqpjvyv7twaz2wzd4mw4am" },
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreihjdj7o75mnffyk362rzabszndywo4yoyjq4r7yvtmu3cv4ff3qhq" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreif55a4bpzojvvdi7i2ezexjvvimdbikjawvgr4wj4gu2riw32avqa" },
+    .{ .name = "messagebox", .cid = "bafkreidnkfjixe64ik3usfgyb65gjhlbuvrjedovo7pipj5f6kqkikzdgq" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreifz27lievgnxzxxo6nwsrmlnjmkhiqcqti5dila62rkqfuu3sazka" },
-    // The address book's writer (#40): BRC-169 resolve, the admin's `peers`; `register` claims only where an application wires them (programs/resolve).
-    .{ .name = "resolve", .cid = "bafkreif6c3licjxn6jnt4fy7olssr365wi6p25otkbqpj37l4k27ekrl34" },
+    // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
+    .{ .name = "resolve", .cid = "bafkreidpvi7hm4u6r4v6xhhj25dq4jcsme3qduarlgmyqhvzq7fa4optby" },
     .{ .name = "find", .cid = "bafkreib7nn5j3hys3m2ux5mzwxnesqzspfou2lng5jcudvnps3g5kpv4bu" },
     .{ .name = "xargs", .cid = "bafkreiaizwk5lqff2b23kpovpsglmct5xconf7n45zlzekyplvnjjjqgju" },
     .{ .name = "diff", .cid = "bafkreifhra2rwueqtn3pqjpjfmobhd6dcijhexr46eyfcnr5hs3gmebv6i" },
@@ -119,7 +119,7 @@ const handlers = [_]Handler{
     .{ .name = "run-handler", .services = &.{}, .description = "The `run` box: read the body {cmd, tree?, cwd?, env?} (no tree: `main`'s, else the empty tree), run the shell over it, reply in `results`." },
     .{ .name = "loop", .services = &.{"infer"}, .description = "The `chat` box: the turn loop. Prompt from the tree's SOUL.md; keeps each turn; asks the `infer` peer; runs `bash` tool calls in the shell and `message` calls as a `chat` to another party (a reply, if the thread already talks with them), resting on their reply; answers the opener with a `chat` reply and awaits theirs. Everything it sends goes through the messagebox's `send` (#40)." },
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
-    .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that writes the handle's peer record into the address book (head `peers`); a `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The admin's `peers` box is the kernel's own operation (#77)." },
+    .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that keeps the handle's record under its own head (`resolve/peers`, #87) and finishes with the record's CID; the messagebox's delivery reads it for a key the address book does not name. A `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The address book is written only by the kernel's `peers` operation, on an owner-signed message (#77, #87)." },
     .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door (#68): the instance's middleware, stepped on every request a transport carries in (http: BRC-103/104 against its session records, head frontdoor/sessions; libp2p: the GossipSub signature; local: a provider's signed message), routed by the kernel's dispatch rows for its transport, the handler an in-VM call, the answer signed on the session. Called (fn read) for a route whose answer is a read of live state." },
 };
 

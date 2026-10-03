@@ -13,7 +13,9 @@
 //   reaches it in `app-demo-tick` (admitted from $cron only: a stranger's is
 //   not); a {fn, args} message from a caller in box `app-demo` is answered in
 //   the caller's mailbox (result, bad-args, read-only for a `writes: false`
-//   function that writes, unknown-fn); the route /app-demo/call answers on the
+//   function that writes, unknown-fn); its `peers` message to the kernel, sent
+//   as the instance itself, is refused (#87: no row admits a program to a
+//   kernel table; recorded, nothing runs, the address book unchanged); the route /app-demo/call answers on the
 //   connection; an install over itself keeps its state; uninstalled, its stop
 //   runs and its route is gone.
 //
@@ -144,6 +146,23 @@ try {
   a = await ask({ fn: "demo.counter.nope" });
   check(a.error?.code === "unknown-fn", `an undeclared function: ${JSON.stringify(a.error)}`);
   check((await state())?.count === 5, "the refused calls changed nothing");
+
+  // #87: a program's `peers` message to the kernel is refused. app-demo emits the kernel's `peers`
+  // operation as the instance itself (any program can); no row admits the instance's key to an admin
+  // box, so the message is recorded (the loopback's `local` request, then the message) and runs nothing.
+  const intruder = PrivateKey.fromRandom().toPublicKey().toString();
+  const peersBefore = await record("peers");
+  const linesBefore = h.lines.length;
+  await callerBox.send(inst, "app-demo", { kind: "app-demo-peers", key: intruder, url: "http://intruder.test" });
+  const noRow = await until("the program's peers message", async () => {
+    await h.router.settled();
+    return h.lines.slice(linesBefore).find((l) => l.startsWith("[inst] ") && / in peers from [0-9a-f]+: no dispatch row; recorded, nothing runs/.test(l));
+  }, 20_000).catch(() => undefined);
+  check(!!noRow, `a program's message to the kernel's \`peers\` box (sent as the instance) finds no row: recorded, nothing runs (${noRow ?? h.lines.slice(linesBefore).filter((l) => l.includes("peers")).join(" | ")})`);
+  check(!h.lines.slice(linesBefore).some((l) => l.includes("kernel peers:")), "the kernel's peers operation did not run");
+  const peersAfter = await record("peers");
+  const book = peersAfter ? await Promise.all(((peersAfter.peers ?? []) as Array<{ peer: CID }>).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array })) : [];
+  check(String(peersAfter && JSON.stringify(peersAfter)) === String(peersBefore && JSON.stringify(peersBefore)) && !book.some((p) => Buffer.from(p.key).toString("hex") === intruder), "the address book is unchanged: the intruder's key is not in it");
 
   // The route /app-demo/call: the answer on the connection (BRC-104, the caller admitted by "*").
   const call = async (body: unknown) => {

@@ -2,20 +2,22 @@
 //! handle → the identity key and the messagebox URL the handle's domain
 //! publishes. The lookup is a thread (#67: external communication is a
 //! thread): each GET goes through the `fetch` provider (an emit), and its
-//! answer is the entry that steps the thread again. The address book is one
-//! of the kernel's four tables (the head `peers`: {kind: "peers", peers:
-//! [{key, peer: <cid>}]}, each {kind: "peer", key, transport, address, role?,
-//! handle?, domain?, since, source}); this program writes no head (#79): a
-//! resolved handle (`transport: "mailbox"`, `address` its messagebox URL) is
-//! recorded by the kernel's `peers` operation — a message the instance sends
-//! itself in the admin box `peers`, admitted by the stock system's delegate
-//! row from the instance's key (genesis.ts RESOLVE_DELEGATE) — and the
-//! kernel answers it to this thread (input `admin`). A later record for the
-//! same key replaces it (a party that moved hosts).
+//! answer is the entry that steps the thread again. What it finds it keeps
+//! under its own name (#87; its write scope, `resolve/…`): the head
+//! `resolve/peers`, {kind: "resolutions", peers: [{key, peer: <cid>}]} sorted
+//! by key, each {kind: "resolution", key, transport: "mailbox", address: <its
+//! messagebox URL>, handle, domain, since, source: "resolve" | "claim"}. A
+//! later record for the same key replaces it (a party that moved hosts).
+//!
+//! It never writes the address book: that is one of the kernel's four tables,
+//! changed only by the kernel's `peers` operation on a message from the owner
+//! (or a key the owner added as a sender on the `peers` row). A message to a
+//! key the address book does not name goes to the messagebox's delivery
+//! thread, which reads this program's record of the key (#87).
 //!
 //! Launched (`sk.launchResolve`: args {handle, domain, key?}): the lookup;
-//!   it finishes with the peer record as its stdout, once the kernel has
-//!   recorded it, or errors ("transient: …" when no answer came, or a 5xx).
+//!   it finishes with the record's CID (a link) as its stdout, or errors
+//!   ("transient: …" when no answer came, or a 5xx).
 //!   `key`: the identity the launcher expects — another answer is refused.
 //! Stepped on messages a dispatch row sends here:
 //!   box `register`, only where an application wires it (#40: the stock
@@ -25,9 +27,8 @@
 //!
 //!   step: the manifest   GET <origin>/manifest.json (`metanet.handles.resolve`,
 //!                        default <origin>/.well-known/metanet-handles/resolve)
-//!   step: the resolution GET <resolve>?handle=<handle> → {identityKey, messagebox, …}
-//!   step: recorded       the kernel's `peers` operation asked (source `resolve` or `claim`)
-//!   step: done           the kernel's answer: the peer record
+//!   step: the resolution GET <resolve>?handle=<handle> → {identityKey, messagebox, …};
+//!                        the record kept (source `resolve` or `claim`), its CID the answer
 //!
 //! Where a domain is looked up: `https://<domain>`, except the instance's own
 //! domain when the genesis sets `defaults.resolveOrigin` (a dev host). The
@@ -40,7 +41,8 @@ const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
-const PEERS = "peers";
+/// This program's records (#87): under its own name, never the address book.
+const RESOLUTIONS = "resolve/peers";
 
 pub fn main() u8 {
     return sk.main("resolve", run);
@@ -66,34 +68,40 @@ fn jsonOf(a: Allocator, body: []const u8) ?std.json.Value {
     return std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch null;
 }
 
-/// Record a resolved handle (#79): the kernel's `peers` operation, as a
-/// message to the instance itself in the admin box `peers` (admitted by the
-/// stock system's delegate row from the instance's key; no program writes the
-/// address book) — awaited: the kernel answers it (input `admin`) once done.
-fn recordPeer(a: Allocator, in: Value, key: []const u8, mailbox: []const u8, handle: []const u8, domain: []const u8, source: []const u8) ![]const u8 {
-    const self: Value = in.get("self") orelse .null;
-    const me = Value.bytesOf(self.get("identity")) orelse return sk.report("resolve: the step names no instance identity");
-    var b = cbor.MapBuilder.init(a);
-    try b.put("op", cbor.string("add"));
-    try b.put("key", .{ .bytes = key });
-    try b.put("transport", cbor.string("mailbox"));
-    try b.put("address", cbor.string(mailbox));
-    try b.put("handle", cbor.string(handle));
-    try b.put("domain", cbor.string(domain));
-    try b.put("source", cbor.string(source));
-    const m = try sk.emit(a, me, PEERS, b.value(), null);
-    try sk.awaitRecord(m);
-    return m;
-}
-
-/// The address book's record for `key` (the head `peers`), or null.
-fn peerRecord(a: Allocator, key: []const u8) !?Value {
-    const root = (try sk.head(a, PEERS)) orelse return null;
-    const r = try sk.get(a, root);
-    const ps = r.get("peers") orelse return null;
-    if (ps != .array) return null;
-    for (ps.array) |x| if (eql(u8, Value.bytesOf(x.get("key")) orelse "", key)) return try sk.get(a, Value.cidOf(x.get("peer")) orelse return null);
-    return null;
+/// Keep a resolved handle (#87): its record under `resolve/peers`, replacing
+/// any earlier one for the same key; the record's CID.
+fn keepResolution(a: Allocator, key: []const u8, mailbox: []const u8, handle: []const u8, domain: []const u8, source: []const u8, at: i128) ![]const u8 {
+    var rec = cbor.MapBuilder.init(a);
+    try rec.put("kind", cbor.string("resolution"));
+    try rec.put("key", .{ .bytes = key });
+    try rec.put("transport", cbor.string("mailbox"));
+    try rec.put("address", cbor.string(mailbox));
+    try rec.put("handle", cbor.string(handle));
+    try rec.put("domain", cbor.string(domain));
+    try rec.put("since", cbor.int(@as(i64, @intCast(at))));
+    try rec.put("source", cbor.string(source));
+    const rc = try sk.put(a, rec.value());
+    var list: std.ArrayList(Value) = .empty;
+    if (try sk.head(a, RESOLUTIONS)) |root| {
+        const r = try sk.get(a, root);
+        if (r.get("peers")) |ps| if (ps == .array) for (ps.array) |x| {
+            if (!eql(u8, Value.bytesOf(x.get("key")) orelse "", key)) try list.append(a, x);
+        };
+    }
+    var e = cbor.MapBuilder.init(a);
+    try e.put("key", .{ .bytes = key });
+    try e.put("peer", cbor.cidv(rc));
+    try list.append(a, e.value());
+    std.mem.sort(Value, list.items, {}, struct {
+        fn lt(_: void, x: Value, y: Value) bool {
+            return std.mem.order(u8, Value.bytesOf(x.get("key")) orelse "", Value.bytesOf(y.get("key")) orelse "") == .lt;
+        }
+    }.lt);
+    var root = cbor.MapBuilder.init(a);
+    try root.put("kind", cbor.string("resolutions"));
+    try root.put("peers", .{ .array = list.items });
+    try sk.advance(RESOLUTIONS, try sk.put(a, root.value()));
+    return rc;
 }
 
 fn keyOf(a: Allocator, v: ?Value) ?[]const u8 {
@@ -161,11 +169,7 @@ fn begin(a: Allocator, in: Value, l0: Lookup) !void {
 fn step(a: Allocator, in: Value) !void {
     const args = in.get("args") orelse return sk.report("no args");
     const at = Value.intOf(in.get("at")) orelse 0;
-    if (try saved(a, in)) |s| {
-        const stage = Value.str(s.get("stage")) orelse "";
-        if (eql(u8, stage, "recorded")) return recorded(a, in, Lookup.of(s));
-        return answered(a, in, Lookup.of(s), stage, at);
-    }
+    if (try saved(a, in)) |s| return answered(a, in, Lookup.of(s), Value.str(s.get("stage")) orelse "", at);
     // Launched: a lookup.
     if (Value.str(args.get("handle"))) |handle| {
         const domain = Value.str(args.get("domain")) orelse return sk.report("resolve wants {handle, domain, key?}");
@@ -185,7 +189,7 @@ fn step(a: Allocator, in: Value) !void {
         const domain = Value.str(claim.get("domain")) orelse return sk.report("a claim names a domain");
         return begin(a, in, .{ .handle = handle, .domain = domain, .key = sender, .source = "claim" });
     }
-    return sk.report(try std.fmt.allocPrint(a, "resolve takes no messages in box {s} (the admin's `peers` box is the kernel's operation, #77)", .{box}));
+    return sk.report(try std.fmt.allocPrint(a, "resolve takes no messages in box {s} (the address book is the kernel's `peers` operation, the owner's, #77)", .{box}));
 }
 
 /// A step on the fetch provider's answer.
@@ -225,16 +229,7 @@ fn answered(a: Allocator, in: Value, l0: Lookup, stage: []const u8, at: i128) !v
         if (eql(u8, l.source, "claim")) return sk.report(try std.fmt.allocPrint(a, "the claim @{s}@{s} resolves to another identity: not recorded", .{ l.handle, l.domain }));
         return sk.report(try std.fmt.allocPrint(a, "@{s}@{s} resolves to {s}, not the identity expected", .{ l.handle, l.domain, try sk.hex(a, key) }));
     };
-    _ = at;
-    _ = try recordPeer(a, in, key, mailbox, l.handle, l.domain, l.source);
-    l.key = key;
-    return l.out(a, "recorded");
-}
-
-/// The kernel's answer to the `peers` operation this thread asked: the peer record, or the refusal.
-fn recorded(a: Allocator, in: Value, l: Lookup) !void {
-    const ans = in.get("admin") orelse return sk.report("resolve: stepped with no answer from the kernel's peers operation");
-    if (Value.str(ans.get("error"))) |e| return sk.report(try std.fmt.allocPrint(a, "@{s}@{s}: the address book refused it: {s}", .{ l.handle, l.domain, e }));
-    const rec = (try peerRecord(a, l.key orelse return sk.report("resolve: no key"))) orelse return sk.report("resolve: the address book has no record after the kernel's peers operation");
-    try sk.answer(a, rec);
+    // #87: kept under this program's own name; the caller is answered with the record's CID.
+    const rc = try keepResolution(a, key, mailbox, l.handle, l.domain, l.source, at);
+    try sk.answer(a, cbor.cidv(rc));
 }

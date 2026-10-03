@@ -20,6 +20,9 @@
 //!                  "beat"; rests on its answer; finishes "scheduled beat next <ms>"
 //!   app-demo       {kind: "app-demo-stop"}    (the uninstall's stop) stops "beat";
 //!                  finishes "stopped beat <true|false>"
+//!   app-demo       {kind: "app-demo-peers", key, url} (#87) emits the kernel's
+//!                  `peers` operation as the instance itself — refused: no row
+//!                  admits a program to a kernel table; finishes "sent peers"
 //!   app-demo-tick  a tick from the cron provider (admitted from `$cron` only):
 //!                  ticks += 1; finishes "tick <ticks>"
 const std = @import("std");
@@ -103,10 +106,11 @@ fn peek(c: *app.Call) !Value {
     return countAnswer(c.a, now.count);
 }
 
-/// A message without `fn`: the start or the stop.
+/// A message without `fn`: the start or the stop — or (#87) a program
+/// reaching for the address book.
 fn other(a: Allocator, in: Value, body: Value) !void {
-    _ = in;
     const kind = Value.str(body.get("kind")) orelse "";
+    if (eql(u8, kind, "app-demo-peers")) return peers(a, in, body);
     var q = cbor.MapBuilder.init(a);
     try q.put("name", cbor.string("beat"));
     if (eql(u8, kind, "app-demo-start")) {
@@ -118,6 +122,21 @@ fn other(a: Allocator, in: Value, body: Value) !void {
     } else return sk.report("not a call, a start or a stop");
     const id = try sk.emit(a, try sk.provider(a, "cron"), "cron", q.value(), null);
     try sk.awaitRecord(id);
+}
+
+/// {kind: "app-demo-peers", key, url}: the kernel's `peers` operation asked
+/// as the instance itself — what any program can emit (#87). No row admits
+/// the instance's own key to an admin box, so the kernel records the message
+/// and runs nothing; this thread does not wait for an answer that never comes.
+fn peers(a: Allocator, in: Value, body: Value) !void {
+    const self: Value = in.get("self") orelse .null;
+    const me = Value.bytesOf(self.get("identity")) orelse return sk.report("the step names no instance identity");
+    var q = cbor.MapBuilder.init(a);
+    try q.put("op", cbor.string("add"));
+    try q.put("key", body.get("key") orelse return sk.report("app-demo-peers wants {key, url}"));
+    try q.put("url", body.get("url") orelse return sk.report("app-demo-peers wants {key, url}"));
+    _ = try sk.emit(a, me, "peers", q.value(), null);
+    return out(a, "sent peers", .{});
 }
 
 fn tick(a: Allocator) !void {

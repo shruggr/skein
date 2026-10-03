@@ -35,6 +35,12 @@ built modules are committed here because the default genesis wires `run` and
 `scripts/update-workbench.sh <skein-workbench checkout>` copies its build
 in, rewrites the pins, and writes the workbench commit to `WORKBENCH`.
 
+Pending (#87): `loop.wasm` here is built from `WORKBENCH`'s commit plus the
+loop's #87 change (it finds a handle in the resolve program's records,
+`resolve/peers`, as well as the address book), which is not yet committed
+in skein-workbench. Once it is, `scripts/update-workbench.sh` over that
+commit gives the same bytes and moves `WORKBENCH`.
+
 ## Not here
 
 Apps outside the default genesis ship their own modules in their trees

@@ -15,10 +15,10 @@
 // finds a provider (`deadline` finds the waker). One of the kernel's four
 // tables (#77): written by the genesis (`addressBook`: the host's providers,
 // the owner's mailbox; source "genesis") and by the kernel's `peers`
-// operation on an admin message (source "admin"; `write` below) — including a
-// resolved handle's record, which the resolve program sends the kernel as the
-// instance itself (#79: a delegate row from the instance's key; source
-// "resolve" / "claim"). No program writes it. The kernel reads it for `emit`.
+// operation on an admin message from the owner or a key the owner added as a
+// sender on the `peers` row (source "admin"; `write` below). No program
+// writes it, the resolve program included (#87: it keeps what it finds under
+// its own name, `resolve/…`). The kernel reads it for `emit`.
 const std = @import("std");
 const cbor = @import("cbor");
 const heads = @import("heads.zig");
@@ -73,7 +73,7 @@ pub fn byRole(a: std.mem.Allocator, s: Store, root: ?[]const u8, role: []const u
 }
 
 /// Write (or replace) the peer record for `key` (#77: the kernel's `peers`
-/// operation; the resolve program's writePeer, moved here); a null `address`
+/// operation); a null `address`
 /// removes it. The head `peers` moves under `by`.
 pub fn write(a: std.mem.Allocator, s: Store, key: []const u8, transport: []const u8, address: ?[]const u8, role: ?[]const u8, handle: ?[]const u8, domain: ?[]const u8, source: []const u8, by: heads.By) !void {
     var list = std.array_list.Managed(Value).init(a);

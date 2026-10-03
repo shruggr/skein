@@ -152,17 +152,6 @@ export const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
 export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, sender: "$owner", program: "kernel", fn: op }));
 
 /**
- * The delegate row the stock system adds where the resolve program is wired
- * (#79): the instance's own identity may send the kernel's `peers` operation —
- * how a BRC-169 lookup's result enters the address book now that no program
- * writes a kernel table (resolve emits `{op: "add", key, …, source: "resolve"}`
- * to the instance itself and awaits the kernel's answer). Any program of the
- * instance can emit as the instance, so this row lets every one of them write
- * the address book (not the other tables): for David to review.
- */
-export const RESOLVE_DELEGATE: DispatchSpec = { address: "peers", sender: "$self", program: "kernel", fn: "peers" };
-
-/**
  * The stock seed (#77), after the admin rows: the owner's `run` and `chat`;
  * `chat` from anyone; the reserved box the host admits into, `:ack` (the
  * messagebox moves a reader's pointer); and the stock HTTP rows (STOCK_HTTP).
@@ -177,9 +166,6 @@ export const STOCK_DISPATCH: DispatchSpec[] = [
   { address: "chat", sender: "$owner", program: "loop" },
   { address: "chat", program: "loop" },
   { address: ":ack", program: "messagebox" },
-  // #79: the resolve program records a resolved handle through the kernel's `peers` operation — a
-  // message the instance sends itself, admitted by this delegate row (only where resolve is wired).
-  RESOLVE_DELEGATE,
 ];
 
 /**
@@ -197,12 +183,15 @@ export const MAILBOX_DISPATCH: DispatchSpec[] = [
  * may advance, by program name. The front door's sessions; the messagebox's
  * lists and outbound sessions; the wallet's records (#79: `wallet/…`, its
  * coins, actions, drafts and outputs — the chain is the chain app's). The
- * resolve program writes no head (#79: a resolved handle goes into the
- * address book through the kernel's `peers` operation, RESOLVE_DELEGATE).
+ * resolve program's records (#87: `resolve/peers`, what a BRC-169 lookup
+ * found — never the address book, which only the owner's `peers` messages
+ * change; the messagebox's delivery reads them for a key the address book
+ * does not name).
  */
 export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
   messagebox: ["mailbox", "outbound"],
+  resolve: ["resolve/"],
   wallet: ["wallet/"],
   // #78: the chain module (shruggr/skein-chain) wired at boot by a system tree as `bin/chain.wasm`:
   // its heads are `chain/…`, as an installed chain app's are by the name rule.
@@ -494,7 +483,7 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
     const s = resolveSystem({ ...c, defaults: undefined, overrides: undefined, infer: undefined, subscriptions: undefined, dispatch: undefined }, mine, [], { peers: {}, names: [] }, undefined, STOCK_HTTP, STOCK_READS, MAILBOX_DISPATCH);
     return { ...s, collect: [], defaults: { ...SESSION_DEFAULTS, ...c.defaults, ...c.overrides } };
   }
-  const specs = STOCK_DISPATCH.filter((s) => (s.address !== "chat" || s.sender || c.openChat !== false) && (s === RESOLVE_DELEGATE ? programs.resolve : programs[s.program]));
+  const specs = STOCK_DISPATCH.filter((s) => (s.address !== "chat" || s.sender || c.openChat !== false) && programs[s.program]);
   // Code genesis has always taken the host's defaults whole (DEFAULTS when none).
   return { ...resolveSystem({ ...c, defaults: undefined, overrides: undefined }, programs, [], {}, undefined, c.routes ?? STOCK_HTTP, c.reads ?? STOCK_READS, specs), defaults: { ...SESSION_DEFAULTS, ...hostFacts(c), ...(c.defaults ? { ...c.defaults, ...c.overrides } : c.overrides ? { ...DEFAULTS, ...c.overrides } : DEFAULTS) } };
 }

@@ -1,7 +1,8 @@
 //! Delivery (#70, #67): the outbound middleware of the `mailbox` transport.
 //! A message a step emits to a recipient whose address book entry is
-//! `{transport: "mailbox", address: <messagebox URL>}` is delivered by the
-//! instance itself, as a BRC-103/104 client of that messagebox: the kernel
+//! `{transport: "mailbox", address: <messagebox URL>}` — or, for a key the
+//! address book does not name, whose record the resolve program kept
+//! (`resolve/peers`, #87) — is delivered by the instance itself, as a BRC-103/104 client of that messagebox: the kernel
 //! launches this program as the message's **delivery thread** (args
 //! {message: <the signed mail record>, transport: "mailbox"}), and the
 //! thread talks HTTP through the `fetch` provider — each request built and
@@ -45,6 +46,8 @@ const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
 const OUTBOUND = "outbound";
+/// The resolve program's records (#87), read, never written here.
+const RESOLUTIONS = "resolve/peers";
 const SEND_ATTEMPTS = 3;
 const SEND_RETRY_MS = 30_000;
 
@@ -294,6 +297,20 @@ fn boolOf(v: ?Value) ?bool {
     return if (x == .bool) x.bool else null;
 }
 
+/// The resolve program's record of `key` (#87: head `resolve/peers`, {kind:
+/// "resolutions", peers: [{key, peer: <cid>}]}, each {kind: "resolution",
+/// key, transport: "mailbox", address, handle, domain, since, source}), or
+/// null. Read for a key the address book does not name: the kernel sends
+/// such a message here, and the address book (the owner's) wins when both name it.
+fn resolutionOf(a: Allocator, key: []const u8) !?Value {
+    const root = (try sk.head(a, RESOLUTIONS)) orelse return null;
+    const r = try sk.get(a, root);
+    const ps = r.get("peers") orelse return null;
+    if (ps != .array) return null;
+    for (ps.array) |x| if (eql(u8, Value.bytesOf(x.get("key")) orelse "", key)) return try sk.get(a, Value.cidOf(x.get("peer")) orelse return null);
+    return null;
+}
+
 /// A step of a message's delivery thread (#70).
 pub fn step(a: Allocator, in: Value) !void {
     const args = in.get("args") orelse return sk.report("no args");
@@ -301,7 +318,7 @@ pub fn step(a: Allocator, in: Value) !void {
     const msg = try sk.get(a, mc);
     const to = Value.bytesOf(msg.get("recipient")) orelse return sk.report("delivery: not a message record");
     const body = try sk.getBytes(a, Value.cidOf(msg.get("body")) orelse return sk.report("delivery: the message has no body"));
-    const p = (try sk.peerOf(a, to)) orelse return sk.report(try std.fmt.allocPrint(a, "no route to {s}: not in the address book", .{try sk.hex(a, to)}));
+    const p = (try sk.peerOf(a, to)) orelse (try resolutionOf(a, to)) orelse return sk.report(try std.fmt.allocPrint(a, "no route to {s}: not in the address book, and not resolved", .{try sk.hex(a, to)}));
     if (!eql(u8, Value.str(p.get("transport")) orelse "", "mailbox")) return sk.report("delivery: the recipient is not reached by mailbox any more");
     const url = Value.str(p.get("address")) orelse return sk.report("delivery: the address book names no URL");
     const me = if (in.get("self")) |s| Value.bytesOf(s.get("identity")) orelse try brc.identityKey(a) else try brc.identityKey(a);

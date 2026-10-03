@@ -441,8 +441,8 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   bytes): emit to a key, not a handle (resolve the handle first)`` · `emit:
   the box is empty or starts with ':' (reserved)` · `emit: the body is not
   dag-cbor` | `… not IPLD` | `… not canonical dag-cbor` · ``emit: `subject`
-  is not a CID`` · ``emit: no route to <hex>: not in the address book
-  (resolve its handle, or add it to the `peers` box)`` · `emit: <hex> is
+  is not a CID`` · ``emit: no route to <hex>: not in the address book, and
+  the genesis has no messagebox program to deliver it`` · `emit: <hex> is
   reached by mailbox, and the genesis has no messagebox program to deliver
   it` · `emit: the oracle did not sign the message` · in a kernel call,
   `emit: a kernel call sends nothing (emit from a step)`.
@@ -479,7 +479,7 @@ The head `peers` — who the instance can reach, and how:
 ```
 {kind: "peers", peers: [{key, peer: <cid>}]}                                   sorted by key
 {kind: "peer", key: bytes(33), transport: "mailbox" | "libp2p" | "local", address: text,
- role?: text, handle?: text, domain?: text, since: ms, source: "genesis" | "admin" | "resolve" | "claim"}
+ role?: text, handle?: text, domain?: text, since: ms, source: "genesis" | "admin"}
 ```
 
 | transport | address | how a message goes out |
@@ -509,26 +509,38 @@ The address book is one of the kernel's four tables (#77). Who writes it:
   [--handle h@d]` / `remove <key>` / `list`; `scripts/host/up.sh` writes the
   owner and the inference peer into every agent this way, and the roster
   step (`skein-host deploy`, `roster --deploy`) the other agents;
-- **the resolve program**, from a BRC-169 lookup (source `resolve` or
-  `claim`; below) — through the kernel's `peers` operation, not by writing
-  the table (#79: no program reaches a kernel table): it emits `{op: "add",
-  key, transport: "mailbox", address, handle, domain, source}` in box
-  `peers` to the instance itself (the host's loopback), admitted by the
-  default system's delegate row `{peers, sender: $self, program: kernel, fn:
-  peers}` (where resolve is wired), and the kernel answers the thread
-  awaiting that message (input `admin`) once the entry is written. Every
-  program of the instance emits as the instance, so that row lets any of
-  them write the address book (the other tables stay the owner's): for
-  David to review.
+and nothing else: **no program writes it** (#87). Every program of the
+instance emits as the instance, and no default row admits the instance's
+own key to an admin box, so a program's `peers` message finds no row —
+recorded, nothing runs. A key the owner adds as a sender on the `peers` row
+may change it too; nothing else can.
 
 A later record for the same key replaces it (a party that moved hosts).
 `sk.peers`, `sk.peerOf(key)` and `sk.peerByHandle(handle, domain)` read it.
-**Registration is application wiring, not core**: nothing registers itself
-or takes claims; an application that wants senders to enter themselves
-writes a row of its own (e.g. `{"address": "register", "sender": "*",
-"program": "resolve"}`: the resolve program writes a claim `{handle,
-domain}` — or a BRC-169 envelope's sender — only if it resolves to the
-sender, source `claim`).
+
+**What the resolve program finds** it keeps under its own name (#87), not in
+the address book — the head `resolve/peers`:
+
+```
+{kind: "resolutions", peers: [{key, peer: <cid>}]}                             sorted by key
+{kind: "resolution", key: bytes(33), transport: "mailbox", address: <messagebox URL>,
+ handle: text, domain: text, since: ms, source: "resolve" | "claim"}
+```
+
+A lookup's thread finishes with the record's CID (a link). A message to a
+key the address book does not name goes to the messagebox's delivery thread
+all the same (the kernel cannot know the resolve program's records; the
+delivery thread can): it reads the address book first, then this record,
+and fails "no route to <hex>: not in the address book, and not resolved"
+when neither names the key. The owner may copy a resolution into the
+address book with a `peers` message (the management page proposes such
+rows as it proposes dispatch rows at install). **Registration is
+application wiring, not core**: nothing registers itself or takes claims;
+an application that wants senders to make themselves reachable writes a row
+of its own (e.g. `{"address": "register", "sender": "*", "program":
+"resolve"}`: the resolve program keeps a claim `{handle, domain}` — or a
+BRC-169 envelope's sender — only if it resolves to the sender, source
+`claim`).
 
 ### The providers
 
@@ -806,8 +818,9 @@ session as a record.
 `emit` takes a key, never a handle. A handle is looked up by **launching**
 the resolve program (`sk.launchResolve(a, in, handle, domain, key?)`; args
 `{handle, domain, key?}`): this step then waits on that thread, and when it
-comes to rest the launcher is stepped again — finished, the address book
-names the handle (the thread's result is the peer record); errored, the
+comes to rest the launcher is stepped again — finished, the resolve
+program's records (`resolve/peers`, #87) name the handle (the thread's
+result is the record's CID), and the launcher may emit to the key; errored, the
 lookup failed (`transient: …` when no answer came, or a 5xx). `key` is the
 identity the launcher expects; another answer is refused.
 
@@ -818,8 +831,9 @@ URL. It is a program, not the core: the resolve program's thread fetches
 `https://<domain>/manifest.json` (`metanet.handles.resolve`, default
 `/.well-known/metanet-handles/resolve`), then `GET <resolve>?handle=<handle>`
 → `{identityKey, messagebox, …}`, each GET an emit to the `fetch` provider
-and its answer the next step, and writes `{transport: "mailbox", address:
-<messagebox>}` (source `resolve`). The instance's own domain is looked up at
+and its answer the next step, and keeps `{kind: "resolution", transport:
+"mailbox", address: <messagebox>, …}` (source `resolve`) under its own head
+`resolve/peers` — never the address book (#87). The instance's own domain is looked up at
 `defaults.resolveOrigin` (a dev host). The BRC-52 certificate is recorded,
 not checked (`unchecked`). The host publishes the manifest and the resolve
 endpoint for its instances (`{handle, domain, identityKey, messagebox}`),
@@ -972,7 +986,8 @@ The loop (`programs/loop`) gives the model a `message` tool beside `bash`:
 message {to: "@handle@domain", text}
 ```
 
-- **Addressing.** The loop finds the handle in its address book, else
+- **Addressing.** The loop finds the handle in its address book, else in
+  the resolve program's records (`resolve/peers`, #87), else
   launches the resolve program (`sk.launchResolve`) and rests on it; when it
   comes to rest the call runs again. A handle that does not resolve is an
   error result.
@@ -997,9 +1012,9 @@ message {to: "@handle@domain", text}
   runs. A resumed thread that rests on a `message` takes the reply as that
   call's result, `{of: <their chat>, role: "tool", call, to, sent: <our chat>,
   text}`; one that rests on its answer takes it as the next user turn.
-- **Undeliverable.** A send to a key with no route fails in the step; one
-  whose delivery thread gives up (after its retries) steps the loop with
-  `undelivered`. Either way a `message` becomes
+- **Undeliverable.** A send whose delivery thread gives up — a key neither
+  the address book nor the resolve program's records name (#87: at once), or
+  after its retries — steps the loop with `undelivered`. Either way a `message` becomes
   an error result for the model (`{of, role: "tool", call, to, error}`) and the
   loop goes on; its `infer`, an `error` turn answered to the opener as an
   inference error; its answer to the opener, an `error` turn, and the thread

@@ -116,8 +116,9 @@ writes the same chain. A name never moved has no chain.
   install) writes `<app>/…` and nothing else; a program the genesis wired
   (no app record) writes only what the genesis's `scopes` list under its
   name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox", "outbound"],
-  wallet: ["wallet/"], chain: ["chain/"]}` by default; `chain` since #78, the
-  chain module wired at boot; `wallet/` since #79) — a bare head name, or a
+  resolve: ["resolve/"], wallet: ["wallet/"], chain: ["chain/"]}` by default;
+  `chain` since #78, the chain module wired at boot; `wallet/` since #79;
+  `resolve/` since #87, its records of what it found) — a bare head name, or a
   prefix ending in `/`. An in-VM callee writes in its own scope, not its
   caller's. There are no other grants (#79: the transitional `heads` on
   program records, the alias head `<app>` and the resolve program's
@@ -199,17 +200,16 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
   - `dispatch` — `{op: "add" | "remove", row}`: the table changed (a program
     row's record and module must be in the store).
   - `peers` — `{op: "add", key, transport?, address? | url?, role?, handle?,
-    domain?, source?}` | `{op: "remove", key}`: the address book (`source`
-    "admin", or "resolve" / "claim" from the resolve program).
+    domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
   [--sender key] <box> <handler>` / `skein-host dispatch <handle> …`,
-  `skein-host peers` send them. No reply — except to the instance itself
-  (#79): an admin message one of its own programs sent (admitted by a
-  delegate row from the instance's key) steps the thread awaiting it with
-  `admin: {message, op, done: true}` or `{message, op, error}`. The default
-  system has one such delegate row, `{peers, $self, kernel, fn: peers}`,
-  where the resolve program is wired: a resolved handle enters the address
-  book through the kernel's operation (the resolve program writes no head).
+  `skein-host peers` send them. No reply. **No program reaches a kernel
+  table** (#87): every program emits as the instance, and no default row
+  admits the instance's own key to an admin box, so a program's message to
+  one (`peers`, say) finds no row — recorded, nothing runs. The resolve
+  program keeps what it finds under its own name (`resolve/peers`); the
+  address book changes only on the owner's messages (or a key the owner
+  added as a sender on the `peers` row).
 - **A row is the permission.** Who may administer is whoever an admin row
   admits: the genesis writes the owner's; delegating is the owner adding a
   row with the same operation and another sender, through `dispatch` —
@@ -329,13 +329,17 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
 ```
 
 - `to` is the recipient's identity key — never a handle (resolve it first:
-  the resolve program, docs/MESSAGES.md "BRC-169 is discovery") — and it
-  must have an entry in the **address book** (the head `peers`, as this
-  step leaves it: a step that resolved a handle may emit to it at once) —
-  or be the instance's own identity (`self.identity` in the step's input),
-  which needs none (#79): **one app of an instance asks another** this way
-  (the wallet or an overlay app sending the chain app an `ingest`, the
-  resolve program sending the kernel a `peers` operation). It goes out by
+  the resolve program, docs/MESSAGES.md "BRC-169 is discovery"). It goes
+  out by its entry in the **address book** (the head `peers`, as this step
+  leaves it); a key the address book does not name goes to the `mailbox`
+  transport's middleware, the messagebox's delivery thread, which reads the
+  resolve program's record of the key (`resolve/peers`, #87: a step whose
+  resolve has finished may emit to the key at once) and fails "no route"
+  when there is none; with no messagebox program in the genesis the emit
+  fails. The instance's own identity (`self.identity` in the step's input)
+  needs no entry (#79): **one app of an instance asks another** this way
+  (the wallet or an overlay app sending the chain app an `ingest`; never a
+  kernel admin box, which no row opens to the instance's key). It goes out by
   the host's loopback (transport `local`, address `self`), comes back as a
   `local` request signed by the instance, and routes like any message: a
   dispatch row from the instance's own key (a manifest's `$self`) admits
@@ -381,8 +385,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   handle (resolve the handle first)`` · `emit: the box is empty or starts
   with ':' (reserved)` · `emit: the body is not dag-cbor` | `… not IPLD` |
   `… not canonical dag-cbor` · ``emit: `subject` is not a CID`` · ``emit:
-  no route to <hex>: not in the address book (resolve its handle, or add
-  it to the `peers` box)`` · `emit: <hex> is reached by mailbox, and the
+  no route to <hex>: not in the address book, and the genesis has no
+  messagebox program to deliver it`` · `emit: <hex> is reached by mailbox, and the
   genesis has no messagebox program to deliver it` · `emit: the oracle did
   not sign the message` · in a kernel call, `emit: a kernel call sends
   nothing (emit from a step)`.
@@ -614,8 +618,9 @@ Every request is an entry, a read's too; what a read moves is nothing. A
 message leaves an instance by `emit` (above): the address book (the head
 `peers`, one of the kernel's tables: seeded by the genesis with the host's
 providers and the owner's mailbox, written by the kernel's `peers`
-operation on the owner's messages, and — transitional, to review — by the
-resolve program's BRC-169 lookup) names how each key is reached. A store in an older
+operation on the owner's messages only) names how each key is reached; for
+a key it does not name, the delivery thread reads the resolve program's
+record (`resolve/peers`, #87). A store in an older
 format is refused (start a new store).
 
 ## Time

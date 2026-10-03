@@ -99,9 +99,10 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
   fills it. It is the only peer a genesis names: the address book
   (head `peers`, one of the kernel's tables) is written by the kernel's
-  `peers` operation on the owner's messages (`skein-host peers`) and on the
-  resolve program's, which the instance sends itself (the delegate row
-  `{peers, $self, kernel}`).
+  `peers` operation on the owner's messages (`skein-host peers`) only — no
+  program writes it. The resolve program keeps what it finds under its own
+  name (`resolve/peers`), which the messagebox's delivery reads for a key
+  the address book does not name.
 - **`libp2p`** (#51) becomes the genesis's `libp2p: {topics, protocols,
   listen?}`: the host's libp2p node runs for the instance (its own peer key,
   derived from the master secret, key ID `libp2p:<handle>`), subscribes
@@ -144,10 +145,11 @@ Booting from it unchanged gives the same programs and rows as code genesis,
 plus the tree.
 
 The default `etc/dispatch.json` has no `register` box (#40): registration —
-a sender entering itself in the address book — is **application wiring**, not
+a sender making itself reachable — is **application wiring**, not
 core. An application that wants it adds its own row, with its own rules on
 who may call it: e.g. `{"address": "register", "program": "resolve"}` (anyone;
-the resolve program's claim handler records `{handle, domain}` only if the
+the resolve program's claim handler records `{handle, domain}` under
+`resolve/peers` — never the address book, #87 — only if the
 handle resolves to the sender), or `{"sender": "<key>", "address":
 "register", "program": "<its own program>"}`. Without one, the admin
 configures the address book (`skein-host peers <handle> add <key>

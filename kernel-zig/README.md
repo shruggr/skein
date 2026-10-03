@@ -562,14 +562,17 @@ machine, four tables and the oracle.
   `thread: null`); a refusal is a log line and nothing written. No program
   runs: `objects-handler`, `head-handler`, `subscribe-handler` and the
   front door's `routes` box are gone, as is the `subscribe` import
-  (preview1 and WIT; skein-sdk 0.3.0). An admin message whose sender is the
-  instance itself (a delegate row from its own key) is answered (#79,
-  `adminDone`): the thread awaiting the message steps with `admin: {message,
-  op, done: true | error}`.
+  (preview1 and WIT; skein-sdk 0.3.0). No reply. No default row admits the
+  instance's own key to an admin box (#87: #79's delegate row `{peers,
+  $self, kernel}` and its `adminDone` answer are gone), so a program's
+  admin message finds no row: recorded, nothing runs.
 - **The loopback** (#79, `routeTo`): `emit` to the instance's own identity
   needs no address book entry; the message goes to the host as transport
   `local`, address `self`, and the host appends it back as a `local`
-  request (src/host/providers.ts).
+  request (src/host/providers.ts). A key the address book does not name
+  routes to the `mailbox` middleware when the genesis has one (#87): the
+  messagebox's delivery thread reads the resolve program's record of it
+  (`resolve/peers`) or fails "no route".
 - **Write scope** (`hAdvance`, `inScope`): `advance(name)` only when the
   running program (the thread's, or the in-VM callee's: `StepState.progs`)
   may write it — its record's `app` makes `<app>/…` its scope; a program
@@ -579,10 +582,10 @@ machine, four tables and the oracle.
   A head update carries `owner` (`heads.ownerOf`: the name's text before
   the first `/`), and `dump` lists `[name, tree, owner]`.
 - **The address book's `peers` operation** is `addressbook.write` (the
-  resolve program's writePeer, moved into the kernel; since #79 the resolve
-  program records a lookup through it — a message to itself, the default
-  delegate row `{peers, $self, kernel}` — with `source` resolve or claim,
-  and writes no head). Sessions are the head `frontdoor/sessions`.
+  resolve program's writePeer, moved into the kernel), source `admin`, on
+  the owner's messages only. Since #87 the resolve program keeps what it
+  finds under its own head `resolve/peers` (genesis scope `resolve/`).
+  Sessions are the head `frontdoor/sessions`.
 
 ### Earlier formats
 

@@ -1,6 +1,7 @@
 // The loop over #40's delivery, end to end with the real Zig kernel: a chat
 // to alpha; alpha's `infer` goes over http to the inference peer's mailbox
-// instance (its address-book entry from its own resolve, first contact); the
+// instance (its record from its own resolve, first contact, kept under
+// `resolve/peers` — #87: never the address book, which is the owner's); the
 // peer answers into alpha's `completions` at the messagebox its own address
 // book names for alpha; the model calls `message` to @beta@localhost — alpha
 // resolves beta, delivers the chat to beta's front door in process (no
@@ -81,24 +82,27 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
   const toolTurn = (asked[2]!.messages as Json[]).find((m) => m.role === "tool") as { content: string };
   assert.equal(toolTurn.content, "pong from beta", "beta's answer is the message tool's result");
 
-  // The peer tables: what each instance's own programs wrote, nothing from the host's rows.
-  const peersOf = async (handle: string) => {
+  // The address book (the owner's, #87) and the resolve program's records (`resolve/peers`, its own):
+  // what each instance's admin and its own resolve wrote, nothing from the host's rows.
+  const tableOf = async (handle: string, head: string) => {
     const k = (await h.router.hydrate(handle)).kernel;
-    const root = await k.call("head", "peers") as CID | null;
+    const root = await k.call("head", head) as CID | null;
     if (!root) return [];
     const t = await k.store.get(root) as unknown as { peers: Array<{ peer: CID }> };
-    const all = await Promise.all(t.peers.map(async (p) => await k.store.get(p.peer) as unknown as { key: Uint8Array; source: string; handle?: string }));
+    const all = await Promise.all(t.peers.map(async (p) => await k.store.get(p.peer) as unknown as { kind: string; key: Uint8Array; source: string; handle?: string }));
     return all.filter((p) => p.source !== "genesis"); // the genesis seeds the host's providers and the owner (#70)
   };
-  const ap = await peersOf("alpha"), bp = await peersOf("beta");
   const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
-  assert.deepEqual(ap.map((p) => [hex(p.key), p.source]).sort(), [[beta, "resolve"], [inferId, "resolve"]].sort(), "alpha: infer and beta by its own resolve");
-  assert.deepEqual(bp.map((p) => [hex(p.key), p.source]).sort(), [[alpha, "admin"], [inferId, "resolve"]].sort(), "beta: alpha from the admin's `peers` message, infer by its own resolve");
+  const rows = (ps: Array<{ kind: string; key: Uint8Array; source: string }>) => ps.map((p) => [p.kind, hex(p.key), p.source]).sort();
+  assert.deepEqual(rows(await tableOf("alpha", "peers")), [], "alpha: its address book has nothing its programs wrote (#87: resolve never writes it)");
+  assert.deepEqual(rows(await tableOf("alpha", "resolve/peers")), [["resolution", beta, "resolve"], ["resolution", inferId, "resolve"]].sort(), "alpha: infer and beta in its resolve program's records");
+  assert.deepEqual(rows(await tableOf("beta", "peers")), [["peer", alpha, "admin"]], "beta: alpha from the admin's `peers` message");
+  assert.deepEqual(rows(await tableOf("beta", "resolve/peers")), [["resolution", inferId, "resolve"]], "beta: infer by its own resolve");
   assert.ok(!boxes.includes("register"), `no claim was ever sent (boxes delivered to: ${[...new Set(boxes)].join(", ")})`);
   assert.ok(boxes.includes("chat") && boxes.includes("infer") && boxes.includes("completions"));
 });
 
-test("the loop: a stranger (in no address book) chats an agent on its open box: admitted, inferred, and the answer fails once with \"no route\" (no retry)", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("the loop: a stranger (in no address book) chats an agent on its open box: admitted, inferred, and the answer fails once with \"no route\" (no retry; #87: in the delivery thread)", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const inferKey = PrivateKey.fromRandom(), inferId = inferKey.toPublicKey().toString();
   const h = await testHost(t, { infer: inferId, genesis: { defaults: { sendRetryMs: "100" } } });
   h.mailbox("david", h.ownerId);
@@ -127,9 +131,14 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   // Some time for a retry storm to show, if there were one.
   for (let i = 0; i < 10; i++) { await peer.poll(); await h.router.settled(); await new Promise((r) => setTimeout(r, 50)); }
   assert.equal(asked.length, 1, "the stranger's chat was admitted and inferred on, once");
+  // #87: the emit goes to the delivery thread (a key the address book does not name may be one the
+  // resolve program recorded); it finds no record and errors once, and the loop is told so, once.
   const lines = noRoute();
-  assert.equal(lines.length, 1, `logged once:\n${lines.join("\n")}`);
-  assert.match(lines[0]!, new RegExp(`could not deliver the answer: .*no route to ${stranger}: not in the address book`));
+  const delivery = lines.filter((l) => / messagebox step \d+ → errored/.test(l)), loop = lines.filter((l) => l.includes("could not deliver the answer"));
+  assert.equal(delivery.length, 1, `the delivery errored once (no retry):\n${lines.join("\n")}`);
+  assert.equal(loop.length, 1, `logged once by the loop:\n${lines.join("\n")}`);
+  assert.equal(lines.length, 2, `nothing else:\n${lines.join("\n")}`);
+  assert.match(loop[0]!, new RegExp(`could not deliver the answer: .*no route to ${stranger}: not in the address book, and not resolved`));
   assert.equal(boxes.filter((b) => b === "chat").length, 1, "the only chat delivered is the stranger's own: no answer went out");
   assert.equal((await new RawBox(h.owner, `${h.base}/@david`).list("chat")).length, 0, "nothing reached the owner");
 });
