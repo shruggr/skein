@@ -299,6 +299,17 @@ goes around the helper; the log shows what it did. A `writes: true`
 function that fails is answered with its error, and what it wrote before
 failing stands: check first, write last.
 
+**A function whose answer needs another party** (a provider's answer, a
+peer's reply) cannot be answered by the helper's `/call`, which answers in
+the request's step. Its route handler launches a thread and answers
+`{wait: true}`; the client waits on that thread (docs/MESSAGES.md, "A
+synchronous client waits on the thread"), and the handler is called again
+with `resolved`. The onboarding app (shruggr/skein-onboard, #90) is the
+example: its own `/onboard/call` (sender `session`) takes `{fn:
+"onboard.create", args}` in the same shape, launches a thread that asks the
+instance manager, and answers `{fn, result | error}` from that thread's
+result.
+
 ## 5. Security model, in one place
 
 - **Only signed messages change anything.** Every package is appended and

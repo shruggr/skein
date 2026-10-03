@@ -1,9 +1,10 @@
-// The shell app and the chat app for tests and equivs (#83). A genesis has no
-// shell, no `run`, no `chat`: a test that runs them installs the apps first,
-// through the real install path (`skein-host install`, src/host/install.ts),
-// from a checkout at the commit pinned here — $SKEIN_SHELL_DIR /
-// $SKEIN_CHAT_DIR name a checkout instead, $SKEIN_SHELL_REV /
-// $SKEIN_CHAT_REV another commit. A pinned commit is fetched once into
+// The shell app and the chat app for tests and equivs (#83), and the
+// onboarding app (#90). A genesis has no shell, no `run`, no `chat`: a test
+// that runs them installs the apps first, through the real install path
+// (`skein-host install`, src/host/install.ts), from a checkout at the commit
+// pinned here — $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR / $SKEIN_ONBOARD_DIR name
+// a checkout instead, $SKEIN_SHELL_REV / $SKEIN_CHAT_REV /
+// $SKEIN_ONBOARD_REV another commit. A pinned commit is fetched once into
 // <tmpdir>/skein-apps/<name>-<rev> and reused. Not part of anything that runs.
 
 import { spawnSync } from "node:child_process";
@@ -28,6 +29,12 @@ export const SHELL_APP: PinnedApp = {
 export const CHAT_APP: PinnedApp = {
   name: "chat", repo: "https://github.com/shruggr/skein-chat",
   rev: process.env.SKEIN_CHAT_REV ?? "a9491ee30668aeee5a44745403dadf7355825a51", dir: process.env.SKEIN_CHAT_DIR,
+};
+
+/** shruggr/skein-onboard (#90): the onboarding app, installed in the host skein. */
+export const ONBOARD_APP: PinnedApp = {
+  name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
+  rev: process.env.SKEIN_ONBOARD_REV ?? "e142f8ea203a5846ac2de9d4c319669c59463af9", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */

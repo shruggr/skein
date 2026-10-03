@@ -103,8 +103,12 @@ request: the body is what was asked. Without `--messagebox`, the owner's
 mailbox instance on this host is used if there is one. While `skein-host
 run` is up the claim goes through its control socket; otherwise the command
 runs a router of its own. The row admits anyone, so the race is closed by
-order: the instance manager (#90) claims the instance before the proxy
-publishes its hostname.
+order: the instance manager's `create` (#90: `skein-host init` for the host
+skein, the onboarding app's request for anyone else) adds the row disabled,
+boots it from the image, delivers the claim and waits for the kernel to
+take it, and only then enables the row, which publishes its hostname. The
+claim is the instance's first entry after its genesis (docs/ARCH.md, "The
+host skein").
 
 ## The system tree
 
@@ -428,6 +432,16 @@ boot is written, and the process exits 0.
   entry; a second claim and a stranger's are refused; the owner installs
   app-demo and calls it; an owned instance refuses a claim; `add --image
   default` and the refused outpoint form; both stores replayed.
+- `src/host/manager.test.ts`: the instance manager (#90) on signed
+  messages: the host skein with the manager in its address book; `create`
+  claims the child before it is published (the claim its first entry), the
+  child's book has no manager; refusals as answers; another instance's
+  message not acted on; `stop`/`start`.
+- `kernel-zig/equiv/host.ts` (in `run.sh`, #90): `skein-host init`, the
+  onboarding app installed in the host skein, a client's session creates
+  alice through it, alice claimed for the client and answering at her url,
+  the client installs app-demo in her; a second create refused; both stores
+  replayed.
 - `kernel-zig/equiv/boot.ts` (in `run.sh`): two instances, one booted from a
   directory and one from a packet of it (mined, proofs checked). Each is
   chatted with over `main` and runs over it. Then a checkpoint is restored on a

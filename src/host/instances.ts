@@ -14,6 +14,9 @@
 // the last event id taken from Arcade's stream, the statuses already routed,
 // and the queue of broadcasts Arcade has not taken yet. And the cron
 // provider's one (#69, cron.ts): the schedules the instances asked for.
+// And the host's own settings (#90): which row is the host skein — the
+// operator's instance (`skein-host init`), whose identity alone reaches the
+// instance manager.
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -77,6 +80,11 @@ CREATE TABLE IF NOT EXISTS cron_schedule (
   request           TEXT NOT NULL,                    -- the tick request's CID
   next              INTEGER NOT NULL,                 -- ms: the next tick
   PRIMARY KEY (instance, name)
+) WITHOUT ROWID;
+-- The host's settings (#90): key → value. \`host_skein\`: the handle of the host skein.
+CREATE TABLE IF NOT EXISTS host_settings (
+  key               TEXT PRIMARY KEY,
+  value             TEXT NOT NULL
 ) WITHOUT ROWID;`;
 
 export type Status = "enabled" | "disabled";
@@ -294,6 +302,22 @@ export class HostDb {
   byIdentity(identity: string): InstanceRow | undefined {
     const r = this.db.prepare("SELECT * FROM instances WHERE identity = ? AND status = 'enabled'").get(identity);
     return r ? { ...r } as unknown as InstanceRow : undefined;
+  }
+
+  /** A host setting (#90), if set. */
+  setting(key: string): string | undefined {
+    const r = this.db.prepare("SELECT value FROM host_settings WHERE key = ?").get(key) as { value: string } | undefined;
+    return r?.value;
+  }
+
+  setSetting(key: string, value: string): void {
+    this.db.prepare("INSERT INTO host_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+  }
+
+  /** The host skein (#90): the operator's instance (`skein-host init`), the one row whose identity reaches the instance manager. */
+  hostSkein(): InstanceRow | undefined {
+    const h = this.setting("host_skein");
+    return h ? this.get(h) : undefined;
   }
 
   close(): void { this.db.close(); }

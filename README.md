@@ -82,6 +82,33 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   `kernel-zig/zig-out/bin/skein-kernel dump | replay | fuel <store>` read a
   store from the command line.
 
+## Run a host
+
+A host runs skeins for others too. It has one of its own, the **host
+skein**: the operator's instance, where the host keeps what is state or
+conversation (docs/ARCH.md, "The host skein").
+
+```
+bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, claimed for you
+bin/skein-host run                                                                       # the host on :8100; the host skein at http://host.localhost:8100
+bin/skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instance host   # the onboarding app, as you (the owner)
+```
+
+- `init` creates the host skein once (handle `host`, or `--handle`), from
+  the default image, claimed for `--owner` (default `SKEIN_OWNER`) before
+  its hostname is published. Its address book alone names the **instance
+  manager**, the host's provider that creates, starts and stops instances;
+  the manager acts for no one else.
+- With the onboarding app installed, anyone with a wallet gets a skein: a
+  BRC-104 session to the host skein and `POST /onboard/call {"fn":
+  "onboard.create", "args": {"handle": "alice"}}`. The answer, on the same
+  connection, is `{handle, identity, url}`: a new instance from the default
+  image, owned by the session's key, already claimed when its URL first
+  answers. Its owner installs apps into it from there (next sections). A
+  handle that is taken is refused (409). The management site (#92) will be
+  the page that does this.
+- `scripts/host/up.sh` does all three for the dev stack.
+
 ## Talk to it
 
 An instance is an HTTP server at its own origin. Every request is appended
@@ -216,6 +243,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.1.0 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
+| [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager | v0.1.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:

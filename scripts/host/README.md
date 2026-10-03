@@ -25,6 +25,12 @@ So `up.sh` goes:
    one already (whatever its handle). `~/.skein/mailbox.url` names the
    owner's. No registration (`POST /account/register`) is needed for keys this machine
    knows: the rows are what a registration would make.
+2b. **The host skein** (#90): `skein-host init --owner <the owner's key>`,
+   once — the operator's own instance (`host`), from the default image,
+   claimed for the owner before its hostname is published, the instance
+   manager in its address book (no other instance's book names it). Run
+   again, it only says which instance it is. `skein-host list` shows it as
+   kind `host`, so the steps below that walk the agents leave it out.
 3. **The host** (`skein-host run`, if nothing listens on :8100). It
    hydrates every enabled row, so the agents' geneses happen here, naming the
    owner's mailbox instance (the host's default for
@@ -50,6 +56,11 @@ So `up.sh` goes:
    `#v0.1.0`). Installing what an instance already has sends only the head
    again. The shell app's first install is the slow step: its modules are
    ~50 MB of messages.
+7. **The onboarding app** (#90) into the host skein, as the owner, from
+   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.1.0`): any wallet
+   with a session then creates a skein of its own with `POST
+   http://host.localhost:8100/onboard/call {"fn": "onboard.create", "args":
+   {"handle": "…"}}` (docs/ARCH.md, "The host skein").
 
 An agent whose genesis names no owner messagebox is logged at every
 hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
@@ -57,7 +68,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65: `fetch`, `waker`, `cron`, `libp2p`, `status`, each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
+| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600, explorers 4610+ | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65, #90: `fetch`, `waker`, `cron`, `libp2p`, `status`, the instance manager `manager` (the host skein's only), each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |

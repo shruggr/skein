@@ -1,6 +1,7 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-host`: the host's management database (instances.ts, $SKEIN_HOME/host.db)
 // and the router (router.ts, #33) that serves every enabled row.
+//   skein-host init [--owner <hex>] [--handle host]   the host skein (#90): the operator's own instance
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host add <handle> --mailbox --owner <hex>   a mailbox instance (#40) for an identity outside the host
 //   skein-host knows <handle> [a,b | --all | --none]
@@ -33,6 +34,15 @@
 // request from the host's instance manager (Router.claim): the kernel writes
 // the owner's admin rows and removes the claim row; like `event`, through the
 // running router's control socket, else a router of its own.
+// `init` (#90) creates the host skein: the operator's own instance, from the
+// default image, claimed for the operator's key (`--owner`, else SKEIN_OWNER)
+// before its hostname is published — Router.createInstance, the instance
+// manager's own `create` — with the instance manager in its address book (no
+// other instance's book names it), and recorded in host.db as the host skein.
+// Once; a second `init` says which instance it is. The operator then installs
+// the onboarding app into it (`skein-host install
+// https://github.com/shruggr/skein-onboard#v0.1.0 --instance host`;
+// scripts/host/up.sh does).
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the oracle's (oracle.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
@@ -106,7 +116,7 @@ import type { CID } from "multiformats/cid";
 import { CID as CIDClass, decode as decodeCbor, parse as parseCid } from "../runtime/cid.ts";
 import { DatabaseSync } from "node:sqlite";
 import { headTree, MAIN } from "../runtime/heads.ts";
-import { anyOf, dirSource, MemBlocks, packetSource, stockSystemFiles, storeObjects, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, MemBlocks, packetSource, stockSystemFiles, storeObjects, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import { Kernel } from "./kernel.ts";
 import type { Server } from "node:http";
 import { dirname, join, resolve } from "node:path";
@@ -140,6 +150,7 @@ export interface Env {
 }
 
 const USAGE = `usage:
+  skein-host init [--owner <hex>] [--handle host]          the host skein (#90): the operator's instance, from the default image, claimed for --owner (default SKEIN_OWNER); once
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex>         a mailbox instance for an identity outside the host (#40)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
@@ -223,6 +234,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         }
         return 0;
       }
+      case "init":
+        return await initCmd(db, rest, env);
       case "identity": {
         // The oracle's key (oracle.ts) for an instance: the BRC-104 identity its front door answers as.
         const [handle, flag, ...more] = rest;
@@ -243,7 +256,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
       case "list": {
         const door = frontDoorKeys(env.vars, home);
         const peer = peerIds(env.vars, home);
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-", peer(r)].join("\t"));
+        const host = db.setting("host_skein");
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.handle === host ? "host" : r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-", peer(r)].join("\t"));
         return 0;
       }
       case "enable": case "disable": case "remove": {
@@ -461,6 +475,42 @@ async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   } finally {
     await router.close();
   }
+}
+
+/**
+ * `skein-host init [--owner <hex>] [--handle host]` (#90): the host skein —
+ * Router.createInstance with `host`, through a router of this command's own
+ * (closed afterwards), unpublished until that router is closed: a running
+ * router serves only enabled rows, so it hydrates the host skein on its first
+ * request, after this process has let go of the store. Once: a second `init`
+ * prints which instance is the host skein.
+ */
+async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { owner: { type: "string" }, handle: { type: "string" } } });
+  if (positionals.length) { env.err(USAGE); return 2; }
+  const had = db.hostSkein();
+  if (had) {
+    if (v.handle !== undefined && v.handle !== had.handle) { env.err(`skein-host init: the host skein is ${had.handle} already`); return 1; }
+    env.out(`the host skein: ${had.handle}@${had.domain} (${had.identity ? short(had.identity) : "-"}) ${had.status}`);
+    return 0;
+  }
+  const owner = v.owner ?? env.vars.SKEIN_OWNER;
+  if (!owner || !/^0[23][0-9a-f]{64}$/.test(owner)) { env.err("skein-host init: the operator's identity key: --owner <hex>, or SKEIN_OWNER"); return 2; }
+  const handle = v.handle ?? "host";
+  const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
+  let c: { handle: string; identity: string; url: string };
+  try {
+    c = await router.createInstance(handle, owner, { host: true, publish: false });
+  } catch (e) {
+    env.err(`skein-host init: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await router.close();
+  }
+  db.setStatus(handle, "enabled");
+  env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, claimed by ${short(owner)} · at ${c.url} · the instance manager in its address book`);
+  env.out(`next: skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instance ${c.handle} (the onboarding app; the router must be running)`);
+  return 0;
 }
 
 /** An outpoint as an image is named on chain: `<txid>_<vout>` (or `.`/`:`). */
@@ -810,9 +860,8 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
 
 // ---------------------------------------------------------------- bootstrap (#4)
 
-const WASM_DIR = join(ROOT, "wasm");
-/** The default image (#89): one genesis for everyone, no owner in it, a claim row. */
-export const DEFAULT_IMAGE = join(ROOT, "images/default");
+/** The default image (#89): one genesis for everyone, no owner in it, a claim row (boot.ts). */
+export { DEFAULT_IMAGE };
 
 /** The source `add --boot/--packet` names (boot.ts): a directory, a tree CID in a store, or a packet file. */
 async function bootSourceOf(v: { boot?: string; from?: string; packet?: string; scope?: string; proofs?: string }, row: InstanceRow): Promise<BootSource> {
@@ -967,6 +1016,8 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   else env.out("skein-host: no Arcade (SKEIN_ARC_URL): a broadcast event is dropped; a new genesis names no status provider");
   await router.start();
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
+  const hs = db.hostSkein();
+  env.out(hs ? `skein-host: the host skein is ${hs.handle} (${hs.identity ? short(hs.identity) : "-"}) at ${router.originOf(hs.handle)}: the instance manager takes its messages only` : "skein-host: no host skein (skein-host init): the instance manager acts for nobody");
   const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);
   const explore = o.explore ?? { command: join(ROOT, "bin/skein-explore") };
   if (base !== undefined) enabled.forEach((row, i) => {

@@ -27,6 +27,8 @@
 // `boot` here.
 
 import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
@@ -335,6 +337,21 @@ export function wasmDirObjects(dir: string): Objects {
       return p ? new Uint8Array(readFileSync(p)) : undefined;
     },
   };
+}
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
+/** The repo's pinned modules (wasm/): what a system tree's `bin/*.cid` names. */
+export const WASM_DIR = join(ROOT, "wasm");
+/** The default image (#89): one genesis for everyone, no owner in it, a claim row. */
+export const DEFAULT_IMAGE = join(ROOT, "images/default");
+
+/**
+ * An image as a boot source (#89, #90): a directory (default: the default
+ * image), its objects with the repo's pinned modules beside them.
+ */
+export async function imageSource(dir: string = DEFAULT_IMAGE): Promise<BootSource> {
+  const d = await dirSource(dir);
+  return { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(WASM_DIR)) };
 }
 
 /** Source B: a packet file, verified (packet.ts) — a system tree to boot, or a checkpoint to restore. */
