@@ -75,9 +75,13 @@ kernel itself performs — no program is stepped:
 | `head` | `{name, tree}` | the head advanced to a record in the store (owner = the name's app) |
 | `dispatch` | `{op: "add" \| "remove", row}` | the row added (replacing the row with its key: transport, address, prefix, sender), or removed |
 | `peers` | `{op: "add", key, transport?, address? \| url?, role?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
+| `claim` | `{owner, messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): the owner's four admin rows added, the claim row removed, the head `claim` → the body, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned |
 
-Every genesis seeds the owner's four admin rows (`sender` the owner,
-`program` `kernel`); delegating administration is the owner adding a row
+Every genesis that names an owner seeds the owner's four admin rows
+(`sender` the owner, `program` `kernel`); an image (the default image,
+docs/BOOTSTRAP.md) names none and seeds the claim row instead, which the
+host's instance manager takes with the owner's key as a `local` request
+(`skein-host claim`) before the instance is published. Delegating administration is the owner adding a row
 with the same operation and another sender. A refused operation (a bad
 body, a record not in the store) is a log line and nothing written. The
 client commands: `skein import` (objects), `skein head`, `skein dispatch`,
@@ -479,7 +483,7 @@ The head `peers` — who the instance can reach, and how:
 ```
 {kind: "peers", peers: [{key, peer: <cid>}]}                                   sorted by key
 {kind: "peer", key: bytes(33), transport: "mailbox" | "libp2p" | "local", address: text,
- role?: text, handle?: text, domain?: text, since: ms, source: "genesis" | "admin"}
+ role?: text, handle?: text, domain?: text, since: ms, source: "genesis" | "admin" | "claim"}
 ```
 
 | transport | address | how a message goes out |

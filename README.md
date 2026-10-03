@@ -30,8 +30,10 @@ The kernel's four tables:
 | address book | key → transport and address; providers are `local` rows | the kernel's `peers` operation |
 
 The four admin operations are the kernel's own, taken on admin messages from
-the owner (or a key the owner delegated with another row). No program writes
-a kernel table. An app writes only heads under its own name; reads are
+the owner (or a key the owner delegated with another row). So is the
+claim: a skein started from the default image has no owner until a message
+at its claim row names one, and then the kernel writes that key's admin rows
+and removes the claim row. No program writes a kernel table. An app writes only heads under its own name; reads are
 global by CID; a call to another app hands back CIDs, not data.
 
 ## Run a skein locally
@@ -45,18 +47,28 @@ owner, a BRC-100 wallet reachable over HTTP (default
 git clone https://github.com/shruggr/skein && cd skein
 npm install
 (cd kernel-zig && mise exec -- zig build --release)   # kernel-zig/zig-out/bin/skein-kernel; fetches skein-sdk by URL+hash
-bin/skein-host add martha                             # an instance: identity derived from ~/.skein/master.key
-SKEIN_OWNER=<owner key hex> bin/skein-host run        # the host on :8100; martha at http://martha.localhost:8100 or /@martha
+bin/skein-host add martha --image default            # an instance from the default image: identity derived from ~/.skein/master.key, no owner yet
+bin/skein-host claim martha <owner key hex>           # the owner's claim: the kernel writes the owner's admin rows, the claim row goes
+bin/skein-host run                                    # the host on :8100; martha at http://martha.localhost:8100 or /@martha
 ```
 
-A genesis needs an owner: `SKEIN_OWNER`, else `~/.skein/owner.identity`
-(the owner wallet's identity key, one line of hex).
+The default image (`images/default`, docs/BOOTSTRAP.md) is the same for
+everyone: the front door, the messagebox, the static app serving the
+management site at `/` (a placeholder until #92), and one row to the kernel,
+`claim`, from anyone. `skein-host claim` is that claim, sent by the host's
+instance manager; with the host running it goes through its control socket.
+`--messagebox <url>` names where the instance reaches its owner (default:
+the owner's mailbox instance here, if any). A second claim is refused.
+
+A plain `skein-host add martha` (no `--image`) is code genesis, with the
+owner in it: `SKEIN_OWNER`, else `~/.skein/owner.identity` (the owner
+wallet's identity key, one line of hex). The tests and the dev stack use it.
 
 - State lives in `$SKEIN_HOME` (default `~/.skein`): `master.key` (the one
   secret every instance key derives from), `host.db` (instances, queues, the
   fuel ledger), `instances/<handle>/runtime.db` (each instance's store),
   `logs/host.log`.
-- An instance's genesis is written at its first start: the owner, the
+- Code genesis (no `--image`) is written at its first start: the owner, the
   owner's admin rows, the boundary programs (front door, messagebox,
   resolve) and their rows, and the host's providers in its address book.
   It has no shell and no chat loop: those are apps, installed next. `skein-host add <h> --boot <dir>` boots
@@ -210,6 +222,7 @@ This repository's layout:
 
 ```
 kernel-zig/      the kernel: skein-kernel serve | replay | shell | dump | fuel; equiv/ (the equivalence suite)
+images/default/  the default image (#89): a system tree with no owner and the claim row
 programs/        frontdoor, messagebox, resolve, wallet (Zig over skein-sdk); test/ (fixtures, app-demo)
 wasm/            the committed modules the kernel pins (kernel-zig/src/programs.zig), see wasm/README.md
 src/host/        the node host: skein-host (cli.ts), the HTTP transport, providers, feeds, broadcaster, libp2p node, oracle, install

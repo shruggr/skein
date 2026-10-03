@@ -204,9 +204,18 @@ app").
    ticks with `$cron`, announcing itself, whatever it declared. (Built, #76.)
 
 Who can install is whoever the kernel's admin rows admit to `objects`,
-`head` and `dispatch`: the owner, by every genesis; a delegate, by a row the
-owner added. An untrusted app cannot tie itself to anything — the worst it
-can do is ask.
+`head` and `dispatch`: the owner, by every genesis that names one; a
+delegate, by a row the owner added. An untrusted app cannot tie itself to
+anything — the worst it can do is ask.
+
+**Install after the claim** (#89). A skein started from the default image
+(docs/BOOTSTRAP.md "The default image") has no owner and no admin rows
+until it is claimed: an install into it is refused (`$owner` cannot
+resolve, and no row admits the messages). The claim (`skein-host claim
+<handle> <owner-key>`) writes the owner's admin rows; from then on the
+owner installs exactly as above — the wallet, the chain app, the shell app,
+the chat app, whatever the catalog offers. `$owner` in a manifest resolves
+to the claimed key (the head `claim`, read by the install).
 
 **Reconfiguration** is the same messages again. Installing an app that is
 installed (its `<name>/app` head's root is an app record) is the upgrade:

@@ -178,9 +178,9 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
 `local` row fires today: a provider's answer is a message, routed by its
 `mailbox` row (to review).
 
-- **The genesis carries the seed.** Every genesis gets the owner's four admin
-  rows first — `{mailbox, objects | head | dispatch | peers, $owner, kernel}`
-  — then its own `dispatch` (src/host/genesis.ts; the default seed: the
+- **The genesis carries the seed.** Every genesis that names an owner gets
+  the owner's four admin rows first — `{mailbox, objects | head | dispatch |
+  peers, $owner, kernel}` — then its own `dispatch` (src/host/genesis.ts; the default seed: the
   reserved box the host admits into, `:ack` → the messagebox, and the
   default HTTP rows — no `run`, no `chat`: those are the shell app's and
   the chat app's rows, #83; a mailbox
@@ -189,7 +189,10 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
   naming `subscriptions` or `routes` is refused. Sessions are state, but no
   table: the front door keeps them under its own head `frontdoor/sessions`
   (#68, MESSAGES.md). No `register` box: registration is application wiring
-  (an application's own etc/dispatch.json, BOOTSTRAP.md).
+  (an application's own etc/dispatch.json, BOOTSTRAP.md). An **image**
+  (#89: the default image, BOOTSTRAP.md) names no owner and has no admin
+  rows: its one kernel row is the claim row, `{mailbox, claim, *, kernel,
+  claim}`.
 - **The admin operations**, one per table, taken by the kernel on a message
   at a row whose program is `kernel` (validated whole, then written under
   the entry; a refusal is a log line and nothing written; replay performs
@@ -202,6 +205,15 @@ routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
     row's record and module must be in the store).
   - `peers` — `{op: "add", key, transport?, address? | url?, role?, handle?,
     domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
+  - `claim` (#89) — `{owner, messagebox?, handle?, domain?}`, at an image's
+    claim row (from anyone): in one step the owner's four admin rows are
+    added, the claim row is removed, the head `claim` points at the body,
+    and with a `messagebox` the owner's address-book entry is written
+    (`source` "claim"). Refused when the genesis names an owner or the table
+    has an admin row; a second claim finds no row. The instance's owner —
+    the step and call input `owner` — is the genesis's, else the key the
+    head `claim` names (none before the claim). The host sends it as the
+    instance manager's `local` request (`skein-host claim`).
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
   [--sender key] <box> <handler>` / `skein-host dispatch <handle> …`,
   `skein-host peers` send them. No reply. **No program reaches a kernel

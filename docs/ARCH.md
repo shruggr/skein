@@ -248,7 +248,10 @@ a chain packet (a BEEF bag plus a scope, verified offline). The genesis
 names the tree and seeds the dispatch table: the owner's four admin rows
 first, then the tree's. Without a tree the host writes its default system
 in code through the same writer. A packet whose scope is a state record is
-a checkpoint. `BOOTSTRAP.md` has the detail.
+a checkpoint. **The default image** (`images/default`, #89) is a tree whose
+genesis names no owner: it carries the claim row instead, and the first
+claim (the host's instance manager, `skein-host claim`) writes the owner's
+admin rows and removes the row. `BOOTSTRAP.md` has the detail.
 
 ## Files in and out
 

@@ -14,7 +14,9 @@ against Zig.
 The kernel at log format 8: one dispatch table routes (rows for boxes, HTTP
 paths, libp2p topics and protocols); the admin operations (`objects`,
 `head`, `dispatch`, `peers`) are the kernel's own, on messages from the
-owner or a delegate; a program advances only heads in its write scope (an
+owner or a delegate, and so is the claim (#89: an image's genesis names no
+owner; a message at its claim row writes the owner's admin rows and removes
+the row); a program advances only heads in its write scope (an
 app's `<app>/…`; a genesis-wired program's genesis `scopes`); every package
 a transport carries in is an entry and the front door is stepped on it; a
 step's one way out is `emit` (a signed message to a key the address book
@@ -227,6 +229,11 @@ docs/BOOTSTRAP.md). The kernel adds only this:
   pre-filled. Processing the genesis (`scheduler.zig`) sets the head `main` to
   it. The head update has no `thread` (`heads.By.thread` is optional), and the
   genesis is refused if the tree is not in the store.
+- **genesis `owner?`** (#89, `log.zig`): an image names no owner. Its
+  `claim` row is the kernel's `claim` operation (`scheduler.zig` claim):
+  the owner's admin rows added, the claim row removed, the head `claim` at
+  the body; the step input `owner` is then that key (`ownerOf`). No format
+  bump: a store that names its owner reads as before.
 - **`serve` frames**:
   - `has` answers whether any block is present, whatever its codec.
   - `putblock {cid, bytes}` stores a block minted elsewhere, hash-checked like

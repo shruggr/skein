@@ -26,9 +26,85 @@ instance** (#40, `skein-host add <h> --mailbox --owner <key>`) is code genesis
 too, with only the kernel's `frontdoor` and `messagebox` programs,
 `MAILBOX_DISPATCH` (`:ack` → messagebox, every message from anyone in any
 box (`*`) → messagebox), the default http rows and reads, and no peers or
-names. **Every genesis carries the owner's four admin rows** first (the
-kernel's `objects`, `head`, `dispatch`, `peers` operations): a bare genesis
-is the four tables and those rows; a bundle adds what its apps ask for.
+names. **Every genesis that names an owner carries the owner's four admin
+rows** first (the kernel's `objects`, `head`, `dispatch`, `peers`
+operations): a bare genesis is the four tables and those rows; a bundle adds
+what its apps ask for. An **image** names no owner: it carries the claim row
+instead, and the owner's rows come with the claim (below, "The default
+image").
+
+## The default image
+
+The default image (#89) is the system tree in `images/default/`: one genesis
+for everyone, with no owner in it, so that it can be published as one
+outpoint later. A new skein starts from it and is then claimed.
+
+```
+images/default/
+  bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
+  bin/static.wasm                         shruggr/skein-static v0.2.0's module
+  bin/*.json                              the program records' inputs and descriptions
+  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; static at `/` (root www)
+  etc/routes.json, etc/reads.json         empty: no explorer route (there is no owner to give it to at genesis)
+  etc/config.json                         {collect: []}
+  www/index.html                          the management site (#92); a placeholder page until it exists
+```
+
+It has the four tables and the apps needed to be reachable and to install
+more: the front door, the messagebox and the static app serving the
+management site. Nothing else — no wallet, no chain app, no shell, no chat:
+the owner installs those afterwards. The front door, the messagebox and
+static are wired by the genesis (no app records), as any system tree wires
+its programs.
+
+The image's genesis is written by `skein-host add <h> --image <spec>`:
+
+- `default` (the repo's `images/default`), a directory, or a tree CID with
+  `--from <store.db>`;
+- an outpoint (`<txid>_<vout>`) is refused for now: an image on chain is read
+  through the ORDFS app, which is not built yet.
+
+The host brings only its own facts to an image's genesis: the instance's
+identity, handle and domain, its providers in the address book, where its
+domain resolves, its defaults. There is no `owner`, no owner's mailbox, no
+inference peer and no names. A tree whose genesis would name no owner must
+carry a claim row (the loader refuses it otherwise), and `$owner` anywhere
+in it is refused. The heads' owner column is unaffected: it is the app a
+head's name belongs to, not a key.
+
+### The claim
+
+The claim row is
+
+```json
+{ "transport": "mailbox", "address": "claim", "sender": "*", "program": "kernel", "fn": "claim" }
+```
+
+A message in box `claim` whose body is `{owner: <key>, messagebox?: <url>,
+handle?, domain?}` is the kernel's `claim` operation (docs/VM.md). In one
+step, under the message's entry, the kernel:
+
+1. adds the owner's four admin rows (`objects`, `head`, `dispatch`, `peers`,
+   each from `owner` to the kernel);
+2. removes the claim row;
+3. points the head `claim` at the body (what was claimed: how the kernel and
+   the host know the owner of an instance whose genesis names none);
+4. with a `messagebox`, writes the owner's address-book entry (source
+   `claim`), so that what the instance sends its owner can be delivered.
+
+A second claim finds no row: recorded, nothing runs. A claim into an
+instance whose genesis names an owner, or whose table has an admin row
+already, is refused and nothing is written.
+
+The host delivers the claim with `skein-host claim <h> <owner-key>
+[--messagebox url] [--handle h@d]` (Router.claim). It is a signed message
+from the host's instance-manager provider (`manager`), appended as a `local`
+request: the body is what was asked. Without `--messagebox`, the owner's
+mailbox instance on this host is used if there is one. While `skein-host
+run` is up the claim goes through its control socket; otherwise the command
+runs a router of its own. The row admits anyone, so the race is closed by
+order: the instance manager (#90) claims the instance before the proxy
+publishes its hostname.
 
 ## The system tree
 
@@ -306,6 +382,8 @@ skein-host system <dir>                                   the default system tre
 skein-host add <h> --boot <dir>                           Source A
 skein-host add <h> --boot <tree-cid> [--from store.db]    a tree already in a store
 skein-host add <h> --packet <file> [--scope cid] [--proofs roots.json]   Source B (tree or checkpoint)
+skein-host add <h> --image <default | dir | tree-cid [--from store.db]>  an image: no owner, the claim row (#89)
+skein-host claim <h> <owner-key> [--messagebox url] [--handle h@d]      the owner's claim into an image
 skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 ```
 
@@ -340,6 +418,16 @@ boot is written, and the process exits 0.
   in `bin/`, the order of defaults, the owner's admin rows first); its
   refusals.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
+- `src/host/boot.test.ts` also resolves the default image: no owner, no
+  admin rows, the claim row its one kernel row, no explorer route;
+  `$owner` in an image refused.
+- `kernel-zig/equiv/claim.ts` (in `run.sh`): an instance from the default
+  image serves the placeholder and refuses the owner's admin messages;
+  `skein-host claim` over the control socket writes the owner's admin rows,
+  removes the claim row, sets the head `claim` and the owner's address-book
+  entry; a second claim and a stranger's are refused; the owner installs
+  app-demo and calls it; an owned instance refuses a claim; `add --image
+  default` and the refused outpoint form; both stores replayed.
 - `kernel-zig/equiv/boot.ts` (in `run.sh`): two instances, one booted from a
   directory and one from a packet of it (mined, proofs checked). Each is
   chatted with over `main` and runs over it. Then a checkpoint is restored on a
