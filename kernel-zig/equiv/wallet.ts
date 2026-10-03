@@ -54,7 +54,6 @@ import { main } from "../../src/host/cli.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { decode, encode } from "../../src/runtime/cid.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
-import { render } from "../../src/dev/explore/server.ts";
 import { MODULES, rawCid, WALLET as WALLET_P1 } from "../../src/runtime/programs.ts";
 import type { ThreadUpdate } from "../../src/runtime/types.ts";
 import { collect } from "../../src/testkit.ts";
@@ -212,8 +211,6 @@ async function settlementScenario(someone: Uint8Array, reorg: { h102: Uint8Array
   const intoA = await view.edges.refsTo(txCid(txA));
   const bSpends = intoA.filter((x) => x.rel === "spends" && x.from.equals(txCid(txB)));
   out.spendsEdge = bSpends.length === 1 && bSpends[0]!.locator === String(Transaction.fromHex(Buffer.from(await view.bytes(txCid(txB))).toString("hex")).inputs[0]!.sourceOutputIndex);
-  const page = await render(view, new URL(`/r/${txCid(txA)}`, "http://x"));
-  out.explorer = page.status === 200 && page.body.includes("bitcoin-tx") && page.body.includes("vin 0") && page.body.includes("← spends") && page.body.includes(txCid(txB).toString());
 
   // A reorg: a heavier branch from 102 drops block 103, where our first spend was proven. The chain
   // app turns it back to unproven and broadcasts it again; the wallet rewrites nothing and lists that
@@ -408,7 +405,6 @@ check(eq(st.rejected, { a: ["DOUBLE_SPEND_ATTEMPTED", "finished"], b: ["input-re
 check(st.inputsFreed === true && st.noOutputsOfAB === true, `the rejected coins vanish; A's input is spendable again — read from the chain state, nothing of the wallet's rewritten (${JSON.stringify([st.inputsFreed, st.noOutputsOfAB])})`);
 check(st.mentions === true, "the results name the transactions as `mentions` edges");
 check(st.spendsEdge === true, "#42: B's input is a `spends` edge into A, from B's own kept block, locator = the vout it spends");
-check(st.explorer === true, "#42: the explorer's record page for A shows it decoded and ← spends from B");
 check(eq(st.reorg, { reposted: true, change: ["unproven"] }), `a reorg drops block 103: the chain app broadcasts the spend again; the wallet lists its change unproven (${JSON.stringify(st.reorg)})`);
 check(eq(report.heads, [true, true, true]), `the wallet's head is wallet/state, the chain's chain/state; no \`wallet\` head (${JSON.stringify(report.heads)})`);
 check(report.sameChainProgram === true, "the same chain app program record in both instances");

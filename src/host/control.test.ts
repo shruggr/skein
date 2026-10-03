@@ -51,7 +51,7 @@ test("skein-host event over the control socket while the router runs; a router o
   await fs.writeFile(join(tree, "etc/subscriptions.json"), JSON.stringify([{ box: "tick", handler: "cron-demo" }]));
   const vars: Record<string, string | undefined> = {
     HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "77".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(),
-    SKEIN_ROUTER_PORT: "0", SKEIN_HOST_PORT: "0", SKEIN_EXPLORE_BASE_PORT: "off", PATH: process.env.PATH,
+    SKEIN_ROUTER_PORT: "0", SKEIN_HOST_PORT: "0", PATH: process.env.PATH,
   };
   const out: string[] = [], err: string[] = [];
   const env = { vars, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };

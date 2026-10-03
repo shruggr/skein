@@ -6,7 +6,8 @@
 // supervised by this host (`skein-host run`), is up and ready, else `idle`.
 // `skein-host roster` prints it; `skein-host run` serves it at /roster.json
 // (CORS *) for a static page on another origin, and an operator page at /
-// (hostPage): every instance, its process, a link to its explorer.
+// (hostPage): every instance, its process, a link to its origin (a skein
+// from the default image serves its management page there, #92).
 //
 // Each agent's own roster (#27) is a file, ROSTER.md, which deploy puts in its
 // tree and the loop appends to the system prompt: the colleagues the row
@@ -108,7 +109,9 @@ export async function roster(rows: InstanceRow[], open: (row: InstanceRow) => Pr
 /** One instance as the operator page shows it. */
 export interface HostRow {
   handle: string; domain: string; identity: string; status: "live" | "idle" | "not run";
-  store: string; tree: string; pid?: number; restarts: number; explorer?: string;
+  store: string; tree: string; pid?: number; restarts: number;
+  /** The instance's origin: a skein from the default image serves the management site there (#92). */
+  origin?: string;
   /** The instance's next wake (ms), if it has one: the waker's earliest, or the cron provider's next tick (#69). */
   wake?: number;
 }
@@ -122,11 +125,11 @@ export interface HostInfo {
 
 const esc = (x: unknown) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
-/** The host's operator page (#23, "Host explorer"): read-only, one row per enabled instance, a link to each one's explorer. */
+/** The host's operator page (#23): read-only, one row per enabled instance, a link to each one's origin. */
 export function hostPage(rows: HostRow[], info: HostInfo = {}): string {
   const body = rows.map((r) => `<tr><td><b>${esc(r.handle)}</b>@${esc(r.domain)}</td><td class="k" title="${esc(r.identity)}">${r.identity ? `${esc(r.identity.slice(0, 16))}…` : "—"}</td>
 <td class="${r.status === "live" ? "ok" : "mut"}">${esc(r.status)}${r.restarts ? ` <span class="mut">(${r.restarts} restart${r.restarts === 1 ? "" : "s"})</span>` : ""}${r.wake !== undefined ? ` <span class="mut small" title="the waker hydrates it then">wakes ${esc(new Date(r.wake).toISOString().replace("T", " ").slice(0, 19))}</span>` : ""}</td><td>${r.pid ?? "—"}</td>
-<td class="k">${esc(r.store)}</td><td class="k" title="${esc(r.tree)}">${r.tree ? `…${esc(r.tree.slice(-12))}` : "—"}</td><td>${r.explorer ? `<a href="${esc(r.explorer)}">explore</a>` : "—"}</td></tr>`).join("\n");
+<td class="k">${esc(r.store)}</td><td class="k" title="${esc(r.tree)}">${r.tree ? `…${esc(r.tree.slice(-12))}` : "—"}</td><td>${r.origin ? `<a href="${esc(r.origin)}/">open</a>` : "—"}</td></tr>`).join("\n");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>skein host</title>
 <style>:root{--bg:#fbfaf7;--fg:#1d1c1a;--mut:#6b6760;--line:#e3e0d8;--acc:#2f5fd0;--ok:#1f7a3d}
 @media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#e8e6e1;--mut:#9a968e;--line:#2c2b28;--acc:#8fb0ff;--ok:#6fcf8f}}
@@ -135,7 +138,7 @@ a{color:var(--acc)}table{border-collapse:collapse;width:100%}td,th{border-bottom
 th{font-size:13px;color:var(--mut);font-weight:600}.k{font-family:ui-monospace,monospace;font-size:13px}.mut{color:var(--mut)}.ok{color:var(--ok)}</style></head>
 <body><h1 style="font-size:19px">skein host <span class="mut" style="font-size:13px">${rows.length} instance${rows.length === 1 ? "" : "s"} · <a href="/roster.json">roster.json</a></span></h1>
 ${info.router ? `<p class="mut">router <code>${esc(info.router)}</code>${info.originOf ? ` · an instance at <code>${esc(info.originOf("<handle>"))}</code> (its front door)` : ""} · an instance is <span class="ok">live</span> while its kernel runs; the router starts it on demand and stops it when idle</p>` : ""}
-<table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>explorer</th></tr>
+<table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>origin</th></tr>
 ${body}</table>
 ${info.mailboxes ? `<h2 style="font-size:16px">mailbox instances</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>whose</th><th>origin</th></tr>
 ${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.owner ?? "")}">${esc((m.owner ?? "").slice(0, 16))}…</td><td class="k">${esc(info.originOf?.(m.handle) ?? "")}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (skein-host add --mailbox, or POST /account/register)</p>`}` : ""}</body></html>`;

@@ -1,9 +1,10 @@
 //! The explorer's read route (#40): the instance's log, threads, heads and
 //! records as JSON, answered from the committed state the call sees (the
 //! kernel's index maps, kernel-zig index.zig, walked as Merkle search trees
-//! through `get`). A route handler: the stock routes put it at the prefix
-//! `/explore` with `read: "explore"`, so only a caller the reads table allows
-//! (the stock reads: the owner) gets an answer, and nothing it does is written.
+//! through `get`). A route handler: code genesis and the default image put it
+//! at the prefix `/explore` with `read: "explore"`, so only a caller the reads
+//! table allows (the owner) gets an answer, and nothing it does is written.
+//! The management site's explorer pages (shruggr/skein-site, #92) read it.
 //!
 //!   GET /explore                       {state, log, cursor, heads: {name: cid}}
 //!   GET /explore/log?before=n&limit=k  {entries: [{n, entry, record}]}  newest first (k ≤ 200, default 20)
@@ -11,6 +12,7 @@
 //!   GET /explore/thread/<origin>     {chain: {tip, seq, kind?}, updates: [{seq, update, record}]}
 //!   GET /explore/head/<name>           {name, tree}
 //!   GET /explore/record/<cid>          the record as DAG-JSON (a block in another codec: its bytes)
+//!   GET /explore/edges/<cid>?rel=r     {to, edges: [{from, seq, rel, locator}]}  what points at it (the index's edges map)
 //! Every value is DAG-JSON: a link is {"/": "<cid>"}, bytes {"/": {"bytes": "<base64>"}}.
 const std = @import("std");
 const cbor = @import("cbor");
@@ -238,6 +240,15 @@ pub fn explore(a: Allocator, in: Value, req: Value) !Answer {
         var m = cbor.MapBuilder.init(a);
         try m.put("name", cbor.string(name));
         try m.put("tree", tree);
+        return json(a, m.value());
+    }
+    if (std.mem.startsWith(u8, rest, "/edges/")) {
+        // #92: who points at a record (the `edges` read: a thread launched by a message, a transaction's spenders).
+        const c = cidm.parse(a, rest["/edges/".len..]) catch return bad("cid");
+        const es = try sk.edges(a, c, param(query, "rel"));
+        var m = cbor.MapBuilder.init(a);
+        try m.put("to", .{ .cid = c });
+        try m.put("edges", es);
         return json(a, m.value());
     }
     if (std.mem.startsWith(u8, rest, "/record/")) {

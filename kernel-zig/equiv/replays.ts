@@ -12,9 +12,7 @@
 //     order, sleepers, awaits, edges, heads, the cursor, fuel per thread and
 //     in total, every record's CID, the state CID (which covers every index
 //     node);
-//   - `skein-kernel fuel`, the billing query;
-//   - the explorer (src/dev/explore, reading the file through
-//     src/runtime/index-store.ts) renders every page the same over both.
+//   - `skein-kernel fuel`, the billing query.
 //
 // Also: every step that ended (finished/errored/waiting) records its fuel,
 // and a source the Zig kernel wrote itself (equiv/serve.ts; format 1) is
@@ -32,9 +30,6 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { render } from "../../src/dev/explore/server.ts";
-import { load } from "../../src/dev/explore/view.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL ?? join(here, "../zig-out/bin/skein-kernel");
@@ -80,27 +75,6 @@ function dumpDiff(x: Dump, y: Dump, what: string): string[] {
   }
   return out;
 }
-
-/** Every explorer page over the two files; the first that differs, if any. */
-async function explorerDiff(p: string, q: string): Promise<string | undefined> {
-  const x = openStoreFile(p, { readOnly: true }), y = openStoreFile(q, { readOnly: true });
-  try {
-    if (!("state" in x) || !("state" in y)) return "explorer: a Zig store did not open through the index";
-    // One world per store for every page (#83: a store with the shell app holds records of tens of MB; loading it per page is minutes).
-    const w = await load(x), wy = await load(y);
-    const pages = ["/", "/log", "/s", "/threads", "/h/main"];
-    for (const t of w.threads) pages.push(`/t/${t.cid}`, `/r/${t.cid}`, ...t.updates.map(({ cid }) => `/r/${cid}`));
-    for (const { cid } of w.log) pages.push(`/e/${cid}`);
-    for (const pg of pages) {
-      const a = await render(x, new URL(pg, "http://x"), w), b = await render(y, new URL(pg, "http://x"), wy);
-      if (a.status !== b.status || a.body !== b.body) return `explorer: ${pg} differs (status ${a.status} vs ${b.status})`;
-      if (a.status >= 500) return `explorer: ${pg} fails (${a.status})`;
-    }
-    explorerPages += pages.length;
-    return undefined;
-  } finally { await x.close(); await y.close(); }
-}
-let explorerPages = 0;
 
 /** A file the Zig kernel wrote in the current format (its state record has `format`). */
 function isZigStore(db: string): boolean {
@@ -176,8 +150,6 @@ for (const source of sources) {
     if (/fuel\.db$/.test(basename(source)) && exhausted === 0) diffs.push(`no step ran out of fuel (limit ${limit})`);
     d.close();
   }
-  const pageDiff = await explorerDiff(z1, z2);
-  if (pageDiff) diffs.push(pageDiff);
   let fromSource = "";
   if (isZigStore(src)) {
     const ds = dump(src);
@@ -198,5 +170,4 @@ for (const source of sources) {
   }
   if (keep) process.stdout.write(`  kept ${work}\n`); else rmSync(work, { recursive: true, force: true });
 }
-process.stdout.write(`explorer: ${explorerPages} pages identical over the two replays' files\n`);
 process.exit(allSame ? 0 : 1);

@@ -30,8 +30,8 @@ import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
-import * as Digest from "multiformats/hashes/digest";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
+import { programRecord, RAW, rawCid, wasmKind } from "../runtime/programs.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
@@ -39,9 +39,9 @@ import { now as clockNow } from "./clock.ts";
 import { CLAIM_ROW, codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
-export const RAW = 0x55;
 export const DAG_CBOR = 0x71;
-const SHA2_256 = 0x12;
+// The module and program-record helpers live in ../runtime/programs.ts (no node APIs: the plan uses them in a browser too, #92).
+export { programRecord, RAW, rawCid, wasmKind };
 
 export const BIN = "bin";
 export const CONFIG = "etc/config.json";
@@ -64,22 +64,12 @@ export class MemBlocks implements Objects, TreeBlocks {
   async putBlock(cid: CID, bytes: Uint8Array) { this.map.set(cid.toString(), { cid, bytes }); }
 }
 
-export const rawCid = (bytes: Uint8Array): CID => CID.createV1(RAW, Digest.create(SHA2_256, createHash("sha256").update(bytes).digest()));
-
 /** A git object's body if it is a `<type>` object. */
 export function gitBody(object: Uint8Array, type: "blob" | "tree"): Uint8Array | undefined {
   const nul = object.indexOf(0);
   if (nul < 0) return undefined;
   const head = Buffer.from(object.subarray(0, nul)).toString("latin1");
   return head === `${type} ${object.length - nul - 1}` ? object.subarray(nul + 1) : undefined;
-}
-
-/** A wasm binary's kind by its preamble: a core module, a component (#34), or neither. */
-export function wasmKind(b: Uint8Array): "module" | "component" | undefined {
-  if (b.length < 8 || b[0] !== 0 || b[1] !== 0x61 || b[2] !== 0x73 || b[3] !== 0x6d) return undefined;
-  if (b[4] === 1 && b[5] === 0 && b[6] === 0 && b[7] === 0) return "module";
-  if (b[4] === 0x0d && b[5] === 0 && b[6] === 1 && b[7] === 0) return "component";
-  return undefined;
 }
 
 // ---------------------------------------------------------------- sources
@@ -109,21 +99,6 @@ export interface SystemTree {
   /** etc/routes.json (#40, the form before #77: http and libp2p rows), else the stock http rows; etc/reads.json, else the stock reads. */
   routes?: RouteSpec[];
   reads?: ReadSpec[];
-}
-
-/** A handler program's record inputs when bin/<name>.json gives none (the kernel's handler inputs). */
-const HANDLER_INPUTS = { message: "cid", body: "cid", box: "string", sender: "identity" };
-
-/**
- * The program record for bin/<name>.wasm or bin/<name>.cid (its module's CID),
- * with bin/<name>.json's {inputs, services, description} if the tree has one:
- * what a boot puts, and what an app install (install.ts, #72) sends.
- */
-export function programRecord(name: string, module: CID, meta: { inputs?: unknown; services?: string[]; description?: string } = {}): Record<string, unknown> {
-  return {
-    kind: "program", name, code: { wasm: module },
-    inputs: meta.inputs ?? HANDLER_INPUTS, services: meta.services ?? [], description: meta.description ?? `${name} (from the system tree)`,
-  };
 }
 
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {

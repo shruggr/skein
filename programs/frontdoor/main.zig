@@ -32,7 +32,8 @@
 //!   identity (another's is 403). `read` names an op the reads table must
 //!   allow the caller. The row is the handler's `match`.
 //! The reads table (the genesis's `reads`, from etc/reads.json):
-//!   [{caller?: <key>, op}] — no caller: anyone.
+//!   [{caller?: <key>, op}] — no caller: anyone; [{owner: true, op}] (#92):
+//!   the instance's owner, the genesis's or else the claim's (input `owner`).
 //!
 //! The route handler contract (docs/MESSAGES.md, "Route handlers"): called
 //! with {caller?, method, path, route, query, headers, body, contentType,
@@ -374,6 +375,12 @@ fn mayRead(in: Value, caller: []const u8, op: []const u8) bool {
     if (rs != .array) return false;
     for (rs.array) |r| {
         if (!eql(u8, Value.str(r.get("op")) orelse "", op) and !eql(u8, Value.str(r.get("op")) orelse "", "*")) continue;
+        // #92: {op, owner: true} — the instance's owner as the step sees it (the genesis's, else the
+        // claim's): an image's reads name no key at genesis, and nobody reads before the claim.
+        if (r.get("owner")) |o| if (o == .bool and o.bool) {
+            if (Value.bytesOf(in.get("owner"))) |k| if (eql(u8, k, caller)) return true;
+            continue;
+        };
         const who = Value.bytesOf(r.get("caller")) orelse return true;
         if (eql(u8, who, caller)) return true;
     }

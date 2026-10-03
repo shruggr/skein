@@ -220,8 +220,14 @@ export const STOCK_SCOPES: Record<string, string[]> = {
  * `libp2p:<topic>` or `libp2p:/<protocol>` path is a `libp2p` row.
  */
 export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; root?: string; index?: string }
-/** A read permission as a system writes it (etc/reads.json): a caller (hex or `$owner`; absent: anyone) may call routes marked `read: op`. */
-export interface ReadSpec { caller?: string; op: string }
+/**
+ * A read permission as a system writes it (etc/reads.json): a caller (hex or
+ * `$owner`; absent: anyone) may call routes marked `read: op`. `owner: true`
+ * (#92) is the instance's owner as the front door sees it at the read (the
+ * genesis's, else the claim's): how an image, which names no owner, gives its
+ * owner the explorer.
+ */
+export interface ReadSpec { caller?: string; owner?: true; op: string }
 
 /**
  * The stock HTTP rows (#40): the BRC-33 messagebox, at the root and under
@@ -284,7 +290,7 @@ export interface System {
   tree?: CID;
   feeds?: FeedSpec[];
   /** The front door's reads (#40). */
-  reads: Array<{ caller?: Uint8Array; op: string }>;
+  reads: Array<{ caller?: Uint8Array; owner?: true; op: string }>;
   /** libp2p (#51): what the host's libp2p node does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
 }
@@ -419,8 +425,9 @@ export function rowsOf(specs: DispatchSpec[], c: Genesis2Config, programs: Recor
 export function resolveReads(c: Pick<Genesis2Config, "owner" | "infer">, reads: ReadSpec[] = []): System["reads"] {
   const rs: System["reads"] = [];
   for (const r of reads) {
-    if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op})`);
-    rs.push({ ...(r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
+    if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op} or {owner: true, op})`);
+    if (r.owner !== undefined && (r.owner !== true || r.caller !== undefined)) throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (owner: true names no caller)`);
+    rs.push({ ...(r.owner ? { owner: true as const } : r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
   }
   return rs;
 }

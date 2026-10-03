@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# The read-only graph explorer over the store file (src/dev/explore/server.ts).
-set -euo pipefail
-root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-exec node --experimental-strip-types --no-warnings "$root/src/dev/explore/server.ts" "$@"

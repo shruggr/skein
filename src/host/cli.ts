@@ -85,8 +85,7 @@
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
 // started on demand and stopped when idle, the providers (the waker, the cron
-// provider among them), the oracle, the fuel ledger; plus one read-only
-// explorer per enabled row and the host page. It
+// provider among them), the oracle, the fuel ledger; plus the host page. It
 // reads (bin/skein-host fills it from $SKEIN_HOME):
 //   SKEIN_HOME            default ~/.skein; host.db and master.key live here
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
@@ -98,8 +97,6 @@
 //   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE its genesis name, default infer@localhost
 //   SKEIN_FUEL_PER_STEP   a new genesis's fuelPerStep
 //   SKEIN_HOST_PORT       the host page (/) and roster (/roster.json) on 127.0.0.1, default 4600
-//   SKEIN_EXPLORE_BASE_PORT  row i's explorer (skein-explore) listens on base + i (i: its place among the enabled rows);
-//                         default 4610; "off" starts none
 //   SKEIN_KERNEL_BIN      the kernel binary, default kernel-zig/zig-out/bin/skein-kernel
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
 //                         queue), one status subscription, the instances' status provider; SKEIN_ARC_TOKEN its one callback token (required with it);
@@ -132,7 +129,6 @@ import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { dispatchBody } from "../client/client.ts";
 import { addressBook, DEFAULT_ONLY, deploy, deployFiles, dispatchRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
-import { Supervisor, type Supervised } from "./supervisor.ts";
 import { noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { RawBox } from "../client/raw.ts";
@@ -811,18 +807,12 @@ async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 
 export interface RunOptions {
-  /** The explorer command: default bin/skein-explore. Tests pass stubs. */
-  explore?: { command: string; args?: string[] };
-  killAfterMs?: number;
   /** The router's options beyond what the environment gives (tests). */
   router?: Partial<RouterOptions>;
 }
 
 export interface Host {
   router: Router;
-  supervisor: Supervisor;
-  /** handle → its explorer process. */
-  explorers: Map<string, { port: number; s: Supervised }>;
   /** The messagebox (router) port and the host page's. */
   messagebox?: number;
   server?: Server;
@@ -992,15 +982,14 @@ async function packCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
 /**
  * `skein-host run`: the router (router.ts) on SKEIN_ROUTER_PORT (default
  * 8100, the messagebox URL clients already use), every enabled row hydrated
- * once at start (then stopped when idle), one read-only `skein-explore` per
- * enabled row, and the host page and roster on SKEIN_HOST_PORT.
+ * once at start (then stopped when idle), and the host page and roster on
+ * SKEIN_HOST_PORT. A skein's explorer is its own (`/explore`, its owner's),
+ * read by the management site (shruggr/skein-site, #92).
  */
 export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise<Host> {
   const v = env.vars;
   const home = homeOf(v);
   const router = new Router({ ...routerOptions(db, env), ...o.router });
-  const supervisor = new Supervisor({ out: env.out, err: env.err, killAfterMs: o.killAfterMs });
-  const explorers = new Map<string, { port: number; s: Supervised }>();
   const enabled = db.list("enabled");
   const mport = Number(v.SKEIN_ROUTER_PORT ?? 8100);
   const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
@@ -1018,34 +1007,28 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
   const hs = db.hostSkein();
   env.out(hs ? `skein-host: the host skein is ${hs.handle} (${hs.identity ? short(hs.identity) : "-"}) at ${router.originOf(hs.handle)}: the instance manager takes its messages only` : "skein-host: no host skein (skein-host init): the instance manager acts for nobody");
-  const base = v.SKEIN_EXPLORE_BASE_PORT === "off" ? undefined : Number(v.SKEIN_EXPLORE_BASE_PORT || 4610);
-  const explore = o.explore ?? { command: join(ROOT, "bin/skein-explore") };
-  if (base !== undefined) enabled.forEach((row, i) => {
-    const port = base + i;
-    explorers.set(row.handle, { port, s: supervisor.add({ name: `${row.handle} explore`, command: explore.command, args: [...(explore.args ?? []), String(port)], env: { ...v, SKEIN_DB: row.store } }) });
-  });
   const live = (row: InstanceRow) => router.loaded.has(row.handle);
   const port = Number(v.SKEIN_HOST_PORT || 4600);
   const page = async () => hostPage(db.list("enabled").map((r): HostRow => {
-    const l = router.loaded.get(r.handle), x = explorers.get(r.handle);
+    const l = router.loaded.get(r.handle);
     return {
       handle: r.handle, domain: r.domain, identity: r.identity ?? "", status: l ? "live" : "idle",
-      store: r.store, tree: r.tree ?? "", pid: l?.kernel.proc.pid, restarts: 0, explorer: x ? `http://127.0.0.1:${x.port}/` : undefined,
+      store: r.store, tree: r.tree ?? "", pid: l?.kernel.proc.pid, restarts: 0, origin: router.originOf(r.handle),
       wake: router.nextWake(r.handle),
     };
   }), { router: messagebox !== undefined ? `http://127.0.0.1:${messagebox}` : undefined, originOf: (h) => router.originOf(h), mailboxes: db.list("enabled").filter((r) => r.kind === "mailbox") });
   const server = await serveRoster(port, () => roster(db.list("enabled"), async (row) => openRow(row, env), live), "127.0.0.1", page)
     .then((s) => { env.out(`skein-host: host page at http://127.0.0.1:${(s.address() as { port: number }).port}/ · roster at /roster.json`); return s; }, (e: Error) => { env.err(`skein-host: host server: ${e.message}`); return undefined; });
   return {
-    router, supervisor, explorers, messagebox, server, port: server ? (server.address() as { port: number }).port : undefined,
+    router, messagebox, server, port: server ? (server.address() as { port: number }).port : undefined,
     async stop() {
       server?.close();
-      await Promise.all([router.close(), supervisor.stop()]);
+      await router.close();
     },
   };
 }
 
-/** `skein-host run`: runHost until SIGINT/SIGTERM, then stop every kernel and explorer and exit. */
+/** `skein-host run`: runHost until SIGINT/SIGTERM, then stop every kernel and exit. */
 async function run(db: HostDb, rest: string[], env: Env): Promise<number> {
   const { positionals } = parseArgs({ args: rest, allowPositionals: true, options: {} });
   if (positionals.length) { env.err(USAGE); db.close(); return 2; }

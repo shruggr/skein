@@ -24,7 +24,7 @@ const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
 async function scratch(t: { after(f: () => unknown): void }) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-close-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), SKEIN_EXPLORE_BASE_PORT: "off", PATH: process.env.PATH };
+  const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), PATH: process.env.PATH };
   const out: string[] = [], err: string[] = [];
   const env = { vars, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
   assert.equal(await main(["system", join(home, "system")], env), 0, err.join("\n"));
