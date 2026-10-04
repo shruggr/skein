@@ -10,12 +10,14 @@
 //   #/s/<identity>/peers     its address book
 //   #/s/<identity>/log, /threads, /thread/<cid>, /record/<cid>, /edges/<cid>, /dispatch
 //                            the explorer: the skein's own reads (/explore, its owner's)
+//   #/inbox                  the Inbox: a mailbox's box listed (@bsv/message-box-client), and synced
+//                            into your wallet (@1sat/actions' syncMessages)
 //
 // Query string (tests): ?key=<hex> runs a wallet in the tab over that key
 // (createWebWallet, webwallet.js) instead of connecting one; &services=<url>
 // points that wallet at a 1sat services endpoint.
 
-import { appRecordIn, CID, connectWallet, dagJson, describe, dispatchOrigin, fold, LockingScript, lookup, parseTree, planInstall, planUninstall, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, senderText, Utils, WalletClient } from "./lib.js";
+import { appRecordIn, CID, connectWallet, createContext, dagJson, describe, dispatchOrigin, fold, LockingScript, lookup, MessageBoxClient, parseTree, planInstall, planUninstall, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, senderText, syncMessages, Utils, WalletClient } from "./lib.js";
 
 const q = new URLSearchParams(location.search);
 /** The skein that served this page: its base URL (the page is its `/`). */
@@ -267,6 +269,7 @@ async function route() {
     return;
   }
   try {
+    if (parts[0] === "inbox") return await inboxPage(m);
     if (parts[0] !== "s") return await home(m);
     const sk = skeinOf(parts[1]);
     if (!sk) {
@@ -598,6 +601,95 @@ async function dispatchPage(m, sk) {
   m.append(h("h2", {}, "The dispatch table, in order (first match wins)"), h("table", { id: "dispatch" }, h("tbody", {}, view.dispatch.map((r) =>
     h("tr", {}, h("td", {}, r.transport), h("td", {}, `${r.address}${r.prefix ? "*" : ""}`), h("td", { class: "key" }, short(senderText(r.sender))),
       h("td", {}, r.program === "kernel" ? `kernel ${r.fn ?? ""}` : [show(sk, r.program), r.fn ? ` .${r.fn}` : ""]), h("td", { class: "mut small" }, r.app ?? "genesis"))))));
+}
+
+// ---------------------------------------------------------------- the Inbox
+
+/**
+ * A mailbox's box, for your key: what is waiting (listed by
+ * @bsv/message-box-client on a BRC-104 session signed by your wallet), and
+ * Sync (@1sat/actions' syncMessages with the same wallet: each message
+ * internalized as a payment, then acknowledged). The mailbox is any BRC-33
+ * messagebox — a mailbox instance, or another — not the skein that served
+ * this page. There is no lookup from a key to its mailbox (a resolver
+ * answers a handle), so the URL is typed once and kept in this browser.
+ */
+const INBOX_BOX = "metanet_inbox";
+const inboxKey = () => `skein-site inbox ${state.me}`;
+function inboxSaved() {
+  try { return JSON.parse(localStorage.getItem(inboxKey()) ?? "{}"); } catch { return {}; }
+}
+function inboxSave(v) {
+  try { localStorage.setItem(inboxKey(), JSON.stringify(v)); } catch { /* not kept: typed again next time */ }
+}
+
+/** One line for a listed body: a BRC-169 envelope, a paymail payment, or the body itself. */
+function inboxWhat(body) {
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    if (body.metanetHandles !== undefined) {
+      const p = body.payment;
+      return `BRC-169 envelope${body.created ? ` of ${body.created}` : ""}: ${p && typeof p === "object" ? `a payment of ${p.satoshis} sats` : "no payment"}`;
+    }
+    if (typeof body.beef === "string" && body.satoshis !== undefined) return `a payment of ${body.satoshis} sats${body.alias ? ` to ${body.alias}` : ""}`;
+  }
+  const t = typeof body === "string" ? body : JSON.stringify(body);
+  return t.length > 120 ? `${t.slice(0, 120)}…` : t;
+}
+
+async function inboxPage(m) {
+  const saved = inboxSaved();
+  const url = h("input", { type: "text", name: "url", placeholder: "your mailbox's URL (https://…)", value: saved.url ?? "" });
+  const box = h("input", { type: "text", name: "box", placeholder: "box", value: saved.box ?? INBOX_BOX });
+  const st = h("div", { class: "status", id: "inbox-status" });
+  const result = h("div", { class: "status", id: "sync-result" });
+  const list = h("div", { id: "inbox-list" });
+  const sync = h("button", { type: "button", class: "go", id: "sync" }, "Sync");
+  const where = () => ({ url: url.value.trim().replace(/\/+$/, ""), box: box.value.trim() || INBOX_BOX });
+
+  async function show() {
+    const w = where();
+    if (!w.url) return status(st, "Type your mailbox's URL: there is no lookup from your key to it. The page keeps it in this browser.");
+    inboxSave(w);
+    status(st, `listing ${w.box} at ${w.url}`);
+    list.replaceChildren();
+    try {
+      const client = new MessageBoxClient({ walletClient: state.wallet, host: w.url });
+      const msgs = await client.listMessagesLite({ messageBox: w.box, host: w.url });
+      status(st, `${msgs.length} waiting in ${w.box} at ${w.url}`);
+      if (!msgs.length) return list.append(h("p", { class: "mut", id: "inbox-messages" }, "Nothing waiting."));
+      list.append(h("table", { id: "inbox-messages" },
+        h("thead", {}, h("tr", {}, h("th", {}, "message"), h("th", {}, "from"), h("th", {}, "at"), h("th", {}, "what"))),
+        h("tbody", {}, msgs.map((x) => {
+          const text = typeof x.body === "string" ? x.body : JSON.stringify(x.body, null, 1);
+          return h("tr", { "data-message": x.messageId },
+            h("td", { class: "cid", title: x.messageId }, short(String(x.messageId), 12)),
+            h("td", { class: "key", title: x.sender }, short(String(x.sender ?? ""))),
+            h("td", { class: "small mut" }, String(x.createdAt ?? "").replace("T", " ").slice(0, 19)),
+            h("td", {}, inboxWhat(x.body), h("details", {}, h("summary", { class: "small mut" }, "body"), h("pre", {}, text.length > 4000 ? `${text.slice(0, 4000)}…` : text))));
+        }))));
+    } catch (e) { status(st, errText(e), "bad"); }
+  }
+
+  sync.onclick = async () => {
+    const w = where();
+    if (!w.url) return status(st, "Type your mailbox's URL first.", "bad");
+    inboxSave(w);
+    sync.disabled = true;
+    status(result, `syncing ${w.box} from ${w.url} into your wallet`);
+    try {
+      const r = await syncMessages.execute(createContext(state.wallet), { messageBox: w.box, messageboxUrl: w.url });
+      status(result, `processed ${r.processed}, failed ${r.failed}`, r.failed ? "bad" : "ok");
+    } catch (e) { status(result, `sync: ${errText(e)}`, "bad"); }
+    sync.disabled = false;
+    await show();
+  };
+
+  m.append(h("h1", {}, "Inbox"),
+    h("p", { class: "mut small" }, "A mailbox's box, for your key: what is waiting there, and Sync, which takes each message into your wallet as a payment (@1sat/actions' syncMessages, with the wallet connected here) and acknowledges it. Processed: internalized and acknowledged. Failed: left in the box (the browser's console says why)."),
+    h("form", { class: "row", id: "inbox", onsubmit: (ev) => { ev.preventDefault(); show(); } }, url, box, h("button", { type: "submit" }, "List"), sync),
+    st, result, list);
+  if (where().url) await show();
+  else status(st, "Type your mailbox's URL: there is no lookup from your key to it. The page keeps it in this browser.");
 }
 
 // ---------------------------------------------------------------- start

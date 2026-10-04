@@ -28,7 +28,16 @@
 //   3. the explorer renders alice's log (genesis, the claim, the requests);
 //   4. back on the host skein, a locator for it added from the page; its page
 //      lists alice under the skeins created there;
-//   5. both stores replay to themselves exactly.
+//   5. the Inbox (#99): you register a mailbox instance (`/account/register`);
+//      a sender delivers a payment to it in box metanet_inbox (a BRC-169
+//      DAG-CBOR envelope, BRC-231 over BRC-104, its `payment` a BRC-29
+//      transaction to you); the page, given the mailbox's URL, lists the
+//      message (@bsv/message-box-client against skein's messagebox), keeps
+//      the URL in the browser, and Sync runs @1sat/actions' syncMessages with
+//      the wallet in the tab and shows its {processed, failed} (today the
+//      published SDK does not read the envelope: failed, left in the box);
+//      the stock client's acknowledgeMessage then empties the box;
+//   6. the stores replay to themselves exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/site.ts
 
@@ -41,7 +50,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MerklePath, P2PKH, PrivateKey, PublicKey, ProtoWallet, Script, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import { EncryptedMessage, Hash, MerklePath, P2PKH, PrivateKey, PublicKey, ProtoWallet, Script, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
@@ -124,6 +134,7 @@ const { publicKey: payTo } = await new ProtoWallet(payer).getPublicKey({ protoco
 const coin = new Transaction();
 coin.addInput({ sourceTXID: "11".repeat(32), sourceOutputIndex: 0, unlockingScript: new Script(), sequence: 0xffffffff });
 coin.addOutput({ lockingScript: new P2PKH().lock(payer.toPublicKey().toAddress()), satoshis: 100_100 });
+coin.addOutput({ lockingScript: new P2PKH().lock(payer.toPublicKey().toAddress()), satoshis: 50_100 }); // the Inbox's delivery (5.)
 const coinTxid = coin.id("hex");
 const HEIGHT = 900_000;
 coin.merklePath = new MerklePath(HEIGHT, [[{ offset: 0, hash: coinTxid, txid: true }]]);
@@ -133,6 +144,14 @@ funding.addInput({ sourceTransaction: coin, sourceOutputIndex: 0, unlockingScrip
 funding.addOutput({ lockingScript: new P2PKH().lock(PublicKey.fromString(payTo).toAddress()), satoshis: 100_000 });
 await funding.sign();
 const atomic = funding.toAtomicBEEF();
+
+// The Inbox's delivery (5.): the payer's second coin, paid to you under BRC-29 (fresh derivation).
+const dPrefix = crypto.getRandomValues(new Uint8Array(8)), dSuffix = crypto.getRandomValues(new Uint8Array(8));
+const { publicKey: payTo2 } = await new ProtoWallet(payer).getPublicKey({ protocolID: [2, "3241645161d8"], keyID: `${Utils.toBase64(Array.from(dPrefix))} ${Utils.toBase64(Array.from(dSuffix))}`, counterparty: you });
+const delivery = new Transaction();
+delivery.addInput({ sourceTransaction: coin, sourceOutputIndex: 1, unlockingScriptTemplate: new P2PKH().unlock(payer), sequence: 0xffffffff });
+delivery.addOutput({ lockingScript: new P2PKH().lock(PublicKey.fromString(payTo2).toAddress()), satoshis: 50_000 });
+await delivery.sign();
 
 // ---------------------------------------------------------------- the stand-in for the 1sat services the wallet calls
 
@@ -302,6 +321,68 @@ try {
   await page.waitForSelector("#children", { timeout: 60_000 });
   const kids = await page.locator("#children").innerText();
   check(/alice/.test(kids) && kids.includes(`${base}/@alice`) && /Open/.test(kids), `the host skein's page lists the skeins created there, alice openable through her locator (${kids.replace(/\s+/g, " ").trim()})`);
+
+  // ------------------------------------------------ 5. the Inbox (#99)
+  const youWallet = ephemeralWallet(youKey);
+  const regSig = await youWallet.createSignature({ protocolID: [2, "skein register"], keyID: "you", counterparty: "anyone", data: [...Buffer.from("register you")] });
+  const reg = await fetch(`${base}/account/register`, { method: "POST", body: JSON.stringify({ username: "you", identityKey: you, signature: Buffer.from(regSig.signature).toString("hex") }) });
+  check(reg.status === 200 && db.mailboxOf(you)?.handle === "you", `you register a mailbox instance (/account/register): ${reg.status}`);
+  stores.push(db.get("you")!.store);
+  // The mailbox's own origin (the router's <handle>.localhost form): the stock client shakes hands at <origin>/.well-known/auth.
+  const mailbox = `http://you.localhost:${port}`;
+  // A BRC-169 §7.3 envelope in DAG-CBOR (1sat-sdk's actions/src/mandala/envelope.ts layout): `payment` the
+  // BRC-29 delivery, `content` a BRC-78 message of a MIME entity, signed by the sender under
+  // [2, "metanet handles envelope"], key ID "send", counterparty anyone, over the map without content and signature.
+  const mime = Buffer.from("Content-Type: text/plain; charset=utf-8\r\n\r\nfor the Inbox", "utf8");
+  const unsigned = {
+    metanetHandles: "1.0",
+    recipient: { handle: "you", domain: "localhost" },
+    sender: { identityKey: Uint8Array.from(payer.toPublicKey().encode(true) as number[]) },
+    created: "2026-10-04T12:00:00Z",
+    payment: { derivationPrefix: dPrefix, derivationSuffix: dSuffix, protocol: Uint8Array.from(Buffer.from("3241645161d8")), satoshis: 50_000, beef: Uint8Array.from(delivery.toAtomicBEEF()) },
+    contentHash: Uint8Array.from(Hash.sha256(Array.from(mime))),
+  };
+  const { signature: envSig } = await new ProtoWallet(payer).createSignature({ data: Array.from(dagCbor.encode(unsigned)), protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone" });
+  const envelope = dagCbor.encode({ ...unsigned, content: Uint8Array.from(EncryptedMessage.encrypt(Array.from(mime), payer, youKey.toPublicKey())), signature: Uint8Array.from(envSig) });
+  const sent = await new RawBox(ephemeralWallet(payer), `${base}/@you`).send(you, "metanet_inbox", envelope);
+  check(!!sent.id, `a sender delivers a payment to your mailbox instance, box metanet_inbox (BRC-231 on its session): ${sent.id}`);
+
+  await page.goto(`${base}/@host/${search}#/inbox`);
+  await ready();
+  await page.fill("#inbox input[name=url]", mailbox);
+  check(await page.locator("#inbox input[name=box]").inputValue() === "metanet_inbox", "the Inbox's box defaults to metanet_inbox");
+  await page.click("#inbox button[type=submit]");
+  await page.waitForSelector("#inbox-messages, #inbox-status.bad", { timeout: 120_000 });
+  if (await page.locator("#inbox-status.bad").count()) throw new Error(`inbox: ${await page.locator("#inbox-status").innerText()}`);
+  const listed = await page.locator("#inbox-messages tbody tr").count();
+  const row = await page.locator("#inbox-messages").innerText();
+  check(listed === 1 && (await page.locator(`tr[data-message="${sent.id}"]`).count()) === 1 && /BRC-169 envelope of 2026-10-04T12:00:00Z: a payment of 50000 sats/.test(row),
+    `the page lists what is waiting: @bsv/message-box-client's listMessagesLite against skein's messagebox, on your wallet's session (${row.replace(/\s+/g, " ").slice(0, 160)})`);
+  await page.goto(`${base}/@host/${search}#/inbox`);
+  await ready();
+  await page.waitForSelector("#inbox-messages", { timeout: 120_000 });
+  check(await page.locator("#inbox input[name=url]").inputValue() === mailbox, "the mailbox's URL is kept in the browser: the Inbox opens on it and lists it");
+
+  await page.click("#sync");
+  await page.waitForFunction(() => /processed \d+, failed \d+|sync: /.test(document.getElementById("sync-result")?.textContent ?? ""), null, { timeout: 120_000 });
+  const synced = (await page.locator("#sync-result").innerText()).trim();
+  check(/^processed \d+, failed \d+$/.test(synced), `Sync runs @1sat/actions' syncMessages over that mailbox with the wallet in the tab and shows its result (${synced})`);
+  await page.waitForSelector("#inbox-messages, #inbox-status.bad", { timeout: 120_000 });
+  check(!(await page.locator("#inbox-status.bad").count()) && !(await page.locator("#error").count()) && (await page.locator(`tr[data-message="${sent.id}"]`).count()) === 1,
+    "the page lists the box again after the sync (the message not taken is still there), and nothing failed in the page");
+  // The stock client's acknowledgeMessage (what syncMessages calls after an internalize) against skein's messagebox, from the tab.
+  const acked = await page.evaluate(async ([host, id]) => {
+    const { MessageBoxClient } = await import(new URL("site/lib.js", location.href).href) as { MessageBoxClient: new (o: unknown) => { acknowledgeMessage(a: unknown): Promise<string> } };
+    const w = (window as unknown as { site: { wallet: unknown } }).site.wallet;
+    return await new MessageBoxClient({ walletClient: w, host }).acknowledgeMessage({ messageIds: [id], host });
+  }, [mailbox, sent.id.toString()] as const);
+  await page.click("#inbox button[type=submit]");
+  await page.waitForFunction(() => /Nothing waiting/.test(document.getElementById("inbox-messages")?.textContent ?? ""), null, { timeout: 120_000 });
+  check(acked === "success", `@bsv/message-box-client's acknowledgeMessage against skein's messagebox: ${acked}; the Inbox then lists nothing waiting`);
+  // TODO(#99): @1sat/actions 0.0.231's syncMessages reads a 1sat paymail body ({beef: hex, outputIndex, …}), not a
+  // BRC-169 envelope, so this delivery comes back failed and stays in the box. When the SDK's metanet_inbox
+  // receive is published and the site bumps it, assert: processed 1, failed 0; the 50 000 sats in the wallet
+  // (the delivery's txid internalized); the box empty after (acknowledged).
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

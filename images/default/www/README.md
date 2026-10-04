@@ -3,7 +3,7 @@
 The management site of a [skein](https://github.com/shruggr/skein): the page
 every skein from the default image serves at `/` (its files at `/site/`).
 The files are the same on every skein; what makes the page yours is the
-wallet in your browser. Version **0.1.0** (shruggr/skein#92).
+wallet in your browser. Version **0.2.0** (shruggr/skein#92; the Inbox, #99).
 
 ## What it does
 
@@ -40,6 +40,20 @@ wallet in your browser. Version **0.1.0** (shruggr/skein#92).
   browsable), what points at a record (edges), the dispatch table.
 - **On a host skein**: the skeins created there (`onboard/instances/…`),
   each openable through a locator.
+- **The Inbox** (`#/inbox`): a mailbox's box for your key — any BRC-33
+  messagebox, such as your mailbox instance on a skein host. Give it the
+  mailbox's URL and a box (default `metanet_inbox`); the page lists what is
+  waiting there (`@bsv/message-box-client`'s `listMessagesLite`, on a
+  BRC-104 session signed by your wallet). **Sync** runs `@1sat/actions`'
+  `syncMessages` with the same wallet against that URL and box: each
+  message internalized into your wallet as a payment, then acknowledged; it
+  shows `{processed, failed}`, and a failed message stays in the box (the
+  browser's console says why). There is no lookup from a key to its mailbox
+  (a BRC-169 resolver answers a handle), so the URL is typed once and kept
+  in this browser (`localStorage`, per identity key). With `@1sat/actions`
+  0.0.231, `syncMessages` reads 1sat's paymail payment body, not a BRC-169
+  envelope: a `metanet_inbox` delivery is listed and comes back failed until
+  the SDK's receive for it is published and this site takes the new version.
 
 ## Files
 
@@ -47,7 +61,7 @@ wallet in your browser. Version **0.1.0** (shruggr/skein#92).
 |---|---|
 | `index.html`, `app.js`, `style.css` | the page: plain HTML and JavaScript, no framework |
 | `catalog.json` | the apps the page offers |
-| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk`, `@ipld/dag-cbor`, `@ipld/dag-json` |
+| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk`, `@bsv/message-box-client`, `@1sat/actions`' `syncMessages` (its module only), `@ipld/dag-cbor`, `@ipld/dag-json` |
 | `webwallet.js` | `@1sat/wallet-browser`'s `createWebWallet`, loaded only in test mode |
 | `lib/entry.ts`, `lib/webwallet.ts`, `build.mjs`, `lib/SKEIN_REV` | how the bundles are made, and the skein commit they are made from |
 
@@ -62,6 +76,8 @@ npm ci
 SKEIN_DIR=../skein node build.mjs     # a skein checkout at lib/SKEIN_REV, with its web/shims
 ```
 
-The bundles are committed: the site is served as the tree is. A skein's
+The chunks' names hash the modules' paths, so the same bytes come out only
+with the skein checkout at `../skein` as above. The bundles are committed:
+the site is served as the tree is. A skein's
 default image carries a copy of this tree under `images/default/www`, the
 same git tree as this repository's tag.

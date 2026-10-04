@@ -141,7 +141,9 @@ bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs
 - In a browser: a skein from the default image serves the management page
   at its origin (`/`). It talks to that skein, and to every skein your
   wallet keeps a locator for, with the same requests as the commands below,
-  signed by your wallet.
+  signed by your wallet. Its Inbox lists a box of any mailbox you give it
+  (your mailbox instance, say) and syncs it into that wallet with
+  `@1sat/actions`' `syncMessages`.
 - Messages are BRC-33 (`/sendMessage`, `/listMessages`,
   `/acknowledgeMessage`) on a BRC-104 session, bodies dag-cbor
   (`application/cbor`, BRC-231) or JSON. A message's id is the CID of its

@@ -1,16 +1,18 @@
 {
   "name": "skein-site",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log.",
+  "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet.",
   "type": "module",
   "scripts": {
     "build": "node build.mjs"
   },
   "license": "MIT",
   "devDependencies": {
+    "@1sat/actions": "0.0.231",
     "@1sat/connect": "0.0.101",
     "@1sat/wallet-browser": "0.0.102",
+    "@bsv/message-box-client": "2.6.0",
     "@bsv/sdk": "2.8.6",
     "@ipld/dag-cbor": "10.0.2",
     "@ipld/dag-json": "11.0.1",
