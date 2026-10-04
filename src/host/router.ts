@@ -942,7 +942,7 @@ export class Router {
     }
     const path = url.pathname;
     if (req.method === "GET" && path === "/manifest.json") {
-      return json(200, { metanet: { handles: { resolve: `${this.origin()}/.well-known/metanet-handles/resolve` } } });
+      return json(200, { metanet: { handles: { version: "1.0", resolve: `${this.origin()}/.well-known/metanet-handles/resolve` } } });
     }
     if (req.method === "GET" && path === "/.well-known/metanet-handles/resolve") {
       const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
