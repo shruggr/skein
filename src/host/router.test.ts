@@ -4,15 +4,19 @@
 // BRC-33 client by path prefix; the agent answers into its owner's mailbox —
 // a mailbox instance — over http, short-circuited in process; the owner lists
 // and acknowledges there; every request is an entry (#68), a poll moves
-// nothing; sessions are records and survive a killed kernel.
+// nothing; sessions are records and survive a killed kernel. The host's
+// headers feed (#102) reaches only the instances with a row taking events in
+// box `chain`, following their dispatch tables live.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
 import { MessageBoxClient } from "@bsv/message-box-client";
 import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
+import { main } from "./cli.ts";
 import { testHost, until } from "./testhost.ts";
 
 test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's mailbox instance over http; list/ack; polls are entries that move nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
@@ -136,4 +140,53 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   const mail = await kd2.store.get(chat.messages[0]!.id) as unknown as { sender: Uint8Array; session: { signature: Uint8Array; nonce: string; yourNonce: string } };
   assert.equal(Buffer.from(mail.sender).toString("hex"), h.ownerId);
   assert.ok(mail.session.signature.length > 0 && mail.session.nonce && mail.session.yourNonce, "the 104 signature and both nonces");
+});
+
+test("router: the host's headers feed (#102) reaches only the instances whose dispatch table takes events in box `chain` — a row added later subscribes, removed unsubscribes", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const conns: ServerResponse[] = [];
+  const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": hello\n\n"); conns.push(res); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => { for (const c of conns) c.end(); server.close(); });
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/chaintracks/v2/tip/stream`;
+  const h = await testHost(t, { headersFeed: url });
+  h.mailbox("david", h.ownerId); // its catch-all `*` row is not a chain row
+  h.agent("a");
+  h.agent("b");
+  await h.router.start();
+  await h.router.settled();
+  const subscribed = () => ["david", "a", "b"].filter((x) => h.router.feeds.hosts(x));
+  assert.deepEqual(subscribed(), [], "no instance has a chain row yet");
+  assert.equal(conns.length, 0, "no connection without a subscriber");
+
+  // A row taking box `chain` from anyone (events included, as the chain app's `event` row does), added to `a`: `a` is subscribed, live.
+  const err: string[] = [];
+  const env = {
+    vars: { SKEIN_HOME: h.home, SKEIN_OWNER: h.ownerId, SKEIN_ROUTER_PORT: String(h.router.port), SKEIN_MASTER_KEY: "11".repeat(32) },
+    out: () => {}, err: (l: string) => err.push(l),
+    owner: { wallet: h.owner, box: (row: { handle: string }) => new RawBox(h.owner, `${h.base}/@${row.handle}`) },
+  };
+  const programs = Object.keys(((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, unknown> }).programs);
+  const handler = programs.includes("resolve") ? "resolve" : programs[0]!;
+  assert.equal(await main(["dispatch", "a", "add", "chain", handler], env), 0, err.join("\n"));
+  await until("a subscribed", async () => { await h.router.settled(); return h.router.feeds.hosts("a") || undefined; });
+  assert.deepEqual(subscribed(), ["a"]);
+  assert.ok(h.lines.includes(`[router] a: subscribed to the host's headers feed ${url}`), h.lines.join("\n"));
+  await until("connected", () => conns[0]);
+
+  // A header (chaintracks' JSON, mainnet block 1): an entry in `a`, nothing in `b` or `david`.
+  const n0 = { a: await h.entries("a"), b: await h.entries("b"), david: await h.entries("david") };
+  const block1 = {
+    version: 1, previousHash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f", merkleRoot: "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098",
+    time: 1231469665, bits: 486604799, nonce: 2573394689, height: 1, hash: "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048",
+  };
+  conns[0]!.write(`data: ${JSON.stringify(block1)}\n\n`);
+  await until("the header admitted into a", async () => (await h.entries("a")) > n0.a || undefined);
+  await h.router.settled();
+  assert.equal(await h.entries("b"), n0.b);
+  assert.equal(await h.entries("david"), n0.david);
+
+  // The row removed: unsubscribed.
+  assert.equal(await main(["dispatch", "a", "remove", "chain", handler], env), 0, err.join("\n"));
+  await until("a unsubscribed", async () => { await h.router.settled(); return !h.router.feeds.hosts("a") || undefined; });
+  assert.ok(h.lines.includes(`[router] a: unsubscribed from the host's headers feed ${url}`));
 });

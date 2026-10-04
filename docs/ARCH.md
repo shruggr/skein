@@ -205,7 +205,14 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   status provider, which an instance takes only through a `$status` row.
 - **Feeds** (`src/host/feeds.ts`): SSE header streams an instance declares
   in its config, one connection per URL, each header appended as an event
-  (box `chain` by default). The chain app validates.
+  (box `chain` by default). The chain app validates. The host has a feed of
+  its own besides (`SKEIN_HEADERS_URL`, #102): every enabled instance whose
+  dispatch table takes events in box `chain` (the chain app's `event` row)
+  is subscribed to it, the others not, and the router keeps that current
+  as the table changes (an install subscribes, an uninstall unsubscribes).
+  A header comes as hex or as chaintracks' JSON (Arcade's
+  `/chaintracks/v2/tip/stream`: the 80 bytes are serialized from its
+  fields, and one whose `hash` is not theirs is dropped).
 - **The store**: one SQLite file per instance
   (`$SKEIN_HOME/instances/<handle>/runtime.db`), written by the kernel
   process.

@@ -127,6 +127,10 @@ bin/skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instanc
   the default image serves the same page (shruggr/skein-site); one page
   manages skeins on many hosts, each through its locator.
 - `scripts/host/up.sh` does all three for the dev stack.
+- Block headers for the chain app: run the host with
+  `SKEIN_HEADERS_URL=http://127.0.0.1:8083/chaintracks/v2/tip/stream`
+  (Arcade's chaintracks); every instance with the chain app installed is
+  subscribed to it (scripts/host/README.md, the feeds).
 
 ## Talk to it
 

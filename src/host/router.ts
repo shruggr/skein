@@ -61,7 +61,10 @@
 // follows the dispatch table: once the kernel has processed what the host
 // handed it (`settle`), the router reads the head (a kernel read), and when
 // it moved, declares the instance's libp2p config again — an install's
-// topics subscribed, an uninstall's unsubscribed, live (`syncP2p`).
+// topics subscribed, an uninstall's unsubscribed, live (`syncDispatch`).
+// The host's headers feed (#102, `headersFeed`, SKEIN_HEADERS_URL; feeds.ts)
+// follows the table the same way: an enabled instance is subscribed while
+// a row of it takes events in box `chain` (the chain app's), else not.
 //
 // Nothing here is an instance's clock but its providers (#69): a schedule
 // originates in a program's step, as a message to the cron provider; an
@@ -78,9 +81,9 @@ import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
-import { Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
+import { DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
 import { Cron, dbSchedules } from "./cron.ts";
-import { currentDispatch, takesEvent, takesMail } from "../runtime/dispatch.ts";
+import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
@@ -112,6 +115,8 @@ export interface RouterOptions {
   genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
+  /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */
+  headersFeed?: string;
   /** The host's Arcade (#58, #65, arc.ts): where the broadcast events go, the status subscription, the `status` provider. Absent: no broadcaster (a broadcast event is dropped). */
   arc?: ArcConfig;
   /** Tests: how the broadcaster reaches Arcade. */
@@ -259,7 +264,7 @@ export class Router {
   /** Rows being created (#90): hydrated before their hostname is published (disabled until claimed). */
   private unpublished = new Set<string>();
   private queues = new Map<string, Promise<unknown>>();
-  /** The libp2p nodes following their dispatch tables (#72: syncP2p after a settle). */
+  /** The libp2p nodes following their dispatch tables (#72: syncDispatch after a settle). */
   private syncing = new Set<Promise<unknown>>();
   private idleTimer?: ReturnType<typeof setInterval>;
   private ledgerTimer?: ReturnType<typeof setInterval>;
@@ -582,8 +587,8 @@ export class Router {
       throw e;
     }
     const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown> };
-    // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial.
-    await this.syncP2p(l, true);
+    // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
+    await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
@@ -722,7 +727,7 @@ export class Router {
       await l.kernel.idle();
       if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
       if (o.host) this.o.db.setSetting("host_skein", handle);
-      if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
+      if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
       this.say("router", `created ${handle} (${short(l.identity)}) from the default image, claimed by ${short(owner)}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
@@ -756,10 +761,12 @@ export class Router {
     if (box === "start") {
       this.o.db.setStatus(handle, "enabled");
       await this.hydrate(handle);
+      await this.refollowHeaders(handle);
       this.say("router", `${handle}: started by the instance manager`);
       return { handle, started: true, url: this.originOf(handle) };
     }
     this.o.db.setStatus(handle, "disabled");
+    await this.refollowHeaders(handle);
     const l = this.loaded.get(handle);
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
     this.say("router", `${handle}: stopped by the instance manager`);
@@ -818,31 +825,57 @@ export class Router {
 
   /**
    * The kernel counts as busy until it has processed what was just admitted
-   * (its `idle` answers after the drain); then the libp2p node follows the
-   * dispatch table (#72, #77).
+   * (its `idle` answers after the drain); then the libp2p node and the host's
+   * headers feed follow the dispatch table (#72, #77, #102).
    */
   private settle(l: Loaded): void {
-    const p = l.kernel.idle().then(() => this.syncP2p(l)).catch(() => {});
+    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch(() => {});
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }
 
   /**
-   * The instance's libp2p node as its genesis and its dispatch table ask
-   * (#72, #77, p2p.ts libp2pConfig): read the table (the kernel's `dispatch`
-   * frame); when its chain's tip moved since the node last followed it (or
-   * `first`), declare the config again — the node started, reconfigured
-   * (topics subscribed and unsubscribed, protocols handled and unhandled) or
-   * stopped. A failure is logged, not fatal.
+   * What the host does by the instance's dispatch table (#72, #77, #102):
+   * read the table (the kernel's `dispatch` frame); when its chain's tip
+   * moved since it was last followed (or `first`), the host's headers feed
+   * subscribes or unsubscribes it (followHeaders), and its libp2p node is
+   * declared again as its genesis and the table ask (p2p.ts libp2pConfig) —
+   * started, reconfigured (topics subscribed and unsubscribed, protocols
+   * handled and unhandled) or stopped. A failure is logged, not fatal.
    */
-  private async syncP2p(l: Loaded, first = false): Promise<void> {
-    if (!this.p2p || l.kernel.gone) return;
+  private async syncDispatch(l: Loaded, first = false): Promise<void> {
+    if ((!this.p2p && !this.o.headersFeed) || l.kernel.gone) return;
     const d = await l.kernel.dispatch().catch(() => undefined);
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
     if (!first && key === (l.dispatchTip ?? "")) return;
     l.dispatchTip = key;
-    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, d.rows as unknown as Array<Record<string, unknown>>)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+    this.followHeaders(l.row.handle, d.rows);
+    await this.p2p?.declare(l.row.handle, libp2pConfig(l.genesis, d.rows as unknown as Array<Record<string, unknown>>)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+  }
+
+  /**
+   * The host's headers feed (#102) for an instance whose dispatch table is
+   * `rows`: subscribed (box `chain`) while it is enabled and a row takes
+   * events in box `chain` by name (the chain app's `event` row; dispatch.zig
+   * forEvent) — a catch-all `*` row (a mailbox instance's) is not one —
+   * else not. One line when that changes.
+   */
+  private followHeaders(handle: string, rows: DispatchRow[]): void {
+    const url = this.o.headersFeed;
+    if (!url) return;
+    const want = this.o.db.get(handle)?.status === "enabled" && rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX));
+    if (want === this.feeds.hosts(handle)) return;
+    this.feeds.host(handle, want ? { kind: "headers", url, box: DEFAULT_BOX } : undefined);
+    this.say("router", `${handle}: ${want ? "subscribed to" : "unsubscribed from"} the host's headers feed ${url}`);
+  }
+
+  /** Follow the host's headers feed for an instance whose status changed (#102): its table read again. */
+  private async refollowHeaders(handle: string): Promise<void> {
+    if (!this.o.headersFeed) return;
+    const l = this.loaded.get(handle);
+    const d = l && !l.kernel.gone ? await l.kernel.dispatch().catch(() => undefined) : undefined;
+    this.followHeaders(handle, d?.rows ?? []);
   }
 
   /**

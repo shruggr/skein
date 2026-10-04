@@ -105,6 +105,9 @@
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
 //                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
+//   SKEIN_HEADERS_URL     the host's headers feed (#102, feeds.ts): an SSE stream of block headers (hex, or chaintracks'
+//                         JSON: Arcade's http://127.0.0.1:8083/chaintracks/v2/tip/stream) that every enabled instance
+//                         whose dispatch table takes events in box `chain` (the chain app's row) is subscribed to
 // `deploy`, `dispatch` and `peers` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
 // (default http://127.0.0.1:8100) /@<handle>, as the owner — SKEIN_OWNER (checked against the wallet):
 //   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
@@ -846,6 +849,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     libp2p: hostP2PConfig(v, home),
+    headersFeed: v.SKEIN_HEADERS_URL || undefined,
     arc: hostArcConfig(v, home),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };

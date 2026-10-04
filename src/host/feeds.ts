@@ -16,7 +16,17 @@
 //
 //   {kind: "headers", url, box?}          an SSE stream of block headers (ChainTracks-style):
 //                                         each event's data is the header's hex (160 digits), or
-//                                         JSON {header | raw | hex: "<hex>"} (or an array of them)
+//                                         JSON {header | raw | hex: "<hex>"}, or chaintracks' JSON
+//                                         {version, previousHash, merkleRoot, time, bits, nonce, height?, hash?}
+//                                         (Arcade's /chaintracks/v2/tip/stream; the hashes in display
+//                                         order: the 80 bytes serialized from the fields, and a `hash`
+//                                         that is not their sha256d is logged and dropped), or an array of them
+//
+// The host has one headers feed of its own besides (#102, SKEIN_HEADERS_URL;
+// the Router's `headersFeed`): every enabled instance whose dispatch table
+// takes events in box `chain` is subscribed to it, the others not; the router
+// keeps that current as dispatch tables change (`host`). A genesis's `feeds`
+// are in addition.
 //
 // `box` defaults to "chain" (the wallet's sender-less subscription). Nothing
 // here judges an item: the instance's own chain tracker validates headers and
@@ -32,6 +42,7 @@
 // per-instance `arc-callback` feed is gone: a genesis that still declares one
 // has it ignored.
 
+import { Hash, Utils } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 
@@ -67,8 +78,35 @@ export function feedsOf(g: Record<string, unknown> | null | undefined): FeedSpec
   return out;
 }
 
-/** Header bytes out of one SSE event's data: hex, or JSON with header/raw/hex, or an array of those. */
-export function headersOf(data: string): Uint8Array[] {
+/**
+ * The 80 bytes of a header given as chaintracks' JSON (Arcade's tip stream):
+ * version, previousHash, merkleRoot (display order: reversed into raw),
+ * time, bits, nonce — and, with `hash`, checked against their sha256d. Not
+ * that form: undefined. A `hash` that does not match: an Error saying so.
+ */
+export function headerOfFields(o: Record<string, unknown>): Uint8Array | Error | undefined {
+  const u32 = (x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 0xffffffff;
+  const h32 = (x: unknown) => typeof x === "string" && /^[0-9a-fA-F]{64}$/.test(x);
+  if (!u32(o.version) || !h32(o.previousHash) || !h32(o.merkleRoot) || !u32(o.time) || !u32(o.bits) || !u32(o.nonce)) return undefined;
+  const w = new Utils.Writer();
+  w.writeUInt32LE(o.version as number);
+  w.writeReverse(Utils.toArray(o.previousHash as string, "hex"));
+  w.writeReverse(Utils.toArray(o.merkleRoot as string, "hex"));
+  w.writeUInt32LE(o.time as number).writeUInt32LE(o.bits as number).writeUInt32LE(o.nonce as number);
+  const raw = w.toArray();
+  if (o.hash !== undefined) {
+    const hash = Utils.toHex(Hash.hash256(raw).reverse());
+    if (typeof o.hash !== "string" || o.hash.toLowerCase() !== hash) return new Error(`header ${String(o.height ?? "?")}: its hash ${String(o.hash)} is not its fields' (${hash}): dropped`);
+  }
+  return Uint8Array.from(raw);
+}
+
+/**
+ * Header bytes out of one SSE event's data: hex, JSON with header/raw/hex,
+ * chaintracks' fields (headerOfFields), or an array of those. A header whose
+ * `hash` is not its fields' is left out, and `drop` told why.
+ */
+export function headersOf(data: string, drop?: (why: string) => void): Uint8Array[] {
   const hex = (s: unknown): Uint8Array | undefined => typeof s === "string" && /^[0-9a-fA-F]{160}$/.test(s) ? Uint8Array.from(Buffer.from(s, "hex")) : undefined;
   const t = data.trim();
   const direct = hex(t);
@@ -78,7 +116,12 @@ export function headersOf(data: string): Uint8Array[] {
   const one = (x: unknown): Uint8Array | undefined => {
     if (typeof x === "string") return hex(x);
     const o = x as Record<string, unknown> | null;
-    return o && typeof o === "object" ? hex(o.header) ?? hex(o.raw) ?? hex(o.hex) : undefined;
+    if (!o || typeof o !== "object") return undefined;
+    const h = hex(o.header) ?? hex(o.raw) ?? hex(o.hex);
+    if (h) return h;
+    const f = headerOfFields(o);
+    if (f instanceof Error) { drop?.(f.message); return undefined; }
+    return f;
   };
   const list = Array.isArray(v) ? v : Array.isArray((v as { headers?: unknown })?.headers) ? (v as { headers: unknown[] }).headers : [v];
   return list.map(one).filter((x): x is Uint8Array => !!x);
@@ -219,6 +262,7 @@ export class Feeds {
   readonly o: FeedsOptions;
   private sse = new Map<string, Sse>();
   private declared = new Map<string, FeedSpec[]>();
+  private hosted = new Map<string, FeedSpec>();
   private queues = new Map<string, Queue>();
   private stopped = false;
 
@@ -230,6 +274,23 @@ export class Feeds {
   declare(handle: string, specs: FeedSpec[]): void {
     if (this.stopped) return;
     this.declared.set(handle, specs);
+    this.subscribe(handle);
+  }
+
+  /** The host's own feed (#102) for `handle`: subscribed to it (`spec`), or not (undefined); a genesis's feeds are kept. */
+  host(handle: string, spec: FeedSpec | undefined): void {
+    if (this.stopped) return;
+    if (spec) this.hosted.set(handle, spec); else this.hosted.delete(handle);
+    this.subscribe(handle);
+  }
+
+  /** Whether `handle` is subscribed to the host's own feed. */
+  hosts(handle: string): boolean { return this.hosted.has(handle); }
+
+  /** Subscribe `handle` to what it declared and the host's feed for it, and to nothing else. */
+  private subscribe(handle: string): void {
+    const h = this.hosted.get(handle);
+    const specs = [...(this.declared.get(handle) ?? []), ...(h ? [h] : [])];
     for (const [url, s] of this.sse) {
       if (s.subscribers.has(handle) && !specs.some((f) => f.kind === "headers" && f.url === url)) s.subscribers.delete(handle);
       if (!s.subscribers.size) { void s.stream.stop(); this.sse.delete(url); }
@@ -290,8 +351,9 @@ export class Feeds {
   }
 
   private dispatch(url: string, subscribers: Map<string, string>, data: string): void {
-    const hs = headersOf(data);
-    if (!hs.length) { this.say("router", `feed ${url}: an event with no header in it: ignored`); return; }
+    let dropped = false;
+    const hs = headersOf(data, (why) => { dropped = true; this.say("router", `feed ${url}: ${why}`); });
+    if (!hs.length) { if (!dropped) this.say("router", `feed ${url}: an event with no header in it: ignored`); return; }
     for (const [handle, box] of subscribers) for (const raw of hs) this.push(handle, box, { kind: "header", raw });
   }
 }

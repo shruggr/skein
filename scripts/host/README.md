@@ -198,6 +198,20 @@ instance), admitting each header as an event into the box (default `chain`,
 the chain app's). Transaction proofs and statuses come from the
 broadcaster.
 
+The host's own headers feed (#102): `SKEIN_HEADERS_URL` (the environment)
+names one SSE stream of block headers — e.g. Arcade's chaintracks,
+`http://127.0.0.1:8083/chaintracks/v2/tip/stream`. Every enabled instance
+whose dispatch table has a row taking events in box `chain` (the chain
+app's `event` row) is subscribed to it, in box `chain`; an instance without
+one gets nothing. The router re-reads the table whenever it moves, so an
+install of the chain app subscribes the instance live and an uninstall
+unsubscribes it; `host.log` has one line each (`[router] <handle>:
+subscribed to the host's headers feed <url>`). A header arrives as hex,
+`{header|raw|hex}`, or chaintracks' JSON (`{version, previousHash,
+merkleRoot, time, bits, nonce, height, hash}`, hashes in display order):
+the 80 bytes are serialized from the fields and checked against `hash`;
+a mismatch is logged and dropped. A genesis's `feeds` are in addition.
+
 Scheduling (#69, `src/host/cron.ts`; docs/MESSAGES.md "Scheduling"): a program
 asks the host's **cron provider** — its address book's role `cron`, seeded
 by every new genesis — with a message (`{fn: "tick", every | at, box, body?,

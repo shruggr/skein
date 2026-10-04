@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type ServerResponse } from "node:http";
-import { Feeds, feedsOf, headersOf, statusOf, txCid } from "./feeds.ts";
+import { Feeds, feedsOf, headerOfFields, headersOf, statusOf, txCid } from "./feeds.ts";
 
 const hdr = (n: number) => Buffer.alloc(80, n).toString("hex");
 const until = async <T>(what: string, f: () => T | undefined, ms = 5000): Promise<T> => {
@@ -34,6 +34,27 @@ test("feeds: header parsing, the genesis's feeds, Arcade's status record", () =>
   assert.deepEqual([...(s.merklePath as Uint8Array)], [0xfe, 0x01]);
   assert.equal(s.txStatus, "MINED");
   assert.equal(statusOf({ txStatus: "MINED" }), "no txid");
+});
+
+test("feeds: chaintracks' JSON (Arcade's tip stream, #102) — the 80 bytes from the fields, the hash checked", () => {
+  // Mainnet block 1: its fields as chaintracks sends them (hashes in display order), and its serialized header.
+  const block1 = {
+    version: 1, previousHash: "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f",
+    merkleRoot: "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098",
+    time: 1231469665, bits: 486604799, nonce: 2573394689, height: 1, hash: "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048",
+  };
+  const raw = "010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299";
+  assert.equal(Buffer.from(headerOfFields(block1) as Uint8Array).toString("hex"), raw);
+  const why: string[] = [];
+  assert.deepEqual(headersOf(JSON.stringify(block1), (w) => why.push(w)).map((b) => Buffer.from(b).toString("hex")), [raw]);
+  const { hash: _, ...unhashed } = block1;
+  assert.deepEqual(headersOf(JSON.stringify(unhashed)).map((b) => Buffer.from(b).toString("hex")), [raw], "no hash: nothing to check");
+  assert.equal(why.length, 0, "nothing dropped");
+  const wrong = { ...block1, nonce: block1.nonce + 1 };
+  assert.ok(headerOfFields(wrong) instanceof Error);
+  assert.deepEqual(headersOf(JSON.stringify([wrong, block1]), (w) => why.push(w)).map((b) => b.length), [80], "the mismatch dropped, the rest kept");
+  assert.match(why.join("\n"), /^header 1: its hash 00000000839a.* is not its fields' \([0-9a-f]{64}\): dropped$/);
+  assert.equal(headerOfFields({ ...block1, previousHash: "00" }), undefined, "not that form");
 });
 
 test("feeds: declared in a system's etc/config.json, carried by its genesis; the session default", async () => {
