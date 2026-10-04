@@ -224,7 +224,12 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   PKI, on the router's own origin — a hostname whose first label is no
   instance; `SKEIN_ROUTER_ORIGIN` (default `http://127.0.0.1:<port>`) is what
   the manifest publishes as the resolve URL and what geneses record as
-  `resolveOrigin`.
+  `resolveOrigin`. The host is the certifier (#100): the manifest's
+  `metanet.trust.publicKey` is its certifier key (a child of the master
+  secret), and each resolution carries the BRC-52 handle certificate it
+  issues for the binding. Revocation is not implemented — the host has no
+  wallet: the certificate's revocation outpoint is BRC-52's disabled
+  sentinel (docs/MESSAGES.md, "BRC-169 is discovery").
 - **The fuel ledger**: a request's fuel is on its thread's updates in the
   log; the host's own kernel calls (the explorer's reads) are charged in
   host.db (`skein-host ledger`).

@@ -20,7 +20,9 @@
 //   host skein records her under onboard/instances/alice (the manager's
 //   answer record). A second create of "alice" is refused (409, the
 //   manager's answer); a request with no session is refused. alice's address
-//   book has no instance manager.
+//   book has no instance manager. alice resolves by BRC-169 (#100): the
+//   manifest names the certifier key, and the resolution carries the handle
+//   certificate the host issued, which the SDK verifies.
 //
 // Both stores then replay to themselves exactly.
 //
@@ -32,11 +34,12 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateKey } from "@bsv/sdk";
+import { Certificate, PrivateKey } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
+import { masterKey, Oracle } from "../../src/host/oracle.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -133,6 +136,20 @@ try {
   const rec = await (await k("host")).call("head", "onboard/instances/alice") as CID | null;
   const answer = rec ? await (await k("host")).store.get(rec) as { handle?: string; identity?: unknown; url?: string; replyTo?: unknown } : undefined;
   check(answer?.handle === "alice" && hex(answer.identity) === res?.identity && answer.url === res?.url && !!answer.replyTo, "the host skein records her: onboard/instances/alice → the instance manager's answer record");
+
+  // ------------------------------------------------ BRC-169: alice resolves (#100)
+  // What 1sat-sdk's resolveHandle checks (the manifest's metanet.handles.version major 1, the certificate's
+  // subject = the identityKey), and the certificate itself: the SDK verifies it, its certifier is the
+  // manifest's trust key, the oracle's certifier key.
+  const manifest = await (await fetch(`${base}/manifest.json`)).json() as { metanet?: { trust?: { publicKey?: string }; handles?: { version?: string; resolve?: string } } };
+  const certifierKey = new Oracle(masterKey(vars, home)).certifierKey().toPublicKey().toString();
+  check(manifest.metanet?.handles?.version?.split(".")[0] === "1" && manifest.metanet.trust?.publicKey === certifierKey, `the manifest: metanet.handles.version ${manifest.metanet?.handles?.version}, metanet.trust.publicKey the oracle's certifier key`);
+  const rs = await fetch(`${manifest.metanet?.handles?.resolve}?handle=alice`);
+  const ra = await rs.json() as { metanetHandles?: string; identityKey?: string; messagebox?: string; ttl?: number; revoked?: boolean; certificate?: Certificate };
+  check(rs.status === 200 && ra.metanetHandles === "1.0" && ra.identityKey === res?.identity && ra.messagebox === res?.url && typeof ra.ttl === "number" && ra.revoked === false, `GET <resolve>?handle=alice: §5.2's answer (${rs.status})`);
+  check(!!ra.certificate && ra.certificate.subject === ra.identityKey, "its certificate's subject is the identityKey (resolveHandle's check)");
+  const cert = ra.certificate!;
+  check(cert.certifier === certifierKey && await new Certificate(cert.type, cert.serialNumber, cert.subject, cert.certifier, cert.revocationOutpoint, cert.fields, cert.signature).verify(), "the certificate verifies with the SDK, issued by the certifier key");
 
   // ------------------------------------------------ the client installs an app in its skein
   r = await cli(["install", demoDir, "--instance", "alice", "--approve-all"], { wallet: client, id: clientId });

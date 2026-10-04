@@ -866,11 +866,32 @@ URL. It is a program, not the core: the resolve program's thread fetches
 and its answer the next step, and keeps `{kind: "resolution", transport:
 "mailbox", address: <messagebox>, …}` (source `resolve`) under its own head
 `resolve/peers` — never the address book (#87). The instance's own domain is looked up at
-`defaults.resolveOrigin` (a dev host). The BRC-52 certificate is recorded,
-not checked (`unchecked`). The host publishes the manifest and the resolve
-endpoint for its instances (`{handle, domain, identityKey, messagebox}`),
-and the paymail PKI (`/bsvalias/id`). An emitted message is signed the way
-BRC-169 signs an envelope (above), so a BRC-169 peer can check it.
+`defaults.resolveOrigin` (a dev host). The BRC-52 certificate in the answer
+is neither checked nor kept: the program reads `identityKey` and
+`messagebox`.
+
+The host is the certifier for its instances (#100, `src/host/handles.ts`).
+`/manifest.json` publishes `metanet.trust.publicKey` — the certifier key,
+the master's child under `[2, "skein provider"]`, key ID `certifier`; not a
+provider, and in no address book — and `metanet.handles` (`version` "1.0",
+`resolve`). `GET /.well-known/metanet-handles/resolve?handle=<handle>` (or
+`<handle>@<domain>`; without a domain, the row's) answers §5.2's
+`{metanetHandles: "1.0", handle, domain, identityKey, certificate,
+messagebox, ttl: 300, revoked: false}`: an agent's own identity, a mailbox
+instance's owner's, and the instance's origin as the messagebox. The
+certificate is the BRC-52 handle certificate (§4.1) the host issues for
+that binding with the SDK's `Certificate.sign`: type §4.5's, subject the
+identity key, certifier the certifier key, `fields.handle` and
+`fields.domain` Base64 of the plaintext (as §A.3; not BRC-52 field
+encryption, so any resolver can check them), serial number
+SHA-256(`<handle>@<domain> <identityKey>`) — the same certificate on every
+resolve. **Revocation is not implemented: the host has no wallet.** The
+`revocationOutpoint` is BRC-52's disabled sentinel (64 zeros, `.0`), not an
+outpoint the certifier controls (§4.1, §4.2); the five-minute `ttl` is all
+that bounds a resolver's copy of a binding host.db no longer holds. Errors
+are §5.3's (`400 malformed-handle`, `404 handle-not-found`). The host also
+answers the paymail PKI (`/bsvalias/id`). An emitted message is signed the
+way BRC-169 signs an envelope (above), so a BRC-169 peer can check it.
 
 ## Calls
 

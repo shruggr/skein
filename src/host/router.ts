@@ -13,9 +13,10 @@
 //   http://<host>:<port>/@<handle>/…      the same instance for our own clients (a dev form): the router strips
 //                                         the prefix for the routes; the client signs the path it sent, and its
 //                                         handshake goes under the prefix (src/client/raw.ts).
-//   GET  /manifest.json                   BRC-169: metanet.handles.resolve
-//   GET  /.well-known/metanet-handles/resolve?handle=h   {handle, domain, identityKey, messagebox}: an agent's own
-//                                         identity; for a mailbox instance, its owner's — and the instance's origin
+//   GET  /manifest.json                   BRC-169 §5.1: metanet.trust.publicKey (the certifier key), metanet.handles
+//   GET  /.well-known/metanet-handles/resolve?handle=h   BRC-169 §5.2 (handles.ts): an agent's own identity; for a
+//                                         mailbox instance, its owner's — the instance's origin the messagebox, and
+//                                         the handle certificate the host issues for the binding
 //   GET  /bsvalias/id/<handle>@<domain>   paymail PKI (identity keys by handle)
 //   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
 //                                         signature: [2, "skein register"], key ID the username, counterparty
@@ -92,6 +93,7 @@ import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type Inbound
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
+import { manifest, resolution, resolutionError } from "./handles.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -153,6 +155,13 @@ export interface RouterOptions {
    * restarted router would not be the providers its instances know).
    */
   providerKeyFor?(name: ProviderName): PrivateKey;
+  /**
+   * The certifier key (#100, oracle.ts certifierKey): BRC-169's trust anchor,
+   * the manifest's `metanet.trust.publicKey`, which signs the handle
+   * certificate in every resolution (handles.ts). Absent: a key of this
+   * router's own, made fresh (a test's).
+   */
+  certifierKey?: PrivateKey;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
 }
@@ -243,6 +252,8 @@ export class Router {
   readonly p2p?: P2PHost;
   /** The host's providers (#70): what carries the instances' messages out. */
   readonly providers: Providers;
+  /** The certifier (#100): signs the BRC-169 handle certificates. */
+  readonly certifier: ProtoWallet;
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
   /** Rows being created (#90): hydrated before their hostname is published (disabled until claimed). */
@@ -269,6 +280,7 @@ export class Router {
   constructor(o: RouterOptions) {
     this.o = o;
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
+    this.certifier = new ProtoWallet(o.certifierKey ?? PrivateKey.fromRandom());
     this.feeds = new Feeds({
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
@@ -942,16 +954,20 @@ export class Router {
     }
     const path = url.pathname;
     if (req.method === "GET" && path === "/manifest.json") {
-      return json(200, { metanet: { handles: { version: "1.0", resolve: `${this.origin()}/.well-known/metanet-handles/resolve` } } });
+      const { publicKey } = await this.certifier.getPublicKey({ identityKey: true });
+      return json(200, manifest(publicKey, `${this.origin()}/.well-known/metanet-handles/resolve`));
     }
     if (req.method === "GET" && path === "/.well-known/metanet-handles/resolve") {
+      // BRC-169 §5.2: `handle` is the bare handle; `handle@domain` is accepted too. Without a domain, the row's.
       const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
-      const [h0, d] = q.includes("@") ? q.split("@") : [q, "localhost"];
-      const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? "localhost").toLowerCase();
+      const [h0, d] = q.split("@");
+      const handle = h0!.split("+")[0]!.toLowerCase();
+      if (!handle) return json(400, resolutionError("malformed-handle", "want ?handle=<handle>"));
       const row = this.o.db.get(handle);
+      const domain = (d ?? row?.domain ?? "localhost").toLowerCase();
       const key = this.o.db.identityOf(handle, domain);
-      if (!row || row.status !== "enabled" || !key) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no handle ${handle}@${domain} here` });
-      return json(200, { handle, domain, identityKey: key, messagebox: this.originOf(handle) });
+      if (!row || row.status !== "enabled" || !key) return json(404, resolutionError("handle-not-found", `no handle ${handle}@${domain} here`));
+      return json(200, await resolution(this.certifier, handle, domain, key, this.originOf(handle)));
     }
     const pki = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
     if (req.method === "GET" && pki) {

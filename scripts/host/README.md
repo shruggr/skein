@@ -110,8 +110,8 @@ The host's own endpoints:
 
 | | |
 |---|---|
-| `GET /manifest.json` | BRC-169: `metanet.handles.resolve` |
-| `GET /.well-known/metanet-handles/resolve?handle=<h>@<d>` | `{handle, domain, identityKey, messagebox}`: an agent's own identity and origin; for a mailbox instance, its owner's key and the instance's origin |
+| `GET /manifest.json` | BRC-169 §5.1: `metanet.trust.publicKey` (the certifier key), `metanet.handles` (`version`, `resolve`) |
+| `GET /.well-known/metanet-handles/resolve?handle=<h>[@<d>]` | BRC-169 §5.2 `{metanetHandles, handle, domain, identityKey, certificate, messagebox, ttl, revoked}`: an agent's own identity and origin; for a mailbox instance, its owner's key and the instance's origin; `certificate` the BRC-52 handle certificate the host issues (revocation not implemented: the host has no wallet) |
 | `GET /bsvalias/id/<handle>@<domain>` | paymail PKI (identity keys by handle) |
 | `POST /account/register {username, identityKey, signature}` | a mailbox instance for that identity: the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username, counterparty anyone, over `register <username>` → `{identityKey, username, handle, messagebox}` (409 if the name is taken) |
 | `POST /arc/callback` | Arcade's webhook (`Authorization: Bearer <SKEIN_ARC_TOKEN>`) |

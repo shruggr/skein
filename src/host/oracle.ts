@@ -11,7 +11,10 @@
 // `libp2p:<handle>`, self (peerKey). Its providers (#70: the HTTP proxy,
 // the waker, the libp2p node, the broadcaster — providers.ts) are fourth
 // children, one per provider for the whole host: [2, "skein provider"], key
-// ID = the provider's name (providerKey).
+// ID = the provider's name (providerKey). The host's BRC-169 certifier key
+// (#100: the manifest's `metanet.trust.publicKey`, the signer of the handle
+// certificates — handles.ts) is the same derivation, key ID `certifier`: not
+// a provider — it takes no messages, and no address book names it.
 //
 // Custody (dev): the secret is a file, `$SKEIN_HOME/master.key` (64 hex
 // digits, mode 0600), made on first use; `SKEIN_MASTER_KEY` (hex) overrides
@@ -84,6 +87,11 @@ export class Oracle {
    */
   providerKey(name: string): PrivateKey {
     return this.deriver.derivePrivateKey(PROVIDER_PROTOCOL, name, "self");
+  }
+
+  /** The certifier key (#100): BRC-169's trust anchor, providerKey("certifier"). */
+  certifierKey(): PrivateKey {
+    return this.providerKey("certifier");
   }
 
   /** The router's own transport identity (BRC-104 server key). */

@@ -69,6 +69,13 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   secret every instance key derives from), `host.db` (instances, queues, the
   fuel ledger), `instances/<handle>/runtime.db` (each instance's store),
   `logs/host.log`.
+- The host answers BRC-169 for its instances on its own origin
+  (`SKEIN_ROUTER_ORIGIN`): `/manifest.json` names its certifier key (a child
+  of `master.key`) as `metanet.trust.publicKey`, and
+  `/.well-known/metanet-handles/resolve` answers a handle's identity key and
+  messagebox with the BRC-52 handle certificate the host issues. Revocation
+  is not implemented (the host has no wallet): the certificate's revocation
+  outpoint is BRC-52's disabled sentinel.
 - Code genesis (no `--image`) is written at its first start: the owner, the
   owner's admin rows, the boundary programs (front door, messagebox,
   resolve) and their rows, and the host's providers in its address book.
