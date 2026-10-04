@@ -3,7 +3,7 @@
 The management site of a [skein](https://github.com/shruggr/skein): the page
 every skein from the default image serves at `/` (its files at `/site/`).
 The files are the same on every skein; what makes the page yours is the
-wallet in your browser. Version **0.2.0** (shruggr/skein#92; the Inbox, #99).
+wallet in your browser. Version **0.2.1** (shruggr/skein#92; the Inbox, #99).
 
 ## What it does
 
@@ -45,15 +45,15 @@ wallet in your browser. Version **0.2.0** (shruggr/skein#92; the Inbox, #99).
   mailbox's URL and a box (default `metanet_inbox`); the page lists what is
   waiting there (`@bsv/message-box-client`'s `listMessagesLite`, on a
   BRC-104 session signed by your wallet). **Sync** runs `@1sat/actions`'
-  `syncMessages` with the same wallet against that URL and box: each
-  message internalized into your wallet as a payment, then acknowledged; it
-  shows `{processed, failed}`, and a failed message stays in the box (the
-  browser's console says why). There is no lookup from a key to its mailbox
-  (a BRC-169 resolver answers a handle), so the URL is typed once and kept
-  in this browser (`localStorage`, per identity key). With `@1sat/actions`
-  0.0.231, `syncMessages` reads 1sat's paymail payment body, not a BRC-169
-  envelope: a `metanet_inbox` delivery is listed and comes back failed until
-  the SDK's receive for it is published and this site takes the new version.
+  `syncMetanetInbox` with the same wallet against that URL. It always reads
+  `metanet_inbox` (the box field is for List only): each BRC-169 envelope
+  there is opened (signature, decryption, content hash), its payment
+  internalized into your wallet, then acknowledged. The page shows a row per
+  message received (txid, sats, memo, sender) and a row per message left in
+  the box with the SDK's reason, the SDK's `error` if it set one, and then
+  lists the box again. There is no lookup from a key to its mailbox (a
+  BRC-169 resolver answers a handle), so the URL is typed once and kept in
+  this browser (`localStorage`, per identity key).
 
 ## Files
 
@@ -61,7 +61,7 @@ wallet in your browser. Version **0.2.0** (shruggr/skein#92; the Inbox, #99).
 |---|---|
 | `index.html`, `app.js`, `style.css` | the page: plain HTML and JavaScript, no framework |
 | `catalog.json` | the apps the page offers |
-| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk`, `@bsv/message-box-client`, `@1sat/actions`' `syncMessages` (its module only), `@ipld/dag-cbor`, `@ipld/dag-json` |
+| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk`, `@bsv/message-box-client`, `@1sat/actions`' `syncMetanetInbox` (its module only), `@ipld/dag-cbor`, `@ipld/dag-json` |
 | `webwallet.js` | `@1sat/wallet-browser`'s `createWebWallet`, loaded only in test mode |
 | `lib/entry.ts`, `lib/webwallet.ts`, `build.mjs`, `lib/SKEIN_REV` | how the bundles are made, and the skein commit they are made from |
 

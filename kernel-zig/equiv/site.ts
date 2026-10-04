@@ -33,10 +33,11 @@
 //      DAG-CBOR envelope, BRC-231 over BRC-104, its `payment` a BRC-29
 //      transaction to you); the page, given the mailbox's URL, lists the
 //      message (@bsv/message-box-client against skein's messagebox), keeps
-//      the URL in the browser, and Sync runs @1sat/actions' syncMessages with
-//      the wallet in the tab and shows its {processed, failed} (today the
-//      published SDK does not read the envelope: failed, left in the box);
-//      the stock client's acknowledgeMessage then empties the box;
+//      the URL in the browser, and Sync runs @1sat/actions' syncMetanetInbox
+//      with the wallet in the tab: the envelope opened, the payment
+//      internalized (label "metanet payment", 50 000 sats in the wallet) and
+//      acknowledged; the page shows the receipt (txid, sats, memo) and lists
+//      the box again, empty;
 //   6. the stores replay to themselves exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/site.ts
@@ -364,25 +365,22 @@ try {
   check(await page.locator("#inbox input[name=url]").inputValue() === mailbox, "the mailbox's URL is kept in the browser: the Inbox opens on it and lists it");
 
   await page.click("#sync");
-  await page.waitForFunction(() => /processed \d+, failed \d+|sync: /.test(document.getElementById("sync-result")?.textContent ?? ""), null, { timeout: 120_000 });
+  await page.waitForFunction(() => /received \d+, skipped \d+|sync: /.test(document.getElementById("sync-result")?.textContent ?? ""), null, { timeout: 120_000 });
   const synced = (await page.locator("#sync-result").innerText()).trim();
-  check(/^processed \d+, failed \d+$/.test(synced), `Sync runs @1sat/actions' syncMessages over that mailbox with the wallet in the tab and shows its result (${synced})`);
-  await page.waitForSelector("#inbox-messages, #inbox-status.bad", { timeout: 120_000 });
-  check(!(await page.locator("#inbox-status.bad").count()) && !(await page.locator("#error").count()) && (await page.locator(`tr[data-message="${sent.id}"]`).count()) === 1,
-    "the page lists the box again after the sync (the message not taken is still there), and nothing failed in the page");
-  // The stock client's acknowledgeMessage (what syncMessages calls after an internalize) against skein's messagebox, from the tab.
-  const acked = await page.evaluate(async ([host, id]) => {
-    const { MessageBoxClient } = await import(new URL("site/lib.js", location.href).href) as { MessageBoxClient: new (o: unknown) => { acknowledgeMessage(a: unknown): Promise<string> } };
-    const w = (window as unknown as { site: { wallet: unknown } }).site.wallet;
-    return await new MessageBoxClient({ walletClient: w, host }).acknowledgeMessage({ messageIds: [id], host });
-  }, [mailbox, sent.id.toString()] as const);
-  await page.click("#inbox button[type=submit]");
+  const txid = delivery.id("hex");
+  const receipt = page.locator(`#sync-received tr[data-message="${sent.id}"]`);
+  const cells = (await receipt.count()) ? (await receipt.locator("td").allInnerTexts()).map((t) => t.trim()) : [];
+  check(synced === "received 1, skipped 0" && (await receipt.count()) === 1 && (await receipt.locator("td").first().getAttribute("title")) === txid && cells[1] === "50000" && cells[2] === "for the Inbox",
+    `Sync runs @1sat/actions' syncMetanetInbox over that mailbox's metanet_inbox with the wallet in the tab and shows its result (${synced}): the delivery received, its txid, sats and memo (${cells.join(" | ")})`);
   await page.waitForFunction(() => /Nothing waiting/.test(document.getElementById("inbox-messages")?.textContent ?? ""), null, { timeout: 120_000 });
-  check(acked === "success", `@bsv/message-box-client's acknowledgeMessage against skein's messagebox: ${acked}; the Inbox then lists nothing waiting`);
-  // TODO(#99): @1sat/actions 0.0.231's syncMessages reads a 1sat paymail body ({beef: hex, outputIndex, …}), not a
-  // BRC-169 envelope, so this delivery comes back failed and stays in the box. When the SDK's metanet_inbox
-  // receive is published and the site bumps it, assert: processed 1, failed 0; the 50 000 sats in the wallet
-  // (the delivery's txid internalized); the box empty after (acknowledged).
+  check(!(await page.locator("#inbox-status.bad").count()) && !(await page.locator("#error").count()),
+    "the page lists the box again after the sync: nothing waiting (the SDK acknowledged the delivery), and nothing failed in the page");
+  const paid = await page.evaluate(async (id) => {
+    const w = (window as unknown as { site: { wallet: { listActions(a: unknown): Promise<{ actions: { txid: string; outputs?: { satoshis: number }[] }[] }> } } }).site.wallet;
+    const { actions } = await w.listActions({ labels: ["metanet payment"], includeOutputs: true });
+    return actions.filter((a) => a.txid === id).flatMap((a) => a.outputs ?? []).reduce((n, o) => n + o.satoshis, 0);
+  }, txid);
+  check(paid === 50_000, `the wallet in the tab holds the payment: its action labelled "metanet payment", txid ${txid}, ${paid} sats`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {
