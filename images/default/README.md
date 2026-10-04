@@ -10,7 +10,7 @@ docs/BOOTSTRAP.md, "The default image".
 
 - `bin/frontdoor.cid`, `bin/messagebox.cid`: the kernel's pinned modules
   (`wasm/`), by CID; `scripts/pin-programs.sh` keeps them current.
-- `bin/static.wasm`: shruggr/skein-static v0.2.0's module.
+- `bin/static.wasm`: shruggr/skein-static v0.2.1's module.
 - `etc/dispatch.json`: the claim row, the messagebox's box and http rows, the
   explorer at `/explore` (a session, read op `explore`), static at `/`
   (`www/index.html`) and under `/site/` (`www/`).

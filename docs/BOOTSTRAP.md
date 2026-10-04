@@ -42,7 +42,7 @@ outpoint later. A new skein starts from it and is then claimed.
 ```
 images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
-  bin/static.wasm                         shruggr/skein-static v0.2.0's module
+  bin/static.wasm                         shruggr/skein-static v0.2.1's module
   bin/*.json                              the program records' inputs and descriptions
   etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; the explorer at `/explore` (a
                                           session, read op `explore`); static at `/` and under `/site/` (root www)
