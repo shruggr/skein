@@ -3,14 +3,23 @@
 // A.3), the certificate the host issues, and the router's manifest and
 // resolve answer (§5.1–§5.3) checked as a resolver checks them; the holder's
 // copy a registration answers with (#103), as a wallet's acquireCertificate
-// takes it.
+// takes it. The profile (#104): the owner of a mailbox instance signs it and
+// writes it there (`objects`, `head profile`); resolve and search serve it;
+// the manifest carries the host's name, note and icon and the search URL.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { outpointToBytes } from "@1sat/templates";
+import { decodeProfile, encodeProfile } from "@1sat/utils";
 import { Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
-import { HANDLE_CERTIFICATE_TYPE, HANDLES_VERSION, issueHandleCertificate, issueSubjectCertificate, NO_REVOCATION_OUTPOINT, RESOLUTION_TTL, serialOf } from "./handles.ts";
+import { RawBox } from "../client/raw.ts";
+import { encode } from "../runtime/cid.ts";
+import { ephemeralWallet } from "../wallet.ts";
+import { HANDLE_CERTIFICATE_TYPE, HANDLES_VERSION, issueHandleCertificate, issueSubjectCertificate, NO_REVOCATION_OUTPOINT, ORDFS_CONTENT, PROFILE_KEY_ID, PROFILE_PROTOCOL, RESOLUTION_TTL, serialOf } from "./handles.ts";
+import { KERNEL_BIN } from "./kernel.ts";
 import { Oracle } from "./oracle.ts";
-import { testHost } from "./testhost.ts";
+import { testHost, until } from "./testhost.ts";
 
 const b64 = (s: string) => Utils.toBase64(Utils.toArray(s, "utf8"));
 const unb64 = (s: string) => Utils.toUTF8(Utils.toArray(s, "base64"));
@@ -66,7 +75,7 @@ test("handles: the router's manifest names the certifier key; a resolution is §
   assert.equal(manifest.metanet.handles.version, HANDLES_VERSION);
   assert.equal(manifest.metanet.handles.resolve, `${h.base}/.well-known/metanet-handles/resolve`);
   const { publicKey: certifierKey } = await h.router.certifier.getPublicKey({ identityKey: true });
-  assert.equal(manifest.metanet.trust.publicKey, certifierKey);
+  assert.deepEqual(manifest.metanet.trust, { publicKey: certifierKey }, "no SKEIN_HOST_NAME/NOTE/ICON: the trust anchor is the key alone");
 
   for (const [q, handle, key] of [["alpha", "alpha", alpha], ["david", "david", h.ownerId], ["@David+tag@localhost", "david", h.ownerId]] as const) {
     const r = await fetch(`${manifest.metanet.handles.resolve}?handle=${encodeURIComponent(q)}`);
@@ -114,4 +123,64 @@ test("handles: the holder's copy (#103) is the binding's certificate with encryp
   const again = await issueSubjectCertificate(certifier, "david", "id.skein.nexus", subject);
   assert.equal(again.certificate.serialNumber, c.serialNumber);
   assert.notEqual((again.certificate.fields as Record<string, string>).handle, fields.handle);
+});
+
+test("handles: the profile (#104) — the owner signs it and writes it to the mailbox instance (objects, head profile); resolve carries it and the hints derived from it; search finds it by handle or name; the manifest names the host and the search endpoint", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const h = await testHost(t, { trust: { name: "Test host", note: "handles for the tests", icon: "https://example.test/icon.png" } });
+  const daveKey = PrivateKey.fromRandom(), dave = daveKey.toPublicKey().toString();
+  h.mailbox("dave", dave);
+  h.mailbox("erin", PrivateKey.fromRandom().toPublicKey().toString());
+  await h.router.start();
+
+  const manifest = await (await fetch(`${h.base}/manifest.json`)).json() as { metanet: { trust: Record<string, string>; handles: { search: string } } };
+  const { publicKey: certifierKey } = await h.router.certifier.getPublicKey({ identityKey: true });
+  assert.deepEqual(manifest.metanet.trust, { name: "Test host", note: "handles for the tests", icon: "https://example.test/icon.png", publicKey: certifierKey });
+  assert.equal(manifest.metanet.handles.search, `${h.base}/.well-known/metanet-handles/search`);
+  const resolve = async (handle: string) => await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=${handle}`)).json() as Record<string, unknown>;
+  const search = async (q: string, limit?: number) => await (await fetch(`${manifest.metanet.handles.search}?q=${encodeURIComponent(q)}${limit ? `&limit=${limit}` : ""}`)).json() as { metanetHandles: string; results: Array<Record<string, unknown>>; truncated: boolean };
+  assert.equal((await resolve("dave")).profile, undefined, "no profile yet: none served");
+
+  // The page's shape (skein-site): the DAG-CBOR profile, signed by dave's wallet, put by `objects`, the head moved by `head`.
+  const avatar = `${"ab".repeat(32)}_1`;
+  const bytes = Uint8Array.from(encodeProfile({ domain: "localhost", name: "Dave D", avatar: outpointToBytes(avatar)! }));
+  const wallet = ephemeralWallet(daveKey);
+  const { signature } = await wallet.createSignature({ protocolID: PROFILE_PROTOCOL, keyID: PROFILE_KEY_ID, counterparty: "anyone", data: Array.from(bytes) });
+  const rec = encode({ profile: bytes, signature: Uint8Array.from(signature) });
+  const box = new RawBox(wallet, `${h.base}/@dave`);
+  const instance = h.keyOf("dave").toPublicKey().toString();
+  await box.send(instance, "objects", { records: [{ cid: rec.cid, bytes: rec.bytes }] });
+  await box.send(instance, "head", { name: "profile", tree: rec.cid });
+  await h.router.settled();
+
+  const a = await until("the profile in dave's resolution", async () => { const x = await resolve("dave"); return x.profile ? x : undefined; });
+  const p = a.profile as { record: string; signature: string; protocolID: [1, string]; keyID: string };
+  assert.deepEqual(p.protocolID, [1, "metanet handles profile"]);
+  assert.equal(p.keyID, "1");
+  assert.deepEqual(Utils.toArray(p.record, "base64"), Array.from(bytes), "the record: the signed DAG-CBOR bytes, base64");
+  // As a client verifies it: the handle's identity key, the protocol, anyone's view.
+  const v = await new ProtoWallet("anyone").verifySignature({ protocolID: p.protocolID, keyID: p.keyID, counterparty: a.identityKey as string, data: Utils.toArray(p.record, "base64"), signature: Utils.toArray(p.signature, "hex") });
+  assert.equal(v.valid, true);
+  assert.deepEqual(decodeProfile(Utils.toArray(p.record, "base64")), { domain: "localhost", name: "Dave D", avatar: outpointToBytes(avatar)! });
+  assert.equal(a.displayName, "Dave D");
+  assert.equal(a.avatarURL, `${ORDFS_CONTENT}/${avatar}`);
+
+  // Search: by handle, by profile name (any case); the bound; nothing.
+  const byName = await search("dave d");
+  assert.deepEqual(byName.results.map((r) => [r.handle, r.identityKey, r.displayName, r.avatarURL]), [["dave", dave, "Dave D", `${ORDFS_CONTENT}/${avatar}`]]);
+  assert.deepEqual(byName.results[0]!.profile, a.profile);
+  assert.equal(byName.truncated, false);
+  assert.deepEqual((await search("ERI")).results.map((r) => r.handle), ["erin"]);
+  assert.deepEqual((await search("")).results.map((r) => r.handle), ["dave", "erin"]);
+  const one = await search("", 1);
+  assert.deepEqual([one.results.map((r) => r.handle), one.truncated], [["dave"], true]);
+  assert.deepEqual(await search("nobody"), { metanetHandles: "1.0", results: [], truncated: false });
+
+  // A record signed by another key is not served: the head moves, nothing is attested.
+  const { signature: forged } = await new ProtoWallet(PrivateKey.fromRandom()).createSignature({ protocolID: PROFILE_PROTOCOL, keyID: PROFILE_KEY_ID, counterparty: "anyone", data: Array.from(bytes) });
+  const bad = encode({ profile: bytes, signature: Uint8Array.from(forged) });
+  await box.send(instance, "objects", { records: [{ cid: bad.cid, bytes: bad.bytes }] });
+  await box.send(instance, "head", { name: "profile", tree: bad.cid });
+  await h.router.settled();
+  await until("the forged profile not served", async () => ((await resolve("dave")).profile === undefined ? true : undefined));
+  assert.equal((await search("dave d")).results.length, 0, "and search no longer finds the name");
 });

@@ -3,8 +3,8 @@
 The management site of a [skein](https://github.com/shruggr/skein): the page
 every skein from the default image serves at `/` (its files at `/site/`).
 The files are the same on every skein; what makes the page yours is the
-wallet in your browser. Version **0.3.0** (shruggr/skein#92; the Inbox, #99;
-handles, #103).
+wallet in your browser. Version **0.4.0** (shruggr/skein#92; the Inbox, #99;
+handles, #103; profiles and search, #104).
 
 ## What it does
 
@@ -57,6 +57,25 @@ handles, #103).
   its signature, the certifier the domain's manifest names), its fields
   decrypted with the keyring the wallet keeps (`@bsv/sdk`'s
   `MasterCertificate.decryptFields`), and resolved to its messagebox.
+- **Your profile** (shruggr/skein#104). Each of your handles has a Profile
+  form: a name and an avatar, an image inscription's outpoint (`txid_vout`
+  or `txid.vout`). The page builds the OpNS profile record (`@1sat/utils`'
+  `encodeProfile`: DAG-CBOR `{domain, name?, avatar?}`, the avatar as its 36
+  bytes), your wallet signs it (`createSignature`, protocol
+  `[1, "metanet handles profile"]`, key id `1`, counterparty anyone), and
+  the page writes `{profile, signature}` to your mailbox instance as its
+  owner: `objects` with the record, then `head` `profile` → it. The host
+  serves it in the handle's resolve answer (`profile`, with `displayName`
+  and `avatarURL` derived for other clients); the page waits until it does.
+- **Handles shown** (BRC-169 §2.4): the avatar, or an identicon drawn from
+  the identity key, then `handle@domain`. A profile whose signature the page
+  verifies against the handle's identity key (and whose domain is the
+  handle's) is shown as signed by its key; the host's `displayName` and
+  `avatarURL` are shown only without one, marked unattested.
+- **Find a handle** (BRC-169 §5.6): the search endpoint the host's
+  manifest names (`metanet.handles.search`), asked on an explicit Search
+  (nothing is sent as you type; one query at a time), this page's host
+  only. Results are hints; each result's profile is verified as above.
 - **The Inbox** (`#/inbox`): a mailbox's box for your key — any BRC-33
   messagebox, such as your mailbox instance on a skein host. Give it the
   mailbox's URL and a box (default `metanet_inbox`); the page lists what is
@@ -78,7 +97,7 @@ handles, #103).
 |---|---|
 | `index.html`, `app.js`, `style.css` | the page: plain HTML and JavaScript, no framework |
 | `catalog.json` | the apps the page offers |
-| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk` (with its `Certificate` and `MasterCertificate`), `@bsv/message-box-client`, `@1sat/actions`' `syncMetanetInbox` (its module only), `@ipld/dag-cbor`, `@ipld/dag-json` |
+| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`), install plan and block encoder (`src/runtime/cid.ts`), `@1sat/connect`, `@bsv/sdk` (with its `Certificate`, `MasterCertificate` and `ProtoWallet`), `@bsv/message-box-client`, `@1sat/actions`' `syncMetanetInbox` (its module only), `@1sat/utils`' profile codec, `@1sat/templates`' outpoint bytes and `@1sat/types`' outpoint form (their modules only), `@ipld/dag-cbor`, `@ipld/dag-json` |
 | `webwallet.js` | `@1sat/wallet-browser`'s `createWebWallet`, loaded only in test mode |
 | `lib/entry.ts`, `lib/webwallet.ts`, `build.mjs`, `lib/SKEIN_REV` | how the bundles are made, and the skein commit they are made from |
 

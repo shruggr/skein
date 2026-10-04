@@ -92,6 +92,10 @@
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
 //   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: what BRC-169 discovery
 //                         (/manifest.json, the resolve endpoint) publishes as the resolve URL, and the geneses' resolveOrigin
+//   SKEIN_HOST_NAME, SKEIN_HOST_NOTE, SKEIN_HOST_ICON   the host's name, a line about it and its icon's URL in the
+//                         manifest's metanet.trust (BRC-169 §5.1, #104); each optional, absent when unset
+//   SKEIN_ORDFS_URL       the ORDFS content route a handle's avatarURL is derived under (#104: <url>/<txid>_<vout>),
+//                         default https://api.1sat.app/content; empty: no avatarURL
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
 //   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
@@ -850,6 +854,8 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     libp2p: hostP2PConfig(v, home),
     headersFeed: v.SKEIN_HEADERS_URL || undefined,
+    trust: { name: v.SKEIN_HOST_NAME || undefined, note: v.SKEIN_HOST_NOTE || undefined, icon: v.SKEIN_HOST_ICON || undefined },
+    ...(v.SKEIN_ORDFS_URL !== undefined ? { ordfs: v.SKEIN_ORDFS_URL } : {}),
     arc: hostArcConfig(v, home),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };

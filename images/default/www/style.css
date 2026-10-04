@@ -26,3 +26,7 @@ nav.tabs{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0;font-size:14px}
 ul.plain{list-style:none;padding:0;margin:4px 0}ul.plain li{margin:3px 0;overflow-wrap:anywhere}
 .status{margin:8px 0;white-space:pre-wrap}
 .json{margin-left:1.2em}
+.handle{display:inline-flex;gap:8px;align-items:center}
+.avatar{width:28px;height:28px;border-radius:50%;flex:none;object-fit:cover;background:var(--code)}
+.pname{font-weight:600}
+details.profile{margin:4px 0}

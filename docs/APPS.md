@@ -277,6 +277,10 @@ sends the messages, signed by the wallet on a BRC-104 session.
   router (`/account/register`, signed by your wallet); the handle
   certificate kept in your wallet (`acquireCertificate`, direct); "Your
   handles" from `listCertificates`.
+- **Profiles** (#104, skein-site 0.4.0): each handle's Profile form (a name,
+  an avatar outpoint) signed by your wallet and written to your mailbox
+  instance (`objects`, `head profile`); handles shown with their avatar or
+  an identicon; "Find a handle" over the host's search endpoint.
 
 Who can install is whoever the kernel's admin rows admit to `objects`,
 `head` and `dispatch`: the owner, by every genesis that names one; a
@@ -655,7 +659,7 @@ bounded at 64 MiB).
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
 | install client (manifest → objects + head + dispatch + start, approvals); `skein-host install <repo|dir>` / `uninstall`; `start`/`stop`, row senders | built (#72, #76, #77) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
-| the management page: the site in the default image; install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92: §3; shruggr/skein-site 0.3.0, with the Inbox, #99, and handles, #103) |
+| the management page: the site in the default image; install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92: §3; shruggr/skein-site 0.4.0, with the Inbox, #99, handles, #103, and profiles, #104) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
