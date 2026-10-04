@@ -896,11 +896,55 @@ certifier as counterparty), and a resolve gives the messagebox. The field
 ciphertexts differ on every issue; the resolve answer's certificate stays
 plaintext, so any resolver can check §4.1's rule 3.
 
+**The profile** (#104). A handle holder's profile is the record the OpNS
+name coin carries in its `profile` field (1sat-sdk#83): DAG-CBOR `{domain,
+name?, avatar?}`, written and read with `@1sat/utils`' `encodeProfile` and
+`decodeProfile`; `avatar` is the 36-byte outpoint of an image inscription
+(`@1sat/templates`' `outpointToBytes`, from `txid_vout` or `txid.vout`).
+The holder's wallet signs those bytes with `createSignature` under
+`[1, "metanet handles profile"]`, key ID `1`, counterparty anyone, so anyone
+with the identity key verifies it. The owner of a mailbox instance keeps it
+there with two admin messages and no program: `objects` with the record
+`{profile: <the bytes>, signature: <DER>}`, then `head` `{name: "profile",
+tree: <its CID>}` (the management page's Profile form does both). The host
+reads that head from the instance's store file (read-only, no kernel) and
+adds to the resolve answer (§5.1 item 3: clients ignore fields they do not
+know)
+
+```
+profile: {record: <base64 of the DAG-CBOR bytes>, signature: <hex DER>,
+          protocolID: [1, "metanet handles profile"], keyID: "1"}
+displayName: <the name>                      §5.6's hints, derived for
+avatarURL: <SKEIN_ORDFS_URL>/<txid>_<vout>   standard clients; unattested
+```
+
+only when the signature verifies for the handle's identity key and the
+record's `domain` is the handle's; otherwise none of the three. `avatarURL`
+is the avatar's content at an ORDFS gateway: the host runs none, so the
+default is the public one at `https://api.1sat.app/content`
+(`SKEIN_ORDFS_URL`; empty: no `avatarURL`). Our page verifies `profile`
+itself against the identity key and shows it as signed by the handle's key;
+the hints only without one, as unattested (§2.4 item 8).
+
+**Search** (§5.6, #104). `GET /.well-known/metanet-handles/search?q=&limit=`,
+advertised in the manifest as `metanet.handles.search`: the handles resolve
+answers at the request's domain (host.db's enabled instances), in handle
+order, whose handle or profile name contains `q` (any case; an empty `q`
+lists them all), at most `limit` (default 20, at most 100) →
+`{metanetHandles: "1.0", results: [{handle, identityKey, displayName?,
+avatarURL?, profile?}], truncated}` — each result's profile as resolve has
+it. Results are hints: no certificate comes with them. The page's "Find a
+handle" asks this page's host only, on an explicit Search.
+
+**The host's presentation** (§5.1). `metanet.trust` carries `name`, `note`
+and `icon` from `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE` and `SKEIN_HOST_ICON`,
+each only when set, beside `publicKey`.
+
 The host is the certifier for its instances (#100, `src/host/handles.ts`).
 `/manifest.json` publishes `metanet.trust.publicKey` — the certifier key,
 the master's child under `[2, "skein provider"]`, key ID `certifier`; not a
 provider, and in no address book — and `metanet.handles` (`version` "1.0",
-`resolve`). `GET /.well-known/metanet-handles/resolve?handle=<handle>` (or
+`resolve`, `search`). `GET /.well-known/metanet-handles/resolve?handle=<handle>` (or
 `<handle>@<domain>`; without one, the domain is the request's hostname, and
 127.0.0.1 is `localhost`) answers §5.2's
 `{metanetHandles: "1.0", handle, domain, identityKey, certificate,

@@ -61,7 +61,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 }
 
 /** A host with agents and mailbox instances, each instance's key its own (the oracle's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; trust?: Router["o"]["trust"] } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
@@ -78,6 +78,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
     // The host's headers feed (#102).
     ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
+    // The host's name, note and icon in the manifest (#104).
+    ...(o.trust ? { trust: o.trust } : {}),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
     providerKeyFor: (name) => new Oracle(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },

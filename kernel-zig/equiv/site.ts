@@ -35,6 +35,14 @@
 //      the tab keeps (acquireCertificate, direct: encrypted fields, your
 //      keyring); listCertificates returns it; "Your handles" shows
 //      you@localhost and the messagebox it resolves to;
+//      your profile (#104): the Profile form of that row — a name and an
+//      avatar outpoint — builds the OpNS profile record (@1sat/utils), the
+//      wallet in the tab signs it ([1, "metanet handles profile"]), and the
+//      page writes it to your mailbox instance as its owner (objects, head
+//      profile); the host's resolve answer carries it (verified here against
+//      your key) with displayName (no avatarURL: SKEIN_ORDFS_URL is empty); the row shows it as signed
+//      by your key; the manifest names the host (SKEIN_HOST_NAME) and its
+//      search endpoint, and Find a handle on the page finds you by that name;
 //      the Inbox (#99): opened on that messagebox (prefilled from the handle);
 //      a sender delivers a payment to it in box metanet_inbox (a BRC-169
 //      DAG-CBOR envelope, BRC-231 over BRC-104, its `payment` a BRC-29
@@ -64,7 +72,9 @@ import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
-import { HANDLE_CERTIFICATE_TYPE, serialOf } from "../../src/host/handles.ts";
+import { HANDLE_CERTIFICATE_TYPE, PROFILE_KEY_ID, PROFILE_PROTOCOL, serialOf } from "../../src/host/handles.ts";
+import { decodeProfile } from "@1sat/utils";
+import { outpointFromBytes } from "@1sat/templates";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { chromium, playwright } from "./browser.ts";
 
@@ -199,6 +209,9 @@ const base = `http://127.0.0.1:${port}`;
 const vars: Env["vars"] = {
   SKEIN_HOME: home, HOME: home, SKEIN_ROUTER_PORT: String(port), SKEIN_HOST_PORT: "0",
   SKEIN_INSTANCE_ORIGIN: "http://127.0.0.1:{port}/@{handle}",
+  // #104: the host's name in the manifest; no avatarURL (nothing fetched from a public ORDFS gateway).
+  SKEIN_HOST_NAME: "Test host",
+  SKEIN_ORDFS_URL: "",
 };
 const lines: string[] = [];
 const out = (l: string) => { lines.push(l); if (verbose) process.stdout.write(`  | ${l}\n`); };
@@ -353,6 +366,33 @@ try {
     `the handle certificate is in the wallet in the tab (acquireCertificate, direct): listCertificates by the host's certifier and the handle type returns it, its fields encrypted, your keyring reads them (${JSON.stringify(read)})`);
   const handles = await page.locator("#handles").innerText();
   check(handles.includes("you@localhost") && handles.includes(`${base}/@you`), `"Your handles" shows it, resolved to its messagebox (${handles.replace(/\s+/g, " ").trim()})`);
+
+  // ------------------------------------------------ your profile (#104)
+  const avatar = `${"cd".repeat(32)}.0`;
+  const mine = page.locator('tr[data-handle="you@localhost"]');
+  await mine.locator("details.profile summary").click();
+  await mine.locator("form.profile-form input[name=name]").fill("You Yourself");
+  await mine.locator("form.profile-form input[name=avatar]").fill(avatar);
+  await mine.locator("form.profile-form button[type=submit]").click();
+  await page.waitForFunction(() => /profile signed by its key/.test(document.getElementById("handles")?.textContent ?? "") || !!document.querySelector(".profile-status.bad"), null, { timeout: 120_000 });
+  if (await page.locator(".profile-status.bad").count()) throw new Error(`profile: ${await page.locator(".profile-status.bad").innerText()}`);
+  const shown = (await page.locator("#handles").innerText()).replace(/\s+/g, " ").trim();
+  check(/you@localhost You Yourself \(profile signed by its key\)/.test(shown) && (await page.locator('tr[data-handle="you@localhost"] svg.avatar').count()) === 1,
+    `the Profile form: the page signs the profile, writes it to your mailbox (objects, head profile), and "Your handles" shows it as signed by your key, with your identicon (no avatar URL from this host) (${shown.slice(0, 120)})`);
+  const res = await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=you`)).json() as { identityKey: string; displayName?: string; avatarURL?: string; profile?: { record: string; signature: string } };
+  const signedOk = res.profile ? (await new ProtoWallet("anyone").verifySignature({ protocolID: PROFILE_PROTOCOL, keyID: PROFILE_KEY_ID, counterparty: you, data: Utils.toArray(res.profile.record, "base64"), signature: Utils.toArray(res.profile.signature, "hex") })).valid : false;
+  const rec = res.profile ? decodeProfile(Utils.toArray(res.profile.record, "base64")) : undefined;
+  check(signedOk && rec?.domain === "localhost" && rec.name === "You Yourself" && outpointFromBytes(rec.avatar ?? []) === avatar.replace(".", "_") && res.displayName === "You Yourself" && res.avatarURL === undefined,
+    `resolve carries the profile, signed by your key (verified here): ${JSON.stringify({ ...rec, avatar: rec?.avatar ? outpointFromBytes(rec.avatar) : undefined })}, displayName ${res.displayName}; no avatarURL (SKEIN_ORDFS_URL empty)`);
+  const mf = await (await fetch(`${base}/manifest.json`)).json() as { metanet: { trust: { name?: string }; handles: { search?: string } } };
+  check(mf.metanet.trust.name === "Test host" && mf.metanet.handles.search === `${base}/.well-known/metanet-handles/search`, `the manifest names the host (${mf.metanet.trust.name}) and its search endpoint`);
+  await page.fill("#search input[name=q]", "yourself");
+  await page.click("#search button[type=submit]");
+  await page.waitForSelector('tr[data-result="you@localhost"], #search-status.bad', { timeout: 60_000 });
+  if (await page.locator("#search-status.bad").count()) throw new Error(`search: ${await page.locator("#search-status").innerText()}`);
+  const found = (await page.locator("#search-results").innerText()).replace(/\s+/g, " ").trim();
+  check((await page.locator("#search-results tr").count()) === 1 && /you@localhost You Yourself \(profile signed by its key\)/.test(found),
+    `Find a handle: the host's search finds you by your profile's name; the result's profile verified in the page (${found.slice(0, 120)})`);
 
   // ------------------------------------------------ the Inbox (#99), opened on that messagebox
   await page.goto(`${base}/@host/${search}#/inbox`);

@@ -1,8 +1,8 @@
 {
   "name": "skein-site",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet.",
+  "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet, sign its profile, find handles.",
   "type": "module",
   "scripts": {
     "build": "node build.mjs"
@@ -11,6 +11,9 @@
   "devDependencies": {
     "@1sat/actions": "0.0.232",
     "@1sat/connect": "0.0.103",
+    "@1sat/templates": "0.0.43",
+    "@1sat/types": "0.0.52",
+    "@1sat/utils": "0.0.42",
     "@1sat/wallet-browser": "0.0.104",
     "@bsv/message-box-client": "2.6.0",
     "@bsv/sdk": "2.8.6",

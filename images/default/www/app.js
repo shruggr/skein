@@ -6,7 +6,9 @@
 // the page is never in the path for another skein's data.
 //
 //   #/                       your skeins (locators in your wallet), add one, create one here; your
-//                            handles (certificates in your wallet), register one on this page's host
+//                            handles (certificates in your wallet), register one on this page's host,
+//                            each one's profile (#104: name and avatar, signed by your wallet); find a
+//                            handle on this page's host (BRC-169 search)
 //   #/s/<identity>           a skein: its apps, install, uninstall, children (a host skein's)
 //   #/s/<identity>/peers     its address book
 //   #/s/<identity>/log, /threads, /thread/<cid>, /record/<cid>, /edges/<cid>, /dispatch
@@ -19,7 +21,7 @@
 // (createWebWallet, webwallet.js) instead of connecting one; &services=<url>
 // points that wallet at a 1sat services endpoint.
 
-import { appRecordIn, Certificate, CID, connectWallet, createContext, dagJson, describe, dispatchOrigin, fold, Hash, LockingScript, lookup, MasterCertificate, MessageBoxClient, parseTree, planInstall, planUninstall, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, senderText, syncMetanetInbox, Utils, WalletClient } from "./lib.js";
+import { appRecordIn, Certificate, CID, connectWallet, createContext, dagJson, decodeProfile, describe, dispatchOrigin, encodeBlock, encodeProfile, fold, formatOrdinalOutpoint, Hash, LockingScript, lookup, MasterCertificate, MessageBoxClient, outpointFromBytes, outpointToBytes, parseTree, planInstall, planUninstall, ProtoWallet, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, senderText, syncMetanetInbox, Utils, WalletClient } from "./lib.js";
 
 const q = new URLSearchParams(location.search);
 /** The skein that served this page: its base URL (the page is its `/`). */
@@ -33,6 +35,17 @@ const GIT_RAW = 0x78;
 const HANDLE_TYPE = Utils.toBase64(Hash.sha256(Utils.toArray("metanet-handles handle certificate v1", "utf8")));
 /** A registration's signature (the host's POST /account/register): protocol, key ID the name, over `register <name>`. */
 const REGISTER = [2, "skein register"];
+/**
+ * A handle's profile (#104): the OpNS profile record (@1sat/utils
+ * encodeProfile: DAG-CBOR {domain, name?, avatar?}, the avatar an image
+ * inscription's 36-byte outpoint), signed by the holder's wallet under this
+ * protocol, key ID "1", counterparty anyone, over those bytes — anyone with
+ * the identity key verifies it. Kept in your mailbox instance under the head
+ * `profile`: a record {profile: <the bytes>, signature}.
+ */
+const PROFILE = [1, "metanet handles profile"];
+const PROFILE_KEY_ID = "1";
+const PROFILE_HEAD = "profile";
 
 const state = { wallet: undefined, me: "", locators: [], catalog: [], boxes: new Map(), host: undefined, handles: undefined };
 window.site = state;
@@ -58,6 +71,30 @@ const isKey = (s) => /^0[23][0-9a-f]{64}$/.test(s);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const when = (t) => (Array.isArray(t) ? new Date(t[0] * 1000 + Math.floor(t[1] / 1e6)).toISOString().replace("T", " ").slice(0, 19) : "");
 function status(el, text, cls = "") { el.className = `status ${cls}`; el.textContent = text; }
+
+/**
+ * A generative identicon for an identity key (BRC-169 §2.4 item 1, where a
+ * handle has no avatar): a 5×5 grid mirrored left to right, its cells and
+ * colour from SHA-256 of the key.
+ */
+function identicon(key, size = 28) {
+  const d = Hash.sha256(Utils.toArray(key, "hex"));
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  for (const [k, v] of Object.entries({ viewBox: "0 0 5 5", width: size, height: size, class: "avatar", "aria-hidden": "true" })) svg.setAttribute(k, String(v));
+  const fill = `hsl(${((d[0] << 8) | d[1]) % 360} 55% 48%)`;
+  for (let y = 0; y < 5; y++) {
+    for (let x = 0; x < 3; x++) {
+      if (!(d[2 + y * 3 + x] & 1)) continue;
+      for (const cx of new Set([x, 4 - x])) {
+        const r = document.createElementNS(ns, "rect");
+        for (const [k, v] of Object.entries({ x: cx, y, width: 1, height: 1, fill })) r.setAttribute(k, String(v));
+        svg.append(r);
+      }
+    }
+  }
+  return svg;
+}
 const errText = (e) => (e instanceof Error ? e.message : String(e));
 
 // ---------------------------------------------------------------- the wallet
@@ -273,9 +310,52 @@ async function hostInfo() {
   try {
     const at = await (await fetch(new URL("/.well-known/skein-host", location.href))).json();
     const mf = await (await fetch(`${at.origin}/manifest.json`)).json();
-    state.host = { origin: at.origin, domain: at.domain, certifier: mf.metanet.trust.publicKey, resolve: mf.metanet.handles.resolve };
+    const t = mf.metanet.trust;
+    state.host = { origin: at.origin, domain: at.domain, certifier: t.publicKey, name: t.name, icon: t.icon, resolve: mf.metanet.handles.resolve, search: mf.metanet.handles.search };
   } catch { state.host = null; }
   return state.host;
+}
+
+/**
+ * What an answer — a resolution, or a search result — says of a handle's
+ * profile (#104). `attested`: its `profile` record verified here against
+ * the answer's identity key (PROFILE, key ID "1"), its domain the handle's;
+ * {name?, avatar?: txid_vout}. `hints`: `displayName` and `avatarURL` as the
+ * host sent them, unattested (BRC-169 §2.4 item 8, §5.6).
+ */
+async function profileIn(a, domain) {
+  const out = { hints: {} };
+  if (typeof a.displayName === "string") out.hints.displayName = a.displayName;
+  if (typeof a.avatarURL === "string") out.hints.avatarURL = a.avatarURL;
+  const p = a.profile;
+  if (p && typeof p.record === "string" && typeof p.signature === "string" && isKey(a.identityKey ?? "")) {
+    try {
+      const data = Utils.toArray(p.record, "base64");
+      const { valid } = await new ProtoWallet("anyone").verifySignature({ protocolID: PROFILE, keyID: PROFILE_KEY_ID, counterparty: a.identityKey, data, signature: Utils.toArray(p.signature, "hex") });
+      const d = decodeProfile(data);
+      if (valid && d.domain === domain) out.attested = { record: p.record, ...(d.name ? { name: d.name } : {}), ...(d.avatar ? { avatar: outpointFromBytes(d.avatar) } : {}) };
+    } catch { /* not verified: only the hints */ }
+  }
+  return out;
+}
+
+/**
+ * A handle as BRC-169 §2.4 has it shown: the avatar, or the identity key's
+ * identicon, then the handle. The name and avatar from a verified profile
+ * are marked as signed by the handle's key; the host's hints, shown only
+ * without one, as unattested.
+ */
+function handleView(key, handle, domain, prof = { hints: {} }) {
+  const a = prof.attested, hint = prof.hints;
+  let pic;
+  if (a?.avatar && hint.avatarURL?.endsWith(`/${a.avatar}`)) pic = h("img", { class: "avatar", src: hint.avatarURL, alt: "", width: 28, height: 28, title: `avatar ${a.avatar}` });
+  else if (!a && hint.avatarURL) pic = h("img", { class: "avatar", src: hint.avatarURL, alt: "", width: 28, height: 28, title: "avatar: from the host, unattested" });
+  else pic = identicon(key);
+  return h("span", { class: "handle" }, pic,
+    h("span", {}, `${handle}@${domain}`,
+      a?.name ? h("span", { class: "pname" }, ` ${a.name}`) : "",
+      a ? h("span", { class: "small ok" }, " (profile signed by its key)") : "",
+      !a && (hint.displayName || hint.avatarURL) ? h("span", { class: "small wait" }, ` ${hint.displayName ?? ""} (from the host, unattested)`) : ""));
 }
 
 /** A domain's manifest (§5.1): this host's from hostInfo, another's from https://<domain>/manifest.json. */
@@ -306,15 +386,113 @@ async function myHandles(refresh = false) {
       row.handle = f.handle; row.domain = f.domain;
       const mf = await manifestOf(f.domain, host);
       if (mf.certifier !== c.certifier) throw new Error(`its certifier is not the one ${f.domain} publishes`);
-      const r = await fetch(`${mf.resolve}?handle=${encodeURIComponent(f.handle)}`);
-      const a = await r.json();
-      if (r.status !== 200) throw new Error(`resolve: ${a.error?.message ?? `HTTP ${r.status}`}`);
+      row.resolve = mf.resolve;
+      const a = await resolveHandle(row);
       if (a.identityKey !== state.me) throw new Error(`${f.handle}@${f.domain} resolves to another key`);
       row.messagebox = a.messagebox;
+      row.profile = await profileIn(a, f.domain);
     } catch (e) { row.error = errText(e); }
     out.push(row);
   }
   return (state.handles = out);
+}
+
+/** A handle's resolution (§5.2) at its domain's resolve endpoint. */
+async function resolveHandle(row) {
+  const r = await fetch(`${row.resolve}?handle=${encodeURIComponent(row.handle)}`);
+  const a = await r.json();
+  if (r.status !== 200) throw new Error(`resolve: ${a.error?.message ?? `HTTP ${r.status}`}`);
+  return a;
+}
+
+/**
+ * Set your profile for a handle (#104): the record built (@1sat/utils
+ * encodeProfile: the handle's domain, the name and the avatar's outpoint
+ * when given), signed by your wallet, and written to your mailbox instance
+ * as its owner — `objects` with the record {profile, signature}, then `head`
+ * `profile` → it. Then the handle is resolved until the host serves it.
+ */
+async function setProfile(row, name, avatar) {
+  let av;
+  if (avatar) {
+    av = outpointToBytes(formatOrdinalOutpoint(avatar));
+    if (!av) throw new Error(`the avatar is not an outpoint (txid_vout or txid.vout): ${avatar}`);
+  }
+  const bytes = encodeProfile({ domain: row.domain, ...(name ? { name } : {}), ...(av ? { avatar: av } : {}) });
+  const { signature } = await state.wallet.createSignature({ protocolID: PROFILE, keyID: PROFILE_KEY_ID, counterparty: "anyone", data: bytes });
+  const rec = encodeBlock({ profile: Uint8Array.from(bytes), signature: Uint8Array.from(signature) });
+  const identity = await identityAt(row.messagebox);
+  const box = boxFor(row.messagebox);
+  await box.send(identity, "objects", { records: [{ cid: rec.cid, bytes: rec.bytes }] });
+  await box.send(identity, "head", { name: PROFILE_HEAD, tree: rec.cid });
+  const want = Utils.toBase64(bytes);
+  for (let wait = 250; wait < 8000; wait *= 2) {
+    const a = await resolveHandle(row);
+    if (a.profile?.record === want) return a;
+    await sleep(wait);
+  }
+  throw new Error("sent to your mailbox; the host does not serve it yet (look again in a moment)");
+}
+
+/** The Profile form of one of your handles: the current profile, and Save (setProfile). */
+function profileForm(x) {
+  const a = x.profile?.attested;
+  const name = h("input", { type: "text", name: "name", placeholder: "a name (optional)", value: a?.name ?? "" });
+  const avatar = h("input", { type: "text", name: "avatar", placeholder: "avatar: an image inscription's outpoint, txid_vout (optional)", value: a?.avatar ?? "" });
+  const st = h("div", { class: "status profile-status" });
+  const now = a
+    ? `Now: ${a.name ? `name ${a.name}` : "no name"}, ${a.avatar ? `avatar ${a.avatar}` : "no avatar"} (signed by your key, verified here).`
+    : "No profile yet.";
+  return h("details", { class: "profile" }, h("summary", { class: "small" }, "Profile"),
+    h("p", { class: "mut small" }, `${now} Your wallet signs the name and the avatar (an image inscription, by outpoint); your mailbox keeps them, and ${x.domain} serves them with ${x.handle}@${x.domain} when it is resolved or found.`),
+    h("form", { class: "row profile-form", onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        status(st, "signing and sending to your mailbox");
+        await setProfile(x, name.value.trim(), avatar.value.trim());
+        status(st, "saved: the host serves it", "ok");
+        state.handles = undefined;
+        await sleep(300);
+        route();
+      } catch (err) { status(st, errText(err), "bad"); }
+    } }, name, avatar, h("button", { type: "submit", class: "go" }, "Save")), st);
+}
+
+/**
+ * Find a handle on this page's host (BRC-169 §5.6): one query per explicit
+ * search (nothing is sent as you type; the button waits for the answer),
+ * to the search endpoint the host's manifest names. The results are hints:
+ * no certificate comes with them.
+ */
+function searchSection(m, host) {
+  if (!host.search) return;
+  const q = h("input", { type: "text", name: "q", placeholder: "a handle or a name" });
+  const go = h("button", { type: "submit" }, "Search");
+  const st = h("div", { class: "status", id: "search-status" });
+  const out = h("div", { id: "search-results" });
+  const where = `${host.name ? `${host.name}, ` : ""}${host.domain}`;
+  m.append(h("h2", {}, "Find a handle"),
+    h("p", { class: "mut small" }, `Asks ${host.search} (${where}) only, when you press Search. Results are hints from the host: resolve a handle before you rely on it. A profile signed by its handle's key is marked; anything else the host adds is unattested.`),
+    h("form", { class: "row", id: "search", onsubmit: async (e) => {
+      e.preventDefault();
+      if (go.disabled) return;
+      go.disabled = true;
+      out.replaceChildren();
+      status(st, `searching ${host.domain}`);
+      try {
+        const r = await fetch(`${host.search}?q=${encodeURIComponent(q.value.trim())}&limit=20`);
+        const v = await r.json();
+        if (r.status !== 200) throw new Error(v.error?.message ?? `HTTP ${r.status}`);
+        status(st, `${v.results.length}${v.truncated ? " (more: narrow the search)" : ""} from ${host.domain}`);
+        if (v.results.length) {
+          const rows = await Promise.all(v.results.map(async (x) => h("tr", { "data-result": `${x.handle}@${host.domain}` },
+            h("td", {}, handleView(x.identityKey, x.handle, host.domain, await profileIn(x, host.domain))),
+            h("td", { class: "key", title: x.identityKey }, short(String(x.identityKey))))));
+          out.append(h("table", {}, h("tbody", {}, rows)));
+        }
+      } catch (err) { status(st, errText(err), "bad"); }
+      go.disabled = false;
+    } }, q, go), st, out);
 }
 
 /**
@@ -454,8 +632,8 @@ async function handlesSection(m) {
     const list = await myHandles();
     at.replaceChildren(list.length
       ? h("table", {}, h("tbody", {}, list.map((x) => h("tr", { "data-handle": x.handle ? `${x.handle}@${x.domain}` : x.serialNumber },
-        h("td", {}, x.handle ? `${x.handle}@${x.domain}` : short(x.serialNumber)),
-        h("td", {}, x.messagebox ? h("a", { href: "#/inbox" }, x.messagebox) : h("span", { class: "bad" }, x.error ?? ""))))))
+        h("td", {}, x.handle ? handleView(state.me, x.handle, x.domain, x.profile) : short(x.serialNumber)),
+        h("td", {}, x.messagebox ? [h("a", { href: "#/inbox" }, x.messagebox), profileForm(x)] : h("span", { class: "bad" }, x.error ?? ""))))))
       : h("p", { class: "mut" }, `No handle certificate from ${host.domain} in your wallet.`));
   } catch (e) { at.replaceChildren(h("p", { class: "bad" }, `listCertificates: ${errText(e)}`)); }
 
@@ -475,6 +653,8 @@ async function handlesSection(m) {
         route();
       } catch (err) { status(st, errText(err), "bad"); }
     } }, name, h("span", { class: "mut" }, `@${host.domain}`), h("button", { type: "submit", class: "go" }, "Register")), st);
+
+  searchSection(m, host);
 }
 
 function skeinHeader(sk, page) {

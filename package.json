@@ -21,6 +21,8 @@
   },
   "license": "MIT",
   "dependencies": {
+    "@1sat/templates": "^0.0.43",
+    "@1sat/utils": "^0.0.42",
     "@1sat/wallet-browser": "^0.0.102",
     "@bsv/message-box-client": "^2.5.4",
     "@bsv/sdk": "^2.8.6",

@@ -75,7 +75,11 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   `/.well-known/metanet-handles/resolve` answers a handle's identity key and
   messagebox with the BRC-52 handle certificate the host issues. Revocation
   is not implemented (the host has no wallet): the certificate's revocation
-  outpoint is BRC-52's disabled sentinel.
+  outpoint is BRC-52's disabled sentinel. `SKEIN_HOST_NAME`,
+  `SKEIN_HOST_NOTE` and `SKEIN_HOST_ICON` (each optional) give the
+  manifest's `metanet.trust` the host's name, a line about it and its
+  icon's URL; `/.well-known/metanet-handles/search?q=&limit=` (advertised
+  as `metanet.handles.search`) finds handles by name (#104).
 - Code genesis (no `--image`) is written at its first start: the owner, the
   owner's admin rows, the boundary programs (front door, messagebox,
   resolve) and their rows, and the host's providers in its address book.
@@ -135,6 +139,13 @@ bin/skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instanc
   wallet keeps it (`acquireCertificate`). "Your handles" lists those
   certificates (`listCertificates`) and the mailbox each resolves to. The
   labels `id` and `host` and every instance's handle are refused.
+- **Your profile** (#104). Each of your handles has a Profile form: a name
+  and an avatar (an image inscription, by outpoint). Your wallet signs the
+  profile record (the OpNS one: DAG-CBOR `{domain, name?, avatar?}`), and
+  the page writes it to your mailbox instance as its owner. The host serves
+  it with the handle when it is resolved or found; the page shows it as
+  signed by the handle's key. "Find a handle" searches the host by handle
+  or name.
 - `scripts/host/up.sh` does all three for the dev stack.
 - Block headers for the chain app: run the host with
   `SKEIN_HEADERS_URL=http://127.0.0.1:8083/chaintracks/v2/tip/stream`
@@ -294,7 +305,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager | v0.1.0 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
-| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site every skein from the default image serves: locators in your wallet, create a skein, install apps, the explorer | v0.1.0 |
+| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site every skein from the default image serves: locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.4.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:

@@ -13,10 +13,16 @@
 //   http://<host>:<port>/@<handle>/…      the same instance for our own clients (a dev form): the router strips
 //                                         the prefix for the routes; the client signs the path it sent, and its
 //                                         handshake goes under the prefix (src/client/raw.ts).
-//   GET  /manifest.json                   BRC-169 §5.1: metanet.trust.publicKey (the certifier key), metanet.handles
+//   GET  /manifest.json                   BRC-169 §5.1: metanet.trust (the host's name, note, icon when set; publicKey:
+//                                         the certifier key), metanet.handles (resolve, search)
 //   GET  /.well-known/metanet-handles/resolve?handle=h   BRC-169 §5.2 (handles.ts): an agent's own identity; for a
 //                                         mailbox instance, its owner's — the instance's origin the messagebox, and
-//                                         the handle certificate the host issues for the binding
+//                                         the handle certificate the host issues for the binding; with the holder's
+//                                         signed profile (#104: the instance's head `profile`), `profile`,
+//                                         `displayName`, `avatarURL`
+//   GET  /.well-known/metanet-handles/search?q=&limit=   BRC-169 §5.6 (#104): this domain's handles whose handle or
+//                                         profile name contains q (any case), at most limit (≤ 100); each with its
+//                                         profile, as resolve has it
 //   GET  /bsvalias/id/<handle>@<domain>   paymail PKI (identity keys by handle)
 //   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
 //                                         signature: [2, "skein register"], key ID the username, counterparty
@@ -101,7 +107,9 @@ import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type Inbound
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
-import { issueSubjectCertificate, manifest, resolution, resolutionError } from "./handles.ts";
+import { HANDLES_VERSION, issueSubjectCertificate, manifest, profileFields, PROFILE_HEAD, RESOLVE_PATH, resolution, resolutionError, SEARCH_DEFAULT, SEARCH_MAX, SEARCH_PATH, type TrustInfo } from "./handles.ts";
+import { headTree } from "../runtime/heads.ts";
+import { decode } from "../runtime/cid.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -172,6 +180,10 @@ export interface RouterOptions {
    * router's own, made fresh (a test's).
    */
   certifierKey?: PrivateKey;
+  /** The host's own name, note and icon in the manifest's `metanet.trust` (#104: SKEIN_HOST_NAME, SKEIN_HOST_NOTE, SKEIN_HOST_ICON). */
+  trust?: TrustInfo;
+  /** The ORDFS content route a profile's `avatarURL` is derived under (#104: SKEIN_ORDFS_URL); default handles.ts ORDFS_CONTENT; empty: no avatarURL. */
+  ordfs?: string;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
 }
@@ -623,6 +635,52 @@ export class Router {
   }
 
   /**
+   * The signed profile an instance's owner keeps under its head `profile`
+   * (#104), as resolve and search serve it for the handle's identity key:
+   * read from its store file, read-only, with no kernel (as `subscribes`);
+   * {} when there is none, or it does not verify (handles.ts profileFields).
+   */
+  async profileOf(handle: string, identityKey: string, domain: string): Promise<Record<string, unknown>> {
+    const row = this.o.db.get(handle);
+    if (!row || !existsSync(row.store)) return {};
+    let rec: unknown;
+    const s = openStoreFile(row.store, { readOnly: true });
+    try {
+      const root = await headTree(s, PROFILE_HEAD);
+      if (!root) return {};
+      rec = decode(await s.bytes(root)); // the record as stored (not the display form: its signature stays bytes)
+    } catch (e) {
+      this.say(handle, `profile: not read: ${(e as Error).message}`);
+      return {};
+    } finally { s.close(); }
+    return { ...await profileFields(rec, identityKey, domain, this.o.ordfs) };
+  }
+
+  /**
+   * BRC-169 §5.6 (#104): the enabled instances' handles at `domain` (host.db,
+   * as resolve answers them), in handle order, whose handle or profile name
+   * contains `q` (any case; an empty `q`: every one), at most `limit`
+   * (default 20, at most 100); `truncated` when more matched.
+   */
+  async search(q: string, limit: number, domain: string): Promise<Record<string, unknown>> {
+    const want = q.trim().toLowerCase();
+    const n = Math.min(SEARCH_MAX, Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : SEARCH_DEFAULT);
+    const results: Array<Record<string, unknown>> = [];
+    let truncated = false;
+    for (const row of this.o.db.list("enabled").sort((a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0))) {
+      if (row.domain !== domain) continue;
+      const identityKey = this.o.db.identityOf(row.handle, domain);
+      if (!identityKey) continue;
+      const p = await this.profileOf(row.handle, identityKey, domain);
+      const name = typeof p.displayName === "string" ? p.displayName.toLowerCase() : "";
+      if (want && !row.handle.includes(want) && !name.includes(want)) continue;
+      if (results.length === n) { truncated = true; break; }
+      results.push({ handle: row.handle, identityKey, ...p });
+    }
+    return { metanetHandles: HANDLES_VERSION, results, truncated };
+  }
+
+  /**
    * Boot a row's empty store from a system tree or a checkpoint (issue #4,
    * boot.ts) before its first hydration; the row's identity is its oracle's.
    */
@@ -1004,9 +1062,12 @@ export class Router {
     const path = url.pathname;
     if (req.method === "GET" && path === "/manifest.json") {
       const { publicKey } = await this.certifier.getPublicKey({ identityKey: true });
-      return json(200, manifest(publicKey, `${this.origin()}/.well-known/metanet-handles/resolve`));
+      return json(200, manifest(publicKey, this.origin(), this.o.trust));
     }
-    if (req.method === "GET" && path === "/.well-known/metanet-handles/resolve") {
+    if (req.method === "GET" && path === SEARCH_PATH) {
+      return json(200, await this.search(url.searchParams.get("q") ?? "", Number(url.searchParams.get("limit") ?? SEARCH_DEFAULT), domainOf(url.hostname)));
+    }
+    if (req.method === "GET" && path === RESOLVE_PATH) {
       // BRC-169 §5.2: the query carries the bare handle (the domain is this endpoint's, the one the manifest
       // was fetched at); `handle@domain` is accepted too. A dev router at 127.0.0.1 answers for `localhost`.
       const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
@@ -1017,7 +1078,7 @@ export class Router {
       const row = this.o.db.get(handle);
       const key = this.o.db.identityOf(handle, domain);
       if (!row || row.status !== "enabled" || !key) return json(404, resolutionError("handle-not-found", `no handle ${handle}@${domain} here`));
-      return json(200, await resolution(this.certifier, handle, domain, key, this.originOf(handle)));
+      return json(200, await resolution(this.certifier, handle, domain, key, this.originOf(handle), await this.profileOf(handle, key, domain)));
     }
     const pki = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
     if (req.method === "GET" && pki) {
