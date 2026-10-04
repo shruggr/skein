@@ -3,8 +3,8 @@
 The management site of a [skein](https://github.com/shruggr/skein): the page
 every skein from the default image serves at `/` (its files at `/site/`).
 The files are the same on every skein; what makes the page yours is the
-wallet in your browser. Version **0.4.0** (shruggr/skein#92; the Inbox, #99;
-handles, #103; profiles and search, #104).
+wallet in your browser. Version **0.5.0** (shruggr/skein#92; the Inbox, #99;
+handles, #103; profiles and search, #104; the wallet's grouped request, #97).
 
 ## What it does
 
@@ -91,12 +91,46 @@ handles, #103; profiles and search, #104).
   browser, `localStorage`, per identity key), else the messagebox your first
   handle resolves to (Your handles).
 
+## The wallet's grouped request (`manifest.json`)
+
+A BRC-100 wallet that seeks grouped permission (wallet-toolbox's
+`WalletPermissionsManager`, `seekGroupedPermission`) reads
+`<origin>/manifest.json` of the page's origin — each skein's own, so the
+default image serves this file there (shruggr/skein#97) — and asks once,
+under `metanet`, for:
+
+- `groupPermissions`, granted together on the first call: the protocols
+  `[1, "identity key retrieval"]`, `[2, "server hmac"]` (self), `[1, "skein
+  locator"]`, `[2, "skein register"]` (anyone), `[1, "certificate
+  acquisition <the BRC-169 handle type>"]`, `[1, "certificate list"]`,
+  `[1, "metanet handles profile"]`; the basket `skein-locators`; and a
+  spending allowance of 1000 sats a month (`spendingAuthorization`, a
+  monthly cap in the toolbox) for locators — 1 sat each and the fee of its
+  transaction, about 400 bytes: some 40 sats at 100 sat/kB, so two dozen
+  locators a month at that rate before the wallet asks again.
+  `[2, "auth message signature"]` is listed without a counterparty, which
+  the toolbox leaves out of the first group: for a wallet without a
+  counterparty prompt it is asked per skein instead.
+- `counterpartyPermissions`, asked once per new counterparty (the first
+  level-2 call to a key the wallet has no grant for): `auth message
+  signature` (a BRC-104 session with that skein) and `certificate field
+  encryption` (reading the handle certificates a host's certifier issued
+  you). No counterparty keys are named: every skein and every certifier
+  costs one first-contact prompt.
+
+Not in it: the Inbox's calls. Sync decrypts each envelope under
+`[2, "message encryption"]` with its sender as counterparty (any key) and
+internalizes the payment with the label `metanet payment` (`[1, "action
+label metanet payment"]`); a BRC-232 delivery brings its sender's labels
+and baskets. The wallet asks for those as they come.
+
 ## Files
 
 | file | what |
 |---|---|
 | `index.html`, `app.js`, `style.css` | the page: plain HTML and JavaScript, no framework |
 | `catalog.json` | the apps the page offers |
+| `manifest.json` | the wallet's grouped permission request (above), served at `/manifest.json` of the skein's origin |
 | `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`), install plan and block encoder (`src/runtime/cid.ts`), `@1sat/connect`, `@bsv/sdk` (with its `Certificate`, `MasterCertificate` and `ProtoWallet`), `@bsv/message-box-client`, `@1sat/actions`' `syncMetanetInbox` (its module only), `@1sat/utils`' profile codec, `@1sat/templates`' outpoint bytes and `@1sat/types`' outpoint form (their modules only), `@ipld/dag-cbor`, `@ipld/dag-json` |
 | `webwallet.js` | `@1sat/wallet-browser`'s `createWebWallet`, loaded only in test mode |
 | `lib/entry.ts`, `lib/webwallet.ts`, `build.mjs`, `lib/SKEIN_REV` | how the bundles are made, and the skein commit they are made from |

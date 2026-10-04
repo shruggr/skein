@@ -45,11 +45,11 @@ images/default/
   bin/static.wasm                         shruggr/skein-static v0.2.1's module
   bin/*.json                              the program records' inputs and descriptions
   etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; the explorer at `/explore` (a
-                                          session, read op `explore`); static at `/` and under `/site/` (root www)
+                                          session, read op `explore`); static at `/`, `/manifest.json` (#97) and under `/site/` (root www)
   etc/reads.json                          [{op: "explore", owner: true}]: the explorer is the owner's, whoever claims it (#92)
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  www/                                    the management site: shruggr/skein-site v0.4.0's tree, copied (the same git tree)
+  www/                                    the management site: shruggr/skein-site v0.5.0's tree, copied (the same git tree)
   apps/git/                               the git app: shruggr/skein-git v0.1.0's tree, copied, not wired
 ```
 

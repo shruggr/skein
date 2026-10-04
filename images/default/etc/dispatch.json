@@ -8,6 +8,7 @@
   { "transport": "http", "address": "/messagebox/listMessages", "sender": "session", "program": "messagebox", "fn": "listMessages" },
   { "transport": "http", "address": "/messagebox/acknowledgeMessage", "sender": "session", "program": "messagebox", "fn": "acknowledgeMessage" },
   { "transport": "http", "address": "/explore", "prefix": true, "sender": "session", "program": "frontdoor", "fn": "explore", "read": "explore" },
+  { "transport": "http", "address": "/manifest.json", "sender": "*", "program": "static", "fn": "get", "root": "www/manifest.json" },
   { "transport": "http", "address": "/site", "prefix": true, "sender": "*", "program": "static", "fn": "get", "root": "www" },
   { "transport": "http", "address": "/", "sender": "*", "program": "static", "fn": "get", "root": "www" }
 ]

@@ -1,0 +1,33 @@
+{
+  "name": "skein",
+  "description": "The management page of a skein: create skeins, keep their locators in your wallet, install apps, register a handle and keep its certificate.",
+  "metanet": {
+    "groupPermissions": {
+      "description": "Manage your skeins from this page.",
+      "protocolPermissions": [
+        { "protocolID": [1, "identity key retrieval"], "counterparty": "self", "description": "Know your identity key: the skeins you own and the handles you hold are your key's." },
+        { "protocolID": [2, "server hmac"], "counterparty": "self", "description": "Make the nonces of your sessions with skeins." },
+        { "protocolID": [2, "auth message signature"], "description": "Sign your session with each skein you open." },
+        { "protocolID": [1, "skein locator"], "counterparty": "self", "description": "Lock the locators of your skeins (a 1-sat PushDrop output each)." },
+        { "protocolID": [2, "skein register"], "counterparty": "anyone", "description": "Sign a handle's registration on a skein host." },
+        { "protocolID": [1, "certificate acquisition XgCFdUfxEcI+3xtDjsIuSAjMl5EwzCUjsQc45ds1lC8="], "counterparty": "self", "description": "Keep the handle certificate a skein host issues you." },
+        { "protocolID": [1, "certificate list"], "counterparty": "self", "description": "List the handle certificates you keep." },
+        { "protocolID": [1, "metanet handles profile"], "counterparty": "anyone", "description": "Sign your handle's profile (a name and an avatar)." }
+      ],
+      "basketAccess": [
+        { "basket": "skein-locators", "description": "Your skeins: list, add and remove their locators." }
+      ],
+      "spendingAuthorization": {
+        "amount": 1000,
+        "description": "Locators: 1 sat each, and the fee of its transaction."
+      }
+    },
+    "counterpartyPermissions": {
+      "description": "A skein, or a skein host's certifier, this page talks to for the first time.",
+      "protocols": [
+        { "protocolName": "auth message signature", "protocolID": [2, "auth message signature"], "description": "A BRC-104 session with it." },
+        { "protocolName": "certificate field encryption", "protocolID": [2, "certificate field encryption"], "description": "Read the handle certificates it issued you." }
+      ]
+    }
+  }
+}

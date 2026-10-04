@@ -7,6 +7,11 @@
 //   owner, and the git app's tree under apps/git); you install the onboarding
 //   app into it with `skein-host install`.
 //
+//   The wallet's grouped request (#97): GET /manifest.json at the host skein's
+//   own origin is the site's manifest.json (the protocols, the basket and the
+//   spend the page uses; the counterparty protocols); the router's origin
+//   still answers its own (metanet.trust, metanet.handles).
+//
 //   The page, served by the host skein, with a wallet in the tab over your
 //   key (`?key=`, createWebWallet) pointed at a stand-in for the 1sat services
 //   (`&services=`: headers for one block holding the payment that funds the
@@ -60,7 +65,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import * as fs from "node:fs/promises";
-import { createServer as httpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as httpServer, get as httpGet, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -240,6 +245,35 @@ try {
   r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all"], { wallet: ephemeralWallet(youKey), id: you });
   await router.settled();
   check(r.code === 0, `the onboarding app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
+
+  // ------------------------------------------------ the wallet's grouped request (#97): /manifest.json at the host skein's own origin
+  // (host.localhost:<port>, the origin a wallet takes the page's originator from); the router's origin keeps its own.
+  const atOrigin = (hostname: string, path: string) => new Promise<{ status: number; type: string; body: string }>((resolve, reject) => {
+    httpGet({ host: "127.0.0.1", port, path, headers: { host: `${hostname}:${port}` } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, type: String(res.headers["content-type"] ?? ""), body: Buffer.concat(chunks).toString("utf8") }));
+    }).on("error", reject);
+  });
+  type Grouped = { protocolPermissions?: Array<{ protocolID: [number, string]; counterparty?: string }>; basketAccess?: Array<{ basket: string }>; spendingAuthorization?: { amount: number } };
+  const pm = await atOrigin("host.localhost", "/manifest.json");
+  const pmf = JSON.parse(pm.body) as { metanet?: { groupPermissions?: Grouped; counterpartyPermissions?: { protocols: Array<{ protocolName: string }> }; handles?: unknown } };
+  const g = pmf.metanet?.groupPermissions ?? {};
+  const has = (level: number, name: string, counterparty?: string) => !!g.protocolPermissions?.some((p) => p.protocolID[0] === level && p.protocolID[1] === name && p.counterparty === counterparty);
+  const wanted: Array<[number, string, string | undefined]> = [
+    [1, "identity key retrieval", "self"], [2, "server hmac", "self"], [2, "auth message signature", undefined], [1, "skein locator", "self"],
+    [2, "skein register", "anyone"], [1, `certificate acquisition ${HANDLE_CERTIFICATE_TYPE}`, "self"], [1, "certificate list", "self"], [PROFILE_PROTOCOL[0], PROFILE_PROTOCOL[1], "anyone"],
+  ];
+  const missing = wanted.filter(([l, n, c]) => !has(l, n, c)).map(([l, n]) => `[${l}, ${n}]`);
+  const cps = (pmf.metanet?.counterpartyPermissions?.protocols ?? []).map((p) => p.protocolName);
+  check(pm.status === 200 && /json/.test(pm.type) && !pmf.metanet?.handles && missing.length === 0 && g.protocolPermissions?.length === wanted.length
+    && g.basketAccess?.length === 1 && g.basketAccess[0]!.basket === "skein-locators" && (g.spendingAuthorization?.amount ?? 0) > 0
+    && cps.join(",") === "auth message signature,certificate field encryption",
+    `GET /manifest.json at the host skein's origin is the site's (${pm.type}): ${g.protocolPermissions?.length} protocols${missing.length ? ` (missing ${missing.join(", ")})` : ""}, basket ${g.basketAccess?.map((b) => b.basket).join(",")}, ${g.spendingAuthorization?.amount} sats; counterparty protocols ${cps.join(", ")}`);
+  const rm = await atOrigin("127.0.0.1", "/manifest.json");
+  const rmf = JSON.parse(rm.body) as { metanet?: { trust?: { publicKey?: string }; handles?: { resolve?: string }; groupPermissions?: unknown } };
+  check(rm.status === 200 && !!rmf.metanet?.trust?.publicKey && rmf.metanet.handles?.resolve === `${base}/.well-known/metanet-handles/resolve` && !rmf.metanet.groupPermissions,
+    "and the router's origin answers its own manifest (metanet.trust, metanet.handles), not the site's");
 
   const page = await (await browser.newContext()).newPage();
   page.on("console", (m) => { if (verbose || m.type() === "error") process.stdout.write(`  | page: ${m.text()}\n`); });
