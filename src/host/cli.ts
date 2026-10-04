@@ -90,6 +90,8 @@
 //   SKEIN_HOME            default ~/.skein; host.db and master.key live here
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
+//   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: what BRC-169 discovery
+//                         (/manifest.json, the resolve endpoint) publishes as the resolve URL, and the geneses' resolveOrigin
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
 //   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
@@ -840,7 +842,7 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     db, ...wallets(v, home),
     owner: v.SKEIN_OWNER, infer: v.SKEIN_INFER, ownerHandle: named(v.SKEIN_OWNER_HANDLE, "david@localhost"), inferHandle: named(v.SKEIN_INFER_HANDLE, "infer@localhost"),
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, home,
-    instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
+    origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     libp2p: hostP2PConfig(v, home),
     arc: hostArcConfig(v, home),

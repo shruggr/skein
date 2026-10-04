@@ -221,7 +221,10 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   replay at hydrate time: a step that was cut off runs again.
 - **Discovery**: the host publishes BRC-169 for its instances
   (`/manifest.json`, `/.well-known/metanet-handles/resolve`) and the paymail
-  PKI.
+  PKI, on the router's own origin — a hostname whose first label is no
+  instance; `SKEIN_ROUTER_ORIGIN` (default `http://127.0.0.1:<port>`) is what
+  the manifest publishes as the resolve URL and what geneses record as
+  `resolveOrigin`.
 - **The fuel ledger**: a request's fuel is on its thread's updates in the
   log; the host's own kernel calls (the explorer's reads) are charged in
   host.db (`skein-host ledger`).
