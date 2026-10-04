@@ -20,7 +20,12 @@
 //   GET  /bsvalias/id/<handle>@<domain>   paymail PKI (identity keys by handle)
 //   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
 //                                         signature: [2, "skein register"], key ID the username, counterparty
-//                                         anyone, over "register <username>")
+//                                         anyone, over "register <username>"), its domain this request's host
+//                                         name; the answer carries the handle certificate for the key's wallet
+//                                         (#103, handles.ts issueSubjectCertificate)
+//   GET  /.well-known/skein-host          at every host name, an instance's too (#103): {origin, domain} — this
+//                                         router's origin and the domain it registers handles in, for a page an
+//                                         instance serves (the management site) to find the manifest and register
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
@@ -96,7 +101,7 @@ import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type Inbound
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
-import { manifest, resolution, resolutionError } from "./handles.ts";
+import { issueSubjectCertificate, manifest, resolution, resolutionError } from "./handles.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -187,6 +192,13 @@ const KEY = /^0[23][0-9a-f]{64}$/;
 /** A handle as an instance's hostname label (#90: what the instance manager creates). */
 export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
+/** Labels a registration may not take (#103): the router's own (`id` in production) and the host skein's. */
+export const RESERVED_HANDLES = new Set(["id", "host"]);
+/** The BRC-169 domain a host name stands for: a dev router at a loopback address answers for `localhost`. */
+export const domainOf = (hostname: string): string => {
+  const h = hostname.toLowerCase();
+  return h === "127.0.0.1" || h === "::1" || h === "[::1]" || h === "" ? "localhost" : h;
+};
 
 /**
  * SKEIN_HTTP=fetch: the HTTP proxy's requests (#70, the `fetch` provider)
@@ -979,6 +991,10 @@ export class Router {
   /** One request, whoever made it: a socket's, or an instance's own http. */
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
+    if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
+      const origin = this.origin();
+      return json(200, { origin, domain: domainOf(new URL(origin).hostname) });
+    }
     const t = this.target(url);
     if (t) {
       const p = this.forward(t.handle, t.route, url, req);
@@ -994,8 +1010,7 @@ export class Router {
       // BRC-169 §5.2: the query carries the bare handle (the domain is this endpoint's, the one the manifest
       // was fetched at); `handle@domain` is accepted too. A dev router at 127.0.0.1 answers for `localhost`.
       const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
-      const here = url.hostname.toLowerCase();
-      const own = here === "127.0.0.1" || here === "::1" || here === "[::1]" || here === "" ? "localhost" : here;
+      const own = domainOf(url.hostname);
       const [h0, d] = q.includes("@") ? q.split("@") : [q, own];
       const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? own).toLowerCase();
       if (!handle) return json(400, resolutionError("malformed-handle", "want ?handle=<handle>"));
@@ -1011,7 +1026,7 @@ export class Router {
       return key ? json(200, { bsvalias: "1.0", handle: `${handle}@${domain}`, pubkey: key }) : json(404, { error: "not found" });
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
-    if (req.method === "POST" && path === "/account/register") return await this.register(req.body);
+    if (req.method === "POST" && path === "/account/register") return await this.register(req.body, domainOf(url.hostname));
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
@@ -1022,21 +1037,32 @@ export class Router {
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no ${req.method} ${path}` });
   }
 
-  /** POST /account/register {username, identityKey, signature}: a mailbox instance for a key its holder signed for. */
-  private async register(raw: Uint8Array): Promise<RouterResponse> {
+  /**
+   * POST /account/register {username, identityKey, signature}: a mailbox
+   * instance for a key its holder signed for, at `domain` (the request's host
+   * name). The answer (#103): {handle, domain, identityKey, messagebox,
+   * certificate, keyringForSubject} — the handle certificate for the key's
+   * wallet to keep (handles.ts issueSubjectCertificate). The same key and
+   * name again: the same handle, a certificate issued again. 409: the name is
+   * another's, an instance's, or reserved, or the key has another handle here.
+   */
+  private async register(raw: Uint8Array, domain: string): Promise<RouterResponse> {
     let b: { username?: unknown; identityKey?: unknown; signature?: unknown };
     try { b = JSON.parse(new TextDecoder().decode(raw)); } catch { return json(400, { error: "the body is not JSON" }); }
     const username = typeof b.username === "string" ? b.username.trim().toLowerCase() : "";
     const key = typeof b.identityKey === "string" ? b.identityKey : "";
     const sig = typeof b.signature === "string" ? b.signature : "";
     if (!KEY.test(key) || !/^[0-9a-f]+$/i.test(sig)) return json(400, { error: "want {username, identityKey, signature (hex)}" });
+    if (!HANDLE.test(username)) return json(400, { error: "the username is a host name label: a-z, 0-9 and -, at most 63" });
     try {
       const v = await new ProtoWallet("anyone").verifySignature({ protocolID: REGISTER_PROTOCOL, keyID: username, counterparty: key, data: Utils.toArray(`register ${username}`, "utf8"), signature: Utils.toArray(sig, "hex") });
       if (!v.valid) throw new Error("invalid");
     } catch { return json(401, { error: "the signature does not verify for that identity" }); }
+    if (RESERVED_HANDLES.has(username)) return json(409, { error: `username ${username} is reserved` });
     try {
-      const row = this.addMailbox(username, key);
-      return json(200, { identityKey: key, username: row.handle, handle: `${row.handle}@${row.domain}`, messagebox: this.originOf(row.handle) });
+      const row = this.addMailbox(username, key, domain);
+      const { certificate, keyringForSubject } = await issueSubjectCertificate(this.certifier, row.handle, row.domain, key);
+      return json(200, { handle: row.handle, domain: row.domain, identityKey: key, messagebox: this.originOf(row.handle), certificate, keyringForSubject });
     } catch (e) {
       return json((e as { status?: number }).status ?? 500, { error: (e as Error).message });
     }

@@ -1,8 +1,8 @@
 {
   "name": "skein-site",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet.",
+  "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet.",
   "type": "module",
   "scripts": {
     "build": "node build.mjs"

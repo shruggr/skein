@@ -1,12 +1,14 @@
 // BRC-169 resolution as the host answers it (#100, handles.ts): the type
 // identifier and the SDK's signing against the spec's worked example (§4.5,
 // A.3), the certificate the host issues, and the router's manifest and
-// resolve answer (§5.1–§5.3) checked as a resolver checks them.
+// resolve answer (§5.1–§5.3) checked as a resolver checks them; the holder's
+// copy a registration answers with (#103), as a wallet's acquireCertificate
+// takes it.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Certificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
-import { HANDLE_CERTIFICATE_TYPE, HANDLES_VERSION, issueHandleCertificate, NO_REVOCATION_OUTPOINT, RESOLUTION_TTL, serialOf } from "./handles.ts";
+import { Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { HANDLE_CERTIFICATE_TYPE, HANDLES_VERSION, issueHandleCertificate, issueSubjectCertificate, NO_REVOCATION_OUTPOINT, RESOLUTION_TTL, serialOf } from "./handles.ts";
 import { Oracle } from "./oracle.ts";
 import { testHost } from "./testhost.ts";
 
@@ -91,4 +93,25 @@ test("handles: the router's manifest names the certifier key; a resolution is §
   const empty = await fetch(`${h.base}/.well-known/metanet-handles/resolve`);
   assert.equal(empty.status, 400);
   assert.deepEqual(await empty.json(), { metanetHandles: "1.0", error: { code: "malformed-handle", message: "want ?handle=<handle>" } });
+});
+
+test("handles: the holder's copy (#103) is the binding's certificate with encrypted fields and a keyring for its subject; only the subject reads it", async () => {
+  const certifier = new ProtoWallet(new Oracle(PrivateKey.fromRandom()).certifierKey());
+  const { publicKey: certifierKey } = await certifier.getPublicKey({ identityKey: true });
+  const subjectKey = PrivateKey.fromRandom(), subject = subjectKey.toPublicKey().toString();
+  const { certificate: c, keyringForSubject } = await issueSubjectCertificate(certifier, "david", "id.skein.nexus", subject);
+  const plain = await issueHandleCertificate(certifier, "david", "id.skein.nexus", subject);
+  // The resolution's binding: type, serial, subject, certifier, revocation outpoint.
+  assert.deepEqual([c.type, c.serialNumber, c.subject, c.certifier, c.revocationOutpoint], [plain.type, plain.serialNumber, plain.subject, plain.certifier, plain.revocationOutpoint]);
+  assert.deepEqual(Object.keys(keyringForSubject).sort(), ["domain", "handle"]);
+  // What acquireCertificate (direct) does with it: a MasterCertificate, verified, its fields decrypted by the subject.
+  const fields = c.fields as Record<string, string>;
+  const m = new MasterCertificate(c.type as string, c.serialNumber as string, c.subject as string, c.certifier as string, c.revocationOutpoint as string, fields, keyringForSubject, c.signature as string);
+  assert.equal(await m.verify(), true);
+  assert.deepEqual({ ...await MasterCertificate.decryptFields(new ProtoWallet(subjectKey), keyringForSubject, fields, certifierKey) }, { handle: "david", domain: "id.skein.nexus" });
+  await assert.rejects(MasterCertificate.decryptFields(new ProtoWallet(PrivateKey.fromRandom()), keyringForSubject, fields, certifierKey));
+  // Issued again: the same serial, fresh ciphertexts.
+  const again = await issueSubjectCertificate(certifier, "david", "id.skein.nexus", subject);
+  assert.equal(again.certificate.serialNumber, c.serialNumber);
+  assert.notEqual((again.certificate.fields as Record<string, string>).handle, fields.handle);
 });

@@ -14,12 +14,22 @@
 // binding, the same on every resolve; the signature is deterministic (RFC
 // 6979), so a binding's certificate is the same bytes every time.
 //
+// The holder's copy (#103): the certificate a registration answers with is
+// the same binding issued for its subject — BRC-52 field encryption and a
+// keyring for the subject (the SDK's MasterCertificate.issueCertificateForSubject),
+// because a BRC-100 wallet's `acquireCertificate` (direct) takes only that:
+// it rebuilds a MasterCertificate, which wants a keyring entry per field, and
+// decrypts the fields with it. Same type, serial and certifier as the
+// resolution's; the field ciphertexts (and so the signature) differ on every
+// issue. The resolution stays plaintext, so that any resolver can make §4.1's
+// check 3.
+//
 // Revocation is not implemented: the host has no wallet. §4.1 wants an
 // outpoint the certifier controls and spends on revocation; the certificate
 // carries BRC-52's disabled sentinel (64 zeros, vout 0) instead. A verifier
 // that checks the outpoint (§4.2) finds no UTXO to check.
 
-import { Certificate, Hash, ProtoWallet, Utils } from "@bsv/sdk";
+import { Certificate, Hash, MasterCertificate, ProtoWallet, Utils } from "@bsv/sdk";
 
 /** §4.5: the handle-certificate type, base64(SHA-256("metanet-handles handle certificate v1")). */
 export const HANDLE_CERTIFICATE_TYPE = Utils.toBase64(Hash.sha256(Utils.toArray("metanet-handles handle certificate v1", "utf8")));
@@ -57,6 +67,17 @@ export async function issueHandleCertificate(certifier: ProtoWallet, handle: str
   const c = new Certificate(HANDLE_CERTIFICATE_TYPE, serialOf(handle, domain, identityKey), identityKey, publicKey, NO_REVOCATION_OUTPOINT, fields);
   await c.sign(certifier);
   return c;
+}
+
+/**
+ * The handle certificate for its subject to keep (#103, §4.6): the binding's
+ * certificate with BRC-52 encrypted fields, and `keyringForSubject` for the
+ * wallet's `acquireCertificate` (acquisitionProtocol "direct", keyringRevealer
+ * "certifier"). The field values are the plaintext strings.
+ */
+export async function issueSubjectCertificate(certifier: ProtoWallet, handle: string, domain: string, identityKey: string): Promise<{ certificate: Record<string, unknown>; keyringForSubject: Record<string, string> }> {
+  const c = await MasterCertificate.issueCertificateForSubject(certifier, identityKey, { handle, domain }, HANDLE_CERTIFICATE_TYPE, async () => NO_REVOCATION_OUTPOINT, serialOf(handle, domain, identityKey));
+  return { certificate: { type: c.type, serialNumber: c.serialNumber, subject: c.subject, certifier: c.certifier, revocationOutpoint: c.revocationOutpoint, fields: c.fields, signature: c.signature }, keyringForSubject: c.masterKeyring };
 }
 
 /** §5.2: the answer for a registered handle. */

@@ -406,8 +406,18 @@ the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 - `POST /account/register {username, identityKey, signature}` on the host
   makes one for the caller: `signature` (hex) under `[2, "skein register"]`,
   key ID the username, counterparty anyone, over `register <username>` —
-  proof that the key's holder asked. The answer: `{identityKey, username,
-  handle, messagebox: <its origin>}`.
+  proof that the key's holder asked. The username is a host name label;
+  its domain is the request's host name (127.0.0.1 is `localhost`). The
+  answer (#103): `{handle, domain, identityKey, messagebox: <its origin>,
+  certificate, keyringForSubject}` — the handle certificate for the key's
+  wallet to keep (below, "BRC-169 is discovery"). The same key and name
+  again: the same handle, the certificate issued again. 409: the name is
+  another key's or an instance's, it is `id` or `host`, or the key already
+  has another handle here.
+- `GET /.well-known/skein-host` is answered by the router at every host
+  name, an instance's origin too: `{origin, domain}`, the router's origin
+  and the domain it registers in. It is how a page an instance serves (the
+  management site) finds the host's manifest and its register route.
 - The host's resolve endpoint answers a mailbox instance's handle with its
   owner's key and the instance's origin.
 
@@ -869,6 +879,22 @@ and its answer the next step, and keeps `{kind: "resolution", transport:
 `defaults.resolveOrigin` (a dev host). The BRC-52 certificate in the answer
 is neither checked nor kept: the program reads `identityKey` and
 `messagebox`.
+
+A wallet finds its own handles in itself (§4.6, §5.8 path 1; #103). A
+registration's answer carries the handle certificate for its subject to
+keep: the same binding (type, serial number, certifier) issued with the
+SDK's `MasterCertificate.issueCertificateForSubject` — BRC-52 field
+encryption, and `keyringForSubject`, the field keys encrypted for the
+subject — because a BRC-100 wallet's `acquireCertificate` with
+`acquisitionProtocol: "direct"` takes only that (wallet-toolbox rebuilds a
+`MasterCertificate`, which wants a keyring entry per field, and decrypts the
+fields with it). The management page passes it with `keyringRevealer:
+"certifier"`; later `listCertificates({certifiers: [<the manifest's
+certifier>], types: [<the handle type>]})` returns it, its `keyring`
+decrypts `handle` and `domain` (`MasterCertificate.decryptFields`, the
+certifier as counterparty), and a resolve gives the messagebox. The field
+ciphertexts differ on every issue; the resolve answer's certificate stays
+plaintext, so any resolver can check §4.1's rule 3.
 
 The host is the certifier for its instances (#100, `src/host/handles.ts`).
 `/manifest.json` publishes `metanet.trust.publicKey` — the certifier key,

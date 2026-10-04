@@ -126,6 +126,15 @@ bin/skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instanc
   requests beyond itself: run it with `SKEIN_HTTP=fetch`. Every skein from
   the default image serves the same page (shruggr/skein-site); one page
   manages skeins on many hosts, each through its locator.
+- **A handle from the page** (#103). On the same page, "Register a handle"
+  asks the host for `<name>@<domain>` for your key (the domain is the
+  router's host name, `id.skein.nexus` in production; the page finds the
+  router through `/.well-known/skein-host`, which the router answers at every
+  skein's origin): your wallet signs the request, the host creates your
+  mailbox instance and answers with the BRC-52 handle certificate, and your
+  wallet keeps it (`acquireCertificate`). "Your handles" lists those
+  certificates (`listCertificates`) and the mailbox each resolves to. The
+  labels `id` and `host` and every instance's handle are refused.
 - `scripts/host/up.sh` does all three for the dev stack.
 - Block headers for the chain app: run the host with
   `SKEIN_HEADERS_URL=http://127.0.0.1:8083/chaintracks/v2/tip/stream`
@@ -153,8 +162,8 @@ bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs
   at its origin (`/`). It talks to that skein, and to every skein your
   wallet keeps a locator for, with the same requests as the commands below,
   signed by your wallet. Its Inbox lists a box of any mailbox you give it
-  (your mailbox instance, say) and syncs its `metanet_inbox` into that
-  wallet with `@1sat/actions`' `syncMetanetInbox`.
+  (by default the mailbox your handle certificate resolves to) and syncs its
+  `metanet_inbox` into that wallet with `@1sat/actions`' `syncMetanetInbox`.
 - Messages are BRC-33 (`/sendMessage`, `/listMessages`,
   `/acknowledgeMessage`) on a BRC-104 session, bodies dag-cbor
   (`application/cbor`, BRC-231) or JSON. A message's id is the CID of its
@@ -281,7 +290,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.2.0 |
 | [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.3.0 |
 | [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
-| [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.1.0 |
+| [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.3.0 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager | v0.1.0 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |

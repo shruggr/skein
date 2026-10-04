@@ -3,7 +3,8 @@
 The management site of a [skein](https://github.com/shruggr/skein): the page
 every skein from the default image serves at `/` (its files at `/site/`).
 The files are the same on every skein; what makes the page yours is the
-wallet in your browser. Version **0.2.1** (shruggr/skein#92; the Inbox, #99).
+wallet in your browser. Version **0.3.0** (shruggr/skein#92; the Inbox, #99;
+handles, #103).
 
 ## What it does
 
@@ -40,6 +41,22 @@ wallet in your browser. Version **0.2.1** (shruggr/skein#92; the Inbox, #99).
   browsable), what points at a record (edges), the dispatch table.
 - **On a host skein**: the skeins created there (`onboard/instances/…`),
   each openable through a locator.
+- **Your handles; register one** (on a skein a skein host runs). The page
+  finds the host's router through `/.well-known/skein-host` (the router
+  answers it at every skein's origin: `{origin, domain}`) and reads its
+  BRC-169 manifest there (`metanet.trust.publicKey`, the certifier key;
+  `metanet.handles.resolve`). **Register a handle**: your wallet signs
+  `register <name>` (protocol `[2, "skein register"]`, key id the name,
+  counterparty anyone); `POST <router>/account/register` creates your
+  mailbox instance, `<name>@<domain>`, and answers with the BRC-52 handle
+  certificate issued for your key (encrypted fields and a keyring for you);
+  the wallet keeps it: `acquireCertificate` with `acquisitionProtocol:
+  "direct"`, `keyringRevealer: "certifier"` (skipped when the wallet holds
+  that serial number already). **Your handles**: `listCertificates` for that
+  certifier and the BRC-169 handle type; each certificate checked (your key,
+  its signature, the certifier the domain's manifest names), its fields
+  decrypted with the keyring the wallet keeps (`@bsv/sdk`'s
+  `MasterCertificate.decryptFields`), and resolved to its messagebox.
 - **The Inbox** (`#/inbox`): a mailbox's box for your key — any BRC-33
   messagebox, such as your mailbox instance on a skein host. Give it the
   mailbox's URL and a box (default `metanet_inbox`); the page lists what is
@@ -51,9 +68,9 @@ wallet in your browser. Version **0.2.1** (shruggr/skein#92; the Inbox, #99).
   internalized into your wallet, then acknowledged. The page shows a row per
   message received (txid, sats, memo, sender) and a row per message left in
   the box with the SDK's reason, the SDK's `error` if it set one, and then
-  lists the box again. There is no lookup from a key to its mailbox (a
-  BRC-169 resolver answers a handle), so the URL is typed once and kept in
-  this browser (`localStorage`, per identity key).
+  lists the box again. The URL: the one you typed last (kept in this
+  browser, `localStorage`, per identity key), else the messagebox your first
+  handle resolves to (Your handles).
 
 ## Files
 
@@ -61,7 +78,7 @@ wallet in your browser. Version **0.2.1** (shruggr/skein#92; the Inbox, #99).
 |---|---|
 | `index.html`, `app.js`, `style.css` | the page: plain HTML and JavaScript, no framework |
 | `catalog.json` | the apps the page offers |
-| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk`, `@bsv/message-box-client`, `@1sat/actions`' `syncMetanetInbox` (its module only), `@ipld/dag-cbor`, `@ipld/dag-json` |
+| `lib.js`, `chunk-*.js` | the libraries, one esbuild bundle (`lib/entry.ts`): skein's BRC-104 client (`src/client/raw.ts`) and install plan, `@1sat/connect`, `@bsv/sdk` (with its `Certificate` and `MasterCertificate`), `@bsv/message-box-client`, `@1sat/actions`' `syncMetanetInbox` (its module only), `@ipld/dag-cbor`, `@ipld/dag-json` |
 | `webwallet.js` | `@1sat/wallet-browser`'s `createWebWallet`, loaded only in test mode |
 | `lib/entry.ts`, `lib/webwallet.ts`, `build.mjs`, `lib/SKEIN_REV` | how the bundles are made, and the skein commit they are made from |
 

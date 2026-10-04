@@ -17,7 +17,7 @@ docs/BOOTSTRAP.md, "The default image".
 - `etc/reads.json`: `{op: "explore", owner: true}` — the explorer answers
   the instance's owner as the front door sees it at the request (the claim's
   key), and nobody before the claim (#92).
-- `www/`: the management site, a copy of shruggr/skein-site v0.2.1's tree
+- `www/`: the management site, a copy of shruggr/skein-site v0.3.0's tree
   (the same git tree, `d2d425b…`): the management page, with the Inbox (#99).
 - `apps/git/`: shruggr/skein-git v0.1.0's tree (the same git tree as that
   tag's commit). Not wired: the management page installs it from here as the

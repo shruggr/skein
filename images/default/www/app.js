@@ -5,19 +5,21 @@
 // changes there is a message from you to that skein. The skein that served
 // the page is never in the path for another skein's data.
 //
-//   #/                       your skeins (locators in your wallet), add one, create one here
+//   #/                       your skeins (locators in your wallet), add one, create one here; your
+//                            handles (certificates in your wallet), register one on this page's host
 //   #/s/<identity>           a skein: its apps, install, uninstall, children (a host skein's)
 //   #/s/<identity>/peers     its address book
 //   #/s/<identity>/log, /threads, /thread/<cid>, /record/<cid>, /edges/<cid>, /dispatch
 //                            the explorer: the skein's own reads (/explore, its owner's)
 //   #/inbox                  the Inbox: a mailbox's box listed (@bsv/message-box-client), and its
-//                            metanet_inbox synced into your wallet (@1sat/actions' syncMetanetInbox)
+//                            metanet_inbox synced into your wallet (@1sat/actions' syncMetanetInbox);
+//                            the mailbox your first handle resolves to, unless you typed another
 //
 // Query string (tests): ?key=<hex> runs a wallet in the tab over that key
 // (createWebWallet, webwallet.js) instead of connecting one; &services=<url>
 // points that wallet at a 1sat services endpoint.
 
-import { appRecordIn, CID, connectWallet, createContext, dagJson, describe, dispatchOrigin, fold, LockingScript, lookup, MessageBoxClient, parseTree, planInstall, planUninstall, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, senderText, syncMetanetInbox, Utils, WalletClient } from "./lib.js";
+import { appRecordIn, Certificate, CID, connectWallet, createContext, dagJson, describe, dispatchOrigin, fold, Hash, LockingScript, lookup, MasterCertificate, MessageBoxClient, parseTree, planInstall, planUninstall, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, senderText, syncMetanetInbox, Utils, WalletClient } from "./lib.js";
 
 const q = new URLSearchParams(location.search);
 /** The skein that served this page: its base URL (the page is its `/`). */
@@ -27,8 +29,12 @@ const BASKET = "skein-locators";
 const PROTOCOL = [1, "skein locator"];
 const KEY_ID = "1";
 const GIT_RAW = 0x78;
+/** BRC-169 §4.5: the handle-certificate type. */
+const HANDLE_TYPE = Utils.toBase64(Hash.sha256(Utils.toArray("metanet-handles handle certificate v1", "utf8")));
+/** A registration's signature (the host's POST /account/register): protocol, key ID the name, over `register <name>`. */
+const REGISTER = [2, "skein register"];
 
-const state = { wallet: undefined, me: "", locators: [], catalog: [], boxes: new Map() };
+const state = { wallet: undefined, me: "", locators: [], catalog: [], boxes: new Map(), host: undefined, handles: undefined };
 window.site = state;
 
 // ---------------------------------------------------------------- DOM
@@ -254,6 +260,90 @@ async function identityAt(url) {
   return s.answeredBy;
 }
 
+// ---------------------------------------------------------------- handles (BRC-169, #103)
+
+/**
+ * The host this page's skein runs on: `/.well-known/skein-host` (the host's
+ * router answers it at every skein's origin) gives its router origin and
+ * domain; the manifest there (BRC-169 §5.1) the certifier key and the
+ * resolve endpoint. null: the page is not served by a skein host.
+ */
+async function hostInfo() {
+  if (state.host !== undefined) return state.host;
+  try {
+    const at = await (await fetch(new URL("/.well-known/skein-host", location.href))).json();
+    const mf = await (await fetch(`${at.origin}/manifest.json`)).json();
+    state.host = { origin: at.origin, domain: at.domain, certifier: mf.metanet.trust.publicKey, resolve: mf.metanet.handles.resolve };
+  } catch { state.host = null; }
+  return state.host;
+}
+
+/** A domain's manifest (§5.1): this host's from hostInfo, another's from https://<domain>/manifest.json. */
+async function manifestOf(domain, host) {
+  if (host && domain === host.domain) return { certifier: host.certifier, resolve: host.resolve };
+  const mf = await (await fetch(`https://${domain}/manifest.json`)).json();
+  return { certifier: mf.metanet?.trust?.publicKey, resolve: mf.metanet?.handles?.resolve };
+}
+
+/**
+ * Your handles (§5.8 path 1): the handle certificates in your wallet from
+ * this host's certifier (`listCertificates`), each checked (your key, the
+ * signature, the certifier the domain's manifest names), its fields
+ * decrypted with the keyring the wallet keeps, and resolved: the messagebox.
+ */
+async function myHandles(refresh = false) {
+  if (state.handles && !refresh) return state.handles;
+  const host = await hostInfo();
+  if (!host) return (state.handles = []);
+  const { certificates } = await state.wallet.listCertificates({ certifiers: [host.certifier], types: [HANDLE_TYPE] });
+  const out = [];
+  for (const c of certificates) {
+    const row = { serialNumber: c.serialNumber, handle: "", domain: "" };
+    try {
+      if (c.subject !== state.me) throw new Error("not your key's certificate");
+      if (!(await new Certificate(c.type, c.serialNumber, c.subject, c.certifier, c.revocationOutpoint, c.fields, c.signature).verify())) throw new Error("its signature does not verify");
+      const f = await MasterCertificate.decryptFields(state.wallet, c.keyring ?? {}, c.fields, c.certifier);
+      row.handle = f.handle; row.domain = f.domain;
+      const mf = await manifestOf(f.domain, host);
+      if (mf.certifier !== c.certifier) throw new Error(`its certifier is not the one ${f.domain} publishes`);
+      const r = await fetch(`${mf.resolve}?handle=${encodeURIComponent(f.handle)}`);
+      const a = await r.json();
+      if (r.status !== 200) throw new Error(`resolve: ${a.error?.message ?? `HTTP ${r.status}`}`);
+      if (a.identityKey !== state.me) throw new Error(`${f.handle}@${f.domain} resolves to another key`);
+      row.messagebox = a.messagebox;
+    } catch (e) { row.error = errText(e); }
+    out.push(row);
+  }
+  return (state.handles = out);
+}
+
+/**
+ * Register `name` on this page's host for your key: the host's
+ * POST /account/register with your signature over `register <name>`; it
+ * creates your mailbox instance and answers with the handle certificate,
+ * which your wallet keeps (`acquireCertificate`, direct) unless it holds it.
+ */
+async function registerHandle(name) {
+  const host = await hostInfo();
+  if (!host) throw new Error("this page's skein is not on a skein host");
+  const { signature } = await state.wallet.createSignature({ protocolID: REGISTER, keyID: name, counterparty: "anyone", data: Utils.toArray(`register ${name}`, "utf8") });
+  const r = await fetch(`${host.origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: name, identityKey: state.me, signature: toHex(signature) }) });
+  let v = {};
+  try { v = await r.json(); } catch { /* the status says it */ }
+  if (r.status !== 200) throw new Error(v.error ?? `HTTP ${r.status}`);
+  const c = v.certificate ?? {};
+  if (c.type !== HANDLE_TYPE || c.subject !== state.me || c.certifier !== host.certifier) throw new Error("the host's answer carries no handle certificate for your key from its certifier");
+  const { certificates } = await state.wallet.listCertificates({ certifiers: [host.certifier], types: [HANDLE_TYPE] });
+  if (!certificates.some((x) => x.serialNumber === c.serialNumber)) {
+    await state.wallet.acquireCertificate({
+      acquisitionProtocol: "direct", type: c.type, serialNumber: c.serialNumber, certifier: c.certifier, revocationOutpoint: c.revocationOutpoint,
+      fields: c.fields, signature: c.signature, keyringRevealer: "certifier", keyringForSubject: v.keyringForSubject,
+    });
+  }
+  state.handles = undefined;
+  return v;
+}
+
 // ---------------------------------------------------------------- pages
 
 const main = () => $("main");
@@ -307,6 +397,8 @@ async function home(m) {
     ? h("table", { id: "locators" }, h("thead", {}, h("tr", {}, h("th", {}, "skein"), h("th", {}, "where"), h("th", {}, "identity"), h("th", {}))), list)
     : h("p", { class: "mut", id: "locators" }, "No locators in your wallet yet."));
 
+  await handlesSection(m);
+
   // Add a locator (a bookmark: what it resolves to is what your key may do there).
   const add = h("div", { class: "status" });
   const url = h("input", { type: "text", name: "url", placeholder: "the skein's URL", value: here });
@@ -349,6 +441,40 @@ async function home(m) {
         location.href = `${at}/${location.search}#/s/${identity}`;
       } catch (err) { status(made, errText(err), "bad"); }
     } }, name, h("button", { type: "submit", class: "go" }, "Create")), made);
+}
+
+/** Your handles (certificates in your wallet), and Register a handle on this page's host. */
+async function handlesSection(m) {
+  const host = await hostInfo();
+  if (!host) return;
+  m.append(h("h2", {}, "Your handles"));
+  const at = h("div", { id: "handles" }, h("p", { class: "mut" }, "Reading the handle certificates in your wallet."));
+  m.append(at);
+  try {
+    const list = await myHandles();
+    at.replaceChildren(list.length
+      ? h("table", {}, h("tbody", {}, list.map((x) => h("tr", { "data-handle": x.handle ? `${x.handle}@${x.domain}` : x.serialNumber },
+        h("td", {}, x.handle ? `${x.handle}@${x.domain}` : short(x.serialNumber)),
+        h("td", {}, x.messagebox ? h("a", { href: "#/inbox" }, x.messagebox) : h("span", { class: "bad" }, x.error ?? ""))))))
+      : h("p", { class: "mut" }, `No handle certificate from ${host.domain} in your wallet.`));
+  } catch (e) { at.replaceChildren(h("p", { class: "bad" }, `listCertificates: ${errText(e)}`)); }
+
+  const st = h("div", { class: "status", id: "register-status" });
+  const name = h("input", { type: "text", name: "handle", placeholder: "a name (a host name label)" });
+  m.append(h("h2", {}, "Register a handle"),
+    h("p", { class: "mut small" }, `Asks ${host.origin} for <name>@${host.domain} for your key, signed by your wallet: the host creates your mailbox there and answers with the handle certificate, which your wallet keeps. One handle per key on a host.`),
+    h("form", { class: "row", id: "register", onsubmit: async (e) => {
+      e.preventDefault();
+      const n = name.value.trim().toLowerCase();
+      if (!n) return;
+      try {
+        status(st, `registering ${n}@${host.domain}`);
+        const v = await registerHandle(n);
+        status(st, `${v.handle}@${v.domain}: the certificate is in your wallet; your mailbox is ${v.messagebox}`, "ok");
+        await sleep(300);
+        route();
+      } catch (err) { status(st, errText(err), "bad"); }
+    } }, name, h("span", { class: "mut" }, `@${host.domain}`), h("button", { type: "submit", class: "go" }, "Register")), st);
 }
 
 function skeinHeader(sk, page) {
@@ -612,8 +738,8 @@ async function dispatchPage(m, sk) {
  * envelope in metanet_inbox opened, its payment internalized, then
  * acknowledged; the box is the SDK's, not the field). The mailbox is any BRC-33
  * messagebox — a mailbox instance, or another — not the skein that served
- * this page. There is no lookup from a key to its mailbox (a resolver
- * answers a handle), so the URL is typed once and kept in this browser.
+ * this page. The URL: the one typed here last (kept in this browser), else
+ * the messagebox your first handle resolves to (myHandles).
  */
 const INBOX_BOX = "metanet_inbox";
 const inboxKey = () => `skein-site inbox ${state.me}`;
@@ -639,6 +765,11 @@ function inboxWhat(body) {
 
 async function inboxPage(m) {
   const saved = inboxSaved();
+  let from = "";
+  if (!saved.url) {
+    const first = (await myHandles().catch(() => [])).find((x) => x.messagebox);
+    if (first) { saved.url = first.messagebox; from = `${first.handle}@${first.domain}`; }
+  }
   const url = h("input", { type: "text", name: "url", placeholder: "your mailbox's URL (https://…)", value: saved.url ?? "" });
   const box = h("input", { type: "text", name: "box", placeholder: "box (List)", value: saved.box ?? INBOX_BOX });
   const st = h("div", { class: "status", id: "inbox-status" });
@@ -647,11 +778,13 @@ async function inboxPage(m) {
   const list = h("div", { id: "inbox-list" });
   const sync = h("button", { type: "button", class: "go", id: "sync" }, "Sync");
   const where = () => ({ url: url.value.trim().replace(/\/+$/, ""), box: box.value.trim() || INBOX_BOX });
+  // Kept in this browser: what you typed; not the URL your handle resolves to (that is looked up each time).
+  const keep = (w) => { if (!(from && w.url === url.defaultValue)) inboxSave(w); };
 
   async function show() {
     const w = where();
-    if (!w.url) return status(st, "Type your mailbox's URL: there is no lookup from your key to it. The page keeps it in this browser.");
-    inboxSave(w);
+    if (!w.url) return status(st, "Type your mailbox's URL, or register a handle (Your skeins): the page finds your mailbox from it.");
+    keep(w);
     status(st, `listing ${w.box} at ${w.url}`);
     list.replaceChildren();
     try {
@@ -675,7 +808,7 @@ async function inboxPage(m) {
   sync.onclick = async () => {
     const w = where();
     if (!w.url) return status(st, "Type your mailbox's URL first.", "bad");
-    inboxSave(w);
+    keep(w);
     sync.disabled = true;
     status(result, `syncing ${INBOX_BOX} from ${w.url} into your wallet`);
     rows.replaceChildren();
@@ -702,9 +835,10 @@ async function inboxPage(m) {
   m.append(h("h1", {}, "Inbox"),
     h("p", { class: "mut small" }, "A mailbox's box, for your key: List shows what is waiting in the box named here. Sync always reads metanet_inbox, whatever the box field says: it opens each BRC-169 envelope there, takes its payment into your wallet (@1sat/actions' syncMetanetInbox, with the wallet connected here) and acknowledges it. Received: internalized and acknowledged. Left in the box: not acknowledged, with the reason."),
     h("form", { class: "row", id: "inbox", onsubmit: (ev) => { ev.preventDefault(); show(); } }, url, box, h("button", { type: "submit" }, "List"), sync),
+    from ? h("p", { class: "mut small", id: "inbox-from" }, `The mailbox ${from} resolves to.`) : "",
     st, result, rows, list);
   if (where().url) await show();
-  else status(st, "Type your mailbox's URL: there is no lookup from your key to it. The page keeps it in this browser.");
+  else status(st, "Type your mailbox's URL, or register a handle (Your skeins): the page finds your mailbox from it.");
 }
 
 // ---------------------------------------------------------------- start

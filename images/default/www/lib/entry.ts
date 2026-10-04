@@ -4,6 +4,8 @@
 // lib/SKEIN_REV), the wallet connection is @1sat/connect over @bsv/sdk's
 // WalletClient, the codecs are @ipld's. The Inbox: @bsv/message-box-client
 // lists a mailbox, @1sat/actions' syncMetanetInbox takes its payments in.
+// Handles (#103): @bsv/sdk's Certificate and MasterCertificate check and
+// read the handle certificates the wallet keeps.
 
 export { RawBox } from "skein/src/client/raw.ts";
 export { chunk } from "skein/src/client/bundle.ts";
@@ -17,7 +19,7 @@ export { syncMetanetInbox } from "../node_modules/@1sat/actions/dist/metanet/rec
 export { createContext } from "../node_modules/@1sat/actions/dist/types.js";
 export { connectWallet } from "@1sat/connect";
 export { MessageBoxClient } from "@bsv/message-box-client";
-export { LockingScript, PushDrop, Utils, WalletClient } from "@bsv/sdk";
+export { Certificate, Hash, LockingScript, MasterCertificate, PushDrop, Utils, WalletClient } from "@bsv/sdk";
 export * as dagCbor from "@ipld/dag-cbor";
 export * as dagJson from "@ipld/dag-json";
 export { CID } from "multiformats/cid";

@@ -6,18 +6,22 @@
 // and acknowledges there; every request is an entry (#68), a poll moves
 // nothing; sessions are records and survive a killed kernel. The host's
 // headers feed (#102) reaches only the instances with a row taking events in
-// box `chain`, following their dispatch tables live.
+// box `chain`, following their dispatch tables live. A registration from a
+// page (#103): signed by the key, answered with the handle certificate for
+// its wallet.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { MessageBoxClient } from "@bsv/message-box-client";
+import { MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { main } from "./cli.ts";
 import { testHost, until } from "./testhost.ts";
+import { HANDLE_CERTIFICATE_TYPE, NO_REVOCATION_OUTPOINT, serialOf } from "./handles.ts";
 
 test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's mailbox instance over http; list/ack; polls are entries that move nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
@@ -189,4 +193,67 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   assert.equal(await main(["dispatch", "a", "remove", "chain", handler], env), 0, err.join("\n"));
   await until("a unsubscribed", async () => { await h.router.settled(); return !h.router.feeds.hosts("a") || undefined; });
   assert.ok(h.lines.includes(`[router] a: unsubscribed from the host's headers feed ${url}`));
+});
+
+test("router: POST /account/register (#103) — signed by the key; the mailbox instance at the request's domain, with the handle certificate for the key's wallet; the same key and name again the same handle; a taken, reserved or second name 409; /.well-known/skein-host at every host name", async (t) => {
+  const h = await testHost(t);
+  const register = async (key: PrivateKey, username: string, signer = key) => {
+    const { signature } = await new ProtoWallet(signer).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}`, "utf8") });
+    const r = await fetch(`${h.base}/account/register`, { method: "POST", body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+    return { status: r.status, body: await r.json() as Record<string, unknown> & { certificate: Record<string, unknown> & { fields: Record<string, string> }; keyringForSubject: Record<string, string> } };
+  };
+  const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
+  const dave = PrivateKey.fromRandom(), daveId = dave.toPublicKey().toString();
+  h.agent("alpha");
+
+  // Where a page served by an instance finds the router: answered at any host name, before an instance's routes.
+  for (const url of [`${h.base}/.well-known/skein-host`, `http://alpha.localhost:${h.router.port}/.well-known/skein-host`]) {
+    const a = await h.router.dispatch({ method: "GET", url, headers: {}, body: new Uint8Array() });
+    assert.equal(a.status, 200);
+    assert.deepEqual(JSON.parse(new TextDecoder().decode(a.body)), { origin: h.base, domain: "localhost" });
+  }
+
+  // Signed by another key than the one named: refused.
+  assert.equal((await register(dave, "dave", PrivateKey.fromRandom())).status, 401);
+
+  const first = await register(dave, "dave");
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const { certificate: c, keyringForSubject, ...rest } = first.body;
+  assert.deepEqual(rest, { handle: "dave", domain: "localhost", identityKey: daveId, messagebox: h.origin("dave") });
+  assert.equal(h.db.mailboxOf(daveId)?.handle, "dave");
+  assert.equal(h.db.identityOf("dave", "localhost"), daveId);
+  // The certificate as the wallet's acquireCertificate (direct) takes it: a MasterCertificate (a keyring entry per
+  // field), its signature, and fields the subject decrypts with the keyring (counterparty: the certifier).
+  assert.equal(c.type, HANDLE_CERTIFICATE_TYPE);
+  assert.equal(c.serialNumber, serialOf("dave", "localhost", daveId));
+  assert.equal(c.subject, daveId);
+  assert.equal(c.certifier, certifier);
+  assert.equal(c.revocationOutpoint, NO_REVOCATION_OUTPOINT);
+  const m = new MasterCertificate(c.type as string, c.serialNumber as string, c.subject as string, c.certifier as string, c.revocationOutpoint as string, c.fields, keyringForSubject, c.signature as string);
+  assert.equal(await m.verify(), true);
+  assert.notEqual(c.fields.handle, Utils.toBase64(Utils.toArray("dave", "utf8")));
+  assert.deepEqual({ ...await MasterCertificate.decryptFields(new ProtoWallet(dave), keyringForSubject, c.fields, certifier) }, { handle: "dave", domain: "localhost" });
+
+  // The same key and name again: the same handle and binding (the serial), a certificate issued again.
+  const again = await register(dave, "dave");
+  assert.equal(again.status, 200);
+  assert.equal(again.body.handle, "dave");
+  assert.equal(again.body.certificate.serialNumber, c.serialNumber);
+  assert.equal(h.db.list().filter((r) => r.owner === daveId).length, 1);
+
+  // 409: the key's second name; another key's name; an instance's handle; the reserved labels.
+  const second = await register(dave, "dave2");
+  assert.equal(second.status, 409);
+  assert.match(String(second.body.error), /already registered as dave/);
+  const eve = PrivateKey.fromRandom();
+  assert.equal((await register(eve, "dave")).status, 409);
+  assert.equal((await register(eve, "alpha")).status, 409);
+  for (const name of ["id", "host"]) {
+    const r = await register(eve, name);
+    assert.equal(r.status, 409);
+    assert.match(String(r.body.error), /reserved/);
+  }
+  // Not a host name label.
+  assert.equal((await register(eve, "e.ve")).status, 400);
+  assert.equal(h.db.mailboxOf(eve.toPublicKey().toString()), undefined);
 });

@@ -28,7 +28,14 @@
 //   3. the explorer renders alice's log (genesis, the claim, the requests);
 //   4. back on the host skein, a locator for it added from the page; its page
 //      lists alice under the skeins created there;
-//   5. the Inbox (#99): you register a mailbox instance (`/account/register`);
+//   5. a handle from the page (#103): Register a handle on the host skein's
+//      page — your wallet's signature, the host's /account/register (found
+//      through /.well-known/skein-host and the manifest) creates your mailbox
+//      instance and answers with the handle certificate, which the wallet in
+//      the tab keeps (acquireCertificate, direct: encrypted fields, your
+//      keyring); listCertificates returns it; "Your handles" shows
+//      you@localhost and the messagebox it resolves to;
+//      the Inbox (#99): opened on that messagebox (prefilled from the handle);
 //      a sender delivers a payment to it in box metanet_inbox (a BRC-169
 //      DAG-CBOR envelope, BRC-231 over BRC-104, its `payment` a BRC-29
 //      transaction to you); the page, given the mailbox's URL, lists the
@@ -51,12 +58,13 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { EncryptedMessage, Hash, MerklePath, P2PKH, PrivateKey, PublicKey, ProtoWallet, Script, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
+import { EncryptedMessage, Hash, MasterCertificate, MerklePath, P2PKH, PrivateKey, PublicKey, ProtoWallet, Script, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
+import { HANDLE_CERTIFICATE_TYPE, serialOf } from "../../src/host/handles.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { chromium, playwright } from "./browser.ts";
 
@@ -323,12 +331,36 @@ try {
   const kids = await page.locator("#children").innerText();
   check(/alice/.test(kids) && kids.includes(`${base}/@alice`) && /Open/.test(kids), `the host skein's page lists the skeins created there, alice openable through her locator (${kids.replace(/\s+/g, " ").trim()})`);
 
-  // ------------------------------------------------ 5. the Inbox (#99)
-  const youWallet = ephemeralWallet(youKey);
-  const regSig = await youWallet.createSignature({ protocolID: [2, "skein register"], keyID: "you", counterparty: "anyone", data: [...Buffer.from("register you")] });
-  const reg = await fetch(`${base}/account/register`, { method: "POST", body: JSON.stringify({ username: "you", identityKey: you, signature: Buffer.from(regSig.signature).toString("hex") }) });
-  check(reg.status === 200 && db.mailboxOf(you)?.handle === "you", `you register a mailbox instance (/account/register): ${reg.status}`);
+  // ------------------------------------------------ 5. a handle from the page (#103)
+  await page.goto(`${base}/@host/${search}`);
+  await ready();
+  await page.waitForSelector("#register", { timeout: 60_000 });
+  check((await page.locator("#handles").innerText()).includes("No handle certificate from localhost"), "the host skein's page finds its host (/.well-known/skein-host, the manifest): no handle certificate in your wallet yet");
+  await page.fill("#register input[name=handle]", "you");
+  await page.click("#register button[type=submit]");
+  await page.waitForSelector('tr[data-handle="you@localhost"], #register-status.bad', { timeout: 120_000 });
+  if (await page.locator("#register-status.bad").count()) throw new Error(`register: ${await page.locator("#register-status").innerText()}`);
+  check(db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you, "Register a handle from the page: your mailbox instance you@localhost, for your key (your wallet's signature)");
   stores.push(db.get("you")!.store);
+  const { publicKey: certifier } = await router.certifier.getPublicKey({ identityKey: true });
+  const held = await page.evaluate(async ([c, type]) => {
+    const w = (window as unknown as { site: { wallet: { listCertificates(a: unknown): Promise<{ certificates: Array<Record<string, unknown>> }> } } }).site.wallet;
+    return (await w.listCertificates({ certifiers: [c], types: [type] })).certificates;
+  }, [certifier, HANDLE_CERTIFICATE_TYPE] as const);
+  const cert = held[0] as { serialNumber: string; subject: string; certifier: string; fields: Record<string, string>; keyring: Record<string, string> } | undefined;
+  const read = cert ? { ...await MasterCertificate.decryptFields(new ProtoWallet(youKey), cert.keyring, cert.fields, certifier) } : {};
+  check(held.length === 1 && cert!.subject === you && cert!.serialNumber === serialOf("you", "localhost", you) && read.handle === "you" && read.domain === "localhost",
+    `the handle certificate is in the wallet in the tab (acquireCertificate, direct): listCertificates by the host's certifier and the handle type returns it, its fields encrypted, your keyring reads them (${JSON.stringify(read)})`);
+  const handles = await page.locator("#handles").innerText();
+  check(handles.includes("you@localhost") && handles.includes(`${base}/@you`), `"Your handles" shows it, resolved to its messagebox (${handles.replace(/\s+/g, " ").trim()})`);
+
+  // ------------------------------------------------ the Inbox (#99), opened on that messagebox
+  await page.goto(`${base}/@host/${search}#/inbox`);
+  await ready();
+  await page.waitForSelector("#inbox-from", { timeout: 60_000 });
+  check(await page.locator("#inbox input[name=url]").inputValue() === `${base}/@you` && (await page.locator("#inbox-from").innerText()).includes("you@localhost"),
+    `the Inbox's mailbox URL is prefilled from your handle (${await page.locator("#inbox input[name=url]").inputValue()})`);
+  await page.waitForFunction(() => !/^listing/.test(document.getElementById("inbox-status")?.textContent ?? ""), null, { timeout: 120_000 });
   // The mailbox's own origin (the router's <handle>.localhost form): the stock client shakes hands at <origin>/.well-known/auth.
   const mailbox = `http://you.localhost:${port}`;
   // A BRC-169 §7.3 envelope in DAG-CBOR (1sat-sdk's actions/src/mandala/envelope.ts layout): `payment` the
@@ -348,8 +380,7 @@ try {
   const sent = await new RawBox(ephemeralWallet(payer), `${base}/@you`).send(you, "metanet_inbox", envelope);
   check(!!sent.id, `a sender delivers a payment to your mailbox instance, box metanet_inbox (BRC-231 on its session): ${sent.id}`);
 
-  await page.goto(`${base}/@host/${search}#/inbox`);
-  await ready();
+  // The stock client shakes hands at the URL's origin, so for it the dev form above is not the mailbox: its <handle>.localhost origin is.
   await page.fill("#inbox input[name=url]", mailbox);
   check(await page.locator("#inbox input[name=box]").inputValue() === "metanet_inbox", "the Inbox's box defaults to metanet_inbox");
   await page.click("#inbox button[type=submit]");
