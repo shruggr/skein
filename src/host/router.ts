@@ -958,13 +958,15 @@ export class Router {
       return json(200, manifest(publicKey, `${this.origin()}/.well-known/metanet-handles/resolve`));
     }
     if (req.method === "GET" && path === "/.well-known/metanet-handles/resolve") {
-      // BRC-169 §5.2: `handle` is the bare handle; `handle@domain` is accepted too. Without a domain, the row's.
+      // BRC-169 §5.2: the query carries the bare handle (the domain is this endpoint's, the one the manifest
+      // was fetched at); `handle@domain` is accepted too. A dev router at 127.0.0.1 answers for `localhost`.
       const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
-      const [h0, d] = q.split("@");
-      const handle = h0!.split("+")[0]!.toLowerCase();
+      const here = url.hostname.toLowerCase();
+      const own = here === "127.0.0.1" || here === "::1" || here === "[::1]" || here === "" ? "localhost" : here;
+      const [h0, d] = q.includes("@") ? q.split("@") : [q, own];
+      const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? own).toLowerCase();
       if (!handle) return json(400, resolutionError("malformed-handle", "want ?handle=<handle>"));
       const row = this.o.db.get(handle);
-      const domain = (d ?? row?.domain ?? "localhost").toLowerCase();
       const key = this.o.db.identityOf(handle, domain);
       if (!row || row.status !== "enabled" || !key) return json(404, resolutionError("handle-not-found", `no handle ${handle}@${domain} here`));
       return json(200, await resolution(this.certifier, handle, domain, key, this.originOf(handle)));

@@ -875,7 +875,8 @@ The host is the certifier for its instances (#100, `src/host/handles.ts`).
 the master's child under `[2, "skein provider"]`, key ID `certifier`; not a
 provider, and in no address book — and `metanet.handles` (`version` "1.0",
 `resolve`). `GET /.well-known/metanet-handles/resolve?handle=<handle>` (or
-`<handle>@<domain>`; without a domain, the row's) answers §5.2's
+`<handle>@<domain>`; without one, the domain is the request's hostname, and
+127.0.0.1 is `localhost`) answers §5.2's
 `{metanetHandles: "1.0", handle, domain, identityKey, certificate,
 messagebox, ttl: 300, revoked: false}`: an agent's own identity, a mailbox
 instance's owner's, and the instance's origin as the messagebox. The
