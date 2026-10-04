@@ -945,9 +945,13 @@ export class Router {
       return json(200, { metanet: { handles: { version: "1.0", resolve: `${this.origin()}/.well-known/metanet-handles/resolve` } } });
     }
     if (req.method === "GET" && path === "/.well-known/metanet-handles/resolve") {
+      // BRC-169 §5.2: the query carries the bare handle (the domain is this endpoint's, the one the manifest
+      // was fetched at); `handle@domain` is accepted too. A dev router at 127.0.0.1 answers for `localhost`.
       const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
-      const [h0, d] = q.includes("@") ? q.split("@") : [q, "localhost"];
-      const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? "localhost").toLowerCase();
+      const here = url.hostname.toLowerCase();
+      const own = here === "127.0.0.1" || here === "::1" || here === "[::1]" || here === "" ? "localhost" : here;
+      const [h0, d] = q.includes("@") ? q.split("@") : [q, own];
+      const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? own).toLowerCase();
       const row = this.o.db.get(handle);
       const key = this.o.db.identityOf(handle, domain);
       if (!row || row.status !== "enabled" || !key) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no handle ${handle}@${domain} here` });
