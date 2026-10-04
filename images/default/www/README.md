@@ -103,11 +103,9 @@ under `metanet`, for:
   `[1, "identity key retrieval"]`, `[2, "server hmac"]` (self), `[1, "skein
   locator"]`, `[2, "skein register"]` (anyone), `[1, "certificate
   acquisition <the BRC-169 handle type>"]`, `[1, "certificate list"]`,
-  `[1, "metanet handles profile"]`; the basket `skein-locators`; and a
-  spending allowance of 1000 sats a month (`spendingAuthorization`, a
-  monthly cap in the toolbox) for locators — 1 sat each and the fee of its
-  transaction, about 400 bytes: some 40 sats at 100 sat/kB, so two dozen
-  locators a month at that rate before the wallet asks again.
+  `[1, "metanet handles profile"]`; and the basket `skein-locators`. No
+  spending allowance: a locator's spend (1 sat and its fee) is asked for
+  when it happens.
   `[2, "auth message signature"]` is listed without a counterparty, which
   the toolbox leaves out of the first group: for a wallet without a
   counterparty prompt it is asked per skein instead.

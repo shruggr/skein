@@ -1,6 +1,6 @@
 {
   "name": "skein-site",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "private": true,
   "description": "The management site every skein serves: create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet, sign its profile, find handles.",
   "type": "module",

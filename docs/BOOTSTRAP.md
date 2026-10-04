@@ -49,7 +49,7 @@ images/default/
   etc/reads.json                          [{op: "explore", owner: true}]: the explorer is the owner's, whoever claims it (#92)
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  www/                                    the management site: shruggr/skein-site v0.5.0's tree, copied (the same git tree)
+  www/                                    the management site: shruggr/skein-site v0.5.2's tree, copied (the same git tree)
   apps/git/                               the git app: shruggr/skein-git v0.1.0's tree, copied, not wired
 ```
 
