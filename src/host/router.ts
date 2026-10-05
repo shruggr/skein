@@ -85,7 +85,7 @@ import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
 import { KeyDeriver, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import type { CID } from "multiformats/cid";
+import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
@@ -101,7 +101,7 @@ import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type 
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
-import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
+import { appTopics, askedTopics, DEFAULT_LISTEN, foldTopicEvents, libp2pConfig, P2PHost, topicEvent, topicOwners, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
@@ -184,6 +184,12 @@ interface Loaded {
   /** The genesis (its `libp2p`), and the dispatch table's tip as the libp2p node last followed it (#72, #77). */
   genesis: Record<string, unknown>;
   dispatchTip?: string;
+  /** The dispatch table as last read (syncDispatch). */
+  rows?: DispatchRow[];
+  /** Each app's topics asked for by event (#119): folded from the log at hydrate, then followed live. */
+  asked: Map<string, Set<string>>;
+  /** A row's program record → its `app` (read once per record). */
+  apps: Map<string, string | undefined>;
 }
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
@@ -377,6 +383,7 @@ export class Router {
       append: (h, pkg) => this.appendLocal(h, pkg),
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
+      ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
       cron: (h, sender, id, body) => this.cron.request(h, sender, id, body),
       // #90: the instance manager acts for the host skein alone.
       manager: {
@@ -652,7 +659,9 @@ export class Router {
       await kernel.stop(1000);
       throw e;
     }
-    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown> };
+    // #119: the topics the apps asked for by event, read from the log (the kernel keeps nothing for them).
+    const asked = await this.foldAsked(row.store).catch((e) => { this.say(handle, `libp2p: the asked topics not read: ${(e as Error).message}`); return new Map<string, Set<string>>(); });
+    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, asked, apps: new Map() };
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
@@ -930,8 +939,68 @@ export class Router {
     const key = d.tip ? d.tip.toString() : "";
     if (!first && key === (l.dispatchTip ?? "")) return;
     l.dispatchTip = key;
+    l.rows = d.rows;
     this.followHeaders(l.row.handle, d.rows);
-    await this.p2p?.declare(l.row.handle, libp2pConfig(l.genesis, d.rows as unknown as Array<Record<string, unknown>>)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+    await this.declareP2P(l, first);
+  }
+
+  /** The instance's libp2p node declared as its genesis, its table and its apps' asked topics (#119) ask. */
+  private async declareP2P(l: Loaded, first = false): Promise<void> {
+    if (!this.p2p) return;
+    const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
+    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, await this.appTopicsOf(l, rows))).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+  }
+
+  /** The asked topics each app's rows let it have (p2p.ts appTopics), the rows' program records read for their `app`. */
+  private async appTopicsOf(l: Loaded, rows: Array<Record<string, unknown>>): Promise<string[]> {
+    if (!l.asked.size) return [];
+    for (const r of rows) {
+      if (r.transport !== "libp2p" || !CID.asCID(r.program)) continue;
+      const k = String(r.program);
+      if (l.apps.has(k)) continue;
+      const rec = await l.kernel.store.get(r.program as CID).catch(() => undefined) as Record<string, unknown> | undefined;
+      l.apps.set(k, typeof rec?.app === "string" ? rec.app : undefined);
+    }
+    return appTopics(l.asked, rows, (r) => CID.asCID(r.program) ? l.apps.get(String(r.program)) : undefined);
+  }
+
+  /**
+   * #119: every app's asked topics, folded from the instance's log — the
+   * libp2p node's recovery at hydrate, by reading (p2p.ts askedTopics; the
+   * store file opened read-only beside the kernel, as `subscribes` reads it).
+   */
+  private async foldAsked(store: string): Promise<Map<string, Set<string>>> {
+    if (!this.p2p || !existsSync(store)) return new Map();
+    const s = openStoreFile(store, { readOnly: true });
+    try { return await askedTopics(s); } finally { s.close(); }
+  }
+
+  /**
+   * A `subscribe` / `unsubscribe` event from `handle` (#119, after its step's
+   * commit): the app's asked set changes, and the node is declared again —
+   * the topic subscribed when one of that app's libp2p rows takes it (p2p.ts
+   * topicOwners), else refused with a log line. An event naming no app (an
+   * uninstalled program record's) is ignored. An instance still loading reads
+   * the event from its log at hydrate; it is applied after that too (the
+   * same result).
+   */
+  private topicEvent(handle: string, rec: Record<string, unknown>): void {
+    const e = topicEvent(rec);
+    if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
+    const apply = async () => {
+      const l = this.loaded.get(handle) ?? await this.loading.get(handle)?.catch(() => undefined);
+      if (!l || l.kernel.gone) return;
+      foldTopicEvents([e], l.asked);
+      const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
+      await this.appTopicsOf(l, rows); // the rows' apps read
+      const owners = topicOwners(rows, e.topic, (r) => CID.asCID(r.program) ? l.apps.get(String(r.program)) : undefined);
+      if (e.event === "subscribe" && !owners.has(e.app)) this.say(handle, `libp2p: subscribe ${e.topic} from app ${e.app}: refused — no libp2p row of ${e.app} takes it${owners.size ? ` (it is ${[...owners].join(", ")}'s)` : ""}; not subscribed`);
+      else this.say(handle, `libp2p: ${e.event} ${e.topic} (app ${e.app})`);
+      await this.declareP2P(l);
+    };
+    const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event} ${e.topic}: ${(x as Error).message}`));
+    this.syncing.add(p);
+    void p.finally(() => this.syncing.delete(p));
   }
 
   /**

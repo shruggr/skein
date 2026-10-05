@@ -133,6 +133,8 @@ export interface ProvidersOptions {
   fetch(req: HttpRequest, from: string): Promise<HttpResponse>;
   /** The broadcaster (#58, #65: the host's Arcade), when the host has one: a broadcast event's transaction and BEEF, queued. */
   broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
+  /** The libp2p node's topic events (#119): a `subscribe` / `unsubscribe` record {kind: "event", event, app?, topic} from `handle`. Absent: no libp2p node (dropped). */
+  topicEvent?(handle: string, record: Record<string, unknown>): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
   /**
@@ -231,12 +233,28 @@ export class Providers {
     while (this.inflight.size) await Promise.all([...this.inflight]);
   }
 
-  /** An event out (#65): unauthenticated, self-validating, addressed to no one. Each is acted on every time it is handed over (a kernel's start hands over again what a waiting thread awaits: the queue takes a transaction once). */
+  /**
+   * An event out (#65, #119): addressed to no one, acted on by its name —
+   * `broadcast` → the broadcaster (Arcade); `subscribe` / `unsubscribe` → the
+   * libp2p node (scoped to the record's app: p2p.ts); any other name: a log
+   * line, nothing else (the step is not told). A broadcast is acted on every
+   * time it is handed over (a kernel's start hands over again what a waiting
+   * thread awaits: the queue takes a transaction once); any other event is
+   * handed over once.
+   */
   private event(handle: string, out: Outgoing): void {
     const m = out.message as unknown as Record<string, unknown>;
-    if (out.address !== "broadcast" || m.kind !== "broadcast") { this.say(handle, `provider: an event ${out.address} this host has no wiring for: dropped`); return; }
-    if (!this.o.broadcast) { this.say(handle, "broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"); return; }
-    this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);
+    if (out.address === "broadcast" && m.kind === "broadcast") {
+      if (!this.o.broadcast) { this.say(handle, "broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"); return; }
+      this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);
+      return;
+    }
+    if ((out.address === "subscribe" || out.address === "unsubscribe") && m.kind === "event" && m.event === out.address) {
+      if (!this.o.topicEvent) { this.say(handle, `${out.address}: this host has no libp2p node: ignored`); return; }
+      this.o.topicEvent(handle, m);
+      return;
+    }
+    this.say(handle, `provider: an event ${out.address} this host has no wiring for: ignored`);
   }
 
   private async carry(handle: string, id: CID, out: Outgoing): Promise<void> {

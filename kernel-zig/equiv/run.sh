@@ -116,6 +116,9 @@ fi
 echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by skein-host install, the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
 
+echo "== open emit events (#119): two apps (programs/test/app-demo's module under other names) on a router with libp2p; an app's subscribe {topic} → the node subscribes it, a message published on it from a second router routed by the app's libp2p prefix row (tm_-style) and accepted; another app's subscribe of that topic refused; an event nobody wires is a record and a log line; unsubscribe leaves; a restarted router subscribes the same topics by reading the log; an uninstall drops the app's; replayed"
+"${node[@]}" "$kz/equiv/emit-events.ts" || status=1
+
 echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by skein-host install, on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
 "${node[@]}" "$kz/equiv/chain.ts" || status=1
 

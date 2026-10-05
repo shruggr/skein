@@ -14,8 +14,13 @@
 //              peer key), noise + yamux, TCP and WebSocket listeners (WSS with a
 //              certificate), Kademlia DHT off | client | server, mDNS on/off,
 //              bootstrap peers kept connected, circuit relays.
-//   topics     the instance's `libp2p.topics` and its dispatch table's libp2p
-//              rows' topics (libp2pConfig): subscribed; each message is judged
+//   topics     the instance's `libp2p.topics`, its dispatch table's libp2p
+//              rows' topics (libp2pConfig; a `prefix` row's address is not a
+//              topic, #119) and the topics its apps asked for by event
+//              (#119: `subscribe` / `unsubscribe` {topic}, emitted by an app's
+//              installed program; each app's asked set folded from the log,
+//              askedTopics, and kept only while one of that app's rows takes
+//              the topic, appTopics): subscribed; each message is judged
 //              by the async topic validator, which makes one front-door call
 //              (`inbound`) and returns its verdict to GossipSub (accept: admit +
 //              forward; reject: drop + penalise the delivering peer; ignore: drop).
@@ -66,6 +71,7 @@ import { webSockets } from "@libp2p/websockets";
 import { multiaddr, type Multiaddr } from "@multiformats/multiaddr";
 import type { PrivateKey } from "@bsv/sdk";
 import { createLibp2p } from "libp2p";
+import type { Store } from "../runtime/store.ts";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 
@@ -202,18 +208,123 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * did not. Undefined: no node — the genesis declares none and no row needs
  * one.
  */
-export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>): P2PInstanceConfig | undefined {
+export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, asked: string[] = []): P2PInstanceConfig | undefined {
   const base = libp2pOf(g);
   const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
-  const names = rows.filter((r) => r.transport === "libp2p" && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
-  if (!base && !names.length) return undefined;
+  // A prefix row (#119) names no topic: what it takes is subscribed when an app asks (`asked`).
+  const names = rows.filter((r) => r.transport === "libp2p" && r.prefix !== true && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
+  if (!base && !names.length && !asked.length) return undefined;
   const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
   return {
-    topics: add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))),
+    topics: add(add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))), asked),
     protocols: add(base?.protocols ?? [], names.filter((n) => n.startsWith("/"))),
     ...(base?.listen ? { listen: base.listen } : {}),
   };
 }
+
+// ---------------------------------------------------------------- topics an app asks for (#119)
+//
+// An app's installed program emits `subscribe` / `unsubscribe` {topic} (the
+// kernel's open events: the record {kind: "event", event, app, topic} on the
+// step's update, handed to the host after the commit). The node follows them
+// per app, and keeps a topic only while it is the app's own:
+//
+//   a topic is app X's when the most specific libp2p rows that take it — the
+//   rows whose address is the topic, else the `prefix` rows with the longest
+//   address the topic starts with (dispatch.zig forLibp2p, the sender aside)
+//   — include one whose program record's `app` is X. A `/<protocol>` is no
+//   topic. So an app's `tm_` prefix row lets it subscribe any `tm_<txid>`,
+//   and another app's exact row for one `tm_<txid>` takes that one from it.
+//
+// Nothing is kept for this but the log: after a restart the asked sets are
+// folded from the events every step recorded (askedTopics), in log order; a
+// subscribe adds, an unsubscribe removes. An event with no `app` (its program
+// record is not installed, #114) is ignored.
+
+/** A `subscribe` / `unsubscribe` event record, read: {app, event, topic}; or why it is not one this host follows. */
+export function topicEvent(rec: Record<string, unknown>): { app: string; event: "subscribe" | "unsubscribe"; topic: string } | { refused: string } {
+  const event = rec.event;
+  if (rec.kind !== "event" || (event !== "subscribe" && event !== "unsubscribe")) return { refused: "not a subscribe or unsubscribe event" };
+  if (typeof rec.app !== "string" || !rec.app) return { refused: "it names no app (its program record is not installed): ignored" };
+  const topic = rec.topic;
+  if (typeof topic !== "string" || !topic || /[\s\0]/.test(topic) || topic.startsWith("/")) return { refused: `${JSON.stringify(topic)} is not a topic (text, no space; a /protocol is not subscribed by event)` };
+  return { app: rec.app, event, topic };
+}
+
+/** Fold topic events in order into each app's asked set. */
+export function foldTopicEvents(events: Iterable<{ app: string; event: "subscribe" | "unsubscribe"; topic: string }>, into = new Map<string, Set<string>>()): Map<string, Set<string>> {
+  for (const e of events) {
+    let set = into.get(e.app);
+    if (!set) into.set(e.app, (set = new Set()));
+    if (e.event === "subscribe") set.add(e.topic); else set.delete(e.topic);
+    if (!set.size) into.delete(e.app);
+  }
+  return into;
+}
+
+/** The apps whose rows own `topic` (the rule above): `appOf` a row's program record's app. */
+export function topicOwners(rows: Array<Record<string, unknown>>, topic: string, appOf: (row: Record<string, unknown>) => string | undefined): Set<string> {
+  const owners = new Set<string>();
+  if (topic.startsWith("/")) return owners;
+  const p2p = rows.filter((r) => r.transport === "libp2p" && typeof r.address === "string");
+  let at = p2p.filter((r) => r.prefix !== true && r.address === topic);
+  if (!at.length) {
+    const takes = p2p.filter((r) => r.prefix === true && topic.startsWith(r.address as string));
+    const len = Math.max(-1, ...takes.map((r) => (r.address as string).length));
+    at = takes.filter((r) => (r.address as string).length === len);
+  }
+  for (const r of at) { const a = appOf(r); if (a) owners.add(a); }
+  return owners;
+}
+
+/** The asked topics the rows let each app have (union): what the node subscribes for the apps. */
+export function appTopics(asked: Map<string, Set<string>>, rows: Array<Record<string, unknown>>, appOf: (row: Record<string, unknown>) => string | undefined): string[] {
+  const out = new Set<string>();
+  for (const [app, topics] of asked) for (const t of topics) if (topicOwners(rows, t, appOf).has(app)) out.add(t);
+  return [...out];
+}
+
+/**
+ * Every app's asked topics, folded from the store's log (#119, the host's
+ * recovery at hydrate): the `subscribe` / `unsubscribe` records each step's
+ * update lists in `emitted`, in log order — by the entry the step processed
+ * (`input`'s `n`), then the step's time, its thread's start and its place in
+ * the thread. Read only; the kernel keeps nothing for it.
+ */
+export async function askedTopics(store: Pick<Store, "get" | "chains" | "edges">): Promise<Map<string, Set<string>>> {
+  type Obj = Record<string, unknown>;
+  const ns = new Map<string, number>();
+  const nOf = async (input: unknown): Promise<number> => {
+    if (!isCid(input)) return -1;
+    const k = input.toString();
+    let n = ns.get(k);
+    if (n === undefined) { const e = await store.get(input).catch(() => undefined) as Obj | undefined; n = typeof e?.n === "number" ? e.n : -1; ns.set(k, n); }
+    return n;
+  };
+  const found: Array<{ key: number[]; e: { app: string; event: "subscribe" | "unsubscribe"; topic: string } }> = [];
+  for await (const origin of store.edges.query({ kind: "thread" })) {
+    const o = await store.get(origin) as Obj;
+    let seq = 0;
+    for await (const c of store.chains.history(origin)) {
+      if (c.equals(origin)) continue;
+      seq++;
+      const u = await store.get(c) as Obj;
+      if (!Array.isArray(u.emitted) || !u.emitted.length) continue;
+      for (const [i, x] of u.emitted.entries()) {
+        if (!isCid(x)) continue;
+        const rec = await store.get(x).catch(() => undefined) as Obj | undefined;
+        if (rec?.kind !== "event") continue;
+        const e = topicEvent(rec);
+        if ("refused" in e) continue;
+        found.push({ key: [await nOf(u.input), Number(u.at ?? 0), Number(o.at ?? 0), seq, i], e });
+      }
+    }
+  }
+  found.sort((x, y) => { for (let i = 0; i < x.key.length; i++) if (x.key[i] !== y.key[i]) return x.key[i]! - y.key[i]!; return 0; });
+  return foldTopicEvents(found.map((f) => f.e));
+}
+
+const isCid = (x: unknown): x is CID => CID.asCID(x) !== null;
 
 // ---------------------------------------------------------------- the host
 /** A stream an instance dialled (the libp2p provider's). */

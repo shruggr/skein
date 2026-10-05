@@ -36,6 +36,14 @@
 //!                  writes heads under app-demo/. A call's outcome is on stderr
 //!                  ("forge call moved <head>" | "forge call refused: …"); a
 //!                  launched thread errors with the kernel's refusal.
+//!   app-demo       {kind: "app-demo-event", event, …fields} (#119): emits the
+//!                  event {event, …fields} (kernel `emit`: any name; the record
+//!                  names this app when its record is installed) — `subscribe` /
+//!                  `unsubscribe` {topic} for the host's libp2p node, or a name
+//!                  nobody wires; finishes "emitted <event>"
+//!
+//! A libp2p row naming fn `topic` (equiv/emit-events.ts installs this module
+//! under other app names with such rows) is answered {verdict: "accept"}.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -66,6 +74,12 @@ fn run(a: Allocator) !void {
     const in = try sk.input(a);
     const kind = Value.str(in.get("kind")) orelse "";
     // K1: the forged record's work (called, or launched), and the forge's thread woken by its child.
+    // #119: a gossiped message on a topic a libp2p row of the app takes.
+    if (eql(u8, kind, "call") and eql(u8, Value.str(in.get("fn")) orelse "", "topic")) {
+        var v = cbor.MapBuilder.init(a);
+        try v.put("verdict", cbor.string("accept"));
+        return sk.answer(a, v.value());
+    }
     if (eql(u8, kind, "call") and eql(u8, Value.str(in.get("fn")) orelse "", "forge.advance")) {
         const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("forge.advance wants {head}");
         return forgeAdvance(a, Value.str(arg.get("head")) orelse return sk.report("forge.advance wants {head}"));
@@ -131,6 +145,7 @@ fn other(a: Allocator, in: Value, body: Value) !void {
     const kind = Value.str(body.get("kind")) orelse "";
     if (eql(u8, kind, "app-demo-peers")) return peers(a, in, body);
     if (eql(u8, kind, "app-demo-forge")) return forge(a, in, body);
+    if (eql(u8, kind, "app-demo-event")) return event(a, body);
     var q = cbor.MapBuilder.init(a);
     try q.put("name", cbor.string("beat"));
     if (eql(u8, kind, "app-demo-start")) {
@@ -157,6 +172,16 @@ fn peers(a: Allocator, in: Value, body: Value) !void {
     try q.put("url", body.get("url") orelse return sk.report("app-demo-peers wants {key, url}"));
     _ = try sk.emit(a, me, "peers", q.value(), null);
     return out(a, "sent peers", .{});
+}
+
+/// {kind: "app-demo-event", event, …fields} (#119): the event {event, …fields} emitted.
+fn event(a: Allocator, body: Value) !void {
+    const name = Value.str(body.get("event")) orelse return sk.report("app-demo-event wants {event, …fields}");
+    var m = cbor.MapBuilder.init(a);
+    for (body.map) |e| if (!eql(u8, e.key, "kind")) try m.put(e.key, e.value);
+    const bytes = try cbor.encode(a, m.value());
+    _ = sk.result(a, sk.raw.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) }) catch return sk.report(sk.lastError());
+    return out(a, "emitted {s}", .{name});
 }
 
 fn tick(a: Allocator) !void {
