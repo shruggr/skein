@@ -5,7 +5,9 @@ network; BRC-169 is discovery; messages are state.** Skein is a state
 process: every package a transport carries in is appended to the log as
 received, every step is recorded, and the log is the only input. The
 detail lives in `VM.md` (the machine), `MESSAGES.md` (the wire), `APPS.md`
-(apps) and `BOOTSTRAP.md` (genesis).
+(apps) and `BOOTSTRAP.md` (genesis). `ARCHITECTURE-MAP.html` draws it: the
+host process, the instance's five frames, the kernel's modules, one request
+end to end, and what state lives where (open it in a browser).
 
 Three layers:
 

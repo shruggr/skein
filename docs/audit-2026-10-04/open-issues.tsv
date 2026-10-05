@@ -1,0 +1,25 @@
+112	needs-david	Overlay: watch syncing and discovery between two instances — SHIP/SLAP style advertisement, peer discovery, and sync of a topic across two hosts (#31's p2p goal)
+111	ready-to-build	Overlay: submit a transaction to an installed topic and look it up — BRC-22 submit, chain app admission, BRC-24 lookup, end to end on host.skein.nexus
+110	ready-to-build	Overlay: install and configure a topic manager and lookup service on an instance — the install path, config.overlay, dispatch rows, and what the operator has to write
+109	ready-to-build	Sync and backup: a host-served SSE feed of an instance's chain updates, followed by another host into a cold replica runtime.db; fail over = enable the replica with the master secret
+108	needs-david	Payments: charge for hosting a mailbox and for hosting a skein — a BRC-169 payment to the host's mailbox as the gate on onboard.create, and renewal
+107	needs-david	Host site: redesign on the skein brand (yarn mandala mark, navy / periwinkle / rust) and open real user signups at accounts.1sat.app
+106	needs-david	1sat CLI wallet: a BRC-100 wallet on the command line so an agent drives a skein with keys (sessions, admin messages, payments), not only skein-host commands
+105	needs-david	Self-documentation for agents: an explorer read that lists the calls the caller's dispatch rows admit, with each function's manifest entry; per-function docs in the manifest
+102	in-progress	Headers into instances: a host-level SSE feed (SKEIN_HEADERS_URL) now, Arcade's chaintracks JSON accepted; chaintracks inside skein over libp2p later
+101	needs-david	Update an instance's image (core apps, the site) without wiping its data: separate what runs in a head from its storage; an upgrade path instead of remove/re-init
+98	needs-david	Paywall on creating a skein: the onboarding app's create is free today — gate it before the onboarding app is installed on a public host
+97	needs-david	Management page: one grouped permission request (manifest.json at every skein's origin) instead of a prompt per call
+96	needs-david	Native key-value store for the kernel (RocksDB / LMDB / a newer embedded KV) instead of SQLite
+95	ready-to-build	No messages from an instance to itself: in-instance asks are calls or launches; $self rows and the host loopback go away; the chain app's ingest becomes a launch
+93		Wallet: BRC-100 caller-supplied inputs — createAction inputs/inputBEEF, signAction spends, fee and change over them
+88		Answers reference, the host renders: a route answer's body and a message body are links to blocks, never copies
+86		gib as a skein app (Zig): publish a head's tree as a gib commit on chain; gib-cli becomes the external client
+85		Proofs-by-block catch-up (block hash → the topic's BUMPs, plus the catch-up walk) is an overlay tool: move it from amm-poc's amm-p2p into skein-overlay
+84		Overlay submit should sync, not error: process the whole BEEF, pause on a missing ancestor and fetch it from peers, broadcast admitted unproven ancestors; proofs for old parents come from the network, not Arcade
+82		Address book: an authenticated HTTP endpoint as a recipient (BRC-103/104 to any server, not only a BRC-33 mailbox)
+81		Genesis manifest: a genesis states the capabilities it requires (kernel format, providers, transports); an app's requires is checked against it
+39		skein.nexus: hosting, billing and management front end (separate project)
+31	tracker	Tracker: start here — decisions pending, conventions, ready-to-build
+29	in-progress	Wallet split: signing oracle outside, wallet state as records inside; headers/proofs/ARC via host wiring (SSE/webhooks → entries) and wasi:http
+11		Payment negotiation on messages: BRC-169 tolls and quotes, policy per program
