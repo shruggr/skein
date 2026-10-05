@@ -122,6 +122,69 @@ pub fn problem(a: std.mem.Allocator, kind: Kind, m: Value, app: ?[]const u8, pro
     return null;
 }
 
+// ---------------------------------------------------------------- beacons (#126)
+//
+// A beacon is the same family as a subscription: an app's installed program
+// declares it once —
+//
+//   beacon   {event: "beacon", topic, every: <ms>, body: bytes}
+//   unbeacon {event: "unbeacon", topic}
+//
+// — and the kernel records it on the step's update as any event ({kind:
+// "event", event, app, …}). No answer comes. The host's libp2p node
+// publishes `body` on `topic` every `every` ms on its own clock (GossipSub
+// signs it with the node's key) and logs nothing per beat; it does not
+// subscribe the topic for it. A beacon stands until its app's unbeacon of the
+// topic (keyed by (app, topic), as a subscription) or its app's uninstall;
+// the host folds them from the log (src/host/p2p.ts beaconsOf). The kernel
+// only checks the shape as it is emitted: nothing delivers by a beacon.
+
+/// The shortest beat (ms).
+pub const BEACON_MIN_MS: i128 = 1000;
+/// The largest beacon body (bytes): one GossipSub message.
+pub const BEACON_MAX_BODY: usize = 64 << 10;
+
+/// Why a `beacon` / `unbeacon` this step emits is refused, or null.
+pub fn beaconProblem(a: std.mem.Allocator, name: []const u8, m: Value, app: ?[]const u8) !?[]u8 {
+    if (app == null) return try std.fmt.allocPrint(a, "emit: {s}: the emitting program is not installed (an app's program), so it has no beacons", .{name});
+    const topic = Value.str(m.get("topic")) orelse return try std.fmt.allocPrint(a, "emit: {s} names a topic: {{event: \"{s}\", topic{s}}}", .{ name, name, if (std.mem.eql(u8, name, "beacon")) ", every, body" else "" });
+    if (!isTopic(topic)) return try std.fmt.allocPrint(a, "emit: {s}: topic {s} is not a topic (text, no space or NUL, not a /protocol)", .{ name, try json.quoted(a, topic) });
+    if (std.mem.eql(u8, name, "unbeacon")) return null;
+    const every = Value.intOf(m.get("every")) orelse return try a.dupe(u8, "emit: beacon: `every` is the beat in ms (an integer)");
+    if (every < BEACON_MIN_MS or every > 86_400_000) return try std.fmt.allocPrint(a, "emit: beacon: every {d} ms: from {d} ms to a day", .{ every, BEACON_MIN_MS });
+    const body = Value.bytesOf(m.get("body")) orelse return try a.dupe(u8, "emit: beacon: `body` is the bytes published at each beat");
+    if (body.len > BEACON_MAX_BODY) return try std.fmt.allocPrint(a, "emit: beacon: the body is {d} bytes, over {d}", .{ body.len, BEACON_MAX_BODY });
+    return null;
+}
+
+test "beacons (#126): an installed app's; a topic, a beat of a second or more, a body; unbeacon names the topic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var b = cbor.MapBuilder.init(a);
+    try b.put("event", cbor.string("beacon"));
+    try b.put("topic", cbor.string("amm-live"));
+    try b.put("every", cbor.int(5000));
+    try b.put("body", .{ .bytes = "hello" });
+    try std.testing.expect((try beaconProblem(a, "beacon", b.value(), "amm")) == null);
+    try std.testing.expect((try beaconProblem(a, "beacon", b.value(), null)) != null);
+    var fast = cbor.MapBuilder.init(a);
+    try fast.put("topic", cbor.string("amm-live"));
+    try fast.put("every", cbor.int(10));
+    try fast.put("body", .{ .bytes = "x" });
+    try std.testing.expect((try beaconProblem(a, "beacon", fast.value(), "amm")) != null);
+    var nobody = cbor.MapBuilder.init(a);
+    try nobody.put("topic", cbor.string("amm-live"));
+    try nobody.put("every", cbor.int(5000));
+    try std.testing.expect((try beaconProblem(a, "beacon", nobody.value(), "amm")) != null);
+    var proto = cbor.MapBuilder.init(a);
+    try proto.put("topic", cbor.string("/amm/1"));
+    try std.testing.expect((try beaconProblem(a, "unbeacon", proto.value(), "amm")) != null);
+    var off = cbor.MapBuilder.init(a);
+    try off.put("topic", cbor.string("amm-live"));
+    try std.testing.expect((try beaconProblem(a, "unbeacon", off.value(), "amm")) == null);
+}
+
 /// The app record's `programs` map (`<app>/app`), or null when the app has no record.
 pub fn programsOf(a: std.mem.Allocator, s: Store, app: []const u8) !?Value {
     const head = try std.fmt.allocPrint(a, "{s}/app", .{app});

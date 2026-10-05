@@ -152,7 +152,7 @@ export interface ProvidersOptions {
   fetch(req: HttpRequest, from: string): Promise<HttpResponse>;
   /** The broadcaster (#58, #65: the host's Arcade), when the host has one: a broadcast event's transaction and BEEF, queued. */
   broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
-  /** The libp2p node's subscriptions (#119): a `subscribe` / `unsubscribe` record {kind: "event", event, app, topic, program?, fn?} from `handle`. Absent: no libp2p node (dropped). */
+  /** The libp2p node's subscriptions (#119) and beacons (#126): a `subscribe` / `unsubscribe` / `beacon` / `unbeacon` record {kind: "event", event, app, topic, …} from `handle`. Absent: no libp2p node (dropped). */
   topicEvent?(handle: string, record: Record<string, unknown>): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
@@ -276,7 +276,7 @@ export class Providers {
       this.track(p);
       return;
     }
-    if ((out.address === "subscribe" || out.address === "unsubscribe") && m.kind === "event" && m.event === out.address) {
+    if ((out.address === "subscribe" || out.address === "unsubscribe" || out.address === "beacon" || out.address === "unbeacon") && m.kind === "event" && m.event === out.address) {
       if (!this.o.topicEvent) { this.say(handle, `${out.address}: this host has no libp2p node: ignored`); return; }
       this.o.topicEvent(handle, m);
       return;

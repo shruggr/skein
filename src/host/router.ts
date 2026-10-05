@@ -101,7 +101,7 @@ import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type 
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
-import { DEFAULT_LISTEN, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
+import { beaconEvent, beaconsOf, DEFAULT_LISTEN, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
@@ -188,6 +188,8 @@ interface Loaded {
   rows?: DispatchRow[];
   /** The apps' subscriptions (#119): folded from the log at hydrate, then followed live. */
   subs: Subscription[];
+  /** The apps' beacons (#126): folded from the log at hydrate, then followed live; an uninstalled app's (no row left) dropped. */
+  beacons: Beacon[];
 }
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
@@ -669,7 +671,9 @@ export class Router {
     }
     // #119: the apps' subscriptions, read from the log (the kernel writes nothing for them).
     const subs = await this.foldSubscriptions(row.store).catch((e) => { this.say(handle, `libp2p: the subscriptions not read: ${(e as Error).message}`); return [] as Subscription[]; });
-    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs };
+    // #126: the apps' beacons, read from the log the same way.
+    const beacons = await this.foldBeacons(row.store).catch((e) => { this.say(handle, `libp2p: the beacons not read: ${(e as Error).message}`); return [] as Beacon[]; });
+    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs, beacons };
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
@@ -934,6 +938,12 @@ export class Router {
     l.dispatchTip = key;
     l.rows = d.rows;
     this.followHeaders(l.row.handle, d.rows);
+    // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
+    // removes every row naming the app and leaves its heads).
+    if (l.beacons.length) {
+      const apps = new Set(d.rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
+      l.beacons = l.beacons.filter((b) => apps.has(b.app));
+    }
     await this.declareP2P(l, first);
   }
 
@@ -941,7 +951,15 @@ export class Router {
   private async declareP2P(l: Loaded, first = false): Promise<void> {
     if (!this.p2p) return;
     const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
-    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, subscribedTopics(l.subs))).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, subscribedTopics(l.subs), l.beacons.length > 0)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+    this.p2p.beacons(l.row.handle, l.beacons);
+  }
+
+  /** #126: the apps' beacons, folded from the instance's log (p2p.ts beaconsOf), the store file read-only. */
+  private async foldBeacons(store: string): Promise<Beacon[]> {
+    if (!this.p2p || !existsSync(store)) return [];
+    const s = openStoreFile(store, { readOnly: true });
+    try { return await beaconsOf(s); } finally { s.close(); }
   }
 
   /**
@@ -965,6 +983,7 @@ export class Router {
    * applied after that too (the same result).
    */
   private topicEvent(handle: string, rec: Record<string, unknown>): void {
+    if (rec.event === "beacon" || rec.event === "unbeacon") return this.beaconEvent(handle, rec);
     const e = subscriptionEvent(rec);
     if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
     const topic = e.event === "subscribe" ? e.sub.topic : e.topic;
@@ -977,6 +996,26 @@ export class Router {
       await this.declareP2P(l);
     };
     const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event} ${topic}: ${(x as Error).message}`));
+    this.syncing.add(p);
+    void p.finally(() => this.syncing.delete(p));
+  }
+
+  /**
+   * A `beacon` / `unbeacon` event from `handle` (#126, after its step's commit;
+   * the kernel checked its shape as it was emitted): the beacons change and
+   * the node beats them (P2PHost.beacons) — started if a beacon needs it; the
+   * topic is not subscribed. An instance still loading reads it from its log.
+   */
+  private beaconEvent(handle: string, rec: Record<string, unknown>): void {
+    const e = beaconEvent(rec);
+    if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
+    const apply = async () => {
+      const l = this.loaded.get(handle) ?? await this.loading.get(handle)?.catch(() => undefined);
+      if (!l || l.kernel.gone) return;
+      foldBeacons([e], l.beacons);
+      await this.declareP2P(l);
+    };
+    const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event}: ${(x as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }

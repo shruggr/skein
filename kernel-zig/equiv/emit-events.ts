@@ -30,6 +30,14 @@
 //     same topics, read from the log (p2p.ts subscriptionsOf); nothing is
 //     re-emitted; the new kernel delivers by the subscription it folds.
 //
+//   - beacons (#126): a beacon faster than a second is refused as it is
+//     emitted; evt-a's `beacon {topic: demo_beat, every: 1000, body}` is
+//     listed on the update, and A's node publishes the body on demo_beat each
+//     second without subscribing it — B sees the beats; nothing is written to
+//     A's log and no host line per beat; an unbeacon stops it; after the
+//     restart the node beats what it folds from the log; an uninstall of
+//     evt-a stops it.
+//
 // The instance's store then replays to itself exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/emit-events.ts
@@ -111,7 +119,7 @@ const routerA = () => new Router({
 });
 let rA = routerA();
 const rB = new Router({
-  ...common, db: hdbB, genesis: { libp2p: { topics: ["demo_abc", "demo_mine", "demo_def"] } },
+  ...common, db: hdbB, genesis: { libp2p: { topics: ["demo_abc", "demo_mine", "demo_def", "demo_beat"] } },
   libp2p: { listen: [`/ip4/127.0.0.1/tcp/${ports.b}`], bootstrap: [`/ip4/127.0.0.1/tcp/${ports.a}/p2p/${idOf("ev")}`], dht: "off", relays: [], mdns: false },
   log: log("b"),
 });
@@ -251,6 +259,35 @@ try {
   const f = await folded();
   check(f === "evt-a demo_mine demo.topic; evt-a demo_def demo.topic", `the subscriptions as the log folds them: ${f}`);
 
+  // ------------------------------------------------ beacons (#126): declared once, beaten by the node, nothing logged per beat
+  // What B's node takes on demo_beat from A's node, as its validator sees each message (B has no row there: it ignores them, one line each).
+  const beats: Array<{ at: number; data: string }> = [];
+  const seenBeat = (from: string, data: Uint8Array) => { if (from === idOf("ev")) beats.push({ at: Date.now(), data: new TextDecoder().decode(data) }); };
+  const ps = pubPs() as unknown as { topicValidators: Map<string, (from: { toString(): string }, msg: { data: Uint8Array }) => unknown> };
+  const validate = ps.topicValidators.get("demo_beat")!;
+  ps.topicValidators.set("demo_beat", (from, msg) => { seenBeat(from.toString(), msg.data); return validate(from, msg); });
+  await emit("evt-a", { event: "beacon", topic: "demo_beat", every: 100 });
+  check(refused(/emit: beacon: every 100 ms: from 1000 ms to a day/), "a beacon faster than a second: refused as it is emitted");
+  await emit("evt-a", { event: "beacon", topic: "demo_beat", every: 1000, body: new TextEncoder().encode("evt-a lives") });
+  const bev = (await events()).find((r) => r.event === "beacon");
+  check(!!bev && bev.app === "evt-a" && bev.topic === "demo_beat" && bev.every === 1000, `the step's update lists the beacon, the app named by the kernel: ${JSON.stringify(bev && { ...bev, body: undefined })}`);
+  const tipBefore = await (await rA.hydrate("ev")).kernel.store.log.tip();
+  const linesBefore = lines.length;
+  await until("three beats seen by the second router", () => beats.length >= 3 || undefined, 15_000).catch(() => undefined);
+  check(beats.length >= 3 && beats.every((b) => b.data === "evt-a lives"), `the node publishes the body on demo_beat on its own clock, signed by its key: the second router sees ${beats.length} beats`);
+  check(!served().includes("demo_beat"), `the node does not subscribe the beacon's topic (${served().join(", ")})`);
+  const tipAfter = await (await rA.hydrate("ev")).kernel.store.log.tip();
+  check(!!tipBefore && !!tipAfter && tipBefore.equals(tipAfter) && !lines.slice(linesBefore).some((l) => l.startsWith("[a:") && /demo_beat/.test(l)), "nothing per beat: no entry in the instance's log, no line in the host's");
+  await emit("evt-a", { event: "unbeacon", topic: "demo_beat" });
+  await sleep(1500);
+  const stoppedAt = beats.length;
+  await sleep(3000);
+  check(beats.length === stoppedAt, `an unbeacon stops it (${beats.length - stoppedAt} beats after)`);
+  // An uninstall ends an app's beacons: evt-a beacons again, then is uninstalled (its rows gone).
+  await emit("evt-a", { event: "beacon", topic: "demo_beat", every: 1000, body: new TextEncoder().encode("evt-a again") });
+  await until("the beacon beats again", () => beats.some((b) => b.data === "evt-a again") || undefined, 10_000).catch(() => undefined);
+  check(beats.some((b) => b.data === "evt-a again"), "a new beacon beats");
+
   // ------------------------------------------------ restart: read back from the log
   const emittedBefore = (await events()).length;
   await rA.stop();
@@ -264,6 +301,15 @@ try {
   const before2 = reqOf(await seen("evt-a"));
   got = await deliver("demo_def", ["evt-a", "evt-b"], 20_000);
   check(got === "evt-a" && reqOf(await seen("evt-a")) !== before2 && (await seen("evt-a"))?.topic === "demo_def", `after the restart a message on demo_def is delivered by the subscription the new kernel folds from the log (${got || "nothing delivered"})`);
+  const afterRestart = beats.length;
+  await until("the beacon beats after the restart", () => beats.length > afterRestart + 1 || undefined, 10_000).catch(() => undefined);
+  check(beats.length > afterRestart + 1, `after the restart the node beats the beacon it folds from the log (${beats.length - afterRestart} beats)`);
+  code = await cli("uninstall", "evt-a", "--instance", "ev");
+  check(code === 0, `skein plan uninstall evt-a: exit ${code} ${err.join(" ")}`);
+  await sleep(1500);
+  const uninstalledAt = beats.length;
+  await sleep(3000);
+  check(beats.length === uninstalledAt && lines.some((l) => /libp2p: beacon demo_beat \(app evt-a\) stopped/.test(l)), `an uninstall stops the app's beacon (${beats.length - uninstalledAt} beats after)`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

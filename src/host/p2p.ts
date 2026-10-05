@@ -204,13 +204,15 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * rows added since the genesis (an app's install; address: a topic, or
  * `/<protocol>`) — a genesis row alone subscribes nothing, as a route alone
  * did not — plus the topics the apps subscribed (#119, `subscribed`).
+ * `beacons` (#126): an app's beacon needs the node, and adds no topic.
  * Undefined: no node — the genesis declares none and nothing needs one.
  */
-export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = []): P2PInstanceConfig | undefined {
+export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = [], beacons = false): P2PInstanceConfig | undefined {
   const base = libp2pOf(g);
   const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
   const names = rows.filter((r) => r.transport === "libp2p" && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
-  if (!base && !names.length && !subscribed.length) return undefined;
+  // #126: a beacon needs the node (to publish), not a subscription of its topic.
+  if (!base && !names.length && !subscribed.length && !beacons) return undefined;
   const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
   return {
     topics: add(add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))), subscribed),
@@ -274,6 +276,20 @@ export const subscribedTopics = (subs: Subscription[]): string[] => [...new Set(
  * the thread's CID, its place in the thread and in `emitted`. Read only.
  */
 export async function subscriptionsOf(store: Pick<Store, "get" | "chains" | "edges">): Promise<Subscription[]> {
+  return foldSubscriptions(await emittedEvents(store, (rec) => { const e = subscriptionEvent(rec); return "refused" in e ? undefined : e; }));
+}
+
+/**
+ * The beacons standing (#126), folded from the store's log as the
+ * subscriptions are: the `beacon` / `unbeacon` records the steps' updates
+ * list, in log order, keyed by (app, topic). Read only.
+ */
+export async function beaconsOf(store: Pick<Store, "get" | "chains" | "edges">): Promise<Beacon[]> {
+  return foldBeacons(await emittedEvents(store, (rec) => { const e = beaconEvent(rec); return "refused" in e ? undefined : e; }));
+}
+
+/** The event records the steps' updates list in `emitted` that `read` takes, in log order (the kernel's fold order, subscriptions.zig). */
+async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, read: (rec: Record<string, unknown>) => T | undefined): Promise<T[]> {
   type Obj = Record<string, unknown>;
   const ns = new Map<string, number>();
   const nOf = async (input: unknown): Promise<number> => {
@@ -283,7 +299,7 @@ export async function subscriptionsOf(store: Pick<Store, "get" | "chains" | "edg
     if (n === undefined) { const e = await store.get(input).catch(() => undefined) as Obj | undefined; n = typeof e?.n === "number" ? e.n : -1; ns.set(k, n); }
     return n;
   };
-  const found: Array<{ key: number[]; thread: Uint8Array; e: SubscriptionEvent }> = [];
+  const found: Array<{ key: number[]; thread: Uint8Array; e: T }> = [];
   for await (const origin of store.edges.query({ kind: "thread" })) {
     const o = await store.get(origin) as Obj;
     let seq = 0;
@@ -296,8 +312,8 @@ export async function subscriptionsOf(store: Pick<Store, "get" | "chains" | "edg
         if (!isCid(x)) continue;
         const rec = await store.get(x).catch(() => undefined) as Obj | undefined;
         if (rec?.kind !== "event") continue;
-        const e = subscriptionEvent(rec);
-        if ("refused" in e) continue;
+        const e = read(rec);
+        if (e === undefined) continue;
         found.push({ key: [await nOf(u.input), Number(u.at ?? 0), Number(o.at ?? 0), seq, i], thread: origin.bytes, e });
       }
     }
@@ -310,7 +326,44 @@ export async function subscriptionsOf(store: Pick<Store, "get" | "chains" | "edg
     return 0;
   };
   found.sort(cmp);
-  return foldSubscriptions(found.map((f) => f.e));
+  return found.map((f) => f.e);
+}
+
+// ---------------------------------------------------------------- beacons (#126)
+//
+// An app's installed program declares `beacon {topic, every, body}` once (and
+// `unbeacon {topic}` to stop it); the kernel records it on the step's update
+// like `subscribe` and answers nothing. The node publishes `body` on `topic`
+// every `every` ms on its own clock — GossipSub signs it with the node's key
+// — logs nothing per beat, and does not subscribe the topic for it. A beacon
+// stands until its app's unbeacon or its app's uninstall (no row of the app
+// left in the dispatch table: Router.syncDispatch). Folded from the log like the
+// subscriptions (beaconsOf), keyed by (app, topic).
+
+export interface Beacon { app: string; topic: string; every: number; body: Uint8Array }
+export type BeaconEvent = { event: "beacon"; beacon: Beacon } | { event: "unbeacon"; app: string; topic: string };
+
+/** A `beacon` / `unbeacon` event record, read; or why it is not one this host follows. */
+export function beaconEvent(rec: Record<string, unknown>): BeaconEvent | { refused: string } {
+  const event = rec.event;
+  if (rec.kind !== "event" || (event !== "beacon" && event !== "unbeacon")) return { refused: "not a beacon or unbeacon event" };
+  if (typeof rec.app !== "string" || !rec.app) return { refused: "it names no app (its program record is not installed): ignored" };
+  if (!isTopic(rec.topic)) return { refused: `${JSON.stringify(rec.topic)} is not a topic` };
+  if (event === "unbeacon") return { event, app: rec.app, topic: rec.topic };
+  const every = typeof rec.every === "number" ? rec.every : typeof rec.every === "bigint" ? Number(rec.every) : NaN;
+  if (!Number.isFinite(every) || every < 1000) return { refused: "a beacon beats every second or slower (`every`, ms)" };
+  if (!(rec.body instanceof Uint8Array)) return { refused: "a beacon has a body (bytes)" };
+  return { event, beacon: { app: rec.app, topic: rec.topic, every, body: rec.body } };
+}
+
+/** Fold beacon events in order: a beacon replaces the app's own on the topic, an unbeacon removes it. */
+export function foldBeacons(events: Iterable<BeaconEvent>, into: Beacon[] = []): Beacon[] {
+  for (const e of events) {
+    const [app, topic] = e.event === "beacon" ? [e.beacon.app, e.beacon.topic] : [e.app, e.topic];
+    const i = into.findIndex((b) => b.app === app && b.topic === topic);
+    if (e.event === "beacon") { if (i >= 0) into[i] = e.beacon; else into.push(e.beacon); } else if (i >= 0) into.splice(i, 1);
+  }
+  return into;
 }
 
 const isCid = (x: unknown): x is CID => CID.asCID(x) !== null;
@@ -326,6 +379,8 @@ interface Node {
   streams: Map<number, OpenStream>;
   /** publish's seqno, caught in msgIdFn by the data object published. */
   seqnos: Map<Uint8Array, bigint>;
+  /** The beacons' timers (#126), by "<app> <topic>". */
+  beats: Map<string, { beacon: Beacon; timer: ReturnType<typeof setInterval> }>;
   timer?: ReturnType<typeof setInterval>;
 }
 
@@ -414,7 +469,7 @@ export class P2PHost {
 
   private async start(handle: string, config: P2PInstanceConfig): Promise<Node | undefined> {
     const h = this.o.host;
-    const n: Node = { handle, node: undefined as never, config, streams: new Map(), seqnos: new Map() };
+    const n: Node = { handle, node: undefined as never, config, streams: new Map(), seqnos: new Map(), beats: new Map() };
     const listen = [...(config.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
     // An address that does not parse counts as private here; start() reports it when it is dialled or listened on.
     const privateDev = [...h.bootstrap, ...listen].every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
@@ -535,6 +590,32 @@ export class P2PHost {
     return n;
   }
 
+  /**
+   * The beacons `handle`'s node beats (#126): each published on its topic
+   * every `every` ms, from now on — the topic not subscribed; nothing logged
+   * per beat (a failed beat is dropped: the next one is the retry). One line
+   * when a beacon starts, changes or stops. No node: nothing beats.
+   */
+  beacons(handle: string, beacons: Beacon[]): void {
+    const n = this.nodes.get(handle);
+    if (!n) return;
+    const want = new Map(beacons.map((b) => [`${b.app} ${b.topic}`, b]));
+    for (const [k, x] of n.beats) {
+      const b = want.get(k);
+      if (b && b.every === x.beacon.every && Buffer.from(b.body).equals(Buffer.from(x.beacon.body))) continue;
+      clearInterval(x.timer);
+      n.beats.delete(k);
+      if (!b) this.say(handle, `libp2p: beacon ${x.beacon.topic} (app ${x.beacon.app}) stopped`);
+    }
+    for (const [k, b] of want) {
+      if (n.beats.has(k)) continue;
+      const beat = () => { if (this.nodes.get(handle) === n) void this.publish(handle, b.topic, b.body).catch(() => {}); };
+      n.beats.set(k, { beacon: b, timer: setInterval(beat, b.every) });
+      beat();
+      this.say(handle, `libp2p: beacon ${b.topic} (app ${b.app}) every ${b.every} ms, ${b.body.length} bytes`);
+    }
+  }
+
   /** Publish `body` on `topic` from `handle`'s node (signed with its peer key): the message's seqno, and how many peers took it. */
   async publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }> {
     const n = this.nodeOf(handle);
@@ -594,6 +675,8 @@ export class P2PHost {
     if (!n) return;
     this.nodes.delete(handle);
     clearInterval(n.timer);
+    for (const b of n.beats.values()) clearInterval(b.timer);
+    n.beats.clear();
     try { await n.node.stop(); } catch (e) { this.say(handle, `libp2p: stop: ${(e as Error).message}`); } // dropped either way
   }
 
