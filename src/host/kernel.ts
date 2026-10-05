@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 import { WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { decode, encode } from "../runtime/cid.ts";
-import type { LogEntry } from "../runtime/log.ts";
+import type { Entry } from "../runtime/log.ts";
 import { NotFound, Rejected, type Store } from "../runtime/store.ts";
 import type { Ms } from "../runtime/types.ts";
 import type { Outgoing } from "./providers.ts";
@@ -172,7 +172,7 @@ export class Kernel {
     log: {
       tip: async () => (await this.call("tip") as CID | null) ?? undefined,
       byEnvelope: async (envelope: CID) => (await this.call("byEnvelope", envelope) as CID | null) ?? undefined,
-      append: async (entry: LogEntry) => await this.call("append", entry) as CID,
+      append: async (entry: Entry) => await this.call("append", entry) as CID,
     },
   } as unknown as Store;
 
@@ -187,7 +187,7 @@ export class Kernel {
   async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
   /** Admit an entry (a message's record put first; its body's bytes beside it). */
-  async admit(entry: LogEntry | Record<string, unknown>, records: { body?: Uint8Array } = {}): Promise<CID> {
+  async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array } = {}): Promise<CID> {
     return await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}) }) as CID;
   }
   /**

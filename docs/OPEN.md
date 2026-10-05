@@ -87,6 +87,6 @@ record.
 ## Known leftovers in the tree
 
 Dead or legacy code, not yet removed: `host-go/` (a shell experiment, not a
-host); `src/runtime/log.ts`, a format-1 reader
-the node host still imports; `attested` in `src/runtime/records.ts` and
-`types.ts`.
+host); the format-1 `LogEntry` type in `src/runtime/store.ts` (and the
+sqlite store's envelope/outcome indexes) that the old-store refusal check
+still writes; `attested` in `src/runtime/records.ts` and `types.ts`.

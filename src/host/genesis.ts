@@ -566,7 +566,7 @@ export function genesis2(c: Genesis2Config, programs: Record<string, CID>): Reco
 /** Write a genesis over `s` into an empty store through its kernel; the entry's CID. */
 export async function writeSystemGenesis(k: Kernel, c: Genesis2Config, s: System, time: Stamp = clockNow()): Promise<CID> {
   const g = await k.store.put(genesisRecord(c, s) as never);
-  return await k.store.log.append(await nextEntry(k.store, { genesis: g }, time) as never);
+  return await k.store.log.append(await nextEntry(k.store, { genesis: g }, time) as never); // the kernel's log takes a format-8 entry; Store's type is format 1
 }
 
 /** Code genesis (the stock system) into an empty store; the entry's CID. */
@@ -579,7 +579,7 @@ export async function writeGenesis(k: Kernel, c: Genesis2Config, time: Stamp = c
 export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array } = {}, time: Stamp = clockNow()): Promise<CID> {
   for (let tries = 0; ; tries++) {
     try {
-      return await k.admit(await nextEntry(k.store, body as EntryBody, time) as never, records);
+      return await k.admit(await nextEntry(k.store, body as EntryBody, time), records);
     } catch (e) {
       if (!(e instanceof Rejected && e.reason === "out-of-order") || tries >= 10) throw e;
     }

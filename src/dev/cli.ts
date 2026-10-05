@@ -127,7 +127,9 @@ const COMMANDS: Record<string, Command> = {
         const lim = a.opts.limit ? Number(a.opts.limit) : all.length;
         for (const { cid, entry } of all.slice(-lim)) {
           const when = new Date(entry.time[0] * 1000 + Math.floor(entry.time[1] / 1e6)).toISOString();
-          const what = entry.genesis ? `genesis ${fmt(entry.genesis)}` : entry.envelope ? `${entry.box} envelope ${fmt(entry.envelope)}`
+          const e8 = entry as typeof entry & { mail?: CID; event?: CID; request?: CID; transport?: string };
+          const what = entry.genesis ? `genesis ${fmt(entry.genesis)}` : e8.request ? `${e8.transport} request ${fmt(e8.request)}`
+            : e8.mail ? `mail ${fmt(e8.mail)}` : e8.event ? `${entry.box} event ${fmt(e8.event)}` : entry.envelope ? `${entry.box} envelope ${fmt(entry.envelope)}`
             : entry.outcome ? `outcome ${entry.outcome.status} emit ${fmt(entry.outcome.emit)}${entry.outcome.reason ? `: ${entry.outcome.reason}` : ""}` : `wake ${entry.wake ? fmt(entry.wake) : "?"}`;
           env.out(`${String(entry.n).padStart(4)}  ${when}  ${fmt(cid)}  ${what}`);
         }

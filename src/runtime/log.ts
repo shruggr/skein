@@ -1,84 +1,88 @@
-// The input log (docs/ARCH.md, docs/MESSAGES.md): every input, in order, as a
-// hash chain of signed log-entry records
+// The input log (docs/VM.md, docs/MESSAGES.md "The log, format 8"): every
+// input, in order, as a hash chain of log-entry records. The kernel
+// (kernel-zig/src/log.zig) is authoritative: it refuses an entry that is
+// malformed or does not extend its tip. This is the host's mirror of the
+// shape, for building entries (src/host/genesis.ts over nextEntry) and
+// reading them.
 //
 //   { kind: "log", prev: <entry | null>, n, time: [sec, nsec],
-//     genesis: <cid>                  n = 0: the starting state
-//   | envelope: <cid>, box: <name>,   an admitted BRC-169 envelope's signed part (its JSON object
-//     body: <cid>                     without `content`, as dag-cbor), its BRC-33 box, and its
-//                                     plaintext body (the dag-cbor bytes, whose sha2-256 is the
-//                                     envelope's signed contentHash)
-//   | wake: <thread origin>           a sleeper's deadline reached; no message, no sender
-//   | outcome: {emit: <emit record>,  what the delivery provider made of an emit: sent
-//       status: "delivered"           (once per emit), or refused for good — a permanent
-//             | "failed", reason?}    refusal, or transient errors past its retry bound
-//     sig }
+//     genesis: <cid>                       n = 0: the starting state
+//   | request: <cid>, transport: <name>    a package as a transport carried it in (#68):
+//                                          the record of an http request, a libp2p message
+//                                          or frame, or a provider's signed message (`local`)
+//   | mail: <cid>                          a message the host admits directly (#40, #70)
+//   | event: <cid>, box: <name> }          a record from the host's wiring (a header, a
+//                                          proof), routed by box or subject (#29, #65)
 //
-// The tip entry's CID is the instance's **state hash**. In this format (1)
-// an entry is the host's statement — "message n arrived at t", "wake at t",
-// "emit e was delivered (or failed) at t" — so `sig` is the host's signature
-// over the entry's dag-cbor without `sig`: protocol [2, "skein log"], key "1",
-// counterparty anyone, so anyone holding the genesis's `host` can check every
-// stamp (verifyEntry). The kernel writes format 3 (issues #33, #40;
-// kernel-zig/src/log.zig): the same chain with no `sig` (no host key) and mail
-// entries; src/host/genesis.ts builds them over nextEntry.
-//
-// `time` is the host's clock at admission, never before the previous entry's.
-// Everything inside the machine derives time from these stamps (syscalls.ts).
+// No signature (format 2, #33): the sender signed its request, `prev` fixes
+// the order, and the stamp is the host's word. The tip entry's CID is the
+// instance's **state hash**. `time` is the host's clock at admission, never
+// before the previous entry's; everything inside the machine derives time
+// from these stamps (syscalls.ts).
 
 import type { WalletProtocol } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "./cid.ts";
-import { verifyAnyone } from "./identity.ts";
-import { isGenesis, type Genesis, type Identity } from "./records.ts";
-import type { LogEntry, Outcome, Store } from "./store.ts";
+import { isGenesis, type Genesis } from "./records.ts";
+import type { LogEntry, Store } from "./store.ts";
 import { maxStamp, type Stamp } from "./syscalls.ts";
 import type { Ms } from "./types.ts";
 
-export type { LogEntry, Outcome };
+/** What an entry admits: exactly one of these (log.zig isLogEntry). */
+export type EntryBody = { genesis: CID } | { request: CID; transport: string } | { mail: CID } | { event: CID; box: string };
 
-export const LOG_PROTOCOL: WalletProtocol = [2, "skein log"];
-export const LOG_KEY_ID = "1";
+/** A log entry in format 8. */
+export type Entry = { kind: "log"; prev: CID | null; n: number; time: Stamp } & EntryBody;
 
 /** A stamp as the `at` (ms) of the records written while processing its entry. */
 export const stampMs = (s: Stamp): Ms => s[0] * 1000 + Math.floor(s[1] / 1_000_000);
 
-export function isLogEntry(x: unknown): x is LogEntry {
-  const e = x as Partial<LogEntry> | null;
-  return !!e && e.kind === "log" && typeof e.n === "number" && e.sig instanceof Uint8Array
-    && [e.genesis, e.envelope, e.wake, e.outcome].filter((v) => v !== undefined).length === 1
-    && (e.envelope === undefined) === (e.body === undefined)
-    && (e.outcome === undefined || isOutcome(e.outcome));
-}
-
-export function isOutcome(x: unknown): x is Outcome {
-  const o = x as Partial<Outcome> | null;
-  return !!o && typeof o === "object" && CID.asCID(o.emit) !== null
-    && (o.status === "delivered" || o.status === "failed")
-    && (o.reason === undefined || typeof o.reason === "string");
-}
-
-/** The signed bytes: the entry's dag-cbor with `sig` removed. */
-export function entryBytes(e: LogEntry | Omit<LogEntry, "sig">): Uint8Array {
-  const { sig: _, ...rest } = e as LogEntry;
-  return encode(rest).bytes;
-}
-
-/** The entry's signature against the host identity (the genesis's `host`). No wallet needed. */
-export function verifyEntry(e: LogEntry, host: Identity): boolean {
-  return verifyAnyone(host, LOG_PROTOCOL, LOG_KEY_ID, entryBytes(e), e.sig);
-}
-
-export type EntryBody = { genesis: CID } | { envelope: CID; box: string; body: CID } | { wake: CID } | { outcome: Outcome };
+const isCid = (x: unknown): boolean => CID.asCID(x) !== null;
+const isName = (x: unknown): boolean => typeof x === "string" && x.length > 0;
 
 /**
- * The next entry, unsigned: extending the tip, stamped `time` (raised to the
- * tip's stamp if earlier). The store refuses an entry that no longer extends
- * its tip.
+ * A format-8 entry, as log.zig's isLogEntry has it: `kind: "log"`, a number
+ * `n`, exactly one of genesis | mail | event | request, a non-empty `box` with
+ * an event and only with it, a non-empty `transport` with a request and only
+ * with it, and none of the older formats' fields (`sig`, `wake`,
+ * `envelope`, `body`, `outcome`).
  */
-export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Promise<Omit<LogEntry, "sig">> {
+export function isLogEntry(x: unknown): x is Entry {
+  const e = x as Record<string, unknown> | null;
+  if (!e || typeof e !== "object" || e.kind !== "log" || typeof e.n !== "number") return false;
+  if (["sig", "wake", "envelope", "body", "outcome"].some((k) => e[k] !== undefined)) return false;
+  if (["genesis", "mail", "event", "request"].filter((k) => e[k] !== undefined).length !== 1) return false;
+  if (e.event !== undefined ? !isCid(e.event) || !isName(e.box) : e.box !== undefined) return false;
+  if (e.request !== undefined ? !isCid(e.request) || !isName(e.transport) : e.transport !== undefined) return false;
+  if (e.mail !== undefined && !isCid(e.mail)) return false;
+  return true;
+}
+
+/**
+ * The next entry: extending the tip, stamped `time` (raised to the tip's
+ * stamp if earlier). The kernel refuses an entry that no longer extends its
+ * tip.
+ */
+export async function nextEntry(store: Store, body: EntryBody, time: Stamp): Promise<Entry> {
   const tipCid = await store.log.tip();
-  const tip = tipCid ? await store.get<LogEntry>(tipCid) : undefined;
+  const tip = tipCid ? await store.get<{ kind: string; n: number; time: Stamp }>(tipCid) : undefined;
   return { kind: "log" as const, prev: tipCid ?? null, n: tip ? tip.n + 1 : 0, time: tip ? maxStamp(time, tip.time) : time, ...body };
+}
+
+// ---------------------------------------------------------------- format 1
+// Before format 2 (#33) an entry was the host's statement, signed by the
+// host: protocol [2, "skein log"], key "1", counterparty anyone, over the
+// entry's dag-cbor without `sig`. The kernel refuses such a store; these are
+// kept for what makes one to check that (kernel-zig/equiv/old-store.ts) and
+// for the signature fixtures (kernel-zig/test/fixtures.ts).
+
+export const LOG_PROTOCOL: WalletProtocol = [2, "skein log"];
+export const LOG_KEY_ID = "1";
+
+/** A format-1 entry's signed bytes: its dag-cbor with `sig` removed. */
+export function entryBytes(e: LogEntry | Omit<LogEntry, "sig"> | Entry): Uint8Array {
+  const { sig: _, ...rest } = e as LogEntry;
+  return encode(rest).bytes;
 }
 
 /**
