@@ -334,7 +334,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein](https://github.com/shruggr/skein) | kernel, boundary programs (front door, messagebox, resolve), the wallet program, the node host, the client | log format 8 |
 | [shruggr/skein-sdk](https://github.com/shruggr/skein-sdk) | the Zig package every program is written against: the `skein` imports, codecs, `app`, `chain`, wallet library, WIT | v0.4.0 |
 | [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.3.0 |
-| [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.4.1 |
+| [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.5.0 |
 | [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.3.0 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
