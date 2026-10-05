@@ -175,6 +175,29 @@
         { "kind": "libp2p", "name": "topic-c", "who": {}, "want": null },
         { "kind": "libp2p", "name": "topic-", "who": {}, "want": null }
       ]
+    },
+    {
+      "name": "libp2p: prefix topic rows (#119): exact first (an exact row after the prefix row in table order still wins), then the longest prefix; a /protocol is exact",
+      "updates": [
+        { "op": "add", "row": { "transport": "libp2p", "address": "tm_", "prefix": true, "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t1" } },
+        { "op": "add", "row": { "transport": "libp2p", "address": "tm_abc", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t2" } },
+        { "op": "add", "row": { "transport": "libp2p", "address": "tm_x", "prefix": true, "sender": "$A", "program": "$cid", "fn": "libp2p", "id": "t3" } },
+        { "op": "add", "row": { "transport": "libp2p", "address": "tm_", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t4" } },
+        { "op": "add", "row": { "transport": "libp2p", "address": "/p", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t5" } },
+        { "op": "add", "row": { "transport": "http", "address": "/p", "prefix": true, "sender": "*", "program": "$cid", "id": "t6" } }
+      ],
+      "fold": ["t1", "t2", "t3", "t4", "t5", "t6"],
+      "cases": [
+        { "kind": "libp2p", "name": "tm_0123", "who": { "key": "B" }, "want": "t1" },
+        { "kind": "libp2p", "name": "tm_abc", "who": {}, "want": "t2" },
+        { "kind": "libp2p", "name": "tm_xyz", "who": { "key": "A" }, "want": "t3" },
+        { "kind": "libp2p", "name": "tm_xyz", "who": { "key": "B" }, "want": "t1" },
+        { "kind": "libp2p", "name": "tm_", "who": {}, "want": "t4" },
+        { "kind": "libp2p", "name": "tm", "who": {}, "want": null },
+        { "kind": "libp2p", "name": "/p", "who": {}, "want": "t5" },
+        { "kind": "libp2p", "name": "/pq", "who": {}, "want": null },
+        { "kind": "http", "path": "/pq", "who": {}, "want": "t6" }
+      ]
     }
   ]
 }

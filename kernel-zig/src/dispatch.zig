@@ -7,8 +7,9 @@
 //          address: text,          mailbox: a box name ("*": any box — a genesis-only catch-all,
 //                                  a mailbox instance's); http: a path; libp2p: a topic, or
 //                                  "/<protocol>"; local: a provider's name
-//          prefix?: true,          http only: `address` is a prefix (exact paths match first,
-//                                  then the longest prefix)
+//          prefix?: true,          http, and a libp2p topic (#119; not a `/<protocol>`): `address`
+//                                  is a prefix (exact addresses match first, then the longest
+//                                  prefix) — one `tm_` row takes every `tm_<txid>` topic
 //          sender: "*" | "event" | "session" | "owner" | bytes(33),
 //                                  "*": anyone (an open route; an event's box too); "event": events
 //                                  only (#79: the host's wiring — a feed's header, a broadcaster's
@@ -134,7 +135,10 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     if (!isBox(addr)) return try std.fmt.allocPrint(a, "address {s}: empty, or has a space or NUL", .{try json.quoted(a, addr)});
     if (v.get("prefix")) |p| {
         if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
-        if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http row has one");
+        if (p == .bool and p.bool) {
+            const topic = std.mem.eql(u8, t, "libp2p") and addr[0] != '/';
+            if (!std.mem.eql(u8, t, "http") and !topic) return try a.dupe(u8, "prefix: only an http row or a libp2p topic row has one (a /protocol is exact)");
+        }
     }
     const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" or \"owner\" (http) or an identity key (33 bytes)");
     if (sender == .session and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"session\": only an http row (a BRC-103/104 session)");
@@ -372,36 +376,47 @@ pub const Refusal = enum {
 
 pub const HttpMatch = union(enum) { row: Row, refused: Refusal };
 
-/// A request's `http` row: exact paths first, then prefixes, longest first;
-/// within each, first in table order whose sender rule takes `w`.
-pub fn forHttp(rows: []const Row, path: []const u8, w: Who) HttpMatch {
-    var any = false;
-    const ex = first(rows, "http", .{ .exact = path }, w);
-    if (ex.row) |r| return .{ .row = r };
-    any = ex.addressed;
+/// The match for an address that prefix rows may take (http paths, libp2p
+/// topics): exact rows first, then prefix rows, longest first; within each,
+/// the first in table order whose sender rule takes `w`.
+fn exactThenPrefix(rows: []const Row, transport: []const u8, path: []const u8, w: Who) Walk {
+    const ex = first(rows, transport, .{ .exact = path }, w);
+    if (ex.row != null) return ex;
+    var any = ex.addressed;
     // The prefix lengths that take `path`, longest first.
     var below: usize = std.math.maxInt(usize);
     while (true) {
         var len: ?usize = null;
         for (rows) |r| {
-            if (!r.prefix or !std.mem.eql(u8, r.transport, "http") or r.address.len >= below) continue;
+            if (!r.prefix or !std.mem.eql(u8, r.transport, transport) or r.address.len >= below) continue;
             if (!std.mem.startsWith(u8, path, r.address)) continue;
             if (len == null or r.address.len > len.?) len = r.address.len;
         }
         const l = len orelse break;
-        const p = first(rows, "http", .{ .prefix = .{ .path = path, .len = l } }, w);
-        if (p.row) |r| return .{ .row = r };
+        const p = first(rows, transport, .{ .prefix = .{ .path = path, .len = l } }, w);
+        if (p.row != null) return p;
         any = any or p.addressed;
         below = l;
     }
-    if (!any) return .{ .refused = .path };
+    return .{ .addressed = any };
+}
+
+/// A request's `http` row: exact paths first, then prefixes, longest first;
+/// within each, first in table order whose sender rule takes `w`.
+pub fn forHttp(rows: []const Row, path: []const u8, w: Who) HttpMatch {
+    const m = exactThenPrefix(rows, "http", path, w);
+    if (m.row) |r| return .{ .row = r };
+    if (!m.addressed) return .{ .refused = .path };
     return .{ .refused = if (w.key == null) .session else .sender };
 }
 
-/// A libp2p package's row: the first `libp2p` row whose address is its topic
-/// (or `/<protocol>`) and whose sender rule takes the peer's key.
+/// A libp2p package's row: a topic as an http path is matched (#119: exact
+/// rows first, then `prefix` rows, longest first — one `tm_` row takes every
+/// `tm_<txid>`); a `/<protocol>` exactly. Within each, the first `libp2p` row
+/// in table order whose sender rule takes the peer's key.
 pub fn forLibp2p(rows: []const Row, name: []const u8, w: Who) ?Row {
-    return first(rows, "libp2p", .{ .exact = name }, w).row;
+    if (name.len > 0 and name[0] == '/') return first(rows, "libp2p", .{ .exact = name }, w).row;
+    return exactThenPrefix(rows, "libp2p", name, w).row;
 }
 
 test "fold: add replaces by key, remove deletes, first match wins" {
@@ -453,4 +468,32 @@ test "fold: add replaces by key, remove deletes, first match wins" {
     const rows2 = try fold(a, &.{ try up(a, "add", r2), try up(a, "add", r1) });
     try std.testing.expect(forMail(rows2, &k2, "run").?.program == null);
     try std.testing.expectEqualStrings("objects", forEvent(rows2, "run").?.op.?);
+}
+
+test "prefix (#119): an http row or a libp2p topic row; a /protocol and a mailbox row are exact" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cid1 = try @import("cid").parse(a, "bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
+    const row = struct {
+        fn f(al: std.mem.Allocator, t: []const u8, addr: []const u8, prog: []const u8) !Value {
+            var m = cbor.MapBuilder.init(al);
+            try m.put("transport", cbor.string(t));
+            try m.put("address", cbor.string(addr));
+            try m.put("prefix", .{ .bool = true });
+            try m.put("sender", cbor.string("*"));
+            try m.put("program", cbor.cidv(prog));
+            return m.value();
+        }
+    }.f;
+    try std.testing.expect((try problem(a, try row(a, "http", "/x", cid1))) == null);
+    try std.testing.expect((try problem(a, try row(a, "libp2p", "tm_", cid1))) == null);
+    try std.testing.expect((try problem(a, try row(a, "libp2p", "/proto", cid1))) != null);
+    try std.testing.expect((try problem(a, try row(a, "mailbox", "run", cid1))) != null);
+    var up = cbor.MapBuilder.init(a);
+    try up.put("op", cbor.string("add"));
+    try up.put("row", try row(a, "libp2p", "tm_", cid1));
+    const rows = try fold(a, &.{up.value()});
+    try std.testing.expect(forLibp2p(rows, "tm_00ff", .{}) != null);
+    try std.testing.expect(forLibp2p(rows, "tx_00ff", .{}) == null);
 }

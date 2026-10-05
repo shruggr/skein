@@ -26,7 +26,9 @@
 //               encoded dot or slash (%2e, %2f), a backslash, a NUL or a URL is refused: no row
 //               reaches outside the app's prefix), with `prefix: true` for a prefix and `fn`
 //               the handler's function; a libp2p row's a topic or "/<protocol>" (global, not
-//               namespaced; sender "*"; fn required). "session" is for http rows only; "event"
+//               namespaced; sender "*"; fn required), a topic row with `prefix: true` (#119)
+//               taking every topic that starts with it (one `tm_` row: every `tm_<txid>`; the
+//               node subscribes none of them until the app emits `subscribe`). "session" is for http rows only; "event"
 //               (#79) for mailbox rows only: the box takes events (the host's wiring, a route's
 //               admit), never a message; "$self" is the instance's own identity (another of its
 //               apps, by the host's loopback: an overlay's own watch, the chain app's callers). `app` is
@@ -153,7 +155,8 @@ function rowProblem(app: string, r: unknown, isRole: (role: unknown) => role is 
     if (typeof r.fn !== "string" || !r.fn) return "fn is not text (an http row names its handler's function)";
   } else {
     if (/[\s\0]/.test(r.address)) return `address ${JSON.stringify(r.address)} is not a topic or /protocol`;
-    if (r.prefix !== undefined) return "a libp2p row has no prefix";
+    if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
+    if (r.prefix === true && r.address.startsWith("/")) return "a /protocol row has no prefix (a topic row may: #119, one `tm_` row takes every `tm_<txid>`)";
     if (typeof r.fn !== "string" || !r.fn) return "fn is not text (a libp2p row names its handler's function)";
     if (r.sender !== undefined && r.sender !== "*") return "a libp2p row's sender is \"*\" (GossipSub messages are signed; streams are Noise)";
   }
