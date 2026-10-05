@@ -259,9 +259,10 @@ It is admitted at its proof, when the chain app gets one
 
 ### Running it on a host
 
-`tm_demo` is a test fixture, not a token: on a live host it is for
-exercising the wire — submit, lookup and the gossip between hosts — without
-on-chain tokens. A real token's topic is `tm_<tokenId>`, from a topic
+`tm_demo` is a test fixture, not a token: on a host it is for exercising
+the wire — submit, lookup and the gossip between hosts — without on-chain
+tokens, on test hosts stood up for that (two local hosts do), not on a
+production skein. A real token's topic is `tm_<tokenId>`, from a topic
 manager that judges that token (shruggr/skein-mandala, #120).
 
 The same against host.skein.nexus, where instances are
