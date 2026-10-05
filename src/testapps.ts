@@ -38,10 +38,10 @@ export const CHAT_APP: PinnedApp = {
   rev: process.env.SKEIN_CHAT_REV ?? "a9491ee30668aeee5a44745403dadf7355825a51", dir: process.env.SKEIN_CHAT_DIR,
 };
 
-/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169 (0.2.0). */
+/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
-  rev: process.env.SKEIN_ONBOARD_REV ?? "c2d4b6e0ad56b326a59be572518bdf80f77cd418", dir: process.env.SKEIN_ONBOARD_DIR,
+  rev: process.env.SKEIN_ONBOARD_REV ?? "7202d9541a66dde5fcdf04a5242c0af29bf7a810", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
 /** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered. */

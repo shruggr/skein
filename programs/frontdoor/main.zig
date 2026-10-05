@@ -211,7 +211,7 @@ fn stepped(a: Allocator, in: Value) !Value {
 /// A signed message carried in whole (#70): a provider's (transport
 /// `local`: {kind: "message", message, body}) or one over libp2p (a frame on
 /// /skein/message/1.0.0, a topic message nothing else routes). Its signature,
-/// its body and its recipient (this instance) checked here, it is admitted as
+/// its body and its recipient (this instance; #127: none, for a forwarded claim) checked here, it is admitted as
 /// the message it is — routed by the kernel after the step by its `replyTo`,
 /// else by subscription on (sender, box), once (the `unique` map). The answer:
 /// {verdict: "accept", admit: [{mail, body}]} | {verdict: "reject" | "ignore", reason}.
@@ -227,7 +227,8 @@ pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8, checke
     };
     if (!checked) if (try message.problem(a, m, body)) |bad| return V.no(a, "reject", bad);
     const me = selfIdentity(in) orelse return V.no(a, "ignore", "no identity");
-    if (!eql(u8, Value.bytesOf(m.get("recipient")).?, me)) return V.no(a, "ignore", "the message is for another identity");
+    // #127: a claim may name no recipient (signed before this instance existed, forwarded into it: message.zig).
+    if (Value.bytesOf(m.get("recipient"))) |to| if (!eql(u8, to, me)) return V.no(a, "ignore", "the message is for another identity");
     var entry = cbor.MapBuilder.init(a);
     try entry.put("mail", m);
     try entry.put("body", .{ .bytes = body });

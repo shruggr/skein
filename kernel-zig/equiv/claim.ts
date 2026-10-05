@@ -1,4 +1,4 @@
-// The default image and the claim (#89), end to end on a router:
+// The default image and the claim (#89, #127), end to end on a router:
 //
 //   an instance booted from the default image (images/default) — its genesis
 //   names no owner and has no admin rows, only the claim row (box `claim`,
@@ -7,14 +7,21 @@
 //   is a key, and the claim brings the owner's), and it takes no owner's
 //   message in an admin box.
 //
-//   `skein-host claim` (through the router's control socket) delivers the
-//   owner's claim as a `local` request from the host's instance manager: in one
-//   step the kernel writes the owner's four admin rows and the explorer row
-//   with the owner's key (#121), and removes the claim row; the head `claim` names what was claimed; the owner's mailbox on this
-//   host goes into the address book. A second claim finds no row and runs
-//   nothing (`skein-host claim` exits 1); a stranger's sendMessage into `claim`
-//   is refused. The owner then installs programs/test/app-demo with
-//   the owner's messages (`skein plan install`, #124) and calls it.
+//   The owner claims it with a message from the owner's wallet (`skein plan
+//   claim`, sent to /sendMessage): the owner is the message's sender (#127),
+//   never a key in the body — a body naming another `owner` changes nothing.
+//   In one step the kernel writes the sender's four admin rows and the
+//   explorer row with the sender's key (#121), and removes the claim row; the
+//   head `claim` names what was claimed (the sender as owner, the messagebox);
+//   the owner's mailbox goes into the address book. A second claim (a
+//   stranger's sendMessage into `claim`) finds no row and is refused. The
+//   owner then installs programs/test/app-demo with the owner's messages
+//   (`skein plan install`, #124) and calls it.
+//
+//   A claim signed before the instance existed (#127: naming no recipient,
+//   what a registrant's page signs and the host forwards) claims a fresh
+//   image for its signer, as the instance's first entry; a message naming no
+//   recipient in any other box is refused at the front door.
 //
 //   An instance that is owned already refuses a claim: a stock instance whose
 //   owner added a claim row to its table keeps its rows when a claim comes.
@@ -31,10 +38,12 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrivateKey } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
-import { RawBox } from "../../src/client/raw.ts";
+import * as dagCbor from "@ipld/dag-cbor";
+import { RawBox, signClaim } from "../../src/client/raw.ts";
+import { planClaim } from "../../src/client/admin.ts";
+import { encode } from "../../src/runtime/cid.ts";
 import { main } from "../../src/host/cli.ts";
-import { ownerCli } from "../../src/testapps.ts";
-import { CONTROL_SOCKET } from "../../src/host/control.ts";
+import { ownerCli, sendPlan } from "../../src/testapps.ts";
 import { dirSource } from "../../src/host/boot.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
@@ -64,7 +73,6 @@ try {
   const booted = await h.image("inst");
   const inst = h.db.get("inst")!.identity!;
   await h.router.start();
-  await h.router.listenControl(join(h.home, CONTROL_SOCKET));
   stores.push(h.db.get("inst")!.store);
   const k = async (handle = "inst") => (await h.router.hydrate(handle)).kernel;
   const rows = async (handle = "inst") => (await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>;
@@ -99,10 +107,12 @@ try {
   const before = await new RawBox(h.owner, `${h.base}/@inst`).send(inst, "objects", { records: [] }).then(() => "sent", (e: Error) => e.message);
   check(/403 ERR_NOT_SUBSCRIBED/.test(before), `before the claim, the owner's message to \`objects\` is refused: no admin row (${before})`);
 
-  // ------------------------------------------------ the claim
+  // ------------------------------------------------ the claim: the owner's own message (#127)
+  const stranger = PrivateKey.fromRandom(), strangerId = stranger.toPublicKey().toString();
   const lines0 = h.lines.length;
-  let r = await cli("claim", "inst", h.ownerId);
-  check(r.code === 0 && r.out.some((l) => /claimed by .* by the running router/.test(l)), `skein-host claim inst <owner> through the control socket: exit ${r.code} ${[...r.out, ...r.err].join(" ")}`);
+  const plan = planClaim(inst, { messagebox: h.origin("david") });
+  (plan.messages[0]!.body as Record<string, unknown>).owner = strangerId; // a key in the body is not read: the sender is the owner
+  await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "inst", plan);
   check(h.lines.slice(lines0).some((l) => /kernel claim: owner [0-9a-f]+: admin rows objects, head, dispatch, peers, the explorer row; the claim row removed; the owner's messagebox in the address book/.test(l)), "the kernel took the claim in one step (one log line)");
   const explorer = (await rows()).filter((x) => x.transport === "http" && x.address === "/explore");
   check(explorer.length === 1 && explorer[0]!.prefix === true && explorer[0]!.fn === "explore" && explorer[0]!.sender instanceof Uint8Array && hex(explorer[0]!.sender) === h.ownerId, `#121: the claim wrote the explorer row with the owner's real key (${explorer.map((x) => x.sender instanceof Uint8Array ? hex(x.sender).slice(0, 8) : String(x.sender)).join(", ")})`);
@@ -110,7 +120,7 @@ try {
   check((await kernelRows()).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${owner8}`).join(","), `the owner's four admin rows, the claim row gone: ${(await kernelRows()).join(", ")}`);
   const claimRoot = await (await k()).call("head", "claim") as CID | null;
   const claimed = claimRoot ? await (await k()).store.get(claimRoot) as { owner?: unknown; messagebox?: string } : undefined;
-  check(hex(claimed?.owner) === h.ownerId && claimed?.messagebox === h.origin("david"), `the head \`claim\` names what was claimed: the owner and its messagebox (${claimed?.messagebox})`);
+  check(hex(claimed?.owner) === h.ownerId && claimed?.messagebox === h.origin("david"), `the head \`claim\` names what was claimed: the sender as owner (not the body's key) and its messagebox (${claimed?.messagebox})`);
   const peers = await (await k()).call("head", "peers") as CID | null;
   const book = peers ? await Promise.all((((await (await k()).store.get(peers)) as { peers?: Array<{ peer: CID }> }).peers ?? []).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array; address: string; source: string })) : [];
   check(book.some((p) => hex(p.key) === h.ownerId && p.address === h.origin("david") && p.source === "claim"), "the owner's messagebox is in the address book (source claim)");
@@ -121,17 +131,12 @@ try {
   check(other.status === 403, `and another key does not (${other.status})`);
 
   // ------------------------------------------------ a second claim
-  const stranger = PrivateKey.fromRandom(), strangerId = stranger.toPublicKey().toString();
-  const lines1 = h.lines.length;
-  r = await cli("claim", "inst", strangerId);
-  check(r.code === 1 && r.err.some((l) => /was refused/.test(l)), `a second claim is refused: exit ${r.code} ${r.err.join(" ")}`);
-  check(h.lines.slice(lines1).some((l) => / in claim from [0-9a-f]+: no dispatch row; recorded, nothing runs/.test(l)), "the second claim found no row: recorded, nothing runs");
   const byStranger = await new RawBox(ephemeralWallet(stranger), `${h.base}/@inst`).send(inst, "claim", { owner: strangerId }).then(() => "sent", (e: Error) => e.message);
   check(/403 ERR_NOT_SUBSCRIBED/.test(byStranger), `a stranger's sendMessage into \`claim\` is refused (${byStranger})`);
   check((await kernelRows()).every((x) => x.endsWith(`<-${owner8}`)), "the admin rows are still the owner's");
 
   // ------------------------------------------------ the owner installs an app
-  r = await cli("install", demoDir, "--instance", "inst");
+  let r = await cli("install", demoDir, "--instance", "inst");
   check(r.code === 0, `skein plan install app-demo into the claimed image: exit ${r.code} ${r.err.join(" ")}`);
   const app = await (await k()).call("head", "app-demo/app") as CID | null;
   check(!!app, "the head app-demo/app is the app record");
@@ -158,8 +163,9 @@ try {
   await h.router.settled();
   check((await kernelRows("owned")).includes("claim<-*"), "the owner of a stock instance added a claim row");
   const lines2 = h.lines.length;
-  const refused = await h.router.claim("owned", strangerId);
-  check(!refused.claimed && h.lines.slice(lines2).some((l) => /kernel claim refused: the genesis names its owner: this instance is not an image; nothing done/.test(l)), "a claim into an owned instance is refused, nothing done");
+  await new RawBox(ephemeralWallet(stranger), `${h.base}/@owned`).send(ownedId, "claim", {});
+  await h.router.settled();
+  check(h.lines.slice(lines2).some((l) => /kernel claim refused: the genesis names its owner: this instance is not an image; nothing done/.test(l)), "a claim into an owned instance is refused, nothing done");
   check((await kernelRows("owned")).filter((x) => x.startsWith("claim")).length === 1 && (await kernelRows("owned")).filter((x) => !x.startsWith("claim")).every((x) => x.endsWith(`<-${owner8}`)), "its rows are unchanged");
 
   // ------------------------------------------------ skein-host add --image
@@ -169,6 +175,24 @@ try {
   check(r.code === 0 && r.out.some((l) => l.includes(`booted from the image ${image.root}`)), `skein-host add fresh --image default: exit ${r.code} ${[...r.out, ...r.err].join(" ")}`);
   const fg = await genesisOf("fresh");
   check(!!fg && fg.owner === undefined && (fg.tree as CID).equals(image.root) && (fg.dispatch as Array<{ fn?: string }>).filter((x) => x.fn).map((x) => x.fn).includes("claim"), "its genesis: no owner, the default image's tree, the claim row");
+
+  // ------------------------------------------------ a claim signed before the instance existed (#127)
+  await h.image("fresh2");
+  await h.router.hydrate("fresh2");
+  stores.push(h.db.get("fresh2")!.store);
+  const signer = PrivateKey.fromRandom(), signerId = signer.toPublicKey().toString();
+  const lines3 = h.lines.length;
+  // A message naming no recipient in another box is not a claim: the front door refuses it.
+  const loose = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(signerId, "hex")), box: "objects", body: encode({}).cid, nonce: new Uint8Array(16) };
+  const { signature } = await ephemeralWallet(signer).createSignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone", data: [...dagCbor.encode(loose)] });
+  const notClaim = await h.router.appendLocal("fresh2", { kind: "message", message: { ...loose, signature: Uint8Array.from(signature) }, body: dagCbor.encode({}) }).then(() => "admitted", (e: Error) => e.message);
+  await h.router.settled();
+  check(/admit: a request record in its transport's shape/.test(notClaim) && !h.lines.slice(lines3).some((l) => /kernel objects/.test(l)), `a message naming no recipient outside box \`claim\` is not admitted (${notClaim.slice(0, 70)})`);
+  const fwd = await signClaim(ephemeralWallet(signer));
+  check(fwd.message.recipient === undefined, "the signed claim names no recipient");
+  await h.router.appendLocal("fresh2", { kind: "message", message: fwd.message, body: fwd.body });
+  await h.router.settled();
+  check((await kernelRows("fresh2")).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${signerId.slice(0, 8)}`).join(","), `the forwarded claim: the signer owns it (${(await kernelRows("fresh2")).join(", ")})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

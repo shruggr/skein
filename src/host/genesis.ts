@@ -159,11 +159,12 @@ export const KERNEL_OPS = [...ADMIN_OPS, "claim"] as const;
 
 /**
  * The claim row (#89): an image's one wildcard row to the kernel. A message
- * in box `claim`, from anyone, whose body names the owner key: in one step
- * the kernel writes that key's four admin rows and removes this row (a
- * second claim finds no row). The host delivers it as a `local` request
- * (Router.claim, `skein-host claim`) before the instance's hostname is
- * published.
+ * in box `claim`, from anyone: its sender is the owner (#127) — in one step
+ * the kernel writes the sender's four admin rows and removes this row (a
+ * second claim finds no row). The owner's own message (`skein plan claim`),
+ * or a claim the owner signed before the instance existed, which the host's
+ * instance manager forwards as its first entry before the hostname is
+ * published (Router.createInstance).
  */
 export const CLAIM_ROW: DispatchSpec = { address: "claim", sender: "*", program: "kernel", fn: "claim" };
 

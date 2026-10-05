@@ -2,8 +2,10 @@
 // as the host skein's onboarding app sends them: the host skein is created
 // from the default image with the manager in its address book (no other
 // instance's book names it); `create` boots a child from the default image,
-// delivers its owner's claim as its first entry after the genesis, then
-// publishes it; a second `create` of the handle is refused (an answer); a
+// forwards its owner's own signed claim (#127: no recipient, signed before
+// the child existed) as its first entry after the genesis, then publishes
+// it — a create with no claim, another key's claim or a forged one is
+// refused and nothing is published; a second `create` of the handle is refused (an answer); a
 // message from any other instance is not acted on and not answered; `stop`
 // unpublishes, `start` publishes again. #113: `create` records the domain it
 // is given; image `mailbox` makes a mailbox instance (what a registration
@@ -16,7 +18,10 @@ import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { PrivateKey, ProtoWallet } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
+import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
+import { signClaim } from "../client/raw.ts";
+import { ephemeralWallet } from "../wallet.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, type MailRecord } from "./providers.ts";
@@ -25,7 +30,7 @@ import { testHost } from "./testhost.ts";
 const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
 const hex = (b: unknown) => b instanceof Uint8Array ? Buffer.from(b).toString("hex") : String(b);
 
-test("the instance manager: create (claimed before published), refusals, the host skein's only, stop and start", { skip, timeout: 180_000 }, async (t) => {
+test("the instance manager: create (the owner's claim forwarded before published), refusals, the host skein's only, stop and start", { skip, timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
   const answers: Array<{ handle: string; box: string; body: Record<string, unknown> }> = [];
   const append = h.router.providers.o.append;
@@ -36,7 +41,7 @@ test("the instance manager: create (claimed before published), refusals, the hos
   const manager = h.router.providers.key("manager");
 
   // The host skein: the default image, claimed for the operator, the manager in its book.
-  const host = await h.router.createInstance("host", h.ownerId, { host: true });
+  const host = await h.router.createInstance("host", h.ownerId, { host: true, claim: await signClaim(h.owner) });
   assert.equal(h.db.hostSkein()?.handle, "host");
   assert.equal(h.db.get("host")!.status, "enabled");
   const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ role?: string }> }).addressBook ?? []).map((e) => e.role);
@@ -56,8 +61,22 @@ test("the instance manager: create (claimed before published), refusals, the hos
     return answers.slice(n).filter((a) => a.box === box && a.handle === from);
   };
 
-  const client = PrivateKey.fromRandom().toPublicKey().toString();
+  const clientKey = PrivateKey.fromRandom(), client = clientKey.toPublicKey().toString();
+  const claim = await signClaim(ephemeralWallet(clientKey));
+  // #127: no claim, another key's claim, a forged claim: refused, nothing published.
   let a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")) });
+  assert.match(String(a[0]?.body.error), /claim: the owner's signed claim/, "a create with no claim is refused");
+  assert.equal(h.db.get("alice"), undefined);
+  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim: await signClaim(ephemeralWallet(PrivateKey.fromRandom())) });
+  assert.match(String(a[0]?.body.error), /its sender is not the owner/, "another key's claim is refused");
+  const forged = { message: claim.message, body: dagCbor.encode({ messagebox: "https://evil.example" }) };
+  a = await send("host", "create", { handle: "eve", owner: Uint8Array.from(Buffer.from(client, "hex")), claim: forged });
+  assert.match(String(a[0]?.body.error), /the claim .* was refused/, "a claim whose body is not the one it signs is refused at the front door");
+  assert.equal(h.db.get("eve")!.status, "disabled", "and the instance is left unpublished");
+  const eveRows = ((await (await h.router.hydrate("eve")).kernel.dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.program === "kernel");
+  assert.deepEqual(eveRows.map((r) => `${r.address}<-${hex(r.sender)}`), ["claim<-*"], "unclaimed: the claim row stands");
+
+  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
   assert.equal(a.length, 1, "one answer");
   assert.equal(a[0]!.body.handle, "alice");
   assert.equal(a[0]!.body.url, h.origin("alice"));
@@ -66,15 +85,17 @@ test("the instance manager: create (claimed before published), refusals, the hos
   assert.equal(alice.status, "enabled", "published");
   const k = (await h.router.hydrate("alice")).kernel;
   const rows = (await k.dispatch()).rows as Array<Record<string, unknown>>;
-  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => `${r.address}<-${hex(r.sender)}`), ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${client}`), "claimed for the client's key; the claim row gone");
+  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => `${r.address}<-${hex(r.sender)}`), ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${client}`), "claimed by the client's own message: its admin rows; the claim row gone");
   const first: Array<Record<string, unknown>> = [];
   const s = openStoreFile(alice.store, { readOnly: true });
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
   assert.equal(first[0]!.transport, "local", "the claim is the first entry after the genesis: nothing reached it before");
+  const fwd = await (await h.router.hydrate("alice")).kernel.store.get((first[0] as { request: CID }).request) as { message?: { sender?: unknown; recipient?: unknown; box?: string } };
+  assert.ok(fwd.message?.box === "claim" && hex(fwd.message.sender) === client && fwd.message.recipient === undefined, "the forwarded message is the client's own, naming no recipient (#127)");
   assert.ok(!(await roles("alice")).includes("manager"), "the child's address book has no instance manager");
   assert.equal((await fetch(`${h.base}/@alice/`)).status, 200, "it answers at its origin");
 
-  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")) });
+  a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
   assert.match(String(a[0]?.body.error), /handle alice is taken/, "a second create of the handle is refused, as an answer");
   a = await send("host", "create", { handle: "Bad_Name", owner: Uint8Array.from(Buffer.from(client, "hex")) });
   assert.match(String(a[0]?.body.error), /hostname label/);
@@ -87,7 +108,7 @@ test("the instance manager: create (claimed before published), refusals, the hos
   assert.match(String(a[0]?.body.error), /domain .*a host name/);
 
   // #113: the domain asked is the row's; image `mailbox` is a mailbox instance for the owner, published at once.
-  a = await send("host", "create", { handle: "dora", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "skein.test" });
+  a = await send("host", "create", { handle: "dora", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "skein.test", claim: await signClaim(ephemeralWallet(clientKey)) });
   assert.equal(h.db.get("dora")!.domain, "skein.test");
   const mailer = PrivateKey.fromRandom().toPublicKey().toString();
   a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox", domain: "skein.test" });

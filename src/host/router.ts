@@ -103,7 +103,7 @@ import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
 import { DEFAULT_LISTEN, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
-import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
+import { Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import * as Digest from "multiformats/hashes/digest";
@@ -474,11 +474,6 @@ export class Router {
     if (this.stopped) throw new Error("the router is stopping");
     const server = await listenControl(path, {
       event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString(),
-      claim: async (h, owner, o) => {
-        const [name, domain] = (o.name ?? "").replace(/^@/, "").split("@");
-        const c = await this.claim(h, owner, { messagebox: o.messagebox, ...(name ? { handle: name, domain: domain || "localhost" } : {}) });
-        return { entry: c.entry.toString(), claimed: c.claimed };
-      },
     });
     this.control = { server, path };
     this.say("router", `control socket at ${path}`);
@@ -733,7 +728,7 @@ export class Router {
    * the instance's identity, handle and domain, its providers in the address
    * book, where its domain resolves, the host's defaults. No owner, no
    * owner's mailbox, no inference peer, no names: the image is the same for
-   * everyone, and the owner comes with the claim (`claim`). `manager`
+   * everyone, and the owner is the claim's sender (#127). `manager`
    * (#90, #113): the host skein's — the instance manager and the certifier
    * in its address book too (no other instance's book names them).
    */
@@ -745,28 +740,6 @@ export class Router {
       feeds: this.o.genesis?.feeds, defaults: this.o.genesis?.defaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined,
       warn: (l) => this.say(row.handle, l),
     };
-  }
-
-  /**
-   * The claim (#89): the instance manager's signed message into an image's
-   * claim row — box `claim`, body {owner, messagebox?, handle?, domain?} —
-   * appended as a `local` request. The kernel writes the owner's admin rows
-   * and removes the claim row in one step, or refuses (no row any more; an
-   * instance owned already). Without a messagebox, the owner's mailbox
-   * instance on this host, if it has one. What happened: the entry, and
-   * whether the instance is now claimed by `owner` (its `dispatch` admin row
-   * from that key).
-   */
-  async claim(handle: string, owner: string, o: { messagebox?: string; handle?: string; domain?: string } = {}): Promise<{ entry: CID; claimed: boolean }> {
-    const row = this.o.db.get(handle);
-    if (!row || row.status !== "enabled") throw new Error(`no enabled instance ${handle}`);
-    const key = keyBytes(owner);
-    const mb = o.messagebox ?? (() => { const m = this.o.db.mailboxOf(owner); return m ? this.originOf(m.handle) : undefined; })();
-    const l = await this.hydrate(handle);
-    const body = { owner: key, ...(mb ? { messagebox: mb } : {}), ...(o.handle ? { handle: o.handle, domain: o.domain ?? await this.handleDomain() } : {}) };
-    const entry = await this.providers.send(handle, "manager", keyBytes(l.identity), "claim", body) as CID;
-    await this.settled();
-    return { entry, claimed: await this.claimedBy(l, owner) };
   }
 
   /** Whether `owner` holds the instance's admin rows (its `dispatch` row): claimed by that key. */
@@ -781,15 +754,21 @@ export class Router {
    * the row, disabled (no hostname: nothing reaches it); its identity
    * derived (the signer's, key ID = the handle) and its store booted from the
    * image (only `default`, the default image, so far); its kernel started
-   * unpublished; the owner's claim delivered as a `local` request from the
-   * instance manager, and processed — the owner's admin rows written, the
-   * claim row removed; only then (`publish`, default true) the row enabled,
-   * which publishes its hostname. No request can reach the claim row first.
-   * `host`: the host skein — the instance manager and the certifier in its
-   * address book, and recorded as the host skein (host.db). `domain`: the
-   * handle's domain, recorded with the row (default `localhost`). A refusal
-   * throws (a bad or taken handle, a bad key, another image, a refused claim:
-   * the row is left disabled, its store kept for a look).
+   * unpublished; `claim` (#127) — the owner's own signed claim, a message in
+   * box `claim` naming no recipient (it was signed before the instance
+   * existed), with its body — forwarded into it as a `local` request, its
+   * first entry after the genesis: the front door checks the signature, and
+   * the kernel takes the owner from the signer (the owner's admin rows
+   * written, the claim row removed); only then (`publish`, default true) the
+   * row enabled, which publishes its hostname. No request can reach the claim
+   * row first. The host signs nothing for the owner. With no `claim` (a bare
+   * image: `skein-host init`), the instance keeps its claim row, from anyone:
+   * the first sender of a claim owns it. `host`: the host skein — the
+   * instance manager and the certifier in its address book, and recorded as
+   * the host skein (host.db). `domain`: the handle's domain, recorded with
+   * the row (default `localhost`). A refusal throws (a bad or taken handle, a
+   * bad key, another image, a claim not `owner`'s or refused: the row is left
+   * disabled, its store kept for a look).
    *
    * Image `mailbox` (#113): a mailbox instance for `owner` — the front door
    * and the messagebox, its owner in its genesis (no claim) — published at
@@ -798,13 +777,16 @@ export class Router {
    * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
    * registrations) and `skein-host add --mailbox` both come here.
    */
-  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string } = {}): Promise<{ handle: string; identity: string; url: string }> {
+  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
     if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
+    const claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
+    if (!claim && o.needsClaim) claimOf(undefined);
+    if (claim) claimProblem(claim, owner);
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
     const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
     if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
@@ -813,13 +795,16 @@ export class Router {
     try {
       await this.bootRow(handle, await imageSource(), { image: true, manager: o.host });
       const l = await this.hydrate(handle);
-      const entry = await this.providers.send(handle, "manager", keyBytes(l.identity), "claim", { owner: keyBytes(owner), ...this.ownerMailbox(owner) }) as CID;
-      await this.queues.get(handle);
-      await l.kernel.idle();
-      if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
+      if (claim) {
+        // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner.
+        const entry = await this.appendLocal(handle, { kind: "message", message: claim.message, body: claim.body });
+        await this.queues.get(handle);
+        await l.kernel.idle();
+        if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
+      }
       if (o.host) this.o.db.setSetting("host_skein", handle);
       if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
-      this.say("router", `created ${handle} (${short(l.identity)}) from the default image, claimed by ${short(owner)}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      this.say("router", `created ${handle} (${short(l.identity)}) from the default image, ${claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);
@@ -849,12 +834,6 @@ export class Router {
     return { handle, identity, url: this.originOf(handle) };
   }
 
-  /** The owner's mailbox instance on this host, as a claim's `messagebox` (none: {}). */
-  private ownerMailbox(owner: string): { messagebox?: string } {
-    const m = this.o.db.mailboxOf(owner);
-    return m ? { messagebox: this.originOf(m.handle) } : {};
-  }
-
   /**
    * The instance manager's work (#90; providers.ts `manager`): a message from
    * the host skein in box `create`, `start` or `stop` → the answer body. A
@@ -866,7 +845,8 @@ export class Router {
       const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : "";
       if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
       if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
-      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}) });
+      // #127: a skein from the default image comes with its owner's signed claim (the registrant's, forwarded).
+      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), needsClaim: true });
       return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
     }
     if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
@@ -1239,4 +1219,30 @@ export class Router {
     this.arc?.start();
     return this.servers[0]!;
   }
+}
+
+/**
+ * The owner's signed claim (#127): a message in box `claim`, signed by the
+ * owner (BRC-169's signing, counterparty anyone) and naming no recipient — it
+ * was signed before the instance it claims existed — with its body (dag-cbor
+ * bytes). The host forwards it as it is (Router.createInstance).
+ */
+export interface SignedClaim { message: Omit<MailRecord, "recipient"> & { recipient?: undefined }; body: Uint8Array }
+
+/** A create's `claim` ({message, body}), checked for its shape (throws; undefined: missing). */
+function claimOf(v: unknown): SignedClaim {
+  const c = v as { message?: unknown; body?: unknown } | null | undefined;
+  if (!c || typeof c !== "object" || !c.message || typeof c.message !== "object" || !(c.body instanceof Uint8Array)) {
+    throw new Error("claim: the owner's signed claim {message, body} (#127: a message in box claim, signed by the owner, naming no recipient)");
+  }
+  return { message: c.message as SignedClaim["message"], body: c.body };
+}
+
+/** Why a claim cannot be forwarded for `owner` (throws): not a claim, another sender, a recipient named. The signature is the front door's to check. */
+function claimProblem(c: SignedClaim, owner: string): void {
+  const m = c.message;
+  if (m.kind !== "mail" || m.op !== "put" || m.box !== "claim") throw new Error("claim: not a message in box claim");
+  if (!(m.sender instanceof Uint8Array) || Buffer.from(m.sender).toString("hex") !== owner) throw new Error("claim: its sender is not the owner");
+  if (m.recipient !== undefined) throw new Error("claim: it names a recipient (a claim is signed before the instance exists: it names none)");
+  if (!(m.signature instanceof Uint8Array)) throw new Error("claim: not signed");
 }

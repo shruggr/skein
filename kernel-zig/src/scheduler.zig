@@ -1071,7 +1071,8 @@ pub const Runtime = struct {
     fn processMail(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, mc: []const u8, at: i64) !void {
         const m = rt.store.getOpt(a, mc) orelse return error.NotFound;
         const sender = Value.bytesOf(m.get("sender")).?;
-        const recipient = Value.bytesOf(m.get("recipient")).?;
+        // #127: a forwarded claim names no recipient — routed by its row, never a reply.
+        const recipient = Value.bytesOf(m.get("recipient")) orelse "";
         const box = Value.str(m.get("box")).?;
         // #121: the body the door put for it, when its row's filter rewrote one (bodyFor).
         const body = bodyFor(ctx, Value.cidOf(m.get("body")).?);
@@ -1167,16 +1168,20 @@ pub const Runtime = struct {
     ///             and module must be in the store)
     ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?} | {op: "remove", key}:
     ///             the address book (addressbook.zig write; source "admin")
-    ///   claim     {owner, messagebox?, handle?, domain?} (#89): an image's one wildcard row. In
-    ///             one step: the owner's four admin rows (objects, head, dispatch, peers from
-    ///             `owner`) added, the claim row removed, the head `claim` → this body (what was
+    ///   claim     {messagebox?, handle?, domain?} (#89, #127): an image's one claim row. The
+    ///             owner is the message's verified sender, never a key in the body (a body's
+    ///             `owner` is not read). In one step: the owner's four admin rows (objects,
+    ///             head, dispatch, peers from the sender) added, the claim row removed, the
+    ///             head `claim` → {owner: the sender, messagebox?, handle?, domain?} (what was
     ///             claimed: the owner of an instance whose genesis names none), and, with a
     ///             `messagebox`, the owner's address-book entry (source "claim"). Refused when
-    ///             the genesis names an owner or the table has an admin row already.
+    ///             the sender is not an identity key, the genesis names an owner or the table
+    ///             has an admin row already.
     /// Only a sender a row admits reaches here: the owner, or a key the owner
     /// added as a sender (#87: no program reaches a kernel table — a
     /// program's message to an admin box finds no row and runs nothing); the
-    /// claim row admits anyone, until it is taken.
+    /// claim row admits the registrant's key the host wrote into it (#127), or
+    /// anyone in a bare image, until it is taken.
     fn kernelOp(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, row: dispatch.Row, m: Value, what: []const u8, at: i64) !void {
         _ = n;
         const op = row.op.?;
@@ -1186,7 +1191,7 @@ pub const Runtime = struct {
             return;
         };
         const by = heads.By{ .thread = null, .input = ctx.cid, .at = at };
-        const done = if (std.mem.eql(u8, op, "claim")) rt.claim(a, row, bc, body, by) else rt.kernelOpBody(a, op, body, by);
+        const done = if (std.mem.eql(u8, op, "claim")) rt.claim(a, row, Value.bytesOf(m.get("sender")).?, body, by) else rt.kernelOpBody(a, op, body, by);
         done catch |err| switch (err) {
             error.Refused => {
                 rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error });
@@ -1269,13 +1274,14 @@ pub const Runtime = struct {
         return refuse(a, "no such operation", .{});
     }
 
-    /// The head the claim leaves (#89): its root is the claim's body, `owner` the claimed key.
+    /// The head the claim leaves (#89): its root is {owner: the claim's sender, messagebox?, handle?, domain?}.
     pub const CLAIM_HEAD = "claim";
 
-    /// The claim (#89): validated whole, then written under the entry.
-    fn claim(rt: *Runtime, a: std.mem.Allocator, row: dispatch.Row, body_cid: []const u8, body: Value, by: heads.By) !void {
+    /// The claim (#89, #127): the owner is the sender; validated whole, then written under the entry.
+    fn claim(rt: *Runtime, a: std.mem.Allocator, row: dispatch.Row, sender: []const u8, body: Value, by: heads.By) !void {
         if (body != .map) return refuse(a, "the body is not a map", .{});
-        const owner = keyOf(a, body.get("owner")) orelse return refuse(a, "want {{owner: <identity key>, messagebox?, handle?, domain?}}", .{});
+        if (!secp.isKey(sender)) return refuse(a, "the sender is not an identity key: the owner is the claim's sender", .{});
+        const owner = sender;
         if (rt.genesis.?.get("owner") != null) return refuse(a, "the genesis names its owner: this instance is not an image", .{});
         const now = (try dispatch.current(a, rt.store)) orelse &.{};
         if (dispatch.hasAdminRow(now)) return refuse(a, "the instance has admin rows already: it is owned", .{});
@@ -1284,6 +1290,14 @@ pub const Runtime = struct {
             else => Value.str(x) orelse return refuse(a, "messagebox: want the owner's messagebox URL", .{}),
         } else null;
         if (mb) |u| if (u.len == 0) return refuse(a, "messagebox: empty", .{});
+        const handle = Value.str(body.get("handle"));
+        const domain = Value.str(body.get("domain"));
+        // What was claimed: the sender as owner, with the body's mailbox entry.
+        var claimed = cbor.MapBuilder.init(a);
+        try claimed.put("owner", .{ .bytes = owner });
+        if (mb) |u| try claimed.put("messagebox", cbor.string(u));
+        if (handle) |x| try claimed.put("handle", cbor.string(x));
+        if (domain) |x| try claimed.put("domain", cbor.string(x));
         const d = dispatch.By{ .thread = null, .input = by.input, .at = by.at };
         for (dispatch.admin_ops) |o| {
             var r = cbor.MapBuilder.init(a);
@@ -1310,8 +1324,8 @@ pub const Runtime = struct {
             _ = try dispatch.apply(a, rt.store, "add", r.value(), d);
         };
         _ = try dispatch.apply(a, rt.store, "remove", row.value, d);
-        _ = try heads.advanceHead(a, rt.store, CLAIM_HEAD, body_cid, by);
-        if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, null, Value.str(body.get("handle")), Value.str(body.get("domain")), "claim", by);
+        _ = try heads.advanceHead(a, rt.store, CLAIM_HEAD, try rt.store.put(a, claimed.value()), by);
+        if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, null, handle, domain, "claim", by);
         rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers{s}; the claim row removed{s}", .{ shortKey(owner), if (symbolic) "" else ", the explorer row", if (mb != null) "; the owner's messagebox in the address book" else "" });
     }
 
@@ -1407,7 +1421,7 @@ pub const Runtime = struct {
     /// holds: what it sent `from`) — the reply is `from` the one it was sent to.
     fn awaiter(rt: *Runtime, a: std.mem.Allocator, sent: []const u8, from: []const u8) !?[]const u8 {
         const rec = rt.store.getOpt(a, sent) orelse return null;
-        if (!logm.isMail(rec) or !std.mem.eql(u8, Value.bytesOf(rec.get("recipient")).?, from)) return null;
+        if (!logm.isMail(rec) or !std.mem.eql(u8, Value.bytesOf(rec.get("recipient")) orelse return null, from)) return null;
         for (try rt.store.awaiting(a, sent)) |t| {
             const tip = rt.tipOf(a, t) catch null orelse continue;
             if (stateIs(tip, "waiting") and cidIn(tip.get("awaits"), sent)) return t;

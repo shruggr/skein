@@ -3,18 +3,22 @@
 // master secret, the control socket, the providers):
 //
 //   `skein-host init --owner <operator>` creates the host skein from the
-//   default image, claimed for the operator, the instance manager in its
-//   address book; a second `init` only says which it is; `skein-host list`
-//   names it `host`. The operator installs the onboarding app
+//   default image, the instance manager in its address book — a bare image,
+//   its claim row from anyone (#127): the operator claims it with a message
+//   from the operator's wallet (`skein plan claim`), the sender owning it; a
+//   second claim finds no row. A second `init` only says which it is;
+//   `skein-host list` names it `host`. The operator installs the onboarding app
 //   (shruggr/skein-onboard at src/testapps.ts's pinned commit, or
 //   $SKEIN_ONBOARD_DIR) into it as the owner's messages (`skein plan install`, #124).
 //
 //   A client — a wallet with a BRC-104 session to the host skein, nothing
-//   else — POSTs {fn: "onboard.create", args: {handle: "alice"}} to
-//   /onboard/call. The answer {handle, identity, url} comes on the same
-//   connection: the onboarding app's thread asked the instance manager, which
-//   created alice from the default image and delivered the client's claim
-//   (alice's first entry after its genesis) before publishing her hostname.
+//   else — POSTs {fn: "onboard.create", args: {handle: "alice", claim}} to
+//   /onboard/call, `claim` its own signed claim naming no recipient (#127).
+//   The answer {handle, identity, url} comes on the same connection: the
+//   onboarding app's thread asked the instance manager, which created alice
+//   from the default image and forwarded the client's claim (alice's first
+//   entry after its genesis) before publishing her hostname; the host signed
+//   nothing for the client. A create with no claim, or another key's, is refused.
 //   alice serves the management site at her URL, is claimed for the client's key,
 //   and the client installs programs/test/app-demo into her and calls it. The
 //   host skein records her under onboard/instances/alice (the manager's
@@ -37,12 +41,14 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Certificate, PrivateKey } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
-import { RawBox } from "../../src/client/raw.ts";
+import * as dagJson from "@ipld/dag-json";
+import { RawBox, signClaim } from "../../src/client/raw.ts";
+import { planClaim } from "../../src/client/admin.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { masterKey, Signer } from "../../src/host/signer.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { appCheckout, ONBOARD_APP, ownerCli } from "../../src/testapps.ts";
+import { appCheckout, ONBOARD_APP, ownerCli, sendPlan } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import type { WalletInterface } from "@bsv/sdk";
 
@@ -94,7 +100,7 @@ const db = new HostDb(join(home, "host.db"));
 try {
   // ------------------------------------------------ init: the host skein
   let r = await cli(["init", "--owner", operatorId]);
-  const said = r.out.find((l) => /^host: the host skein .* claimed by .* the instance manager in its address book/.test(l));
+  const said = r.out.find((l) => /^host: the host skein .* to claim .* the instance manager in its address book/.test(l));
   check(r.code === 0 && !!said, `skein-host init --owner <operator>: exit ${r.code} ${said ?? [...r.out, ...r.err].join(" ")}`);
   r = await cli(["init"]);
   check(r.code === 0 && r.out.some((l) => /^the host skein: host@localhost/.test(l)), `a second init says which instance is the host skein: ${r.out.join(" ")}`);
@@ -107,36 +113,50 @@ try {
   const k = async (handle: string) => (await router.hydrate(handle)).kernel;
   const genesisBook = async (handle: string) => (((await (await k(handle)).genesis()) as { addressBook?: Array<{ role?: string }> }).addressBook ?? []).map((e) => e.role);
   check((await genesisBook("host")).includes("manager"), "the host skein's address book names the instance manager");
-  const hostRows = ((await (await k("host")).dispatch()).rows as Array<Record<string, unknown>>).filter((x) => x.program === "kernel");
-  check(hostRows.length === 4 && hostRows.every((x) => hex(x.sender) === operatorId), "the host skein is claimed for the operator: its four admin rows");
+  const kernelRows = async (handle: string) => ((await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>).filter((x) => x.program === "kernel");
+  check((await kernelRows("host")).map((x) => `${x.address}<-${x.sender}`).join(",") === "claim<-*", "the host skein is a bare image: its one kernel row, the claim row from anyone");
+  // #127: the operator claims it from the operator's wallet (skein plan claim --recipient <identity>, skein send): the sender owns it.
+  const hostId = db.get("host")!.identity!;
+  await sendPlan({ port, owner: operator, settled: () => router.settled() }, "host", planClaim(hostId));
+  const hostRows = await kernelRows("host");
+  check(hostRows.length === 4 && hostRows.every((x) => hex(x.sender) === operatorId), "the operator's claim, from the operator's wallet: the host skein's four admin rows are the operator's");
+  const late = await sendPlan({ port, owner: client, settled: () => router.settled() }, "host", planClaim(hostId)).then(() => "sent", (e: Error) => e.message);
+  check(/403/.test(late) && (await kernelRows("host")).every((x) => hex(x.sender) === operatorId), `a second claim (another wallet's) finds no row: ${late.slice(0, 80)}`);
 
   // ------------------------------------------------ the operator installs the onboarding app
   // #113: the handle domain and the host's origin (where the manifest says resolve is) in the app's config.
   r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base } })], { wallet: operator, id: operatorId });
   await router.settled();
-  check(r.code === 0 && r.out.some((l) => /onboard 0\.2\.0 installed/.test(l)), `skein plan install skein-onboard --origin host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
+  check(r.code === 0 && r.out.some((l) => /onboard 0\.3\.0 installed/.test(l)), `skein plan install skein-onboard --origin host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
   check(r.out.some((l) => /row +http \/onboard\/call from session → onboard\.call/.test(l)) && r.out.some((l) => /row +http \/onboard\/register from anyone → onboard\.register/.test(l)), "its rows: /onboard/call from any session → onboard.call; /onboard/register (and resolve, search, the manifest, profile, paymail) from anyone");
 
   // ------------------------------------------------ a client creates a skein
-  const create = async (handle: string, w = client) => {
-    const res = await new RawBox(w, `${base}/@host`).af.fetch(`${base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.create", args: { handle } }) });
+  /** onboard.create with `w`'s own signed claim (#127; `claim: null`: none, `claimBy`: another wallet's), as dag-json. */
+  const create = async (handle: string, w = client, o: { claim?: null; claimBy?: typeof client } = {}) => {
+    const claim = o.claim === null ? undefined : await signClaim(o.claimBy ?? w);
+    const body = new TextDecoder().decode(dagJson.encode({ fn: "onboard.create", args: { handle, ...(claim ? { claim } : {}) } }));
+    const res = await new RawBox(w, `${base}/@host`).af.fetch(`${base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body });
     const text = await res.text();
     let v: { fn?: string; result?: { handle: string; identity: string; url: string }; error?: { code: string; message: string } } = {};
     try { v = JSON.parse(text); } catch { /* not JSON: the check below says so */ }
     return { status: res.status, v, text };
   };
-  let c = await create("alice");
+  let c = await create("alice", client, { claim: null });
+  check(c.status === 400 && c.v.error?.code === "bad-args" && /args\.claim: missing/.test(c.v.error.message) && !db.get("alice"), `a create with no claim is refused: ${c.status} ${c.text}`);
+  c = await create("alice", client, { claimBy: ephemeralWallet(PrivateKey.fromRandom()) });
+  check(c.status === 409 && /its sender is not the owner/.test(c.v.error?.message ?? "") && !db.get("alice"), `a create with another key's claim is refused: ${c.status} ${c.text}`);
+  c = await create("alice");
   const res = c.v.result;
   check(c.status === 200 && res?.handle === "alice" && res.url === `${base}/@alice`, `POST /onboard/call create alice → ${c.status} ${c.text}`);
   const alice = db.get("alice");
   check(!!alice && alice.status === "enabled" && alice.identity === res?.identity, `alice exists, published, her identity as answered (${alice?.identity?.slice(0, 8)})`);
   const aliceRows = ((await (await k("alice")).dispatch()).rows as Array<Record<string, unknown>>).filter((x) => x.program === "kernel");
-  check(aliceRows.map((x) => `${x.address}<-${hex(x.sender)}`).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${clientId}`).join(","), "alice is claimed for the client's key, her claim row gone");
+  check(aliceRows.map((x) => `${x.address}<-${hex(x.sender)}`).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${clientId}`).join(","), "alice is claimed by the client's own signed claim: the client's admin rows, her claim row gone");
   stores.push(alice!.store);
   const s = openStoreFile(alice!.store, { readOnly: true });
   const first: Array<Record<string, unknown>> = [];
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
-  check(first[0]?.transport === "local", "the claim is alice's first entry after her genesis: her hostname was published after it");
+  check(first[0]?.transport === "local", "the forwarded claim is alice's first entry after her genesis: her hostname was published after it");
   check(!(await genesisBook("alice")).includes("manager"), "alice's address book has no instance manager");
   const page = await fetch(`${res?.url}/`);
   check(page.status === 200 && (await page.text()).includes('src="site/app.js"'), `alice answers at her url with the management site: GET ${res?.url}/ → ${page.status}`);
@@ -173,7 +193,7 @@ try {
   check(c.status === 409 && /hostname label/.test(c.v.error?.message ?? ""), `a handle that is no hostname label is refused: ${c.status} ${c.text}`);
   const open = await fetch(`${base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.create", args: { handle: "mallory" } }) });
   check(open.status === 401 && !db.get("mallory"), `no session, no create: ${open.status}`);
-  const bad = await new RawBox(client, `${base}/@host`).af.fetch(`${base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.create", args: { handle: "x", owner: operatorId } }) });
+  const bad = await new RawBox(client, `${base}/@host`).af.fetch(`${base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: new TextDecoder().decode(dagJson.encode({ fn: "onboard.create", args: { handle: "x", owner: operatorId, claim: await signClaim(client) } })) });
   check(bad.status === 400 && /not in the shape/.test(await bad.text()), `the owner is the session's key, not an argument: ${bad.status}`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);

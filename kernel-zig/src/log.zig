@@ -32,6 +32,8 @@
 //                      from) carried in with its body (#70): the front door checks the
 //                      signature and routes it
 //   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, subject?: <cid>,
+//             (#127: a claim, box `claim`, may name no recipient — signed before the instance it
+//             claims existed and forwarded into it by the host)
 //             json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce} | nonce?: bytes, signature?: bytes}
 //            a message (#40, #70): its CID is the message's id — what a
 //            reply's `replyTo` names. Its sender is proven one of two ways:
@@ -259,9 +261,12 @@ pub fn isMail(x: ?Value) bool {
     if (!std.mem.eql(u8, Value.str(m.get("kind")) orelse return false, "mail")) return false;
     if (!std.mem.eql(u8, Value.str(m.get("op")) orelse return false, "put")) return false;
     if (!secp.isKey(Value.bytesOf(m.get("sender")) orelse return false)) return false;
-    if (!secp.isKey(Value.bytesOf(m.get("recipient")) orelse return false)) return false;
     const box = Value.str(m.get("box")) orelse return false;
     if (box.len == 0 or box[0] == ':') return false;
+    // #127: a claim may name no recipient (signed before the instance it claims existed, forwarded into it).
+    if (m.get("recipient")) |r| {
+        if (!secp.isKey(Value.bytesOf(r) orelse return false)) return false;
+    } else if (!std.mem.eql(u8, box, CLAIM_BOX)) return false;
     if (Value.cidOf(m.get("body")) == null) return false;
     if (m.get("json")) |j| if (j != .bool) return false;
     if (m.get("subject")) |s| if (s != .cid) return false;
@@ -287,6 +292,8 @@ pub fn signedPart(a: std.mem.Allocator, m: Value) ![]u8 {
 /// The BRC-43 protocol and key an emitted message is signed under (#70): BRC-169 §7.2's.
 pub const MESSAGE_PROTOCOL = "metanet handles envelope";
 pub const MESSAGE_KEY_ID = "send";
+/// The one box a message may name no recipient in (#127: a claim, forwarded; the SDK's message.CLAIM_BOX).
+pub const CLAIM_BOX = "claim";
 
 fn isCidMap(v: ?Value) bool {
     const m = v orelse return false;

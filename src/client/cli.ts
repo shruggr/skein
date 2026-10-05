@@ -41,7 +41,7 @@ export const USAGE = `usage:
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]
-  skein plan install|uninstall|dispatch|peers|deploy …   the owner's admin messages as files (skein plan help)
+  skein plan install|uninstall|dispatch|peers|deploy|claim …   the owner's admin messages as files (skein plan help)
   skein send <origin> <dir>                             those files to <origin>/sendMessage by the wallet (\`1sat authfetch\`)`;
 
 export const DEFAULT_TIMEOUT = 120;

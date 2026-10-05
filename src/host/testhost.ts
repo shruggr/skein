@@ -14,14 +14,14 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import type { Store } from "../runtime/store.ts";
 import { dirBundles } from "../client/client.ts";
-import { RawBox } from "../client/raw.ts";
+import { RawBox, signClaim } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from "../testapps.ts";
 import { fakeDiscovery } from "./fake-discovery.ts";
 import { anyOf, dirSource, wasmDirObjects } from "./boot.ts";
 import { HostDb } from "./instances.ts";
-import { Router } from "./router.ts";
+import { Router, type SignedClaim } from "./router.ts";
 import { Signer } from "./signer.ts";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
@@ -103,8 +103,9 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     agent(handle: string) { return h.instance(handle); },
     /**
      * An instance booted from an image (#89; default: the default image,
-     * images/default): no owner in its genesis, the claim row. Claim it with
-     * `router.claim(handle, ownerId)` (or `skein-host claim`).
+     * images/default): no owner in its genesis, the claim row from anyone.
+     * Claim it with a message from the owner's wallet in box `claim`
+     * (src/testapps.ts sendPlan of planClaim, #127): its sender owns it.
      */
     async image(handle: string, dir = join(ROOT, "images/default")) {
       db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() });
@@ -114,14 +115,14 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     /** A mailbox instance's row (a fixture's: its genesis at first hydration; the product path is the manager's create, Router.createInstance image `mailbox`). */
     mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); },
     /**
-     * The host skein (#90, #113): `host` from the default image, claimed for
-     * the owner, the instance manager and the certifier in its address book;
+     * The host skein (#90, #113): `host` from the default image, claimed by
+     * the owner's own signed claim, forwarded (#127), the instance manager and the certifier in its address book;
      * the onboarding app installed with `config` over its manifest's (default:
      * domain `localhost`, origin this router's). Its own origin's BRC-169
      * requests are then the app's.
      */
     async hostSkein(config: Record<string, unknown> = {}) {
-      const c = await router.createInstance("host", ownerId, { host: true });
+      const c = await router.createInstance("host", ownerId, { host: true, claim: await signClaim(owner) as SignedClaim });
       await router.hydrate("host");
       await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], { config: { onboard: { domain: "localhost", origin: base, ...config } } });
       return c;

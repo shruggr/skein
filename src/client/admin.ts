@@ -112,6 +112,16 @@ export function planDispatch(recipient: string, a: { op: "add" | "remove"; sende
   return { prompt: [`dispatch ${a.op} mailbox ${a.box} from ${a.sender ?? "anyone"} → ${a.handler} (${String(body.row.program)})`], recipient, messages: [{ box: "dispatch", body }] };
 }
 
+/**
+ * The claim (#89, #127): one message in box `claim` to an image whose claim
+ * row admits anyone — its sender (the wallet that sends it) is the owner;
+ * the body carries only the owner's mailbox entry, if any.
+ */
+export function planClaim(recipient: string, o: { messagebox?: string; handle?: string; domain?: string } = {}): AdminPlan {
+  const body = { ...(o.messagebox ? { messagebox: o.messagebox } : {}), ...(o.handle ? { handle: o.handle, ...(o.domain ? { domain: o.domain } : {}) } : {}) };
+  return { prompt: [`claim ${recipient}: its owner becomes the key that sends this${o.messagebox ? ` · messagebox ${o.messagebox}` : ""}${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, messages: [{ box: "claim", body }] };
+}
+
 export type PeerChange = ({ op: "add" } & AddressEntry) | { op: "remove"; key: string };
 
 /** Address-book changes (#40, #70): one message to `peers` each. */

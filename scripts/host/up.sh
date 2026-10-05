@@ -22,7 +22,7 @@
 #      earlier can never deliver its answers to him (it needs a new store).
 #   2b. the host skein (#90): `skein-host init --owner <the owner's key>` — the
 #      operator's own instance (handle `host`), from the default image,
-#      claimed for the owner, the instance manager in its address book. Once:
+#      for the owner to claim (step 7, #127), the instance manager in its address book. Once:
 #      run again, it only says which instance it is
 #   3. the router, if nothing listens on :8100 (it hydrates every enabled row:
 #      the agents' geneses happen here, the owner's mailbox already there).
@@ -52,7 +52,8 @@
 #   owner.identity that is not owner-dev.identity) refuses them: that owner
 #   sends from its own wallet.
 #   7. the onboarding app (#90, #113) into the host skein (SKEIN_ONBOARD_APP,
-#      default shruggr/skein-onboard#v0.2.0), its config the handle domain
+#      default shruggr/skein-onboard#v0.3.0; first the owner's claim of the
+#      host skein, #127, a no-op once claimed), its config the handle domain
 #      (SKEIN_HANDLE_DOMAIN, default localhost) and the router's origin:
 #      POST /@host/onboard/call creates a skein for any wallet with a session,
 #      through the instance manager; POST /account/register (signed over
@@ -175,7 +176,9 @@ echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer know
 
 # 7. The onboarding app (#90) into the host skein.
 if [ -n "$hostskein" ]; then
-  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.2.0}"
+  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.3.0}"
+  # #127: the host skein is a bare image until the owner's own claim (its sender owns it); claimed already: refused, nothing changes.
+  owner_send "$hostskein" claim 2> /dev/null || true
   config="{\"onboard\": {\"domain\": \"${SKEIN_HANDLE_DOMAIN:-localhost}\", \"origin\": \"${SKEIN_ROUTER_ORIGIN:-http://127.0.0.1:$port}\"}}"
   owner_send "$hostskein" install "$onboard" --config "$config" || echo "install $onboard into $hostskein failed (above)" >&2
   # The mailboxes the app did not make: adopted by the owner's requests import-handles prints.

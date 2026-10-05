@@ -31,6 +31,22 @@ export interface Listed {
 
 const hexOf = (b: Uint8Array): string => Buffer.from(b).toString("hex");
 
+/**
+ * A claim (#127), signed by `wallet` and naming no recipient: a message in
+ * box `claim`, its body {messagebox?, handle?, domain?} (the owner's mailbox
+ * entry, if any), signed as an emit is ([2, "metanet handles envelope"], key
+ * "send", counterparty anyone). Signed before the instance it claims exists;
+ * the host forwards it into that instance as its first entry, and the kernel
+ * takes the owner from the signer. {message, body: its dag-cbor bytes}.
+ */
+export async function signClaim(wallet: WalletInterface, body: { messagebox?: string; handle?: string; domain?: string } = {}, originator?: string): Promise<{ message: Record<string, unknown>; body: Uint8Array }> {
+  const bytes = dagCbor.encode(body);
+  const me = (await wallet.getPublicKey({ identityKey: true }, originator)).publicKey;
+  const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(me, "hex")), box: "claim", body: encode(dagCbor.decode(bytes)).cid, nonce: globalThis.crypto.getRandomValues(new Uint8Array(16)) };
+  const { signature } = await wallet.createSignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone", data: [...dagCbor.encode(unsigned)] }, originator);
+  return { message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bytes };
+}
+
 export class RawBox {
   readonly url: string;
   readonly af: AuthFetch;

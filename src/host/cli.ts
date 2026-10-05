@@ -19,7 +19,6 @@
 //   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>
-//   skein-host claim <handle> <owner-key> [--messagebox url] [--handle h@d]
 //   skein-host system <dir>
 //   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 // `add --boot/--packet` runs the loader (boot.ts, #4) on the new row's empty
@@ -29,18 +28,20 @@
 // `add --image` (#89) boots the new row from an image: a system tree whose
 // genesis names no owner and carries the claim row (`default`: the repo's
 // images/default, the default image; an outpoint is refused until the ORDFS
-// app exists). `claim` delivers the owner's claim into it as a `local`
-// request from the host's instance manager (Router.claim): the kernel writes
-// the owner's admin rows and removes the claim row; like `event`, through the
-// running router's control socket, else a router of its own.
+// app exists). Its claim row admits anyone: the first claim's sender owns it
+// (#127) — the owner claims it from a wallet (`skein plan claim --recipient
+// <its identity> --out claim`, then `skein send <its origin> claim`); the host
+// holds no owner's key and sends no claim.
 // `init` (#90) creates the host skein: the operator's own instance, from the
-// default image, claimed for the operator's key (`--owner`, else SKEIN_OWNER)
-// before its hostname is published — Router.createInstance, the instance
-// manager's own `create` — with the instance manager in its address book (no
-// other instance's book names it), and recorded in host.db as the host skein.
-// Once; a second `init` says which instance it is. The operator, as the
-// owner, then installs the onboarding app into it from a wallet (#124: `skein
-// plan install https://github.com/shruggr/skein-onboard#v0.2.0 --origin
+// default image — Router.createInstance, as the instance manager's `create`
+// — with the instance manager in its address book (no other instance's book
+// names it), and recorded in host.db as the host skein. It is a bare image
+// (#127: no signed claim to forward): the operator (`--owner`, else
+// SKEIN_OWNER, the key it is for) claims it from a wallet as above, the first
+// thing once the router runs. Once; a second `init` says which instance it
+// is. The operator, as the owner, then installs the onboarding app into it
+// from a wallet (#124: `skein
+// plan install https://github.com/shruggr/skein-onboard#v0.3.0 --origin
 // <the host skein's origin> --config '{"onboard": {"domain": "<the handle
 // domain>"}}' --out plan` and `skein send <origin> plan`, or the management
 // page). The onboarding app is the host's BRC-169 server (#113): registrations,
@@ -133,7 +134,7 @@ export interface Env {
 }
 
 const USAGE = `usage:
-  skein-host init [--owner <hex>] [--handle host]          the host skein (#90): the operator's instance, from the default image, claimed for --owner (default SKEIN_OWNER); once
+  skein-host init [--owner <hex>] [--handle host]          the host skein (#90): the operator's instance, from the default image, for --owner (default SKEIN_OWNER) to claim from a wallet (skein plan claim); once
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance for an identity outside the host (#40): the instance manager's create (#113)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
@@ -151,8 +152,7 @@ const USAGE = `usage:
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
-  skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row (#89)
-  skein-host claim <handle> <owner-key> [--messagebox url] [--handle h@d]      the owner's claim into an image: the owner's admin rows, the claim row removed
+  skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein plan claim)
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 the owner's messages (installing an app, dispatch rows, the address book, a directory into main) are built by
@@ -204,7 +204,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
           try {
             const src = await bootSourceOf(v.image !== undefined ? { boot: v.image === "default" ? DEFAULT_IMAGE : v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
-            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein-host claim)" : ""}`);
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it from your wallet (skein plan claim, skein send)" : ""}`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
@@ -260,8 +260,6 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await eventCmd(db, rest, env);
       case "import-handles":
         return await importHandlesCmd(db, rest, env);
-      case "claim":
-        return await claimCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -426,8 +424,9 @@ async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     await router.close();
   }
   db.setStatus(handle, "enabled");
-  env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, claimed by ${short(owner)} · at ${c.url} · the instance manager in its address book`);
-  env.out(`next, as the owner (#124; the router running): skein plan install https://github.com/shruggr/skein-onboard#v0.2.0 --origin ${c.url} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' --out plan, then skein send ${c.url} plan (the onboarding app: registration and BRC-169)`);
+  env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, for ${short(owner)} to claim · at ${c.url} · the instance manager in its address book`);
+  env.out(`next, as the owner (#127; the router running), first: skein plan claim --recipient ${c.identity} --out claim, then skein send ${c.url} claim (its claim row admits anyone until then: the first claim's sender owns it)`);
+  env.out(`then (#124): skein plan install https://github.com/shruggr/skein-onboard#v0.3.0 --origin ${c.url} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' --out plan, then skein send ${c.url} plan (the onboarding app: registration and BRC-169)`);
   return 0;
 }
 
@@ -454,56 +453,6 @@ async function mailboxCmd(db: HostDb, handle: string, owner: string, domain: str
 
 /** An outpoint as an image is named on chain: `<txid>_<vout>` (or `.`/`:`). */
 const isOutpoint = (s: string) => /^[0-9a-f]{64}[_.:][0-9]+$/.test(s);
-
-/**
- * `skein-host claim <handle> <owner-key>` (#89): the owner's claim into an
- * image (Router.claim: the instance manager's message in box `claim`,
- * appended as a `local` request). Through the running router's control
- * socket when `run` is up (its kernel holds the store), else a router of
- * this command's own, closed afterwards — as `event`.
- */
-async function claimCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [handle, owner, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { messagebox: { type: "string" }, handle: { type: "string" } } });
-  if (!handle || !owner || more.length) { env.err(USAGE); return 2; }
-  if (!/^0[23][0-9a-f]{64}$/.test(owner)) { env.err(`skein-host claim: ${owner} is not an identity key (hex)`); return 2; }
-  if (v.messagebox !== undefined && !/^https?:\/\/[^/]/.test(v.messagebox)) { env.err(`skein-host claim: ${v.messagebox} is not an http(s) URL`); return 2; }
-  const row = db.get(handle);
-  if (!row) { env.err(`skein-host claim: no instance ${handle}`); return 1; }
-  if (row.kind === "mailbox") { env.err(`skein-host claim: ${handle} is a mailbox instance`); return 1; }
-  const said = (c: { entry: string; claimed?: boolean }, by: string) => {
-    if (c.claimed) { env.out(`${handle}: claimed by ${short(owner)} (${c.entry}${by}): the owner's admin rows written, the claim row removed`); return 0; }
-    env.err(`${handle}: the claim ${c.entry} was refused (no claim row: claimed already, or not an image) — the instance's log says why`);
-    return 1;
-  };
-  const sock = join(homeOf(env.vars), CONTROL_SOCKET);
-  let answer;
-  try {
-    answer = await controlRequest(sock, { op: "claim", handle, owner, ...(v.messagebox ? { messagebox: v.messagebox } : {}), ...(v.handle ? { name: v.handle } : {}) });
-  } catch (e) {
-    env.err(`skein-host claim ${handle}: the router's control socket: ${(e as Error).message}`);
-    return 1;
-  }
-  if (answer) {
-    if (!answer.ok) { env.err(`skein-host claim ${handle}: ${answer.error}`); return 1; }
-    return said(answer, ", by the running router");
-  }
-  const running = await routerAt(env.vars);
-  if (running) {
-    env.err(`skein-host claim: a router serves this host at ${running}, but no control socket answers at ${sock}: its kernel holds ${handle}'s store, and a second one must not write it. Run this with the router's SKEIN_HOME, or restart the router`);
-    return 1;
-  }
-  const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
-  try {
-    const [name, domain] = (v.handle ?? "").replace(/^@/, "").split("@");
-    const c = await router.claim(handle, owner, { messagebox: v.messagebox, ...(name ? { handle: name, ...(domain ? { domain } : {}) } : {}) });
-    return said({ entry: c.entry.toString(), claimed: c.claimed }, "");
-  } catch (e) {
-    env.err(`skein-host claim ${handle}: ${(e as Error).message}`);
-    return 1;
-  } finally {
-    await router.close();
-  }
-}
 
 /**
  * `skein-host import-handles` (#113): the mailbox instances host.db has and

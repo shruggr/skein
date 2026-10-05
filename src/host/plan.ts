@@ -130,7 +130,7 @@ function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"
   if (s === "session") return { sender: "session", label: "a session" };
   if (s === "event") return { sender: "event", label: "events" };
   if (s === "$owner") {
-    if (!view.owner) throw new Error("sender $owner: the instance has no owner yet (an image not claimed, #89: skein-host claim)");
+    if (!view.owner) throw new Error("sender $owner: the instance has no owner yet (an image not claimed, #89, #127: the owner's own claim, skein plan claim)");
     return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
   }
   if (s === "$self") return { sender: keyBytes(view.identity), label: `the instance itself (${view.identity.slice(0, 10)}…)` };

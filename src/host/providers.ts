@@ -63,12 +63,14 @@
 //              operator's instance, `skein-host init`): its entry is in the host
 //              skein's address book alone, and a message from any other instance
 //              or key is not acted on and not answered (a line in the host's log).
-//              create {handle, owner, image?}   → {handle, identity: bytes(33), url}:
+//              create {handle, owner, image?, claim} → {handle, identity: bytes(33), url}:
 //                     the identity derived, the instance booted from the image
-//                     (`default`, the only one so far), the owner's claim delivered,
-//                     then — claimed — its hostname published and it started
-//                     (Router.createInstance). Refused (an answer {error}): a bad or
-//                     taken handle, a bad owner key, another image, a refused claim
+//                     (`default`, the only one so far), `claim` — the owner's own
+//                     signed claim {message, body}, naming no recipient (#127) —
+//                     forwarded into it, then — claimed — its hostname published
+//                     and it started (Router.createInstance). Refused (an answer
+//                     {error}): a bad or taken handle, a bad owner key, another
+//                     image, no claim, another key's claim, a refused claim
 //              start {handle}   → {handle, started: true, url}: published and started
 //              stop {handle}    → {handle, stopped: true}: unpublished and stopped
 //              create {handle, owner, image: "mailbox", domain?} (#113): a mailbox
@@ -76,10 +78,8 @@
 //                     keeping its mail), published at once; the same owner and
 //                     handle again: the same answer (it exists). `domain` (both
 //                     images): the handle's domain, recorded with the row
-//              (`list` later.) It also speaks first: the claim — a message in box
-//              `claim`, body {owner, messagebox?, handle?, domain?}, into an image
-//              (Router.claim, `skein-host claim`, and create's own); the image's
-//              claim row admits anyone
+//              (`list` later.) It signs no claim (#127): it forwards the owner's,
+//              as signed
 //   certifier  the host's BRC-169 certifier (#100, #113): the host skein's alone,
 //              as the manager. Its key is the certifier key, the manifest's
 //              metanet.trust.publicKey (the master's child, key ID `certifier`).

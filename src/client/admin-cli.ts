@@ -7,11 +7,13 @@
 //   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] <where> [--out dir]
 //   skein plan peers remove <key> <where> [--out dir]
 //   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
+//   skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]
 //   skein send <origin> <dir>
 //
 // <where> is how the plan reads the instance: `--origin <url>` (its explorer,
 // the owner's, read through the wallet: `1sat authfetch GET`), or `--store
 // <runtime.db>` (its store file, read only, on the host). `dispatch`, `peers`
+// `claim` (#127: an image's claim row, from anyone; the sender owns it),
 // and `deploy` also take `--recipient <identity key>` alone (no reads: a
 // deploy then sends every object and the head). With `--out` the plan is a
 // directory — prompt.txt and 001-<box>.json, … — else the prompt goes to
@@ -24,7 +26,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { CID } from "multiformats/cid";
-import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planDeploy, planDispatch, planFiles, planInstallApp, planPeers, planUninstallApp, writePlan, type AdminPlan, type PeerChange } from "./admin.ts";
+import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planClaim, planDeploy, planDispatch, planFiles, planInstallApp, planPeers, planUninstallApp, writePlan, type AdminPlan, type PeerChange } from "./admin.ts";
 import type { InstanceView } from "../host/plan.ts";
 
 export const PLAN_USAGE = `usage:
@@ -34,9 +36,10 @@ export const PLAN_USAGE = `usage:
   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] <where> [--out dir]
   skein plan peers remove <key> <where> [--out dir]                                  an address-book entry (#70)
   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]             a directory into main (objects, head)
+  skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]             an image's claim (#127): the wallet that sends it owns the instance
   skein send <origin> <dir>                                                          the files, in order, to <origin>/sendMessage by the wallet
 <where>: --origin <url> (the explorer, read by the wallet: \`1sat authfetch GET\`; the owner's) | --store <runtime.db> (read only)
-         | --recipient <key> (dispatch, peers, deploy: no reads)
+         | --recipient <key> (dispatch, peers, deploy, claim: no reads)
 the wallet: $SKEIN_AUTHFETCH, default \`1sat authfetch\` (load its env first: set -a; . ~/.1sat/cli/wallet.env; set +a)`;
 
 export interface AdminEnv {
@@ -140,6 +143,21 @@ export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
         const change: PeerChange = op === "add" ? { op: "add", key: key!, transport, address: address!, ...(v.role ? { role: v.role } : {}), ...named } : { op: "remove", key: key! };
         const t = await targetOf(v, env);
         try { emit(planPeers(t.recipient, [change]), v.out, env); } finally { t.close(); }
+        return 0;
+      }
+      case "claim": {
+        const { values: v, positionals: more } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, messagebox: { type: "string" }, handle: { type: "string" } } });
+        if (more.length) { env.err(PLAN_USAGE); return 2; }
+        if (v.messagebox !== undefined && !/^https?:\/\/[^/]/.test(v.messagebox)) { env.err(`skein plan claim: ${v.messagebox} is not an http(s) URL`); return 2; }
+        let named: { handle?: string; domain?: string } = {};
+        if (v.handle !== undefined) {
+          const h = v.handle.replace(/^@/, "");
+          const at = h.lastIndexOf("@");
+          named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h };
+          if (!named.handle || (at > 0 && !named.domain)) { env.err(`skein plan claim: --handle ${v.handle}: want handle@domain`); return 2; }
+        }
+        const t = await targetOf(v, env);
+        try { emit(planClaim(t.recipient, { messagebox: v.messagebox, ...named }), v.out, env); } finally { t.close(); }
         return 0;
       }
       case "deploy": {
