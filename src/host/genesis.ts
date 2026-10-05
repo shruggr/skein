@@ -196,7 +196,7 @@ export const MAILBOX_DISPATCH: DispatchSpec[] = [
 /**
  * The write scopes of the stock genesis-wired programs (#77): the heads each
  * may advance, by program name. The front door's sessions; the messagebox's
- * lists and outbound sessions; the wallet's records (#79: `wallet/…`, its
+ * lists (#126: its outbound sessions are the kernel's, authfetch); the wallet's records (#79: `wallet/…`, its
  * coins, actions, drafts and outputs — the chain is the chain app's). The
  * resolve program's records (#87: `resolve/peers`, what a BRC-169 lookup
  * found — never the address book, which only the owner's `peers` messages
@@ -205,7 +205,7 @@ export const MAILBOX_DISPATCH: DispatchSpec[] = [
  */
 export const STOCK_SCOPES: Record<string, string[]> = {
   frontdoor: ["frontdoor/"],
-  messagebox: ["mailbox", "outbound"],
+  messagebox: ["mailbox"],
   resolve: ["resolve/"],
   wallet: ["wallet/"],
   // #78: the chain module (shruggr/skein-chain) wired at boot by a system tree as `bin/chain.wasm`:

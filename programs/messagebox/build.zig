@@ -10,7 +10,6 @@ pub fn build(b: *std.Build) void {
     const sdk = b.dependency("skein_sdk", .{ .target = t, .optimize = o, .wallet = false });
     const cbor = sdk.module("cbor");
     const sk = sdk.module("sk");
-    const brc = sdk.module("brc104");
     const dagjson = sdk.module("dagjson");
     const message = sdk.module("message");
     const exe = b.addExecutable(.{
@@ -20,7 +19,7 @@ pub fn build(b: *std.Build) void {
             .target = t,
             .optimize = o,
             .strip = true,
-            .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "sk", .module = sk }, .{ .name = "brc104", .module = brc }, .{ .name = "dagjson", .module = dagjson }, .{ .name = "message", .module = message } },
+            .imports = &.{ .{ .name = "cbor", .module = cbor }, .{ .name = "sk", .module = sk }, .{ .name = "dagjson", .module = dagjson }, .{ .name = "message", .module = message } },
         }),
     });
     b.installArtifact(exe);

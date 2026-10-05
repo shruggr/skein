@@ -22,11 +22,11 @@ pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreibf72q5lb4e3ooiz6zymcsjnoje6r7o3mgocsiurwdqutpueyle4y" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreieiuxsale5wmudfymyuys4sldggvqo6foothuvmfscyeerfczjpli" },
+    .{ .name = "messagebox", .cid = "bafkreig3j636ef3kybhzvzpnkkgquj6uoms77kgiminhkeg6cysjpjkt34" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreifym5amre63pmamem3uvfkat7qo24ymkif37h2yrzumrsu3kxzhmy" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
-    .{ .name = "resolve", .cid = "bafkreidpvi7hm4u6r4v6xhhj25dq4jcsme3qduarlgmyqhvzq7fa4optby" },
+    .{ .name = "resolve", .cid = "bafkreifaksuagkwqclhbja7nkuwnxmlkfpv2lsqr2zvbod76qvia2mfdmq" },
 };
 
 pub fn moduleText(name: []const u8) []const u8 {
