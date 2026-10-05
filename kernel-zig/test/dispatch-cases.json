@@ -56,7 +56,7 @@
     {
       "name": "http: exact before prefix, longest prefix first, the sender rule within each; a row's key separates \"/x*\" from the prefix \"/x\"",
       "updates": [
-        { "op": "add", "row": { "transport": "http", "address": "/explore", "prefix": true, "sender": "owner", "program": "$cid", "fn": "explore", "id": "h1" } },
+        { "op": "add", "row": { "transport": "http", "address": "/explore", "prefix": true, "sender": "$O", "program": "$cid", "fn": "explore", "id": "h1" } },
         { "op": "add", "row": { "transport": "http", "address": "/", "prefix": true, "sender": "*", "program": "$cid", "fn": "get", "id": "h2" } },
         { "op": "add", "row": { "transport": "http", "address": "/sendMessage", "sender": "session", "program": "$cid", "id": "h3" } },
         { "op": "add", "row": { "transport": "http", "address": "/a/b", "prefix": true, "sender": "$A", "program": "$cid", "id": "h4" } },
@@ -73,10 +73,9 @@
       "cases": [
         { "kind": "http", "path": "/sendMessage", "who": {}, "want": "h2" },
         { "kind": "http", "path": "/sendMessage", "who": { "key": "A" }, "want": "h3" },
-        { "kind": "http", "path": "/explore/log", "who": { "key": "O", "owner": "O" }, "want": "h1" },
-        { "kind": "http", "path": "/explore", "who": { "key": "O", "owner": "O" }, "want": "h1" },
-        { "kind": "http", "path": "/explore/log", "who": { "key": "A", "owner": "O" }, "want": "h2" },
-        { "kind": "http", "path": "/explore/log", "who": { "key": "O" }, "want": "h2" },
+        { "kind": "http", "path": "/explore/log", "who": { "key": "O" }, "want": "h1" },
+        { "kind": "http", "path": "/explore", "who": { "key": "O" }, "want": "h1" },
+        { "kind": "http", "path": "/explore/log", "who": { "key": "A" }, "want": "h2" },
         { "kind": "http", "path": "/a/b/c", "who": { "key": "A" }, "want": "h6" },
         { "kind": "http", "path": "/a/b/c", "who": { "key": "B" }, "want": "h9" },
         { "kind": "http", "path": "/a/b/c", "who": { "key": "O" }, "want": "h5" },
@@ -98,7 +97,7 @@
       "updates": [
         { "op": "add", "row": { "transport": "http", "address": "/only", "sender": "session", "program": "$cid", "id": "r1" } },
         { "op": "add", "row": { "transport": "http", "address": "/k", "sender": "$A", "program": "$cid", "id": "r2" } },
-        { "op": "add", "row": { "transport": "http", "address": "/p", "prefix": true, "sender": "owner", "program": "$cid", "id": "r3" } },
+        { "op": "add", "row": { "transport": "http", "address": "/p", "prefix": true, "sender": "$O", "program": "$cid", "id": "r3" } },
         { "op": "add", "row": { "transport": "http", "address": "/open", "sender": "*", "program": "$cid", "id": "r4" } },
         { "op": "add", "row": { "transport": "mailbox", "address": "/none", "sender": "*", "program": "$cid", "id": "r5" } }
       ],
@@ -111,9 +110,8 @@
         { "kind": "http", "path": "/only/x", "who": { "key": "B" }, "want": { "refused": "path" } },
         { "kind": "http", "path": "/k", "who": { "key": "B" }, "want": { "refused": "sender" } },
         { "kind": "http", "path": "/k", "who": {}, "want": { "refused": "session" } },
-        { "kind": "http", "path": "/p/x", "who": { "key": "A", "owner": "O" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/p/x", "who": { "key": "O", "owner": "O" }, "want": "r3" },
-        { "kind": "http", "path": "/p/x", "who": { "key": "O" }, "want": { "refused": "sender" } },
+        { "kind": "http", "path": "/p/x", "who": { "key": "A" }, "want": { "refused": "sender" } },
+        { "kind": "http", "path": "/p/x", "who": { "key": "O" }, "want": "r3" },
         { "kind": "http", "path": "/open", "who": {}, "want": "r4" },
         { "kind": "http", "path": "/open", "who": { "key": "A" }, "want": "r4" }
       ]
@@ -121,7 +119,7 @@
     {
       "name": "http: a row's `read` op against the genesis's reads (a log before #115)",
       "reads": [
-        { "op": "explore", "owner": true },
+        { "op": "explore", "caller": "$O" },
         { "op": "other", "caller": "$A" },
         { "op": "any" },
         { "op": "*", "caller": "$C" }
@@ -135,9 +133,9 @@
       ],
       "fold": ["l1", "l2", "l3", "l4", "l5"],
       "cases": [
-        { "kind": "http", "path": "/explore/x", "who": { "key": "O", "owner": "O" }, "want": "l1" },
-        { "kind": "http", "path": "/explore/x", "who": { "key": "A", "owner": "O" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/explore/x", "who": { "key": "C", "owner": "O" }, "want": "l1" },
+        { "kind": "http", "path": "/explore/x", "who": { "key": "O" }, "want": "l1" },
+        { "kind": "http", "path": "/explore/x", "who": { "key": "A" }, "want": { "refused": "sender" } },
+        { "kind": "http", "path": "/explore/x", "who": { "key": "C" }, "want": "l1" },
         { "kind": "http", "path": "/other", "who": { "key": "A" }, "want": "l2" },
         { "kind": "http", "path": "/other", "who": { "key": "B" }, "want": { "refused": "sender" } },
         { "kind": "http", "path": "/free", "who": {}, "want": "l3" },
@@ -153,7 +151,7 @@
       ],
       "fold": ["n1"],
       "cases": [
-        { "kind": "http", "path": "/explore/x", "who": { "key": "O", "owner": "O" }, "want": { "refused": "sender" } }
+        { "kind": "http", "path": "/explore/x", "who": { "key": "O" }, "want": { "refused": "sender" } }
       ]
     },
     {

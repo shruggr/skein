@@ -903,16 +903,15 @@ pub const Runtime = struct {
     /// The row a request record matches as the table stands (#115; for http with none, why).
     fn matchOf(rt: *Runtime, a: std.mem.Allocator, transport: []const u8, req: Value) !Match {
         const rows = (try dispatch.current(a, rt.store)) orelse &.{};
-        const owner = if (try rt.ownerOf(a)) |v| Value.bytesOf(v) else null;
         if (std.mem.eql(u8, transport, "http")) {
-            const who: dispatch.Who = .{ .key = claimedKey(a, req.get("headers")), .owner = owner, .reads = rt.genesis.?.get("reads") };
+            const who: dispatch.Who = .{ .key = claimedKey(a, req.get("headers")), .reads = try legacyReads(a, rt.genesis.?) };
             return switch (dispatch.forHttp(rows, Value.str(req.get("route")) orelse "/", who)) {
                 .row => |r| .{ .row = r.value },
                 .refused => |why| .{ .refused = why.text() },
             };
         } else if (std.mem.eql(u8, transport, "libp2p")) {
             const name = Value.str(req.get("topic")) orelse Value.str(req.get("protocol")) orelse return .{};
-            const who: dispatch.Who = .{ .key = peerKey(Value.bytesOf(req.get("from")) orelse ""), .owner = owner };
+            const who: dispatch.Who = .{ .key = peerKey(Value.bytesOf(req.get("from")) orelse "") };
             if (dispatch.forLibp2p(rows, name, who)) |r| return .{ .row = r.value };
             // #119: a topic no row is at is delivered by the app that subscribed it (the first standing subscription).
             const topic = Value.str(req.get("topic")) orelse return .{};
@@ -921,6 +920,25 @@ pub const Runtime = struct {
             return .{ .row = try subsm.rowValue(a, rt.store, sub) };
         }
         return .{};
+    }
+
+    /// A genesis's `reads` (a log before #115) as the match takes them: an `{owner: true, op}` read
+    /// is the genesis's owner's (`caller`: its key) — there is no built-in owner in the match (#126).
+    fn legacyReads(a: std.mem.Allocator, g: Value) !?Value {
+        const rs = g.get("reads") orelse return null;
+        if (rs != .array) return rs;
+        const out = try a.alloc(Value, rs.array.len);
+        for (rs.array, out) |r, *o| {
+            o.* = r;
+            const x = r.get("owner") orelse continue;
+            if (x != .bool or !x.bool) continue;
+            var m = cbor.MapBuilder.init(a);
+            try m.put("op", r.get("op"));
+            // An owner's read with no owner in the genesis is no one's: a key no request claims.
+            try m.put("caller", .{ .bytes = Value.bytesOf(g.get("owner")) orelse &[_]u8{0} ** 33 });
+            o.* = m.value();
+        }
+        return .{ .array = out };
     }
 
     /// The subscriptions as the log stands (#119): the kept fold, else folded now from the store.
@@ -1324,12 +1342,9 @@ pub const Runtime = struct {
             try r.put("fn", cbor.string(o));
             _ = try dispatch.apply(a, rt.store, "add", r.value(), d);
         }
-        // #121: every sender is a key. Beside the admin rows, the owner's explorer row (the front
-        // door's fn `explore`, at /explore and below) — unless the image seeded a row for the
-        // `owner` symbol (#115, an image before #121), which keeps reading the claim's key as then.
-        var symbolic = false;
-        for (now) |x| symbolic = symbolic or x.sender == .owner;
-        if (!symbolic) if (rt.genesis.?.get("programs")) |ps| if (Value.cidOf(ps.get("frontdoor"))) |fd| {
+        // #121, #126: every sender is a key. Beside the admin rows, the owner's explorer row (the
+        // front door's fn `explore`, at /explore and below), with the claim's key.
+        if (rt.genesis.?.get("programs")) |ps| if (Value.cidOf(ps.get("frontdoor"))) |fd| {
             var r = cbor.MapBuilder.init(a);
             try r.put("transport", cbor.string("http"));
             try r.put("address", cbor.string("/explore"));
@@ -1342,7 +1357,7 @@ pub const Runtime = struct {
         _ = try dispatch.apply(a, rt.store, "remove", row.value, d);
         _ = try heads.advanceHead(a, rt.store, CLAIM_HEAD, try rt.store.put(a, claimed.value()), by);
         if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, null, handle, domain, "claim", by);
-        rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers{s}; the claim row removed{s}", .{ shortKey(owner), if (symbolic) "" else ", the explorer row", if (mb != null) "; the owner's messagebox in the address book" else "" });
+        rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers, the explorer row; the claim row removed{s}", .{ shortKey(owner), if (mb != null) "; the owner's messagebox in the address book" else "" });
     }
 
     /// The instance's owner (#89): the genesis's, else the claimed key (the head `claim`), else null (an unclaimed image).

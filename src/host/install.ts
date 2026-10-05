@@ -114,7 +114,7 @@ export async function instanceView(store: Store): Promise<InstanceView> {
   const heads = typeof (store as Partial<IndexStore>).heads === "function" ? (store as IndexStore).heads() : [];
   return {
     store,
-    owner: await ownerOf(store, g),
+    owner: await ownerOf(store),
     identity: g.identity instanceof Uint8Array ? Buffer.from(g.identity).toString("hex") : String(g.identity),
     programs: (g.programs ?? {}) as Record<string, CID>,
     addressBook: await addressBook(store),
@@ -125,17 +125,19 @@ export async function instanceView(store: Store): Promise<InstanceView> {
 }
 
 /**
- * The instance's owner (hex): its genesis's, else — an image (#89) — the key
- * its claim named (the head `claim` → the claim's body), else "" (an image
- * not claimed yet: nobody may install into it).
+ * The instance's owner (hex) as tooling resolves `$owner` (#126: there is no
+ * built-in owner in the kernel — the owner is the key on the admin rows): the
+ * sender of the kernel's `dispatch` admin row (the claim writes the admin rows
+ * with its sender's key; a genesis that names its owner seeds them with it),
+ * else "" (an image not claimed yet: nobody may install into it). With
+ * delegates (another `dispatch` row), the first row's sender: the genesis's or
+ * the claim's.
  */
-export async function ownerOf(store: Store, genesis: Record<string, unknown>): Promise<string> {
-  const hex = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "";
-  if (genesis.owner !== undefined) return hex(genesis.owner);
-  const root = await headTree(store, "claim");
-  if (!root) return "";
-  const b = await store.get(root).catch(() => undefined) as { owner?: unknown } | undefined;
-  return hex(b?.owner);
+export async function ownerOf(store: Store): Promise<string> {
+  const rows = (await currentDispatch(store)) ?? [];
+  const r = rows.find((x) => x.program === "kernel" && x.fn === "dispatch" && x.transport === "mailbox");
+  const k = r ? senderBytes(r.sender) : undefined;
+  return k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" && /^0[23][0-9a-f]{64}$/.test(k) ? k : "";
 }
 
 /** The app record a head's root is, if it is one. */

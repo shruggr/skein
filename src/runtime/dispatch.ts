@@ -13,12 +13,11 @@
 // match wins, in table order, for every transport (#115).
 //
 //   row  {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true (http only; a libp2p row is exact, #119),
-//         sender: "*" | "event" | "session" | "owner" | bytes(33), program: <cid> | "kernel", fn?, …settings}
+//         sender: "*" | "event" | "session" | bytes(33), program: <cid> | "kernel", fn?, …settings}
 //
 //   sender "event" (#79): the row takes events only (a feed's header, a broadcaster's proof, a route's
-//   admit), never a message — the host's wiring into a box, not an open box. "owner" (#115, http):
-//   the instance's owner's session (the genesis's owner, else the claim's) — #121: gone; nothing writes it, and a row a log
-//   already holds with it is still read so (every sender is a key: the claim writes the owner's explorer row).
+//   admit), never a message — the host's wiring into a box, not an open box. No built-in owner (#115, #126):
+//   every sender is a key (the claim writes the owner's admin rows and explorer row with its sender's key).
 //   `filter?: "beef"` (#121): what the kernel's door runs on a package before its entry is written.
 //
 // The kernel writes the chain and matches by it (kernel-zig/src/dispatch.zig):
@@ -37,7 +36,7 @@ import type { Ms } from "./types.ts";
 export type DispatchOrigin = { kind: "dispatch" };
 export type Op = "add" | "remove";
 export type Transport = "mailbox" | "http" | "libp2p" | "local";
-export type Sender = "*" | "event" | "session" | "owner" | Uint8Array;
+export type Sender = "*" | "event" | "session" | Uint8Array;
 /** A row as the kernel holds it; `program` a program record's CID, or "kernel" (an admin operation named by `fn`). */
 export type DispatchRow = { transport: Transport; address: string; prefix?: boolean; sender: Sender; program: CID | "kernel"; fn?: string; [setting: string]: unknown };
 export type DispatchUpdate = { op: Op; row: DispatchRow; origin: CID; prev: CID; seq: number; thread?: CID; input: CID; at: Ms };
@@ -65,7 +64,7 @@ const isKey = (b: unknown): b is Uint8Array => b instanceof Uint8Array && b.leng
 
 /** A row's sender as the kernel reads it (dispatch.zig senderOf), or undefined: not a row. A key may be hex: the index-store reader's form. */
 function senderOf(s: unknown): Sender | string | undefined {
-  if (s === "*" || s === "event" || s === "session" || s === "owner") return s;
+  if (s === "*" || s === "event" || s === "session") return s;
   if (typeof s === "string") return /^0[23][0-9a-f]{64}$/.test(s) ? s : undefined;
   return isKey(s) ? s : undefined;
 }
@@ -121,10 +120,8 @@ export interface Who {
   key?: string;
   /** An event (no sender): only a `*` or an `event` row takes it. */
   event?: boolean;
-  /** The instance's owner, for an `owner` row. */
-  owner?: string;
-  /** The genesis's `reads` (a log before #115): a row with a `read` op takes only a sender they allow. */
-  reads?: Array<{ caller?: Uint8Array; owner?: boolean; op?: string }>;
+  /** The genesis's `reads` (a log before #115): a row with a `read` op takes only a sender they allow (an `{owner: true}` read already the owner's key: the kernel's legacyReads). */
+  reads?: Array<{ caller?: Uint8Array; op?: string }>;
 }
 
 /** Whether `r`'s sender rule takes `w` (dispatch.zig `takes`). */
@@ -135,7 +132,6 @@ export function takes(r: DispatchRow, w: Who): boolean {
   const ok = s === "event" ? w.event === true
     : w.event || w.key === undefined ? false
     : s === "session" ? http
-    : s === "owner" ? http && w.owner !== undefined && w.key === w.owner
     : senderText(s) === w.key;
   if (!ok) return false;
   if (http && typeof r.read === "string") return mayRead(w, r.read);
@@ -146,7 +142,6 @@ function mayRead(w: Who, op: string): boolean {
   if (!w.reads || w.key === undefined) return false;
   for (const r of w.reads) {
     if (r.op !== op && r.op !== "*") continue;
-    if (r.owner === true) { if (w.owner !== undefined && w.owner === w.key) return true; continue; }
     if (!(r.caller instanceof Uint8Array)) return true;
     if (senderText(r.caller) === w.key) return true;
   }

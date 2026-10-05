@@ -34,7 +34,7 @@ for (const t of f.tables) {
     assert.deepEqual(rows.map((r) => r.id), t.fold, "fold");
     const reads = t.reads === undefined ? undefined : value(t.reads) as Who["reads"];
     t.cases.forEach((c, i) => {
-      const who: Who = { ...(c.who?.key ? { key: f.keys[c.who.key] } : {}), ...(c.who?.owner ? { owner: f.keys[c.who.owner] } : {}), ...(reads ? { reads } : {}) };
+      const who: Who = { ...(c.who?.key ? { key: f.keys[c.who.key] } : {}), ...(reads ? { reads } : {}) };
       let got: unknown;
       if (c.kind === "mail") got = id(forMail(rows, f.keys[c.sender]!, c.box));
       else if (c.kind === "event") got = id(forEvent(rows, c.box));

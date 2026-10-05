@@ -10,14 +10,15 @@
 //                                  "/<protocol>"; local: a provider's name
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
 //                                  then the longest prefix); a libp2p row is exact (#119)
-//          sender: "*" | "event" | "session" | "owner" | bytes(33),
+//          sender: "*" | "event" | "session" | bytes(33),
 //                                  "*": anyone (an open route; an event's box too); "event": events
 //                                  only (#79: the host's wiring — a feed's header, a broadcaster's
 //                                  proof, a route's admit — never a message); "session": an HTTP
-//                                  route that needs a BRC-103/104 session, any identity; "owner"
-//                                  (#115, http): the instance's owner's session (the genesis's
-//                                  owner, else the claim's) — #121: nothing writes it (every sender is a key; the claim writes the owner's explorer row), and a row a log holds with it is still read so; a key: that
-//                                  identity — a message's sender, the session's, a libp2p peer's
+//                                  route that needs a BRC-103/104 session, any identity; a key:
+//                                  that identity — a message's sender, the session's, a libp2p
+//                                  peer's. There is no built-in owner (#115, #126): the owner is
+//                                  the key on the admin rows (the claim writes them with its
+//                                  sender's key)
 //          program: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
 //                                  itself: an admin operation (`fn`: objects | head | dispatch | peers),
@@ -57,7 +58,7 @@ pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
 /// written and the claim row removed (scheduler.zig kernelOp).
 pub const kernel_ops = admin_ops ++ [_][]const u8{"claim"};
 
-pub const Sender = union(enum) { any, event, session, owner, key: []const u8 };
+pub const Sender = union(enum) { any, event, session, key: []const u8 };
 
 pub const Row = struct {
     transport: []const u8,
@@ -119,7 +120,6 @@ fn senderOf(v: ?Value) ?Sender {
         if (std.mem.eql(u8, s, "*")) return .any;
         if (std.mem.eql(u8, s, "event")) return .event;
         if (std.mem.eql(u8, s, "session")) return .session;
-        if (std.mem.eql(u8, s, "owner")) return .owner;
         return null;
     }
     if (Value.bytesOf(x)) |b| if (secp.isKey(b)) return .{ .key = b };
@@ -139,9 +139,8 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
         if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
         if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http row has one");
     }
-    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" or \"owner\" (http) or an identity key (33 bytes)");
+    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" (http) or an identity key (33 bytes)");
     if (sender == .session and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"session\": only an http row (a BRC-103/104 session)");
-    if (sender == .owner and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"owner\": only an http row (the owner's BRC-103/104 session)");
     if (sender == .event and !std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "sender \"event\": only a mailbox row (a box events are admitted into)");
     const prog = v.get("program") orelse return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
     if (Value.str(prog)) |s| {
@@ -181,7 +180,6 @@ fn senderEq(x: Sender, y: Sender) bool {
         .any => y == .any,
         .event => y == .event,
         .session => y == .session,
-        .owner => y == .owner,
         .key => |k| y == .key and std.mem.eql(u8, k, y.key),
     };
 }
@@ -276,9 +274,9 @@ pub const Who = struct {
     key: ?[]const u8 = null,
     /// An event (the host's wiring): no sender; only a `*` or an `event` row takes it.
     event: bool = false,
-    /// The instance's owner (the genesis's, else the claim's), for an `owner` row.
-    owner: ?[]const u8 = null,
-    /// The genesis's `reads` (a log written before #115): a row with a `read` op takes only a sender they allow.
+    /// The genesis's `reads` (a log written before #115): a row with a `read` op takes only a sender
+    /// they allow ([{caller?, op}]; the scheduler writes an `{owner: true}` read's caller as the
+    /// genesis's owner key, legacyReads).
     reads: ?Value = null,
 };
 
@@ -288,7 +286,6 @@ pub fn takes(r: Row, w: Who) bool {
         .any => return true,
         .event => w.event,
         .session => !w.event and w.key != null and std.mem.eql(u8, r.transport, "http"),
-        .owner => !w.event and w.key != null and w.owner != null and std.mem.eql(u8, r.transport, "http") and std.mem.eql(u8, w.key.?, w.owner.?),
         .key => |k| !w.event and w.key != null and std.mem.eql(u8, k, w.key.?),
     };
     if (!ok) return false;
@@ -296,7 +293,7 @@ pub fn takes(r: Row, w: Who) bool {
     return true;
 }
 
-/// A legacy read permission (the genesis's `reads`, before #115: [{caller?, op} | {owner: true, op}]).
+/// A legacy read permission (the genesis's `reads`, before #115: [{caller?, op}], an `{owner: true}` one already the owner's key).
 fn mayRead(w: Who, op: []const u8) bool {
     const rs = w.reads orelse return false;
     if (rs != .array) return false;
@@ -304,10 +301,6 @@ fn mayRead(w: Who, op: []const u8) bool {
     for (rs.array) |r| {
         const o = Value.str(r.get("op")) orelse "";
         if (!std.mem.eql(u8, o, op) and !std.mem.eql(u8, o, "*")) continue;
-        if (r.get("owner")) |x| if (x == .bool and x.bool) {
-            if (w.owner) |k| if (std.mem.eql(u8, k, caller)) return true;
-            continue;
-        };
         const who = Value.bytesOf(r.get("caller")) orelse return true;
         if (std.mem.eql(u8, who, caller)) return true;
     }

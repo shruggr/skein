@@ -226,7 +226,6 @@ test "the dispatch table: fold and match, the cases dispatch.ts is checked again
             const want = c.object.get("want").?;
             const who: dispatch.Who = if (c.object.get("who")) |w| .{
                 .key = try caseKey(a, f, w.object.get("key")),
-                .owner = try caseKey(a, f, w.object.get("owner")),
                 .reads = reads,
             } else .{};
             var got: ?[]const u8 = null;
