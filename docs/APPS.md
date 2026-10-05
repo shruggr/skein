@@ -139,7 +139,7 @@ approves (§3): the install prompt is the rows read aloud. A manifest asking
 for a row the owner did not approve is refused at install.
 
 **The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
-(#79): skein-static 0.2.0, skein-overlay 0.4.0, skein-shell and skein-chat
+(#79): skein-static 0.2.0, skein-overlay 0.4.1, skein-shell and skein-chat
 0.1.0 are in this shape. There are no grants: an app writes only `<name>/…`.
 
 **The app record** — the root of `<name>/app`, written by the install

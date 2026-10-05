@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.4.0).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.4.1).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -70,7 +70,7 @@ docs/MESSAGES.md "libp2p (#51)", "Topics an app asks for".
 ## Installing an overlay
 
 The steps below were run on skein main 9b06db6 with skein-chain v0.3.0
-(61b03c6) and skein-overlay v0.4.0 (2073980), on regtest, with no Arcade;
+(61b03c6) and skein-overlay v0.4.1 (d5df94e), on regtest, with no Arcade;
 the outputs are trimmed. `kernel-zig/equiv/install-overlay.ts` runs the same
 install, submit and lookup in the equivalence suite.
 
@@ -141,12 +141,12 @@ chain: prompt.txt and 6 messages to <ov1's key>
 `skein send`.
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-overlay#2073980541f652dd4ba8b2f4af4ad05072d01b91 --origin http://ov1.localhost:8100 --out overlay
+bin/skein plan install https://github.com/shruggr/skein-overlay#d5df94e8a7f875314e385f7d053aea835de53f6f --origin http://ov1.localhost:8100 --out overlay
 bin/skein send http://ov1.localhost:8100 overlay
 ```
 
 ```
-install overlay 0.4.0 — Overlay services …
+install overlay 0.4.1 — Overlay services …
   head      overlay/app → the app record bafyreicmdz4tu7ergfn2ddozvagwrrlat6ivvfsdydfwutmnexld7fzg6e (tree baf4bcfez5gnvrnapt2lcsqkrjct6z2yqopa6ywi)
   row       http /overlay/listTopicManagers from anyone → overlay.listTopicManagers
   row       http /overlay/listLookupServiceProviders from anyone → overlay.listLookupServiceProviders
@@ -161,7 +161,7 @@ install overlay 0.4.0 — Overlay services …
   row       libp2p tm_demo-proof from anyone → overlay.peerProof (derived: config.overlay)
   requires  chain/1
   publishes tm_demo, tm_demo-admit, tm_demo-proof (for information: emitting needs no grant)
-ov1: overlay 0.4.0 installed: 15 messages sent as the owner · head overlay/app → bafyreicmdz4tu7ergfn2ddozvagwrrlat6ivvfsdydfwutmnexld7fzg6e
+ov1: overlay 0.4.1 installed: 15 messages sent as the owner · head overlay/app → bafyreicmdz4tu7ergfn2ddozvagwrrlat6ivvfsdydfwutmnexld7fzg6e
 ```
 
 ### What `config.overlay` wires
@@ -268,7 +268,7 @@ and commit id), or from any machine with your wallet:
 ```
 bin/skein plan install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --origin https://<handle>.skein.nexus --out chain
 bin/skein send https://<handle>.skein.nexus chain
-bin/skein plan install https://github.com/shruggr/skein-overlay#2073980541f652dd4ba8b2f4af4ad05072d01b91 --origin https://<handle>.skein.nexus --out overlay
+bin/skein plan install https://github.com/shruggr/skein-overlay#d5df94e8a7f875314e385f7d053aea835de53f6f --origin https://<handle>.skein.nexus --out overlay
 bin/skein send https://<handle>.skein.nexus overlay
 ```
 
