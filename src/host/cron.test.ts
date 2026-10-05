@@ -175,7 +175,7 @@ test("cron through the router: cron-demo asks the host's cron provider; each tic
   let skew = 0;
   const h = await testHost(t, { idleMs: 400, now: () => msStamp(Date.now() + skew) });
   const dir = await cronTree(t);
-  const id = h.agent("cronny");
+  const id = h.instance("cronny");
   const d = await dirSource(dir);
   await h.router.bootRow("cronny", { kind: "tree", root: d.root, objects: d.objects });
   await h.router.start();
@@ -220,7 +220,7 @@ test("cron: a stopped instance with only an unsubscribed box is not woken", { sk
   let skew = 0;
   const h = await testHost(t, { idleMs: 300, now: () => msStamp(Date.now() + skew) });
   const dir = await cronTree(t);
-  const id = h.agent("quiet");
+  const id = h.instance("quiet");
   const d = await dirSource(dir);
   await h.router.bootRow("quiet", { kind: "tree", root: d.root, objects: d.objects });
   await h.router.start();
@@ -242,7 +242,7 @@ test("cron, remote: the same program, the cron provider reached by mailbox over 
   // Host A: the agent, whose http goes out for real (to B).
   const a = await testHost(t, { http: fetchHttp });
   const dir = await cronTree(t);
-  const id = a.agent("cronny");
+  const id = a.instance("cronny");
   const d = await dirSource(dir);
   await a.router.bootRow("cronny", { kind: "tree", root: d.root, objects: d.objects });
   await a.router.start();

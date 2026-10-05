@@ -36,7 +36,7 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
-import { CLAIM_ROW, codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type RouteSpec, type SubscriptionSpec, type System } from "./genesis.ts";
+import { CLAIM_ROW, codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type PathRowSpec, type BoxRowSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
@@ -95,9 +95,9 @@ export interface SystemTree {
   config: ConfigSpec;
   /** etc/dispatch.json (#77): the dispatch rows; etc/subscriptions.json, the form before it (mailbox rows). One of them is required. */
   dispatch?: DispatchSpec[];
-  subscriptions?: SubscriptionSpec[];
+  subscriptions?: BoxRowSpec[];
   /** etc/routes.json (#40, the form before #77: http and libp2p rows), else the stock http rows; etc/reads.json, else the stock reads. */
-  routes?: RouteSpec[];
+  routes?: PathRowSpec[];
   reads?: ReadSpec[];
 }
 
@@ -178,7 +178,7 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
   }
   const dispatch = json<DispatchSpec[]>(DISPATCH);
   if (dispatch !== undefined && !Array.isArray(dispatch)) throw new Error(`${DISPATCH}: not a list`);
-  const subscriptions = json<SubscriptionSpec[]>(SUBSCRIPTIONS);
+  const subscriptions = json<BoxRowSpec[]>(SUBSCRIPTIONS);
   if (subscriptions !== undefined && !Array.isArray(subscriptions)) throw new Error(`${SUBSCRIPTIONS}: not a list`);
   if (dispatch === undefined && subscriptions === undefined) throw new Error(`${DISPATCH}: missing (a system tree names its dispatch rows; ${SUBSCRIPTIONS} is the form before #77)`);
   for (const s of subscriptions ?? []) {
@@ -188,7 +188,7 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
   }
   const config = json<ConfigSpec>(CONFIG) ?? {};
   if (config.defaults && Object.values(config.defaults).some((v) => typeof v !== "string")) throw new Error(`${CONFIG}: every default is a string`);
-  const routes = json<RouteSpec[]>(ROUTES);
+  const routes = json<PathRowSpec[]>(ROUTES);
   if (routes !== undefined && !Array.isArray(routes)) throw new Error(`${ROUTES}: not a list`);
   const reads = json<ReadSpec[]>(READS);
   if (reads !== undefined && !Array.isArray(reads)) throw new Error(`${READS}: not a list`);

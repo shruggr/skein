@@ -104,7 +104,7 @@ test("the instance manager: create (claimed before published), refusals, the hos
   assert.match(String(a[0]?.body.error), /handle mel is taken/);
 
   // Another instance (its own key, from its own handle) is not acted on, and not answered.
-  h.agent("other");
+  h.instance("other");
   await h.router.hydrate("other");
   const lines = h.lines.length;
   a = await send("other", "create", { handle: "bob", owner: client });

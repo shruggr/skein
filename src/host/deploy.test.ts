@@ -72,7 +72,7 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
   const h = await testHost(t, { infer: inferId });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
-  for (const x of handles) h.agent(x);
+  for (const x of handles) h.instance(x);
   await h.router.start();
   const requests: Json[] = [];
   const f = (async (_url: string, init: { body: string }) => {

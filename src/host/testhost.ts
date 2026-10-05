@@ -1,5 +1,5 @@
-// A test host (#40): a router over a temporary host.db and SKEIN_HOME, agents
-// and mailbox instances with keys of their own (the signer's stand-in). With no
+// A test host (#40): a router over a temporary host.db and SKEIN_HOME,
+// instances (mailbox instances among them) with keys of their own (the signer's stand-in). With no
 // host skein its own origin's BRC-169 requests are answered by a fixture over
 // host.db (fake-discovery.ts); `hostSkein()` makes the real one (#113): the host
 // skein with the onboarding app installed, which then answers them.
@@ -64,7 +64,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
   return out;
 }
 
-/** A host with agents and mailbox instances, each instance's key its own (the signer's stand-in). */
+/** A host with instances (mailbox instances among them), each instance's key its own (the signer's stand-in). */
 export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
@@ -93,8 +93,14 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const base = `http://127.0.0.1:${router.port}`;
   const h = {
     home, db, router, base, owner, ownerKey, ownerId, lines, keyOf,
-    /** An agent row (its genesis at first hydration: the owner's mailbox must exist first to be named in it). */
-    agent(handle: string) { db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); return keyOf(handle).toPublicKey().toString(); },
+    /**
+     * An instance's row (host.db kind `agent`: not a mailbox instance), its
+     * genesis at first hydration (the owner's mailbox must exist first to be
+     * named in it). Its identity key (hex).
+     */
+    instance(handle: string) { db.add(handle, { store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); return keyOf(handle).toPublicKey().toString(); },
+    /** The same as `instance`, by its old name (for tests written before the rename). */
+    agent(handle: string) { return h.instance(handle); },
     /**
      * An instance booted from an image (#89; default: the default image,
      * images/default): no owner in its genesis, the claim row. Claim it with
@@ -139,7 +145,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
 
 /**
  * A small world on a test host (the explorer's and the store reader's tests):
- * the owner's mailbox, the inference peer's, and agent `alpha` with the shell
+ * the owner's mailbox, the inference peer's, and instance `alpha` with the shell
  * app and the chat app installed (#83); `dir` imported into alpha (objects →
  * `main`); a chat whose turn makes one bash
  * tool call (`ls | head -3`) and answers "README and **src**." into the
@@ -150,7 +156,7 @@ export async function chatWorld(t: { after(f: () => unknown): void }, dir: strin
   const h = await testHost(t, { infer: inferId });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
-  const alpha = h.agent("alpha");
+  const alpha = h.instance("alpha");
   await h.router.start();
   await h.install("alpha");
   const reply = (message: Record<string, unknown>) => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", ...message } }], usage: { prompt_tokens: 10, completion_tokens: 5 }, model: "qwen38" }), { status: 200 });

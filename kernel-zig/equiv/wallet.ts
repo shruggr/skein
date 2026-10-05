@@ -129,8 +129,8 @@ const h = await testHost({ after: (f) => afters.push(f) }, {
   },
 });
 const owner = h.owner;
-const identity = h.agent("wallettest");
-const payeeId = h.agent("payee");
+const identity = h.instance("wallettest");
+const payeeId = h.instance("payee");
 const toWallet = new RawBox(owner, `${h.base}/@wallettest`);
 const toPayee = new RawBox(owner, `${h.base}/@payee`);
 

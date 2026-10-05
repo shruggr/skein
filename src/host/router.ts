@@ -98,7 +98,7 @@ import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, imageSource, type BootSource, type Booted } from "./boot.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
+import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
 import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
@@ -121,7 +121,7 @@ export interface RouterOptions {
   inferHandle?: Named;
   fuelPerStep?: string;
   /** A new genesis's extra seed rows — boxes (a sender in hex, `$owner`, or a provider's `$<name>`: `$status`, `$cron`, …) and routes — and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: RouteSpec[] };
+  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: PathRowSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */

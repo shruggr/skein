@@ -23,7 +23,7 @@ const link = (v: unknown) => (v as { "/": string })["/"];
 test("explore: the owner reads the log, threads, a thread, a head and a record; a stranger is refused; each read is an entry and moves nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   h.mailbox("david", h.ownerId);
-  h.agent("alpha");
+  h.instance("alpha");
   await h.router.start();
   await h.install("alpha", [CHAT_APP]); // #83: the chat loop is an app
   const alpha = h.db.get("alpha")!.identity!;

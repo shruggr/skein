@@ -143,7 +143,7 @@ try {
   check(!!ticked, "its start scheduled a heartbeat with the cron provider ($cron, from the image's address book), and the tick came");
 
   // ------------------------------------------------ an owned instance refuses a claim
-  h.agent("owned");
+  h.instance("owned");
   await h.router.hydrate("owned");
   stores.push(h.db.get("owned")!.store);
   const ownedId = h.db.get("owned")!.identity!;

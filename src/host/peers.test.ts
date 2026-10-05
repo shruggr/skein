@@ -16,8 +16,8 @@ import { testHost, until } from "./testhost.ts";
 test("skein-host peers: add / list / remove through the `peers` box as the owner; an unchanged entry is not sent again; roster --deploy writes the other agents", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   h.mailbox("david", h.ownerId);
-  const alpha = h.agent("alpha");
-  const beta = h.agent("beta");
+  const alpha = h.instance("alpha");
+  const beta = h.instance("beta");
   await h.router.start();
   const out: string[] = [], err: string[] = [];
   const env = {

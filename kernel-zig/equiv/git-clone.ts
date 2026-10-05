@@ -128,7 +128,7 @@ const h = await testHost({ after: (f) => afters.push(f) }, { http: network });
 let store = "";
 try {
   h.mailbox("david", h.ownerId);
-  const inst = h.agent("inst");
+  const inst = h.instance("inst");
   await h.router.start();
   await h.install("inst", [GIT_APP]);
   store = h.db.get("inst")!.store;

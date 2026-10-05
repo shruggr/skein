@@ -1,7 +1,7 @@
 // The router as a reverse proxy (#40), end to end with the real Zig kernel:
 // every instance is an HTTP server (its front door) at its own origin; the
-// stock @bsv/message-box-client talks to an agent by host name, our raw
-// BRC-33 client by path prefix; the agent answers into its owner's mailbox —
+// stock @bsv/message-box-client talks to an instance by host name, our raw
+// BRC-33 client by path prefix; the instance answers into its owner's mailbox —
 // a mailbox instance — over http, short-circuited in process; the owner lists
 // and acknowledges there; every request is an entry (#68), a poll moves
 // nothing; sessions are records and survive a killed kernel. The host's
@@ -29,7 +29,7 @@ import { ephemeralWallet } from "../wallet.ts";
 test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's mailbox instance over http; list/ack; polls are entries that move nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   h.mailbox("david", h.ownerId);
-  const alpha = h.agent("alpha");
+  const alpha = h.instance("alpha");
   await h.router.start();
   await h.install("alpha"); // #83: `run` and `chat` are the shell app's and the chat app's
 
@@ -82,23 +82,23 @@ test("router: the stock client by host name, our client by path prefix; the answ
   assert.ok((await kd.call("head", "mailbox") as CID).equals(m0), `${n} polls: the mailbox unchanged`);
 });
 
-test("router: an agent's genesis names the owner's mailbox instance when it exists first; one without it is warned about at hydration", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("router: an instance's genesis names the owner's mailbox instance when it exists first; one without it is warned about at hydration", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
-  h.agent("early"); // genesised before the owner has a mailbox instance
+  h.instance("early"); // genesised before the owner has a mailbox instance
   await h.router.hydrate("early");
   assert.ok(h.lines.some((l) => l.startsWith("[early] WARNING: its genesis names no owner messagebox")), `warned (${h.lines.join(" | ")})`);
   h.mailbox("david", h.ownerId);
-  h.agent("late");
+  h.instance("late");
   const k = (await h.router.hydrate("late")).kernel;
   const g = await k.genesis() as { defaults: Record<string, string> };
   assert.equal(g.defaults.ownerMessagebox, h.origin("david"), "the owner's mailbox instance, by default");
-  assert.ok(!h.lines.some((l) => l.startsWith("[late] WARNING")), "no warning for an agent whose genesis names it");
+  assert.ok(!h.lines.some((l) => l.startsWith("[late] WARNING")), "no warning for an instance whose genesis names it");
 });
 
-test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on a mailbox instance and an agent; a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("router: sessions are state (#68) — the stock client's handshake is an entry and a record, on a mailbox instance and another instance; a killed kernel keeps them, and the client goes on with no new handshake", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
   h.mailbox("david", h.ownerId);
-  h.agent("alpha");
+  h.instance("alpha");
   await h.router.start();
   await h.router.settled();
   // Every forwarded request's answer, as the client got it: `<handle> <route> <status>`.
@@ -116,7 +116,7 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   await h.router.settled();
   assert.deepEqual(seen, ["david /.well-known/auth 200", "david /listMessages 200", "alpha /.well-known/auth 200", "alpha /listMessages 200"]);
   assert.equal(await h.entries("david"), n0.david + 2, "the mailbox instance: the handshake and the listing, an entry each");
-  assert.equal(await h.entries("alpha"), n0.alpha + 2, "the agent: the handshake and the listing, an entry each");
+  assert.equal(await h.entries("alpha"), n0.alpha + 2, "the instance: the handshake and the listing, an entry each");
   const kd = (await h.router.hydrate("david")).kernel;
   const s1 = await kd.call("head", "frontdoor/sessions") as CID | null;
   assert.ok(s1, "david's session: a record (head `frontdoor/sessions`)");
@@ -133,7 +133,7 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
   assert.equal(listed.length, 1, "list works after the restart");
   assert.equal(listed[0]!.sender, h.ownerId);
   seen.length = 0;
-  assert.deepEqual(await al.listMessagesLite({ messageBox: "chat", host: h.origin("alpha") }), [], "list works on the agent after its restart");
+  assert.deepEqual(await al.listMessagesLite({ messageBox: "chat", host: h.origin("alpha") }), [], "list works on the instance after its restart");
   assert.deepEqual(seen, ["alpha /listMessages 200"]);
   const kd2 = (await h.router.hydrate("david")).kernel;
   assert.notEqual(kd2, kd, "a new kernel process");
@@ -157,8 +157,8 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/chaintracks/v2/tip/stream`;
   const h = await testHost(t, { headersFeed: url });
   h.mailbox("david", h.ownerId); // its catch-all `*` row is not a chain row
-  h.agent("a");
-  h.agent("b");
+  h.instance("a");
+  h.instance("b");
   await h.router.start();
   await h.router.settled();
   const subscribed = () => ["david", "a", "b"].filter((x) => h.router.feeds.hosts(x));
@@ -210,7 +210,7 @@ test("router: registration through the host skein (#113) — POST /account/regis
   };
   const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
   const dave = PrivateKey.fromRandom(), daveId = dave.toPublicKey().toString();
-  h.agent("alpha");
+  h.instance("alpha");
 
   // Where a page finds the router and the handle domain (the app's config): at any host name.
   for (const url of [`${h.base}/.well-known/skein-host`, `http://alpha.localhost:${h.router.port}/.well-known/skein-host`]) {

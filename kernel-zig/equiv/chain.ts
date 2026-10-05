@@ -90,7 +90,7 @@ function cloneChain(home: string): string {
 try {
   const callerWallet = ephemeralWallet(callerKey);
   h.mailbox("caller", callerId);
-  const inst = h.agent("ch");
+  const inst = h.instance("ch");
   await h.router.start();
   const owner = new RawBox(h.owner, `${h.base}/@ch`);
   await owner.send(inst, "peers", { op: "add", key: callerId, url: h.origin("caller") });
@@ -247,7 +247,7 @@ try {
   const rowsAt = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8")) as unknown[];
   rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain" }, { address: "chain", sender: "$owner", program: "chain" }, { address: "status", sender: "$status", program: "chain" });
   writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(rowsAt));
-  const bootId = h.agent("boot");
+  const bootId = h.instance("boot");
   const src = await dirSource(sys);
   await h.router.bootRow("boot", { kind: "tree", root: src.root, objects: src.objects });
   await new RawBox(h.owner, `${h.base}/@boot`).send(bootId, "peers", { op: "add", key: callerId, url: h.origin("caller") });

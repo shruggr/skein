@@ -46,8 +46,8 @@ test("the loop: infer over http to a mailbox instance; `message` to another agen
   const h = await testHost(t, { infer: inferId });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
-  const alpha = h.agent("alpha");
-  const beta = h.agent("beta");
+  const alpha = h.instance("alpha");
+  const beta = h.instance("beta");
   await h.router.start();
   // #83: the chat loop is an app; the genesis has none.
   await h.install("alpha", [CHAT_APP]);
@@ -111,7 +111,7 @@ test("the loop: a stranger (in no address book) chats an agent on its open box: 
   const h = await testHost(t, { infer: inferId, genesis: { defaults: { sendRetryMs: "100" } } });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
-  const alpha = h.agent("alpha");
+  const alpha = h.instance("alpha");
   await h.router.start();
   await h.install("alpha", [CHAT_APP]);
   const boxes = watchBoxes(h);
@@ -153,8 +153,8 @@ test("the loop: a `message` whose delivery fails transiently is tried again on a
   const h = await testHost(t, { infer: inferId, genesis: { defaults: { sendRetryMs: "300" } } });
   h.mailbox("david", h.ownerId);
   h.mailbox("infer", inferId);
-  const alpha = h.agent("alpha");
-  h.agent("beta");
+  const alpha = h.instance("alpha");
+  h.instance("beta");
   await h.router.start();
   await h.install("alpha", [CHAT_APP]);
   await h.install("beta", [CHAT_APP]);

@@ -55,7 +55,7 @@ try {
   const callerKey = PrivateKey.fromRandom(), callerId = callerKey.toPublicKey().toString();
   const caller = ephemeralWallet(callerKey);
   h.mailbox("caller", callerId);
-  const inst = h.agent("inst");
+  const inst = h.instance("inst");
   await h.router.start();
   const owner = new RawBox(h.owner, `${h.base}/@inst`);
   await owner.send(inst, "peers", { op: "add", key: callerId, url: h.origin("caller") });
