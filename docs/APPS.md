@@ -472,18 +472,15 @@ no app record — wired into a genesis by a system tree — reads the genesis
 defaults `overlayTopics`/`overlayLookups`/`overlayGossip` instead, and
 writes under its program's name (`overlay/…`, the tree's `scopes`).
 
-**Topics an app activates live** (#119, #120, skein-overlay ≥ 0.5.0):
-`config.overlay.prefixes = {"tm_": {"program": "topic", "active":
-"mandala"}}` serves, under the prefix, the topics listed in the app's own
-record at `<app>/mandala` (`{topics: [<topic>, …]}`, written by the app's
-activate call, which emits `subscribe` for each, #119). `program` is a role
-in `programs`; `active` is a head under the app's name (one name, no `/`).
-A lookup service in the object form may add `"prefixes": ["tm_"]`. An
-overlay names at least one topic or one prefix. No rows are derived from a
-prefix: the app's manifest names its own libp2p row `{transport: "libp2p",
-address: "tm_", prefix: true, sender: "*", program: "overlay", fn:
-"submit", filter: "beef"}`, which carries the gossip; `/submit`, `/lookup`
-and the box are derived as below.
+**An overlay may list no topics** (#120): `topics` absent or `{}` is
+accepted. A dynamic overlay (Mandala, an AMM) has no topics in its manifest:
+its topics are registered and deregistered by a call at runtime, and the
+engine adds and drops each topic's rows itself. The install derives the box
+rows, `/submit` and `/lookup` as below, and no per-topic rows. A manifest
+may still pre-configure topics (OpNS: one global topic). There are no prefix
+declarations: `prefixes`, here or in a lookup service, is refused as an
+unknown field, as is any field other than `topics`, `lookups`, `gossip`
+(and, in a lookup service's object form, `program`, `topics`).
 
 **Its state is under its own name** (#79, skein-overlay ≥ 0.3.0):
 `<app>/state` (what its topics admitted and judged, and the submissions

@@ -213,9 +213,7 @@ test("config.overlay: two topics; what the manifest names itself wins", () => {
 
 test("config.overlay: its problems", () => {
   const p = (ov: unknown, more: Record<string, unknown> = {}) => overlayProblems(overlayApp(ov, more)).join("\n");
-  assert.match(p({ topics: {} }), /want at least one topic \(topics: .*\) or prefix \(prefixes: /);
-  assert.match(p({}), /want at least one topic .* or prefix/);
-  assert.match(p({ topics: {}, prefixes: {} }), /want at least one topic .* or prefix/);
+  assert.match(p({ topics: ["tm_x"] }), /topics: want \{<topic>: <role>\}/);
   assert.match(p({ topics: { tm_x: "nobody" } }), /topics\.tm_x: "nobody" is not a role/);
   assert.match(p({ topics: { "tm x": "topic-demo" } }), /is not a topic name/);
   assert.match(p({ topics: { tm_demo: "topic-demo" }, lookups: { ls_x: { program: "nobody" } } }), /lookups\.ls_x: program "nobody"/);
@@ -227,32 +225,25 @@ test("config.overlay: its problems", () => {
   assert.ok(!Array.isArray(w) && w.rows.filter((r) => r.address === "ov2").length === 2, "the app's own box, by its name");
 });
 
-test("config.overlay.prefixes (#119, #120): accepted; no rows derived from a prefix; the app's own prefix row carries gossip", () => {
-  const ov = { prefixes: { tm_: { program: "topic-demo", active: "mandala" } }, lookups: { ls_demo: { program: "lookup-demo", prefixes: ["tm_"] } } };
-  const own = { transport: "libp2p", address: "tm_", prefix: true, sender: "*", program: "overlay", fn: "submit", filter: "beef" };
-  const c = checkManifest(overlayApp(ov, { dispatch: [own] }), (p) => overlayFiles.has(p));
-  assert.deepEqual(c.derived, { rows: ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *", "http /overlay/lookup *"] });
-  assert.deepEqual(c.manifest.dispatch.filter((r) => r.transport === "libp2p").map((r) => rowKey("overlay", r)), ["libp2p tm_* *"], "only the app's own prefix row");
-  const w = overlayWiring("mandala", { prefixes: { tm_: { program: "t", active: "mandala" } } }, (r) => r === "t" || r === "overlay");
+test("config.overlay with no topics (#120): accepted; the box, /submit and /lookup derived, no per-topic rows", () => {
+  const rows = ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *", "http /overlay/lookup *"];
+  for (const ov of [{}, { topics: {} }, { lookups: { ls_demo: "lookup-demo" } }, { topics: {}, lookups: { ls_demo: { program: "lookup-demo" } } }]) {
+    const c = checkManifest(overlayApp(ov), (p) => overlayFiles.has(p));
+    assert.deepEqual(c.derived, { rows }, JSON.stringify(ov));
+    assert.ok(!c.manifest.dispatch.some((r) => r.transport === "libp2p"), "no per-topic rows");
+  }
+  const w = overlayWiring("mandala", {}, (r) => r === "overlay");
   assert.ok(!Array.isArray(w));
   assert.deepEqual(w.topics, []);
   assert.deepEqual(w.rows.map((r) => rowKey("mandala", r)), ["mailbox mandala event", "mailbox mandala $self", "http /mandala/submit *", "http /mandala/lookup *"]);
-  // With topics too: the topics' rows, still none from the prefix.
-  const both = overlayWiring("mandala", { topics: { tm_x: "t" }, prefixes: { tm_: { program: "t", active: "mandala" } } }, (r) => r === "t" || r === "overlay");
-  assert.ok(!Array.isArray(both) && both.rows.filter((r) => r.transport === "libp2p").map((r) => r.address).join() === "tm_x,tm_x-admit,tm_x-proof");
 });
 
-test("config.overlay.prefixes: bad shapes refused", () => {
+test("config.overlay: no prefix declarations (#120): prefixes refused, in the overlay and in a lookup service", () => {
   const p = (ov: unknown) => overlayProblems(overlayApp(ov)).join("\n");
-  assert.match(p({ prefixes: ["tm_"] }), /prefixes: want \{<prefix>: \{program: <role>, active: <head>\}\}/);
-  assert.match(p({ prefixes: { tm_: "topic-demo" } }), /prefixes\.tm_: want \{program: <role>, active: <head>\}/);
-  assert.match(p({ prefixes: { "tm x": { program: "topic-demo", active: "a" } } }), /"tm x" is not a topic prefix/);
-  assert.match(p({ prefixes: { tm_: { program: "nobody", active: "a" } } }), /prefixes\.tm_\.program: "nobody" is not a role in programs/);
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo" } } }), /prefixes\.tm_\.active: undefined is not a head/);
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "" } } }), /prefixes\.tm_\.active: "" is not a head/);
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "a/b" } } }), /prefixes\.tm_\.active: "a\/b" is not a head under the app's name/);
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "a", extra: 1 } } }), /prefixes\.tm_: extra: not a field/);
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "a" } }, lookups: { ls_x: { program: "lookup-demo", prefixes: ["ls_"] } } }), /lookups\.ls_x\.prefixes: want a list of the overlay's prefixes/);
+  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "mandala" } } }), /prefixes: not a field \(want topics, lookups, gossip; no prefix declarations, #120\)/);
+  assert.match(p({ topics: { tm_demo: "topic-demo" }, prefixes: {} }), /prefixes: not a field/);
+  assert.match(p({ lookups: { ls_demo: { program: "lookup-demo", prefixes: ["tm_"] } } }), /lookups\.ls_demo: prefixes: not a field \(want program, topics\)/);
+  assert.match(p({ topics: { tm_demo: "topic-demo" }, extra: 1 }), /extra: not a field/);
 });
 
 test("optional rows (#78): only from a $<provider>; kept in the manifest as written", () => {
