@@ -125,8 +125,11 @@ dot or slash (`%2e`, `%2f`), a backslash, a NUL, a query, a URL. No
 top-level grants exist for apps. The protocol endpoints are unaffected:
 BRC-22's `/submit` and BRC-24's `/lookup` are relative to the overlay's
 **base URL**, which BRC-23's advertisement carries (a host base URL, not a
-bare domain), so an overlay app advertises `https://<host>/<handle>/amm`
-and standard clients call `${baseUrl}/submit`. The root belongs to skein's
+bare domain), so an overlay app advertises `https://<handle>.<host>/amm`
+(the host's name is the skein's, one subdomain per handle; on a host
+without wildcard DNS the router also serves `/@<handle>/amm` on its
+origin) and standard clients call `${baseUrl}/submit`
+(`POST https://alice.skein.nexus/amm/submit`). The root belongs to skein's
 boundary programs (the messagebox rows, the BRC-103 well-known path), which
 are not apps. libp2p topic names are global by nature and are not
 namespaced. Boxes follow the same rule: an app's box is its name.

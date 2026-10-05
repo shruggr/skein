@@ -137,7 +137,9 @@ conflicting spend reaches every registrant.
 
 **Overlays.** An overlay is the engine (shruggr/skein-overlay) plus its own
 topic managers and lookup services, installed under one name, wired from
-`config.overlay`. It serves `/<handle>/<app>/submit` and `/lookup`. Submit
+`config.overlay`. It serves `<base>/submit` and `<base>/lookup`, its
+BRC-23 base URL `https://<handle>.<host>/<app>` (`/@<handle>/<app>` on the
+host's origin without wildcard DNS). Submit
 decodes the BEEF once into the step's write cache, asks the topic managers
 to judge it by CID, and hands it to the chain app; the submission is
 admitted on the chain app's first `accepted` or `proven` answer. Nothing

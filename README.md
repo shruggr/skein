@@ -43,6 +43,23 @@ owner, a BRC-100 wallet reachable over HTTP (default
 `http://127.0.0.1:3322`; the dev setup runs `1sat serve wallet-api`,
 `scripts/host/wallets.sh`).
 
+The wallet is deny-by-default. The client (`skein-host install` among the
+commands; origin `skein-client`, `SKEIN_ORIGINATOR`) needs these grants
+from the owner's wallet (`scripts/host/grants.sh` grants them for the dev
+stack):
+
+| protocol | level | counterparty |
+|---|---|---|
+| `identity key retrieval` | 1 | |
+| `server hmac` | 2 | `self` |
+| `messagebox` | 1 | |
+| `auth message signature` | 2 | the instance's front-door key |
+| `message encryption` | 2 | the instance's front-door key |
+
+The front-door key is column 5 of `skein-host list`; a new instance is a
+new counterparty. A missing grant fails the command with the wallet's
+refusal, which names the `1sat permissions grant …` command for it.
+
 ```
 git clone https://github.com/shruggr/skein && cd skein
 npm install
@@ -265,7 +282,9 @@ app, the security model, worked examples for an overlay and the chain app).
 
 An overlay is an app built on shruggr/skein-overlay: the engine program plus
 your topic managers and lookup services, wired from `config.overlay` in its
-manifest, serving BRC-22/24 at `/<handle>/<app>/submit` and `/lookup`. It
+manifest, serving BRC-22/24 at `<base>/submit` and `<base>/lookup`, its
+BRC-23 base URL `https://<handle>.<host>/<app>` (`/@<handle>/<app>` on the
+host's origin without wildcard DNS). It
 needs the chain app installed (`requires: ["chain/1"]`). The engine exports
 the `topic`, `lookup` and `sk` Zig modules to build against; its README and
 docs/OVERLAY.md there have the walkthrough.

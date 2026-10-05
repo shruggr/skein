@@ -104,6 +104,8 @@
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
 //   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
+//   SKEIN_ANSWER_WAIT_MS  how long the front door holds a request waiting on its thread's answer (ms) before 503 +
+//                         Retry-After; default 120000 (two minutes; frontdoor.ts)
 //   SKEIN_OWNER           a new instance's owner;   SKEIN_OWNER_HANDLE its genesis name, default david@localhost
 //   SKEIN_INFER           a new instance's peers.infer;   SKEIN_INFER_HANDLE its genesis name, default infer@localhost
 //   SKEIN_FUEL_PER_STEP   a new genesis's fuelPerStep
