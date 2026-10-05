@@ -53,7 +53,7 @@ export interface RawTransport {
   /** Its mailbox instance (a RawBox). */
   inbox: { list(box: string): Promise<RawListed[]>; ack(ids: string[]): Promise<void> };
   /** A session with the messagebox at `url` (a RawBox). */
-  outbox(url: string): { send(recipient: string, box: string, body: unknown): Promise<unknown> };
+  outbox(url: string): { send(recipient: string, box: string, body: unknown, o?: { sign?: boolean }): Promise<unknown> };
   /** Its address book (#40): the messagebox URL of the sender `key`, configured by its admin; undefined: no route. */
   addressOf(key: string): string | undefined;
 }
@@ -235,7 +235,8 @@ export class InferPeer {
       let result: Completion;
       try { result = await this.answer(m.sender, m.value as InferRequest); } catch (e) { result = { error: (e as Error).message }; }
       try {
-        await raw.outbox(url).send(m.sender, "completions", clean({ replyTo, ...result }));
+        // Signed (K2): a browser host admits only a message that verifies on its own.
+        await raw.outbox(url).send(m.sender, "completions", clean({ replyTo, ...result }), { sign: true });
         n++;
       } catch (e) {
         this.say(`infer ${short(m.messageId)}: answer to ${url}: ${(e as Error).message} (left unacknowledged)`);

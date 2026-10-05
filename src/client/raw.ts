@@ -14,6 +14,7 @@
 import { AuthFetch, Peer, SimplifiedFetchTransport, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
+import { encode } from "../runtime/cid.ts";
 
 export interface Listed {
   /** The message's id: its record's CID (text). */
@@ -88,10 +89,24 @@ export class RawBox {
     return { status: r.status, v };
   }
 
-  /** A message to `recipient` (hex) in `box`: `body` a record (encoded here) or its dag-cbor bytes. Its id. */
-  async send(recipient: string, box: string, body: unknown): Promise<{ id: CID }> {
+  /**
+   * A message to `recipient` (hex) in `box`: `body` a record (encoded here) or its dag-cbor bytes. Its id.
+   * `sign`: signed as an emit is (BRC-169's way: [2, "metanet handles envelope"], key "send", counterparty
+   * anyone, over the mail record without `signature`), so the record verifies on its own wherever it is
+   * carried next — a browser host appends it for its front door (K2), and admits no unsigned message.
+   */
+  async send(recipient: string, box: string, body: unknown, o: { sign?: boolean } = {}): Promise<{ id: CID }> {
     const bytes = body instanceof Uint8Array ? body : dagCbor.encode(body);
-    const r = await this.post("/sendMessage", { message: { recipient: Uint8Array.from(Buffer.from(recipient, "hex")), messageBox: box, body: bytes } });
+    const to = Uint8Array.from(Buffer.from(recipient, "hex"));
+    let signed: Record<string, unknown> = {};
+    if (o.sign) {
+      const me = (await this.wallet.getPublicKey({ identityKey: true }, this.originator)).publicKey;
+      const nonce = globalThis.crypto.getRandomValues(new Uint8Array(16));
+      const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(me, "hex")), recipient: to, box, body: encode(dagCbor.decode(bytes)).cid, nonce };
+      const { signature } = await this.wallet.createSignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone", data: [...dagCbor.encode(unsigned)] }, this.originator);
+      signed = { signature: Uint8Array.from(signature), nonce };
+    }
+    const r = await this.post("/sendMessage", { message: { recipient: to, messageBox: box, body: bytes, ...signed } });
     if (r.status !== 200) throw new Error(`sendMessage ${box}: HTTP ${r.status} ${String(r.v.code ?? "")} ${String(r.v.description ?? "")}`.trim());
     return { id: CID.parse(String(r.v.id ?? r.v.messageId)) };
   }
