@@ -127,7 +127,7 @@ try {
   // #113: the handle domain and the host's origin (where the manifest says resolve is) in the app's config.
   r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base } })], { wallet: operator, id: operatorId });
   await router.settled();
-  check(r.code === 0 && r.out.some((l) => /onboard 0\.3\.0 installed/.test(l)), `skein plan install skein-onboard --origin host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
+  check(r.code === 0 && r.out.some((l) => /onboard 0\.3\.2 installed/.test(l)), `skein plan install skein-onboard --origin host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
   check(r.out.some((l) => /row +http \/onboard\/call from session → onboard\.call/.test(l)) && r.out.some((l) => /row +http \/onboard\/register from anyone → onboard\.register/.test(l)), "its rows: /onboard/call from any session → onboard.call; /onboard/register (and resolve, search, the manifest, profile, paymail) from anyone");
 
   // ------------------------------------------------ a client creates a skein
