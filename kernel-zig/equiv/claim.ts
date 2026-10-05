@@ -3,13 +3,14 @@
 //   an instance booted from the default image (images/default) — its genesis
 //   names no owner and has no admin rows, only the claim row (box `claim`,
 //   from anyone, to the kernel); it serves the management site at `/` and
-//   `/site/` (the static app, #92), its explorer answers nobody, and it takes
-//   no owner's message in an admin box.
+//   `/site/` (the static app, #92), it has no explorer row (#121: every sender
+//   is a key, and the claim brings the owner's), and it takes no owner's
+//   message in an admin box.
 //
 //   `skein-host claim` (through the router's control socket) delivers the
 //   owner's claim as a `local` request from the host's instance manager: in one
-//   step the kernel writes the owner's four admin rows and removes the claim
-//   row; the head `claim` names what was claimed; the owner's mailbox on this
+//   step the kernel writes the owner's four admin rows and the explorer row
+//   with the owner's key (#121), and removes the claim row; the head `claim` names what was claimed; the owner's mailbox on this
 //   host goes into the address book. A second claim finds no row and runs
 //   nothing (`skein-host claim` exits 1); a stranger's sendMessage into `claim`
 //   is refused. The owner then installs programs/test/app-demo with
@@ -89,8 +90,9 @@ try {
   check(home.status === 200 && page.includes('src="site/app.js"'), `GET / : the management site, served by the static app (${home.status})`);
   const js = await fetch(`${h.base}/@inst/site/app.js`);
   check(js.status === 200 && /javascript/.test(js.headers.get("content-type") ?? "") && (await js.text()).includes("skein-locators"), `GET /site/app.js: the site's files under /site/ (${js.status})`);
-  const unread = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore`, { method: "GET" });
-  check(unread.status === 403, `before the claim, the explorer answers nobody: its read is the owner's (${unread.status})`);
+  const unread = await fetch(`${h.base}/@inst/explore`);
+  check(unread.status === 404, `before the claim there is no explorer row (#121: the claim writes it with the owner's key): ${unread.status}`);
+  check(!(await rows()).some((x) => x.sender === "owner"), "#121: no row names the `owner` symbol");
   const before = await new RawBox(h.owner, `${h.base}/@inst`).send(inst, "objects", { records: [] }).then(() => "sent", (e: Error) => e.message);
   check(/403 ERR_NOT_SUBSCRIBED/.test(before), `before the claim, the owner's message to \`objects\` is refused: no admin row (${before})`);
 
@@ -98,7 +100,9 @@ try {
   const lines0 = h.lines.length;
   let r = await cli("claim", "inst", h.ownerId);
   check(r.code === 0 && r.out.some((l) => /claimed by .* by the running router/.test(l)), `skein-host claim inst <owner> through the control socket: exit ${r.code} ${[...r.out, ...r.err].join(" ")}`);
-  check(h.lines.slice(lines0).some((l) => /kernel claim: owner [0-9a-f]+: admin rows objects, head, dispatch, peers; the claim row removed; the owner's messagebox in the address book/.test(l)), "the kernel took the claim in one step (one log line)");
+  check(h.lines.slice(lines0).some((l) => /kernel claim: owner [0-9a-f]+: admin rows objects, head, dispatch, peers, the explorer row; the claim row removed; the owner's messagebox in the address book/.test(l)), "the kernel took the claim in one step (one log line)");
+  const explorer = (await rows()).filter((x) => x.transport === "http" && x.address === "/explore");
+  check(explorer.length === 1 && explorer[0]!.prefix === true && explorer[0]!.fn === "explore" && explorer[0]!.sender instanceof Uint8Array && hex(explorer[0]!.sender) === h.ownerId, `#121: the claim wrote the explorer row with the owner's real key (${explorer.map((x) => x.sender instanceof Uint8Array ? hex(x.sender).slice(0, 8) : String(x.sender)).join(", ")})`);
   const owner8 = h.ownerId.slice(0, 8);
   check((await kernelRows()).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${owner8}`).join(","), `the owner's four admin rows, the claim row gone: ${(await kernelRows()).join(", ")}`);
   const claimRoot = await (await k()).call("head", "claim") as CID | null;
