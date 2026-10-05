@@ -437,6 +437,20 @@ pub const Runtime = struct {
         }
     }
 
+    /// The host's `append` frame (K24): the genesis entry and nothing else, only as the log's
+    /// first entry, its record in the store and well formed (log.zig isGenesis). Every other
+    /// entry comes in through `admit`.
+    pub fn appendGenesis(rt: *Runtime, a: std.mem.Allocator, entry: Value) !AdmitResult {
+        if (!logm.isLogEntry(entry) or entry.get("genesis") == null) return .{ .invalid = "append: only the genesis entry is appended (every other entry is admitted: admit)" };
+        if ((try rt.store.logTip(a)) != null) return .{ .invalid = "append: the log has its genesis already (every other entry is admitted: admit)" };
+        const gc = Value.cidOf(entry.get("genesis")).?;
+        if (!logm.isGenesis(rt.store.getOpt(a, gc))) return .{ .invalid = "append: the genesis record is not in the store, or is malformed (put it first)" };
+        return switch (try rt.store.logAppend(a, entry)) {
+            .ok => |c| .{ .ok = c },
+            .rejected => |r| .{ .rejected = .{ .reason = r.reason, .message = r.message } },
+        };
+    }
+
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !?AdmitResult {
         if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a request, mail or event entry (format 7: a wake is the waker's message, #69)" };
         try rt.loadGenesis();

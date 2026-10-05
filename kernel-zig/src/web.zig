@@ -281,9 +281,11 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
         return reply(a, (try s.get(a, c)) orelse .null, null, null);
     }
     if (eq(u8, op, "put")) return reply(a, cbor.cidv(try s.put(a, v)), null, null);
-    if (eq(u8, op, "append")) return switch (try s.logAppend(a, v)) {
+    // K24: the genesis entry only, as the log's first (scheduler.zig appendGenesis); the rest is `admit`'s.
+    if (eq(u8, op, "append")) return switch (try r.appendGenesis(a, v)) {
         .ok => |c| reply(a, cbor.cidv(c), null, null),
         .rejected => |x| reply(a, null, x.message, x.reason.text()),
+        .invalid => |m| reply(a, null, m, null),
     };
     if (eq(u8, op, "programs")) {
         var m = cbor.MapBuilder.init(a);

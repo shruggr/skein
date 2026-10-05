@@ -243,9 +243,11 @@ const Server = struct {
             try s.ss.restore(c);
             s.reply(a, id, cbor.cidv(c), null, null);
         } else if (eq(u8, op, "append")) {
-            switch (try s.store.logAppend(a, v)) {
+            // K24: the genesis entry only, as the log's first (scheduler.zig appendGenesis); the rest is `admit`'s.
+            switch (try s.rt.appendGenesis(a, v)) {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
                 .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
+                .invalid => |m| s.reply(a, id, null, m, null),
             }
         } else if (eq(u8, op, "programs")) {
             // The programs this kernel pins (a genesis's `programs`): their records put, name → CID.
