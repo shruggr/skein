@@ -15,7 +15,10 @@
 //   the caller's mailbox (result, bad-args, read-only for a `writes: false`
 //   function that writes, unknown-fn); its `peers` message to the kernel, sent
 //   as the instance itself, is refused (#87: no row admits a program to a
-//   kernel table; recorded, nothing runs, the address book unchanged); the route /app-demo/call answers on the
+//   kernel table; recorded, nothing runs, the address book unchanged); a
+//   program record it puts itself, claiming app chain (or the name wallet),
+//   called or launched, runs but its advance is refused (K1: not installed),
+//   while its own installed record still advances app-demo/…; the route /app-demo/call answers on the
 //   connection; an install over itself keeps its state; uninstalled, its stop
 //   runs and its route is gone.
 //
@@ -163,6 +166,29 @@ try {
   const peersAfter = await record("peers");
   const book = peersAfter ? await Promise.all(((peersAfter.peers ?? []) as Array<{ peer: CID }>).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array })) : [];
   check(String(peersAfter && JSON.stringify(peersAfter)) === String(peersBefore && JSON.stringify(peersBefore)) && !book.some((p) => Buffer.from(p.key).toString("hex") === intruder), "the address book is unchanged: the intruder's key is not in it");
+
+  // K1: a write scope comes only from a program record the owner installed (a dispatch row's
+  // program, one listed in its app's record at <app>/app, a genesis program). app-demo puts a
+  // record of its own module claiming another app (or a genesis-wired name) and calls or launches
+  // it: the record runs, and its advance is refused. Its own installed record still writes app-demo/….
+  const forge = async (body: Record<string, unknown>, want: RegExp, what: string) => {
+    const before = h.lines.length;
+    await callerBox.send(inst, "app-demo", { kind: "app-demo-forge", ...body });
+    const line = await until(what, async () => {
+      await h.router.settled();
+      return h.lines.slice(before).find((l) => l.startsWith("[inst] ") && want.test(l));
+    }, 20_000).catch(() => undefined);
+    check(!!line, `${what} (${line ?? h.lines.slice(before).filter((l) => /forge|advance/.test(l)).join(" | ")})`);
+  };
+  const notInstalled = (head: string, name: string) => new RegExp(`advance: "${head}" is outside the write scope of ${name}: its program record \\S+ is not installed`);
+  await forge({ how: "call", app: "chain", head: "chain/state" }, new RegExp(`forge call refused: .*${notInstalled("chain/state", "forged").source}`), "a program record a step put, claiming app chain, called: its advance of chain/state is refused (not installed)");
+  await forge({ how: "launch", app: "chain", head: "chain/state" }, new RegExp(` forged step 1 → errored · .*${notInstalled("chain/state", "forged").source}`), "the same record launched: the thread runs and its advance of chain/state is refused");
+  await forge({ how: "launch", name: "wallet", head: "wallet/state" }, new RegExp(` wallet step 1 → errored · .*${notInstalled("wallet/state", "wallet").source}`), "a record a step put named like a genesis-wired program (wallet, no app), launched: no genesis scope");
+  await forge({ how: "call", app: "app-demo", head: "app-demo/forged" }, new RegExp(`forge call refused: .*${notInstalled("app-demo/forged", "forged").source}`), "a record claiming app-demo itself but not listed in app-demo/app: refused too");
+  check((await record("chain/state")) === undefined && (await record("wallet/state")) === undefined && (await record("app-demo/forged")) === undefined, "no forged advance moved a head: chain/state, wallet/state and app-demo/forged never moved");
+  await forge({ how: "installed", head: "app-demo/forged" }, /forge call moved app-demo\/forged/, "app-demo's installed record (a dispatch row's program), called the same way: it advances app-demo/forged");
+  check((await record("app-demo/forged"))?.kind === "app-demo-forged", "app-demo/forged moved by the installed program");
+  await forge({ how: "installed", head: "chain/state" }, /forge call refused: .*advance: "chain\/state" is outside the write scope of app-demo \(app app-demo writes only heads under its own name/, "the installed record still writes only its own app's heads: chain/state refused");
 
   // The route /app-demo/call: the answer on the connection (BRC-104, the caller admitted by "*").
   const call = async (body: unknown) => {

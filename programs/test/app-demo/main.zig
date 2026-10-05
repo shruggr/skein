@@ -25,6 +25,17 @@
 //!                  admits a program to a kernel table; finishes "sent peers"
 //!   app-demo-tick  a tick from the cron provider (admitted from `$cron` only):
 //!                  ticks += 1; finishes "tick <ticks>"
+//!   app-demo       {kind: "app-demo-forge", how, head, app?, name?} (K1): the
+//!                  forgery the kernel refuses. With how "call" or "launch" it
+//!                  puts a program record of its own (this module, `app` and
+//!                  `name` as asked: say app "chain") and calls it (fn
+//!                  `forge.advance`) or launches it (args {forge: <head>}); that
+//!                  record is not installed, so its `advance` of `head` is
+//!                  refused. With how "installed" it calls its own record — the
+//!                  one the install wrote, a dispatch row's program — which
+//!                  writes heads under app-demo/. A call's outcome is on stderr
+//!                  ("forge call moved <head>" | "forge call refused: …"); a
+//!                  launched thread errors with the kernel's refusal.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -53,7 +64,15 @@ fn out(a: Allocator, comptime f: []const u8, args: anytype) !void {
 
 fn run(a: Allocator) !void {
     const in = try sk.input(a);
-    if (eql(u8, Value.str(in.get("kind")) orelse "", "step")) {
+    const kind = Value.str(in.get("kind")) orelse "";
+    // K1: the forged record's work (called, or launched), and the forge's thread woken by its child.
+    if (eql(u8, kind, "call") and eql(u8, Value.str(in.get("fn")) orelse "", "forge.advance")) {
+        const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("forge.advance wants {head}");
+        return forgeAdvance(a, Value.str(arg.get("head")) orelse return sk.report("forge.advance wants {head}"));
+    }
+    if (eql(u8, kind, "step")) if (in.get("args")) |args| if (Value.str(args.get("forge"))) |h| return forgeAdvance(a, h);
+    if (eql(u8, kind, "step") and in.get("resolved") != null) return out(a, "forge: the launched thread came to rest", .{});
+    if (eql(u8, kind, "step")) {
         // The cron provider's answer to a start or a stop: the thread's next step.
         if (try sk.replyOf(a, in)) |r| {
             if (Value.str(r.body.get("error"))) |e| return sk.report(try std.fmt.allocPrint(a, "the cron provider: {s}", .{e}));
@@ -111,6 +130,7 @@ fn peek(c: *app.Call) !Value {
 fn other(a: Allocator, in: Value, body: Value) !void {
     const kind = Value.str(body.get("kind")) orelse "";
     if (eql(u8, kind, "app-demo-peers")) return peers(a, in, body);
+    if (eql(u8, kind, "app-demo-forge")) return forge(a, in, body);
     var q = cbor.MapBuilder.init(a);
     try q.put("name", cbor.string("beat"));
     if (eql(u8, kind, "app-demo-start")) {
@@ -144,4 +164,50 @@ fn tick(a: Allocator) !void {
     const now = counts(try app.stateOf(a, m));
     _ = try app.putState(a, NAME, m, try stateValue(a, now.count, now.ticks + 1));
     return out(a, "tick {d}", .{now.ticks + 1});
+}
+
+/// {kind: "app-demo-forge", how: "call" | "launch" | "installed", head, app?, name?} (K1).
+fn forge(a: Allocator, in: Value, body: Value) !void {
+    const how = Value.str(body.get("how")) orelse "";
+    const head = Value.str(body.get("head")) orelse return sk.report("app-demo-forge wants {how, head, app?, name?}");
+    const origin = try sk.get(a, Value.cidOf(in.get("thread")) orelse return sk.report("the step names no thread"));
+    const mine = Value.cidOf(origin.get("program")) orelse return sk.report("the thread names no program");
+    var prog: []const u8 = mine;
+    if (!eql(u8, how, "installed")) {
+        // A program record of this step's own making: this module, under the app and name asked for.
+        const rec = try sk.get(a, mine);
+        var m = cbor.MapBuilder.init(a);
+        try m.put("kind", cbor.string("program"));
+        try m.put("name", cbor.string(Value.str(body.get("name")) orelse "forged"));
+        if (Value.str(body.get("app"))) |x| try m.put("app", cbor.string(x));
+        try m.put("code", rec.get("code"));
+        try m.put("inputs", rec.get("inputs"));
+        try m.put("services", rec.get("services"));
+        try m.put("description", cbor.string("a program record a step put (app-demo's forge, K1)"));
+        prog = try sk.put(a, m.value());
+    }
+    if (eql(u8, how, "launch")) {
+        var args = cbor.MapBuilder.init(a);
+        try args.put("forge", cbor.string(head));
+        _ = try sk.launch(a, prog, try sk.put(a, args.value()));
+        return out(a, "forge launched", .{});
+    }
+    var arg = cbor.MapBuilder.init(a);
+    try arg.put("head", cbor.string(head));
+    const msg = if (sk.call(a, prog, "forge.advance", try cbor.encode(a, arg.value()))) |_|
+        try std.fmt.allocPrint(a, "forge call moved {s}\n", .{head})
+    else |_|
+        try std.fmt.allocPrint(a, "forge call refused: {s}\n", .{sk.lastError()});
+    try std.Io.File.stderr().writeStreamingAll(sk.io(), msg);
+    return out(a, "forge called", .{});
+}
+
+/// Advance `head` to a record of the forge's: allowed only in the running record's write scope.
+fn forgeAdvance(a: Allocator, head: []const u8) !void {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("app-demo-forged"));
+    try m.put("head", cbor.string(head));
+    const c = try sk.put(a, m.value());
+    sk.advance(head, c) catch return sk.report(sk.lastError());
+    return out(a, "moved {s}", .{head});
 }

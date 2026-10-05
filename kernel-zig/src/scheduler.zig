@@ -14,7 +14,8 @@
 // heads.zig), the dispatch table (dispatch.zig) and the address book
 // (addressbook.zig). No program import reaches a table: a step advances a
 // head only in its write scope (hAdvance — an app's `<app>/…`, a
-// genesis-wired program's genesis `scopes`), and everything else is an
+// genesis-wired program's genesis `scopes`; read from the record only when
+// the owner installed it, installedAs), and everything else is an
 // admin message from the owner or a delegate, taken by the kernel itself.
 //
 // Outbound there is one primitive, `emit` (#70, #67): a step signs a message
@@ -1296,7 +1297,7 @@ pub const Runtime = struct {
         moves: std.array_list.Managed([2][]const u8),
         children: std.array_list.Managed(Value),
         /// The program running now (#77: the thread's, and under it each in-VM callee): its write scope.
-        progs: std.array_list.Managed(Value),
+        progs: std.array_list.Managed(Running),
         /// The messages the step emitted (#70), in order: listed on its update, sent when it ends without error.
         emitted: std.array_list.Managed([]const u8),
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
@@ -1443,7 +1444,7 @@ pub const Runtime = struct {
             .progs = .init(a),
             .emitted = .init(a),
         };
-        try st.progs.append(prog);
+        try st.progs.append(.{ .record = prog, .cid = Value.cidOf(o.get("program")).? });
         st.clock.drive(time.ns());
         st.clock.meter = meter; // the in-step clock runs on the step's fuel (issue #38)
 
@@ -1658,18 +1659,73 @@ pub const Runtime = struct {
     /// `advance` (#77): only a head in the running program's write scope. An app's program (its
     /// record's `app`) writes `<app>/…`; a genesis-wired program writes what the genesis's `scopes`
     /// list under its name (an exact name, or a prefix ending in `/`). Nothing else (#79: the
-    /// transitional `heads` grants on program records are gone).
+    /// transitional `heads` grants on program records are gone). The scope is read from the record
+    /// only when the owner installed it (installedAs): a record a step put and launched or called
+    /// runs, and writes no head (K1).
     fn hAdvance(imp: *program.Imports, name: []const u8, t: []const u8) program.Err!void {
         const st = stepOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("advance: bad head name {s}", .{try json.quoted(st.a, name)});
-        const prog = st.progs.items[st.progs.items.len - 1];
-        if (!inScope(st.rt.genesis, prog, name)) {
-            const pname = Value.str(prog.get("name")) orelse "?";
+        const run_ = &st.progs.items[st.progs.items.len - 1];
+        const prog = run_.record;
+        const pname = Value.str(prog.get("name")) orelse "?";
+        if (run_.install == null) run_.install = st.rt.installedAs(st.a, run_.cid, prog) catch return imp.failWith("store error");
+        if (run_.install.? == .none) return imp.failFmt("advance: {s} is outside the write scope of {s}: its program record {s} is not installed (not a dispatch row's program, not in the genesis's programs, not listed in its app's record at <app>/app), so it writes no head", .{ try json.quoted(st.a, name), pname, fmtCid(st.a, run_.cid) });
+        if (!mayAdvance(st.rt.genesis, prog, run_.install.?, name)) {
             if (Value.str(prog.get("app"))) |app| return imp.failFmt("advance: {s} is outside the write scope of {s} (app {s} writes only heads under its own name, {s}/…)", .{ try json.quoted(st.a, name), pname, app, app });
             return imp.failFmt("advance: {s} is outside the write scope of {s} (a genesis-wired program writes only the heads its genesis `scopes` name under {s})", .{ try json.quoted(st.a, name), pname, pname });
         }
         if (!(st.rt.store.has(t) catch false)) return imp.failFmt("advance: tree {s} is not in the store", .{fmtCid(st.a, t)});
         try st.moves.append(.{ name, t });
+    }
+
+    /// A program running in a step (the thread's, or an in-VM callee): its record, the record's
+    /// CID, and how it is installed (looked up at its first `advance`, then kept for the step).
+    const Running = struct { record: Value, cid: []const u8, install: ?Install = null };
+
+    /// How a program record is installed (K1), which says what its self-declared `app` and `name`
+    /// may claim. `owner`: the owner put it in place — a genesis program (the genesis's `programs`
+    /// or `middleware`) or the program of a dispatch row (only the owner's admin messages change the
+    /// table) — so its scope is read from the record as written (an app's `<app>/…`, or the genesis
+    /// `scopes` under its name). `app`: listed under `programs` in the app record at `<app>/app`
+    /// for the `app` its record names, so it writes `<app>/…` and nothing else (that head is the
+    /// owner's install, or that app's own writing: an app can only grant its own scope). `none`:
+    /// any other record — one a step put — which runs (launch and call take any program record)
+    /// but writes no head.
+    pub const Install = enum { owner, app, none };
+
+    fn mapHasCid(m: ?Value, c: []const u8) bool {
+        const v = m orelse return false;
+        if (v != .map) return false;
+        for (v.map) |e| if (Value.cidOf(e.value)) |x| if (std.mem.eql(u8, x, c)) return true;
+        return false;
+    }
+
+    /// The lookup over the tables as they stand (the store's state at this point in the log — the
+    /// same on replay): no copy to keep in step with the dispatch table, `<app>/app` and the genesis.
+    pub fn installedAs(rt: *Runtime, a: std.mem.Allocator, c: []const u8, record: Value) !Install {
+        const g = rt.genesis orelse return .none;
+        if (mapHasCid(g.get("programs"), c) or mapHasCid(g.get("middleware"), c)) return .owner;
+        if (try dispatch.current(a, rt.store)) |rows| for (rows) |r| if (r.program) |p| if (std.mem.eql(u8, p, c)) return .owner;
+        const app = Value.str(record.get("app")) orelse return .none;
+        const head = try std.fmt.allocPrint(a, "{s}/app", .{app});
+        if (!heads.isHeadName(head)) return .none;
+        const root = (try heads.headTree(a, rt.store, head)) orelse return .none;
+        const ar = rt.store.getOpt(a, root) orelse return .none;
+        if (!std.mem.eql(u8, Value.str(ar.get("kind")) orelse "", "app")) return .none;
+        return if (mapHasCid(ar.get("programs"), c)) .app else .none;
+    }
+
+    /// Whether a program record installed as `install` may advance `name`.
+    pub fn mayAdvance(genesis: ?Value, prog: Value, install: Install, name: []const u8) bool {
+        return switch (install) {
+            .none => false,
+            .app => if (Value.str(prog.get("app"))) |app| appScope(app, name) else false,
+            .owner => inScope(genesis, prog, name),
+        };
+    }
+
+    fn appScope(app: []const u8, name: []const u8) bool {
+        return name.len > app.len and std.mem.startsWith(u8, name, app) and name[app.len] == '/';
     }
 
     fn scopeMatch(entry: []const u8, name: []const u8) bool {
@@ -1680,7 +1736,7 @@ pub const Runtime = struct {
     /// Whether `prog` (a program record) may advance `name` (#77).
     pub fn inScope(genesis: ?Value, prog: Value, name: []const u8) bool {
         if (Value.str(prog.get("app"))) |app| {
-            if (name.len > app.len and std.mem.startsWith(u8, name, app) and name[app.len] == '/') return true;
+            if (appScope(app, name)) return true;
         } else if (genesis) |g| if (g.get("scopes")) |sc| if (sc == .map) if (Value.str(prog.get("name"))) |pname| if (sc.get(pname)) |list| if (list == .array) {
             for (list.array) |e| if (Value.str(e)) |s| if (scopeMatch(s, name)) return true;
         };
@@ -1866,7 +1922,7 @@ pub const Runtime = struct {
         if (st.depth >= MAX_CALL_DEPTH) return imp.failWith("call: nested too deep");
         const loaded = try loadCallee(st.rt, imp, a, prog);
         // #77: the callee's writes are the step's, in the callee's own write scope.
-        try st.progs.append(loaded.record);
+        try st.progs.append(.{ .record = loaded.record, .cid = prog });
         defer _ = st.progs.pop();
         var ctx = st.rt.callContext(a, func, arg, st.origin, st.at) catch |err| return imp.failFmt("call: {s}", .{@errorName(err)});
         var extra = cbor.MapBuilder.init(a);
