@@ -30,6 +30,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { dirSource } from "../../src/host/boot.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
+import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
 import { Oracle } from "../../src/host/oracle.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
@@ -58,8 +59,10 @@ const instanceKeys: Record<string, PrivateKey> = { zigtest: key("1111"), fueltes
 const lines: string[] = [];
 const owner = ephemeralWallet(key(KEYS.owner)), ownerId = key(KEYS.owner).toPublicKey().toString();
 const inferId = key(KEYS.infer).toPublicKey().toString();
-const make = (fuel?: string) => new Router({
+const make = (fuel?: string): Router => new Router({
   db, walletFor: (row) => ephemeralWallet(instanceKeys[row.handle]!), home, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
+  // No host skein here (#113): the handles resolve over host.db (a fixture).
+  discovery: fakeDiscovery(db, () => router),
   owner: ownerId, infer: inferId, fuelPerStep: fuel, idleMs: 1500, kernel: { command: kernel, env: { SKEIN_HOME: home } },
   log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
@@ -69,13 +72,11 @@ let port = 0;
 // The router comes back on the same port: an agent's genesis names its owner's mailbox by URL.
 const listen = async (r: Router) => { await r.listen(port); port = r.port; base = `http://127.0.0.1:${port}`; };
 await listen(router);
-// The owner's and the inference peer's mailboxes: mailbox instances (registering is creating one).
-const reg = async (w: ReturnType<typeof ephemeralWallet>, id: string, name: string) => {
-  const sig = await w.createSignature({ protocolID: [2, "skein register"], keyID: name, counterparty: "anyone", data: [...Buffer.from(`register ${name}`)] });
-  return (await fetch(`${base}/account/register`, { method: "POST", body: JSON.stringify({ username: name, identityKey: id, signature: Buffer.from(sig.signature).toString("hex") }) })).status;
-};
-check(await reg(owner, ownerId, "david") === 200, "the owner registers: a mailbox instance of its own (a signed claim to its key)");
-check(await reg(ephemeralWallet(key(KEYS.infer)), inferId, "infer") === 200, "the inference peer registers its mailbox instance");
+// The owner's and the inference peer's mailboxes: mailbox instances, by the instance manager's create (#113: image
+// `mailbox`, what a registration through the host skein asks for; this host has no host skein).
+const mb = async (id: string, name: string) => (await router.createInstance(name, id, { image: "mailbox" })).url === router.originOf(name);
+check(await mb(ownerId, "david"), "the owner's mailbox instance (the manager's create, image mailbox)");
+check(await mb(inferId, "infer"), "the inference peer's mailbox instance");
 await router.start();
 const zig = db.get("zigtest")!.identity!;
 

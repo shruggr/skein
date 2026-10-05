@@ -56,7 +56,9 @@
 // instance's own (p2p.ts); the instance manager (#90) creates, starts and
 // stops instances for the host skein alone (host.db `host_settings`:
 // `skein-host init` made it; createInstance claims a new instance before
-// its row is enabled, which publishes its hostname). Each genesis it writes names the providers' keys
+// its row is enabled, which publishes its hostname; image `mailbox`, #113, a
+// mailbox instance for a registration); the certifier (#113) signs handle
+// certificates for the host skein alone. Each genesis it writes names the providers' keys
 // in its address book (`addressBook`). A kernel's broadcast events go to the
 // broadcaster (#65).
 //

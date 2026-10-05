@@ -31,6 +31,7 @@ import { PrivateKey } from "@bsv/sdk";
 import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
+import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { instanceView, planInstall, readApp, sendInstall } from "../../src/host/install.ts";
 import { wasmDirObjects } from "../../src/host/boot.ts";
@@ -65,8 +66,10 @@ const db = new HostDb(join(home, "host.db"));
 const keys = new Map<string, PrivateKey>();
 const ownerKey = key(), inferKey = key(), pageKey = key();
 const inferId = inferKey.toPublicKey().toString(), pageId = pageKey.toPublicKey().toString();
-const router = new Router({
+const router: Router = new Router({
   db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home,
+  // No host skein here (#113): discovery over host.db (a fixture); the page's registration is answered below.
+  discovery: fakeDiscovery(db, () => router),
   owner: ownerKey.toPublicKey().toString(), infer: inferId, idleMs: 0, kernel: { command: kernelBin, env: { SKEIN_HOME: home } },
   log: (s, l) => { if (verbose) console.log(`  | [${s}] ${l}`); },
 });
@@ -75,8 +78,7 @@ const base = `http://127.0.0.1:${router.port}`;
 // The inference peer's mailbox instance. The agent answers the page (its opener) at the page identity's
 // mailbox instance: the admin wrote that into the agent's address book (#40: no claims).
 keys.set("infer", key());
-router.addMailbox("infer", inferId);
-db.add("infer", { identity: keys.get("infer")!.toPublicKey().toString() });
+db.add("infer", { kind: "mailbox", owner: inferId, store: join(home, "instances", "infer", "runtime.db"), identity: keys.get("infer")!.toPublicKey().toString() });
 keys.set("page", key()); // the page identity's mailbox instance, registered by the page itself
 keys.set("agent", key());
 db.add("agent", { store: join(home, "agent.db"), identity: keys.get("agent")!.toPublicKey().toString() });

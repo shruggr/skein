@@ -33,21 +33,23 @@
 //   3. the explorer renders alice's log (genesis, the claim, the requests);
 //   4. back on the host skein, a locator for it added from the page; its page
 //      lists alice under the skeins created there;
-//   5. a handle from the page (#103): Register a handle on the host skein's
-//      page — your wallet's signature, the host's /account/register (found
-//      through /.well-known/skein-host and the manifest) creates your mailbox
-//      instance and answers with the handle certificate, which the wallet in
-//      the tab keeps (acquireCertificate, direct: encrypted fields, your
-//      keyring); listCertificates returns it; "Your handles" shows
-//      you@localhost and the messagebox it resolves to;
-//      your profile (#104): the Profile form of that row — a name and an
-//      avatar outpoint — builds the OpNS profile record (@1sat/utils), the
-//      wallet in the tab signs it ([1, "metanet handles profile"]), and the
-//      page writes it to your mailbox instance as its owner (objects, head
-//      profile); the host's resolve answer carries it (verified here against
-//      your key) with displayName (no avatarURL: SKEIN_ORDFS_URL is empty); the row shows it as signed
-//      by your key; the manifest names the host (SKEIN_HOST_NAME) and its
-//      search endpoint, and Find a handle on the page finds you by that name;
+//   5. a handle (#103, #113): the page's Register form (skein-site 0.5.2)
+//      still signs `register <name>`, which the host skein's onboarding app
+//      refuses (it wants `register <name>@<domain>`); until skein-site
+//      follows, the page's wallet sends the new request from the page
+//      (/.well-known/skein-host for the domain, /account/register): the app
+//      has the instance manager create your mailbox instance and answers the
+//      handle certificate its record holds, which the wallet in the tab keeps
+//      (acquireCertificate, direct: encrypted fields, your keyring);
+//      listCertificates returns it, its serial the one resolve answers;
+//      "Your handles" shows you@localhost and the messagebox it resolves to;
+//      your profile (#104): the OpNS profile record, signed by the wallet in
+//      the tab ([1, "metanet handles profile"]) and posted to the host's
+//      /account/profile (#113: the app keeps it; the page's Profile form still
+//      writes your mailbox instance); resolve carries it (verified here
+//      against your key) with displayName (no avatarURL: the app's ordfs is
+//      empty); the manifest names the host (the app's config) and its search
+//      endpoint, and Find a handle on the page finds you by that name;
 //      the Inbox (#99): opened on that messagebox (prefilled from the handle);
 //      a sender delivers a payment to it in box metanet_inbox (a BRC-169
 //      DAG-CBOR envelope, BRC-231 over BRC-104, its `payment` a BRC-29
@@ -77,11 +79,15 @@ import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
-import { HANDLE_CERTIFICATE_TYPE, PROFILE_KEY_ID, PROFILE_PROTOCOL, serialOf } from "../../src/host/handles.ts";
+import { HANDLE_CERTIFICATE_TYPE } from "../../src/host/handles.ts";
 import { decodeProfile } from "@1sat/utils";
-import { outpointFromBytes } from "@1sat/templates";
+import { outpointFromBytes, outpointToBytes } from "@1sat/templates";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { chromium, playwright } from "./browser.ts";
+
+/** The profile signature (#104): [1, "metanet handles profile"], key ID "1", counterparty anyone. */
+const PROFILE_PROTOCOL: [1, string] = [1, "metanet handles profile"];
+const PROFILE_KEY_ID = "1";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const demoDir = join(here, "../../programs/test/app-demo");
@@ -214,9 +220,6 @@ const base = `http://127.0.0.1:${port}`;
 const vars: Env["vars"] = {
   SKEIN_HOME: home, HOME: home, SKEIN_ROUTER_PORT: String(port), SKEIN_HOST_PORT: "0",
   SKEIN_INSTANCE_ORIGIN: "http://127.0.0.1:{port}/@{handle}",
-  // #104: the host's name in the manifest; no avatarURL (nothing fetched from a public ORDFS gateway).
-  SKEIN_HOST_NAME: "Test host",
-  SKEIN_ORDFS_URL: "",
 };
 const lines: string[] = [];
 const out = (l: string) => { lines.push(l); if (verbose) process.stdout.write(`  | ${l}\n`); };
@@ -242,7 +245,9 @@ try {
   stores.push(db.get("host")!.store);
   host = await runHost(db, { vars: { ...vars, SKEIN_OWNER: you }, out, err: out });
   const router = host.router;
-  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all"], { wallet: ephemeralWallet(youKey), id: you });
+  // #113: the handle domain and the host's origin in the app's config; #104: the host's name in the manifest, no
+  // avatarURL (nothing fetched from a public ORDFS gateway).
+  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
   await router.settled();
   check(r.code === 0, `the onboarding app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
 
@@ -378,48 +383,90 @@ try {
   const kids = await page.locator("#children").innerText();
   check(/alice/.test(kids) && kids.includes(`${base}/@alice`) && /Open/.test(kids), `the host skein's page lists the skeins created there, alice openable through her locator (${kids.replace(/\s+/g, " ").trim()})`);
 
-  // ------------------------------------------------ 5. a handle from the page (#103)
+  // ------------------------------------------------ 5. a handle (#103, #113)
   await page.goto(`${base}/@host/${search}`);
   await ready();
   await page.waitForSelector("#register", { timeout: 60_000 });
   check((await page.locator("#handles").innerText()).includes("No handle certificate from localhost"), "the host skein's page finds its host (/.well-known/skein-host, the manifest): no handle certificate in your wallet yet");
+  // The page's Register form (skein-site 0.5.2) still signs `register <name>`: the host skein's onboarding app
+  // wants `register <name>@<domain>` (#113) and refuses it. skein-site follows docs/MESSAGES.md "Mailbox instances".
   await page.fill("#register input[name=handle]", "you");
   await page.click("#register button[type=submit]");
   await page.waitForSelector('tr[data-handle="you@localhost"], #register-status.bad', { timeout: 120_000 });
-  if (await page.locator("#register-status.bad").count()) throw new Error(`register: ${await page.locator("#register-status").innerText()}`);
-  check(db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you, "Register a handle from the page: your mailbox instance you@localhost, for your key (your wallet's signature)");
-  stores.push(db.get("you")!.store);
+  const pageRefused = (await page.locator("#register-status.bad").count()) ? await page.locator("#register-status").innerText() : "";
+  check(/does not verify/.test(pageRefused) && !db.get("you"), `the page's Register form (the pre-#113 signature, without the domain) is refused by the host skein: ${pageRefused.slice(0, 120)}`);
+  // What the page sends once skein-site follows: the same request signed over `register you@localhost` by the
+  // wallet in the tab, its certificate acquired (direct) — run in the page with its wallet.
   const { publicKey: certifier } = await router.certifier.getPublicKey({ identityKey: true });
+  const reg = await page.evaluate(async ([origin, me, certifierKey]) => {
+    const w = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }>; acquireCertificate(a: unknown): Promise<unknown> } } }).site.wallet;
+    const { domain } = await (await fetch(`${origin}/.well-known/skein-host`)).json() as { domain: string };
+    const { signature } = await w.createSignature({ protocolID: [2, "skein register"], keyID: "you", counterparty: "anyone", data: Array.from(new TextEncoder().encode(`register you@${domain}`)) });
+    const r = await fetch(`${origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "you", identityKey: me, signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    const v = await r.json() as { messagebox?: string; certificate?: Record<string, unknown> & { certifier?: string }; keyringForSubject?: Record<string, string>; error?: string };
+    if (r.status !== 200 || !v.certificate || v.certificate.certifier !== certifierKey) return { status: r.status, error: v.error ?? "no certificate" };
+    const c = v.certificate;
+    await w.acquireCertificate({ acquisitionProtocol: "direct", type: c.type, serialNumber: c.serialNumber, certifier: c.certifier, revocationOutpoint: c.revocationOutpoint, fields: c.fields, signature: c.signature, keyringRevealer: "certifier", keyringForSubject: v.keyringForSubject });
+    return { status: r.status, messagebox: v.messagebox, serialNumber: c.serialNumber as string };
+  }, [base, you, certifier] as const);
+  check(reg.status === 200 && db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you && reg.messagebox === `${base}/@you`,
+    `a registration signed over register you@localhost by the wallet in the tab: the host skein's app had the instance manager create your mailbox instance you@localhost (${reg.status} ${"error" in reg ? reg.error : reg.messagebox})`);
+  stores.push(db.get("you")!.store);
   const held = await page.evaluate(async ([c, type]) => {
     const w = (window as unknown as { site: { wallet: { listCertificates(a: unknown): Promise<{ certificates: Array<Record<string, unknown>> }> } } }).site.wallet;
     return (await w.listCertificates({ certifiers: [c], types: [type] })).certificates;
   }, [certifier, HANDLE_CERTIFICATE_TYPE] as const);
   const cert = held[0] as { serialNumber: string; subject: string; certifier: string; fields: Record<string, string>; keyring: Record<string, string> } | undefined;
   const read = cert ? { ...await MasterCertificate.decryptFields(new ProtoWallet(youKey), cert.keyring, cert.fields, certifier) } : {};
-  check(held.length === 1 && cert!.subject === you && cert!.serialNumber === serialOf("you", "localhost", you) && read.handle === "you" && read.domain === "localhost",
-    `the handle certificate is in the wallet in the tab (acquireCertificate, direct): listCertificates by the host's certifier and the handle type returns it, its fields encrypted, your keyring reads them (${JSON.stringify(read)})`);
+  const resolved = await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=you`)).json() as { certificate?: { serialNumber?: string } };
+  check(held.length === 1 && cert!.subject === you && cert!.serialNumber === resolved.certificate?.serialNumber && read.handle === "you" && read.domain === "localhost",
+    `the handle certificate is in the wallet in the tab (acquireCertificate, direct): listCertificates by the host's certifier and the handle type returns it, the serial resolve answers (the app's record), your keyring reads its fields (${JSON.stringify(read)})`);
+  // I1 (#113): "Remove from wallet" (relinquishCertificate: the toolbox keeps a deleted row, unique on type, certifier and
+  // serial), then register again: the app issues under a new serial, so the wallet takes it.
+  const again = await page.evaluate(async ([origin, me, certifierKey, type, old]) => {
+    const w = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }>; acquireCertificate(a: unknown): Promise<unknown>; relinquishCertificate(a: unknown): Promise<unknown>; listCertificates(a: unknown): Promise<{ certificates: Array<{ serialNumber: string }> }> } } }).site.wallet;
+    await w.relinquishCertificate({ type, serialNumber: old, certifier: certifierKey });
+    const { domain } = await (await fetch(`${origin}/.well-known/skein-host`)).json() as { domain: string };
+    const { signature } = await w.createSignature({ protocolID: [2, "skein register"], keyID: "you", counterparty: "anyone", data: Array.from(new TextEncoder().encode(`register you@${domain}`)) });
+    const r = await fetch(`${origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "you", identityKey: me, signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    const v = await r.json() as { certificate: Record<string, unknown>; keyringForSubject: Record<string, string> };
+    const c = v.certificate;
+    try {
+      await w.acquireCertificate({ acquisitionProtocol: "direct", type: c.type, serialNumber: c.serialNumber, certifier: c.certifier, revocationOutpoint: c.revocationOutpoint, fields: c.fields, signature: c.signature, keyringRevealer: "certifier", keyringForSubject: v.keyringForSubject });
+    } catch (e) { return { status: r.status, error: (e as Error).message }; }
+    const { certificates } = await w.listCertificates({ certifiers: [certifierKey], types: [type] });
+    return { status: r.status, serialNumber: c.serialNumber as string, held: certificates.map((x) => x.serialNumber) };
+  }, [base, you, certifier, HANDLE_CERTIFICATE_TYPE, cert!.serialNumber] as const);
+  check(again.status === 200 && "held" in again && again.serialNumber !== cert!.serialNumber && again.held.length === 1 && again.held[0] === again.serialNumber,
+    `the certificate removed from the wallet (relinquishCertificate), then registered again: a new serial (${"serialNumber" in again ? again.serialNumber : ""}), which the wallet acquires (${"error" in again ? again.error : `holds ${"held" in again ? again.held.length : 0}`})`);
+  await page.goto(`${base}/@host/${search}`);
+  await ready();
+  await page.waitForSelector('tr[data-handle="you@localhost"]', { timeout: 60_000 });
   const handles = await page.locator("#handles").innerText();
   check(handles.includes("you@localhost") && handles.includes(`${base}/@you`), `"Your handles" shows it, resolved to its messagebox (${handles.replace(/\s+/g, " ").trim()})`);
 
-  // ------------------------------------------------ your profile (#104)
+  // ------------------------------------------------ your profile (#104, #113: kept by the host skein's app)
+  // The page's Profile form (skein-site 0.5.2) writes to your mailbox instance, which the host no longer reads; what it
+  // sends once skein-site follows: the same signed record posted to the host's /account/profile.
   const avatar = `${"cd".repeat(32)}.0`;
-  const mine = page.locator('tr[data-handle="you@localhost"]');
-  await mine.locator("details.profile summary").click();
-  await mine.locator("form.profile-form input[name=name]").fill("You Yourself");
-  await mine.locator("form.profile-form input[name=avatar]").fill(avatar);
-  await mine.locator("form.profile-form button[type=submit]").click();
-  await page.waitForFunction(() => /profile signed by its key/.test(document.getElementById("handles")?.textContent ?? "") || !!document.querySelector(".profile-status.bad"), null, { timeout: 120_000 });
-  if (await page.locator(".profile-status.bad").count()) throw new Error(`profile: ${await page.locator(".profile-status.bad").innerText()}`);
-  const shown = (await page.locator("#handles").innerText()).replace(/\s+/g, " ").trim();
-  check(/you@localhost You Yourself \(profile signed by its key\)/.test(shown) && (await page.locator('tr[data-handle="you@localhost"] svg.avatar').count()) === 1,
-    `the Profile form: the page signs the profile, writes it to your mailbox (objects, head profile), and "Your handles" shows it as signed by your key, with your identicon (no avatar URL from this host) (${shown.slice(0, 120)})`);
+  const posted = await page.evaluate(async ([origin, avatarBytes]) => {
+    const w = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }> } } }).site.wallet;
+    // The DAG-CBOR {domain, name, avatar} @1sat/utils encodeProfile writes (keys in canonical order: name, avatar, domain).
+    const enc = new TextEncoder();
+    const text = (s: string) => { const b = enc.encode(s); return [0x60 + b.length, ...b]; };
+    const record = Uint8Array.from([0xa3, ...text("name"), ...text("You Yourself"), ...text("avatar"), 0x58, 36, ...avatarBytes, ...text("domain"), ...text("localhost")]);
+    const { signature } = await w.createSignature({ protocolID: [1, "metanet handles profile"], keyID: "1", counterparty: "anyone", data: Array.from(record) });
+    const r = await fetch(`${origin}/account/profile`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ handle: "you", record: btoa(String.fromCharCode(...record)), signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    return { status: r.status, text: await r.text() };
+  }, [base, Array.from(outpointToBytes(avatar.replace(".", "_"))!)] as const);
+  check(posted.status === 200, `your profile, signed by the wallet in the tab, posted to the host (/account/profile → the host skein's app): ${posted.status} ${posted.text.slice(0, 120)}`);
   const res = await (await fetch(`${base}/.well-known/metanet-handles/resolve?handle=you`)).json() as { identityKey: string; displayName?: string; avatarURL?: string; profile?: { record: string; signature: string } };
   const signedOk = res.profile ? (await new ProtoWallet("anyone").verifySignature({ protocolID: PROFILE_PROTOCOL, keyID: PROFILE_KEY_ID, counterparty: you, data: Utils.toArray(res.profile.record, "base64"), signature: Utils.toArray(res.profile.signature, "hex") })).valid : false;
   const rec = res.profile ? decodeProfile(Utils.toArray(res.profile.record, "base64")) : undefined;
   check(signedOk && rec?.domain === "localhost" && rec.name === "You Yourself" && outpointFromBytes(rec.avatar ?? []) === avatar.replace(".", "_") && res.displayName === "You Yourself" && res.avatarURL === undefined,
-    `resolve carries the profile, signed by your key (verified here): ${JSON.stringify({ ...rec, avatar: rec?.avatar ? outpointFromBytes(rec.avatar) : undefined })}, displayName ${res.displayName}; no avatarURL (SKEIN_ORDFS_URL empty)`);
+    `resolve carries the profile, signed by your key (verified here): ${JSON.stringify({ ...rec, avatar: rec?.avatar ? outpointFromBytes(rec.avatar) : undefined })}, displayName ${res.displayName}; no avatarURL (the app's config.onboard.ordfs empty)`);
   const mf = await (await fetch(`${base}/manifest.json`)).json() as { metanet: { trust: { name?: string }; handles: { search?: string } } };
-  check(mf.metanet.trust.name === "Test host" && mf.metanet.handles.search === `${base}/.well-known/metanet-handles/search`, `the manifest names the host (${mf.metanet.trust.name}) and its search endpoint`);
+  check(mf.metanet.trust.name === "Test host" && mf.metanet.handles.search === `${base}/.well-known/metanet-handles/search`, `the manifest names the host (${mf.metanet.trust.name}, the app's config) and its search endpoint`);
   await page.fill("#search input[name=q]", "yourself");
   await page.click("#search button[type=submit]");
   await page.waitForSelector('tr[data-result="you@localhost"], #search-status.bad', { timeout: 60_000 });

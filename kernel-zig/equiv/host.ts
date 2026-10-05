@@ -20,9 +20,10 @@
 //   host skein records her under onboard/instances/alice (the manager's
 //   answer record). A second create of "alice" is refused (409, the
 //   manager's answer); a request with no session is refused. alice's address
-//   book has no instance manager. alice resolves by BRC-169 (#100): the
-//   manifest names the certifier key, and the resolution carries the handle
-//   certificate the host issued, which the SDK verifies.
+//   book has no instance manager. alice resolves by BRC-169 (#100, #113):
+//   the host skein's app answers it from its record of her certificate (the
+//   create's thread had the certifier sign it); the manifest names the
+//   certifier key, and the SDK verifies the certificate.
 //
 // Both stores then replay to themselves exactly.
 //
@@ -105,10 +106,11 @@ try {
   check(hostRows.length === 4 && hostRows.every((x) => hex(x.sender) === operatorId), "the host skein is claimed for the operator: its four admin rows");
 
   // ------------------------------------------------ the operator installs the onboarding app
-  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all"], { wallet: operator, id: operatorId });
+  // #113: the handle domain and the host's origin (where the manifest says resolve is) in the app's config.
+  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base } })], { wallet: operator, id: operatorId });
   await router.settled();
-  check(r.code === 0 && r.out.some((l) => /onboard 0\.1\.0 installed/.test(l)), `skein-host install skein-onboard --instance host: exit ${r.code} ${r.err.join(" ")}`);
-  check(r.out.some((l) => /row +http \/onboard\/call from session → onboard\.call/.test(l)), "its one row: /onboard/call from any session → onboard.call");
+  check(r.code === 0 && r.out.some((l) => /onboard 0\.2\.0 installed/.test(l)), `skein-host install skein-onboard --instance host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
+  check(r.out.some((l) => /row +http \/onboard\/call from session → onboard\.call/.test(l)) && r.out.some((l) => /row +http \/onboard\/register from anyone → onboard\.register/.test(l)), "its rows: /onboard/call from any session → onboard.call; /onboard/register (and resolve, search, the manifest, profile, paymail) from anyone");
 
   // ------------------------------------------------ a client creates a skein
   const create = async (handle: string, w = client) => {

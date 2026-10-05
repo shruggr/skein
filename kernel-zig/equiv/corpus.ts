@@ -26,6 +26,7 @@ import { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
+import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
 import { Oracle } from "../../src/host/oracle.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { DEFAULTS } from "../../src/runtime/log.ts";
@@ -78,8 +79,10 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
   const handles = new Map<string, string>(); // key → handle
   const ownerKey = key();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
-  const router = new Router({
+  const router: Router = new Router({
     db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
+    // No host skein here (#113): the handles resolve over host.db (a fixture).
+    discovery: fakeDiscovery(db, () => router),
     owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, ledgerMs: 3_600_000,
     fuelPerStep: o.defaults?.fuelPerStep, kernel: { command: kernel, env: { SKEIN_HOME: home } },
     log: (src, l) => { if (verbose) process.stdout.write(`  | [${src}] ${l}\n`); },
@@ -93,11 +96,10 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     if (!b) { b = new RawBox(w, `${base}/@${handle}`); boxes.set(k, b); }
     return b;
   };
-  /** A mailbox instance for identity `whose`. */
+  /** A mailbox instance for identity `whose`: its row (a fixture's; its genesis at first hydration). */
   const mailbox = (name: string, whose: string, store?: string) => {
     keys.set(name, key());
-    router.addMailbox(name, whose);
-    db.add(name, { identity: keys.get(name)!.toPublicKey().toString(), ...(store ? { store } : {}) });
+    db.add(name, { kind: "mailbox", owner: whose, store: store ?? join(home, "instances", name, "runtime.db"), identity: keys.get(name)!.toPublicKey().toString() });
   };
   let first: string | undefined;
   const add = async (name: string) => {

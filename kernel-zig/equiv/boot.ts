@@ -43,6 +43,7 @@ import { collect } from "../../src/testkit.ts";
 import { CID } from "multiformats/cid";
 import { existsSync } from "node:fs";
 import { Router } from "../../src/host/router.ts";
+import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -79,11 +80,14 @@ const withComponent = existsSync(COMPONENT);
 let router: Router | undefined;
 const routerFor = (h: string, db: HostDb) => {
   const oracle = new Oracle(masterKey({}, h));
-  return new Router({
+  const r: Router = new Router({
     db, walletFor: (row) => oracle.wallet(row.handle), providerKeyFor: (n) => oracle.providerKey(n), home: h, port,
+    // No host skein here (#113): the handles resolve over host.db (a fixture).
+    discovery: fakeDiscovery(db, () => r),
     owner: ownerId, infer: inferId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: h } },
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
   });
+  return r;
 };
 
 /** The instances the shell app is installed into (#83); the others have the chat app only. */

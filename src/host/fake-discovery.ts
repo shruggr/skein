@@ -6,14 +6,17 @@
 // the corpus) answers them here instead, from host.db, as the router did
 // before #113: an agent's own identity, a mailbox instance's owner's, the
 // instance's origin as the messagebox, a certificate signed by the
-// certifier key with a serial number of the binding. Not part of anything
-// that runs (the router's `discovery` option is a test's).
+// certifier key with a serial number of the binding; and a registration
+// (POST /account/register, the #113 contract: signed over `register
+// <name>@<domain>`) answered with the mailbox instance the manager's create
+// makes, without a certificate (the browser page's own mailbox). Not part of
+// anything that runs (the router's `discovery` option is a test's).
 
-import { Hash, Utils } from "@bsv/sdk";
+import { Hash, ProtoWallet, Utils } from "@bsv/sdk";
 import { issueHandleCertificate, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import type { HostDb } from "./instances.ts";
 import type { Router, RouterRequest, RouterResponse } from "./router.ts";
-import { domainOf } from "./router.ts";
+import { domainOf, REGISTER_PROTOCOL } from "./router.ts";
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 
@@ -38,6 +41,16 @@ export function fakeDiscovery(db: HostDb, router: () => Router): (req: RouterReq
       const c = await issueHandleCertificate(r.certifier, handle, domain, key, serial);
       const certificate = { type: c.type, serialNumber: c.serialNumber, subject: c.subject, certifier: c.certifier, revocationOutpoint: c.revocationOutpoint, fields: c.fields, signature: c.signature };
       return json(200, { metanetHandles: "1.0", handle, domain, identityKey: key, certificate, messagebox: r.originOf(handle), ttl: 300, revoked: false });
+    }
+    if (req.method === "POST" && url.pathname === "/account/register") {
+      const b = JSON.parse(new TextDecoder().decode(req.body)) as { username: string; identityKey: string; signature: string };
+      const domain = await r.handleDomain();
+      const v = await new ProtoWallet("anyone").verifySignature({ protocolID: REGISTER_PROTOCOL, keyID: b.username, counterparty: b.identityKey, data: Utils.toArray(`register ${b.username}@${domain}`, "utf8"), signature: Utils.toArray(b.signature, "hex") }).catch(() => ({ valid: false }));
+      if (!v.valid) return json(401, { error: "the signature does not verify for that identity" });
+      try {
+        const c = await r.createInstance(b.username, b.identityKey, { image: "mailbox", domain });
+        return json(200, { handle: c.handle, domain, identityKey: b.identityKey, messagebox: c.url });
+      } catch (e) { return json(409, { error: (e as Error).message }); }
     }
     return undefined;
   };
