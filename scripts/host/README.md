@@ -589,11 +589,9 @@ where they use one. Unset means the default.
 | `SKEIN_MASTER_KEY` | the master secret (hex) every instance, provider and certifier key derives from |
 | `SKEIN_MASTER_KEY_FILE` | the master secret's file instead (default `$SKEIN_HOME/master.key`, made if absent) |
 | `SKEIN_ROUTER_PORT` | the HTTP transport's port (default 8100) |
-| `SKEIN_ROUTER_ORIGIN` | the router's public origin (default `http://127.0.0.1:{port}`): the manifest's resolve URL, the geneses' `resolveOrigin`, and the host's domain (its host name) for created instances, claims and new rows |
+| `SKEIN_ROUTER_ORIGIN` | the router's public origin (default `http://127.0.0.1:{port}`): the geneses' `resolveOrigin`, where the host's own origin's BRC-169 requests are answered (by the host skein's onboarding app), and the host's domain (its host name) when the onboarding app names none |
 | `SKEIN_INSTANCE_ORIGIN` | an instance's origin template (default `http://{handle}.localhost:{port}`) |
 | `SKEIN_HOST_PORT` | the host page and `/roster.json` (default 4600) |
-| `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE`, `SKEIN_HOST_ICON` | the manifest's `metanet.trust` name, note and icon URL (#104) |
-| `SKEIN_ORDFS_URL` | the ORDFS content route a profile's avatar URL is made under (default `https://api.1sat.app/content`; empty: none) |
 | `SKEIN_IDLE_MS` | stop a kernel this long after its last work (default 0: never) |
 | `SKEIN_ANSWER_WAIT_MS` | how long a client waits on its request's thread before 503 + Retry-After (default two minutes) |
 | `SKEIN_HTTP` | `fetch`: the HTTP proxy (the `fetch` provider) performs URLs that are not this host's; unset: refused |
