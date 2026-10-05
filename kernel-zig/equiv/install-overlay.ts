@@ -54,9 +54,9 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "9d3c5b649b6a69cd98c5d8180c77fae0f7fecb5c";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "d34010875ef4a9a2f3e2dfdba96e5b0af145568c";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "9668965821fb50cfa0853519834f319983ab7f53";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "0fd0697bd71946d18d8bac7be81909c1dd438748";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));

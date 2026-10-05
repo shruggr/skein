@@ -46,7 +46,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "9668965821fb50cfa0853519834f319983ab7f53";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "0fd0697bd71946d18d8bac7be81909c1dd438748";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -245,7 +245,7 @@ try {
   check(JSON.stringify(conf.scopes?.chain) === '["chain/"]', `the stock scopes name chain/ for a genesis-wired chain program (${JSON.stringify(conf.scopes?.chain)})`);
   writeFileSync(join(sys, "etc/config.json"), JSON.stringify(conf));
   const rowsAt = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8")) as unknown[];
-  rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain" }, { address: "chain", sender: "$owner", program: "chain" }, { address: "status", sender: "$status", program: "chain" });
+  rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain", filter: "beef" }, { address: "chain", sender: "$owner", program: "chain", filter: "beef" }, { address: "status", sender: "$status", program: "chain" });
   writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(rowsAt));
   const bootId = h.instance("boot");
   const src = await dirSource(sys);

@@ -40,6 +40,7 @@
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/wallet.ts
 
 import { spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
@@ -67,7 +68,7 @@ const WALLET = abi === "component" ? { ...WALLET_P1, code: { wasm: rawCid(readFi
 const WALLET_CID = encode(WALLET).cid;
 // The chain app (#78, #79): SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "9668965821fb50cfa0853519834f319983ab7f53";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "0fd0697bd71946d18d8bac7be81909c1dd438748";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -411,6 +412,27 @@ check(report.sameChainProgram === true, "the same chain app program record in bo
 check(eq(report.edges, { sameRoot: true, spends: true }), `#42: the TS reader derives the kernel's edges map (same root), with spends edges (${JSON.stringify(report.edges)})`);
 
 if (db) {
+  // #121: the wallet's ingest messages carry the BEEF's bytes; the chain app's `$self` row names `filter: "beef"`,
+  // so the kernel's door decoded each before its `local` entry was written: the message record untouched (its id,
+  // what the chain app's answers name), the body the door put for it (`door.bodies`) carrying the pointer record.
+  const d = new DatabaseSync(db, { readOnly: true });
+  const blocks = new Map<string, Uint8Array>();
+  try { for (const row of d.prepare("SELECT cid, bytes FROM blocks").iterate() as Iterable<{ cid: Uint8Array; bytes: Uint8Array }>) blocks.set(CID.decode(row.cid).toString(), row.bytes); } finally { d.close(); }
+  let filtered = 0, linked = 0, bytesInBody = 0;
+  for (const [c, b] of blocks) {
+    if (CID.parse(c).code !== 0x71) continue;
+    let e: { kind?: string; door?: { filter?: string; bodies?: Array<{ of: CID; is: CID }> } };
+    try { e = decode(b) as typeof e; } catch { continue; }
+    if (e?.kind !== "log" || e.door?.filter !== "beef" || !e.door.bodies) continue;
+    filtered++;
+    for (const p of e.door.bodies) {
+      const body = blocks.get(String(p.is));
+      const v = body ? decode(body) as { fn?: string; args?: { beef?: unknown } } : undefined;
+      if (v?.fn === "ingest" && CID.asCID(v.args?.beef)) linked++;
+      if (v?.args?.beef instanceof Uint8Array) bytesInBody++;
+    }
+  }
+  check(filtered > 0 && linked === filtered && bytesInBody === 0, `#121: the wallet's ingests went through the door: ${filtered} local entries filtered (beef), each message's body put with the pointer record's CID in place of the bytes (${linked}), none with bytes`);
   const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db, payeeDb], { encoding: "utf8" });
   process.stdout.write(r.stdout);
   if (r.status !== 0) process.stdout.write(r.stderr);
