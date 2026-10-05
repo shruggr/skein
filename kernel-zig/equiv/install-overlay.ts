@@ -18,6 +18,12 @@
 //     judges it with the manifest's topic manager, hands it to the chain app
 //     (which broadcasts it), admits it on the chain app's answer (Arcade's
 //     word); /overlay/lookup finds it; an HTTP /overlay/submit answers its STEAK;
+//   - BRC-22 → the chain app → BRC-24 over HTTP at the base URL
+//     /@<handle>/overlay (#111): a mined token's BEEF to <base>/submit with
+//     X-Topics: tm_demo, the chain app's answer proven (nothing broadcast),
+//     <base>/lookup {service: ls_demo, query: {txid, outputIndex, topic}}
+//     returns the output, its BEEF verifying against the headers; the token
+//     submitted unproven (admitted on Arcade's accepted) found the same way;
 //   - two overlay apps on one instance (#79): the same tree installed again as
 //     `overlay2` with its own topic tm_two: no row clash; each writes only its
 //     own heads (`<app>/state`, `<app>/ls_demo`); a submission to
@@ -240,6 +246,41 @@ try {
   const list = await fetch(`${rA.originOf("ov")}/overlay/listTopicManagers`);
   const listed1 = Object.keys(await list.json() as Record<string, unknown>);
   check(list.status === 200 && JSON.stringify(listed1) === '["tm_demo"]', `/overlay/listTopicManagers (the manifest's own row; the topics config.overlay names): ${JSON.stringify(listed1)}`);
+
+  // ------------------------------------------------ BRC-22 submit → the chain app → BRC-24 lookup, over HTTP at the base URL (#111)
+  // The base URL on a host without wildcard DNS: /@<handle>/<app> on the router's origin (docs/OVERLAY.md "Installing an overlay").
+  const base = `http://127.0.0.1:${rA.port}/@ov/overlay`;
+  // A mined token: block 2 is [coinbase, tM]; its parent (fund) is proven at 1. The header reaches the chain app as the feed's would.
+  const tM = token(4);
+  await tM.sign();
+  const cb2 = "cd".repeat(32);
+  tM.merklePath = new MerklePath(2, [[{ offset: 0, hash: cb2 }, { offset: 1, hash: tM.id("hex"), txid: true }]]);
+  const h2 = mine(sha256d(h1), sha256d(Buffer.concat([internal(cb2), internal(tM.id("hex"))])), 1_790_100_600);
+  await rA.admitEvent("ov", "chain", { kind: "header", raw: h2 });
+  await rA.settled();
+  const postsBefore = arcade.posts.length;
+  const subM = await fetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": "tm_demo" }, body: new Uint8Array(tM.toBEEF()) });
+  const steakM = await subM.json() as Record<string, { outputsToAdmit?: number[] }>;
+  check(subM.status === 200 && JSON.stringify(steakM) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}', `BRC-22 POST ${base.replace(/^http:\/\/[^/]+/, "")}/submit (X-Topics: tm_demo, a mined token's BEEF): ${subM.status} ${JSON.stringify(steakM)}`);
+  // The chain app's answer: proven from the BEEF at once, nothing broadcast.
+  const chainApp = ((await record("chain/app")) as { programs: Record<string, CID> }).programs.chain!;
+  const stateOf = async (txid: string) => { const r = await (await kA()).invoke(chainApp, "status", dagCbor.encode({ txid })); return r.ok ? (dagCbor.decode(r.result) as { state?: string }).state : String(r.error); };
+  const stM = await stateOf(tM.id("hex"));
+  check(stM === "proven" && arcade.posts.length === postsBefore, `the chain app's answer: ${stM}, admitted on it; nothing posted to Arcade (${arcade.posts.length - postsBefore} posts)`);
+  // BRC-24: the output back, its BEEF verifying against the headers the chain app holds.
+  const roots: Record<number, string> = { 1: Buffer.from(h1.subarray(36, 68)).reverse().toString("hex"), 2: Buffer.from(h2.subarray(36, 68)).reverse().toString("hex") };
+  const tracker = { isValidRootForHeight: async (root: string, height: number) => roots[height] === root, currentHeight: async () => 2 };
+  const lookupAt = async (query: Record<string, unknown>) => {
+    const res = await fetch(`${base}/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_demo", query }) });
+    const body = await res.json() as { type?: string; outputs?: Array<{ beef: number[]; outputIndex: number }> };
+    const outs = await Promise.all((body.outputs ?? []).map(async (o) => { const t = Transaction.fromBEEF(o.beef); return [t.id("hex"), o.outputIndex, await t.verify(tracker).catch(() => false)] as const; }));
+    return { status: res.status, type: body.type, outs };
+  };
+  const lkM = await lookupAt({ txid: tM.id("hex"), outputIndex: 0, topic: "tm_demo" });
+  check(lkM.status === 200 && lkM.type === "output-list" && lkM.outs.length === 1 && lkM.outs[0]![0] === tM.id("hex") && lkM.outs[0]![1] === 0 && lkM.outs[0]![2] === true, `BRC-24 POST …/@ov/overlay/lookup {service: ls_demo, query: {txid, outputIndex: 0, topic: tm_demo}}: ${lkM.status} ${lkM.type} [${lkM.outs.map((o) => `${o[0].slice(0, 8)}:${o[1]} verifies ${o[2]}`).join(", ")}]`);
+  // The token submitted above while unproven, admitted on Arcade's accepted: found the same way.
+  const lk2 = await lookupAt({ txid: t2.id("hex"), outputIndex: 0, topic: "tm_demo" });
+  check(lk2.status === 200 && lk2.outs.length === 1 && lk2.outs[0]![0] === t2.id("hex") && lk2.outs[0]![2] === true, `the unproven one admitted on the chain app's accepted: found too, its BEEF verifying (${lk2.status} [${lk2.outs.map((o) => `${o[0].slice(0, 8)}:${o[1]} verifies ${o[2]}`).join(", ")}])`);
 
   // ------------------------------------------------ a second overlay app on the same instance (#79)
   const dir2 = join(home, "overlay2");
