@@ -143,7 +143,7 @@ import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { dispatchBody } from "../client/client.ts";
 import { addressBook, DEFAULT_ONLY, deploy, deployFiles, dispatchRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
-import { noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
+import { hostDomain, noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { RawBox } from "../client/raw.ts";
 import type { Outbox } from "./deploy.ts";
@@ -219,7 +219,10 @@ export async function main(argv: string[], env: Env): Promise<number> {
           if ([v.boot, v.packet, v.image, v.identity, v.store, v.tree].some((x) => x !== undefined) || v.derive) { env.err("skein-host add --mailbox: only --owner and --domain"); return 2; }
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
-        if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
+        if (!db.get(handle)) {
+          f.store ??= join(home, "instances", handle, "runtime.db");
+          f.domain ??= hostDomain(env.vars.SKEIN_ROUTER_ORIGIN ?? "http://127.0.0.1"); // the host's domain (H4), as the router's
+        }
         // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
         if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Signer(masterKey(env.vars, home)).identity(handle);
         if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
@@ -588,7 +591,7 @@ async function claimCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
   try {
     const [name, domain] = (v.handle ?? "").replace(/^@/, "").split("@");
-    const c = await router.claim(handle, owner, { messagebox: v.messagebox, ...(name ? { handle: name, domain: domain || "localhost" } : {}) });
+    const c = await router.claim(handle, owner, { messagebox: v.messagebox, ...(name ? { handle: name, ...(domain ? { domain } : {}) } : {}) });
     return said({ entry: c.entry.toString(), claimed: c.claimed }, "");
   } catch (e) {
     env.err(`skein-host claim ${handle}: ${(e as Error).message}`);

@@ -299,7 +299,8 @@ message is answered with a signed message:
 
 - `create {handle, owner, image?, domain?}` → `{handle, identity, url}`. The row is
   added disabled (no hostname) at `domain` (#113: the onboarding app's
-  handle domain), the identity derived from the master
+  handle domain; when none is given, the host's: the onboarding app's
+  `config.onboard.domain`, else the host name of `SKEIN_ROUTER_ORIGIN`), the identity derived from the master
   secret, the store booted from the image (`default`),
   the kernel started, and the owner's claim delivered as a `local` request
   from the manager. Only once the kernel has written the owner's admin rows

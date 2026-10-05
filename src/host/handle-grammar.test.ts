@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import { ephemeralWallet } from "../wallet.ts";
 import { HostDb } from "./instances.ts";
-import { Router } from "./router.ts";
+import { hostDomain, Router } from "./router.ts";
 
 test("handles: one grammar for add, mailbox and create; the reserved names and the router's own label", async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-handles-"));
@@ -44,4 +44,16 @@ test("handles: one grammar for add, mailbox and create; the reserved names and t
   const local = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, idleMs: 0, ledgerMs: 60_000 });
   t.after(() => local.stop());
   assert.equal(local.ownLabel(), undefined);
+});
+
+test("the host's domain (H4): from its origin when no onboarding app names one", async (t) => {
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-domain-"));
+  const db = new HostDb(join(home, "host.db"));
+  const router = new Router({ db, walletFor: () => ephemeralWallet(PrivateKey.fromRandom()), home, origin: "https://id.example.test", idleMs: 0, ledgerMs: 60_000 });
+  t.after(async () => { await router.stop(); db.close(); await fs.rm(home, { recursive: true, force: true }); });
+  assert.equal(router.domain(), "id.example.test");
+  assert.equal(await router.handleDomain(), "id.example.test", "no host skein: the origin's host name, not localhost");
+  assert.equal(hostDomain("http://127.0.0.1:{port}"), "localhost");
+  const r = await router.dispatch({ method: "GET", url: "https://id.example.test/.well-known/skein-host", headers: {}, body: new Uint8Array() });
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(r.body)), { origin: "https://id.example.test", domain: "id.example.test" });
 });

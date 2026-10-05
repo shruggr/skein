@@ -219,6 +219,15 @@ export const domainOf = (hostname: string): string => {
   const h = hostname.toLowerCase();
   return h === "127.0.0.1" || h === "::1" || h === "[::1]" || h === "" ? "localhost" : h;
 };
+/**
+ * The BRC-169 domain of this host (H4): its public origin's host name
+ * (SKEIN_ROUTER_ORIGIN, default the loopback: `localhost`). What a created
+ * instance, a claim and a mailbox instance record when nothing names one,
+ * and what /.well-known/skein-host answers.
+ */
+export const hostDomain = (origin: string): string => {
+  try { return domainOf(new URL(origin.replace("{port}", "0")).hostname); } catch { return "localhost"; } // an origin that is no URL: the loopback's
+};
 
 /**
  * SKEIN_HTTP=fetch: the HTTP proxy's requests (#70, the `fetch` provider)
@@ -416,6 +425,9 @@ export class Router {
   reserved(handle: string): boolean {
     return RESERVED_HANDLES.has(handle) || handle === this.ownLabel();
   }
+
+  /** This host's BRC-169 domain: its origin's host name (hostDomain). */
+  domain(): string { return hostDomain(this.origin()); }
 
   /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
   originOf(handle: string): string {
@@ -736,7 +748,7 @@ export class Router {
     const key = keyBytes(owner);
     const mb = o.messagebox ?? (() => { const m = this.o.db.mailboxOf(owner); return m ? this.originOf(m.handle) : undefined; })();
     const l = await this.hydrate(handle);
-    const body = { owner: key, ...(mb ? { messagebox: mb } : {}), ...(o.handle ? { handle: o.handle, domain: o.domain ?? "localhost" } : {}) };
+    const body = { owner: key, ...(mb ? { messagebox: mb } : {}), ...(o.handle ? { handle: o.handle, domain: o.domain ?? await this.handleDomain() } : {}) };
     const entry = await this.providers.send(handle, "manager", keyBytes(l.identity), "claim", body) as CID;
     await this.settled();
     return { entry, claimed: await this.claimedBy(l, owner) };
@@ -781,7 +793,7 @@ export class Router {
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
     const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
     if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
-    this.o.db.add(handle, { store, status: "disabled", ...(o.domain ? { domain: o.domain } : {}) });
+    this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain() }); // H4: never the column's `localhost` on a host with a domain
     this.unpublished.add(handle);
     try {
       await this.bootRow(handle, await imageSource(), { image: true, manager: o.host });
@@ -1078,7 +1090,7 @@ export class Router {
    * origin's host name as a domain.
    */
   async handleDomain(): Promise<string> {
-    const fallback = domainOf(new URL(this.origin()).hostname);
+    const fallback = this.domain();
     const host = this.o.db.hostSkein();
     if (host?.status !== "enabled") return fallback;
     try {
