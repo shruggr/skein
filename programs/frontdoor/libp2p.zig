@@ -80,6 +80,8 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     const from = Value.bytesOf(req.get("from")) orelse return verdict(a, "reject", "no from");
     const body = Value.bytesOf(req.get("body")) orelse "";
     const key = keyOfPeerId(from) orelse return verdict(a, "reject", "from is not a secp256k1 peer ID");
+    // #121: the door verified a topic message's signature before the entry was written.
+    const checked = in.get("door") != null;
     // #70: a signed message over libp2p — a frame on MESSAGE_PROTOCOL, or a topic message no route takes.
     const route = in.get("match") orelse {
         if (protocol != null and !eql(u8, protocol.?, MESSAGE_PROTOCOL)) return verdict(a, "ignore", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
@@ -87,11 +89,11 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
             if (in.get("seen") != null) return verdict(a, "ignore", "already admitted");
             const sq = Value.bytesOf(req.get("seqno")) orelse return verdict(a, "reject", "no seqno");
             const sg = Value.bytesOf(req.get("signature")) orelse return verdict(a, "reject", "no signature");
-            if (sq.len != 8 or !try verifyMessage(a, from, body, sq, t, sg, key)) return verdict(a, "reject", "the signature does not verify");
+            if (!checked and (sq.len != 8 or !try verifyMessage(a, from, body, sq, t, sg, key))) return verdict(a, "reject", "the signature does not verify");
         }
         const pkg = cbor.decode(a, body) catch return verdict(a, if (topic != null) "ignore" else "reject", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
         const m = pkg.get("message") orelse return verdict(a, if (topic != null) "ignore" else "reject", "not a message {message, body}");
-        return main.signedMessage(a, in, m, Value.bytesOf(pkg.get("body")) orelse "");
+        return main.signedMessage(a, in, m, Value.bytesOf(pkg.get("body")) orelse "", false);
     };
     const again = Value.cidOf(in.get("tip")) != null;
     if (again) _ = try main.saved(a, Value.cidOf(in.get("tip")).?);
@@ -103,7 +105,7 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         seqno = Value.bytesOf(req.get("seqno")) orelse return verdict(a, "reject", "no seqno");
         signature = Value.bytesOf(req.get("signature")) orelse return verdict(a, "reject", "no signature");
         if (seqno.len != 8) return verdict(a, "reject", "the seqno is not 8 bytes");
-        if (!try verifyMessage(a, from, body, seqno, t, signature, key)) return verdict(a, "reject", "the signature does not verify");
+        if (!checked and !try verifyMessage(a, from, body, seqno, t, signature, key)) return verdict(a, "reject", "the signature does not verify");
     }
 
     const prog = Value.cidOf(route.get("program")) orelse return verdict(a, "ignore", "the route names no program");
@@ -118,7 +120,8 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         try h.put("seqno", .{ .bytes = seqno });
         try h.put("signature", .{ .bytes = signature });
     }
-    try h.put("body", .{ .bytes = body });
+    // The body as logged: bytes, or (#121) the link a row's filter put in their place.
+    try h.put("body", req.get("body") orelse Value{ .bytes = "" });
     try h.put("request", cbor.cidv(rc));
     // The dispatch row that matched (as HTTP's handlers get it, main.zig invoke): an installed row's
     // `program` and `app` tell a handler which app it runs as (#72).
@@ -163,6 +166,23 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     if (out.get("admit")) |ad| if (ad == .array) try m.put("admit", ad);
     if (out.get("close")) |c| if (c == .bool and c.bool) try m.put("close", .{ .bool = true });
     return m.value();
+}
+
+/// The door's verification of a libp2p package (#121; main.zig doorVerify): a topic message's
+/// signature (GossipSub's StrictSign) against the key its `from` names. A stream frame is not
+/// signed (the stream is Noise's): nothing to check.
+pub fn verify(a: Allocator, req: Value) !Value {
+    if (!eql(u8, Value.str(req.get("kind")) orelse "", "p2p")) return main.doorOk(a, null);
+    const from = Value.bytesOf(req.get("from")) orelse return main.doorRefused(a, 400, "reject", "no from");
+    const key = keyOfPeerId(from) orelse return main.doorRefused(a, 400, "reject", "from is not a secp256k1 peer ID");
+    const t = Value.str(req.get("topic")) orelse return main.doorRefused(a, 400, "reject", "no topic");
+    const sq = Value.bytesOf(req.get("seqno")) orelse return main.doorRefused(a, 400, "reject", "no seqno");
+    const sg = Value.bytesOf(req.get("signature")) orelse return main.doorRefused(a, 400, "reject", "no signature");
+    if (sq.len != 8) return main.doorRefused(a, 400, "reject", "the seqno is not 8 bytes");
+    if (!try verifyMessage(a, from, Value.bytesOf(req.get("body")) orelse "", sq, t, sg, key)) return main.doorRefused(a, 400, "reject", "the signature does not verify");
+    var m = cbor.MapBuilder.init(a);
+    try m.put("key", .{ .bytes = key });
+    return main.doorOk(a, m.value());
 }
 
 fn verdict(a: Allocator, v: []const u8, reason: ?[]const u8) !Value {

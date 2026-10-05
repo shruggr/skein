@@ -72,10 +72,15 @@ export function headerMap(h: Record<string, string | string[] | undefined> | Hea
   return out;
 }
 
-/** Append a package as received (#68): its record put, then one `request` entry naming it and its transport. */
+/**
+ * Append a package as received (#68): one `request` entry naming it and its
+ * transport. The record goes with the frame, not into the store (#121): the
+ * kernel's door verifies the sender, matches the row, runs the row's filter
+ * and puts the package as it hands it back (a BEEF's bytes never stored), so
+ * the entry written — its CID, returned — may name another record than this.
+ */
 export async function appendRequest(k: Kernel, transport: string, record: Record<string, unknown>, time: Stamp = clockNow()): Promise<CID> {
-  const rc = await k.store.put(record as never);
-  return await admit2(k, { request: rc, transport }, {}, time);
+  return await admit2(k, { request: cidOf(record), transport }, { request: record }, time);
 }
 
 /** An HTTP request's record (log.zig: {kind: "http", method, path, route, query, headers, body}). */
@@ -99,6 +104,8 @@ export async function frontDoor(k: Kernel, req: FrontRequest, o: { now?: Stamp; 
 /** A request thread's answer as the HTTP response: its last step's, a read after it, or 500/503. */
 export async function httpAnswer(k: Kernel, entry: CID, a: RequestAnswer): Promise<FrontAnswer> {
   const at = { entry, ...(a.thread ? { thread: a.thread } : {}) };
+  // #121: refused at the door (the middleware, or the row's filter): no thread ran; the refusal answers.
+  if (a.state === "refused") return { status: a.refused.status ?? 400, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: a.refused.code ?? "ERR_REFUSED", description: a.refused.reason }), ...at };
   if (a.state === "errored") return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: a.error }), ...at };
   if (a.state !== "finished") return unavailable(`not answered yet (its thread is ${a.state}): try again`, at);
   const r = dagCbor.decode(a.answer) as { status?: number; headers?: Record<string, string>; body?: Uint8Array; read?: { caller?: unknown } };

@@ -98,6 +98,7 @@ fn run(a: Allocator) !void {
     if (!eql(u8, kind, "call")) return sk.report("the front door is stepped on a request, or called (fn \"read\", \"explore\")");
     const func = Value.str(in.get("fn")) orelse "";
     const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
+    if (eql(u8, func, "verify")) return sk.answer(a, try doorVerify(a, in, arg));
     if (eql(u8, func, "read")) return sk.answer(a, try read(a, in, arg));
     if (eql(u8, func, "explore")) {
         // In a step (the request's thread) the log's live state is no answer: the host reads it after (fn "read").
@@ -113,7 +114,84 @@ fn run(a: Allocator) !void {
         try m.put("body", .{ .bytes = r.body });
         return sk.answer(a, m.value());
     }
-    return sk.report("unknown fn (the front door is called for \"read\", and as the route handler \"explore\")");
+    return sk.report("unknown fn (the front door is called for \"verify\", \"read\", and as the route handler \"explore\")");
+}
+
+// ---------------------------------------------------------------- the door (#121)
+
+/// The door's verification: a kernel call at admission, before the entry is
+/// written (scheduler.zig `door`). Read only. `arg` is {request: <the
+/// request record itself>, transport, match?, refused?} — the row the kernel
+/// matched, or why none. Who the package is from is checked here: BRC-104
+/// for http (a row that is not open: the session and the signature of the
+/// identity the kernel matched on), GossipSub's signature for a libp2p topic
+/// message, the message's signature for a `local` package. The answer is the
+/// door's outcome: {ok: true, verified?: {caller, theirs, requestId} | {key}}
+/// — written on the entry (`door.verified`), so the step does not verify
+/// again — or {refused: {status, code?, reason}}: the entry is a refusal and
+/// nothing runs. A handshake is a request like any other (its step writes
+/// the session); a request no row takes is answered by its step (404, 401).
+fn doorVerify(a: Allocator, in: Value, arg: Value) !Value {
+    const req = arg.get("request") orelse return sk.report("verify: no request");
+    const transport = Value.str(arg.get("transport")) orelse "";
+    if (eql(u8, transport, "libp2p")) return p2p.verify(a, req);
+    if (eql(u8, transport, "local")) {
+        if (try message.problem(a, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "")) |bad| return doorRefused(a, 400, null, bad);
+        return doorOk(a, null);
+    }
+    if (!eql(u8, transport, "http")) return doorRefused(a, 400, null, "the front door takes http, libp2p and local");
+    if (eql(u8, Value.str(req.get("route")) orelse "/", brc.WELL_KNOWN)) return doorOk(a, null);
+    const r = arg.get("match");
+    const refused = Value.str(arg.get("refused")) orelse "path";
+    if (r == null and !eql(u8, refused, "sender")) return doorOk(a, null);
+    if (r) |row| if (isOpen(row)) return doorOk(a, null);
+    const request_id = brc.headerOf(req.get("headers"), "x-bsv-auth-request-id") orelse return doorRefused(a, 401, "UNAUTHORIZED", "Mutual-authentication failed!");
+    const v = verify(a, in, req, request_id) catch |err| return switch (err) {
+        error.Malformed => doorRefused(a, 400, "ERR_AUTH_MALFORMED", "The authentication request is malformed."),
+        error.Unauthorized => doorRefused(a, 401, "ERR_AUTH_FAILED", why),
+        else => err,
+    };
+    var m = cbor.MapBuilder.init(a);
+    try m.put("caller", .{ .bytes = v.peer });
+    try m.put("theirs", cbor.string(v.theirs));
+    try m.put("requestId", cbor.string(v.request_id));
+    return doorOk(a, m.value());
+}
+
+pub fn doorOk(a: Allocator, verified: ?Value) !Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("ok", .{ .bool = true });
+    try m.put("verified", verified);
+    return m.value();
+}
+
+pub fn doorRefused(a: Allocator, status: u64, code: ?[]const u8, reason: []const u8) !Value {
+    var x = cbor.MapBuilder.init(a);
+    try x.put("status", cbor.int(status));
+    try x.put("code", cbor.optStr(code));
+    try x.put("reason", cbor.string(reason));
+    var m = cbor.MapBuilder.init(a);
+    try m.put("refused", x.value());
+    return m.value();
+}
+
+/// A request the door verified (#121, `door.verified` on its entry): who it is from, as the door
+/// found it, and the BRC-104 proof read off the request (its payload rebuilt from the record when
+/// the body is as received; a body a filter replaced is reconstructible, not rebuilt here).
+fn verifiedByDoor(a: Allocator, req: Value, d: Value, request_id: []const u8) !?Verified {
+    const x = d.get("verified") orelse return null;
+    const peer = Value.bytesOf(x.get("caller")) orelse return null;
+    const theirs = Value.str(x.get("theirs")) orelse return null;
+    const headers = req.get("headers");
+    var p = cbor.MapBuilder.init(a);
+    if (Value.bytesOf(req.get("body"))) |body| if (brc.decode64(a, request_id)) |rid| {
+        try p.put("payload", .{ .bytes = try brc.requestPayload(a, rid, Value.str(req.get("method")) orelse "GET", Value.str(req.get("path")) orelse "/", Value.str(req.get("query")) orelse "", try brc.headerList(a, headers), body) });
+    };
+    if (brc.headerOf(headers, "x-bsv-auth-signature")) |h| if (sk.unhex(a, h)) |sig| try p.put("signature", .{ .bytes = sig });
+    try p.put("nonce", cbor.optStr(brc.headerOf(headers, "x-bsv-auth-nonce")));
+    try p.put("yourNonce", cbor.optStr(brc.headerOf(headers, "x-bsv-auth-your-nonce")));
+    const proof = p.value();
+    return .{ .peer = peer, .theirs = theirs, .request_id = request_id, .proof = if (proof.get("payload") != null) proof else null };
 }
 
 /// A step of a request's thread: the first verifies and routes; a later one
@@ -124,7 +202,7 @@ fn stepped(a: Allocator, in: Value) !Value {
     const transport = Value.str(args.get("transport")) orelse "";
     const req = try sk.get(a, rc);
     if (eql(u8, transport, "libp2p")) return p2p.stepped(a, in, rc, req);
-    if (eql(u8, transport, "local")) return signedMessage(a, in, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "");
+    if (eql(u8, transport, "local")) return signedMessage(a, in, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "", in.get("door") != null);
     if (!eql(u8, transport, "http")) return sk.report("the front door takes http, libp2p and local");
     if (Value.cidOf(in.get("tip"))) |tip| return resumed(a, in, rc, req, tip);
     return http(a, in, rc, req);
@@ -137,7 +215,8 @@ fn stepped(a: Allocator, in: Value) !Value {
 /// the message it is — routed by the kernel after the step by its `replyTo`,
 /// else by subscription on (sender, box), once (the `unique` map). The answer:
 /// {verdict: "accept", admit: [{mail, body}]} | {verdict: "reject" | "ignore", reason}.
-pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8) !Value {
+/// `checked`: the door checked the signature before the entry was written (#121).
+pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8, checked: bool) !Value {
     const V = struct {
         fn no(al: Allocator, v: []const u8, reason: []const u8) !Value {
             var r = cbor.MapBuilder.init(al);
@@ -146,7 +225,7 @@ pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8) !Value
             return r.value();
         }
     };
-    if (try message.problem(a, m, body)) |bad| return V.no(a, "reject", bad);
+    if (!checked) if (try message.problem(a, m, body)) |bad| return V.no(a, "reject", bad);
     const me = selfIdentity(in) orelse return V.no(a, "ignore", "no identity");
     if (!eql(u8, Value.bytesOf(m.get("recipient")).?, me)) return V.no(a, "ignore", "the message is for another identity");
     var entry = cbor.MapBuilder.init(a);
@@ -242,7 +321,10 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         resp = mutualAuthFailed();
         return resp.value(a);
     };
-    const v = verify(a, in, req, request_id) catch |err| {
+    // #121: the door verified it before the entry was written (`door.verified`); a log written
+    // before the door has none, and this step verifies as it always did.
+    const by_door: ?Verified = if (in.get("door")) |d| try verifiedByDoor(a, req, d, request_id) else null;
+    const v = if (by_door) |x| x else verify(a, in, req, request_id) catch |err| {
         resp = switch (err) {
             error.Malformed => try jsonError(a, 400, "ERR_AUTH_MALFORMED", "The authentication request is malformed."),
             // A plain 401 (no auth headers): the stock client takes it as a stale session and shakes hands again.

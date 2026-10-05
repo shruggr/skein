@@ -285,7 +285,7 @@ const Server = struct {
             s.reply(a, id, cbor.optCid(try s.store.byEnvelope(a, c)) orelse .null, null, null);
         } else if (eq(u8, op, "admit")) {
             const entry = v.get("entry") orelse return error.BadRequest;
-            const res = try s.rt.admit(a, entry, Value.bytesOf(v.get("body")));
+            const res = try s.rt.admit(a, entry, v.get("request"));
             switch (res) {
                 .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
                 .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
@@ -322,6 +322,13 @@ const Server = struct {
             //   ({thread, state: "waiting"}, or {state: "pending"}: the entry not yet processed).
             const entry = Value.cidOf(v.get("entry")) orelse return error.BadRequest;
             const wait = Value.intOf(v.get("wait")) orelse 120_000;
+            // #121: refused at the door — no thread; the refusal is the answer, at once.
+            if (try s.store.get(a, entry)) |e| if (e.get("refused")) |x| {
+                var m = cbor.MapBuilder.init(a);
+                try m.put("state", cbor.string("refused"));
+                try m.put("refused", x);
+                return s.reply(a, id, m.value(), null, null);
+            };
             if (try s.rt.requestThread(a, entry)) |t| {
                 const r = try s.rt.answerOf(a, t);
                 if (eq(u8, r.state, "finished") or eq(u8, r.state, "errored")) return s.reply(a, id, try s.answerValue(a, t), null, null);

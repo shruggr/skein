@@ -8,7 +8,13 @@
 // entry (format 7, #69): a deadline and a sleep are answered by the waker
 // provider's signed message.
 //
-//   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport}
+//   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport (+ door | refused)}
+//   door     (#121) a request's admission: what the door established before the entry was written —
+//            {verified?: <the middleware's answer: who the package is from>, filter?: <the row's
+//            filter>, beefs?: [<pointer record CID>]} — the request record then the package as the
+//            door handed it back (a filter's rewrite: door.zig, beef.zig)
+//   refused  (#121) a refusal at the door: {stage: "middleware" | "filter", reason, status, code?};
+//            the entry is written and nothing runs (the request record as far as the door got)
 //   request  a package as a transport carried it in (#68), unverified: the
 //            host verifies nothing. `transport` names the middleware stepped
 //            on it (the genesis's front door for "http", "libp2p" and
@@ -173,12 +179,18 @@ pub fn isLogEntry(e: Value) bool {
         if (box.len == 0) return false;
     } else if (e.get("box") != null) return false;
     if (e.get("mail")) |m| if (m != .cid) return false;
-    // A transport goes with a request, and only with it (#68).
+    // A transport goes with a request, and only with it (#68); so does the door's outcome (#121):
+    // `door` on an admission, `refused` on a refusal, never both.
     if (e.get("request")) |r| {
         if (r != .cid) return false;
         const t = Value.str(e.get("transport")) orelse return false;
         if (t.len == 0) return false;
-    } else if (e.get("transport") != null) return false;
+        if (e.get("door")) |d| if (d != .map) return false;
+        if (e.get("refused")) |x| {
+            if (x != .map or Value.str(x.get("stage")) == null or Value.str(x.get("reason")) == null) return false;
+            if (e.get("door") != null) return false;
+        }
+    } else if (e.get("transport") != null or e.get("door") != null or e.get("refused") != null) return false;
     return true;
 }
 

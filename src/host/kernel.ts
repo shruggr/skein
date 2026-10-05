@@ -37,7 +37,11 @@ export const KERNEL_BIN = process.env.SKEIN_KERNEL_BIN || join(ROOT, "kernel-zig
 
 type Frame = Record<string, unknown>;
 /** A request thread's answer (#66, the `answer` frame): at rest (finished | errored), or not yet at the wait's bound. */
-export type RequestAnswer = { thread?: CID; state: "finished"; answer: Uint8Array } | { thread?: CID; state: "errored"; error: string } | { thread?: CID; state: "waiting" | "running" | "new" | "pending" };
+export type RequestAnswer = { thread?: CID; state: "finished"; answer: Uint8Array } | { thread?: CID; state: "errored"; error: string } | { thread?: CID; state: "waiting" | "running" | "new" | "pending" }
+  /** #121: refused at the door — the entry is a refusal ({stage, reason, status, code?}) and nothing ran. */
+  | { thread?: undefined; state: "refused"; refused: Refusal };
+/** A refusal entry's `refused` (#121): the door's stage, why, and the status the transport answers with. */
+export interface Refusal { stage: "middleware" | "filter"; reason: string; status?: number; code?: string }
 /** A kernel call's answer (#40): the program's stdout, or its error; the fuel it used either way. */
 export type CallAnswer = { ok: true; result: Uint8Array; fuel: number } | { ok: false; error: string; fuel: number };
 
@@ -188,9 +192,9 @@ export class Kernel {
   /** The dispatch table as it stands (#77): its chain's tip (the change key; null before the genesis is processed) and its rows. */
   async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
-  /** Admit an entry (a message's record put first; its body's bytes beside it). */
-  async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array } = {}): Promise<CID> {
-    return await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}) }) as CID;
+  /** Admit an entry; a request entry's record beside it (#121: the kernel puts it, after the door), else put first. */
+  async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}): Promise<CID> {
+    return await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}) }) as CID;
   }
   /**
    * The kernel's `call` (#40): a program's function (by CID, or a genesis

@@ -52,6 +52,7 @@ const program = @import("program.zig");
 const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
 const engine = @import("engine.zig");
+const doorm = @import("door.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
 const Value = cbor.Value;
@@ -436,12 +437,22 @@ pub const Runtime = struct {
         invalid: []const u8, // a TypeError / Error: the provider's bug
     };
 
-    /// Admit a finished entry (Runtime.admit): a request (its record put first) or an event.
-    /// No mail entry (K2): a message comes in inside the request that carries it. `body` is
-    /// unused (the frame's field from when a host admitted messages).
-    pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !AdmitResult {
-        if (try rt.check(a, entry, body)) |r| return r;
-        const res = try rt.store.logAppend(a, entry);
+    /// Admit a finished entry (Runtime.admit): a request or an event. No mail
+    /// entry (K2): a message comes in inside the request that carries it.
+    /// A request goes through the door first (#121, `door`): the entry
+    /// written is the admission (naming its package as the door hands it
+    /// back) or a refusal, and its CID is what this answers. `record` is the
+    /// request record itself (the host need not put it: a package's BEEF
+    /// bytes are never stored); without it the record the entry names is
+    /// read from the store.
+    pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: ?Value) !AdmitResult {
+        if (try rt.check(a, entry, record)) |r| return r;
+        var e = entry;
+        if (Value.cidOf(entry.get("request"))) |rc| {
+            const rec = record orelse (try rt.store.get(a, rc)).?;
+            e = try rt.door(a, entry, rec);
+        }
+        const res = try rt.store.logAppend(a, e);
         switch (res) {
             .ok => |c| return .{ .ok = c }, // the caller kick()s: the entry is processed after the host hears back
             .rejected => |r| return .{ .rejected = .{ .reason = r.reason, .message = r.message } },
@@ -462,17 +473,25 @@ pub const Runtime = struct {
         };
     }
 
-    fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !?AdmitResult {
+    fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: ?Value) !?AdmitResult {
         if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a request, mail or event entry (format 7: a wake is the waker's message, #69)" };
+        if (entry.get("door") != null or entry.get("refused") != null) return .{ .invalid = "admit: `door` and `refused` are the kernel's to write (#121: the door's outcome)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
         if (Value.cidOf(entry.get("request"))) |rc| {
             // #68: the package as received; its form only (what it says is the middleware's to judge).
             const transport = Value.str(entry.get("transport")).?;
             if (middlewareOf(rt.genesis.?, transport) == null) return .{ .invalid = "admit: no middleware for this transport (the genesis's front door takes \"http\", \"libp2p\" and \"local\")" };
-            if (!logm.isRequest(transport, rt.store.getOpt(a, rc))) return .{ .invalid = "admit: a request entry names its request record, put first, in its transport's shape (docs/VM.md, \"Requests\")" };
+            if (record) |r| {
+                // #121: the record comes with the frame, the entry naming it by its CID.
+                if (!std.mem.eql(u8, try cbor.cidOfValue(a, r), rc)) return .{ .invalid = "admit: the request record is not the one the entry names (its CID)" };
+                if (!logm.isRequest(transport, r)) return .{ .invalid = "admit: a request record in its transport's shape (docs/VM.md, \"Requests\")" };
+                return null;
+            }
+            if (!logm.isRequest(transport, rt.store.getOpt(a, rc))) return .{ .invalid = "admit: a request entry names its request record, put first or sent with the frame (`request`), in its transport's shape (docs/VM.md, \"Requests\")" };
             return null;
         }
+        if (record != null) return .{ .invalid = "admit: a request record comes only with a request entry" };
         if (Value.cidOf(entry.get("event"))) |ev| {
             if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first)" };
             return null;
@@ -481,9 +500,85 @@ pub const Runtime = struct {
         // `local` request {kind: "message", message: <the signed mail record>, body}, or a client's
         // request), and the front door verifies it; only what a step routes becomes a message
         // (routeAdmits). A `mail` entry in a log written before this is still processed (replay).
-        _ = body;
         if (entry.get("mail") != null) return .{ .invalid = "admit: a message is not admitted as a mail entry; append the signed package as a `local` request ({kind: \"message\", message, body}): the front door verifies it (docs/VM.md, \"Requests\")" };
         return null;
+    }
+
+    // ------------------------------------------------------------ the door (#121)
+
+    /// The door: read-only, before the entry is written. The kernel matches
+    /// the package's dispatch row (#115, `matchOf`); the transport's
+    /// middleware verifies who the package is from — a kernel call of its fn
+    /// `verify` (the front door: BRC-104 for http, GossipSub's signature for
+    /// libp2p, the message's signature for local; matching on the claim and
+    /// then verifying it is the same as verifying and then matching); the
+    /// row's `filter`, if it names one, runs on the package's content
+    /// (door.zig). The outcome is the entry, written either way: the
+    /// admission — naming the package as the door hands it back, with
+    /// `door: {verified?, filter?, beefs?}` — or a refusal, `refused: {stage:
+    /// "middleware" | "filter", reason, status, code?}`, which runs nothing
+    /// (`processRequest`). A middleware with no fn `verify` (a front door
+    /// pinned before #121) gets the package as received, no `door`, no
+    /// filter: its step verifies as it always did.
+    fn door(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: Value) !Value {
+        const g = rt.genesis.?;
+        const transport = Value.str(entry.get("transport")).?;
+        const mw = middlewareOf(g, transport).?;
+        const m = try rt.matchOf(a, transport, record);
+        const at = logm.stampOf(entry.get("time")).?.ms();
+        var arg = cbor.MapBuilder.init(a);
+        try arg.put("request", record);
+        try arg.put("transport", cbor.string(transport));
+        try arg.put("match", m.row);
+        try arg.put("refused", cbor.optStr(m.refused));
+        const r = try rt.call(a, mw, "verify", try cbor.encode(a, arg.value()), null, at);
+        if (!r.ok) {
+            if (std.mem.indexOf(u8, r.err, "unknown fn") != null) return withRequest(a, entry, try rt.store.put(a, record), null, null);
+            return refusedEntry(a, entry, try rt.store.put(a, record), "middleware", try std.fmt.allocPrint(a, "the middleware failed: {s}", .{r.err}), 500, null);
+        }
+        const said = cbor.decode(a, r.result) catch return refusedEntry(a, entry, try rt.store.put(a, record), "middleware", "the middleware's answer is not dag-cbor", 500, null);
+        if (said.get("refused")) |x| {
+            const reason = Value.str(x.get("reason")) orelse "refused";
+            return refusedEntry(a, entry, try rt.store.put(a, record), "middleware", reason, Value.intOf(x.get("status")) orelse 401, Value.str(x.get("code")));
+        }
+        var d = cbor.MapBuilder.init(a);
+        try d.put("verified", said.get("verified"));
+        var rec = record;
+        if (m.row) |row| if (Value.str(row.get("filter"))) |f| {
+            if (!doorm.isFilter(f)) return refusedEntry(a, entry, try rt.store.put(a, record), "filter", try std.fmt.allocPrint(a, "the row names a filter this kernel has not: {s}", .{f}), 500, null);
+            const x = try doorm.filterBeef(a, rt.store, record);
+            rec = x.value;
+            try d.put("filter", cbor.string(f));
+            if (x.beefs.len > 0) {
+                const bs = try a.alloc(Value, x.beefs.len);
+                for (x.beefs, bs) |c, *v| v.* = cbor.cidv(c);
+                try d.put("beefs", .{ .array = bs });
+            }
+            if (x.refused) |why| {
+                rt.say("door: {s} request refused by its row's filter {s}: {s}", .{ transport, f, why });
+                return refusedEntry(a, entry, try rt.store.put(a, rec), "filter", why, 400, null);
+            }
+        };
+        return withRequest(a, entry, try rt.store.put(a, rec), d.value(), null);
+    }
+
+    fn refusedEntry(a: std.mem.Allocator, entry: Value, rc: []const u8, stage: []const u8, reason: []const u8, status: i128, code: ?[]const u8) !Value {
+        var x = cbor.MapBuilder.init(a);
+        try x.put("stage", cbor.string(stage));
+        try x.put("reason", cbor.string(reason));
+        try x.put("status", cbor.int(status));
+        try x.put("code", cbor.optStr(code));
+        return withRequest(a, entry, rc, null, x.value());
+    }
+
+    /// The entry naming `rc` as its request, with the door's outcome.
+    fn withRequest(a: std.mem.Allocator, entry: Value, rc: []const u8, d: ?Value, refused: ?Value) !Value {
+        var m = cbor.MapBuilder.init(a);
+        for (entry.map) |e| try m.put(e.key, e.value);
+        try m.put("request", cbor.cidv(rc));
+        try m.put("door", d);
+        try m.put("refused", refused);
+        return m.value();
     }
 
     // ------------------------------------------------------------ the loop
@@ -671,6 +766,7 @@ pub const Runtime = struct {
         const g = rt.genesis orelse return null;
         const rc = Value.cidOf(e.get("request")) orelse return null;
         const transport = Value.str(e.get("transport")) orelse return null;
+        if (e.get("refused") != null) return null; // #121: refused at the door, nothing runs
         const mw = middlewareOf(g, transport) orelse return null;
         var args = cbor.MapBuilder.init(a);
         try args.put("request", cbor.cidv(rc));
@@ -711,24 +807,34 @@ pub const Runtime = struct {
     /// needs a session and the request claims none: 401), "sender" (none
     /// there takes the identity it claims: 403). Who it is from is what it
     /// claims — `x-bsv-auth-identity-key`, a libp2p peer ID's key — and the
-    /// front door verifies that before it runs the handler.
+    /// middleware verifies that before the handler runs (#121: at the door).
     fn putMatch(rt: *Runtime, a: std.mem.Allocator, input: *cbor.MapBuilder, o: Value) !void {
         const args = o.get("args").?;
         const transport = Value.str(args.get("transport")) orelse return;
         const req = (try rt.store.get(a, Value.cidOf(args.get("request")).?)) orelse return;
+        const m = try rt.matchOf(a, transport, req);
+        try input.put("match", m.row);
+        try input.put("refused", cbor.optStr(m.refused));
+    }
+
+    pub const Match = struct { row: ?Value = null, refused: ?[]const u8 = null };
+
+    /// The row a request record matches as the table stands (#115; for http with none, why).
+    fn matchOf(rt: *Runtime, a: std.mem.Allocator, transport: []const u8, req: Value) !Match {
         const rows = (try dispatch.current(a, rt.store)) orelse &.{};
         const owner = if (try rt.ownerOf(a)) |v| Value.bytesOf(v) else null;
         if (std.mem.eql(u8, transport, "http")) {
             const who: dispatch.Who = .{ .key = claimedKey(a, req.get("headers")), .owner = owner, .reads = rt.genesis.?.get("reads") };
-            switch (dispatch.forHttp(rows, Value.str(req.get("route")) orelse "/", who)) {
-                .row => |r| try input.put("match", r.value),
-                .refused => |why| try input.put("refused", cbor.string(why.text())),
-            }
+            return switch (dispatch.forHttp(rows, Value.str(req.get("route")) orelse "/", who)) {
+                .row => |r| .{ .row = r.value },
+                .refused => |why| .{ .refused = why.text() },
+            };
         } else if (std.mem.eql(u8, transport, "libp2p")) {
-            const name = Value.str(req.get("topic")) orelse Value.str(req.get("protocol")) orelse return;
+            const name = Value.str(req.get("topic")) orelse Value.str(req.get("protocol")) orelse return .{};
             const who: dispatch.Who = .{ .key = peerKey(Value.bytesOf(req.get("from")) orelse ""), .owner = owner };
-            if (dispatch.forLibp2p(rows, name, who)) |r| try input.put("match", r.value);
+            if (dispatch.forLibp2p(rows, name, who)) |r| return .{ .row = r.value };
         }
+        return .{};
     }
 
     /// The identity an HTTP request claims (its BRC-104 `x-bsv-auth-identity-key`), or null.
@@ -757,6 +863,10 @@ pub const Runtime = struct {
     /// first step verifies the package and routes it.
     fn processRequest(rt: *Runtime, a: std.mem.Allocator, n: i128, ctx: Ctx, rc: []const u8, at: i64) !void {
         _ = at;
+        if (ctx.e.get("refused")) |x| {
+            rt.say("#{d} {s} request {s}: refused at the door ({s}: {s}); recorded, nothing runs", .{ n, Value.str(ctx.e.get("transport")).?, short(a, rc), Value.str(x.get("stage")) orelse "?", Value.str(x.get("reason")) orelse "?" });
+            return;
+        }
         const origin = (try rt.requestOrigin(a, ctx.cid, ctx.e)) orelse {
             rt.say("#{d} request {s}: no middleware for its transport; recorded, nothing runs", .{ n, short(a, rc) });
             return;
@@ -1101,10 +1211,25 @@ pub const Runtime = struct {
             try r.put("fn", cbor.string(o));
             _ = try dispatch.apply(a, rt.store, "add", r.value(), d);
         }
+        // #121: every sender is a key. Beside the admin rows, the owner's explorer row (the front
+        // door's fn `explore`, at /explore and below) — unless the image seeded a row for the
+        // `owner` symbol (#115, an image before #121), which keeps reading the claim's key as then.
+        var symbolic = false;
+        for (now) |x| symbolic = symbolic or x.sender == .owner;
+        if (!symbolic) if (rt.genesis.?.get("programs")) |ps| if (Value.cidOf(ps.get("frontdoor"))) |fd| {
+            var r = cbor.MapBuilder.init(a);
+            try r.put("transport", cbor.string("http"));
+            try r.put("address", cbor.string("/explore"));
+            try r.put("prefix", .{ .bool = true });
+            try r.put("sender", .{ .bytes = owner });
+            try r.put("program", cbor.cidv(fd));
+            try r.put("fn", cbor.string("explore"));
+            _ = try dispatch.apply(a, rt.store, "add", r.value(), d);
+        };
         _ = try dispatch.apply(a, rt.store, "remove", row.value, d);
         _ = try heads.advanceHead(a, rt.store, CLAIM_HEAD, body_cid, by);
         if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, null, Value.str(body.get("handle")), Value.str(body.get("domain")), "claim", by);
-        rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers; the claim row removed{s}", .{ shortKey(owner), if (mb != null) "; the owner's messagebox in the address book" else "" });
+        rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers{s}; the claim row removed{s}", .{ shortKey(owner), if (symbolic) "" else ", the explorer row", if (mb != null) "; the owner's messagebox in the address book" else "" });
     }
 
     /// The instance's owner (#89): the genesis's, else the claimed key (the head `claim`), else null (an unclaimed image).
@@ -1487,6 +1612,9 @@ pub const Runtime = struct {
             // record was admitted before as what it routes (a redelivered GossipSub message: the
             // `unique` map holds its `p2p` record).
             try rt.putMatch(a, &input, o);
+            // #121: what the door established (the middleware verified the sender at admission):
+            // the step does not verify again.
+            if (Value.cidOf(o.get("input"))) |ec| if (try rt.store.get(a, ec)) |re| try input.put("door", re.get("door"));
             if (g.get("reads") != null) {
                 // A genesis written before #115 (it carries the front door's `reads`) pins a front
                 // door that matches for itself: it is handed the table and the reads as then.

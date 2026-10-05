@@ -574,6 +574,13 @@ export class Router {
     const entry = await appendRequest(l.kernel, "libp2p", record, this.now());
     const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
     this.settle(l);
+    if (a.state === "refused") {
+      // #121: refused at the door. A bad signature or a bad BEEF is the sender's fault (reject: GossipSub
+      // penalises the forwarder); what this instance cannot judge (no chain state, a failing middleware) is ignore.
+      const verdict = (a.refused.status ?? 400) < 500 && !/no chain state/.test(a.refused.reason) ? "reject" : "ignore";
+      this.say(handle, `${source} from ${from}: ${verdict} (refused at the door, ${a.refused.stage}: ${a.refused.reason})`);
+      return { verdict, reason: a.refused.reason };
+    }
     if (a.state !== "finished") {
       const why = a.state === "errored" ? `the front door failed: ${a.error}` : `not answered in time (${a.state})`;
       this.say(handle, `${source} from ${from}: ${why}`);

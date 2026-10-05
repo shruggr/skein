@@ -124,9 +124,10 @@ export class WebKernel {
     },
   };
   /** The one call in: admitted and durable when this resolves (processing is drain's). */
-  async admit(entry: unknown, records: { body?: Uint8Array } = {}): Promise<CID> {
+  async admit(entry: unknown, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}): Promise<CID> {
     const frame: Record<string, unknown> = { entry };
     if (records.body) frame.body = records.body;
+    if (records.request) frame.request = records.request;
     return WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply) as CID;
   }
   async drain(): Promise<void> { await this.kw.call("drain"); }
@@ -271,8 +272,8 @@ export class BrowserHost {
   /** A provider's answer (#70): a signed message, appended as a `local` request; the front door checks it and routes it. */
   private async appendLocal(pkg: Record<string, unknown>): Promise<CID> {
     return await this.serial(async () => {
-      const rc = await this.kernel.store.put(pkg);
-      const e = await admit2(this.kernel as unknown as Kernel, { request: rc, transport: "local" } as never, {}, now());
+      // #121: the record goes with the frame; the kernel's door puts it.
+      const e = await admit2(this.kernel as unknown as Kernel, { request: encode(pkg).cid, transport: "local" } as never, { request: pkg }, now());
       await this.kernel.drain();
       return e;
     });

@@ -309,7 +309,7 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     }
     if (eq(u8, op, "admit")) {
         const entry = v.get("entry") orelse return error.BadRequest;
-        const res = try r.admit(a, entry, Value.bytesOf(v.get("body")));
+        const res = try r.admit(a, entry, v.get("request"));
         // Not processed here: skein_drain runs the step loop (the shim acknowledges first, once it is durable).
         return switch (res) {
             .ok => |c| reply(a, cbor.cidv(c), null, null),
