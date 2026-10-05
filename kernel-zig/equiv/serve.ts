@@ -4,7 +4,7 @@
 // the owner and the inference peer speaking raw BRC-33 on BRC-104 sessions,
 // each with its mailbox instance on the same router. The shell and the chat
 // loop are apps (#83): each instance that runs them has the shell app and/or
-// the chat app installed first (`skein-host install`, src/testapps.ts).
+// the chat app installed first (the owner's messages, `skein plan install`, #124; src/testapps.ts).
 // Checks a run and a chat answered end to end, a sleep woken by the
 // waker provider (#69: the shell's sleep is a wake-me message), an idle stop mid-sleep and the hydration that finishes it,
 // and (issue #5) a shell that never ends running out of fuel under a low

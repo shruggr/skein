@@ -4,7 +4,7 @@
 //   alpha   booted from the directory (`add --boot <dir>`)
 //   beta    booted from a packet of it (`pack <dir>` in the ordfs form, mined; `add --packet --proofs`)
 // A genesis has no shell and no chat loop (#83): each instance has apps
-// installed on top (`skein-host install`, src/testapps.ts) — alpha the chat
+// installed on top (the owner's messages, `skein plan install`, #124; src/testapps.ts) — alpha the chat
 // app, beta the chat app and the shell app — then is chatted with — no tree
 // named, so the loop reads `main`, the system tree — and beta runs a command
 // over `main`. (alpha has no shell so that its checkpoint stays small: a

@@ -20,11 +20,20 @@ skein whoami
 skein import <dir>                                   # tree objects -> the kernel's objects operation; prints the tree CID
 skein run [--tree <cid>] [--cwd p] [--env K=V]... -- '<cmd>'   # no --tree: the instance's `main` head
 skein head <name> <cid>                              # the kernel's head operation: "<name> is now <cid>"
-skein dispatch add|remove [--sender <key>] <box> <handler>    # the kernel's dispatch operation: a mailbox row; handler: a program record CID (skein-host dispatch also takes a name the genesis gives)
+skein dispatch add|remove [--sender <key>] <box> <handler>    # the kernel's dispatch operation: a mailbox row; handler: a program record CID (`skein plan dispatch` also takes a name the genesis gives)
 skein inbox [--wait] [--timeout s] [--no-ack] [--json]
 skein chat "<text>" [--tree <cid>] [--model ripper/qwen38] [--new] [--wait] [--timeout s]
 skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
+skein plan install|uninstall|dispatch|peers|deploy …  # the owner's admin messages as /sendMessage JSON files (no wallet: admin.ts)
+skein send <origin> <dir>                            # those files, in order, by the wallet's BRC-104 client (`1sat authfetch`)
 ```
+
+`plan` and `send` (#124, src/client/admin-cli.ts, admin.ts) need no wallet
+of the client's own: the plan reads the instance through its explorer with
+the owner's wallet (`--origin`, `1sat authfetch GET`) or from its store file
+(`--store`), and writes the prompt and one `/sendMessage` body per message;
+any BRC-100 wallet sends them (scripts/host/README.md, "The owner's
+messages").
 
 ## Chat
 

@@ -2,7 +2,7 @@
 // uninstalling an app sends, as the owner, to the kernel's admin boxes, read
 // from a view of the instance — its heads, dispatch table, address book,
 // genesis programs, and its store by CID. No node APIs: the node client
-// (install.ts: `skein-host install`, a store file's view) and the management
+// (install.ts and src/client/admin.ts: `skein plan install`, #124, a store file's or the explorer's view) and the management
 // site (shruggr/skein-site, #92: a view over the instance's explorer reads, in
 // a browser) plan with the same code. install.ts's header has the steps.
 

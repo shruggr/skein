@@ -39,19 +39,17 @@ So `up.sh` goes:
 4. **The grants** (`grants.sh`), toward every row's front-door key from
    `skein-host list`, now that every row exists.
 5. **The address books** (#40). Into every enabled agent, through its
-   `peers` box as the owner (`skein-host peers <agent> add …`): the owner's
-   key and mailbox instance origin (`http://david.localhost:8100`, handle
-   `SKEIN_OWNER_HANDLE`) and the inference peer's (`http://infer.localhost:8100`,
-   `SKEIN_INFER_HANDLE`). Then the roster step, `skein-host roster --deploy`,
-   writes the other agents' keys and origins into each (and redeploys any
-   changed ROSTER.md). The inference peer's own address book, every agent's
-   key → origin, is written to `~/.skein/infer-peers.json` (bin/skein-infer
-   reads it, again whenever it changes). An add identical to what the store
-   has is not sent, so this is idempotent. Run `up.sh` again after adding an
-   agent.
+   `peers` box as the owner (`skein plan peers <key> <origin> …`, sent; see
+   "The owner's messages" below): the owner's key and mailbox instance
+   origin (`http://david.localhost:8100`, handle `SKEIN_OWNER_HANDLE`), the
+   inference peer's (`http://infer.localhost:8100`, `SKEIN_INFER_HANDLE`)
+   and every other agent's. The inference peer's own address book, every
+   agent's key → origin, is written to `~/.skein/infer-peers.json`
+   (bin/skein-infer reads it, again whenever it changes). Run `up.sh` again
+   after adding an agent.
 6. **The apps** (#83). A genesis has no shell and no chat loop: every
    enabled agent gets the shell app (`run`) and the chat app (`chat`) by
-   `skein-host install … --approve-all` as the owner, from
+   the owner's messages (`skein plan install`, sent), from
    `SKEIN_SHELL_APP` / `SKEIN_CHAT_APP` (default the two repos at
    `#v0.1.0`). Installing what an instance already has sends only the head
    again. The shell app's first install is the slow step: its modules are
@@ -64,12 +62,19 @@ So `up.sh` goes:
    http://host.localhost:8100/onboard/call {"fn": "onboard.create", "args":
    {"handle": "…"}}` (docs/ARCH.md, "The host skein"), and any wallet
    registers a handle and its mailbox at the router's `POST
-   /account/register`. Then `skein-host import-handles` adopts step 2's
-   mailboxes (the app records and certifies them, so they resolve).
+   /account/register`. Then step 2's mailboxes are adopted (the app records
+   and certifies them, so they resolve): `skein-host import-handles` prints
+   the owner's request for each, and the owner's wallet sends it.
+
+Steps 5–7 are the owner's messages, built by `skein plan … --store <the
+instance's store>` and sent by `skein send` with the dev owner's wallet
+(`1sat authfetch`, HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`).
+An instance whose owner is another key (an `owner.identity` that is not
+`owner-dev.identity`) refuses them; that owner sends from its own wallet.
 
 An agent whose genesis names no owner messagebox is logged at every
 hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
-`host.log`) and `skein-host deploy` says the same.
+`host.log`).
 
 | process | address | what | log |
 |---|---|---|---|
@@ -140,18 +145,21 @@ where it went and what came back:
 [martha] deliver chat for 79d35eb2 → https://other.host/sendMessage (remote): failed: fetch failed
 ```
 
-### The address book: `skein-host peers`
+### The address book: `skein plan peers`
 
 Where an agent delivers to a key — its answers, its `message` tool — is its
 address book (head `peers`: key → transport and address, role and handle
 optional; docs/MESSAGES.md, "Outbound: emit, the address book and the
 providers"). Every new genesis seeds it with the host's providers and the
-owner's mailbox (source `genesis`); the rest is configuration: the admin
-writes it through the agent's `peers` box as the owner, like `dispatch`.
+owner's mailbox (source `genesis`); the rest is configuration: the owner
+writes it through the agent's `peers` box, like `dispatch` — messages
+`skein plan` builds and the owner's wallet sends (#124; "The owner's
+messages", below).
 
 ```
-bin/skein-host peers martha add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle bob@example.com]
-bin/skein-host peers martha remove <key>
+bin/skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle bob@example.com] --origin http://martha.localhost:8100 --out plan
+bin/skein plan peers remove <key> --origin http://martha.localhost:8100 --out plan
+bin/skein send http://martha.localhost:8100 plan
 bin/skein-host peers martha list        # key, transport, address, role, handle@domain, source (genesis | admin | resolve)
 ```
 
@@ -166,8 +174,7 @@ Until then its chats are still admitted (the key authenticates, the
 dispatch table decides), and the agent's answer fails once, logged on the
 step's line in host.log: `stderr: loop: could not deliver the answer: … no
 route to <key>: not in the address book`. `up.sh` writes the owner, the
-inference peer and every other agent; `deploy` and `roster --deploy` write
-the other agents.
+inference peer and every other agent.
 
 **Mailbox instances.** A person or peer outside the host gets a mailbox: an
 instance of its own with only the front door and the messagebox, keeping
@@ -177,7 +184,8 @@ every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
 know; #113: the host skein's onboarding app takes it and asks the instance
 manager, whose `create` with image `mailbox` is the one creation path —
 `add --mailbox` calls it too). `up.sh` makes `david`'s and `infer`'s with `add`, then
-adopts them into the app (`skein-host import-handles`). `skein-host mailboxes` lists them (whose, the key their front door signs
+adopts them into the app (`skein-host import-handles` prints the owner's
+`onboard.adopt` request for each; the owner's wallet sends it). `skein-host mailboxes` lists them (whose, the key their front door signs
 sessions with, and where); `skein-host list` prints that key for every row
 (its fifth column), which is what `grants.sh` grants toward. The
 owner's is where every instance delivers what it sends him: a new genesis
@@ -187,7 +195,7 @@ owner's mailbox instance here), the one peer a genesis names.
 Files:
 
 - `~/.skein/master.key` — the host's master secret (hex, 0600, made once; `SKEIN_MASTER_KEY` overrides). Every instance key derives from it; losing it loses the instances' identities. `skein-host identity <handle>` prints one.
-- `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322). `bin/skein-host` reads `owner.identity` into `SKEIN_OWNER` and `infer.identity` into `SKEIN_INFER`, unless they are set, for `run`, `deploy`, `roster`, `peers`, `add` (so `add --boot`/`--packet` needs no `SKEIN_OWNER` by hand) and `event`.
+- `~/.skein/owner.identity`, `~/.skein/owner-dev.identity`, `~/.skein/infer.identity` — public keys, one line each. `owner.identity` is the *configured* owner (a genesis's `owner`) and is written once; `owner-dev.identity` is the owner wallet's (3322). `bin/skein-host` reads `owner.identity` into `SKEIN_OWNER` and `infer.identity` into `SKEIN_INFER`, unless they are set, for `run`, `add` (so `add --boot`/`--packet` needs no `SKEIN_OWNER` by hand), `event` and `init`.
 - `~/.skein/host.sock` — the running host's control socket (0600; there only while `run` is up): `skein-host event` sends through it.
 - `~/.skein/infer.json` — the inference peer's providers (written if absent).
 - `~/.skein/mailbox.url` — the owner's mailbox instance, `http://127.0.0.1:8100/@david` (`up.sh`): where `bin/skein` reads.
@@ -343,8 +351,8 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 | `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the signer's, BRC-42 child, key ID the handle) |
 | `wallet_url`, `wallet_originator` | only in files made before #33: nothing reads them, and new files lack them |
 | `store` | its store file (default `~/.skein/instances/<handle>/runtime.db`) |
-| `tree` | the root CID of the directory last deployed into it (`skein-host deploy`) |
-| `source` | that directory, which `deploy --all` sends again |
+| `tree` | a deployed tree's root CID (`add --tree`; unset: the roster reads the store's `main`) |
+| `source` | a directory the roster reads IDENTITY.md from when the store has neither (set before #124 by `deploy`) |
 | `knows` | JSON array of the handles its `ROSTER.md` lists (`skein-host knows`); `["*"]`: every other enabled row; NULL: none, no `ROSTER.md` |
 | `status` | `enabled` / `disabled` |
 | `created_at` | ISO time |
@@ -355,11 +363,10 @@ bin/skein-host add <handle> --mailbox --owner <hex>   # a mailbox instance for a
 bin/skein-host knows <handle> [a,b | --all | --none]   # who its ROSTER.md lists; no list: print it
 bin/skein-host list | mailboxes | enable <handle> | disable <handle> | remove <handle>   # remove leaves the store
 bin/skein-host run                    # the host, the host page and roster
-bin/skein-host deploy <handle> <dir> [--only glob,glob]
-bin/skein-host deploy --all [--only glob,glob]   # every enabled row, from its `source`
 bin/skein-host roster                 # the roster JSON, printed
 bin/skein-host roster --for <handle>  # that agent's ROSTER.md, printed
-bin/skein-host roster --deploy        # redeploy every enabled row whose ROSTER.md changed
+bin/skein-host peers <handle> list    # its address book, from its store
+bin/skein-host import-handles         # the mailboxes the onboarding app has no record of, each with the owner's adopt request
 ```
 
 ### Running them: `skein-host run`
@@ -386,99 +393,103 @@ enabled instance — handle, identity, status (`live` while its kernel runs,
 else `idle`), pid, store path, deployed tree — and a link to its origin.
 This is the host operator's view; the user's is the management page (#92).
 
-### Changing an instance's dispatch table: `skein-host dispatch`
+### The owner's messages: `skein plan` and `skein send` (#124)
 
-The genesis carries only the seed of an instance's dispatch table (#77,
-docs/MESSAGES.md "The dispatch table"); the table is a chain in the
-instance's store, so a change is a message, not a new genesis.
-`skein-host dispatch <handle> add|remove [--sender <key>] <box> <handler>`
-sends one message to the instance's `dispatch` box as the owner, through the
-owner's wallet to its front door exactly as `deploy` does (same checks). The
-kernel performs it (an admin operation, not a program): the body is
-`{op, row}`, the row `{transport: "mailbox", address: <box>, sender: "*" |
-<key bytes>, program: <handler>}`; `add` replaces the row with the same
-(transport, address, prefix, sender) or appends it, `remove` deletes it.
-`<handler>` is a program the instance's genesis names (`resolve`,
-`messagebox`, …: resolved to its record's CID from the row's store) or a
-program record's CID (its record and module go in through `objects` first).
-No reply; the change shows on the management page's dispatch table (the explorer's read of the chain `{kind: "dispatch"}`). Nothing in host.db maps
-to rows yet (`knows` is only ROSTER.md), so nothing sends these
-automatically.
+Nothing on the host writes into an instance as its owner. Installing an app,
+a dispatch row, an address-book entry, a directory into `main` are messages
+from the owner to the kernel's admin boxes (docs/MESSAGES.md, "The dispatch
+table and the kernel's operations": `objects`, `head`, `dispatch`, `peers`)
+and the app's own box (start, stop). `bin/skein plan` builds them (the
+library is src/client/admin.ts, over the install plan src/host/plan.ts that
+the management page uses too); any BRC-100 wallet with a BRC-104 session
+sends them, in order, to the instance's `/sendMessage` — the sender is the
+wallet's identity, admitted by the owner's admin rows.
 
 ```
-bin/skein-host dispatch martha add --sender <key> register resolve
-bin/skein-host dispatch martha remove --sender <key> register resolve
+bin/skein plan install <repo-url#commit | dir> <where> [--config json] [--out dir]
+bin/skein plan uninstall <app> <where> [--out dir]
+bin/skein plan dispatch add|remove [--sender <key>] <box> <handler> <where> [--out dir]
+bin/skein plan peers add <key> <address> [--transport …] [--role r] [--handle h@d] <where> [--out dir]
+bin/skein plan peers remove <key> <where> [--out dir]
+bin/skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
+bin/skein send <origin> <dir>
 ```
 
-**Stores before format 8** are not read by this kernel. Move the
-runtime.db aside, restart `skein-host run` on this build, and `deploy`
-again; host.db is untouched.
-
-### Installing an app: `skein-host install` / `uninstall`
-
-```
-skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]
-skein-host uninstall <app> --instance <handle> [--approve-all]
-```
-
-An app (docs/APPS.md) is a tree with `etc/app.json`. `install` clones the
-repo (a `#<rev>` checks that commit out) or reads the directory (leaving out
-`.git`, `node_modules`, `zig-out`, `.zig-cache`, `zig-pkg`), checks the
-manifest (src/host/manifest.ts) and the instance (its store, read only:
-`requires` provided by an installed app, the name free, no row whose key
-another app or the genesis has, `$<provider>` senders in the address book,
-`optional` rows left out when the provider is missing), prints what the app
-asks for (the head `<app>/app`, each dispatch row, start/stop,
-requires/provides, the messages) and, approved (`--approve-all`, or "y" at
-a terminal; `--dry-run` stops at the prompt), sends as the owner through
-the owner's wallet to the row's front door (as `deploy` does): `objects`
-(the tree, modules, program records, the app record), `head` `{name:
-"<app>/app", tree: <app record>}`, `dispatch` per row, then `start`.
-Installing it again is the upgrade (state kept, rows it no longer asks for
-removed, start sent again). `uninstall` sends `stop`, then removes the
-app's rows; the heads are left. Exit 0 sent, 1 refused or failed, 2 usage.
+`<where>` is how the plan reads the instance: `--origin <url>` (its
+explorer, the owner's, read through the wallet: `1sat authfetch GET`), or
+`--store <runtime.db>` (its store file, read only, on the host); `dispatch`,
+`peers` and `deploy` also take `--recipient <key>` alone (no reads; a deploy
+then sends every object and the head). With `--out` the plan is a
+directory: `prompt.txt` (what the management page shows) and one file per
+message, `001-objects.json`, `002-head.json`, …, each a `/sendMessage` JSON
+body:
 
 ```
-skein-host install https://github.com/shruggr/skein-static --instance martha --approve-all   # /static/… from main's www/
-skein-host install programs/test/app-demo --instance martha --dry-run
+{"message": {"recipient": "<the instance's key, hex>", "messageBox": "<box>", "body": <the body as DAG-JSON>}}
 ```
 
-### Deploying an agent: `skein-host deploy`
+Without `--out`, the prompt goes to stderr and the bodies to stdout, one per
+line. `skein send <origin> <dir>` POSTs the files in order with the wallet's
+command (`$SKEIN_AUTHFETCH`, default `1sat authfetch`) and stops at the
+first answer that is not 2xx. Any wallet does the same by hand:
 
-Genesis is only the core image; the agent's personality arrives as a
-message (#23, "Deployment via `objects`"). `skein-host deploy <handle> <dir>`
-does what `bin/skein import` does, for the row's instance: it hashes `<dir>`
-into git objects, sends them in ≤ 1 MiB bundles to the instance's `objects`
-box (blobs, then trees, the root tree on the last bundle), and records the
-root CID as the row's `tree` and `<dir>` as its `source`. Each message is
-sent as the **owner** — the identity the genesis's dispatch rows take `objects` and
-`head` from — on the owner's BRC-104 session with the front door, as `bin/skein` does
-(`SKEIN_OWNER_WALLET`, default http://127.0.0.1:3322, origin
-`SKEIN_ORIGINATOR`, default `skein-client`); it refuses if that wallet is not
-`SKEIN_OWNER` or not the store's genesis owner. Each bundle is one message
-to the instance's front door (the host starts its kernel if it is not
-running), admitted as one request entry.
+```
+set -a; . ~/.1sat/cli/wallet.env; set +a     # the 1sat CLI wallet's env
+for f in plan/[0-9]*.json; do 1sat authfetch POST <origin>/sendMessage --body @"$f" || break; done
+```
 
-- **First deploy**: the kernel's `objects` operation makes the root `main` (there is none yet).
-- **Redeploy of a changed directory**: only the records the instance's store
-  lacks (read-only look at the store, if it exists), then `head` `{name:
-  "main", tree: root}`, so the next *new* conversation starts from the new
-  tree (a SOUL.md edit takes effect there; running conversations keep their
-  prompt).
-- **Unchanged directory** (root = the row's `tree`, and the instance's store,
-  if it has one, holds it): nothing is sent. A store without it (reset to a
-  new genesis, or not admitted yet) gets it sent again.
-- `deploy --all`: every enabled row that has a `source`.
-- The row's generated `ROSTER.md` (below) is added at the tree's root, in
-  memory — never written into `<dir>` — so it is part of the root: a roster
-  change alone is a changed tree (objects + `head`).
+- **install** clones the repo (`#<commit>` checks it out) or reads the
+  directory (leaving out `.git`, `node_modules`, `zig-out`, `.zig-cache`,
+  `zig-pkg`), checks the manifest (src/host/manifest.ts) and the instance
+  (`requires` provided by an installed app, the name free, no row whose key
+  another app or the genesis has, `$<provider>` senders in the address book,
+  `optional` rows left out when the provider is missing), and plans
+  `objects` (the tree, modules, program records, the app record; only what
+  the instance lacks), `head {name: "<app>/app", tree: <app record>}`, a
+  `dispatch` per row that changes, then `start`. `--config` is merged over
+  the manifest's config (per program, one level deep). Installing it again
+  is the upgrade (state kept, rows it no longer asks for removed, start sent
+  again). **uninstall** plans `stop`, then the app's rows removed; the heads
+  are left.
+- **dispatch** is one message to `dispatch`: `{op, row}`, the row
+  `{transport: "mailbox", address: <box>, sender: "*" | <key bytes>,
+  program: <handler>}`; `add` replaces the row with the same (transport,
+  address, prefix, sender) or appends it, `remove` deletes it. `<handler>`
+  is a program the instance's genesis names (`resolve`, `messagebox`, …:
+  resolved from the view) or a program record's CID.
+- **peers** is one message to `peers` per change ("The address book",
+  above).
+- **deploy** hashes `<dir>` into git objects (the filter below), plans them
+  in ≤ 1 MiB bundles to `objects` (blobs, then trees, the root on the last
+  bundle; only what the store lacks), then `head {name: "main", tree:
+  root}` when `main` is another tree. The first deploy needs no head (the
+  kernel's `objects` operation makes the root `main` when there is none); a
+  changed directory moves `main`, so the next *new* conversation starts
+  from the new tree; an unchanged one plans nothing.
 
 **The filter.** Only what the loop uses goes in, not the code around it
 (b-open-io/prompts' `.agents/<name>/` also holds `src/`, `package.json`,
 `bun.lock`, `data/`, …). Default `--only SOUL.md,IDENTITY.md,skills`.
 Patterns are paths from the directory's root, comma-separated, `*`/`?`
 within one segment; a pattern naming a directory takes all of it;
-`.git` and `node_modules` are never sent. `--only '*'` sends everything else.
+`.git` and `node_modules` are never sent. `--all` sends everything else.
+
+```
+bin/skein plan install https://github.com/shruggr/skein-static#<commit> --origin http://martha.localhost:8100 --out plan
+bin/skein send http://martha.localhost:8100 plan
+bin/skein plan dispatch add --sender <key> register resolve --store ~/.skein/instances/martha/runtime.db --out plan
+bin/skein plan deploy ~/Work/prompts/.agents/martha --store ~/.skein/instances/martha/runtime.db --out plan
+```
+
+The wallet's identity must be the instance's owner: the explorer refuses
+another key's reads (403), and the instance refuses its messages (403
+`ERR_NOT_SUBSCRIBED`). A single record larger than a bundle travels alone,
+so a module's size is a message's size; whether a wallet's BRC-104 client
+takes a message that large is the wallet's limit.
+
+**Stores before format 8** are not read by this kernel. Move the
+runtime.db aside, restart `skein-host run` on this build, and deploy again;
+host.db is untouched.
 
 ### The roster: `/roster.json`
 
@@ -493,8 +504,9 @@ within one segment; a pattern naming a directory takes all of it;
 
 `displayName`, `description`, `emoji`, `avatar` are IDENTITY.md's `- Name:`,
 `- Description:`, `- Emoji:`, `- Avatar:` lines, read from the instance's
-store by the row's `tree` (read-only); empty (or absent) when nothing is
-deployed or the deploy has not been admitted yet. `status` is `live` if the
+store by the row's `tree` (`add --tree`), else its `main` (read-only);
+empty (or absent) when nothing is deployed or the deploy has not been
+admitted yet. `status` is `live` if the
 instance's process, supervised by this `skein-host run`, is up, else `idle`
 (so `skein-host roster`, its own process, says `idle` for every row).
 
@@ -503,7 +515,9 @@ instance's process, supervised by this `skein-host run`, is up, else `idle`
 Agents know each other only from their trees (#27): each row's `knows` names
 the agents its `ROSTER.md` lists, and the loop appends `/ROSTER.md` to a new
 conversation's system prompt after `IDENTITY.md`. The file, generated by the
-host and put at the root of the deployed tree:
+host (`skein-host roster --for <handle>`), goes at the root of the deployed
+tree with the agent's directory (`skein plan deploy <dir> --only
+SOUL.md,IDENTITY.md,skills,ROSTER.md`):
 
 ```
 ## Colleagues
@@ -514,29 +528,20 @@ host and put at the root of the deployed tree:
 One line per known enabled row (in `list` order, never the agent itself;
 handles with no row are skipped until one exists): `- @<handle>@<domain> —
 <Name>: <Description>` from that row's IDENTITY.md — the directory being
-deployed in the same command, else the row's deployed tree in its store,
-else (not admitted yet) its `source` directory's; no name: the handle; no
-description: no `: …`. `knows` empty: no `ROSTER.md` (a deploy removes one).
-
-- `deploy <handle> <dir>` / `deploy --all` include it.
-- `roster --deploy` refreshes rosters without the source directories: for
-  every enabled deployed row it takes the row's `tree` from the instance's
-  store, sets `ROSTER.md` in its root, and sends only what is new (the file
-  and the root) plus `head` if the root changed; otherwise `unchanged`. Run it
-  after `knows` changes, or after deploying an agent whose IDENTITY.md
-  changed (its colleagues' rosters show the old name until then). A row
-  whose store does not have its `tree` yet (deploy not admitted) is an
-  error for that row: wait, or `deploy` its directory.
+deployed tree in its store (its `tree`, else `main`), else its `source`
+directory's; no name: the handle; no description: no `: …`. `knows` empty:
+no `ROSTER.md`.
 
 Relations for the live POC (#22's who-references-whom: Martha lists
-everyone, Kurt hands off to Martha), then push the rosters:
+everyone, Kurt hands off to Martha), then each roster into its directory
+and deployed by the owner:
 
 ```
 bin/skein-host knows martha --all
 bin/skein-host knows kurt martha
-bin/skein-host roster --for martha     # check
-bin/skein-host roster --for kurt
-bin/skein-host roster --deploy
+bin/skein-host roster --for martha > ~/Work/prompts/.agents/martha/ROSTER.md
+bin/skein plan deploy ~/Work/prompts/.agents/martha --only SOUL.md,IDENTITY.md,skills,ROSTER.md --origin http://martha.localhost:8100 --out plan
+bin/skein send http://martha.localhost:8100 plan
 ```
 
 The loop reads `ROSTER.md` at the next *new* conversation.
@@ -548,6 +553,7 @@ bin/skein whoami
 bin/skein import ~/Work/easel                        # prints the root tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'         # prints the run message's id
 bin/skein inbox --wait                               # until a result with replyTo = that id
+bin/skein plan … / bin/skein send <origin> <dir>     # the owner's admin messages (above), no wallet of its own
 ```
 
 - Wallet: `HTTPWalletJSON('skein-client', http://127.0.0.1:3322)`. Override
@@ -600,8 +606,7 @@ where they use one. Unset means the default.
 | `SKEIN_OWNER`, `SKEIN_OWNER_HANDLE` | a new code genesis's owner key and its handle (default `david@localhost`); bin/skein-host fills the key from `owner.identity` |
 | `SKEIN_OWNER_MESSAGEBOX` | the owner's messagebox URL for new geneses (default: the owner's mailbox instance here) |
 | `SKEIN_INFER`, `SKEIN_INFER_HANDLE` | a new code genesis's inference peer key and handle (default `infer@localhost`); bin/skein-host fills the key from `infer.identity` |
-| `SKEIN_OWNER_WALLET`, `SKEIN_ORIGINATOR` | the owner's BRC-100 wallet (default `http://127.0.0.1:3322`) and origin (default `skein-client`) for `deploy`, `dispatch`, `peers`, `install` |
-| `SKEIN_HOST_URL` | where those commands find the running host (default `http://127.0.0.1:8100`) |
+| `SKEIN_HOST_URL` | where `event`, `claim` and `import-handles` find the running host (default `http://127.0.0.1:8100`) |
 | `SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`, `SKEIN_ARC_EVENTS_URL`, `SKEIN_ARC_CALLBACK_URL` | the host's Arcade ("The broadcaster" above); also read from `$SKEIN_HOME/host.env` |
 | `SKEIN_HEADERS_URL` | the host's headers feed (#102) |
 | `SKEIN_LIBP2P_LISTEN`, `_TLS_CERT`, `_TLS_KEY`, `_BOOTSTRAP`, `_DHT`, `_RELAYS`, `_MDNS` | the libp2p nodes ("libp2p" above) |
@@ -627,6 +632,7 @@ where they use one. Unset means the default.
 | variable | what |
 |---|---|
 | `SKEIN_INSTANCE_IDENTITY`, `SKEIN_INSTANCE_HANDLE`, `SKEIN_INSTANCE_URL` | the client's instance: its key (default `$SKEIN_HOME/instance.identity`), `handle@domain`, its URL |
+| `SKEIN_AUTHFETCH` | `skein plan --origin` and `skein send`: the wallet's BRC-104 command (default `1sat authfetch`; words, the method, URL, `--body @file` and `--json` appended) |
 | `SKEIN_MAILBOX_URL`, `SKEIN_MAILBOX_HANDLE` | the client's (or the inference peer's) mailbox instance; the handle when no URL is set (default `david`) |
 | `SKEIN_INFER_WALLET_URL` | the inference peer's wallet (default `http://127.0.0.1:3323`) |
 | `SKEIN_INFER_PEERS`, `SKEIN_INFER_PROVIDERS` | its address book and provider map files |

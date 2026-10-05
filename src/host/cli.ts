@@ -12,15 +12,11 @@
 //   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
-//   skein-host deploy <handle> <dir> [--only glob,glob]   |   skein-host deploy --all [--only glob,glob]
-//   skein-host roster [--for <handle> | --deploy]
-//   skein-host dispatch <handle> add|remove [--sender key] <box> <handler-name-or-cid>
-//   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] | remove <key> | list
-//   skein-host event <handle> <box> [json]
-//   skein-host install <repo-url[#rev] | dir> --instance <handle> [--config json] [--approve-all | --dry-run]
+//   skein-host roster [--for <handle>]
+//   skein-host peers <handle> list    its address book, read from its store
 //   skein-host import-handles         the host.db mailbox instances the host skein's onboarding app has no record
-//                                     of, adopted (#113: onboard.adopt as the owner): recorded and certified
-//   skein-host uninstall <app> --instance <handle> [--approve-all]
+//                                     of (#113), each with the request that adopts it — for the owner's wallet to send
+//   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>
 //   skein-host claim <handle> <owner-key> [--messagebox url] [--handle h@d]
@@ -42,34 +38,27 @@
 // before its hostname is published — Router.createInstance, the instance
 // manager's own `create` — with the instance manager in its address book (no
 // other instance's book names it), and recorded in host.db as the host skein.
-// Once; a second `init` says which instance it is. The operator then installs
-// the onboarding app into it (`skein-host install
-// https://github.com/shruggr/skein-onboard#v0.2.0 --instance host --config
-// '{"onboard": {"domain": "<the handle domain>"}}'`; scripts/host/up.sh does).
-// The onboarding app is the host's BRC-169 server (#113): registrations,
+// Once; a second `init` says which instance it is. The operator, as the
+// owner, then installs the onboarding app into it from a wallet (#124: `skein
+// plan install https://github.com/shruggr/skein-onboard#v0.2.0 --origin
+// <the host skein's origin> --config '{"onboard": {"domain": "<the handle
+// domain>"}}' --out plan` and `skein send <origin> plan`, or the management
+// page). The onboarding app is the host's BRC-169 server (#113): registrations,
 // the handle certificates (through the certifier provider), resolve, search,
 // the manifest — the router maps its own origin's requests onto it.
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the signer's (signer.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
-// on an existing row (its store must then be a new one: re-genesis). `deploy`
-// sends a directory into an instance through its `objects` box as the owner
-// (deploy.ts) and records its root as the row's `tree` (and the directory as
-// its `source`, which `--all` deploys again), with the row's generated
-// ROSTER.md at the tree's root (#27: the rows it `knows`; `knows` sets them).
+// on an existing row (its store must then be a new one: re-genesis).
 // `roster` prints the front end's roster (roster.ts), which `run` also serves
-// at /roster.json; `roster --for h` prints h's ROSTER.md; `roster --deploy`
-// sends every enabled row whose ROSTER.md changed its deployed tree (from the
-// instance's store) with the new one. `dispatch` changes a mailbox row of an
-// instance's dispatch table (#77) by a message to its `dispatch` box as the
-// owner, a kernel operation, as `deploy` sends (a new instance's genesis
-// carries only the table's seed: the admin rows and the owner's boxes). `peers` writes an instance's address book (#40: key →
-// messagebox URL, handle optional; where it delivers to a key) by messages to
-// its `peers` box as the owner, the admin's configuration; `list` reads it
-// from the store. `deploy` and `roster --deploy` also write every other
-// enabled agent's key and origin into each row's address book that way (the
-// roster is a configuration act; ROSTER.md carries the names for the model).
-// Nothing registers itself anywhere: a key in no address book is "no route".
+// at /roster.json; `roster --for h` prints h's ROSTER.md (#27: the rows it
+// `knows`; `knows` sets them). `peers <handle> list` reads an instance's
+// address book from its store. Nothing here writes into an instance as its
+// owner (#124): installing an app, a dispatch row, an address-book entry, a
+// directory into `main` are the owner's messages, built by `skein plan` (or
+// the management page) and sent by the owner's wallet to the instance's
+// /sendMessage. Nothing registers itself anywhere: a key in no address book
+// is "no route".
 // `event` (#60, #69) sends one message from the host's cron provider into a
 // box of an instance now, as a tick due now would be (cron.ts): the JSON
 // object given, its kind "cron" unless it names one, `due` now; the instance
@@ -79,14 +68,6 @@
 // sends it; with the host down, through a router of its own, closed
 // afterwards. A router that answers at SKEIN_HOST_URL / SKEIN_ROUTER_PORT
 // with no control socket here is refused.
-// `install` (#72, #76, #77; install.ts, docs/APPS.md §3) is the owner's client for
-// an app: the tree (a directory, or a git URL cloned) and its etc/app.json
-// checked, the requests derived and shown (the permission prompt: heads,
-// its dispatch rows: boxes and their senders, http paths under /<app>/, libp2p topics; start, requires, provides),
-// then — approved (`--approve-all`, or "y" at a terminal) — sent as the owner:
-// objects, head (the app record at <app>/app), dispatch per row, start.
-// `uninstall` sends the app's stop, then removes its dispatch rows;
-// the head is left. Both speak to the row's front door as `deploy` does.
 // `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
@@ -119,9 +100,6 @@
 //   SKEIN_HEADERS_URL     the host's headers feed (#102, feeds.ts): an SSE stream of block headers (hex, or chaintracks'
 //                         JSON: Arcade's http://127.0.0.1:8083/chaintracks/v2/tip/stream) that every enabled instance
 //                         whose dispatch table takes events in box `chain` (the chain app's row) is subscribed to
-// `deploy`, `dispatch` and `peers` speak raw BRC-33 to the row's front door, at SKEIN_HOST_URL
-// (default http://127.0.0.1:8100) /@<handle>, as the owner — SKEIN_OWNER (checked against the wallet):
-//   SKEIN_OWNER_WALLET    default http://127.0.0.1:3322;   SKEIN_ORIGINATOR default skein-client
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -136,27 +114,20 @@ import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { short } from "../runtime/log.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
-import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
-import { remoteWallet, type WalletInterface } from "../wallet.ts";
 import { masterKey, Signer } from "./signer.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
-import { dispatchBody } from "../client/client.ts";
-import { addressBook, DEFAULT_ONLY, deploy, deployFiles, dispatchRow, writeAddresses, type AddressEntry, type Deployed } from "./deploy.ts";
-import { hostDomain, noOwnerMessagebox, Router, type RouterOptions } from "./router.ts";
+import { addressBook } from "./deploy.ts";
+import { hostDomain, Router, type RouterOptions } from "./router.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
-import { RawBox } from "../client/raw.ts";
-import type { Outbox } from "./deploy.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
 
 export interface Env {
   vars: Record<string, string | undefined>;
   out(line: string): void;
   err(line: string): void;
-  /** Tests: the owner's wallet and its sessions with the rows `deploy` uses instead of SKEIN_OWNER_WALLET / SKEIN_HOST_URL. */
-  owner?: { wallet: WalletInterface; box(row: InstanceRow): Outbox };
   /** Tests: a row's store, instead of opening its file read-only. */
   store?(row: InstanceRow): Store | undefined;
 }
@@ -172,25 +143,20 @@ const USAGE = `usage:
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host enable|disable|remove <handle>
   skein-host run                                          the router on :8100 (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
-  skein-host deploy <handle> <dir> [--only glob,glob]     default --only ${DEFAULT_ONLY.join(",")}
-  skein-host deploy --all [--only glob,glob]              every enabled row, from its last deployed directory
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
-  skein-host roster --deploy                              redeploy every enabled row whose ROSTER.md changed
-  skein-host dispatch <handle> add|remove [--sender key] <box> <handler-name-or-cid>   a mailbox row of the dispatch table (#77): (sender, box) → handler
-  skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d]   an address-book entry (#70): how the agent reaches <key> (mailbox: a URL; libp2p: a peer ID or topic:<name>; local: a provider)
-  skein-host peers <handle> remove <key>
-  skein-host peers <handle> list                          its address book: key, transport, address, role, handle, source
-  skein-host install <repo-url[#rev] | dir> --instance <handle> [--config json] [--approve-all | --dry-run]   an app (docs/APPS.md): check, show what it asks for, send as the owner; --config: merged over the manifest's config
-  skein-host uninstall <app> --instance <handle> [--approve-all]                          its stop, then its dispatch rows removed (the heads are left)
-  skein-host import-handles                               the mailbox instances in host.db the host skein's onboarding app has no record of: adopted (onboard.adopt as the owner), so they resolve (#113)
+  skein-host peers <handle> list                          its address book, from its store: key, transport, address, role, handle, source
+  skein-host import-handles                               the mailbox instances in host.db the host skein's onboarding app has no record of (#113), each with
+                                                          the owner's request that adopts it (onboard.adopt): \`1sat authfetch POST <origin>/onboard/call --body '…'\`
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row (#89)
   skein-host claim <handle> <owner-key> [--messagebox url] [--handle h@d]      the owner's claim into an image: the owner's admin rows, the claim row removed
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
-  skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]`;
+  skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
+the owner's messages (installing an app, dispatch rows, the address book, a directory into main) are built by
+\`skein plan\` and sent by the owner's wallet to the instance's /sendMessage (#124; scripts/host/README.md)`;
 
 export const homeOf = (vars: Env["vars"]) => vars.SKEIN_HOME || join(vars.HOME ?? ".", ".skein");
 
@@ -284,26 +250,18 @@ export async function main(argv: string[], env: Env): Promise<number> {
       }
       case "run":
         return await run(db, rest, env);
-      case "deploy":
-        return await deployCmd(db, rest, env);
       case "knows":
         return knowsCmd(db, rest, env);
       case "roster":
         return await rosterCmd(db, rest, env);
-      case "dispatch":
-        return await dispatchCmd(db, rest, env);
       case "peers":
         return await peersCmd(db, rest, env);
       case "event":
         return await eventCmd(db, rest, env);
-      case "claim":
-        return await claimCmd(db, rest, env);
-      case "install":
-        return await installCmd(db, rest, env);
-      case "uninstall":
-        return await uninstallCmd(db, rest, env);
       case "import-handles":
         return await importHandlesCmd(db, rest, env);
+      case "claim":
+        return await claimCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -354,26 +312,6 @@ function knowsCmd(db: HostDb, rest: string[], env: Env): number {
   return 0;
 }
 
-async function dispatchCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [handle, op, box, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { sender: { type: "string" } } });
-  if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(USAGE); return 2; }
-  const row = db.get(handle!);
-  if (!row) { env.err(`skein-host dispatch: no instance ${handle}`); return 1; }
-  const owner = await ownerOf(env, "skein-host dispatch");
-  if (typeof owner === "number") return owner;
-  const s = openRow(row, env);
-  try {
-    await dispatchRow({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, dispatchBody({ op, sender: v.sender, box: box!, handler }, await genesisPrograms(s.blocks)));
-    env.out(`${row.handle}: dispatch ${op} (mailbox ${box}, ${v.sender ? short(v.sender) : "anyone"}) → ${handler} sent`);
-    return 0;
-  } catch (e) {
-    env.err(`${row.handle}: ${(e as Error).message}`);
-    return 1;
-  } finally {
-    await s.close?.();
-  }
-}
-
 /**
  * An instance's origin here (router.ts originOf): its front door, its
  * messagebox — SKEIN_INSTANCE_ORIGIN (default http://{handle}.localhost:{port})
@@ -383,53 +321,17 @@ export function originOf(vars: Env["vars"], handle: string): string {
   return (vars.SKEIN_INSTANCE_ORIGIN || "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", vars.SKEIN_ROUTER_PORT || "8100");
 }
 
-/** The other enabled agents, as `row`'s address book should have them: key, origin, handle. */
-function agentAddresses(row: InstanceRow, rows: InstanceRow[], vars: Env["vars"]): Array<{ op: "add" } & AddressEntry> {
-  return rows.filter((r) => r.handle !== row.handle && r.kind !== "mailbox" && r.identity).map((r) => ({ op: "add" as const, key: r.identity!, transport: "mailbox" as const, address: originOf(vars, r.handle), handle: r.handle, domain: r.domain }));
-}
-
-/** Write the other agents into `row`'s address book (unchanged entries are not sent); a line saying what was sent, if anything. */
-async function syncAgents(row: InstanceRow, rows: InstanceRow[], owner: { wallet: WalletInterface; box(row: InstanceRow): Outbox }, store: Store | undefined, env: Env): Promise<void> {
-  const want = agentAddresses(row, rows, env.vars);
-  if (!want.length) return;
-  const r = await writeAddresses({ row, owner: owner.wallet, box: owner.box(row), store }, want);
-  const sent = want.filter((_, i) => r[i] === "sent").map((w) => w.handle);
-  if (sent.length) env.out(`${row.handle}: address book: ${sent.join(", ")} written`);
-}
-
+/** `skein-host peers <handle> list`: the instance's address book, read from its store (#124: writing it is the owner's `peers` messages, `skein plan peers`). */
 async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [handle, op, key, url, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { handle: { type: "string" }, transport: { type: "string" }, role: { type: "string" } } });
-  const shape = op === "list" ? !key : op === "remove" ? !!key && !url : op === "add" ? !!key && !!url : false;
-  if (!handle || more.length || !shape || ((v.handle !== undefined || v.transport !== undefined || v.role !== undefined) && op !== "add")) { env.err(USAGE); return 2; }
-  const transport = (v.transport ?? "mailbox") as AddressEntry["transport"];
-  if (!["mailbox", "libp2p", "local"].includes(transport)) { env.err(`skein-host peers: --transport is mailbox, libp2p or local`); return 2; }
+  const [handle, op, ...more] = rest;
+  if (!handle || more.length || op !== "list") { env.err(USAGE); return 2; }
   const row = db.get(handle);
   if (!row) { env.err(`skein-host peers: no instance ${handle}`); return 1; }
   if (row.kind === "mailbox") { env.err(`skein-host peers: ${handle} is a mailbox instance: it keeps mail, it sends nothing`); return 1; }
   const s = openRow(row, env);
   try {
-    if (op === "list") {
-      for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.role ?? "-", e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
-      return 0;
-    }
-    if (!/^0[23][0-9a-f]{64}$/.test(key!)) { env.err(`skein-host peers: ${key} is not an identity key (hex)`); return 2; }
-    if (op === "add" && transport === "mailbox" && !/^https?:\/\/[^/]/.test(url!)) { env.err(`skein-host peers: ${url} is not an http(s) URL`); return 2; }
-    let named: { handle?: string; domain?: string } = {};
-    if (v.handle !== undefined) {
-      const at = v.handle.replace(/^@/, "").lastIndexOf("@");
-      const h = v.handle.replace(/^@/, "");
-      named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h, domain: row.domain };
-      if (!named.handle || !named.domain) { env.err(`skein-host peers: --handle ${v.handle}: want handle@domain`); return 2; }
-    }
-    const owner = await ownerOf(env, "skein-host peers");
-    if (typeof owner === "number") return owner;
-    const change = op === "add" ? { op: "add" as const, key: key!, transport, address: url!, ...(v.role ? { role: v.role } : {}), ...named } : { op: "remove" as const, key: key! };
-    const [r] = await writeAddresses({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks }, [change]);
-    env.out(`${row.handle}: peers ${op} ${short(key!)}${op === "add" ? ` → ${url}${named.handle ? ` (@${named.handle}@${named.domain})` : ""}` : ""}: ${r === "sent" ? "sent" : "unchanged (the address book has it so already)"}`);
+    for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.role ?? "-", e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
     return 0;
-  } catch (e) {
-    env.err(`${row.handle}: ${(e as Error).message}`);
-    return 1;
   } finally {
     await s.close?.();
   }
@@ -525,7 +427,7 @@ async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   }
   db.setStatus(handle, "enabled");
   env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, claimed by ${short(owner)} · at ${c.url} · the instance manager in its address book`);
-  env.out(`next: skein-host install https://github.com/shruggr/skein-onboard#v0.2.0 --instance ${c.handle} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' (the onboarding app: registration and BRC-169; the router must be running)`);
+  env.out(`next, as the owner (#124; the router running): skein plan install https://github.com/shruggr/skein-onboard#v0.2.0 --origin ${c.url} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' --out plan, then skein send ${c.url} plan (the onboarding app: registration and BRC-169)`);
   return 0;
 }
 
@@ -603,117 +505,32 @@ async function claimCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   }
 }
 
-/** The owner's yes: `--approve-all`, else "y" at a terminal; refused when neither can be had. */
-async function approved(v: { "approve-all"?: boolean }, env: Env, what: string): Promise<boolean> {
-  if (v["approve-all"]) return true;
-  if (!process.stdin.isTTY || env.owner) { env.err(`${what}: not approved (--approve-all, or run it at a terminal to answer the prompt)`); return false; }
-  const { createInterface } = await import("node:readline/promises");
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  try { return /^y(es)?$/i.test((await rl.question(`${what}? [y/N] `)).trim()); } finally { rl.close(); }
-}
-
-/** `skein-host install <repo-url | dir> --instance <handle>` (#72, #76): install.ts. */
-async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [spec, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, config: { type: "string" }, "approve-all": { type: "boolean" }, "dry-run": { type: "boolean" } } });
-  if (!spec || more.length || !v.instance) { env.err(USAGE); return 2; }
-  let config: Record<string, unknown> | undefined;
-  if (v.config !== undefined) {
-    try { config = JSON.parse(v.config) as Record<string, unknown>; } catch { config = undefined; }
-    if (!config || typeof config !== "object" || Array.isArray(config)) { env.err("skein-host install --config: a JSON object ({<program>: {…}}), merged over the manifest's config"); return 2; }
-  }
-  const row = db.get(v.instance);
-  if (!row) { env.err(`skein-host install: no instance ${v.instance}`); return 1; }
-  if (row.kind === "mailbox") { env.err(`skein-host install: ${row.handle} is a mailbox instance`); return 1; }
-  const s = openRow(row, env);
-  try {
-    if (!s.blocks) throw new Error(`no store at ${row.store} yet (run the instance once)`);
-    const { fetchApp, readApp, instanceView, planInstall, describe, sendInstall } = await import("./install.ts");
-    const tree = await readApp(fetchApp(spec));
-    // --config (#113): the installed config is the manifest's with these values over it (one level deep per program).
-    if (config) tree.checked.manifest.config = mergeConfig(tree.checked.manifest.config, config);
-    const plan = await planInstall(tree, await instanceView(s.blocks), { modules: wasmDirObjects(WASM_DIR) });
-    for (const l of describe(plan)) env.out(l);
-    if (v["dry-run"]) return 0;
-    if (!(await approved(v, env, `install ${plan.app} into ${row.handle}`))) return 1;
-    const owner = await ownerOf(env, "skein-host install");
-    if (typeof owner === "number") return owner;
-    const box = owner.box(row);
-    const r = await sendInstall(plan, (b, body) => box.send(row.identity!, b, body));
-    env.out(`${row.handle}: ${plan.app} ${plan.version} ${plan.upgrade ? "upgraded" : "installed"}: ${r.messages} messages sent as the owner · head ${plan.app}/app → ${plan.recordCid}`);
-    return 0;
-  } catch (e) {
-    env.err(`skein-host install: ${(e as Error).message}`);
-    return 1;
-  } finally {
-    await s.close?.();
-  }
-}
-
 /**
  * `skein-host import-handles` (#113): the mailbox instances host.db has and
  * the host skein's onboarding app does not (a registration before the app
- * took them), each adopted — `{fn: "onboard.adopt", args: {handle, owner}}`
- * on /onboard/call over the owner's session: the app asks the instance
- * manager (which answers for the existing row, at the app's domain), issues
- * the certificate and records it, so the handle resolves. The running
- * router serves the host skein.
+ * took them; its public resolve says), each printed with the request that
+ * adopts it: `{fn: "onboard.adopt", args: {handle, owner}}` POSTed to the
+ * host skein's /onboard/call on the owner's session — the owner's wallet
+ * sends it (#124: `1sat authfetch POST <origin>/onboard/call --body '…'`).
+ * The app asks the instance manager (which answers for the existing row, at
+ * the app's domain), issues the certificate and records it, so the handle
+ * resolves. The running router serves the host skein.
  */
 async function importHandlesCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   if (rest.length) { env.err(USAGE); return 2; }
   const host = db.hostSkein();
   if (!host) { env.err("skein-host import-handles: no host skein (skein-host init)"); return 1; }
-  const owner = await ownerOf(env, "skein-host import-handles");
-  if (typeof owner === "number") return owner;
-  const box = owner.box(host) as RawBox;
-  let failed = 0;
+  const local = `${(env.vars.SKEIN_HOST_URL || `http://127.0.0.1:${env.vars.SKEIN_ROUTER_PORT || 8100}`).replace(/\/+$/, "")}/@${host.handle}`;
+  const origin = originOf(env.vars, host.handle);
+  let n = 0;
   for (const r of db.list().filter((x) => x.kind === "mailbox" && x.owner)) {
-    const known = await fetch(`${box.url}/onboard/resolve?handle=${encodeURIComponent(r.handle)}`).then((x) => x.json() as Promise<{ identityKey?: string }>).catch(() => ({ identityKey: undefined }));
-    if (known.identityKey === r.owner) { env.out(`${r.handle}: recorded already`); continue; }
-    const res = await box.af.fetch(`${box.url}/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.adopt", args: { handle: r.handle, owner: r.owner } }) });
-    const text = await res.text();
-    let v: { result?: { domain?: string; serialNumber?: string }; error?: { message?: string } } = {};
-    try { v = JSON.parse(text); } catch { /* said below */ }
-    if (res.status === 200) env.out(`${r.handle}: adopted at ${v.result?.domain} · serial ${v.result?.serialNumber}`);
-    else { failed++; env.err(`${r.handle}: ${res.status} ${v.error?.message ?? text.slice(0, 200)}`); }
+    const known = await fetch(`${local}/onboard/resolve?handle=${encodeURIComponent(r.handle)}`).then((x) => x.json() as Promise<{ identityKey?: string }>).catch(() => ({ identityKey: undefined }));
+    if (known.identityKey === r.owner) continue;
+    n++;
+    env.out(`1sat authfetch POST ${origin}/onboard/call --body '${JSON.stringify({ fn: "onboard.adopt", args: { handle: r.handle, owner: r.owner } })}'`);
   }
-  return failed ? 1 : 0;
-}
-
-/** A manifest's `config` with `over` merged in: per program, its keys over the manifest's. */
-export function mergeConfig(base: Record<string, unknown> | undefined, over: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...base };
-  for (const [k, x] of Object.entries(over)) {
-    const b = out[k];
-    out[k] = x && typeof x === "object" && !Array.isArray(x) && b && typeof b === "object" && !Array.isArray(b) ? { ...b as Record<string, unknown>, ...x as Record<string, unknown> } : x;
-  }
-  return out;
-}
-
-/** `skein-host uninstall <app> --instance <handle>` (#72, #76, #77): stop, then its dispatch rows removed. */
-async function uninstallCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [app, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, "approve-all": { type: "boolean" } } });
-  if (!app || more.length || !v.instance) { env.err(USAGE); return 2; }
-  const row = db.get(v.instance);
-  if (!row) { env.err(`skein-host uninstall: no instance ${v.instance}`); return 1; }
-  const s = openRow(row, env);
-  try {
-    if (!s.blocks) throw new Error(`no store at ${row.store}`);
-    const { instanceView, planUninstall, sendUninstall } = await import("./install.ts");
-    const p = await planUninstall(app, await instanceView(s.blocks));
-    env.out(`uninstall ${app} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length} · head ${app}/app left`);
-    if (!(await approved(v, env, `uninstall ${app} from ${row.handle}`))) return 1;
-    const owner = await ownerOf(env, "skein-host uninstall");
-    if (typeof owner === "number") return owner;
-    const box = owner.box(row);
-    const r = await sendUninstall(p, (b, body) => box.send(row.identity!, b, body));
-    env.out(`${row.handle}: ${app} uninstalled: ${r.messages} messages sent as the owner`);
-    return 0;
-  } catch (e) {
-    env.err(`skein-host uninstall: ${(e as Error).message}`);
-    return 1;
-  } finally {
-    await s.close?.();
-  }
+  env.err(n ? `${n} mailbox instance${n === 1 ? "" : "s"} to adopt: the owner's wallet sends each line above` : "every mailbox instance is recorded");
+  return 0;
 }
 
 /** The URL of a router answering for this host (its /manifest.json), if one does. */
@@ -754,8 +571,8 @@ function identities(env: Env, pending: Map<string, string> = new Map()): (row: I
 }
 
 async function rosterCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { for: { type: "string" }, deploy: { type: "boolean" } } });
-  if (positionals.length || (v.for !== undefined && v.deploy)) { env.err(USAGE); return 2; }
+  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { for: { type: "string" } } });
+  if (positionals.length) { env.err(USAGE); return 2; }
   const rows = db.list("enabled");
   if (v.for !== undefined) {
     const row = db.get(v.for);
@@ -765,77 +582,8 @@ async function rosterCmd(db: HostDb, rest: string[], env: Env): Promise<number> 
     else env.err(`${row.handle} knows nobody: no ROSTER.md`);
     return 0;
   }
-  if (!v.deploy) {
-    env.out(JSON.stringify(await roster(rows, async (row) => openRow(row, env), () => false), null, 2));
-    return 0;
-  }
-  const owner = await ownerOf(env, "skein-host roster");
-  if (typeof owner === "number") return owner;
-  const fields = identities(env);
-  let failed = 0;
-  for (const row of rows) {
-    if (row.kind === "mailbox") continue;
-    const s = openRow(row, env);
-    try {
-      // The address book first (the other agents' keys and origins): it needs no tree.
-      await syncAgents(row, rows, owner, s.blocks, env);
-      if (!row.tree) { env.out(`${row.handle}: never deployed; ROSTER.md skipped`); continue; }
-      if (!s.blocks) throw new Error(`no store at ${row.store}: deploy the directory instead`);
-      const r = await deployFiles({ row, owner: owner.wallet, box: owner.box(row), store: s.blocks, files: { "ROSTER.md": (await rosterFor(row, rows, fields)) ?? null } });
-      db.add(row.handle, { tree: r.root });
-      env.out(deployedLine(row, r));
-    } catch (e) {
-      failed++;
-      env.err(`${row.handle}: ${(e as Error).message}`);
-    } finally {
-      await s.close?.();
-    }
-  }
-  return failed ? 1 : 0;
-}
-
-const deployedLine = (row: InstanceRow, r: Deployed) => r.unchanged
-  ? `${row.handle}: unchanged ${r.root}`
-  : `${row.handle}: deployed ${r.root} · ${r.records} objects in ${r.bundles} message(s) to objects${r.head ? " · head main" : ""}`;
-
-/** The owner's wallet and its sessions with the rows' front doors (env.owner in tests), checked against SKEIN_OWNER; else an exit code. */
-async function ownerOf(env: Env, cmd: string): Promise<{ wallet: WalletInterface; box(row: InstanceRow): Outbox } | number> {
-  let owner = env.owner;
-  if (!owner) {
-    const host = (env.vars.SKEIN_HOST_URL || `http://127.0.0.1:${env.vars.SKEIN_ROUTER_PORT || 8100}`).replace(/\/+$/, "");
-    const wallet = remoteWallet(env.vars.SKEIN_OWNER_WALLET || "http://127.0.0.1:3322", env.vars.SKEIN_ORIGINATOR || "skein-client");
-    owner = { wallet, box: (row) => new RawBox(wallet, `${host}/@${row.handle}`, { originator: env.vars.SKEIN_ORIGINATOR || "skein-client" }) };
-    void cmd;
-  }
-  const me = await rootIdentity(owner.wallet);
-  if (env.vars.SKEIN_OWNER && env.vars.SKEIN_OWNER !== me) {
-    env.err(`${cmd}: the owner wallet is ${short(me)}, not SKEIN_OWNER ${short(env.vars.SKEIN_OWNER)}: instances would not admit what it signs`);
-    return 1;
-  }
-  return owner;
-}
-
-/** An agent whose store's genesis names no owner messagebox: the warning (router.ts noOwnerMessagebox); else undefined. */
-async function ownerMessageboxWarning(row: InstanceRow, store: Store | undefined): Promise<string | undefined> {
-  if (row.kind === "mailbox" || !store) return undefined;
-  try {
-    for await (const { entry } of store.log.entries(0)) {
-      const g = (entry as { genesis?: CID }).genesis;
-      return g ? noOwnerMessagebox(await store.get(g) as Record<string, unknown>) : undefined;
-    }
-  } catch { /* a store this build cannot read: the router says so at hydration */ }
-  return undefined;
-}
-
-/** The programs a store's genesis names (name → program record CID): what `dispatch` resolves a handler name against. */
-async function genesisPrograms(store: Store | undefined): Promise<Record<string, CID>> {
-  if (!store) return {};
-  for await (const { entry } of store.log.entries(0)) {
-    const g = (entry as { genesis?: CID }).genesis;
-    const programs = g ? (await store.get(g) as Record<string, unknown>).programs : undefined;
-    return programs && typeof programs === "object" ? programs as Record<string, CID> : {};
-  }
-  return {};
+  env.out(JSON.stringify(await roster(rows, async (row) => openRow(row, env), () => false), null, 2));
+  return 0;
 }
 
 /** A row's store to read while something else may be writing it: read-only, if it exists. */
@@ -845,51 +593,6 @@ function openRow(row: InstanceRow, env: Env): { blocks?: Store; close?(): Promis
   if (!existsSync(row.store)) return {};
   const s = openStoreFile(row.store, { readOnly: true });
   return { blocks: s, close: () => s.close() };
-}
-
-async function deployCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { all: { type: "boolean" }, only: { type: "string" } } });
-  const only = v.only !== undefined ? v.only.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
-  let jobs: Array<{ row: InstanceRow; dir: string }>;
-  if (v.all) {
-    if (positionals.length) { env.err(USAGE); return 2; }
-    jobs = [];
-    for (const row of db.list("enabled")) {
-      if (row.source) jobs.push({ row, dir: row.source });
-      else env.out(`${row.handle}: never deployed (no source directory); skipped`);
-    }
-  } else {
-    const [handle, dir] = positionals;
-    if (!handle || !dir || positionals.length > 2) { env.err(USAGE); return 2; }
-    const row = db.get(handle);
-    if (!row) { env.err(`skein-host deploy: no instance ${handle}`); return 1; }
-    jobs = [{ row, dir: resolve(dir) }];
-  }
-  if (!jobs.length) return 0;
-  const owner = await ownerOf(env, "skein-host deploy");
-  if (typeof owner === "number") return owner;
-  // Every ROSTER.md from the IDENTITY.md about to go in, for the rows deployed now.
-  const rows = db.list("enabled");
-  const fields = identities(env, new Map(jobs.map((j) => [j.row.handle, j.dir])));
-  let failed = 0;
-  for (const { row, dir } of jobs) {
-    const s = openRow(row, env);
-    try {
-      const files = { "ROSTER.md": (await rosterFor(row, rows, fields)) ?? null };
-      await syncAgents(row, rows, owner, s.blocks, env);
-      const r = await deploy({ row, dir, only, owner: owner.wallet, box: owner.box(row), store: s.blocks, files });
-      db.add(row.handle, { tree: r.root, source: dir });
-      env.out(deployedLine(row, r));
-      const w = await ownerMessageboxWarning(row, s.blocks);
-      if (w) env.err(`${row.handle}: ${w}`);
-    } catch (e) {
-      failed++;
-      env.err(`${row.handle}: ${(e as Error).message}`);
-    } finally {
-      await s.close?.();
-    }
-  }
-  return failed ? 1 : 0;
 }
 
 const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");

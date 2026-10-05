@@ -123,7 +123,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     async hostSkein(config: Record<string, unknown> = {}) {
       const c = await router.createInstance("host", ownerId, { host: true });
       await router.hydrate("host");
-      await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], ["--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, ...config } })]);
+      await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], { config: { onboard: { domain: "localhost", origin: base, ...config } } });
       return c;
     },
     origin: (handle: string) => router.originOf(handle),
@@ -131,7 +131,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     /**
      * Install apps into an instance as the owner (#83: a genesis has no shell,
      * no `run`, no `chat`): by default the shell app and the chat app, through
-     * `skein-host install` (src/testapps.ts). Hydrates the instance first.
+     * the owner's messages (src/testapps.ts installApps, #124). Hydrates the instance first.
      */
     async install(handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP]) {
       await router.hydrate(handle);

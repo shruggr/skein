@@ -37,7 +37,7 @@ export function handlerCid(s: string, programs: Record<string, CID> = {}): CID {
   if (named) return named;
   try { return CID.parse(s); } catch {
     const names = Object.keys(programs);
-    throw new Error(`handler ${JSON.stringify(s)}: not a CID${names.length ? ` or a program name (${names.join(", ")})` : " (a program by name needs the instance's genesis: skein-host dispatch)"}`);
+    throw new Error(`handler ${JSON.stringify(s)}: not a CID${names.length ? ` or a program name (${names.join(", ")})` : " (a program by name needs the instance's genesis: skein plan dispatch)"}`);
   }
 }
 

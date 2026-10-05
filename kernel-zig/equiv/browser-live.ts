@@ -4,7 +4,7 @@
 // with an agent on the native kernel and a scripted inference peer. The page
 // identity (a wallet in the tab over a test key here; Yours in use) registers its mailbox
 // instance on the router; the chat app is installed into both instances (#83:
-// a genesis has no chat loop) — the agent's by `skein-host install`, the
+// a genesis has no chat loop) — the agent's by the owner's messages (`skein plan install`, #124), the
 // browser instance's by the install client's plan (src/host/install.ts
 // planInstall, over a copy of the browser's store) sent as the page
 // identity, its owner, through the page; the page chats its instance; the instance's loop asks the

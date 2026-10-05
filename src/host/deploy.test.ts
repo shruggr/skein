@@ -1,9 +1,11 @@
 // Deployment via `objects` (#23) and the front end's roster (#24), with the
-// real Zig kernel behind a router (testhost.ts): the host sends a filtered
-// directory into an instance as the owner; the first root sets main, a
-// changed directory moves it through `head`, an unchanged one sends nothing;
-// the loop's next new conversation reads the new SOUL.md. The roster reads
-// IDENTITY.md from the deployed tree.
+// real Zig kernel behind a router (testhost.ts): the owner's messages for a
+// filtered directory (#124: `skein plan deploy`, src/client/admin.ts),
+// delivered to the instance's /sendMessage on the owner's session; the first
+// root sets main, a changed directory moves it through `head`, an unchanged
+// one sends nothing; the loop's next new conversation reads the new SOUL.md.
+// A dispatch row the same way (`skein plan dispatch`). The roster reads
+// IDENTITY.md from the deployed tree (`main`).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -13,19 +15,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
+import { planMain } from "../client/admin-cli.ts";
+import { planDeploy } from "../client/admin.ts";
 import { RawBox } from "../client/raw.ts";
-import { hashDir } from "../client/client.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
 import { currentDispatch, senderText } from "../runtime/dispatch.ts";
-import { gitCid, readFile, readTree, walk } from "../runtime/tree.ts";
-import { CHAT_APP } from "../testapps.ts";
+import { readFile, readTree, walk } from "../runtime/tree.ts";
+import { CHAT_APP, sendDir, sendPlan, viewOf } from "../testapps.ts";
 import { collect, iso, T0 } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
-import { DEFAULT_ONLY, deploy, deployFiles, onlyIgnore } from "./deploy.ts";
+import { onlyIgnore } from "./deploy.ts";
 import { appRecordOf } from "./install.ts";
 import { HostDb, type InstanceRow } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
@@ -105,12 +108,23 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
     return {
       out, err,
       env: {
-        vars: { SKEIN_HOME: h.home, SKEIN_OWNER: h.ownerId, SKEIN_ROUTER_PORT: String(h.router.port), SKEIN_MASTER_KEY: "11".repeat(32), ...vars },
-        out: (l: string) => out.push(l), err: (l: string) => err.push(l), owner,
+        vars: { SKEIN_HOME: h.home, SKEIN_ROUTER_PORT: String(h.router.port), SKEIN_MASTER_KEY: "11".repeat(32), ...vars },
+        out: (l: string) => out.push(l), err: (l: string) => err.push(l),
       },
     };
   };
-  return { h, peer, requests, owner, store, env };
+  const host = { home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() };
+  /** `skein plan deploy <dir> --store <its store>`, sent: the plan. */
+  const deploy = async (handle: string, dir: string, only?: string[]) => {
+    await h.router.hydrate(handle);
+    await h.router.settled();
+    const view = await viewOf(host, handle);
+    let p;
+    try { p = await planDeploy(dir, view, { only }); } finally { view.close(); }
+    await sendPlan(host, handle, p);
+    return p;
+  };
+  return { h, peer, requests, owner, store, env, deploy, host };
 }
 
 /** The boxes of the messages the instance took in after the genesis (routed from its requests, #68), in order. */
@@ -147,38 +161,39 @@ test("onlyIgnore: named files and everything under a named directory, directorie
   assert.ok(!onlyIgnore(d, ["*"])("src/index.ts"));
 });
 
-test("deploy: the filtered tree through `objects` as the owner sets main; the same directory again sends nothing; an edited SOUL.md moves main and the next new conversation reads it", { skip }, async (t) => {
-  const { h, peer, requests, owner, store } = await setup(t, ["martha"]);
+test("skein plan deploy: the filtered tree through `objects` as the owner sets main; the same directory again sends nothing; an edited SOUL.md moves main and the next new conversation reads it", { skip }, async (t) => {
+  const { h, peer, requests, owner, store, deploy } = await setup(t, ["martha"]);
   const s = await store("martha");
   const dir = await agentDir(t);
-  let row = h.db.get("martha")!;
+  const row = h.db.get("martha")!;
+  const boxesOf = (p: { messages: Array<{ box: string }> }) => p.messages.map((m) => m.box);
+  const before = (await boxes(s)).length;
+  const since = async () => (await boxes(s)).slice(before);
 
-  // First deploy: the instance's store is given (read-only use), no main yet → objects only.
-  const d1 = await deploy({ row, dir, owner: owner.wallet, box: owner.box(row), store: s });
-  assert.equal(d1.unchanged, false);
-  assert.equal(d1.head, false, "no main yet: objects-handler sets it from the root");
-  assert.equal(d1.records, 5, "SOUL.md, IDENTITY.md, skills/x.md, skills/, the root");
-  await mainIs(s, d1.root);
-  const root1 = CID.parse(d1.root);
-  assert.deepEqual(await paths(s, root1), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
-  assert.deepEqual((await readTree(s, root1)).map((e) => e.name), ["IDENTITY.md", "SOUL.md", "skills"]);
-  assert.deepEqual(await boxes(s), ["objects"], "one bundle, one message");
+  // First deploy: no main yet → objects only (the root on the last bundle: the kernel sets main from it).
+  const d1 = await deploy("martha", dir);
+  assert.deepEqual(boxesOf(d1), ["objects"], "no main yet: the objects operation sets it from the root");
+  const records = (d1.messages[0]!.body as { records: unknown[] }).records.length;
+  assert.equal(records, 5, "SOUL.md, IDENTITY.md, skills/x.md, skills/, the root");
+  await mainIs(s, d1.root.toString());
+  assert.deepEqual(await paths(s, d1.root), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
+  assert.deepEqual((await readTree(s, d1.root)).map((e) => e.name), ["IDENTITY.md", "SOUL.md", "skills"]);
+  assert.deepEqual(await since(), ["objects"], "one bundle, one message");
   for (const m of await messagesIn(s)) assert.equal(Buffer.from(m.sender as Uint8Array).toString("hex"), h.ownerId, "sent as the owner");
-  row = { ...row, tree: d1.root };
 
-  // The same directory: nothing sent.
-  const d2 = await deploy({ row, dir, owner: owner.wallet, box: owner.box(row), store: s });
-  assert.deepEqual(d2, { root: d1.root, unchanged: true, records: 0, bundles: 0, head: false });
+  // The same directory: nothing to send.
+  const d2 = await deploy("martha", dir);
+  assert.deepEqual([d2.root.toString(), d2.messages.length], [d1.root.toString(), 0]);
   await h.router.settled();
-  assert.deepEqual(await boxes(s), ["objects"]);
+  assert.deepEqual(await since(), ["objects"]);
 
   // Edited SOUL.md: only what the store lacks (the new blob, the new root), then `head main`.
   await fs.writeFile(join(dir, "SOUL.md"), "You are Martha, now at the back office.\n");
-  const d3 = await deploy({ row, dir, owner: owner.wallet, box: owner.box(row), store: s });
-  assert.equal(d3.records, 2);
-  assert.equal(d3.head, true);
-  await mainIs(s, d3.root);
-  assert.deepEqual(await boxes(s), ["objects", "objects", "head"]);
+  const d3 = await deploy("martha", dir);
+  assert.equal((d3.messages[0]!.body as { records: unknown[] }).records.length, 2);
+  assert.deepEqual(boxesOf(d3), ["objects", "head"]);
+  await mainIs(s, d3.root.toString());
+  assert.deepEqual(await since(), ["objects", "objects", "head"]);
 
   // A new conversation (no tree: main's) gets the new prompt — the chat app installed for it (#83: the genesis has no chat loop).
   await h.install("martha", [CHAT_APP]);
@@ -191,73 +206,48 @@ test("deploy: the filtered tree through `objects` as the owner sets main; the sa
   assert.equal((await collect(s.edges.query({ kind: "thread", program: loop }))).length, 1);
 });
 
-test("deploy: before the store is asked (none given), a second deploy queued behind the first moves main by `head` once both are admitted", { skip }, async (t) => {
-  const { h, owner, store } = await setup(t, ["kurt"]);
+test("skein plan deploy --recipient (no reads): every object and the head; another key's messages are refused", { skip }, async (t) => {
+  const { h, store, env, host } = await setup(t, ["kurt"]);
   const dir = await agentDir(t);
-  const row = h.db.get("kurt")!;
-  const d1 = await deploy({ row, dir, owner: owner.wallet, box: owner.box(row) });
-  await fs.writeFile(join(dir, "IDENTITY.md"), "- Name: Kurt\n");
-  const d2 = await deploy({ row: { ...row, tree: d1.root }, dir, owner: owner.wallet, box: owner.box(row) });
-  assert.equal(d2.head, true, "an earlier deploy is on its way to setting main");
-  assert.equal(d2.records, 5, "no store to ask: everything goes");
-  await mainIs(await store("kurt"), d2.root);
-});
-
-test("deploy: refused when the store's genesis owner is not the owner wallet, or the row has no identity", { skip }, async (t) => {
-  const { h, owner, store } = await setup(t, ["martha"]);
-  const dir = await agentDir(t);
-  const stranger = ephemeralWallet(PrivateKey.fromRandom());
-  const row = h.db.get("martha")!;
-  await assert.rejects(deploy({ row, dir, owner: stranger, box: owner.box(row), store: await store("martha") }), /genesis owner/);
-  await assert.rejects(deploy({ row: rowOf("martha"), dir, owner: owner.wallet, box: owner.box(row) }), /no identity/);
-});
-
-test("skein-host deploy: records the root and source in the row; again: unchanged; --all redeploys rows with a source", { skip }, async (t) => {
-  const { h, env, store } = await setup(t, ["martha", "kurt"]);
-  const dir = await agentDir(t);
+  const out = await tmp(t);
   const e = env();
-  const cli = (...argv: string[]) => main(argv, e.env);
-  const mine = (l: string[], handle: string) => l.filter((x) => x.startsWith(`${handle}: `));
-  assert.equal(await cli("deploy", "martha", dir), 0, e.err.join("\n"));
-  const tree = h.db.get("martha")!.tree!;
-  assert.equal(h.db.get("martha")!.source, dir);
-  assert.match(mine(e.out, "martha").at(-1)!, new RegExp(`^martha: deployed ${tree} · 5 objects in 1 message\\(s\\) to objects$`));
-  await mainIs(await store("martha"), tree);
-  assert.equal(await cli("deploy", "martha", dir), 0);
-  assert.equal(mine(e.out, "martha").at(-1), `martha: unchanged ${tree}`);
-  const n = e.out.length;
-  assert.equal(await cli("deploy", "--all"), 0);
-  assert.deepEqual([...mine(e.out.slice(n), "kurt"), ...mine(e.out.slice(n), "martha")], ["kurt: never deployed (no source directory); skipped", `martha: unchanged ${tree}`]);
-  assert.equal(await cli("deploy", "nobody", dir), 1);
-  const other = env({ SKEIN_OWNER: "02" + "e".repeat(64) });
-  assert.equal(await main(["deploy", "martha", dir], other.env), 1);
-  assert.match(other.err.at(-1)!, /not SKEIN_OWNER/);
+  const id = h.db.get("kurt")!.identity!;
+  assert.equal(await planMain(["deploy", dir, "--recipient", id, "--out", out], e.env), 0, e.err.join("\n"));
+  assert.deepEqual((await fs.readdir(out)).sort(), ["001-objects.json", "002-head.json", "prompt.txt"]);
+  const head = JSON.parse(await fs.readFile(join(out, "002-head.json"), "utf8")) as { message: { recipient: string; messageBox: string; body: { name: string; tree: { "/": string } } } };
+  assert.deepEqual([head.message.recipient, head.message.messageBox, head.message.body.name], [id, "head", "main"]);
+  await h.router.hydrate("kurt");
+  await assert.rejects(sendDir(host, "kurt", out, ephemeralWallet(PrivateKey.fromRandom())), /403/, "a stranger's objects are refused");
+  assert.equal(await sendDir(host, "kurt", out), 2);
+  await mainIs(await store("kurt"), head.message.body.tree["/"]);
 });
 
-test("skein-host dispatch: a message to box `dispatch` as the owner changes a running instance's dispatch table (a kernel operation), a handler named from its genesis; no new genesis", { skip }, async (t) => {
-  const { env, store } = await setup(t, ["martha"]);
+test("skein plan dispatch: a message to box `dispatch` as the owner changes a running instance's dispatch table (a kernel operation), a handler named from its genesis; no new genesis", { skip }, async (t) => {
+  const { h, env, store, host } = await setup(t, ["martha"]);
   const s = await store("martha");
   const e = env();
-  const cli = (...argv: string[]) => main(argv, e.env);
+  const work = await tmp(t);
+  let n = 0;
+  const plan = async (...argv: string[]) => { const out = join(work, String(++n)); const code = await planMain(["dispatch", ...argv, "--store", h.db.get("martha")!.store, "--out", out], e.env); if (code === 0) await sendDir(host, "martha", out); return code; };
   const genesis = (await collect(s.log.entries(0)))[0]!.cid;
   const before = await until("the genesis processed (its seed rows)", () => currentDispatch(s));
   const resolve = (await programsOf(s)).resolve!;
   const peer = PrivateKey.fromRandom().toPublicKey().toString();
   const last = async () => (await currentDispatch(s))!.at(-1)!;
 
-  assert.equal(await cli("dispatch", "martha", "add", "--sender", peer, "register", "resolve"), 0, e.err.join("\n"));
+  assert.equal(await plan("add", "--sender", peer, "register", "resolve"), 0, e.err.join("\n"));
   await until("the new row", async () => senderText((await last()).sender) === peer ? true : undefined);
   const row = await last();
   assert.deepEqual([row.transport, row.address, senderText(row.sender), String(row.program)], ["mailbox", "register", peer, String(resolve)]);
-  assert.equal(await cli("dispatch", "martha", "remove", "--sender", peer, "register", String(resolve)), 0);
+  assert.equal(await plan("remove", "--sender", peer, "register", String(resolve)), 0);
   await until("the row removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
   assert.deepEqual(await currentDispatch(s), before, "removed: the rows as they were");
   assert.ok((await collect(s.log.entries(0)))[0]!.cid.equals(genesis), "the same genesis");
 
-  assert.equal(await cli("dispatch", "martha", "swap", "register", "resolve"), 2);
-  assert.equal(await cli("dispatch", "nobody", "add", "register", "resolve"), 1);
-  assert.equal(await cli("dispatch", "martha", "add", "register", "no-such-program"), 1);
+  assert.equal(await plan("swap", "register", "resolve"), 2);
+  assert.equal(await plan("add", "register", "no-such-program"), 1);
   assert.match(e.err.at(-1)!, /not a CID or a program name/);
+  assert.equal(await main(["dispatch", "martha", "add", "register", "resolve"], e.env), 2, "skein-host changes no dispatch table");
 });
 
 // ---------------------------------------------------------------- the roster
@@ -269,15 +259,15 @@ test("parseIdentity: the `- Key: value` lines of IDENTITY.md", () => {
 });
 
 test("roster: a deployed row has its IDENTITY.md fields; one not deployed has empty ones; live per the host process; served as /roster.json with CORS *", { skip }, async (t) => {
-  const { h, owner, store } = await setup(t, ["martha", "kurt"]);
+  const { h, store, deploy } = await setup(t, ["martha", "kurt"]);
   const a = h.db.get("martha")!, b = h.db.get("kurt")!;
   const db = new HostDb(join(await tmp(t), "host.db"));
   t.after(() => db.close());
   db.add("martha", { store: a.store, identity: a.identity! }, new Date(0));
   db.add("kurt", { store: b.store, identity: b.identity! }, new Date(1));
   const dir = await agentDir(t);
-  const d = await deploy({ row: db.get("martha")!, dir, owner: owner.wallet, box: owner.box(a), store: await store("martha") });
-  db.add("martha", { tree: d.root });
+  // #124: deployed by the owner's messages; the roster reads IDENTITY.md from the store's main (the row has no `tree`).
+  const d = { root: (await deploy("martha", dir)).root.toString() };
   await mainIs(await store("martha"), d.root);
   const stores: Record<string, Store> = { martha: await store("martha"), kurt: await store("kurt") };
   const get = () => roster(db.list("enabled"), async (row) => ({ blocks: stores[row.handle] }), (row) => row.handle === "martha");
@@ -298,7 +288,7 @@ test("roster: a deployed row has its IDENTITY.md fields; one not deployed has em
   assert.equal((await fetch(`http://127.0.0.1:${port}/roster.json`, { method: "OPTIONS" })).status, 204);
   assert.equal((await fetch(`http://127.0.0.1:${port}/other`)).status, 404);
 
-  // A tree the store does not have yet (deploy queued, not admitted): empty fields, not an error.
+  // A row's `tree` the store does not have yet: empty fields, not an error.
   db.add("kurt", { tree: d.root });
   assert.equal((await get())[1]!.displayName, "");
 });
@@ -325,59 +315,13 @@ test("rosterFor: the rows a row knows, in row order, never itself; `- @handle@do
   assert.equal(await rosterFor({ ...rowOf("solo"), knows: '["*"]' }, [], f), undefined);
 });
 
-test("deploy with files: ROSTER.md joins the tree (not the directory); the same again is unchanged; a roster change alone moves main; null removes it; deployFiles does it from the store alone", { skip }, async (t) => {
-  const { h, owner, store } = await setup(t, ["martha", "martha2"]);
-  const s = await store("martha");
-  const dir = await agentDir(t);
-  let row = h.db.get("martha")!;
-  const box = owner.box(row);
-  const deployWith = (roster: string | null) => deploy({ row, dir, owner: owner.wallet, box, store: s, files: { "ROSTER.md": roster } });
-
-  const d1 = await deployWith("## Colleagues\n\n- @kurt@localhost — Kurt\n");
-  assert.equal(d1.records, 6, "SOUL.md, IDENTITY.md, ROSTER.md, skills/x.md, skills/, the root");
-  await mainIs(s, d1.root);
-  const root1 = CID.parse(d1.root);
-  assert.deepEqual(await paths(s, root1), ["IDENTITY.md", "ROSTER.md", "SOUL.md", "skills/x.md"]);
-  assert.equal(new TextDecoder().decode(await readFile(s, root1, "ROSTER.md")), "## Colleagues\n\n- @kurt@localhost — Kurt\n");
-  assert.equal(await fs.stat(join(dir, "ROSTER.md")).catch(() => undefined), undefined, "nothing written into the directory");
-  row = { ...row, tree: d1.root };
-
-  assert.equal((await deployWith("## Colleagues\n\n- @kurt@localhost — Kurt\n")).unchanged, true);
-
-  const d2 = await deployWith("## Colleagues\n\n- @kurt@localhost — Kurt: Account manager.\n");
-  assert.deepEqual([d2.unchanged, d2.records, d2.head], [false, 2, true], "the new ROSTER.md and root, then head");
-  await mainIs(s, d2.root);
-  row = { ...row, tree: d2.root };
-
-  const d3 = await deployWith(null);
-  await mainIs(s, d3.root);
-  assert.deepEqual(await paths(s, CID.parse(d3.root)), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
-  assert.equal(d3.root, (await hashDir(dir, { ignore: onlyIgnore(dir, DEFAULT_ONLY) })).root.toString(), "no ROSTER.md: the directory's own tree");
-  row = { ...row, tree: d3.root };
-
-  // No directory: the deployed tree from the store, ROSTER.md set; same root as deploying the directory with it.
-  const f1 = await deployFiles({ row, owner: owner.wallet, box, store: s, files: { "ROSTER.md": "## Colleagues\n\n- @kurt@localhost — Kurt\n" } });
-  assert.deepEqual([f1.root, f1.records, f1.head], [d1.root, 0, true], "the store has every object already: only head");
-  await mainIs(s, d1.root);
-  assert.equal((await deployFiles({ row: { ...row, tree: f1.root }, owner: owner.wallet, box, store: s, files: { "ROSTER.md": "## Colleagues\n\n- @kurt@localhost — Kurt\n" } })).unchanged, true);
-  // Another store (as after a reset: a new genesis) that lacks the row's tree: not unchanged.
-  const other = h.db.get("martha2")!;
-  const fresh = await store("martha2");
-  const again = await deploy({ row: { ...other, tree: d1.root }, dir, owner: owner.wallet, box: owner.box(other), store: fresh, files: { "ROSTER.md": "## Colleagues\n\n- @kurt@localhost — Kurt\n" } });
-  assert.deepEqual([again.root, again.unchanged, again.records], [d1.root, false, 6]);
-  await mainIs(fresh, d1.root);
-  await assert.rejects(deployFiles({ row: { ...row, tree: gitCid("0".repeat(40)).toString() }, owner: owner.wallet, box, store: s, files: {} }), /does not have the deployed tree/);
-});
-
-test("skein-host knows / roster --for / deploy / roster --deploy: each agent's ROSTER.md from host.db and the deployed IDENTITY.md; only a changed roster redeploys", { skip }, async (t) => {
-  const { h, env, store } = await setup(t, ["martha", "kurt"]);
+test("skein-host knows / roster --for: each agent's ROSTER.md from host.db and the IDENTITY.md the owner deployed (main); deployed with it as the owner's messages", { skip }, async (t) => {
+  const { h, env, store, deploy } = await setup(t, ["martha", "kurt"]);
   const mdir = await agentDir(t);
   const kdir = await agentDir(t);
   await fs.writeFile(join(kdir, "IDENTITY.md"), KURT);
   const e = env();
   const cli = (...argv: string[]) => main(argv, e.env);
-  // What each command said about the agents (not the address-book lines roster --deploy also writes).
-  const said = (from: number) => e.out.slice(from).filter((l) => /^(martha|kurt): (deployed|unchanged)/.test(l)).sort();
   const rosterOf = async (handle: string) => { const s = await store(handle); return new TextDecoder().decode(await readFile(s, (await headTree(s, MAIN))!, "ROSTER.md")); };
   // Not --all: the host's mailbox instances (david, infer) are rows too.
   assert.equal(await cli("knows", "martha", "kurt"), 0);
@@ -390,48 +334,23 @@ test("skein-host knows / roster --for / deploy / roster --deploy: each agent's R
   assert.equal(await cli("roster", "--for", "martha"), 0);
   assert.equal(e.out.at(-1), "## Colleagues\n\n- @kurt@localhost — kurt");
 
-  // Martha first (Kurt has no IDENTITY.md anywhere yet), then Kurt (Martha's is in her store).
-  assert.equal(await cli("deploy", "martha", mdir), 0, e.err.join("\n"));
-  await mainIs(await store("martha"), h.db.get("martha")!.tree!);
-  assert.equal(await cli("deploy", "kurt", kdir), 0, e.err.join("\n"));
-  await mainIs(await store("kurt"), h.db.get("kurt")!.tree!);
-  assert.equal(await rosterOf("martha"), "## Colleagues\n\n- @kurt@localhost — kurt\n");
-  assert.equal(await rosterOf("kurt"), "## Colleagues\n\n- @martha@localhost — Martha: Organization front desk and directory service.\n");
-  assert.equal(await fs.stat(join(mdir, "ROSTER.md")).catch(() => undefined), undefined);
-
-  // Kurt's IDENTITY.md is deployed now: only Martha's roster changed.
-  const kurtTree = h.db.get("kurt")!.tree!;
-  let n = e.out.length;
-  assert.equal(await cli("roster", "--deploy"), 0, e.err.join("\n"));
-  const [kl, ml] = said(n);
-  assert.equal(kl, `kurt: unchanged ${kurtTree}`);
-  assert.match(ml!, /^martha: deployed \S+ · 2 objects in 1 message\(s\) to objects · head main$/);
-  await mainIs(await store("martha"), h.db.get("martha")!.tree!);
-  assert.equal(await rosterOf("martha"), "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager for\n");
+  // Kurt deployed (his IDENTITY.md in his main): Martha's roster names him; written into her directory and deployed with it.
+  const k = await deploy("kurt", kdir);
+  await mainIs(await store("kurt"), k.root.toString());
   assert.equal(await cli("roster", "--for", "martha"), 0);
   assert.equal(e.out.at(-1), "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager for");
+  await fs.writeFile(join(mdir, "ROSTER.md"), `${e.out.at(-1)}\n`);
+  const m = await deploy("martha", mdir, ["SOUL.md", "IDENTITY.md", "skills", "ROSTER.md"]);
+  await mainIs(await store("martha"), m.root.toString());
+  assert.equal(await rosterOf("martha"), "## Colleagues\n\n- @kurt@localhost — Kurt: Account manager for\n");
+  assert.equal(await cli("roster", "--for", "kurt"), 0);
+  assert.equal(e.out.at(-1), "## Colleagues\n\n- @martha@localhost — Martha: Organization front desk and directory service.");
 
-  // Again, and deploy --all from the source directories: all unchanged.
-  const before = [h.db.get("martha")!.tree, h.db.get("kurt")!.tree];
-  n = e.out.length;
-  assert.equal(await cli("roster", "--deploy"), 0);
-  assert.deepEqual(said(n), [`kurt: unchanged ${before[1]}`, `martha: unchanged ${before[0]}`]);
-  n = e.out.length;
-  assert.equal(await cli("deploy", "--all"), 0);
-  assert.deepEqual(said(n), [`kurt: unchanged ${before[1]}`, `martha: unchanged ${before[0]}`]);
-
-  // Kurt knows nobody now: his tree loses ROSTER.md.
+  // Kurt knows nobody now: no ROSTER.md for him.
   assert.equal(await cli("knows", "kurt", "--none"), 0);
   assert.equal(await cli("roster", "--for", "kurt"), 0);
   assert.equal(e.err.at(-1), "kurt knows nobody: no ROSTER.md");
-  n = e.out.length;
-  assert.equal(await cli("roster", "--deploy"), 0);
-  const [k2, m2] = said(n);
-  assert.equal(m2, `martha: unchanged ${before[0]}`);
-  assert.match(k2!, /^kurt: deployed \S+ · 1 objects in 1 message\(s\) to objects · head main$/);
-  await mainIs(await store("kurt"), h.db.get("kurt")!.tree!);
-  const ks = await store("kurt");
-  assert.deepEqual(await paths(ks, (await headTree(ks, MAIN))!), ["IDENTITY.md", "SOUL.md", "skills/x.md"]);
+  await assert.rejects(cli("roster", "--deploy"), /Unknown option '--deploy'/, "skein-host deploys nothing");
 
   assert.equal(await cli("knows", "nobody", "--all"), 1);
   assert.equal(await cli("knows", "kurt", "martha", "--all"), 2);

@@ -1,6 +1,7 @@
-// Installing apps (#72, #76, #79) end to end, through `skein-host install` and
-// `uninstall` (src/host/cli.ts, install.ts) as the owner, into an instance of
-// the stock system on a router:
+// Installing apps (#72, #76, #79) end to end, as the owner's messages (#124:
+// `skein plan install|uninstall`, src/client/admin.ts, each /sendMessage JSON
+// body POSTed on the owner's session; src/testapps.ts ownerCli), into an
+// instance of the stock system on a router:
 //
 //   skein-static (shruggr/skein-static at a pinned commit, cloned by the
 //   install itself; or $SKEIN_STATIC_DIR; 0.2.0, the #77 shape): the head
@@ -36,6 +37,7 @@ import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { dirBundles } from "../../src/client/client.ts";
 import { main } from "../../src/host/cli.ts";
+import { ownerCli } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -71,9 +73,11 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    const code = await main(args, {
+    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, args) : undefined;
+    if (o) { out.push(...o.out); err.push(...o.err); }
+    const code = o ? o.code : await main(args, {
       vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => out.push(l), err: (l) => err.push(l),
-      owner: { wallet: h.owner, box: (row) => new RawBox(h.owner, `${h.base}/@${row.handle}`) },
     });
     await h.router.settled();
     if (process.env.VERBOSE) for (const l of [...out, ...err]) process.stdout.write(`  | ${l}\n`);
@@ -96,9 +100,7 @@ try {
   check(code === 0 && out.some((l) => l.includes("row       http /static/site* from anyone → static.get")) && out.some((l) => l.includes("row       http /static/ from anyone → static.get")), `the prompt shows static's rows under /static/ (${code}: ${out.filter((l) => l.includes("row ")).join(" | ")})`);
   check((await record("static/app")) === undefined, "a dry run sends nothing");
   code = await cli("install", staticSpec, "--instance", "inst");
-  check(code === 1 && err.some((l) => /not approved/.test(l)), `without --approve-all (and no terminal) the install is refused (${code} ${err.join(" ")})`);
-  code = await cli("install", staticSpec, "--instance", "inst", "--approve-all");
-  check(code === 0, `skein-host install skein-static: exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein plan install skein-static, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
   const st = await record("static/app");
   check(st?.kind === "app" && st.name === "static" && !!st.tree && !!(st.programs as Record<string, unknown>)?.static && st.version === "0.2.0" && (await record("static")) === undefined, `the head static/app is the app record (0.2.0), linking the tree and the program record; no alias head \`static\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
   const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
@@ -111,8 +113,8 @@ try {
   check(r.status === 404, `GET /site/ (the manifest's own path, outside /static/): 404 (${r.status})`);
 
   // ------------------------------------------------ app-demo: start, ticks, calls
-  code = await cli("install", demoDir, "--instance", "inst", "--approve-all");
-  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo-tick from $cron → demo")), `skein-host install app-demo: exit ${code} ${err.join(" ")}`);
+  code = await cli("install", demoDir, "--instance", "inst");
+  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo-tick from $cron → demo")), `skein plan install app-demo: exit ${code} ${err.join(" ")}`);
   const state = async () => {
     const rec = await record("app-demo/app");
     return rec?.state ? await (await k()).store.get(rec.state as CID) as { count: number; ticks: number } : undefined;
@@ -213,21 +215,21 @@ try {
   check(c.status === 404 && c.v.error?.code === "unknown-fn", `POST /app-demo/call nope: ${c.status}`);
 
   // An install over itself: no new row, the state kept, start sent again.
-  code = await cli("install", demoDir, "--instance", "inst", "--approve-all");
+  code = await cli("install", demoDir, "--instance", "inst");
   check(code === 0 && out[0]?.startsWith("upgrade app-demo 0.1.0 (installed: 0.1.0)") && out.some((l) => l.includes("dispatch ×0 · start")), `reinstalled: ${out[0]} · ${out.find((l) => l.startsWith("  messages"))}`);
   check((await state())?.count === 7, "the state is kept across the install");
 
   // ------------------------------------------------ uninstall
-  code = await cli("uninstall", "app-demo", "--instance", "inst", "--approve-all");
-  check(code === 0 && out[0]?.includes("dispatch remove ×3"), `skein-host uninstall app-demo: ${code} ${out[0]} ${err.join(" ")}`);
+  code = await cli("uninstall", "app-demo", "--instance", "inst");
+  check(code === 0 && out[0]?.includes("dispatch remove ×3"), `skein plan uninstall app-demo: ${code} ${out[0]} ${err.join(" ")}`);
   const stopped = await until("the stop", async () => { await h.router.settled(); return h.lines.some((l) => /cron: beat stopped$/.test(l)) || undefined; }, 10_000).catch(() => false);
   check(stopped, "the stop message reached app-demo before its rows went: the cron provider stopped beat");
   c = await call({ fn: "demo.counter.get" });
   check(c.status === 404, `after uninstall, /app-demo/call is no route: ${c.status}`);
   check((await record("app-demo/app"))?.kind === "app", "the head app-demo/app is left");
-  code = await cli("uninstall", "static", "--instance", "inst", "--approve-all");
+  code = await cli("uninstall", "static", "--instance", "inst");
   r = await get("/static/");
-  check(code === 0 && r.status === 404, `skein-host uninstall static: its routes are gone (${code}, GET /static/ ${r.status})`);
+  check(code === 0 && r.status === 404, `skein plan uninstall static: its routes are gone (${code}, GET /static/ ${r.status})`);
   check((await appRows("static")).length === 0 && (await appRows("app-demo")).length === 0, "no app rows left in the dispatch table");
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);

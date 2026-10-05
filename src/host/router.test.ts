@@ -22,6 +22,8 @@ import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { main } from "./cli.ts";
+import { planDispatch } from "../client/admin.ts";
+import { sendPlan } from "../testapps.ts";
 import { testHost, until } from "./testhost.ts";
 import { HANDLE_CERTIFICATE_TYPE, NO_REVOCATION_OUTPOINT } from "./handles.ts";
 import { ephemeralWallet } from "../wallet.ts";
@@ -166,15 +168,13 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   assert.equal(conns.length, 0, "no connection without a subscriber");
 
   // A row taking box `chain` from anyone (events included, as the chain app's `event` row does), added to `a`: `a` is subscribed, live.
-  const err: string[] = [];
-  const env = {
-    vars: { SKEIN_HOME: h.home, SKEIN_OWNER: h.ownerId, SKEIN_ROUTER_PORT: String(h.router.port), SKEIN_MASTER_KEY: "11".repeat(32) },
-    out: () => {}, err: (l: string) => err.push(l),
-    owner: { wallet: h.owner, box: (row: { handle: string }) => new RawBox(h.owner, `${h.base}/@${row.handle}`) },
-  };
   const programs = Object.keys(((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, unknown> }).programs);
   const handler = programs.includes("resolve") ? "resolve" : programs[0]!;
-  assert.equal(await main(["dispatch", "a", "add", "chain", handler], env), 0, err.join("\n"));
+  const gp = ((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, CID> }).programs;
+  const id = h.db.get("a")!.identity!;
+  // #124: the owner's dispatch message (`skein plan dispatch`), POSTed to a's /sendMessage on the owner's session.
+  const sendRow = (op: "add" | "remove") => sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "a", planDispatch(id, { op, box: "chain", handler }, gp));
+  await sendRow("add");
   await until("a subscribed", async () => { await h.router.settled(); return h.router.feeds.hosts("a") || undefined; });
   assert.deepEqual(subscribed(), ["a"]);
   assert.ok(h.lines.includes(`[router] a: subscribed to the host's headers feed ${url}`), h.lines.join("\n"));
@@ -193,7 +193,7 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   assert.equal(await h.entries("david"), n0.david);
 
   // The row removed: unsubscribed.
-  assert.equal(await main(["dispatch", "a", "remove", "chain", handler], env), 0, err.join("\n"));
+  await sendRow("remove");
   await until("a unsubscribed", async () => { await h.router.settled(); return !h.router.feeds.hosts("a") || undefined; });
   assert.ok(h.lines.includes(`[router] a: unsubscribed from the host's headers feed ${url}`));
 });
@@ -314,26 +314,30 @@ test("router: registration through the host skein (#113) — POST /account/regis
   assert.deepEqual(h.db.list().filter((x) => x.kind === "mailbox").map((x) => x.handle), recorded);
 });
 
-test("router: a mailbox registered before #113 (a host.db row the app has no record of) adopted by skein-host import-handles — onboard.adopt as the owner, the manager's answer for the row, at the app's domain; then it resolves, and the paymail PKI answers from the same record; adopt is the owner's", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
+test("router: a mailbox registered before #113 (a host.db row the app has no record of) listed by skein-host import-handles with the owner's request — onboard.adopt sent by the owner's wallet (#124), the manager's answer for the row, at the app's domain; then it resolves, and the paymail PKI answers from the same record; adopt is the owner's", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
   await h.hostSkein();
   const old = PrivateKey.fromRandom().toPublicKey().toString();
   h.mailbox("olde", old);
   h.db.add("olde", { domain: "id.skein.nexus" });
   assert.equal((await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=olde`)).status, 404, "no record: not resolved");
-  const out: string[] = [];
-  const run = async () => await main(["import-handles"], {
-    vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => out.push(l), err: (l) => out.push(l),
-    owner: { wallet: h.owner, box: (row) => new RawBox(h.owner, `${h.base}/@${row.handle}`) },
-  });
-  assert.equal(await run(), 0, out.join("\n"));
-  assert.match(out.join("\n"), /olde: adopted at localhost · serial /);
+  const out: string[] = [], err: string[] = [];
+  const run = async () => { out.length = 0; err.length = 0; return await main(["import-handles"], { vars: { SKEIN_HOME: h.home, HOME: h.home, SKEIN_ROUTER_PORT: String(h.router.port) }, out: (l) => out.push(l), err: (l) => err.push(l) }); };
+  assert.equal(await run(), 0, err.join("\n"));
+  // #124: each line is the owner's request for the wallet to send; sent here on the owner's session.
+  assert.equal(out.length, 1, out.join("\n"));
+  const body = /--body '(.*)'$/.exec(out[0]!)![1]!;
+  assert.deepEqual(JSON.parse(body), { fn: "onboard.adopt", args: { handle: "olde", owner: old } });
+  const adopted = await new RawBox(h.owner, `${h.base}/@host`).af.fetch(`${h.base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body });
+  const v = JSON.parse(await adopted.text()) as { result?: { domain?: string; serialNumber?: string } };
+  assert.equal(adopted.status, 200, JSON.stringify(v));
+  assert.equal(v.result?.domain, "localhost");
+  assert.ok(v.result?.serialNumber);
   assert.equal(h.db.get("olde")!.domain, "localhost", "the row's domain is the app's now");
   const r = await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=olde`)).json() as { identityKey: string; messagebox: string; certificate: Certificate };
   assert.deepEqual([r.identityKey, r.messagebox, r.certificate.subject], [old, h.origin("olde"), old]);
-  out.length = 0;
   assert.equal(await run(), 0);
-  assert.deepEqual(out, ["olde: recorded already"]);
+  assert.deepEqual([out, err], [[], ["every mailbox instance is recorded"]]);
   // The paymail PKI, from the app's record (the domain the app's when none is given).
   for (const q of ["olde", "olde@localhost"]) assert.deepEqual(await (await fetch(`${h.base}/bsvalias/id/${q}`)).json(), { bsvalias: "1.0", handle: "olde@localhost", pubkey: old });
   assert.equal((await fetch(`${h.base}/bsvalias/id/nobody`)).status, 404);

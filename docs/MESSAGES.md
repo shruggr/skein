@@ -99,9 +99,11 @@ host's instance manager delivers the owner's claim to as a `local` request
 (`skein-host claim`, or its `create`, #90) before the instance is published. Delegating administration is the owner adding a row
 with the same operation and another sender. A refused operation (a bad
 body, a record not in the store) is a log line and nothing written. The
-client commands: `skein import` (objects), `skein head`, `skein dispatch`,
-`skein-host dispatch`, `skein-host peers`, and `skein-host install`
-(docs/APPS.md). An app's own writes are heads under its name,
+client commands: `skein plan install|uninstall|dispatch|peers|deploy`
+build the owner's messages as `/sendMessage` JSON bodies and any BRC-100
+wallet sends them (`skein send`, `1sat authfetch`; #124, docs/APPS.md §3);
+`skein import` (objects), `skein head` and `skein dispatch` send one each
+through the client's own wallet. An app's own writes are heads under its name,
 `<app>/…` (docs/VM.md, "Heads"); the front door's sessions are
 `frontdoor/sessions`.
 
@@ -649,10 +651,10 @@ The address book is one of the kernel's four tables (#77). Who writes it:
   by every genesis, or a delegate's; source `admin`): `{op: "add", key,
   transport?, address? | url?, role?, handle?, domain?}` | `{op: "remove",
   key}` — `url` alone, or no `transport`, is a mailbox. No program runs.
-  `skein-host peers <agent> add <key> <address> [--transport t] [--role r]
-  [--handle h@d]` / `remove <key>` / `list`; `scripts/host/up.sh` writes the
-  owner and the inference peer into every agent this way, and the roster
-  step (`skein-host deploy`, `roster --deploy`) the other agents;
+  `skein plan peers add <key> <address> [--transport t] [--role r]
+  [--handle h@d]` / `remove <key>`, sent by the owner's wallet (#124), and
+  `skein-host peers <agent> list`; `scripts/host/up.sh` writes the owner,
+  the inference peer and the other agents into every agent this way;
 and nothing else: **no program writes it** (#87). Every program of the
 instance emits as the instance, and no default row admits the instance's
 own key to an admin box, so a program's `peers` message finds no row —
@@ -733,8 +735,9 @@ skein's address book alone (`skein-host init` writes that genesis; no
 other instance's book names them), and they act only on a message from the
 host skein's identity, sent from the host skein: any other is not acted on
 and not answered (a line in the host's log). A host skein made before #113
-has no `certifier` entry: `skein-host peers host add <certifier key>
-certifier --transport local --role certifier` adds it (the key: what the
+has no `certifier` entry: the owner's `peers` message adds it (`skein plan
+peers add <certifier key> certifier --transport local --role certifier
+--origin <the host skein's origin>`, sent) (the key: what the
 host's manifest published as `metanet.trust.publicKey` before #113 — the
 master secret's child under `[2, "skein provider"]`, key ID `certifier`). A refusal is an answer: `{error}` for a handle that is not a
 hostname label or is taken, an owner that is not a key, another image, a
@@ -1024,8 +1027,8 @@ appended as a request entry, the app's route handler answering:
 | `POST /account/profile` | `/onboard/profile` |
 
 A host with no host skein answers them 404. The app's configuration
-(`config.onboard` of its installed manifest, written by `skein-host install
-… --config '{"onboard": {…}}'`): `domain`, the **handle domain** (default
+(`config.onboard` of its installed manifest, written by `skein plan install
+… --config '{"onboard": {…}}'`, sent by the owner's wallet): `domain`, the **handle domain** (default
 `localhost`); `origin`, where the manifest says resolve and search are
 (default `https://<domain>`); `name`, `note`, `icon`, the host's
 presentation in `metanet.trust` (§5.1); `ordfs`, the ORDFS content route

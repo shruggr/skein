@@ -94,7 +94,7 @@ echo "== overlay services (#36, #79): the app shruggr/skein-overlay (#71: cloned
 echo "== static files (#52): the app shruggr/skein-static (#71: cloned at static.ts's pinned commit, or \$SKEIN_STATIC_DIR) in a tree; its files through its routes (types, index, 301, 404s, 405, HEAD, ETag/304); each request an entry, no head moved; replayed"
 "${node[@]}" "$kz/equiv/static.ts" || status=1
 
-echo "== apps (#72, #76): skein-host install of shruggr/skein-static (its routes under /static/, the head its app record) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
+echo "== apps (#72, #76, #124): the owner's messages (skein plan install) for shruggr/skein-static (its routes under /static/, the head its app record) and programs/test/app-demo (start → a cron heartbeat from \$cron; {fn, args} answered by message and on /app-demo/call; args checked; a writes: false function that writes refused); uninstall (stop, routes gone); replayed"
 "${node[@]}" "$kz/equiv/install.ts" || status=1
 
 echo "== the default image and the claim (#89): an instance from images/default (no owner, the claim row, the management site at / and /site/, the explorer nobody's until the claim); skein-host claim → the owner's admin rows, the claim row gone, the owner reads the explorer; a second claim refused; the owner installs app-demo; an owned instance refuses a claim; add --image; replayed"
@@ -113,13 +113,13 @@ else
   "${node[@]}" "$kz/equiv/site.ts" || status=1
 fi
 
-echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by skein-host install, the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; BRC-22 submit → the chain app's answer → BRC-24 lookup over HTTP at the base URL /@<handle>/overlay (#111); two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
+echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shruggr/skein-overlay (install-overlay.ts's pinned commits, or \$SKEIN_CHAIN_DIR / \$SKEIN_OVERLAY_DIR) by the owner's messages (skein plan install, #124), the overlay refused without the chain app; its wiring derived from config.overlay; the libp2p node subscribes the installed topics live; a token gossiped from a second router admitted on the chain app's answer; BRC-22 submit → the chain app's answer → BRC-24 lookup over HTTP at the base URL /@<handle>/overlay (#111); two overlay apps on one instance; a reinstall with another topic read without a restart; uninstall unsubscribes; replayed"
 "${node[@]}" "$kz/equiv/install-overlay.ts" || status=1
 
 echo "== open emit events (#119): two apps (programs/test/app-demo's module under other names) on a router with libp2p; an app's subscribe {topic} → the node subscribes it, a message published on it from a second router routed by the app's libp2p prefix row (tm_-style) and accepted; another app's subscribe of that topic refused; an event nobody wires is a record and a log line; unsubscribe leaves; a restarted router subscribes the same topics by reading the log; an uninstall drops the app's; replayed"
 "${node[@]}" "$kz/equiv/emit-events.ts" || status=1
 
-echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by skein-host install, on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
+echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by the owner's messages (skein plan install, #124), on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
 "${node[@]}" "$kz/equiv/chain.ts" || status=1
 
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"

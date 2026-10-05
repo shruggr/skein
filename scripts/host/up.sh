@@ -36,36 +36,43 @@
 #   4. the grants, toward every row's front-door key (`skein-host list`), now
 #      that every row exists
 #   5. the address books (#40, #70): how each agent reaches a key. Into every
-#      enabled agent, through its `peers` box as the owner (`skein-host peers`):
-#      the owner's key and mailbox instance, the inference peer's key and its
-#      mailbox instance; then the roster step (`skein-host roster --deploy`)
-#      writes the other agents' keys and origins. The inference peer's own
-#      address book (every agent's key and origin) is the file
-#      ~/.skein/infer-peers.json, which bin/skein-infer reads.
+#      enabled agent, through its `peers` box as the owner: the owner's key and
+#      mailbox instance, the inference peer's key and its mailbox instance, and
+#      every other agent's key and origin. The inference peer's own address
+#      book (every agent's key and origin) is the file ~/.skein/infer-peers.json,
+#      which bin/skein-infer reads.
 #   6. the apps (#83): a genesis has no shell and no chat loop, so every enabled
-#      agent gets the shell app and the chat app (`skein-host install`, as the
-#      owner, at the tags SKEIN_SHELL_APP / SKEIN_CHAT_APP name). Installing
-#      what an instance has sends only the head again.
+#      agent gets the shell app and the chat app (as the owner, at the tags
+#      SKEIN_SHELL_APP / SKEIN_CHAT_APP name). Installing what an instance has
+#      sends only the head again.
+#   Steps 5–7 are the owner's messages (#124): `skein plan … --store <the
+#   instance's store>` builds them, `skein send <origin> <dir>` delivers them
+#   with the dev owner's wallet (`1sat authfetch`, HOME ~/.skein/owner-home,
+#   key ~/.skein/owner-wallet.env). An instance owned by another key (an
+#   owner.identity that is not owner-dev.identity) refuses them: that owner
+#   sends from its own wallet.
 #   7. the onboarding app (#90, #113) into the host skein (SKEIN_ONBOARD_APP,
 #      default shruggr/skein-onboard#v0.2.0), its config the handle domain
 #      (SKEIN_HANDLE_DOMAIN, default localhost) and the router's origin:
 #      POST /@host/onboard/call creates a skein for any wallet with a session,
 #      through the instance manager; POST /account/register (signed over
-#      `register <name>@<domain>`) a mailbox; it answers BRC-169. Then
-#      `skein-host import-handles`: the mailboxes of step 2, which the app
-#      did not make, recorded and certified so they resolve.
+#      `register <name>@<domain>`) a mailbox; it answers BRC-169. Then the
+#      mailboxes of step 2, which the app did not make, adopted (`skein-host
+#      import-handles` prints the owner's request for each), recorded and
+#      certified so they resolve.
 #
 # Nothing is registered, and nothing registers itself: the mailbox rows of
 # step 2 are what a registration (register.ts, POST /account/register) would
 # make — that is for identities whose keys this machine does not know (the
 # front end's Register) — and an identity outside the host reaches an agent's
 # answers only once the admin puts its key and mailbox URL in that agent's
-# address book (`skein-host peers <agent> add <key> <url>`). The owner's
+# address book (`skein plan peers add <key> <url> --store …`, sent). The owner's
 # mailbox URL goes to ~/.skein/mailbox.url (the client's). The inference peer
 # itself is bin/skein-infer (SKEIN_MAILBOX_URL=http://127.0.0.1:8100/@infer).
-# Agents are rows: `skein-host add <handle>` (identity derived), then
-# `skein-host deploy <handle> <dir>`; run this again after adding one (its
-# address book, and everyone else's). See README.md.
+# Agents are rows: `skein-host add <handle>` (identity derived), then the
+# owner deploys its directory (`skein plan deploy <dir>`, `skein send`); run
+# this again after adding one (its address book, and everyone else's). See
+# README.md.
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -74,6 +81,21 @@ export SKEIN_HOME="$skein"
 port="${SKEIN_ROUTER_PORT:-8100}"
 mkdir -p "$skein/logs"
 host() { "$root/bin/skein-host" "$@"; }
+# An instance's origin, as the router publishes it (SKEIN_INSTANCE_ORIGIN).
+origin() { local t="${SKEIN_INSTANCE_ORIGIN:-http://{handle\}.localhost:{port\}}"; t="${t//\{handle\}/$1}"; echo "${t//\{port\}/$port}"; }
+# The owner's messages (#124): `owner_send <handle> <skein plan args…>` plans them from the instance's store
+# and sends them with the dev owner's wallet (1sat authfetch) to the instance's origin.
+owner_send() {
+  local h=$1 store dir rc=0; shift
+  store="$(host list | awk -F'\t' -v h="$h" '{ split($1, a, "@") } a[1] == h { print $7; exit }')"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/skein-plan-XXXXXX")"
+  "$root/bin/skein" plan "$@" --store "$store" --out "$dir" > /dev/null || rc=$?
+  if [ $rc -eq 0 ] && ls "$dir"/[0-9]*.json > /dev/null 2>&1; then
+    ( set -a; . "$skein/owner-wallet.env"; set +a; HOME="$skein/owner-home" "$root/bin/skein" send "$(origin "$h")" "$dir" ) > /dev/null || rc=$?
+  fi
+  rm -rf "$dir"
+  return $rc
+}
 
 # 1. The client wallets.
 "$here/wallets.sh" owner infer
@@ -116,16 +138,18 @@ fi
 # 4. The grants, toward every row (agents and mailbox instances), all of which exist now.
 "$here/grants.sh"
 
-# 5. The address books. An instance's origin, as the router publishes it (SKEIN_INSTANCE_ORIGIN).
-origin() { local t="${SKEIN_INSTANCE_ORIGIN:-http://{handle\}.localhost:{port\}}"; t="${t//\{handle\}/$1}"; echo "${t//\{port\}/$port}"; }
+# 5. The address books, as the owner's messages.
 mapfile -t agents < <(host list | awk -F'\t' '$2 == "agent" && $3 == "enabled" { split($1, h, "@"); print h[1] "\t" $4 }')
 for a in "${agents[@]}"; do
   h="${a%%$'\t'*}"
-  host peers "$h" add "$owner" "$(origin "$mine")" --handle "${SKEIN_OWNER_HANDLE:-david@localhost}"
-  host peers "$h" add "$infer" "$(origin "$theirs")" --handle "${SKEIN_INFER_HANDLE:-infer@localhost}"
+  owner_send "$h" peers add "$owner" "$(origin "$mine")" --handle "${SKEIN_OWNER_HANDLE:-david@localhost}" || echo "peers add the owner into $h failed (above)" >&2
+  owner_send "$h" peers add "$infer" "$(origin "$theirs")" --handle "${SKEIN_INFER_HANDLE:-infer@localhost}" || echo "peers add infer into $h failed (above)" >&2
+  # The other agents: their keys and origins.
+  for b in "${agents[@]}"; do
+    o="${b%%$'\t'*}"; k="${b#*$'\t'}"
+    [ "$o" = "$h" ] || owner_send "$h" peers add "$k" "$(origin "$o")" --handle "$o@localhost" || echo "peers add $o into $h failed (above)" >&2
+  done
 done
-# The other agents (and ROSTER.md for the deployed ones): the roster step.
-if [ "${#agents[@]}" -gt 1 ]; then host roster --deploy || echo "roster --deploy failed (above); the agents may not know each other yet" >&2; fi
 # The inference peer's address book: every agent's key at its origin.
 {
   echo "{"
@@ -144,7 +168,7 @@ if [ "${#agents[@]}" -gt 1 ]; then host roster --deploy || echo "roster --deploy
 for a in "${agents[@]}"; do
   h="${a%%$'\t'*}"
   for app in "${SKEIN_SHELL_APP:-https://github.com/shruggr/skein-shell#v0.1.0}" "${SKEIN_CHAT_APP:-https://github.com/shruggr/skein-chat#v0.1.0}"; do
-    host install "$app" --instance "$h" --approve-all > /dev/null || echo "install $app into $h failed (above)" >&2
+    owner_send "$h" install "$app" || echo "install $app into $h failed (above)" >&2
   done
 done
 echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer knows them ($skein/infer-peers.json)"
@@ -153,7 +177,11 @@ echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer know
 if [ -n "$hostskein" ]; then
   onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.2.0}"
   config="{\"onboard\": {\"domain\": \"${SKEIN_HANDLE_DOMAIN:-localhost}\", \"origin\": \"${SKEIN_ROUTER_ORIGIN:-http://127.0.0.1:$port}\"}}"
-  host install "$onboard" --instance "$hostskein" --config "$config" --approve-all > /dev/null || echo "install $onboard into $hostskein failed (above)" >&2
-  host import-handles > /dev/null || echo "import-handles failed (above)" >&2
+  owner_send "$hostskein" install "$onboard" --config "$config" || echo "install $onboard into $hostskein failed (above)" >&2
+  # The mailboxes the app did not make: adopted by the owner's requests import-handles prints.
+  host import-handles 2> /dev/null | while read -r line; do
+    body="${line#*--body \'}"; body="${body%\'}"
+    ( set -a; . "$skein/owner-wallet.env"; set +a; HOME="$skein/owner-home" 1sat authfetch POST "$(origin "$hostskein")/onboard/call" --body "$body" ) > /dev/null || echo "adopting failed: $body" >&2
+  done
   echo "the host skein: @$hostskein, the onboarding app at $(origin "$hostskein")/onboard/call; handles @${SKEIN_HANDLE_DOMAIN:-localhost}"
 fi

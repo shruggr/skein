@@ -111,6 +111,17 @@ export class RawBox {
     return { id: CID.parse(String(r.v.id ?? r.v.messageId)) };
   }
 
+  /**
+   * A BRC-33 request with a JSON body on the session (`path` under the box URL, e.g. "/sendMessage"):
+   * what any BRC-100 wallet's BRC-104 client sends (`1sat authfetch POST <origin>/sendMessage --body @file`,
+   * the owner's admin messages `skein plan` writes, src/client/admin.ts). The status and the answer's text.
+   */
+  async postJson(path: string, json: string): Promise<{ status: number; text: string }> {
+    await this.ensurePeer(this.wallet, this.originator);
+    const r = await this.af.fetch(`${this.url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: json });
+    return { status: r.status, text: await r.text() };
+  }
+
   /** The messages in the caller's `box`, oldest first. */
   async list(box: string): Promise<Listed[]> {
     const r = await this.post("/listMessages", { messageBox: box });

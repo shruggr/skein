@@ -276,8 +276,9 @@ against those reads in the kernel's match.)
     head `claim` names (none before the claim). The host sends it as the
     instance manager's `local` request (`skein-host claim`).
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
-  [--sender key] <box> <handler>` / `skein-host dispatch <handle> …`,
-  `skein-host peers` send them. No reply. **No program reaches a kernel
+  [--sender key] <box> <handler>` send them, and `skein plan
+  install|uninstall|dispatch|peers|deploy` builds them for any BRC-100
+  wallet to send (#124). No reply. **No program reaches a kernel
   table** (#87): every program emits as the instance, and no default row
   admits the instance's own key to an admin box, so a program's message to
   one (`peers`, say) finds no row — recorded, nothing runs. The resolve

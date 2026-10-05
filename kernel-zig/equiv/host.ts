@@ -7,7 +7,7 @@
 //   address book; a second `init` only says which it is; `skein-host list`
 //   names it `host`. The operator installs the onboarding app
 //   (shruggr/skein-onboard at src/testapps.ts's pinned commit, or
-//   $SKEIN_ONBOARD_DIR) into it with `skein-host install`.
+//   $SKEIN_ONBOARD_DIR) into it as the owner's messages (`skein plan install`, #124).
 //
 //   A client — a wallet with a BRC-104 session to the host skein, nothing
 //   else — POSTs {fn: "onboard.create", args: {handle: "alice"}} to
@@ -42,7 +42,7 @@ import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { masterKey, Signer } from "../../src/host/signer.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
+import { appCheckout, ONBOARD_APP, ownerCli } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import type { WalletInterface } from "@bsv/sdk";
 
@@ -76,9 +76,14 @@ const out = (l: string) => { lines.push(l); if (process.env.VERBOSE) process.std
 /** `skein-host <args>` as `who` (the owner's wallet for install/deploy), with SKEIN_OWNER = who's key. */
 const cli = async (args: string[], who?: { wallet: WalletInterface; id: string }) => {
   const o: string[] = [], e: string[] = [];
+  // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent by who's wallet to /sendMessage.
+  if (who && (args[0] === "install" || args[0] === "uninstall")) {
+    const r = await ownerCli({ home, port, owner: who.wallet, settled: () => host!.router.settled() }, args);
+    for (const l of [...r.out, ...r.err]) out(l);
+    return r;
+  }
   const code = await main(args, {
     vars: { ...vars, ...(who ? { SKEIN_OWNER: who.id } : {}) }, out: (l) => { o.push(l); out(l); }, err: (l) => { e.push(l); out(l); },
-    ...(who ? { owner: { wallet: who.wallet, box: (row) => new RawBox(who.wallet, `${base}/@${row.handle}`) } } : {}),
   });
   return { code, out: o, err: e };
 };
@@ -107,9 +112,9 @@ try {
 
   // ------------------------------------------------ the operator installs the onboarding app
   // #113: the handle domain and the host's origin (where the manifest says resolve is) in the app's config.
-  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base } })], { wallet: operator, id: operatorId });
+  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base } })], { wallet: operator, id: operatorId });
   await router.settled();
-  check(r.code === 0 && r.out.some((l) => /onboard 0\.2\.0 installed/.test(l)), `skein-host install skein-onboard --instance host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
+  check(r.code === 0 && r.out.some((l) => /onboard 0\.2\.0 installed/.test(l)), `skein plan install skein-onboard --origin host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
   check(r.out.some((l) => /row +http \/onboard\/call from session → onboard\.call/.test(l)) && r.out.some((l) => /row +http \/onboard\/register from anyone → onboard\.register/.test(l)), "its rows: /onboard/call from any session → onboard.call; /onboard/register (and resolve, search, the manifest, profile, paymail) from anyone");
 
   // ------------------------------------------------ a client creates a skein
@@ -154,7 +159,7 @@ try {
   check(cert.certifier === certifierKey && await new Certificate(cert.type, cert.serialNumber, cert.subject, cert.certifier, cert.revocationOutpoint, cert.fields, cert.signature).verify(), "the certificate verifies with the SDK, issued by the certifier key");
 
   // ------------------------------------------------ the client installs an app in its skein
-  r = await cli(["install", demoDir, "--instance", "alice", "--approve-all"], { wallet: client, id: clientId });
+  r = await cli(["install", demoDir, "--instance", "alice"], { wallet: client, id: clientId });
   await router.settled();
   check(r.code === 0, `the client installs app-demo into alice: exit ${r.code} ${r.err.join(" ")}`);
   const call = await new RawBox(client, `${base}/@alice`).af.fetch(`${base}/@alice/app-demo/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "demo.counter.add", args: { by: 3 } }) });

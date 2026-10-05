@@ -103,12 +103,13 @@ The feed reaches an instance once the chain app is installed in it
 
 ### The owner's wallet
 
-`skein-host install` signs as the owner through the owner's BRC-100 wallet
-(`SKEIN_OWNER_WALLET`, `SKEIN_OWNER`). The grants it needs are README
-"Run a skein locally"; the counterparty of two of them is the instance's
-front-door key, column 5 of `skein-host list`. The command reads the
-instance's store, so it runs on the host's machine, with the host's
-`SKEIN_HOME`.
+Installing is the owner's messages (#124): `skein plan install` builds
+them and the owner's BRC-100 wallet sends them to the instance's
+`/sendMessage` (`skein send`, which runs `1sat authfetch`; any wallet with a
+BRC-104 client does the same). The plan reads the instance through its
+explorer with the same wallet (`--origin <the instance's origin>`), or, on
+the host's machine, its store file (`--store
+~/.skein/instances/<handle>/runtime.db`).
 
 ### The chain app, then the overlay
 
@@ -118,7 +119,8 @@ and its install into an instance without it is refused (`requires chain/1:
 no installed app provides it`).
 
 ```
-bin/skein-host install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --instance ov1 --config '{"chain": {"network": "regtest"}}' --approve-all
+bin/skein plan install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --origin http://ov1.localhost:8100 --config '{"chain": {"network": "regtest"}}' --out chain
+bin/skein send http://ov1.localhost:8100 chain
 ```
 
 ```
@@ -130,15 +132,17 @@ install chain 0.3.0 — The chain module …
   row       mailbox status from $status → chain
   provides  chain/1: ingest, status (read), proof (read)
   note      row mailbox status from $status: no status provider in the address book (optional; left out)
-ov1: chain 0.3.0 installed: 6 messages sent as the owner · head chain/app → bafyreicqn4mjtom5wbydzcrkdtdtn7oiyiqbu3vosau5ib2iqhqxggtbxe
+chain: prompt.txt and 6 messages to <ov1's key>
 ```
 
 `--config` is merged over the manifest's `config`; on mainnet leave it out
 (`config.chain.network` defaults to the genesis's `walletNetwork`, else
-`main`). Without `--approve-all` the command reads the rows aloud and asks.
+`main`). The prompt is also `chain/prompt.txt`; nothing is sent until
+`skein send`.
 
 ```
-bin/skein-host install https://github.com/shruggr/skein-overlay#2073980541f652dd4ba8b2f4af4ad05072d01b91 --instance ov1 --approve-all
+bin/skein plan install https://github.com/shruggr/skein-overlay#2073980541f652dd4ba8b2f4af4ad05072d01b91 --origin http://ov1.localhost:8100 --out overlay
+bin/skein send http://ov1.localhost:8100 overlay
 ```
 
 ```
@@ -259,11 +263,13 @@ The same against host.skein.nexus, where instances are
 `https://<handle>.skein.nexus` and the host has its headers feed and
 Arcade. Install the chain app and the overlay into your instance from its
 management page (`https://<handle>.skein.nexus/`: an app by repository URL
-and commit id), or on the host's machine:
+and commit id), or from any machine with your wallet:
 
 ```
-bin/skein-host install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --instance <handle>
-bin/skein-host install https://github.com/shruggr/skein-overlay#2073980541f652dd4ba8b2f4af4ad05072d01b91 --instance <handle>
+bin/skein plan install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --origin https://<handle>.skein.nexus --out chain
+bin/skein send https://<handle>.skein.nexus chain
+bin/skein plan install https://github.com/shruggr/skein-overlay#2073980541f652dd4ba8b2f4af4ad05072d01b91 --origin https://<handle>.skein.nexus --out overlay
+bin/skein send https://<handle>.skein.nexus overlay
 ```
 
 Then, from anywhere:

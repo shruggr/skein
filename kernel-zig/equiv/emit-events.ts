@@ -1,6 +1,6 @@
 // Open emit events (#119) end to end: two routers with libp2p. On A, one
 // instance (`ev`, the stock system, no libp2p in its genesis) gets two apps
-// by `skein-host install`, both the module programs/test/app-demo under other
+// by the owner's messages (`skein plan install`, #124), both the module programs/test/app-demo under other
 // names: `evt-a` (a libp2p row `demo_` with `prefix: true`) and `evt-b` (a
 // prefix row `other_` and an exact row `demo_mine`). A message {kind:
 // "app-demo-event", event, …} in the app's box makes the app emit that event.
@@ -37,6 +37,7 @@ import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { main } from "../../src/host/cli.ts";
+import { ownerCli } from "../../src/testapps.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { askedTopics, peerIdOf } from "../../src/host/p2p.ts";
@@ -119,9 +120,11 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    const code = await main(args, {
+    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: home, port: rA.port!, owner: ownerWallet, settled: () => rA.settled() }, args) : undefined;
+    if (o) { out.push(...o.out); err.push(...o.err); }
+    const code = o ? o.code : await main(args, {
       vars: { SKEIN_HOME: home, HOME: home }, out: (l) => out.push(l), err: (l) => err.push(l),
-      owner: { wallet: ownerWallet, box: (row) => new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@${row.handle}`) },
     });
     await rA.settled();
     if (process.env.VERBOSE) for (const l of [...out, ...err]) process.stdout.write(`  | ${l}\n`);
@@ -157,10 +160,10 @@ try {
   const fmtAsked = (m: Map<string, Set<string>>) => [...m].map(([a, t]) => `${a}: ${[...t].sort().join(" ")}`).sort().join("; ");
 
   // ------------------------------------------------ install: the prefix rows subscribe nothing
-  let code = await cli("install", treeA, "--instance", "ev", "--approve-all");
-  check(code === 0 && out.some((l) => /row\s+libp2p demo_\*? from anyone → demo\.topic/.test(l)), `skein-host install evt-a (a libp2p prefix row demo_): exit ${code} ${err.join(" ")} ${out.filter((l) => l.includes("libp2p")).join(" | ")}`);
-  code = await cli("install", treeB, "--instance", "ev", "--approve-all");
-  check(code === 0, `skein-host install evt-b (a prefix row other_, an exact row demo_mine): exit ${code} ${err.join(" ")}`);
+  let code = await cli("install", treeA, "--instance", "ev");
+  check(code === 0 && out.some((l) => /row\s+libp2p demo_\*? from anyone → demo\.topic/.test(l)), `skein plan install evt-a (a libp2p prefix row demo_): exit ${code} ${err.join(" ")} ${out.filter((l) => l.includes("libp2p")).join(" | ")}`);
+  code = await cli("install", treeB, "--instance", "ev");
+  check(code === 0, `skein plan install evt-b (a prefix row other_, an exact row demo_mine): exit ${code} ${err.join(" ")}`);
   let topics = await until("the node subscribes evt-b's exact row", () => served().length ? served() : undefined).catch(() => served());
   check(topics.join(",") === "demo_mine", `a prefix row is not subscribed; the exact row is: ${topics.join(", ")}`);
 
@@ -223,7 +226,7 @@ try {
   check((await events()).length === emittedBefore, "nothing re-emitted at the restart (the kernel keeps nothing for the events; the host read them)");
 
   // ------------------------------------------------ uninstall evt-a: its asked topics go with its rows
-  code = await cli("uninstall", "evt-a", "--instance", "ev", "--approve-all");
+  code = await cli("uninstall", "evt-a", "--instance", "ev");
   topics = await until("the node leaves demo_def", () => !served().includes("demo_def") ? served() : undefined).catch(() => served());
   check(code === 0 && topics.join(",") === "demo_mine,other_1", `evt-a uninstalled: no row of evt-a takes demo_def any more, so the node leaves it (${topics.join(", ")})`);
 } catch (e) {

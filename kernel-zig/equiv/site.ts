@@ -5,7 +5,7 @@
 //   `skein-host init --owner <you>` creates the host skein from the default
 //   image (which carries the site at / and /site/, the explorer route for its
 //   owner, and the git app's tree under apps/git); you install the onboarding
-//   app into it with `skein-host install`.
+//   app into it as the owner's messages (`skein plan install`, #124).
 //
 //   The wallet's grouped request (#97): GET /manifest.json at the host skein's
 //   own origin is the site's manifest.json (the protocols, the basket and the
@@ -78,7 +78,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
+import { appCheckout, ONBOARD_APP, ownerCli } from "../../src/testapps.ts";
 import { HANDLE_CERTIFICATE_TYPE } from "../../src/host/handles.ts";
 import { decodeProfile } from "@1sat/utils";
 import { outpointFromBytes, outpointToBytes } from "@1sat/templates";
@@ -225,9 +225,14 @@ const lines: string[] = [];
 const out = (l: string) => { lines.push(l); if (verbose) process.stdout.write(`  | ${l}\n`); };
 const cli = async (args: string[], who?: { wallet: WalletInterface; id: string }) => {
   const o: string[] = [], e: string[] = [];
+  // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent by who's wallet to /sendMessage.
+  if (who && (args[0] === "install" || args[0] === "uninstall")) {
+    const r = await ownerCli({ home, port, owner: who.wallet, settled: () => host!.router.settled() }, args);
+    for (const l of [...r.out, ...r.err]) out(l);
+    return r;
+  }
   const code = await main(args, {
     vars: { ...vars, ...(who ? { SKEIN_OWNER: who.id } : {}) }, out: (l) => { o.push(l); out(l); }, err: (l) => { e.push(l); out(l); },
-    ...(who ? { owner: { wallet: who.wallet, box: (row) => new RawBox(who.wallet, `${base}/@${row.handle}`) } } : {}),
   });
   return { code, out: o, err: e };
 };
@@ -247,7 +252,7 @@ try {
   const router = host.router;
   // #113: the handle domain and the host's origin in the app's config; #104: the host's name in the manifest, no
   // avatarURL (nothing fetched from a public ORDFS gateway).
-  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--approve-all", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
+  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
   await router.settled();
   check(r.code === 0, `the onboarding app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
 

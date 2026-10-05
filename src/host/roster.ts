@@ -2,19 +2,22 @@
 //   {handle, domain, identity, displayName, description, emoji?, avatar?, status}
 // with the display fields from the deployed tree's IDENTITY.md (`- Name:`,
 // `- Emoji:`, `- Description:`, `- Avatar:` lines), read from the instance's
-// store by the row's `tree`; `status` is `live` when the instance's process,
+// store by the row's `tree` (else, #124, the store's `main`); `status` is `live` when the instance's process,
 // supervised by this host (`skein-host run`), is up and ready, else `idle`.
 // `skein-host roster` prints it; `skein-host run` serves it at /roster.json
 // (CORS *) for a static page on another origin, and an operator page at /
 // (hostPage): every instance, its process, a link to its origin (a skein
 // from the default image serves its management page there, #92).
 //
-// Each agent's own roster (#27) is a file, ROSTER.md, which deploy puts in its
-// tree and the loop appends to the system prompt: the colleagues the row
+// Each agent's own roster (#27) is a file, ROSTER.md (`skein-host roster --for`
+// prints it; the owner deploys it with the directory: `skein plan deploy
+// --only …,ROSTER.md`), which the loop appends to the system prompt: the colleagues the row
 // `knows` (host.db), each with its address — `- @kurt@localhost — Kurt: …`.
 
 import { createServer, type Server } from "node:http";
 import { CID } from "multiformats/cid";
+import { headTree, MAIN } from "../runtime/heads.ts";
+import type { Store } from "../runtime/store.ts";
 import { lookup, readBlob, readFile, type TreeBlocks } from "../runtime/tree.ts";
 import { knowsOf, type InstanceRow } from "./instances.ts";
 
@@ -50,12 +53,21 @@ export function parseIdentity(text: string): IdentityFields {
 /** The row's entry; `blocks` holds its store, if there is one to read. A tree not (yet) in the store reads as no IDENTITY.md. */
 export async function rosterEntry(row: InstanceRow, blocks: TreeBlocks | undefined, live: boolean): Promise<RosterEntry> {
   let id: IdentityFields = { displayName: "", description: "" };
-  if (row.tree && blocks) {
+  const tree = await treeOf(row, blocks);
+  if (tree && blocks) {
     try {
-      id = parseIdentity(new TextDecoder().decode(await readFile(blocks, CID.parse(row.tree), "IDENTITY.md")));
+      id = parseIdentity(new TextDecoder().decode(await readFile(blocks, tree, "IDENTITY.md")));
     } catch { /* no IDENTITY.md, or the deploy has not been admitted yet: the page shows the row without a name either way */ }
   }
   return { handle: row.handle, domain: row.domain, identity: row.identity ?? "", ...id, status: live ? "live" : "idle" };
+}
+
+/** The row's deployed tree: its `tree`, else (#124: the owner deploys by message) the store's `main`. */
+async function treeOf(row: InstanceRow, blocks: TreeBlocks | undefined): Promise<CID | undefined> {
+  if (row.tree) return CID.parse(row.tree);
+  const s = blocks as Partial<Store> | undefined;
+  if (!s?.log || !(await s.log.tip())) return undefined;
+  try { return await headTree(s as Store, MAIN); } catch { return undefined; }
 }
 
 /**
@@ -63,8 +75,8 @@ export async function rosterEntry(row: InstanceRow, blocks: TreeBlocks | undefin
  * none, undefined if there is no tree or `blocks` does not have it (yet).
  */
 export async function deployedIdentity(row: InstanceRow, blocks: TreeBlocks | undefined): Promise<IdentityFields | undefined> {
-  if (!row.tree || !blocks) return undefined;
-  const tree = CID.parse(row.tree);
+  const tree = await treeOf(row, blocks);
+  if (!tree || !blocks) return undefined;
   if (!(await blocks.has(tree))) return undefined;
   const leaf = await lookup(blocks, tree, "IDENTITY.md");
   return leaf ? parseIdentity(new TextDecoder().decode(await readBlob(blocks, leaf.cid))) : { displayName: "", description: "" };

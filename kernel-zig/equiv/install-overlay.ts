@@ -1,7 +1,7 @@
 // Overlays installed as apps (#72 build 3, #79; docs/APPS.md §6) end to end:
 // shruggr/skein-chain and shruggr/skein-overlay at pinned commits (or
-// $SKEIN_CHAIN_DIR / $SKEIN_OVERLAY_DIR), installed with `skein-host install
-// --approve-all` into an instance of the stock system whose genesis has no
+// $SKEIN_CHAIN_DIR / $SKEIN_OVERLAY_DIR), installed as the owner's messages (#124:
+// `skein plan install`, sent to /sendMessage) into an instance of the stock system whose genesis has no
 // overlay config and no libp2p — on a router with libp2p and an Arcade (so a
 // `$status` provider) — while a second router runs a plain instance
 // subscribed to the overlays' topics:
@@ -49,8 +49,8 @@ import { fileURLToPath } from "node:url";
 import { MerklePath, P2PKH, PrivateKey, Script, Transaction, UnlockingScript } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
-import { RawBox } from "../../src/client/raw.ts";
 import { main } from "../../src/host/cli.ts";
+import { ownerCli } from "../../src/testapps.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
@@ -163,9 +163,11 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    const code = await main(args, {
+    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: home, port: rA.port!, owner: ownerWallet, settled: () => rA.settled() }, args) : undefined;
+    if (o) { out.push(...o.out); err.push(...o.err); }
+    const code = o ? o.code : await main(args, {
       vars: { SKEIN_HOME: home, HOME: home }, out: (l) => out.push(l), err: (l) => err.push(l),
-      owner: { wallet: ownerWallet, box: (row) => new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@${row.handle}`) },
     });
     await rA.settled();
     if (process.env.VERBOSE) for (const l of [...out, ...err]) process.stdout.write(`  | ${l}\n`);
@@ -178,15 +180,15 @@ try {
 
   // ------------------------------------------------ requires chain/1: refused without the chain app
   await rA.hydrate("bare");
-  let code = await cli("install", overlayDir, "--instance", "bare", "--approve-all");
+  let code = await cli("install", overlayDir, "--instance", "bare");
   check(code !== 0 && /requires chain\/1/.test(err.join(" ")), `the overlay into an instance without the chain app: refused (${code}: ${err.join(" ")})`);
 
   // ------------------------------------------------ the chain app, then the overlay: on one instance (#79)
-  code = await cli("install", chainDir, "--instance", "ov", "--approve-all");
-  check(code === 0, `skein-host install skein-chain: exit ${code} ${err.join(" ")}`);
-  code = await cli("install", overlayDir, "--instance", "ov", "--approve-all");
+  code = await cli("install", chainDir, "--instance", "ov");
+  check(code === 0, `skein plan install skein-chain: exit ${code} ${err.join(" ")}`);
+  code = await cli("install", overlayDir, "--instance", "ov");
   const derived = out.filter((l) => l.includes("(derived: config.overlay)"));
-  check(code === 0, `skein-host install skein-overlay beside the chain app (requires chain/1 satisfied): exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein plan install skein-overlay beside the chain app (requires chain/1 satisfied): exit ${code} ${err.join(" ")}`);
   check(["row       libp2p tm_demo from anyone → overlay.submit (filter beef)", "row       libp2p tm_demo-admit from anyone → overlay.peerAdmit", "row       libp2p tm_demo-proof from anyone → overlay.peerProof", "row       http /overlay/submit from anyone → overlay.submit (filter beef)", "row       http /overlay/lookup from anyone → overlay.lookup", "row       mailbox overlay from event → overlay", "row       mailbox overlay from $self → overlay"].every((x) => derived.some((l) => l.includes(x))) && derived.length === 7 && derived.filter((l) => l.includes("(filter beef)")).length === 2 && out.some((l) => l.includes("dispatch add http /overlay/submit from anyone → overlay.submit (filter beef)")), `the prompt shows the wiring derived from config.overlay, the filter of the submit rows (#121) among it (${derived.length} lines: ${derived.map((l) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "")).join(" | ")})`);
   check(!out.some((l) => /grants|mailbox (chain|status|submit) from .* → overlay/.test(l)), "no grants, no chain/status/submit box for the overlay (#79: the chain app's)");
   const app = await record("overlay/app");
@@ -289,7 +291,7 @@ try {
   mf2.name = "overlay2";
   mf2.config.overlay = { topics: { tm_two: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: ["tm_two"] } }, gossip: { tm_two: true } };
   writeFileSync(join(dir2, "etc/app.json"), JSON.stringify(mf2, null, 2));
-  code = await cli("install", dir2, "--instance", "ov", "--approve-all");
+  code = await cli("install", dir2, "--instance", "ov");
   check(code === 0 && out.some((l) => l.includes("row       mailbox overlay2 from event → overlay")) && out.some((l) => l.includes("row       http /overlay2/submit from anyone → overlay.submit")), `two overlay apps on one instance: the same tree installed as overlay2 (its own box, its own routes, no row clash): exit ${code} ${err.join(" ")}`);
   const t3 = token(2);
   await t3.sign();
@@ -319,7 +321,7 @@ try {
   mf.config.overlay.topics.tm_three = "topic-demo";
   mf.config.overlay.lookups.ls_demo!.topics = ["tm_demo", "tm_three"];
   writeFileSync(join(dir, "etc/app.json"), JSON.stringify(mf, null, 2));
-  code = await cli("install", dir, "--instance", "ov", "--approve-all");
+  code = await cli("install", dir, "--instance", "ov");
   check(code === 0 && /^upgrade overlay /.test(out[0] ?? "") && out.some((l) => l.includes("row       libp2p tm_three from anyone → overlay.submit")), `reinstalled with config.overlay.topics.tm_three: exit ${code} ${out[0]} ${err.join(" ")}`);
   const topics2 = [...topics1, "tm_two", "tm_two-admit", "tm_two-proof", "tm_three", "tm_three-admit", "tm_three-proof"];
   const s2 = await until("the node subscribes tm_three", () => { const s = served(); return s && topics2.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
@@ -334,8 +336,8 @@ try {
   check(!!found4 && !found4.includes(`${t1.id("hex")}:0`), `a token published on tm_three: judged under tm_three (the new config), found by a lookup on tm_three (${found4?.join(", ")})`);
 
   // ------------------------------------------------ uninstall: the rows go, the node unsubscribes
-  code = await cli("uninstall", "overlay", "--instance", "ov", "--approve-all");
-  check(code === 0, `skein-host uninstall overlay: exit ${code} ${out[0]} ${err.join(" ")}`);
+  code = await cli("uninstall", "overlay", "--instance", "ov");
+  check(code === 0, `skein plan uninstall overlay: exit ${code} ${out[0]} ${err.join(" ")}`);
   const left = await appRows();
   check(left.length === 0 && (await appRows("overlay2")).length > 0, `no overlay rows left in the dispatch table (${left.length}); overlay2's stand`);
   const s3 = await until("the node unsubscribes overlay's topics", () => { const s = served(); return s && s.topics.length === 3 && s.topics.every((t) => t.startsWith("tm_two")) ? s : undefined; }, 10_000).catch(() => undefined);
@@ -344,7 +346,7 @@ try {
   check(leftB, "the publisher's node sees the instance leave tm_demo and tm_three");
   const r = await fetch(`${rA.originOf("ov")}/overlay/lookup`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ service: "ls_demo", query: { topic: "tm_demo" } }) });
   check(r.status === 404, `after uninstall, /overlay/lookup is no route: ${r.status}`);
-  code = await cli("uninstall", "overlay2", "--instance", "ov", "--approve-all");
+  code = await cli("uninstall", "overlay2", "--instance", "ov");
   const gone = await until("the node stops", () => (served() === undefined && rA.p2p?.node("ov") === undefined) || undefined, 10_000).catch(() => false);
   check(code === 0 && gone, "overlay2 uninstalled too: no libp2p row left and none in the genesis: the instance's node unsubscribed and stopped");
 } catch (e) {

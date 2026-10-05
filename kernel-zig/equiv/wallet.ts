@@ -51,7 +51,7 @@ import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { RawBox } from "../../src/client/raw.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
-import { main } from "../../src/host/cli.ts";
+import { ownerCli } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { decode, encode } from "../../src/runtime/cid.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
@@ -237,11 +237,8 @@ try {
   // The chain app, installed into both instances (#78, #79).
   const spec = process.env.SKEIN_CHAIN_DIR ?? cloneChain();
   for (const inst of ["wallettest", "payee"]) {
-    const err: string[] = [];
-    const code = await main(["install", spec, "--instance", inst, "--approve-all"], {
-      vars: { SKEIN_HOME: h.home, HOME: h.home }, out: () => {}, err: (l) => err.push(l),
-      owner: { wallet: owner, box: (row) => new RawBox(owner, `${h.base}/@${row.handle}`) },
-    });
+    // #124: the owner's messages (`skein plan install`), sent to the instance's /sendMessage.
+    const { code, err } = await ownerCli({ home: h.home, port: h.router.port!, owner, settled: () => h.router.settled() }, ["install", spec, "--instance", inst]);
     if (code !== 0) throw new Error(`install skein-chain into ${inst}: ${err.join(" ")}`);
   }
   await h.router.settled();

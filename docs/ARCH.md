@@ -159,7 +159,7 @@ the providers.
 `{transport: mailbox | libp2p | local, address, role?, handle?}`. The
 genesis seeds it (the host's providers by role, the owner's mailbox); after
 that it changes only through the kernel's `peers` operation, on a message
-signed by the owner (`skein-host peers`) or by a key the owner added as a
+signed by the owner (`skein plan peers`, sent by the owner's wallet) or by a key the owner added as a
 sender on the `peers` row. No program writes it: every program emits as the
 instance, and no row admits the instance's own key to an admin box. The
 resolve program keeps what a BRC-169 lookup finds under its own name

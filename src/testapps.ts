@@ -1,7 +1,9 @@
 // The shell app and the chat app for tests and equivs (#83), the
 // onboarding app (#90) and the git app (#91). A genesis has no shell, no
 // `run`, no `chat`: a test that runs them installs the apps first, through
-// the real install path (`skein-host install`, src/host/install.ts), from a
+// the real install path (the owner's messages `skein plan install` builds,
+// src/client/admin.ts, POSTed to the instance's /sendMessage on the owner's
+// BRC-104 session as any wallet sends them, #124), from a
 // checkout at the commit pinned here — $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR /
 // $SKEIN_ONBOARD_DIR / $SKEIN_GIT_DIR name a checkout instead,
 // $SKEIN_SHELL_REV / $SKEIN_CHAT_REV / $SKEIN_ONBOARD_REV / $SKEIN_GIT_REV
@@ -14,9 +16,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
+import { join as joinPath } from "node:path";
+import { deliver, planFiles, planInstallApp, planUninstallApp, messageJson, type AdminPlan } from "./client/admin.ts";
 import { RawBox } from "./client/raw.ts";
-import { main } from "./host/cli.ts";
-import { readApp, shellProgram } from "./host/install.ts";
+import { WASM_DIR, wasmDirObjects } from "./host/boot.ts";
+import { HostDb } from "./host/instances.ts";
+import { fetchApp, instanceView, readApp, shellProgram, type InstanceView } from "./host/install.ts";
+import { openStoreFile } from "./runtime/index-store.ts";
 import type { Store } from "./runtime/store.ts";
 
 export interface PinnedApp { name: string; repo: string; rev: string; dir?: string }
@@ -67,20 +73,104 @@ export function appCheckout(app: PinnedApp): string {
 /** What installing needs of a host: its SKEIN_HOME (host.db), the router's port, the owner's wallet, a wait for the router to settle. */
 export interface InstallHost { home: string; port: number; owner: WalletInterface; settled(): Promise<void> }
 
+/** The instance `handle` as the plan reads it: its store file (host.db's row), read only, while the router runs it. */
+export async function viewOf(h: Pick<InstallHost, "home">, handle: string): Promise<InstanceView & { close(): void }> {
+  const db = new HostDb(joinPath(h.home, "host.db"));
+  const row = db.get(handle);
+  db.close();
+  if (!row) throw new Error(`no instance ${handle}`);
+  if (!existsSync(row.store)) throw new Error(`${handle}: no store at ${row.store} yet (hydrate it first)`);
+  const s = openStoreFile(row.store, { readOnly: true });
+  try { return { ...(await instanceView(s)), close: () => s.close() }; } catch (e) { s.close(); throw e; }
+}
+
 /**
- * Install apps into an instance as its owner, by `skein-host install
- * <checkout> --instance <handle> --approve-all` (the instance's store must
- * exist: hydrate it first). Throws with the install's output when one fails.
+ * Deliver a plan as any wallet does (#124): each message's `/sendMessage` JSON body (src/client/admin.ts
+ * messageJson, what `skein plan` writes), POSTed in order on the wallet's BRC-104 session with the
+ * instance's front door; throws at the first answer that is not 200.
  */
-export async function installApps(h: InstallHost, handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP], extra: string[] = []): Promise<void> {
-  for (const app of apps) {
-    const out: string[] = [];
-    const code = await main(["install", appCheckout(app), "--instance", handle, "--approve-all", ...extra], {
-      vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => out.push(l), err: (l) => out.push(l),
-      owner: { wallet: h.owner, box: (row) => new RawBox(h.owner, `http://127.0.0.1:${h.port}/@${row.handle}`) },
-    });
-    if (code !== 0) throw new Error(`skein-host install ${app.name} --instance ${handle}: exit ${code}\n${out.join("\n")}`);
+export async function sendPlan(h: Pick<InstallHost, "port" | "owner" | "settled">, handle: string, p: AdminPlan, wallet: WalletInterface = h.owner): Promise<number> {
+  const box = new RawBox(wallet, `http://127.0.0.1:${h.port}/@${handle}`);
+  for (const m of p.messages) {
+    const r = await box.postJson("/sendMessage", messageJson(p.recipient, m));
+    if (r.status !== 200) throw new Error(`sendMessage ${m.box}: ${r.status} ${r.text.slice(0, 300)}`);
+  }
+  await h.settled();
+  return p.messages.length;
+}
+
+/** Deliver a plan directory (`skein plan … --out dir`) as `skein send` does, with `wallet`'s session instead of `1sat authfetch`; throws at the first answer that is not 200. */
+export async function sendDir(h: Pick<InstallHost, "port" | "owner" | "settled">, handle: string, dir: string, wallet: WalletInterface = h.owner): Promise<number> {
+  const box = new RawBox(wallet, `http://127.0.0.1:${h.port}/@${handle}`);
+  const done = await deliver(planFiles(dir), (json) => box.postJson("/sendMessage", json));
+  const last = done.at(-1);
+  if (last && last.status !== 200) throw new Error(`${last.file}: ${last.status} ${last.text.slice(0, 300)}`);
+  await h.settled();
+  return done.length;
+}
+
+/**
+ * Install the app in `dir` into `handle` as its owner: planned from the instance's store (`skein plan
+ * install --store`), `config` merged over the manifest's, then sent (sendPlan). The prompt.
+ */
+export async function installApp(h: InstallHost, handle: string, dir: string, o: { config?: Record<string, unknown>; wallet?: WalletInterface } = {}): Promise<string[]> {
+  await h.settled();
+  const view = await viewOf(h, handle);
+  let p;
+  try { p = await planInstallApp(await readApp(dir), view, { config: o.config, modules: wasmDirObjects(WASM_DIR) }); } finally { view.close(); }
+  await sendPlan(h, handle, p, o.wallet);
+  return p.prompt;
+}
+
+/** Uninstall `app` from `handle` as its owner (`skein plan uninstall`, then sent). The prompt. */
+export async function uninstallApp(h: InstallHost, handle: string, app: string, o: { wallet?: WalletInterface } = {}): Promise<string[]> {
+  await h.settled();
+  const view = await viewOf(h, handle);
+  let p;
+  try { p = await planUninstallApp(app, view); } finally { view.close(); }
+  await sendPlan(h, handle, p, o.wallet);
+  return p.prompt;
+}
+
+/**
+ * What the equivs ran as `skein-host install|uninstall` before #124, now the owner's path: `install <dir>
+ * --instance <h> [--config json] [--dry-run]` or `uninstall <app> --instance <h>` — planned from the
+ * instance's store (`skein plan … --store`) and, unless a dry run, sent by `wallet` (default the owner) to
+ * its /sendMessage (sendPlan). `out`: the prompt, then `<h>: <app> <version> installed|upgraded: <n>
+ * messages sent` (or `<h>: <app> uninstalled: …`); `err` and code 1 when planning or a send fails.
+ */
+export async function ownerCli(h: InstallHost, args: string[], wallet: WalletInterface = h.owner): Promise<{ code: number; out: string[]; err: string[] }> {
+  const out: string[] = [], err: string[] = [];
+  const [cmd, what] = args;
+  const opt = (name: string) => { const i = args.indexOf(name); return i > 0 ? args[i + 1] : undefined; };
+  const handle = opt("--instance");
+  if ((cmd !== "install" && cmd !== "uninstall") || !what || !handle) return { code: 2, out, err: [`ownerCli: ${args.join(" ")}`] };
+  try {
     await h.settled();
+    const view = await viewOf(h, handle);
+    let p: AdminPlan & { app?: string; version?: string; upgrade?: boolean };
+    try {
+      if (cmd === "install") {
+        const c = opt("--config");
+        const r = await planInstallApp(await readApp(fetchApp(what)), view, { config: c ? JSON.parse(c) as Record<string, unknown> : undefined, modules: wasmDirObjects(WASM_DIR) });
+        p = { ...r, upgrade: r.prompt[0]!.startsWith("upgrade") };
+      } else p = { ...(await planUninstallApp(what, view)), app: what };
+    } finally { view.close(); }
+    out.push(...p.prompt);
+    if (args.includes("--dry-run")) return { code: 0, out, err };
+    const n = await sendPlan(h, handle, p, wallet);
+    out.push(cmd === "install" ? `${handle}: ${p.app} ${p.version} ${p.upgrade ? "upgraded" : "installed"}: ${n} messages sent` : `${handle}: ${what} uninstalled: ${n} messages sent`);
+    return { code: 0, out, err };
+  } catch (e) {
+    err.push(`${cmd}: ${(e as Error).message}`);
+    return { code: 1, out, err };
+  }
+}
+
+/** Install apps into an instance as its owner (installApp each; the instance's store must exist: hydrate it first). */
+export async function installApps(h: InstallHost, handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP], o: { config?: Record<string, unknown> } = {}): Promise<void> {
+  for (const app of apps) {
+    try { await installApp(h, handle, appCheckout(app), o); } catch (e) { throw new Error(`install ${app.name} into ${handle}: ${(e as Error).message}`); }
   }
 }
 

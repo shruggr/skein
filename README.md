@@ -39,12 +39,16 @@ global by CID; a call to another app hands back CIDs, not data.
 ## Run a skein locally
 
 Needs Node 26, Zig 0.16.0 through `mise`, and, for anything sent as the
-owner, a BRC-100 wallet reachable over HTTP (default
-`http://127.0.0.1:3322`; the dev setup runs `1sat serve wallet-api`,
-`scripts/host/wallets.sh`).
+owner, a BRC-100 wallet with a BRC-104 client: the owner's admin messages
+(installing an app, a dispatch row, the address book, a directory into
+`main`) are built by `bin/skein plan` and sent by any such wallet to the
+instance's `/sendMessage` — from a shell, the 1sat CLI's `1sat authfetch`
+(`bin/skein send` runs it; #124). The `bin/skein` client's other commands
+use a wallet reachable over HTTP (default `http://127.0.0.1:3322`; the dev
+setup runs `1sat serve wallet-api`, `scripts/host/wallets.sh`).
 
-The wallet is deny-by-default. The client (`skein-host install` among the
-commands; origin `skein-client`, `SKEIN_ORIGINATOR`) needs these grants
+That HTTP wallet is deny-by-default. The client (origin `skein-client`,
+`SKEIN_ORIGINATOR`) needs these grants
 from the owner's wallet (`scripts/host/grants.sh` grants them for the dev
 stack):
 
@@ -96,7 +100,7 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   handle certificate under a serial of its own, records every issue, and
   answers resolve, search and the manifest from those records. The handle
   domain, the host's name, note and icon are the app's config
-  (`skein-host install … --config '{"onboard": {"domain": "…"}}'`).
+  (`skein plan install … --config '{"onboard": {"domain": "…"}}'`).
   Revocation is not implemented (the host has no wallet): the certificate's
   revocation outpoint is BRC-52's disabled sentinel.
 - Code genesis (no `--image`) is written at its first start: the owner, the
@@ -123,7 +127,9 @@ conversation (docs/ARCH.md, "The host skein").
 ```
 bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, claimed for you
 bin/skein-host run                                                                       # the host on :8100; the host skein at http://host.localhost:8100
-bin/skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instance host   # the onboarding app, as you (the owner)
+bin/skein plan install https://github.com/shruggr/skein-onboard#v0.2.0 --origin http://host.localhost:8100 \
+  --config '{"onboard": {"domain": "<the handle domain>"}}' --out plan                   # the onboarding app: the messages, read by your wallet
+bin/skein send http://host.localhost:8100 plan                                            # sent by your wallet (1sat authfetch), as you (the owner)
 ```
 
 - `init` creates the host skein once (handle `host`, or `--handle`), from
@@ -179,8 +185,8 @@ inside the VM; the host holds the connection until the request's thread
 comes to rest, and the answer is signed on the session.
 
 ```
-bin/skein-host install https://github.com/shruggr/skein-shell --instance martha   # the shell app: box run
-bin/skein-host install https://github.com/shruggr/skein-chat --instance martha    # the chat app: box chat
+bin/skein plan install https://github.com/shruggr/skein-shell#v0.1.0 --origin http://martha.localhost:8100 --out shell && bin/skein send http://martha.localhost:8100 shell   # the shell app: box run
+bin/skein plan install https://github.com/shruggr/skein-chat#v0.1.0 --origin http://martha.localhost:8100 --out chat && bin/skein send http://martha.localhost:8100 chat      # the chat app: box chat
 bin/skein whoami
 bin/skein import ~/some/dir                      # tree objects into the kernel's objects operation; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'     # box run (the shell app: the shell over a tree)
@@ -212,17 +218,21 @@ The wire contract is docs/MESSAGES.md.
 ## Install an app
 
 ```
-bin/skein-host install https://github.com/shruggr/skein-chain --instance martha            # prints the rows it asks for, asks y/n
-bin/skein-host install https://github.com/shruggr/skein-static#<rev> --instance martha --approve-all
-bin/skein-host uninstall static --instance martha
+bin/skein plan install https://github.com/shruggr/skein-chain#<commit> --origin http://martha.localhost:8100 --out plan   # plan/prompt.txt: the rows it asks for
+bin/skein send http://martha.localhost:8100 plan                                                                       # your wallet sends plan/001-….json, … in order
+bin/skein plan uninstall static --origin http://martha.localhost:8100 --out plan && bin/skein send http://martha.localhost:8100 plan
 ```
 
-Install reads the manifest aloud (its dispatch rows), then sends, as the
-owner: `objects` (the tree and program records), `head` (`<app>/app` → the
-app record), one `dispatch` per row, and the app's `start` message.
-Installing again is the upgrade. docs/APPS.md §3.
+The plan reads the manifest aloud (its dispatch rows) into `prompt.txt`,
+and writes the owner's messages as `/sendMessage` JSON bodies:
+`objects` (the tree and program records), `head` (`<app>/app` → the app
+record), one `dispatch` per row, and the app's `start` message. Installing
+again is the upgrade. Any BRC-100 wallet sends them; the 1sat CLI by hand:
+`for f in plan/[0-9]*.json; do 1sat authfetch POST <origin>/sendMessage
+--body @"$f" || break; done`. docs/APPS.md §3, scripts/host/README.md
+("The owner's messages").
 
-That command clones the repository on your machine (a coding-session tool).
+`skein plan install` clones the repository on your machine (a coding-session tool).
 **Deploy by hash** is the other path, the one a page uses: with the git app
 ([shruggr/skein-git](https://github.com/shruggr/skein-git)) installed, the
 owner sends `{fn: "git.clone", args: {url, hash}}` to box `git`; the app

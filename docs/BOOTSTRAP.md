@@ -197,7 +197,7 @@ etc/reads.json           the form before #115, still read: who may call a route 
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
   fills it. It is the only peer a genesis names: the address book
   (head `peers`, one of the kernel's tables) is written by the kernel's
-  `peers` operation on the owner's messages (`skein-host peers`) only — no
+  `peers` operation on the owner's messages (`skein plan peers`, sent by the owner's wallet) only — no
   program writes it. The resolve program keeps what it finds under its own
   name (`resolve/peers`), which the messagebox's delivery reads for a key
   the address book does not name.
@@ -250,8 +250,9 @@ the resolve program's claim handler records `{handle, domain}` under
 `resolve/peers` — never the address book, #87 — only if the
 handle resolves to the sender), or `{"sender": "<key>", "address":
 "register", "program": "<its own program>"}`. Without one, the admin
-configures the address book (`skein-host peers <handle> add <key>
-<mailbox-url> [--handle h@d]`: the kernel's `peers` operation), and a sender
+configures the address book (`skein plan peers add <key> <mailbox-url>
+[--handle h@d]`, sent by the owner's wallet: the kernel's `peers`
+operation), and a sender
 in it is answered; any other sender on an open box is still admitted, and
 an answer to it fails with "no route".
 
@@ -262,12 +263,12 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 
 | repo | what | in a tree |
 |---|---|---|
-| shruggr/skein-shell | the shell app (#83): `run` (a command over a tree, row `run` from the owner) and the shell itself — brush, coreutils, the toolset, python's stdlib, each a file of its tree, declared as a shell program in its manifest (docs/APPS.md §6b) | `skein-host install https://github.com/shruggr/skein-shell --instance <h>`. A genesis has no shell: an instance runs commands only once this is installed |
-| shruggr/skein-chat | the chat app (#83): the turn loop, rows `chat` from the owner and from anyone; its `bash` calls run the shell app's shell when the instance has the shell app | `skein-host install https://github.com/shruggr/skein-chat --instance <h>` |
-| shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein-host install https://github.com/shruggr/skein-static --instance <h>`: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
-| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein-host install https://github.com/shruggr/skein-chain --instance <h>`: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
-| shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein-host install https://github.com/shruggr/skein-overlay --instance <h>` (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
-| shruggr/skein-git | the git app (#91): `git.clone {url, hash}` from the owner, box `git` — one commit fetched through the fetch provider, checked against the hash, kept in the store, its app record built and answered (deploy by hash, below) | `skein-host install https://github.com/shruggr/skein-git --instance <h>` |
+| shruggr/skein-shell | the shell app (#83): `run` (a command over a tree, row `run` from the owner) and the shell itself — brush, coreutils, the toolset, python's stdlib, each a file of its tree, declared as a shell program in its manifest (docs/APPS.md §6b) | `skein plan install https://github.com/shruggr/skein-shell#<commit> --origin <url>`, sent (below). A genesis has no shell: an instance runs commands only once this is installed |
+| shruggr/skein-chat | the chat app (#83): the turn loop, rows `chat` from the owner and from anyone; its `bash` calls run the shell app's shell when the instance has the shell app | `skein plan install https://github.com/shruggr/skein-chat#<commit> --origin <url>`, sent |
+| shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein plan install https://github.com/shruggr/skein-static#<commit> --origin <url>`, sent: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
+| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein plan install https://github.com/shruggr/skein-chain#<commit> --origin <url>`, sent: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
+| shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein plan install https://github.com/shruggr/skein-overlay#<commit> --origin <url>`, sent (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
+| shruggr/skein-git | the git app (#91): `git.clone {url, hash}` from the owner, box `git` — one commit fetched through the fetch provider, checked against the hash, kept in the store, its app record built and answered (deploy by hash, below) | `skein plan install https://github.com/shruggr/skein-git#<commit> --origin <url>`, sent |
 
 The SDK they build against is shruggr/skein-sdk, a sibling repo: a Zig
 package dependency by URL+hash (#75), not a path in this tree. Developing
@@ -279,14 +280,16 @@ There are three ways to install an app.
   entries the tree needs into its `bin/`, its rows into `etc/dispatch.json`
   and, since a genesis-wired program has no app record, the heads it writes
   (its name's prefix, `<name>/`) as `scopes` in `etc/config.json`. Then `skein-host add <h> --boot <dir>` (above).
-- **Into a running instance** (#72, #76, built): `skein-host install`.
+- **Into a running instance** (#72, #76, #124, built): the owner's
+  messages, built by `skein plan` and sent by the owner's wallet.
 
   ```
-  skein-host install <repo-url[#rev] | dir> --instance <h> [--approve-all | --dry-run]
-  skein-host uninstall <app> --instance <h> [--approve-all]
+  skein plan install <repo-url#commit | dir> (--origin <url> | --store <runtime.db>) [--config json] --out <dir>
+  skein plan uninstall <app> (--origin <url> | --store <runtime.db>) --out <dir>
+  skein send <origin> <dir>                     # or: for f in <dir>/[0-9]*.json; do 1sat authfetch POST <origin>/sendMessage --body @"$f" || break; done
   ```
 
-  `install` clones the repo (or reads the directory), checks `etc/app.json`
+  `plan install` clones the repo (or reads the directory), checks `etc/app.json`
   (docs/APPS.md §2; src/host/manifest.ts), checks the instance (every
   `requires` interface provided by an installed app's `*/app` head; the
   name free; no row with a key the genesis or another app has; every
@@ -296,10 +299,13 @@ There are three ways to install an app.
   libp2p topic or protocol as it is), `start`/`stop`, `requires`/`provides`,
   what an overlay publishes, and the messages it will send. An overlay
   app's wiring (docs/APPS.md §6) is derived from its `config.overlay` and
-  marked "(derived: config.overlay)". Approved (`--approve-all`, or "y" at
-  a terminal; `--dry-run` only prints), it sends them as the owner
-  (SKEIN_OWNER_WALLET, as `deploy` does), in order — each a kernel
-  operation on an admin box (docs/APPS.md §3, src/host/install.ts):
+  marked "(derived: config.overlay)". The view of the instance is its
+  explorer (`--origin`, the owner's read, through the wallet) or its store
+  file (`--store`, on the host). It writes the prompt (`prompt.txt`) and the
+  messages as `/sendMessage` JSON bodies (`001-objects.json`, …); the
+  owner's wallet sends them, in order, on a BRC-104 session to the
+  instance's origin — each a kernel operation on an admin box
+  (docs/APPS.md §3, src/client/admin.ts):
 
   1. `objects`: the tree's git objects, its `bin/*.wasm` modules, a program
      record per program (with `app: <name>`), and the **app record**, ≤ 1 MiB per message, no root named
@@ -318,12 +324,12 @@ There are three ways to install an app.
   removed, and `start` is sent again. `uninstall` sends `stop`, then removes
   the app's rows (its libp2p topics unsubscribed); the heads are left.
 
-  By hand, the same messages: `bin/skein import <checkout>` (objects),
-  `skein head`, `skein dispatch add [--sender <key>] <box> <handler>` /
-  `skein-host dispatch <h> add …` (a mailbox row; http and libp2p rows
-  through `install`).
+  One at a time, the same messages: `skein plan deploy <dir>` (objects and
+  `head main`), `skein plan dispatch add [--sender <key>] <box> <handler>`
+  (a mailbox row; http and libp2p rows through `install`), `skein plan
+  peers …`.
 
-  `install` clones the repository host-side, on the machine it runs on: a
+  `plan install` clones the repository on the machine it runs on: a
   coding-session tool, not the user's path.
 - **By hash, from a page** (#91, built): the clone happens in the VM. With
   the git app installed, two owner-signed steps:
@@ -457,7 +463,8 @@ boot is written, and the process exits 0.
 - `src/host/manifest.test.ts`: the manifest's checks (the rows, the http
   address escapes, the senders, the form before #77 refused, shapes,
   `requires`); `kernel-zig/equiv/install.ts`
-  (in `run.sh`): `skein-host install` of shruggr/skein-static and
+  (in `run.sh`): the owner's messages (`skein plan install`, sent to
+  `/sendMessage`) for shruggr/skein-static and
   programs/test/app-demo into a running instance, driven, uninstalled,
   replayed.
 - `src/host/packet.test.ts`: both forms, with and without an index; the

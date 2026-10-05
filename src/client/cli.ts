@@ -12,6 +12,8 @@
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
 //   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
 //   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
+//   skein plan … | skein send <origin> <dir>   the owner's admin messages as files, and their delivery
+//                                              by a BRC-100 wallet (#124: src/client/admin-cli.ts)
 
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
@@ -38,7 +40,9 @@ export const USAGE = `usage:
   skein dispatch add|remove [--sender <identity-key>] <box> <handler-cid>
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
-  skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]`;
+  skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]
+  skein plan install|uninstall|dispatch|peers|deploy …   the owner's admin messages as files (skein plan help)
+  skein send <origin> <dir>                             those files to <origin>/sendMessage by the wallet (\`1sat authfetch\`)`;
 
 export const DEFAULT_TIMEOUT = 120;
 
@@ -165,6 +169,12 @@ function show(r: Result, json: boolean): void {
 // ---------------------------------------------------------------- main
 
 export async function main(argv: string[]): Promise<number> {
+  // #124: building admin messages needs no wallet; sending them is the wallet's (its own command).
+  if (argv[0] === "plan" || argv[0] === "send") {
+    const { planMain, sendMain } = await import("./admin-cli.ts");
+    const env = { vars: process.env, out: (l: string) => process.stdout.write(`${l}\n`), err: (l: string) => process.stderr.write(`${l}\n`) };
+    return argv[0] === "plan" ? planMain(argv.slice(1), env) : sendMain(argv.slice(1), env);
+  }
   const c = parseCli(argv);
   if (c.cmd === "help") { console.log(USAGE); return 0; }
   const cfg = loadConfig();
