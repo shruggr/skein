@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { PrivateKey, ProtoWallet } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
-import { appTopics, foldTopicEvents, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, topicEvent, topicOwners, MESSAGE_PROTOCOL, P2PHost, peerIdOf, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { foldSubscriptions, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -111,37 +111,35 @@ test("p2p: two nodes — a topic message through the validator, a stream round t
   await a.close("alpha", m);
 });
 
-test("p2p: topics asked by event (#119) — a prefix row names no topic; the asked set folded in order; a topic is the app's when its most specific rows include one of the app's", () => {
+test("p2p: subscriptions (#119) — the topics the apps subscribed; keyed by (app, topic), folded in order; a libp2p row is exact", () => {
   const rows = [
-    { transport: "libp2p", address: "tm_", prefix: true, program: "P-overlay" },
-    { transport: "libp2p", address: "tm_x", prefix: true, program: "P-other" },
     { transport: "libp2p", address: "tm_mine", program: "P-other" },
     { transport: "libp2p", address: "/proto/1", program: "P-overlay" },
     { transport: "http", address: "/tm_", prefix: true, program: "P-other" },
   ];
-  const appOf = (r: Record<string, unknown>) => ({ "P-overlay": "overlay", "P-other": "other" } as Record<string, string>)[String(r.program)];
-  assert.deepEqual(libp2pConfig({}, rows), { topics: ["tm_mine"], protocols: ["/proto/1"] }, "a prefix row is not subscribed by itself");
-  assert.equal(libp2pConfig({}, [rows[0]!]), undefined, "a prefix row alone starts no node");
-  assert.deepEqual(libp2pConfig({}, [rows[0]!], ["tm_ab"]), { topics: ["tm_ab"], protocols: [] }, "an asked topic does");
-  assert.deepEqual([...topicOwners(rows, "tm_ab", appOf)], ["overlay"], "the prefix row takes tm_ab");
-  assert.deepEqual([...topicOwners(rows, "tm_xy", appOf)], ["other"], "the longer prefix is the more specific");
-  assert.deepEqual([...topicOwners(rows, "tm_mine", appOf)], ["other"], "an exact row before any prefix");
-  assert.deepEqual([...topicOwners(rows, "/proto/1", appOf)], [], "a /protocol is no topic");
-  assert.deepEqual([...topicOwners(rows, "zz", appOf)], [], "no row takes it");
-  const asked = foldTopicEvents([
-    { app: "overlay", event: "subscribe", topic: "tm_ab" },
-    { app: "overlay", event: "subscribe", topic: "tm_cd" },
-    { app: "overlay", event: "subscribe", topic: "tm_mine" },
-    { app: "other", event: "subscribe", topic: "tm_ab" },
-    { app: "overlay", event: "unsubscribe", topic: "tm_cd" },
-    { app: "other", event: "unsubscribe", topic: "tm_ab" },
+  assert.deepEqual(libp2pConfig({}, rows), { topics: ["tm_mine"], protocols: ["/proto/1"] }, "the rows' topic and protocol");
+  assert.equal(libp2pConfig({}, []), undefined, "nothing: no node");
+  assert.deepEqual(libp2pConfig({}, [], ["tm_ab"]), { topics: ["tm_ab"], protocols: [] }, "a subscribed topic starts one");
+  assert.deepEqual(libp2pConfig({}, rows, ["tm_ab", "tm_mine"]), { topics: ["tm_mine", "tm_ab"], protocols: ["/proto/1"] }, "a topic both a row and a subscription take: once");
+  const sub = (app: string, topic: string, fn = "submit") => ({ event: "subscribe" as const, sub: { app, topic, program: "engine", fn } });
+  const unsub = (app: string, topic: string) => ({ event: "unsubscribe" as const, app, topic });
+  const subs = foldSubscriptions([
+    sub("overlay", "tm_ab"),
+    sub("overlay", "tm_cd"),
+    sub("other", "tm_ab", "theirs"),
+    sub("overlay", "tm_ab", "peerAdmit"),
+    unsub("overlay", "tm_cd"),
+    unsub("other", "tm_zz"),
   ]);
-  assert.deepEqual([...asked].map(([a, t]) => [a, [...t]]), [["overlay", ["tm_ab", "tm_mine"]]], "in order: a subscribe adds, an unsubscribe removes, per app");
-  assert.deepEqual(appTopics(asked, rows, appOf), ["tm_ab"], "tm_mine is other's (its exact row): not overlay's to subscribe");
-  assert.deepEqual(topicEvent({ kind: "event", event: "subscribe", app: "overlay", topic: "tm_ab" }), { app: "overlay", event: "subscribe", topic: "tm_ab" });
-  assert.ok("refused" in topicEvent({ kind: "event", event: "subscribe", topic: "tm_ab" }), "no app (an uninstalled record's event): ignored");
-  assert.ok("refused" in topicEvent({ kind: "event", event: "subscribe", app: "overlay", topic: "/proto/1" }), "a /protocol: not by event");
-  assert.ok("refused" in topicEvent({ kind: "event", event: "made-up", app: "overlay" }), "another event: not the node's");
+  assert.deepEqual(subs.map((s) => `${s.app} ${s.topic} ${s.fn}`), ["overlay tm_ab peerAdmit", "other tm_ab theirs"], "in order: an app's subscribe replaces its own in place; another app's is its own; an unsubscribe removes only the app's");
+  assert.deepEqual(subscribedTopics(subs), ["tm_ab"], "each topic once");
+  assert.deepEqual(subscribedTopics(foldSubscriptions([unsub("overlay", "tm_ab")], subs)), ["tm_ab"], "other's still takes it");
+  assert.deepEqual(subscriptionEvent({ kind: "event", event: "subscribe", app: "overlay", topic: "tm_ab", program: "engine", fn: "submit" }), sub("overlay", "tm_ab"));
+  assert.deepEqual(subscriptionEvent({ kind: "event", event: "unsubscribe", app: "overlay", topic: "tm_ab" }), unsub("overlay", "tm_ab"));
+  assert.ok("refused" in subscriptionEvent({ kind: "event", event: "subscribe", topic: "tm_ab", program: "engine", fn: "submit" }), "no app (an uninstalled record's event): ignored");
+  assert.ok("refused" in subscriptionEvent({ kind: "event", event: "subscribe", app: "overlay", topic: "tm_ab" }), "no program or fn (the shape before the subscription named them): ignored");
+  assert.ok("refused" in subscriptionEvent({ kind: "event", event: "subscribe", app: "overlay", topic: "/proto/1", program: "engine", fn: "submit" }), "a /protocol: not by event");
+  assert.ok("refused" in subscriptionEvent({ kind: "event", event: "made-up", app: "overlay" }), "another event: not the node's");
 });
 
 test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #77), and a node declared again follows it — subscribed, unsubscribed, handled, unhandled, stopped — with no restart", async (t) => {

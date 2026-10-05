@@ -133,7 +133,7 @@ export interface ProvidersOptions {
   fetch(req: HttpRequest, from: string): Promise<HttpResponse>;
   /** The broadcaster (#58, #65: the host's Arcade), when the host has one: a broadcast event's transaction and BEEF, queued. */
   broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
-  /** The libp2p node's topic events (#119): a `subscribe` / `unsubscribe` record {kind: "event", event, app?, topic} from `handle`. Absent: no libp2p node (dropped). */
+  /** The libp2p node's subscriptions (#119): a `subscribe` / `unsubscribe` record {kind: "event", event, app, topic, program?, fn?} from `handle`. Absent: no libp2p node (dropped). */
   topicEvent?(handle: string, record: Record<string, unknown>): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
@@ -236,7 +236,7 @@ export class Providers {
   /**
    * An event out (#65, #119): addressed to no one, acted on by its name —
    * `broadcast` → the broadcaster (Arcade); `subscribe` / `unsubscribe` → the
-   * libp2p node (scoped to the record's app: p2p.ts); any other name: a log
+   * libp2p node (the topics it subscribes: p2p.ts; delivery is the kernel's, by the subscription); any other name: a log
    * line, nothing else (the step is not told). A broadcast is acted on every
    * time it is handed over (a kernel's start hands over again what a waiting
    * thread awaits: the queue takes a transaction once); any other event is

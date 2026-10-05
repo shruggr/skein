@@ -15,12 +15,10 @@
 //              certificate), Kademlia DHT off | client | server, mDNS on/off,
 //              bootstrap peers kept connected, circuit relays.
 //   topics     the instance's `libp2p.topics`, its dispatch table's libp2p
-//              rows' topics (libp2pConfig; a `prefix` row's address is not a
-//              topic, #119) and the topics its apps asked for by event
-//              (#119: `subscribe` / `unsubscribe` {topic}, emitted by an app's
-//              installed program; each app's asked set folded from the log,
-//              askedTopics, and kept only while one of that app's rows takes
-//              the topic, appTopics): subscribed; each message is judged
+//              rows' topics (libp2pConfig) and the topics its apps subscribed
+//              (#119: `subscribe {topic, program, fn}` / `unsubscribe {topic}`,
+//              emitted by an app's installed program; the subscriptions folded
+//              from the log, subscriptionsOf, then followed live): subscribed; each message is judged
 //              by the async topic validator, which makes one front-door call
 //              (`inbound`) and returns its verdict to GossipSub (accept: admit +
 //              forward; reject: drop + penalise the delivering peer; ignore: drop).
@@ -205,93 +203,77 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * plus the topics and protocols named by the dispatch table's `libp2p`
  * rows added since the genesis (an app's install; address: a topic, or
  * `/<protocol>`) — a genesis row alone subscribes nothing, as a route alone
- * did not. Undefined: no node — the genesis declares none and no row needs
- * one.
+ * did not — plus the topics the apps subscribed (#119, `subscribed`).
+ * Undefined: no node — the genesis declares none and nothing needs one.
  */
-export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, asked: string[] = []): P2PInstanceConfig | undefined {
+export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = []): P2PInstanceConfig | undefined {
   const base = libp2pOf(g);
   const seeded = new Set(((g?.dispatch as Array<Record<string, unknown>> | undefined) ?? []).filter((r) => r.transport === "libp2p").map((r) => String(r.address)));
-  // A prefix row (#119) names no topic: what it takes is subscribed when an app asks (`asked`).
-  const names = rows.filter((r) => r.transport === "libp2p" && r.prefix !== true && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
-  if (!base && !names.length && !asked.length) return undefined;
+  const names = rows.filter((r) => r.transport === "libp2p" && !seeded.has(String(r.address))).map((r) => r.address).filter((p): p is string => typeof p === "string" && p.length > 0);
+  if (!base && !names.length && !subscribed.length) return undefined;
   const add = (xs: string[], ys: string[]) => [...new Set([...xs, ...ys])];
   return {
-    topics: add(add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))), asked),
+    topics: add(add(base?.topics ?? [], names.filter((n) => !n.startsWith("/"))), subscribed),
     protocols: add(base?.protocols ?? [], names.filter((n) => n.startsWith("/"))),
     ...(base?.listen ? { listen: base.listen } : {}),
   };
 }
 
-// ---------------------------------------------------------------- topics an app asks for (#119)
+// ---------------------------------------------------------------- subscriptions (#119)
 //
-// An app's installed program emits `subscribe` / `unsubscribe` {topic} (the
-// kernel's open events: the record {kind: "event", event, app, topic} on the
-// step's update, handed to the host after the commit). The node follows them
-// per app, and keeps a topic only while it is the app's own:
+// An app's installed program emits `subscribe {topic, program, fn}` /
+// `unsubscribe {topic}` (the kernel's open events: the record {kind: "event",
+// event, app, topic, program?, fn?, filter?} on the step's update, `app` the
+// kernel's, handed to the host after the commit). A subscription is the
+// delivery record: the kernel delivers a message on the topic to that app's
+// program and fn (kernel-zig/src/subscriptions.zig) — the host only
+// subscribes the topic and hands each message to the kernel. The kernel
+// checks a subscription as it is emitted (an installed app's program, a fn, a
+// topic not a /protocol, an unsubscribe of the app's own), so what the log
+// lists is followed as it is.
 //
-//   a topic is app X's when the most specific libp2p rows that take it — the
-//   rows whose address is the topic, else the `prefix` rows with the longest
-//   address the topic starts with (dispatch.zig forLibp2p, the sender aside)
-//   — include one whose program record's `app` is X. A `/<protocol>` is no
-//   topic. So an app's `tm_` prefix row lets it subscribe any `tm_<txid>`,
-//   and another app's exact row for one `tm_<txid>` takes that one from it.
-//
-// Nothing is kept for this but the log: after a restart the asked sets are
-// folded from the events every step recorded (askedTopics), in log order; a
-// subscribe adds, an unsubscribe removes. An event with no `app` (its program
-// record is not installed, #114) is ignored.
+// The same fold as the kernel's: keyed by (app, topic) — an app's subscribe
+// replaces its own, an unsubscribe removes only its own — in log order. After
+// a restart the subscriptions are folded from the events every step recorded
+// (subscriptionsOf); the kernel keeps nothing written for them.
 
-/** A `subscribe` / `unsubscribe` event record, read: {app, event, topic}; or why it is not one this host follows. */
-export function topicEvent(rec: Record<string, unknown>): { app: string; event: "subscribe" | "unsubscribe"; topic: string } | { refused: string } {
+export interface Subscription { app: string; topic: string; program: string; fn: string; filter?: string }
+export type SubscriptionEvent = { event: "subscribe"; sub: Subscription } | { event: "unsubscribe"; app: string; topic: string };
+
+const isTopic = (t: unknown): t is string => typeof t === "string" && t.length > 0 && !/[\s\0]/.test(t) && !t.startsWith("/");
+
+/** A `subscribe` / `unsubscribe` event record, read (subscriptions.zig eventOf); or why it is not one this host follows. */
+export function subscriptionEvent(rec: Record<string, unknown>): SubscriptionEvent | { refused: string } {
   const event = rec.event;
   if (rec.kind !== "event" || (event !== "subscribe" && event !== "unsubscribe")) return { refused: "not a subscribe or unsubscribe event" };
   if (typeof rec.app !== "string" || !rec.app) return { refused: "it names no app (its program record is not installed): ignored" };
-  const topic = rec.topic;
-  if (typeof topic !== "string" || !topic || /[\s\0]/.test(topic) || topic.startsWith("/")) return { refused: `${JSON.stringify(topic)} is not a topic (text, no space; a /protocol is not subscribed by event)` };
-  return { app: rec.app, event, topic };
+  if (!isTopic(rec.topic)) return { refused: `${JSON.stringify(rec.topic)} is not a topic (text, no space; a /protocol is not subscribed)` };
+  if (event === "unsubscribe") return { event, app: rec.app, topic: rec.topic };
+  if (typeof rec.program !== "string" || !rec.program || typeof rec.fn !== "string" || !rec.fn) return { refused: "a subscribe names its program and fn" };
+  return { event, sub: { app: rec.app, topic: rec.topic, program: rec.program, fn: rec.fn, ...(typeof rec.filter === "string" ? { filter: rec.filter } : {}) } };
 }
 
-/** Fold topic events in order into each app's asked set. */
-export function foldTopicEvents(events: Iterable<{ app: string; event: "subscribe" | "unsubscribe"; topic: string }>, into = new Map<string, Set<string>>()): Map<string, Set<string>> {
+/** Fold subscription events in order (subscriptions.zig apply). */
+export function foldSubscriptions(events: Iterable<SubscriptionEvent>, into: Subscription[] = []): Subscription[] {
   for (const e of events) {
-    let set = into.get(e.app);
-    if (!set) into.set(e.app, (set = new Set()));
-    if (e.event === "subscribe") set.add(e.topic); else set.delete(e.topic);
-    if (!set.size) into.delete(e.app);
+    const [app, topic] = e.event === "subscribe" ? [e.sub.app, e.sub.topic] : [e.app, e.topic];
+    const i = into.findIndex((s) => s.app === app && s.topic === topic);
+    if (e.event === "subscribe") { if (i >= 0) into[i] = e.sub; else into.push(e.sub); } else if (i >= 0) into.splice(i, 1);
   }
   return into;
 }
 
-/** The apps whose rows own `topic` (the rule above): `appOf` a row's program record's app. */
-export function topicOwners(rows: Array<Record<string, unknown>>, topic: string, appOf: (row: Record<string, unknown>) => string | undefined): Set<string> {
-  const owners = new Set<string>();
-  if (topic.startsWith("/")) return owners;
-  const p2p = rows.filter((r) => r.transport === "libp2p" && typeof r.address === "string");
-  let at = p2p.filter((r) => r.prefix !== true && r.address === topic);
-  if (!at.length) {
-    const takes = p2p.filter((r) => r.prefix === true && topic.startsWith(r.address as string));
-    const len = Math.max(-1, ...takes.map((r) => (r.address as string).length));
-    at = takes.filter((r) => (r.address as string).length === len);
-  }
-  for (const r of at) { const a = appOf(r); if (a) owners.add(a); }
-  return owners;
-}
-
-/** The asked topics the rows let each app have (union): what the node subscribes for the apps. */
-export function appTopics(asked: Map<string, Set<string>>, rows: Array<Record<string, unknown>>, appOf: (row: Record<string, unknown>) => string | undefined): string[] {
-  const out = new Set<string>();
-  for (const [app, topics] of asked) for (const t of topics) if (topicOwners(rows, t, appOf).has(app)) out.add(t);
-  return [...out];
-}
+/** The topics the subscriptions take (each once): what the node subscribes for the apps. */
+export const subscribedTopics = (subs: Subscription[]): string[] => [...new Set(subs.map((s) => s.topic))];
 
 /**
- * Every app's asked topics, folded from the store's log (#119, the host's
- * recovery at hydrate): the `subscribe` / `unsubscribe` records each step's
- * update lists in `emitted`, in log order — by the entry the step processed
- * (`input`'s `n`), then the step's time, its thread's start and its place in
- * the thread. Read only; the kernel keeps nothing for it.
+ * The subscriptions, folded from the store's log (#119, the host's recovery
+ * at hydrate; subscriptions.zig fold): the `subscribe` / `unsubscribe`
+ * records each step's update lists in `emitted`, in log order — by the entry
+ * the step processed (`input`'s `n`), the step's time, its thread's start,
+ * the thread's CID, its place in the thread and in `emitted`. Read only.
  */
-export async function askedTopics(store: Pick<Store, "get" | "chains" | "edges">): Promise<Map<string, Set<string>>> {
+export async function subscriptionsOf(store: Pick<Store, "get" | "chains" | "edges">): Promise<Subscription[]> {
   type Obj = Record<string, unknown>;
   const ns = new Map<string, number>();
   const nOf = async (input: unknown): Promise<number> => {
@@ -301,7 +283,7 @@ export async function askedTopics(store: Pick<Store, "get" | "chains" | "edges">
     if (n === undefined) { const e = await store.get(input).catch(() => undefined) as Obj | undefined; n = typeof e?.n === "number" ? e.n : -1; ns.set(k, n); }
     return n;
   };
-  const found: Array<{ key: number[]; e: { app: string; event: "subscribe" | "unsubscribe"; topic: string } }> = [];
+  const found: Array<{ key: number[]; thread: Uint8Array; e: SubscriptionEvent }> = [];
   for await (const origin of store.edges.query({ kind: "thread" })) {
     const o = await store.get(origin) as Obj;
     let seq = 0;
@@ -314,14 +296,21 @@ export async function askedTopics(store: Pick<Store, "get" | "chains" | "edges">
         if (!isCid(x)) continue;
         const rec = await store.get(x).catch(() => undefined) as Obj | undefined;
         if (rec?.kind !== "event") continue;
-        const e = topicEvent(rec);
+        const e = subscriptionEvent(rec);
         if ("refused" in e) continue;
-        found.push({ key: [await nOf(u.input), Number(u.at ?? 0), Number(o.at ?? 0), seq, i], e });
+        found.push({ key: [await nOf(u.input), Number(u.at ?? 0), Number(o.at ?? 0), seq, i], thread: origin.bytes, e });
       }
     }
   }
-  found.sort((x, y) => { for (let i = 0; i < x.key.length; i++) if (x.key[i] !== y.key[i]) return x.key[i]! - y.key[i]!; return 0; });
-  return foldTopicEvents(found.map((f) => f.e));
+  const cmp = (x: (typeof found)[number], y: (typeof found)[number]) => {
+    for (let i = 0; i < 3; i++) if (x.key[i] !== y.key[i]) return x.key[i]! - y.key[i]!;
+    const t = Buffer.compare(x.thread, y.thread);
+    if (t) return t;
+    for (let i = 3; i < x.key.length; i++) if (x.key[i] !== y.key[i]) return x.key[i]! - y.key[i]!;
+    return 0;
+  };
+  found.sort(cmp);
+  return foldSubscriptions(found.map((f) => f.e));
 }
 
 const isCid = (x: unknown): x is CID => CID.asCID(x) !== null;

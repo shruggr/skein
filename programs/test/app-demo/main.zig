@@ -36,14 +36,19 @@
 //!                  writes heads under app-demo/. A call's outcome is on stderr
 //!                  ("forge call moved <head>" | "forge call refused: …"); a
 //!                  launched thread errors with the kernel's refusal.
-//!   app-demo       {kind: "app-demo-event", event, …fields} (#119): emits the
+//!   app-demo       {kind: "app-demo-event", event, …fields} or {kind:
+//!                  "app-demo-event", emit: {event, …fields}} (#119; the second for
+//!                  a subscribe, whose `fn` would make the first a call): emits the
 //!                  event {event, …fields} (kernel `emit`: any name; the record
 //!                  names this app when its record is installed) — `subscribe` /
 //!                  `unsubscribe` {topic} for the host's libp2p node, or a name
 //!                  nobody wires; finishes "emitted <event>"
 //!
-//! A libp2p row naming fn `topic` (equiv/emit-events.ts installs this module
-//! under other app names with such rows) is answered {verdict: "accept"}.
+//! A libp2p message delivered to fn `topic` (a libp2p row's, or a subscription
+//! {topic, program, fn: "topic"}: equiv/emit-events.ts installs this module
+//! under other app names) moves the head `<app>/seen` (the app the match
+//! names) to {kind: "app-demo-seen", app, topic, request} and is answered
+//! {verdict: "accept"}: which app's fn ran is in the store.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -75,11 +80,7 @@ fn run(a: Allocator) !void {
     const kind = Value.str(in.get("kind")) orelse "";
     // K1: the forged record's work (called, or launched), and the forge's thread woken by its child.
     // #119: a gossiped message on a topic a libp2p row of the app takes.
-    if (eql(u8, kind, "call") and eql(u8, Value.str(in.get("fn")) orelse "", "topic")) {
-        var v = cbor.MapBuilder.init(a);
-        try v.put("verdict", cbor.string("accept"));
-        return sk.answer(a, v.value());
-    }
+    if (eql(u8, kind, "call") and eql(u8, Value.str(in.get("fn")) orelse "", "topic")) return topic(a, in);
     if (eql(u8, kind, "call") and eql(u8, Value.str(in.get("fn")) orelse "", "forge.advance")) {
         const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("forge.advance wants {head}");
         return forgeAdvance(a, Value.str(arg.get("head")) orelse return sk.report("forge.advance wants {head}"));
@@ -174,11 +175,14 @@ fn peers(a: Allocator, in: Value, body: Value) !void {
     return out(a, "sent peers", .{});
 }
 
-/// {kind: "app-demo-event", event, …fields} (#119): the event {event, …fields} emitted.
+/// {kind: "app-demo-event", event, …fields} (#119): the event {event, …fields} emitted. Or
+/// {kind: "app-demo-event", emit: {event, …fields}}: the same, for an event with a field a
+/// call's message has at the top (a subscription's `fn`).
 fn event(a: Allocator, body: Value) !void {
-    const name = Value.str(body.get("event")) orelse return sk.report("app-demo-event wants {event, …fields}");
+    const src: Value = if (body.get("emit")) |x| (if (x == .map) x else body) else body;
+    const name = Value.str(src.get("event")) orelse return sk.report("app-demo-event wants {event, …fields} or {emit: {event, …fields}}");
     var m = cbor.MapBuilder.init(a);
-    for (body.map) |e| if (!eql(u8, e.key, "kind")) try m.put(e.key, e.value);
+    for (src.map) |e| if (!eql(u8, e.key, "kind")) try m.put(e.key, e.value);
     const bytes = try cbor.encode(a, m.value());
     _ = sk.result(a, sk.raw.emit, .{ bytes.ptr, @as(u32, @intCast(bytes.len)) }) catch return sk.report(sk.lastError());
     return out(a, "emitted {s}", .{name});
@@ -225,6 +229,23 @@ fn forge(a: Allocator, in: Value, body: Value) !void {
         try std.fmt.allocPrint(a, "forge call refused: {s}\n", .{sk.lastError()});
     try std.Io.File.stderr().writeStreamingAll(sk.io(), msg);
     return out(a, "forge called", .{});
+}
+
+/// A libp2p message delivered to fn `topic` (#119): `<app>/seen` moved to what it was, then accepted.
+fn topic(a: Allocator, in: Value) !void {
+    const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("topic wants the front door's package");
+    const match: Value = arg.get("match") orelse .null;
+    const who = Value.str(match.get("app")) orelse NAME;
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("app-demo-seen"));
+    try m.put("app", cbor.string(who));
+    try m.put("topic", arg.get("topic") orelse .null);
+    try m.put("request", arg.get("request") orelse .null);
+    const c = try sk.put(a, m.value());
+    sk.advance(try std.fmt.allocPrint(a, "{s}/seen", .{who}), c) catch return sk.report(sk.lastError());
+    var v = cbor.MapBuilder.init(a);
+    try v.put("verdict", cbor.string("accept"));
+    return sk.answer(a, v.value());
 }
 
 /// Advance `head` to a record of the forge's: allowed only in the running record's write scope.

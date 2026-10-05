@@ -101,7 +101,7 @@ import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type 
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
-import { appTopics, askedTopics, DEFAULT_LISTEN, foldTopicEvents, libp2pConfig, P2PHost, topicEvent, topicOwners, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
+import { DEFAULT_LISTEN, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
@@ -186,10 +186,8 @@ interface Loaded {
   dispatchTip?: string;
   /** The dispatch table as last read (syncDispatch). */
   rows?: DispatchRow[];
-  /** Each app's topics asked for by event (#119): folded from the log at hydrate, then followed live. */
-  asked: Map<string, Set<string>>;
-  /** A row's program record → its `app` (read once per record). */
-  apps: Map<string, string | undefined>;
+  /** The apps' subscriptions (#119): folded from the log at hydrate, then followed live. */
+  subs: Subscription[];
 }
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
@@ -666,9 +664,9 @@ export class Router {
       await kernel.stop(1000);
       throw e;
     }
-    // #119: the topics the apps asked for by event, read from the log (the kernel keeps nothing for them).
-    const asked = await this.foldAsked(row.store).catch((e) => { this.say(handle, `libp2p: the asked topics not read: ${(e as Error).message}`); return new Map<string, Set<string>>(); });
-    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, asked, apps: new Map() };
+    // #119: the apps' subscriptions, read from the log (the kernel writes nothing for them).
+    const subs = await this.foldSubscriptions(row.store).catch((e) => { this.say(handle, `libp2p: the subscriptions not read: ${(e as Error).message}`); return [] as Subscription[]; });
+    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs };
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
@@ -951,61 +949,46 @@ export class Router {
     await this.declareP2P(l, first);
   }
 
-  /** The instance's libp2p node declared as its genesis, its table and its apps' asked topics (#119) ask. */
+  /** The instance's libp2p node declared as its genesis, its table and its apps' subscriptions (#119) ask. */
   private async declareP2P(l: Loaded, first = false): Promise<void> {
     if (!this.p2p) return;
     const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
-    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, await this.appTopicsOf(l, rows))).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
-  }
-
-  /** The asked topics each app's rows let it have (p2p.ts appTopics), the rows' program records read for their `app`. */
-  private async appTopicsOf(l: Loaded, rows: Array<Record<string, unknown>>): Promise<string[]> {
-    if (!l.asked.size) return [];
-    for (const r of rows) {
-      if (r.transport !== "libp2p" || !CID.asCID(r.program)) continue;
-      const k = String(r.program);
-      if (l.apps.has(k)) continue;
-      const rec = await l.kernel.store.get(r.program as CID).catch(() => undefined) as Record<string, unknown> | undefined;
-      l.apps.set(k, typeof rec?.app === "string" ? rec.app : undefined);
-    }
-    return appTopics(l.asked, rows, (r) => CID.asCID(r.program) ? l.apps.get(String(r.program)) : undefined);
+    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, subscribedTopics(l.subs))).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
   }
 
   /**
-   * #119: every app's asked topics, folded from the instance's log — the
-   * libp2p node's recovery at hydrate, by reading (p2p.ts askedTopics; the
-   * store file opened read-only beside the kernel, as `subscribes` reads it).
+   * #119: the apps' subscriptions, folded from the instance's log — the
+   * libp2p node's recovery at hydrate, by reading (p2p.ts subscriptionsOf;
+   * the store file opened read-only beside the kernel, as `subscribes` reads it).
    */
-  private async foldAsked(store: string): Promise<Map<string, Set<string>>> {
-    if (!this.p2p || !existsSync(store)) return new Map();
+  private async foldSubscriptions(store: string): Promise<Subscription[]> {
+    if (!this.p2p || !existsSync(store)) return [];
     const s = openStoreFile(store, { readOnly: true });
-    try { return await askedTopics(s); } finally { s.close(); }
+    try { return await subscriptionsOf(s); } finally { s.close(); }
   }
 
   /**
    * A `subscribe` / `unsubscribe` event from `handle` (#119, after its step's
-   * commit): the app's asked set changes, and the node is declared again —
-   * the topic subscribed when one of that app's libp2p rows takes it (p2p.ts
-   * topicOwners), else refused with a log line. An event naming no app (an
-   * uninstalled program record's) is ignored. An instance still loading reads
-   * the event from its log at hydrate; it is applied after that too (the
-   * same result).
+   * commit; the kernel checked it as it was emitted): the subscriptions
+   * change and the node is declared again — the topic subscribed, or left
+   * when no subscription, row or genesis topic takes it any more. Which app's
+   * program runs for a message on it is the kernel's (the subscription). An
+   * instance still loading reads the event from its log at hydrate; it is
+   * applied after that too (the same result).
    */
   private topicEvent(handle: string, rec: Record<string, unknown>): void {
-    const e = topicEvent(rec);
+    const e = subscriptionEvent(rec);
     if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
+    const topic = e.event === "subscribe" ? e.sub.topic : e.topic;
+    const app = e.event === "subscribe" ? e.sub.app : e.app;
     const apply = async () => {
       const l = this.loaded.get(handle) ?? await this.loading.get(handle)?.catch(() => undefined);
       if (!l || l.kernel.gone) return;
-      foldTopicEvents([e], l.asked);
-      const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
-      await this.appTopicsOf(l, rows); // the rows' apps read
-      const owners = topicOwners(rows, e.topic, (r) => CID.asCID(r.program) ? l.apps.get(String(r.program)) : undefined);
-      if (e.event === "subscribe" && !owners.has(e.app)) this.say(handle, `libp2p: subscribe ${e.topic} from app ${e.app}: refused — no libp2p row of ${e.app} takes it${owners.size ? ` (it is ${[...owners].join(", ")}'s)` : ""}; not subscribed`);
-      else this.say(handle, `libp2p: ${e.event} ${e.topic} (app ${e.app})`);
+      foldSubscriptions([e], l.subs);
+      this.say(handle, `libp2p: ${e.event} ${topic} (app ${app}${e.event === "subscribe" ? ` → ${e.sub.program}.${e.sub.fn}` : ""})`);
       await this.declareP2P(l);
     };
-    const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event} ${e.topic}: ${(x as Error).message}`));
+    const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event} ${topic}: ${(x as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }
