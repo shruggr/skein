@@ -278,7 +278,7 @@ ol.flow li{margin:4px 0}
       <rect x="460" y="140" width="240" height="40" class="bx"/><text x="580" y="158" class="t" text-anchor="middle">dispatch table</text><text x="580" y="172" class="t m" text-anchor="middle">matches every transport (#115)</text>
       <rect x="460" y="192" width="112" height="60" class="bx"/><text x="516" y="212" class="t" text-anchor="middle">front door</text><text x="516" y="228" class="t m" text-anchor="middle">verifies 103/104</text><text x="516" y="242" class="t m" text-anchor="middle">matches nothing</text>
       <rect x="588" y="192" width="112" height="60" class="bx"/><text x="644" y="212" class="t" text-anchor="middle">app programs</text><text x="644" y="228" class="t m" text-anchor="middle">WASI steps</text><text x="644" y="242" class="t m" text-anchor="middle">threads</text>
-      <rect x="460" y="264" width="240" height="60" class="bx"/><text x="580" y="282" class="t" text-anchor="middle">store</text><text x="580" y="298" class="t m" text-anchor="middle">objects · heads · dispatch · peers</text><text x="580" y="312" class="t m" text-anchor="middle">chains of updates, blocks by CID</text>
+      <rect x="460" y="264" width="240" height="60" class="bx"/><text x="580" y="282" class="t" text-anchor="middle">store</text><text x="580" y="298" class="t m" text-anchor="middle">objects · heads · dispatch · address book</text><text x="580" y="312" class="t m" text-anchor="middle">chains of updates, blocks by CID</text>
 
       <line x1="360" y1="108" x2="460" y2="108" class="ln k" marker-end="url(#a2k)"/>
       <text x="410" y="102" class="t k" text-anchor="middle">admit</text>
@@ -294,7 +294,7 @@ ol.flow li{margin:4px 0}
       <line x1="720" y1="294" x2="770" y2="294" class="ln k" marker-end="url(#a2k)"/>
       <text x="745" y="288" class="t k" text-anchor="middle">wallet</text>
 
-      <rect x="770" y="200" width="190" height="44" class="bx h"/><text x="865" y="218" class="t" text-anchor="middle">address book</text><text x="865" y="234" class="t m" text-anchor="middle">key → transport, address</text>
+      <rect x="770" y="200" width="190" height="44" class="bx h"/><text x="865" y="218" class="t" text-anchor="middle">host delivers</text><text x="865" y="234" class="t m" text-anchor="middle">to the transport the instance named</text>
       <rect x="770" y="272" width="190" height="44" class="bx h"/><text x="865" y="290" class="t" text-anchor="middle">signer</text><text x="865" y="306" class="t m" text-anchor="middle">signs as the instance</text>
 
       <text x="865" y="36" class="t b" text-anchor="middle">where emit goes</text>
@@ -308,7 +308,7 @@ ol.flow li{margin:4px 0}
       <text x="536" y="394" class="t m" text-anchor="middle">the answer to an emit comes back as a new entry, signed by whoever answered</text>
     </svg>
     </div>
-    <figcaption>Everything a transport carries becomes an entry; the kernel matches the dispatch row first, the front door only verifies the session or signature, the row's program runs, and the thread's resting state is the answer. No host-asserted mail enters: a message is admitted only inside a signed request (#114). A call reads current state without an entry. Emit leaves after the step commits and comes back as a fresh entry.</figcaption>
+    <figcaption>Everything a transport carries becomes an entry; the kernel matches the dispatch row first, the front door only verifies the session or signature, the row's program runs, and the thread's resting state is the answer. No host-asserted mail enters: a message is admitted only inside a signed request (#114). A call reads current state without an entry. Emit names a key; the instance's own address book, one of the four tables, says which transport and address, and the host only carries it. The answer comes back as a fresh entry.</figcaption>
     <div class="key"><span><i class="sw e"></i> the log</span><span><i class="sw k"></i> kernel</span><span><i class="sw h"></i> host-side</span></div>
   </figure>
   <table>
@@ -317,7 +317,7 @@ ol.flow li{margin:4px 0}
     <tr><td>answer</td><td>in</td><td>Wait until a request's thread comes to rest; the resting state is the HTTP response. Past two minutes, 503 + Retry-After.</td></tr>
     <tr><td>call</td><td>in</td><td>Run a program function over current state. No entry, no writes, not replayed. The explorer's reads; a route's thread answers <code>read</code> and the host then calls.</td></tr>
     <tr><td>wallet</td><td>out</td><td>A signing request to the signer. The one recorded syscall: request and answer are written on the step and replay serves them from there.</td></tr>
-    <tr><td>emit</td><td>out</td><td>What a committed step sent: a signed message to a key in the address book, or a broadcast event. The host delivers it after commit.</td></tr>
+    <tr><td>emit</td><td>out</td><td>What a committed step sent: a signed message to a key, resolved to a transport and address by the instance's own address book, or a broadcast event. The host only carries it, after commit.</td></tr>
   </table>
 </section>
 
