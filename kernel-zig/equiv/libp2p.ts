@@ -68,7 +68,7 @@ try {
     const owner = g.dispatch.find((r) => r.transport === "mailbox" && r.address === "p2p")!.sender as Uint8Array;
     const bodyBytes = dagCbor.encode({ op: "publish", topic: "skein-test/demo", text: "from a tab" });
     // K2: the owner's message signed by the owner (src/host/p2p-router.test.ts's key) and appended as a
-    // `local` request, which the front door verifies when the tab drains (no oracle needed for that).
+    // `local` request, which the front door verifies when the tab drains (no signer needed for that).
     const ownerKey = new PrivateKey("2222", 16);
     if (ownerKey.toPublicKey().toString() !== Buffer.from(owner).toString("hex")) throw new Error("the p2p row's sender is not p2p-router.test.ts's owner key");
     const unsigned = { kind: "mail", op: "put", sender: owner, recipient: g.identity, box: "p2p", body: encode(dagCbor.decode(bodyBytes)).cid, nonce: new Uint8Array(16) };
