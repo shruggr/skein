@@ -21,6 +21,7 @@ test {
     _ = @import("component_test.zig");
     _ = @import("wasm_fuel.zig");
     _ = @import("wasm_fuel_test.zig");
+    _ = @import("dispatch.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {
@@ -165,5 +166,101 @@ test "traps come back as V8 names them (modules as in README; messages read from
         }.f, &em, a, null);
         try std.testing.expect(out == .trapped);
         try std.testing.expectEqualStrings(cs.want, out.trapped.v8Message());
+    }
+}
+
+// ---------------------------------------------------------------- the dispatch table's cases (#115)
+
+const dispatch = @import("dispatch.zig");
+
+/// A fixture value as the kernel holds it: "$<name>" a key, "$cid" the CID, "$bytes32" 32 bytes.
+fn caseValue(a: std.mem.Allocator, f: std.json.Value, j: std.json.Value) !cbor.Value {
+    return switch (j) {
+        .null => .null,
+        .bool => |b| .{ .bool = b },
+        .integer => |i| cbor.int(i),
+        .string => |s| blk: {
+            if (std.mem.eql(u8, s, "$cid")) break :blk cbor.cidv(try cidm.parse(a, f.object.get("cid").?.string));
+            if (std.mem.eql(u8, s, "$bytes32")) break :blk .{ .bytes = try a.alloc(u8, 32) };
+            if (s.len > 1 and s[0] == '$') if (f.object.get("keys").?.object.get(s[1..])) |k| break :blk .{ .bytes = try unhex(a, k.string) };
+            break :blk cbor.string(s);
+        },
+        .array => |xs| blk: {
+            const out = try a.alloc(cbor.Value, xs.items.len);
+            for (xs.items, out) |x, *o| o.* = try caseValue(a, f, x);
+            break :blk .{ .array = out };
+        },
+        .object => |o| blk: {
+            var m = cbor.MapBuilder.init(a);
+            var it = o.iterator();
+            while (it.next()) |e| try m.put(e.key_ptr.*, try caseValue(a, f, e.value_ptr.*));
+            break :blk m.value();
+        },
+        else => error.BadFixture,
+    };
+}
+
+fn caseKey(a: std.mem.Allocator, f: std.json.Value, name: ?std.json.Value) !?[]const u8 {
+    const n = name orelse return null;
+    return try unhex(a, f.object.get("keys").?.object.get(n.string).?.string);
+}
+
+fn idOf(r: ?dispatch.Row) ?[]const u8 {
+    const x = r orelse return null;
+    return cbor.Value.str(x.value.get("id"));
+}
+
+test "the dispatch table: fold and match, the cases dispatch.ts is checked against (test/dispatch-cases.json)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/dispatch-cases.json", a, .limited(1 << 20));
+    const f = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+    for (f.object.get("tables").?.array.items) |t| {
+        const name = t.object.get("name").?.string;
+        const ups = t.object.get("updates").?.array.items;
+        const vals = try a.alloc(cbor.Value, ups.len);
+        for (ups, vals) |u, *v| v.* = try caseValue(a, f, u);
+        const rows = try dispatch.fold(a, vals);
+        const want_fold = t.object.get("fold").?.array.items;
+        std.testing.expectEqual(want_fold.len, rows.len) catch |e| {
+            std.debug.print("{s}: fold\n", .{name});
+            return e;
+        };
+        for (want_fold, rows) |w, r| try std.testing.expectEqualStrings(w.string, idOf(r).?);
+        const reads: ?cbor.Value = if (t.object.get("reads")) |r| try caseValue(a, f, r) else null;
+        for (t.object.get("cases").?.array.items, 0..) |c, i| {
+            const kind = c.object.get("kind").?.string;
+            const want = c.object.get("want").?;
+            const who: dispatch.Who = if (c.object.get("who")) |w| .{
+                .key = try caseKey(a, f, w.object.get("key")),
+                .owner = try caseKey(a, f, w.object.get("owner")),
+                .reads = reads,
+            } else .{};
+            var got: ?[]const u8 = null;
+            var refused: ?[]const u8 = null;
+            if (std.mem.eql(u8, kind, "mail")) {
+                got = idOf(dispatch.forMail(rows, (try caseKey(a, f, c.object.get("sender"))).?, c.object.get("box").?.string));
+            } else if (std.mem.eql(u8, kind, "event")) {
+                got = idOf(dispatch.forEvent(rows, c.object.get("box").?.string));
+            } else if (std.mem.eql(u8, kind, "http")) {
+                switch (dispatch.forHttp(rows, c.object.get("path").?.string, who)) {
+                    .row => |r| got = idOf(r),
+                    .refused => |why| refused = why.text(),
+                }
+            } else if (std.mem.eql(u8, kind, "libp2p")) {
+                got = idOf(dispatch.forLibp2p(rows, c.object.get("name").?.string, who));
+            } else return error.BadFixture;
+            const ok = switch (want) {
+                .null => got == null and refused == null,
+                .string => |s| got != null and std.mem.eql(u8, got.?, s),
+                .object => |o| refused != null and std.mem.eql(u8, refused.?, o.get("refused").?.string),
+                else => false,
+            };
+            if (!ok) {
+                std.debug.print("{s}: case {d} ({s}): got {?s} refused {?s}\n", .{ name, i, kind, got, refused });
+                return error.TestUnexpectedResult;
+            }
+        }
     }
 }

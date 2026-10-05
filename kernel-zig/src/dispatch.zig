@@ -9,12 +9,14 @@
 //                                  "/<protocol>"; local: a provider's name
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
 //                                  then the longest prefix)
-//          sender: "*" | "event" | "session" | bytes(33),
+//          sender: "*" | "event" | "session" | "owner" | bytes(33),
 //                                  "*": anyone (an open route; an event's box too); "event": events
 //                                  only (#79: the host's wiring — a feed's header, a broadcaster's
 //                                  proof, a route's admit — never a message); "session": an HTTP
-//                                  route that needs a BRC-103/104 session, any identity; a key:
-//                                  that identity — a message's sender, or the session's identity
+//                                  route that needs a BRC-103/104 session, any identity; "owner"
+//                                  (#115, http): the instance's owner's session (the genesis's
+//                                  owner, else the claim's — an image's explorer); a key: that
+//                                  identity — a message's sender, the session's, a libp2p peer's
 //          program: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
 //                                  itself: an admin operation (`fn`: objects | head | dispatch | peers),
@@ -28,7 +30,9 @@
 // updates folded in order. A row's key is (transport, address, prefix,
 // sender): `add` replaces the row with that key in place (nothing written when
 // it is the same row), else appends; `remove` deletes it (nothing written when
-// there is none). First match wins, in table order. The genesis's `dispatch`
+// there is none). First match wins, in table order, for every transport
+// (#115: `match` below — the one walk; the front door is handed the row and
+// only verifies who the request is from). The genesis's `dispatch`
 // is written as the chain's first updates (no `thread`); afterwards only the
 // kernel's `dispatch` operation changes it — on a message in an admin box from
 // the owner or a delegate (scheduler.zig kernelOp). No program import reaches
@@ -49,7 +53,7 @@ pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
 /// written and the claim row removed (scheduler.zig kernelOp).
 pub const kernel_ops = admin_ops ++ [_][]const u8{"claim"};
 
-pub const Sender = union(enum) { any, event, session, key: []const u8 };
+pub const Sender = union(enum) { any, event, session, owner, key: []const u8 };
 
 pub const Row = struct {
     transport: []const u8,
@@ -111,6 +115,7 @@ fn senderOf(v: ?Value) ?Sender {
         if (std.mem.eql(u8, s, "*")) return .any;
         if (std.mem.eql(u8, s, "event")) return .event;
         if (std.mem.eql(u8, s, "session")) return .session;
+        if (std.mem.eql(u8, s, "owner")) return .owner;
         return null;
     }
     if (Value.bytesOf(x)) |b| if (secp.isKey(b)) return .{ .key = b };
@@ -130,8 +135,9 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
         if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
         if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http row has one");
     }
-    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" (http) or an identity key (33 bytes)");
+    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" or \"owner\" (http) or an identity key (33 bytes)");
     if (sender == .session and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"session\": only an http row (a BRC-103/104 session)");
+    if (sender == .owner and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"owner\": only an http row (the owner's BRC-103/104 session)");
     if (sender == .event and !std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "sender \"event\": only a mailbox row (a box events are admitted into)");
     const prog = v.get("program") orelse return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
     if (Value.str(prog)) |s| {
@@ -171,6 +177,7 @@ fn senderEq(x: Sender, y: Sender) bool {
         .any => y == .any,
         .event => y == .event,
         .session => y == .session,
+        .owner => y == .owner,
         .key => |k| y == .key and std.mem.eql(u8, k, y.key),
     };
 }
@@ -248,29 +255,152 @@ pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, v: Value, by: By) !
     return try s.chainAppend(a, o, m.value());
 }
 
+// ---------------------------------------------------------------- the match (#115)
+//
+// One walk for every transport: the first row, in table order, whose
+// transport and address take the package and whose sender rule takes who it
+// is from. What it is from is what the package claims — a message's sender, an
+// HTTP request's `x-bsv-auth-identity-key`, a libp2p peer's key — and the
+// front door verifies that claim before the row's handler runs (BRC-104's
+// session and signature; GossipSub's signature): it is handed the row, never
+// the table.
+
+/// Who a package is from, as the match sees it.
+pub const Who = struct {
+    /// The sender's identity: a message's sender, the identity an HTTP request claims (its session's, verified by
+    /// the front door before the handler runs), a libp2p peer's key; null: none (an HTTP request with no session).
+    key: ?[]const u8 = null,
+    /// An event (the host's wiring): no sender; only a `*` or an `event` row takes it.
+    event: bool = false,
+    /// The instance's owner (the genesis's, else the claim's), for an `owner` row.
+    owner: ?[]const u8 = null,
+    /// The genesis's `reads` (a log written before #115): a row with a `read` op takes only a sender they allow.
+    reads: ?Value = null,
+};
+
+/// Whether `r`'s sender rule takes `w`.
+pub fn takes(r: Row, w: Who) bool {
+    const ok = switch (r.sender) {
+        .any => return true,
+        .event => w.event,
+        .session => !w.event and w.key != null and std.mem.eql(u8, r.transport, "http"),
+        .owner => !w.event and w.key != null and w.owner != null and std.mem.eql(u8, r.transport, "http") and std.mem.eql(u8, w.key.?, w.owner.?),
+        .key => |k| !w.event and w.key != null and std.mem.eql(u8, k, w.key.?),
+    };
+    if (!ok) return false;
+    if (std.mem.eql(u8, r.transport, "http")) if (Value.str(r.value.get("read"))) |op| return mayRead(w, op);
+    return true;
+}
+
+/// A legacy read permission (the genesis's `reads`, before #115: [{caller?, op} | {owner: true, op}]).
+fn mayRead(w: Who, op: []const u8) bool {
+    const rs = w.reads orelse return false;
+    if (rs != .array) return false;
+    const caller = w.key orelse return false;
+    for (rs.array) |r| {
+        const o = Value.str(r.get("op")) orelse "";
+        if (!std.mem.eql(u8, o, op) and !std.mem.eql(u8, o, "*")) continue;
+        if (r.get("owner")) |x| if (x == .bool and x.bool) {
+            if (w.owner) |k| if (std.mem.eql(u8, k, caller)) return true;
+            continue;
+        };
+        const who = Value.bytesOf(r.get("caller")) orelse return true;
+        if (std.mem.eql(u8, who, caller)) return true;
+    }
+    return false;
+}
+
+/// Which addresses a walk takes.
+const Address = union(enum) {
+    /// a mailbox box: the row's address, or a `*` row
+    box: []const u8,
+    /// exactly this address, no prefix row (an http path, a libp2p topic or protocol)
+    exact: []const u8,
+    /// a prefix row of this length that `path` starts with
+    prefix: struct { path: []const u8, len: usize },
+};
+
+fn addressed(r: Row, at: Address) bool {
+    return switch (at) {
+        .box => |b| std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, b),
+        .exact => |x| !r.prefix and std.mem.eql(u8, r.address, x),
+        .prefix => |p| r.prefix and r.address.len == p.len and std.mem.startsWith(u8, p.path, r.address),
+    };
+}
+
+/// What a walk found: the row, and whether any row of the transport had the address (for an HTTP refusal).
+const Walk = struct { row: ?Row = null, addressed: bool = false };
+
+/// The walk: the first row in table order of `transport` at `at` whose sender rule takes `w`.
+fn first(rows: []const Row, transport: []const u8, at: Address, w: Who) Walk {
+    var out: Walk = .{};
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.transport, transport) or !addressed(r, at)) continue;
+        out.addressed = true;
+        if (takes(r, w)) {
+            out.row = r;
+            return out;
+        }
+    }
+    return out;
+}
+
 /// A message's row: the first `mailbox` row whose address is the box (or any
 /// box) and whose sender takes `sender` (anyone, or that key; a `session` or
 /// an `event` sender takes no message).
 pub fn forMail(rows: []const Row, sender: []const u8, box: []const u8) ?Row {
-    for (rows) |r| {
-        if (!std.mem.eql(u8, r.transport, "mailbox")) continue;
-        if (!std.mem.eql(u8, r.address, "*") and !std.mem.eql(u8, r.address, box)) continue;
-        switch (r.sender) {
-            .any => return r,
-            .session, .event => continue,
-            .key => |k| if (std.mem.eql(u8, k, sender)) return r,
-        }
-    }
-    return null;
+    return first(rows, "mailbox", .{ .box = box }, .{ .key = sender }).row;
 }
 
 /// An event's row: the first `mailbox` row from `event` or anyone whose address is the box (or any box).
 pub fn forEvent(rows: []const Row, box: []const u8) ?Row {
-    for (rows) |r| {
-        if (!std.mem.eql(u8, r.transport, "mailbox") or (r.sender != .any and r.sender != .event)) continue;
-        if (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box)) return r;
+    return first(rows, "mailbox", .{ .box = box }, .{ .event = true }).row;
+}
+
+/// Why no `http` row takes a request: no row at its path (404), a row there
+/// that needs a session and the request has none (401: the client shakes
+/// hands), or rows there and none takes its identity (403).
+pub const Refusal = enum {
+    path,
+    session,
+    sender,
+    pub fn text(r: Refusal) []const u8 {
+        return @tagName(r);
     }
-    return null;
+};
+
+pub const HttpMatch = union(enum) { row: Row, refused: Refusal };
+
+/// A request's `http` row: exact paths first, then prefixes, longest first;
+/// within each, first in table order whose sender rule takes `w`.
+pub fn forHttp(rows: []const Row, path: []const u8, w: Who) HttpMatch {
+    var any = false;
+    const ex = first(rows, "http", .{ .exact = path }, w);
+    if (ex.row) |r| return .{ .row = r };
+    any = ex.addressed;
+    // The prefix lengths that take `path`, longest first.
+    var below: usize = std.math.maxInt(usize);
+    while (true) {
+        var len: ?usize = null;
+        for (rows) |r| {
+            if (!r.prefix or !std.mem.eql(u8, r.transport, "http") or r.address.len >= below) continue;
+            if (!std.mem.startsWith(u8, path, r.address)) continue;
+            if (len == null or r.address.len > len.?) len = r.address.len;
+        }
+        const l = len orelse break;
+        const p = first(rows, "http", .{ .prefix = .{ .path = path, .len = l } }, w);
+        if (p.row) |r| return .{ .row = r };
+        any = any or p.addressed;
+        below = l;
+    }
+    if (!any) return .{ .refused = .path };
+    return .{ .refused = if (w.key == null) .session else .sender };
+}
+
+/// A libp2p package's row: the first `libp2p` row whose address is its topic
+/// (or `/<protocol>`) and whose sender rule takes the peer's key.
+pub fn forLibp2p(rows: []const Row, name: []const u8, w: Who) ?Row {
+    return first(rows, "libp2p", .{ .exact = name }, w).row;
 }
 
 test "fold: add replaces by key, remove deletes, first match wins" {
