@@ -472,6 +472,19 @@ no app record — wired into a genesis by a system tree — reads the genesis
 defaults `overlayTopics`/`overlayLookups`/`overlayGossip` instead, and
 writes under its program's name (`overlay/…`, the tree's `scopes`).
 
+**Topics an app activates live** (#119, #120, skein-overlay ≥ 0.5.0):
+`config.overlay.prefixes = {"tm_": {"program": "topic", "active":
+"mandala"}}` serves, under the prefix, the topics listed in the app's own
+record at `<app>/mandala` (`{topics: [<topic>, …]}`, written by the app's
+activate call, which emits `subscribe` for each, #119). `program` is a role
+in `programs`; `active` is a head under the app's name (one name, no `/`).
+A lookup service in the object form may add `"prefixes": ["tm_"]`. An
+overlay names at least one topic or one prefix. No rows are derived from a
+prefix: the app's manifest names its own libp2p row `{transport: "libp2p",
+address: "tm_", prefix: true, sender: "*", program: "overlay", fn:
+"submit", filter: "beef"}`, which carries the gossip; `/submit`, `/lookup`
+and the box are derived as below.
+
 **Its state is under its own name** (#79, skein-overlay ≥ 0.3.0):
 `<app>/state` (what its topics admitted and judged, and the submissions
 pending at the chain app), `<app>/ls_<service>` (each lookup service's own

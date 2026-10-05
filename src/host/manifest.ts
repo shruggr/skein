@@ -42,10 +42,13 @@
 //   requires[]  "<name>/<major>"
 //   start, stop {body: {…}}; `start` needs a row admitting the owner (or anyone) to the app's box
 //   config      a map (the programs read it from the head's root record)
-//   config.overlay   an overlay app (APPS.md §6): {topics: {<topic>: <role>}, lookups:
-//               {<service>: <role> | {program: <role>, topics?: [<topic>]}}, gossip?: {<topic>:
-//               bool}}; the engine is the role `overlay`. Its wiring is derived (overlayWiring) and
-//               added to the rows the manifest names itself — an explicit row with the same key wins.
+//   config.overlay   an overlay app (APPS.md §6): {topics?: {<topic>: <role>}, prefixes?:
+//               {<prefix>: {program: <role>, active: <head suffix>}}, lookups?: {<service>: <role> |
+//               {program: <role>, topics?: [<topic>], prefixes?: [<prefix>]}}, gossip?: {<topic>:
+//               bool}}, at least one topic or prefix; the engine is the role `overlay`. Its wiring is
+//               derived (overlayWiring) and added to the rows the manifest names itself — an explicit
+//               row with the same key wins. No rows are derived from a prefix: the app names its own
+//               libp2p prefix row (`prefix: true`) and subscribes each topic it activates (#119, #120).
 //
 //   The form before #77 (`handler`, `boxes`, `routes`, `heads`) is refused (#79): an app names
 //   dispatch rows, and writes only heads under its own name.
@@ -350,25 +353,42 @@ const TOPIC = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
  * `$self` (its own watch of a submission the chain app has accepted, sent by
  * the host's loopback). All to the role `overlay`, the engine. No `chain` or
  * `status` box (the chain app's), no grants: the engine writes `<app>/…`
- * only. `isRole` tells which roles the manifest has.
+ * only. `prefixes` (#119, #120) derive no rows: the topics under a prefix
+ * are the ones the app activates live (listed at `<app>/<active>`), carried
+ * by the app's own libp2p prefix row. `isRole` tells which roles the
+ * manifest has.
  */
 export function overlayWiring(app: string, ov: unknown, isRole: (role: string) => boolean): OverlayWiring | string[] {
   const bad: string[] = [];
-  if (!isMap(ov)) return ["want {topics, lookups?, gossip?}"];
+  if (!isMap(ov)) return ["want {topics?, prefixes?, lookups?, gossip?}"];
   if (!isRole(OVERLAY_ROLE)) bad.push(`the engine is the role "${OVERLAY_ROLE}": programs has none`);
   const topics: string[] = [];
-  if (!isMap(ov.topics) || !Object.keys(ov.topics).length) bad.push("topics: want {<topic>: <role>}, at least one");
-  else for (const [t, role] of Object.entries(ov.topics)) {
+  if (ov.topics !== undefined && !isMap(ov.topics)) bad.push("topics: want {<topic>: <role>}");
+  else for (const [t, role] of Object.entries(isMap(ov.topics) ? ov.topics : {})) {
     if (!TOPIC.test(t)) bad.push(`topics: ${JSON.stringify(t)} is not a topic name`);
     else if (typeof role !== "string" || !isRole(role)) bad.push(`topics.${t}: ${JSON.stringify(role)} is not a role in programs`);
     else topics.push(t);
   }
-  if (ov.lookups !== undefined && !isMap(ov.lookups)) bad.push("lookups: want {<service>: <role> | {program: <role>, topics?: [<topic>]}}");
+  // #119, #120: a prefix serves the topics the app activates live, listed at <app>/<active>.
+  const prefixes: string[] = [];
+  if (ov.prefixes !== undefined && !isMap(ov.prefixes)) bad.push("prefixes: want {<prefix>: {program: <role>, active: <head>}}");
+  else for (const [x, v] of Object.entries(isMap(ov.prefixes) ? ov.prefixes : {})) {
+    if (!TOPIC.test(x)) { bad.push(`prefixes: ${JSON.stringify(x)} is not a topic prefix`); continue; }
+    if (!isMap(v)) { bad.push(`prefixes.${x}: want {program: <role>, active: <head>}`); continue; }
+    const extra = Object.keys(v).filter((k) => k !== "program" && k !== "active");
+    if (extra.length) bad.push(`prefixes.${x}: ${extra.join(", ")}: not a field (want program, active)`);
+    if (typeof v.program !== "string" || !isRole(v.program)) bad.push(`prefixes.${x}.program: ${JSON.stringify(v.program)} is not a role in programs`);
+    if (typeof v.active !== "string" || !v.active || v.active.includes("/")) bad.push(`prefixes.${x}.active: ${JSON.stringify(v.active)} is not a head under the app's name (a name, no "/")`);
+    prefixes.push(x);
+  }
+  if (!topics.length && !prefixes.length && !bad.some((b) => b.startsWith("topics") || b.startsWith("prefixes"))) bad.push("want at least one topic (topics: {<topic>: <role>}) or prefix (prefixes: {<prefix>: {program, active}})");
+  if (ov.lookups !== undefined && !isMap(ov.lookups)) bad.push("lookups: want {<service>: <role> | {program: <role>, topics?: [<topic>], prefixes?: [<prefix>]}}");
   for (const [service, l] of Object.entries(isMap(ov.lookups) ? ov.lookups : {})) {
     if (!TOPIC.test(service)) { bad.push(`lookups: ${JSON.stringify(service)} is not a service name`); continue; }
     const role = typeof l === "string" ? l : isMap(l) ? l.program : undefined;
     if (typeof role !== "string" || !isRole(role)) bad.push(`lookups.${service}: program ${JSON.stringify(role)} is not a role in programs`);
     if (isMap(l) && l.topics !== undefined && (!Array.isArray(l.topics) || l.topics.some((t) => typeof t !== "string" || !isMap(ov.topics) || !(t in ov.topics)))) bad.push(`lookups.${service}.topics: want a list of the topics the overlay serves`);
+    if (isMap(l) && l.prefixes !== undefined && (!Array.isArray(l.prefixes) || l.prefixes.some((x) => typeof x !== "string" || !prefixes.includes(x)))) bad.push(`lookups.${service}.prefixes: want a list of the overlay's prefixes`);
   }
   if (ov.status !== undefined) bad.push("status: gone (#79): statuses are the chain app's (its `status` row); the overlay admits on the chain app's answer");
   if (ov.gossip !== undefined && (!isMap(ov.gossip) || Object.entries(ov.gossip).some(([t, on]) => typeof on !== "boolean" || !topics.includes(t)))) bad.push("gossip: want {<topic the overlay serves>: true | false}");
