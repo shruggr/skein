@@ -25,8 +25,9 @@ Apps ship their own modules in their trees (docs/APPS.md), and the install
 sends them. The shell app (shruggr/skein-shell) carries `run` and the shell
 itself: brush, coreutils and the toolset, with python's stdlib as a support
 file (#83: the kernel pins none of them; a genesis has no shell). The chat
-app (shruggr/skein-chat) carries the chat loop. Static files are
-shruggr/skein-static (`bin/static.wasm`). The overlay engine is
+app (shruggr/skein-chat) carries the chat loop. The management site is
+shruggr/skein-site (`bin/site.wasm`, serving its tree with skein-sdk's
+`files`; #125). The overlay engine is
 shruggr/skein-overlay (`bin/overlay.wasm`, with its demo topic manager and
 lookup service), the chain app shruggr/skein-chain (`bin/chain.wasm`).
 

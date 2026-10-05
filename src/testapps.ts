@@ -1,5 +1,5 @@
 // The shell app and the chat app for tests and equivs (#83), the
-// onboarding app (#90) and the git app (#91). A genesis has no shell, no
+// onboarding app (#90), the git app (#91) and the management site (#125). A genesis has no shell, no
 // `run`, no `chat`: a test that runs them installs the apps first, through
 // the real install path (the owner's messages `skein plan install` builds,
 // src/client/admin.ts, POSTed to the instance's /sendMessage on the owner's
@@ -48,6 +48,12 @@ export const ONBOARD_APP: PinnedApp = {
 export const GIT_APP: PinnedApp = {
   name: "git", repo: "https://github.com/shruggr/skein-git",
   rev: process.env.SKEIN_GIT_REV ?? "b571f42fe80fc348206bea65ac810f02a162c511", dir: process.env.SKEIN_GIT_DIR,
+};
+
+/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.0). */
+export const SITE_APP: PinnedApp = {
+  name: "site", repo: "https://github.com/shruggr/skein-site",
+  rev: process.env.SKEIN_SITE_REV ?? "aa98eef4002cfb73203f6119e1af6a59c058acba", dir: process.env.SKEIN_SITE_DIR,
 };
 
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */

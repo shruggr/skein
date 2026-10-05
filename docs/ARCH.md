@@ -116,7 +116,7 @@ owner. `APPS.md` is the specification.
 | wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`). Not installable: a genesis-wired program the kernel pins, with no `etc/app.json`; `wallet` is a reserved app name |
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
 | overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
-| static | shruggr/skein-static | files from the `main` head's tree, at the http rows pointed at it |
+| site | shruggr/skein-site | the management page (#92): its own tree's `www` at `/site/` (and at `/` by the owner's row), served with skein-sdk's `files` (#125: the static app archived; serving files is a function any handler calls) |
 | shell | shruggr/skein-shell | `run` (a command over a tree), and the shell itself: brush, coreutils and the toolset as modules of its tree, run by the kernel (#83); a userland is this app, not something every skein has |
 | chat | shruggr/skein-chat | `chat`: the turn loop; its `bash` calls run the shell app's shell when the instance has it (#83) |
 

@@ -2,10 +2,10 @@
 //
 //   an instance booted from the default image (images/default) — its genesis
 //   names no owner and has no admin rows, only the claim row (box `claim`,
-//   from anyone, to the kernel); it serves the management site at `/` and
-//   `/site/` (the static app, #92), it has no explorer row (#121: every sender
-//   is a key, and the claim brings the owner's), and it takes no owner's
-//   message in an admin box.
+//   from anyone, to the kernel); it serves nothing at `/`, `/site/` or
+//   `/manifest.json` (#125: no site and no static in the image), it has no
+//   explorer row (#121: every sender is a key, and the claim brings the
+//   owner's), and it takes no owner's message in an admin box.
 //
 //   The owner claims it with a message from the owner's wallet (`skein plan
 //   claim`, sent to /sendMessage): the owner is the message's sender (#127),
@@ -96,11 +96,10 @@ try {
   const g = (await genesisOf("inst"))!;
   check(g.owner === undefined && (g.tree as CID).equals(image.root), "the genesis names no owner, and the image's tree");
   check((await kernelRows()).join(",") === "claim<-*", `the only kernel row is the claim row, from anyone: ${(await kernelRows()).join(", ")}`);
-  const home = await fetch(`${h.base}/@inst/`);
-  const page = await home.text();
-  check(home.status === 200 && page.includes('src="site/app.js"'), `GET / : the management site, served by the static app (${home.status})`);
-  const js = await fetch(`${h.base}/@inst/site/app.js`);
-  check(js.status === 200 && /javascript/.test(js.headers.get("content-type") ?? "") && (await js.text()).includes("skein-locators"), `GET /site/app.js: the site's files under /site/ (${js.status})`);
+  for (const path of ["/", "/site/", "/site/app.js", "/manifest.json"]) {
+    const r = await fetch(`${h.base}/@inst${path}`);
+    check(r.status === 404, `GET ${path}: 404, nothing served there (#125: no site and no static in the image): ${r.status}`);
+  }
   const unread = await fetch(`${h.base}/@inst/explore`);
   check(unread.status === 404, `before the claim there is no explorer row (#121: the claim writes it with the owner's key): ${unread.status}`);
   check(!(await rows()).some((x) => x.sender === "owner"), "#121: no row names the `owner` symbol");

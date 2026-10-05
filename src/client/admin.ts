@@ -30,7 +30,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
 import type { CID } from "multiformats/cid";
 import { type Rec } from "./bundle.ts";
-import { dispatchBody, hashDir, recordBundles } from "./client.ts";
+import { dispatchBody, handlerCid, hashDir, recordBundles, senderKey } from "./client.ts";
 import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
 import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
@@ -103,13 +103,39 @@ export async function planUninstallApp(name: string, view: InstanceView): Promis
   return { prompt, recipient: view.identity, messages };
 }
 
+/** An http row's own parts (#125): `prefix`, the handler's `fn`, and its settings (a file server's `root`, `index`), carried to it as `match`. */
+export interface HttpRowArgs { prefix?: boolean; fn: string; settings?: Record<string, unknown> }
+
+/** The fields of a row that are not a handler's settings. */
+const ROW_FIELDS = ["transport", "address", "prefix", "sender", "program", "fn", "app", "optional"];
+
 /**
- * One mailbox row of the dispatch table (#77): `{op, row: {transport: "mailbox", address: box, sender, program}}`,
- * the handler a program record CID or a name the instance's genesis gives (`programs`).
+ * One row of the dispatch table (#77): a mailbox row `{op, row: {transport: "mailbox", address: box,
+ * sender, program}}`, or with `http` an http row `{transport: "http", address: <path>, prefix?, sender,
+ * program, fn, …settings}` (#125: the owner's own row, such as the site at `/`: no `app`, so an app's
+ * upgrade or uninstall leaves it). The handler is a program record CID or a name the instance's genesis
+ * gives (`programs`); the sender anyone when absent, `session` (http only), or an identity key in hex.
  */
-export function planDispatch(recipient: string, a: { op: "add" | "remove"; sender?: string; box: string; handler: string }, programs: Record<string, CID> = {}): AdminPlan {
-  const body = dispatchBody(a, programs);
-  return { prompt: [`dispatch ${a.op} mailbox ${a.box} from ${a.sender ?? "anyone"} → ${a.handler} (${String(body.row.program)})`], recipient, messages: [{ box: "dispatch", body }] };
+export function planDispatch(recipient: string, a: { op: "add" | "remove"; sender?: string; box: string; handler: string; http?: HttpRowArgs }, programs: Record<string, CID> = {}): AdminPlan {
+  if (!a.http) {
+    if (a.sender === "session") throw new Error("sender session: an http row's (--http)");
+    const body = dispatchBody(a, programs);
+    return { prompt: [`dispatch ${a.op} mailbox ${a.box} from ${a.sender ?? "anyone"} → ${a.handler} (${String(body.row.program)})`], recipient, messages: [{ box: "dispatch", body }] };
+  }
+  const h = a.http;
+  if (!a.box.startsWith("/") || /[\\\0?#]/.test(a.box) || a.box.split("/").some((x) => x === "." || x === "..")) throw new Error(`http address ${JSON.stringify(a.box)}: a path (from /, no ".", "..", query or fragment)`);
+  if (!h.fn) throw new Error("an http row names its handler's function (--fn)");
+  const settings = h.settings ?? {};
+  const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
+  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the row's own, not a setting`);
+  const program = handlerCid(a.handler, programs);
+  const sender = a.sender === undefined ? "*" : a.sender === "session" ? "session" : senderKey(a.sender);
+  const row = { ...settings, transport: "http", address: a.box, ...(h.prefix ? { prefix: true } : {}), sender, program, fn: h.fn };
+  const shown = Object.entries(settings).map(([k, v]) => `${k} ${typeof v === "string" ? v : JSON.stringify(v)}`).join(", ");
+  return {
+    prompt: [`dispatch ${a.op} http ${a.box}${h.prefix ? "*" : ""} from ${a.sender ?? "anyone"} → ${a.handler}.${h.fn} (${String(program)})${shown ? ` (${shown})` : ""}`],
+    recipient, messages: [{ box: "dispatch", body: { op: a.op, row } }],
+  };
 }
 
 /**
@@ -172,7 +198,7 @@ export type ExplorerRead = (path: string) => Promise<unknown>;
 /**
  * The instance as the install plan reads it (plan.ts InstanceView), from its explorer: heads, the genesis
  * (identity, programs, owner), the claim, the address book, the dispatch table, and the store by CID —
- * what the management page's view reads (images/default/www/app.js `Skein.view`).
+ * what the management page's view reads (shruggr/skein-site www/app.js `Skein.view`).
  */
 export async function explorerView(read: ExplorerRead): Promise<InstanceView> {
   const records = new Map<string, unknown>();

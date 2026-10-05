@@ -70,7 +70,7 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   void t;
   const { root, objects } = await dirSource(join(import.meta.dirname, "../../images/default"));
   const s = await readSystemTree(anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm"))), root);
-  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "messagebox", "static"]);
+  assert.deepEqual(s.programs.map((p) => p.name), ["frontdoor", "messagebox"]);
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
   const c = { identity: key(), handle: "a", domain: "localhost" };
   const g = genesisRecord(c, resolveSystem(c, programs, [], s.config, root, s.routes, s.reads, s.dispatch)) as Record<string, any>;
@@ -93,12 +93,13 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   const ownedRows = (owned.dispatch as Array<{ address: string; sender: unknown }>).filter((r) => r.address === "/old");
   assert.equal(ownedRows.length, 1);
   assert.equal(Buffer.from(ownedRows[0]!.sender as Uint8Array).toString("hex"), ownerKey, "#121: the owner's real key");
-  assert.ok(g.dispatch.some((r: { transport: string; address: string; root?: string }) => r.transport === "http" && r.address === "/" && r.root === "www"), "the static app at /");
-  assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; root?: string }) => r.transport === "http" && r.address === "/site" && r.prefix === true && r.root === "www"), "#92: and the site's files under /site/");
+  const http = (g.dispatch as Array<{ transport: string; address: string }>).filter((r) => r.transport === "http").map((r) => r.address);
+  assert.ok(!http.some((a) => a === "/" || a === "/site" || a === "/manifest.json"), `#125: no site and no static in the image: nothing at /, /site or /manifest.json (${http.join(", ")})`);
+  assert.ok(http.every((a) => /^\/(messagebox\/)?(sendMessage|listMessages|acknowledgeMessage)$/.test(a)), "the image's http rows are the messagebox's");
   assert.throws(() => resolveReads({}, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);
   // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
   for (const n of ["frontdoor", "messagebox"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
-  assert.throws(() => resolveSystem(c, programs, [{ sender: "$owner", box: "x", handler: "static" }]), /an image names no owner/);
+  assert.throws(() => resolveSystem(c, programs, [{ sender: "$owner", box: "x", handler: "messagebox" }]), /an image names no owner/);
 });
 
 test("system tree: refusals — no dispatch rows, a bad .cid, a handler that is no program, $infer on a host without one", async (t) => {

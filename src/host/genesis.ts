@@ -139,7 +139,7 @@ export interface BoxRowSpec { sender?: string; box?: string; handler: string }
  * its programs, by the host's loopback), `$infer` or a provider's `$<name>`; `program` a program
  * name (bin/<name>), a program record's CID, or `kernel` (an admin
  * row: `fn` the operation — objects, head, dispatch, peers); `fn` a handler's
- * function; anything else a handler's own setting (static's `root`, `index`;
+ * function; anything else a handler's own setting (a file handler's `root`, `index`;
  * a route's `read` op).
  */
 export interface DispatchSpec { transport?: Transport; address: string; prefix?: boolean; sender?: string; program: string; fn?: string; [setting: string]: unknown }
@@ -219,7 +219,7 @@ export const STOCK_SCOPES: Record<string, string[]> = {
  * or a CID) and its function; `auth: "none"` for an open route (sender `*`,
  * else `session`); `read` an op the reads must allow the caller (folded
  * into the row's sender at genesis, #115: foldReads).
- * `root` and `index` are the static handler's (#52), carried on the row. A
+ * `root` and `index` are a file handler's (#52, #125: skein-sdk `files`), carried on the row. A
  * `libp2p:<topic>` or `libp2p:/<protocol>` path is a `libp2p` row.
  */
 export interface PathRowSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; root?: string; index?: string }

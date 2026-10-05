@@ -50,7 +50,7 @@ export function dispatchBody(a: DispatchArgs, programs: Record<string, CID> = {}
   return { op: a.op, row: { transport: "mailbox", address: a.box, sender: a.sender ? senderKey(a.sender) : "*", program: handlerCid(a.handler, programs) } };
 }
 
-function senderKey(hex: string): Uint8Array {
+export function senderKey(hex: string): Uint8Array {
   if (!/^0[23][0-9a-f]{64}$/i.test(hex)) throw new Error(`sender ${JSON.stringify(hex)}: not an identity key (33 bytes, hex)`);
   return new Uint8Array(Buffer.from(hex, "hex"));
 }

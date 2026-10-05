@@ -97,7 +97,7 @@ bin/skein plan claim --recipient <ov1's identity> --out claim && bin/skein send 
 ```
 
 ```
-ov1: booted from the image baf4bcfb6esis6uqhtc6xoi4gtyvydibg24bfqva · 54 objects pre-filled · programs frontdoor, messagebox, static · … · no owner: claim it from your wallet (skein plan claim, skein send)
+ov1: booted from the image baf4bcfb6esis6uqhtc6xoi4gtyvydibg24bfqva · 54 objects pre-filled · programs frontdoor, messagebox · … · no owner: claim it from your wallet (skein plan claim, skein send)
 skein-host: router at http://127.0.0.1:8100 · an instance at http://<handle>.localhost:8100 (or /@<handle>)
 skein-host: no Arcade (SKEIN_ARC_URL): a broadcast event is dropped; a new genesis names no status provider
 ```

@@ -93,7 +93,8 @@ test("the instance manager: create (the owner's claim forwarded before published
   const fwd = await (await h.router.hydrate("alice")).kernel.store.get((first[0] as { request: CID }).request) as { message?: { sender?: unknown; recipient?: unknown; box?: string } };
   assert.ok(fwd.message?.box === "claim" && hex(fwd.message.sender) === client && fwd.message.recipient === undefined, "the forwarded message is the client's own, naming no recipient (#127)");
   assert.ok(!(await roles("alice")).includes("manager"), "the child's address book has no instance manager");
-  assert.equal((await fetch(`${h.base}/@alice/`)).status, 200, "it answers at its origin");
+  // #125: an image serves nothing at `/`; the explorer row (the claim's, the owner's key) answers, wanting a session.
+  assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 401, "it answers at its origin");
 
   a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
   assert.match(String(a[0]?.body.error), /handle alice is taken/, "a second create of the handle is refused, as an answer");
@@ -137,10 +138,10 @@ test("the instance manager: create (the owner's claim forwarded before published
   a = await send("host", "stop", { handle: "alice" });
   assert.equal(a[0]!.body.stopped, true);
   assert.equal(h.db.get("alice")!.status, "disabled");
-  assert.equal((await fetch(`${h.base}/@alice/`)).status, 404, "unpublished");
+  assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 404, "unpublished");
   a = await send("host", "start", { handle: "alice" });
   assert.equal(a[0]!.body.started, true);
-  assert.equal((await fetch(`${h.base}/@alice/`)).status, 200, "published again");
+  assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 401, "published again (#125: its explorer row answers; nothing is at /)");
   a = await send("host", "stop", { handle: "host" });
   assert.match(String(a[0]?.body.error), /is the host skein/);
   void host;

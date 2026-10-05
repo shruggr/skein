@@ -1,5 +1,0 @@
-{
-  "inputs": {},
-  "services": [],
-  "description": "shruggr/skein-static v0.2.1 (#52, #71): files from the instance's `main` tree, called by the front door with each request on its http rows; here the management site at `/` (root `www`)."
-}

@@ -76,11 +76,12 @@ bin/skein send http://martha.localhost:8100 claim     # sent by your wallet: you
 ```
 
 The default image (`images/default`, docs/BOOTSTRAP.md) is the same for
-everyone: the front door, the messagebox, the static app serving the
-management site at `/` (shruggr/skein-site), the explorer for whoever
-claims it, the git app's tree (not installed), and one row to the kernel,
-`claim`, from anyone: the first claim's sender owns it (#127), so claim it
-first thing. The host holds no owner's key and sends no claim; `skein plan
+everyone: the front door, the messagebox, the git app's tree (not
+installed), and one row to the kernel, `claim`, from anyone: the first
+claim's sender owns it (#127), so claim it first thing. It serves nothing
+at `/` (#125): the management site is an app (shruggr/skein-site, its page
+at `/site/`), which the host's own skein carries and from which you manage
+yours. The host holds no owner's key and sends no claim; `skein plan
 claim --messagebox <url>` names where the instance reaches its owner. A
 second claim is refused.
 
@@ -320,8 +321,8 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
   and pull request, with the browser and component parts of the equivalence
   suite skipped (no Playwright, Chromium, wasm-tools or adapter there).
 - `equiv/run.sh` clones the pinned sibling apps (skein-chain, skein-overlay,
-  skein-static, skein-shell, skein-chat, skein-onboard, skein-git);
-  `SKEIN_CHAIN_DIR`, `SKEIN_OVERLAY_DIR`, `SKEIN_STATIC_DIR`,
+  skein-site, skein-shell, skein-chat, skein-onboard, skein-git);
+  `SKEIN_CHAIN_DIR`, `SKEIN_OVERLAY_DIR`, `SKEIN_SITE_DIR`,
   `SKEIN_SHELL_DIR`, `SKEIN_CHAT_DIR`, `SKEIN_ONBOARD_DIR`, `SKEIN_GIT_DIR`
   point it at local checkouts. The git app's case (`git-clone.ts`) serves a
   local repository with `git http-backend`. `npm test` installs the
@@ -337,22 +338,21 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | repo | what | version |
 |---|---|---|
 | [shruggr/skein](https://github.com/shruggr/skein) | kernel, boundary programs (front door, messagebox, resolve), the wallet program, the node host, the client | log format 8 |
-| [shruggr/skein-sdk](https://github.com/shruggr/skein-sdk) | the Zig package every program is written against: the `skein` imports, codecs, `app`, `chain`, wallet library, WIT | v0.4.0 |
+| [shruggr/skein-sdk](https://github.com/shruggr/skein-sdk) | the Zig package every program is written against: the `skein` imports, codecs, `app`, `files`, `chain`, wallet library, WIT | v0.6.0 |
 | [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.3.0 |
 | [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.6.1 |
-| [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.3.0 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager (the wallet's signed claim forwarded, #127) | v0.3.0 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
-| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site every skein from the default image serves: locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.5.2 |
+| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site, an app (#125: its page at `/site/`, served from its own tree by skein-sdk's `files`; the owner may add a row for `/`): locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.6.0 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:
 
 ```
 kernel-zig/      the kernel: skein-kernel serve | replay | shell | dump | fuel; equiv/ (the equivalence suite)
-images/default/  the default image (#89): a system tree with no owner and the claim row; the site in www/, the git app's tree in apps/git (#92)
+images/default/  the default image (#89): a system tree with no owner and the claim row; the git app's tree in apps/git (#92); no site (#125)
 programs/        frontdoor, messagebox, resolve, wallet (Zig over skein-sdk); test/ (fixtures, app-demo)
 wasm/            the committed modules the kernel pins (kernel-zig/src/programs.zig), see wasm/README.md
 src/host/        the node host: skein-host (cli.ts), the HTTP transport, providers, feeds, broadcaster, libp2p node, signer, install

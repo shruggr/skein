@@ -42,23 +42,23 @@ outpoint later. A new skein starts from it and is then claimed.
 ```
 images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
-  bin/static.wasm                         shruggr/skein-static v0.2.1's module
   bin/*.json                              the program records' inputs and descriptions
   etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; no explorer row (#121: the claim
-                                          writes it with the owner's key); static at `/`, `/manifest.json` (#97) and under `/site/` (root www)
+                                          writes it with the owner's key); nothing at `/` (#125)
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  www/                                    the management site: shruggr/skein-site v0.5.2's tree, copied (the same git tree)
   apps/git/                               the git app: shruggr/skein-git v0.1.0's tree, copied, not wired
 ```
 
-It has the four tables and the apps needed to be reachable and to install
-more: the front door, the messagebox and the static app serving the
-management site (shruggr/skein-site, #92). Nothing else is installed — no
-git app, no wallet, no chain app, no shell, no chat: the owner installs those
-afterwards, from the management page. The front door, the messagebox and
-static are wired by the genesis (no app records), as any system tree wires
-its programs.
+It has the four tables and the programs needed to be reachable and to
+install more: the front door and the messagebox. It serves no page (#125):
+the management site is an app (shruggr/skein-site, its page at `/site/`),
+which the host's own skein carries, installed by the host's owner; you
+manage your skeins from that page, which talks to each one directly.
+Nothing else is installed — no site, no git app, no wallet, no chain app, no
+shell, no chat: the owner installs those afterwards, from a management
+page. The front door and the messagebox are wired by the genesis (no app
+records), as any system tree wires its programs.
 
 - **The explorer** is not a row of the image (#121: every sender is a key,
   and an image has no owner's key yet). The claim writes it — `/explore`
@@ -166,7 +166,7 @@ etc/dispatch.json        the dispatch rows (#77): [{transport?: mailbox | http |
 etc/subscriptions.json   the form before #77, still read: [{sender?: key, box?, handler}], each a mailbox row
 etc/routes.json          the form before #77, still read (#40): [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}],
                          each an http row (auth none → sender "*", else "session") or, for a `libp2p:` path, a
-                         libp2p row; default: the default http rows (root, index: the static handler's, #52)
+                         libp2p row; default: the default http rows (root, index: a file handler's, #52)
 etc/reads.json           the form before #115, still read: who may call a route marked `read: op`, [{caller?: key, op} | {owner: true, op}]; folded into those rows' senders at genesis; default: the default reads
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
@@ -193,18 +193,15 @@ etc/reads.json           the form before #115, still read: who may call a route 
   `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
   writes `etc/routes.json` replaces the default http rows whole (include them
   to keep the messagebox); likewise `etc/reads.json`.
-- **Static files** (#52): an app, shruggr/skein-static (#71), not pinned:
-  a tree that serves files wires it — `bin/static.wasm` (copied from that
-  repo's tree; `bin/static.cid` if the instance already holds the module),
-  optionally `bin/static.json`
-  (`{"inputs": {}, "description": …}`), and a row to it in
-  `etc/dispatch.json`, e.g. `{"transport": "http", "address": "/site",
-  "prefix": true, "sender": "*", "program": "static", "fn": "get", "root":
-  "www"}` (and, for the site's root, `{"address": "/", …, "root":
-  "www"}`). `root` and `index` are the row's settings, passed to the
-  handler as the row that matched
-  (docs/MESSAGES.md, "Static files"). The files are the tree's own
-  (`www/…`), served from the `main` head's tree as it stands.
+- **Files** (#52, #125): serving files is a function, skein-sdk's `files`
+  module (`files.serve(a, req, tree, files.rowOptions(req))`), which any
+  http handler calls with the tree it picks — its own app's
+  (shruggr/skein-site serves its tree's `www`), a head's, any CID. A row to
+  such a handler carries its settings, e.g. `{"transport": "http",
+  "address": "/site", "prefix": true, "sender": "*", "program": <the
+  handler>, "fn": "get", "root": "www"}`; `root` and `index` are passed to
+  the handler as the row that matched (docs/MESSAGES.md, "Files"). The
+  static app (shruggr/skein-static) is archived.
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
   where the instance delivers what it sends its owner. Unset, the host's
   (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
@@ -278,7 +275,7 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 |---|---|---|
 | shruggr/skein-shell | the shell app (#83): `run` (a command over a tree, row `run` from the owner) and the shell itself — brush, coreutils, the toolset, python's stdlib, each a file of its tree, declared as a shell program in its manifest (docs/APPS.md §6b) | `skein plan install https://github.com/shruggr/skein-shell#<commit> --origin <url>`, sent (below). A genesis has no shell: an instance runs commands only once this is installed |
 | shruggr/skein-chat | the chat app (#83): the turn loop, rows `chat` from the owner and from anyone; its `bash` calls run the shell app's shell when the instance has the shell app | `skein plan install https://github.com/shruggr/skein-chat#<commit> --origin <url>`, sent |
-| shruggr/skein-static | the static file handler (#52; 0.2.0: the #77 rows) | `skein plan install https://github.com/shruggr/skein-static#<commit> --origin <url>`, sent: its rows under `/static/`; or at boot, `bin/static.wasm` and a row (above, "Static files") |
+| shruggr/skein-site | the management site (#92; an app since #125): one route handler serving its own tree's `www` (skein-sdk `files`) | `skein plan install https://github.com/shruggr/skein-site#<commit> --origin <url>`, sent: its row under `/site/`; then, if the owner wants the page at `/`, the owner's own row: `skein plan dispatch add --http --prefix --fn get --settings '{"root":"www"}' / site.site --origin <url>`, sent (docs/APPS.md §3, "The management page") |
 | shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein plan install https://github.com/shruggr/skein-chain#<commit> --origin <url>`, sent: rows `chain` from `event`, `$self` and `$owner`, `status` from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
 | shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein plan install https://github.com/shruggr/skein-overlay#<commit> --origin <url>`, sent (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 | shruggr/skein-git | the git app (#91): `git.clone {url, hash}` from the owner, box `git` — one commit fetched through the fetch provider, checked against the hash, kept in the store, its app record built and answered (deploy by hash, below) | `skein plan install https://github.com/shruggr/skein-git#<commit> --origin <url>`, sent |
@@ -339,8 +336,11 @@ There are three ways to install an app.
 
   One at a time, the same messages: `skein plan deploy <dir>` (objects and
   `head main`), `skein plan dispatch add [--sender <key>] <box> <handler>`
-  (a mailbox row; http and libp2p rows through `install`), `skein plan
-  peers …`.
+  (a mailbox row), `skein plan dispatch add --http [--prefix] --fn <fn>
+  [--settings <json>] <path> <handler>` (#125: an http row of the owner's,
+  the handler a program record CID, a genesis program or `<app>.<role>`, an
+  installed app's; an app's own http and libp2p rows come through
+  `install`), `skein plan peers …`.
 
   `plan install` clones the repository on the machine it runs on: a
   coding-session tool, not the user's path.
@@ -476,9 +476,11 @@ boot is written, and the process exits 0.
   address escapes, the senders, the form before #77 refused, shapes,
   `requires`); `kernel-zig/equiv/install.ts`
   (in `run.sh`): the owner's messages (`skein plan install`, sent to
-  `/sendMessage`) for shruggr/skein-static and
+  `/sendMessage`) for shruggr/skein-site (and the owner's root row to its
+  handler, which its uninstall leaves) and
   programs/test/app-demo into a running instance, driven, uninstalled,
-  replayed.
+  replayed. `kernel-zig/equiv/files.ts` (in `run.sh`): skein-sdk's `files`
+  through the site's handler (#125), its row and the owner's.
 - `src/host/packet.test.ts`: both forms, with and without an index; the
   scope-mismatch, hash-mismatch, incomplete, unproven and malformed refusals; a
   patched file resolved through its base, and incomplete without it.
@@ -488,10 +490,10 @@ boot is written, and the process exits 0.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
 - `src/host/boot.test.ts` also resolves the default image: no owner, no
   admin rows, the claim row its one kernel row, the explorer route with the
-  read rule `{op: "explore", owner: true}`, the site at `/` and `/site/`;
-  `$owner` in an image refused.
+  read rule `{op: "explore", owner: true}`, nothing at `/`, `/site` or
+  `/manifest.json` (#125); `$owner` in an image refused.
 - `kernel-zig/equiv/claim.ts` (in `run.sh`): an instance from the default
-  image serves the management site, answers nobody's explorer read and
+  image serves nothing at `/` (#125), answers nobody's explorer read and
   refuses the owner's admin messages; the owner's own claim (`skein plan
   claim`, sent to `/sendMessage`; a key in its body not read) writes the
   sender's admin rows, removes the claim row, sets the head `claim` and the
@@ -522,8 +524,9 @@ boot is written, and the process exits 0.
   + `dispatch` + `start` install it and it runs; a hash not held, another
   commit's pack, a bad URL, no repository and no manifest refused; replayed.
 - `kernel-zig/equiv/site.ts` (in `run.sh`, #92): the management site in
-  headless Chrome on a host skein — create from the page, the locator in the
-  wallet's basket, the git app installed from the image's `apps/git`,
+  headless Chrome on a host skein (#125: installed there as an app, with the
+  owner's root row) — create from the page, the locator in the
+  wallet's basket, the new skein managed from the host's page, the git app installed from the image's `apps/git`,
   app-demo deployed by hash from the page, the explorer, the host skein's
   children; replayed.
 - `src/host/http.test.ts`: the fetch provider's network (`fetchHttp`): a

@@ -411,6 +411,7 @@ wallet's identity, admitted by the owner's admin rows.
 bin/skein plan install <repo-url#commit | dir> <where> [--config json] [--out dir]
 bin/skein plan uninstall <app> <where> [--out dir]
 bin/skein plan dispatch add|remove [--sender <key>] <box> <handler> <where> [--out dir]
+bin/skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender <key>|session] <path> <handler> <where> [--out dir]
 bin/skein plan peers add <key> <address> [--transport …] [--role r] [--handle h@d] <where> [--out dir]
 bin/skein plan peers remove <key> <where> [--out dir]
 bin/skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
@@ -477,7 +478,8 @@ within one segment; a pattern naming a directory takes all of it;
 `.git` and `node_modules` are never sent. `--all` sends everything else.
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-static#<commit> --origin http://martha.localhost:8100 --out plan
+bin/skein plan install https://github.com/shruggr/skein-site#<commit> --origin http://martha.localhost:8100 --out plan
+bin/skein plan dispatch add --http --prefix --fn get --settings '{"root":"www"}' / site.site --origin http://martha.localhost:8100 --out root   # the owner's own row: the site at /
 bin/skein send http://martha.localhost:8100 plan
 bin/skein plan dispatch add --sender <key> register resolve --store ~/.skein/instances/martha/runtime.db --out plan
 bin/skein plan deploy ~/Work/prompts/.agents/martha --store ~/.skein/instances/martha/runtime.db --out plan
@@ -648,7 +650,7 @@ where they use one. Unset means the default.
 | variable | what |
 |---|---|
 | `SKEIN_SHELL_DIR`, `SKEIN_SHELL_REV`, `SKEIN_CHAT_DIR`, `SKEIN_CHAT_REV`, `SKEIN_ONBOARD_DIR`, `SKEIN_ONBOARD_REV`, `SKEIN_GIT_DIR`, `SKEIN_GIT_REV` | the apps the tests install: a checkout, or another commit than src/testapps.ts pins |
-| `SKEIN_CHAIN_DIR`, `SKEIN_CHAIN_REV`, `SKEIN_OVERLAY_DIR`, `SKEIN_OVERLAY_REV`, `SKEIN_STATIC_DIR`, `SKEIN_STATIC_REV` | the same for the equiv drivers' apps |
+| `SKEIN_CHAIN_DIR`, `SKEIN_CHAIN_REV`, `SKEIN_OVERLAY_DIR`, `SKEIN_OVERLAY_REV`, `SKEIN_SITE_DIR`, `SKEIN_SITE_REV` | the same for the equiv drivers' apps (the site, #125) |
 | `SKEIN_KERNEL` | the equiv drivers' kernel binary (default `kernel-zig/zig-out/bin/skein-kernel`) |
 | `SKEIN_EQUIV_BROWSER` | `0`: skip the browser parts of equiv/run.sh |
 | `SKEIN_CHROMIUM`, `SKEIN_PLAYWRIGHT` | the Chromium and the Playwright package the browser parts use |
@@ -661,5 +663,5 @@ where they use one. Unset means the default.
 | `SKEIN_POLLS` | router.test.ts: how many polls the poll test makes (default 100) |
 | `SKEIN_TEST_MESSAGEBOX_HOST` | web/envelope.test.ts: the live messagebox it tries (default `http://127.0.0.1:8100`) |
 | `SKEIN_SDK_DIR` | scripts/sdk-local.sh: the sibling skein-sdk checkout |
-| `SKEIN_DIR` | images/default/www/build.mjs (the site's build): the skein checkout it builds against |
+| `SKEIN_DIR` | shruggr/skein-site's build.mjs (the page's bundles): the skein checkout it builds against |
 | `SKEIN_NO_NODE` | host-go's tests: skip the comparison with Node |

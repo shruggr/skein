@@ -36,6 +36,21 @@ test("planDispatch / planPeers: the kernel's bodies (sender and key as bytes)", 
   assert.throws(() => planPeers(KEY, [{ op: "remove", key: "02ab" }]), /not an identity key/);
 });
 
+test("planDispatch --http (#125): the owner's http row (prefix, fn, the handler's settings; no app); refusals", () => {
+  const prog = encode({ kind: "program" } as never).cid;
+  const p = planDispatch(KEY, { op: "add", box: "/", handler: "site.site", http: { prefix: true, fn: "get", settings: { root: "www" } } }, { "site.site": prog });
+  const row = (p.messages[0]!.body as { row: Record<string, unknown> }).row;
+  assert.deepEqual({ ...row, program: String(row.program) }, { transport: "http", address: "/", prefix: true, sender: "*", program: String(prog), fn: "get", root: "www" });
+  assert.equal(p.prompt[0], `dispatch add http /* from anyone → site.site.get (${prog}) (root www)`);
+  const s = planDispatch(KEY, { op: "add", box: "/x", sender: "session", handler: String(prog), http: { fn: "get" } });
+  assert.deepEqual([(s.messages[0]!.body as { row: { sender: unknown; prefix?: unknown } }).row.sender, (s.messages[0]!.body as { row: { prefix?: unknown } }).row.prefix], ["session", undefined]);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "x", handler: String(prog), http: { fn: "get" } }), /a path/);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "/a/../b", handler: String(prog), http: { fn: "get" } }), /a path/);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "" } }), /--fn/);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "get", settings: { app: "site" } } }), /the row's own/);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "x", sender: "session", handler: String(prog) }), /an http row's/);
+});
+
 test("writePlan / planFiles / deliver: numbered files in order, an earlier plan's removed; delivery stops at the first non-2xx", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "skein-admin-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

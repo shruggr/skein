@@ -196,7 +196,7 @@ explorer row's sender (there is no reads table since #115). `program` is
 the handler, or the string `kernel`: an admin row, `fn` its operation.
 `filter` (#121) names what the kernel's door runs on the package's content
 before the entry is written ("The door", below, "Requests"): `beef`. The
-rest is the handler's own (static's `root` and `index`, the install's
+rest is the handler's own (a file handler's `root` and `index`, #125; the install's
 `app`), carried to it as `match`. A row's key is (transport, address,
 prefix, sender): `add` replaces the row with that key in place, else
 appends; `remove` deletes it. Replay writes the same chain.

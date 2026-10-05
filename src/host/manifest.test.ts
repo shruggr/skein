@@ -115,18 +115,15 @@ test("the form before #77 (handler, boxes, routes, heads) is refused", () => {
   }
 });
 
-test("the stock apps' manifests check in the #77 shape (skein-static, #79; skein-chat, #83)", () => {
-  const stat = {
-    kind: "app", name: "static", version: "0.2.0", programs: { static: "bin/static.wasm" },
-    provides: [{ interface: "static.files/1", functions: { get: { writes: false, args: { "method?": "string", "route?": "string", "path?": "string", "query?": "string", "headers?": "map", "match?": "map" }, answer: { status: "int", type: "string", headers: "map", body: "bytes" } } } }],
+test("the stock apps' manifests check in the #77 shape (skein-site, #125; skein-chat, #83)", () => {
+  const site = {
+    kind: "app", name: "site", version: "0.6.0", programs: { site: "bin/site.wasm" },
+    provides: [{ interface: "site/1", functions: { get: { writes: false, args: { "method?": "string", "route?": "string", "path?": "string", "query?": "string", "headers?": "map", "match?": "map" }, answer: { status: "int", type: "string", headers: "map", body: "bytes" } } } }],
     requires: [],
-    dispatch: [
-      { transport: "http", address: "/site", prefix: true, sender: "*", program: "static", fn: "get", root: "www" },
-      { transport: "http", address: "/", sender: "*", program: "static", fn: "get", root: "www" },
-    ],
+    dispatch: [{ transport: "http", address: "/", prefix: true, sender: "*", program: "site", fn: "get", root: "www" }],
   };
-  const c = checkManifest(stat, (p) => p === "bin/static.wasm");
-  assert.deepEqual(c.manifest.dispatch.map((r) => rowKey("static", r)), ["http /static/site* *", "http /static/ *"]);
+  const c = checkManifest(site, (p) => p === "bin/site.wasm");
+  assert.deepEqual(c.manifest.dispatch.map((r) => rowKey("site", r)), ["http /site/* *"], "#125: the site's one row is under /site/");
   // #83: the chat app — and the shell app, whose shell program is a map (below); app names `shell` and `chat` are free.
   const chat = {
     kind: "app", name: "chat", version: "0.1.0", programs: { loop: "bin/loop.wasm" }, provides: [], requires: [],

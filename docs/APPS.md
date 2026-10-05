@@ -7,7 +7,8 @@ wallet and the overlay apps under their own names over the chain app, the
 form before #77 gone; and by #83: the shell and the chat loop are apps,
 shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
 by #91: deploy by hash, the git app cloning in the VM, §3; and by #92: the
-management page, §3). Status of each
+management page, §3; and by #125: the management site an app, not in the
+default image, §3). Status of each
 part is marked (Built, #…) or (Spec.) in the text, and in §7's table. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
@@ -139,8 +140,8 @@ approves (§3): the install prompt is the rows read aloud. A manifest asking
 for a row the owner did not approve is refused at install.
 
 **The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
-(#79): skein-static 0.2.0, skein-overlay 0.6.1, skein-shell and skein-chat
-0.1.0 are in this shape. There are no grants: an app writes only `<name>/…`.
+(#79): skein-overlay 0.6.1, skein-shell and skein-chat 0.1.0 and
+skein-site 0.6.0 are in this shape (skein-static, archived by #125, was). There are no grants: an app writes only `<name>/…`.
 
 **The app record** — the root of `<name>/app`, written by the install
 (built):
@@ -258,10 +259,25 @@ instance, and there are two ways:
   is). Not yet: `push` (publishing from a skein), refs or tags as the
   `hash`, sha256 repositories.
 
-**The management page** (built, #92). Every skein from the default image
-serves the management site — shruggr/skein-site, a static app's files in the
-image's `www/`, at `/` and `/site/` — and that page is the installer (there
-is no installer program). Connected to the owner's wallet, it reads the
+**The management page** (built, #92; an app since #125). The management
+site is an app, shruggr/skein-site (name `site`): one route handler serving
+its own tree's `www` (the head `site/app`'s record, its `tree`, through
+skein-sdk's `files`) on one row, `/site/*`; the page is the installer
+(there is no installer program). The default image has no site and serves
+nothing at `/`: the host's own skein carries the site, installed by the
+host's owner, and a user manages their skeins from there, the page talking
+to each one directly. **The root is the owner's**: an app's rows are under
+its name, and the owner may send one more row of their own to the site's
+handler, `{transport: "http", address: "/", prefix: true, sender: "*",
+program: <the site's program record>, fn: "get", root: "www"}` — `skein
+plan dispatch add --http --prefix --fn get --settings '{"root":"www"}' /
+site.site <where>` (a handler `<app>.<role>` is that installed app's
+program) — to serve the page at `/` (and its `manifest.json`, the wallet's
+grouped request, at the origin's `/manifest.json`). A manifest has no field
+for it: the install shows the app's own rows only, and the site's README
+says how. The row carries no `app`, so the site's upgrade or uninstall
+leaves it (`skein plan dispatch remove` with the same arguments removes it);
+as a prefix at `/` it takes every path no exact row or longer prefix takes. Connected to the owner's wallet, it reads the
 skein through its explorer (`/explore`, the owner's read, docs/MESSAGES.md),
 which gives it what the plan needs: the heads, the genesis, the claim, the
 address book, the dispatch table (the chain `{kind: "dispatch"}`) and any
@@ -304,7 +320,7 @@ loop are three ways to the same messages: none of it is the host's (#124).
   instance's head is read no more, so the form has to post there.
 - **One grouped permission request** (#97, skein-site 0.5.0; 0.5.2 without
   the spending allowance): the site's `manifest.json`, served at
-  `/manifest.json` of the skein's own origin, asks a BRC-100 wallet once for
+  `/manifest.json` of the skein's own origin by the owner's root row (#125), asks a BRC-100 wallet once for
   the page's protocols and its basket, and declares the counterparty
   protocols (one prompt per new skein or certifier).
 
@@ -717,7 +733,8 @@ bounded at 64 MiB).
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
 | install client (manifest → objects + head + dispatch + start, the prompt); `skein plan install <repo#commit|dir>` / `uninstall` writing the owner's `/sendMessage` bodies, `skein send` (any BRC-100 wallet: `1sat authfetch`); `start`/`stop`, row senders | built (#72, #76, #77, #124) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
-| the management page: the site in the default image; install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92: §3; shruggr/skein-site 0.5.2, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
+| the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's optional `/` row); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92, #125: §3; shruggr/skein-site 0.6.0, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
+| the owner's own http row to an app's handler (`skein plan dispatch --http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125: src/client/admin.ts `planDispatch`) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
@@ -726,4 +743,4 @@ bounded at 64 MiB).
 | the wallet and each overlay under their own names, reading `chain/…`, ingesting by message (the wallet is a genesis-wired program the kernel pins, with scope `wallet/`, not an installable app: it has no `etc/app.json` and `wallet` is a reserved app name); two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0; skein-shell and skein-chat 0.1.0 since #83) |
 | the shell and the chat loop as apps (shruggr/skein-shell, shruggr/skein-chat); a shell program declared in a manifest, its modules files of the tree; no shell in a genesis | built (#83: §6b) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
-| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-shell, shruggr/skein-chat, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |
+| apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-shell, shruggr/skein-chat, shruggr/skein-site, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |

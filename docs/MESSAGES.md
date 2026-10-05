@@ -200,10 +200,12 @@ envelope. Answers are signed on the session through the instance's signer
   (`match`), verifies, and calls the row's handler, an in-VM call of
   `program`'s `fn` in its step; what that receives and returns is the
   program-facing contract below ("Route handlers").
-- **Static files** (#52, the app shruggr/skein-static): the handler for a site. A row
-  `{transport: "http", address, prefix?, sender: "*", program: static, fn: "get",
-  root?, index?}` answers `GET`/`HEAD` with the file at `<root>/<path>` in the
-  `main` head's tree — `path` the route past the prefix, percent-decoded;
+- **Files** (#52; #125: skein-sdk's `files` module, the static app
+  archived): any handler serves a site with `files.serve(a, req, tree,
+  files.rowOptions(req))` over the tree it picks (shruggr/skein-site: its
+  own app record's `tree`). A row `{transport: "http", address, prefix?,
+  sender: "*", program: <the handler>, fn: "get", root?, index?}` answers
+  `GET`/`HEAD` with the file at `<root>/<path>` in that tree — `path` the route past the prefix, percent-decoded;
   `root` default the tree's top; a path ending in `/` (or an exact route on
   a directory) its `index`, default `index.html`; a directory without the
   `/` a 301 to it. `type` comes from the extension (html, css, js, mjs,
@@ -332,10 +334,10 @@ The **default routes**: the BRC-33 messagebox (`/sendMessage`,
 `/listMessages`, `/acknowledgeMessage`, at the root and under `/messagebox`)
 and the explorer (`/explore…`, read op `explore`: the log, threads, a thread,
 a head, a record, what points at a record (`/explore/edges/<cid>?rel=`, #92),
-as DAG-JSON; `programs/frontdoor/explore.zig`). The default image adds the
-management site (static, at `/` and `/site/`), which reads a skein through
-these routes (docs/APPS.md §3, "The management page"); each read is a
-request entry, nothing else written.
+as DAG-JSON; `programs/frontdoor/explore.zig`). The management site (an
+app, shruggr/skein-site: `/site/`, and `/` by the owner's row, #125; not in
+the default image) reads a skein through these routes (docs/APPS.md §3,
+"The management page"); each read is a request entry, nothing else written.
 
 **The standard AuthFetch** (`@bsv/sdk`, and the `@bsv/message-box-client` over it)
 keeps one session per origin and shakes hands at `<origin>/.well-known/auth`.

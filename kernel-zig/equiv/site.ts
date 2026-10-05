@@ -3,16 +3,18 @@
 // providers, the instance manager), with its host skein:
 //
 //   `skein-host init --owner <you>` creates the host skein from the default
-//   image (which carries the site at / and /site/, the explorer route for its
-//   owner, and the git app's tree under apps/git); you install the onboarding
-//   app into it as the owner's messages (`skein plan install`, #124).
+//   image (no site, no static, #125: the explorer route for its owner and the
+//   git app's tree under apps/git); you install the onboarding app and the
+//   management site (shruggr/skein-site, an app: its page at /site/) into it
+//   as the owner's messages (`skein plan install`, #124), and send the site's
+//   optional root row (`skein plan dispatch --http … / site.site`).
 //
 //   The wallet's grouped request (#97): GET /manifest.json at the host skein's
-//   own origin is the site's manifest.json (the protocols, the basket and the
-//   spend the page uses; the counterparty protocols); the router's origin
-//   still answers its own (metanet.trust, metanet.handles).
+//   own origin is the site's manifest.json, by that root row (the protocols,
+//   the basket and the spend the page uses; the counterparty protocols); the
+//   router's origin still answers its own (metanet.trust, metanet.handles).
 //
-//   The page, served by the host skein, with a wallet in the tab over your
+//   The page, served by the host skein at /site/, with a wallet in the tab over your
 //   key (`?key=`, createWebWallet) pointed at a stand-in for the 1sat services
 //   (`&services=`: headers for one block holding the payment that funds the
 //   wallet, and a broadcast that accepts) — the chain is the only thing not
@@ -21,8 +23,9 @@
 //   1. create: the form sends {fn: "onboard.create", args: {handle: alice}}
 //      to /onboard/call on your session; the answer {handle, identity, url};
 //      a locator token (a PushDrop output in basket skein-locators: alice's
-//      identity, url, handle) written into your wallet; the page opens alice;
-//   2. on alice (the same files, served by alice): her apps read from her
+//      identity, url, handle) written into your wallet; the page opens alice's
+//      view (alice serves no page: she is managed from the host's);
+//   2. alice's apps, from the host's page talking to alice: her apps read from her
 //      explorer (yours: you own her); install the git app from the tree her
 //      image carries (objects for its module and records, head, dispatch,
 //      start — the prompt shown first); then install app-demo by hash from a
@@ -33,11 +36,9 @@
 //   3. the explorer renders alice's log (genesis, the claim, the requests);
 //   4. back on the host skein, a locator for it added from the page; its page
 //      lists alice under the skeins created there;
-//   5. a handle (#103, #113): the page's Register form (skein-site 0.5.2)
-//      still signs `register <name>`, which the host skein's onboarding app
-//      refuses (it wants `register <name>@<domain>`); until skein-site
-//      follows, the page's wallet sends the new request from the page
-//      (/.well-known/skein-host for the domain, /account/register): the app
+//   5. a handle (#103, #113): the page's Register form (skein-site ≥ 0.5.3)
+//      signs `register <name>@<domain>` (/.well-known/skein-host for the
+//      domain) and posts it to /account/register: the host skein's app
 //      has the instance manager create your mailbox instance and answers the
 //      handle certificate its record holds, which the wallet in the tab keeps
 //      (acquireCertificate, direct: encrypted fields, your keyring);
@@ -78,7 +79,8 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { appCheckout, ONBOARD_APP, ownerCli } from "../../src/testapps.ts";
+import { appCheckout, ONBOARD_APP, ownerCli, sendDir, SITE_APP } from "../../src/testapps.ts";
+import { planMain } from "../../src/client/admin-cli.ts";
 import { HANDLE_CERTIFICATE_TYPE } from "../../src/host/handles.ts";
 import { decodeProfile } from "@1sat/utils";
 import { outpointFromBytes, outpointToBytes } from "@1sat/templates";
@@ -255,6 +257,15 @@ try {
   r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
   await router.settled();
   check(r.code === 0, `the onboarding app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
+  // #125: the management site, an app the host's owner installs, and its optional root row (the owner's own).
+  r = await cli(["install", appCheckout(SITE_APP), "--instance", "host"], { wallet: ephemeralWallet(youKey), id: you });
+  await router.settled();
+  check(r.code === 0, `the site app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
+  const rootPlan = join(home, "root-row");
+  const pe: string[] = [];
+  const pc = await planMain(["dispatch", "add", "--http", "--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", db.get("host")!.store, "--out", rootPlan], { vars: {}, out, err: (l) => { pe.push(l); out(l); } });
+  const rootSent = pc === 0 ? await sendDir({ port, owner: ephemeralWallet(youKey), settled: () => router.settled() }, "host", rootPlan) : 0;
+  check(pc === 0 && rootSent === 1, `the owner's root row for the site (skein plan dispatch add --http … / site.site), sent: ${pc} ${pe.join(" ")}`);
 
   // ------------------------------------------------ the wallet's grouped request (#97): /manifest.json at the host skein's own origin
   // (host.localhost:<port>, the origin a wallet takes the page's originator from); the router's origin keeps its own.
@@ -286,6 +297,8 @@ try {
     "and the router's origin answers its own manifest (metanet.trust, metanet.handles), not the site's");
 
   const page = await (await browser.newContext()).newPage();
+  /** The host skein's site, at the app's own path. */
+  const sitePage = `${base}/@host/site/`;
   page.on("console", (m) => { if (verbose || m.type() === "error") process.stdout.write(`  | page: ${m.text()}\n`); });
   page.on("pageerror", (e) => process.stdout.write(`  | page error: ${e.message}\n`));
   page.on("dialog", (d) => void d.accept());
@@ -302,10 +315,12 @@ try {
   };
 
   // ------------------------------------------------ the page on the host skein, your wallet in the tab
-  await page.goto(`${base}/@host/${search}`);
+  const root = await fetch(`${base}/@host/`);
+  check(root.status === 200 && (await root.text()).includes('src="app.js"'), `the host skein serves the site at / by the owner's row (${root.status})`);
+  await page.goto(`${sitePage}${search}`);
   await ready();
   const who = await page.locator("#who").getAttribute("title");
-  check(who === you, `the host skein serves the site at / and the page runs your wallet (${who?.slice(0, 10)})`);
+  check(who === you, `the host skein serves the site at /site/ and the page runs your wallet (${who?.slice(0, 10)})`);
   const funded = await page.evaluate(async ([tx, prefix, suffix, sender]) => {
     const w = (window as unknown as { site: { wallet: { internalizeAction(a: unknown): Promise<{ accepted: boolean }> } } }).site.wallet;
     return (await w.internalizeAction({ tx, outputs: [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: prefix, derivationSuffix: suffix, senderIdentityKey: sender } }], description: "fund the test wallet" })).accepted;
@@ -315,13 +330,15 @@ try {
   // ------------------------------------------------ 1. create
   await page.fill("#create input[name=handle]", "alice");
   await page.click("#create button[type=submit]");
-  await page.waitForURL(/\/@alice\//, { timeout: 180_000 });
+  await page.waitForURL(/#\/s\/0[23][0-9a-f]{64}$/, { timeout: 180_000 });
   await ready();
   const alice = db.get("alice");
-  check(!!alice && alice.status === "enabled", `create from the page: alice exists (${alice?.identity?.slice(0, 10)}), and the page opened her at her url`);
+  check(!!alice && alice.status === "enabled", `create from the page: alice exists (${alice?.identity?.slice(0, 10)}), and the page opened her view`);
   const aliceId = alice!.identity!;
   stores.push(alice!.store);
-  check(page.url().startsWith(`${base}/@alice/?key=`) && page.url().endsWith(`#/s/${aliceId}`), `the page is alice's own copy of the site, on her page (${page.url().replace(/key=[0-9a-f]+/, "key=…")})`);
+  check(page.url().startsWith(`${sitePage}?key=`) && page.url().endsWith(`#/s/${aliceId}`), `the page stays the host's, on alice's view (#125: she serves no page) (${page.url().replace(/key=[0-9a-f]+/, "key=…")})`);
+  const aliceRoot = await fetch(`${base}/@alice/`);
+  check(aliceRoot.status === 404, `alice serves nothing at / (#125: no site in the image): ${aliceRoot.status}`);
   const locators = await page.evaluate(async () => {
     const w = (window as unknown as { site: { wallet: { listOutputs(a: unknown): Promise<{ outputs: Array<{ outpoint: string; lockingScript: string }> }> } } }).site.wallet;
     return (await w.listOutputs({ basket: "skein-locators", include: "locking scripts" })).outputs;
@@ -359,16 +376,16 @@ try {
   check(call.status === 200 && cv.result?.count === 2, `app-demo runs in alice: /app-demo/call add {by: 2} → ${call.status} ${JSON.stringify(cv)}`);
 
   // ------------------------------------------------ 3. the explorer
-  await page.goto(`${base}/@alice/${search}#/s/${aliceId}/log`);
+  await page.goto(`${sitePage}${search}#/s/${aliceId}/log`);
   await ready();
   await page.waitForSelector("#log", { timeout: 60_000 });
   const log = await page.locator("#log").innerText();
   check(/request \(http\)/.test(log) && /request \(local\)/.test(log) && /Older/.test(await page.locator("main").innerText()), `the explorer renders alice's log, newest first: the page's requests, the providers' answers (${log.split("\n").length} rows), and a link to older entries`);
-  await page.goto(`${base}/@alice/${search}#/s/${aliceId}/log?before=2`);
+  await page.goto(`${sitePage}${search}#/s/${aliceId}/log?before=2`);
   await page.waitForFunction(() => /genesis/.test(document.getElementById("log")?.innerText ?? ""), null, { timeout: 60_000 });
   const first = await page.locator("#log").innerText();
   check(/^1\s.*request \(local\)/m.test(first) && /^0\s.*genesis/m.test(first), `and its first entries: 0 the genesis, 1 the claim (a local request) (${first.replace(/\s+/g, " ").slice(0, 160)})`);
-  await page.goto(`${base}/@alice/${search}#/s/${aliceId}/dispatch`);
+  await page.goto(`${sitePage}${search}#/s/${aliceId}/dispatch`);
   await page.waitForSelector("#dispatch", { timeout: 60_000 });
   check((await page.locator("#dispatch").innerText()).includes("/app-demo/call"), "and her dispatch table, with app-demo's rows");
   const stranger = PrivateKey.fromRandom();
@@ -376,46 +393,32 @@ try {
   check(refused.status === 403, `another key's read of alice's explorer is refused (${refused.status}): the explorer is the owner's`);
 
   // ------------------------------------------------ 4. the host skein's page: its children
-  await page.goto(`${base}/@host/${search}`);
+  await page.goto(`${sitePage}${search}`);
   await ready();
   await page.fill("#add-locator input[name=handle]", "host");
   await page.click("#add-locator button[type=submit]");
   const hostId = db.get("host")!.identity!;
   await page.waitForSelector(`tr[data-locator="${hostId}"]`, { timeout: 120_000 });
   check(true, "a locator for the host skein added from the page (its identity from its signed answer)");
-  await page.goto(`${base}/@host/${search}#/s/${hostId}`);
+  await page.goto(`${sitePage}${search}#/s/${hostId}`);
   await page.waitForSelector("#children", { timeout: 60_000 });
   const kids = await page.locator("#children").innerText();
   check(/alice/.test(kids) && kids.includes(`${base}/@alice`) && /Open/.test(kids), `the host skein's page lists the skeins created there, alice openable through her locator (${kids.replace(/\s+/g, " ").trim()})`);
 
   // ------------------------------------------------ 5. a handle (#103, #113)
-  await page.goto(`${base}/@host/${search}`);
+  await page.goto(`${sitePage}${search}`);
   await ready();
   await page.waitForSelector("#register", { timeout: 60_000 });
   check((await page.locator("#handles").innerText()).includes("No handle certificate from localhost"), "the host skein's page finds its host (/.well-known/skein-host, the manifest): no handle certificate in your wallet yet");
-  // The page's Register form (skein-site 0.5.2) still signs `register <name>`: the host skein's onboarding app
-  // wants `register <name>@<domain>` (#113) and refuses it. skein-site follows docs/MESSAGES.md "Mailbox instances".
+  // The page's Register form (skein-site ≥ 0.5.3): your wallet signs `register you@localhost` (the domain from
+  // /.well-known/skein-host), POST /account/register, and the certificate it answers acquired (direct).
+  const { publicKey: certifier } = await router.certifier.getPublicKey({ identityKey: true });
   await page.fill("#register input[name=handle]", "you");
   await page.click("#register button[type=submit]");
-  await page.waitForSelector('tr[data-handle="you@localhost"], #register-status.bad', { timeout: 120_000 });
-  const pageRefused = (await page.locator("#register-status.bad").count()) ? await page.locator("#register-status").innerText() : "";
-  check(/does not verify/.test(pageRefused) && !db.get("you"), `the page's Register form (the pre-#113 signature, without the domain) is refused by the host skein: ${pageRefused.slice(0, 120)}`);
-  // What the page sends once skein-site follows: the same request signed over `register you@localhost` by the
-  // wallet in the tab, its certificate acquired (direct) — run in the page with its wallet.
-  const { publicKey: certifier } = await router.certifier.getPublicKey({ identityKey: true });
-  const reg = await page.evaluate(async ([origin, me, certifierKey]) => {
-    const w = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }>; acquireCertificate(a: unknown): Promise<unknown> } } }).site.wallet;
-    const { domain } = await (await fetch(`${origin}/.well-known/skein-host`)).json() as { domain: string };
-    const { signature } = await w.createSignature({ protocolID: [2, "skein register"], keyID: "you", counterparty: "anyone", data: Array.from(new TextEncoder().encode(`register you@${domain}`)) });
-    const r = await fetch(`${origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "you", identityKey: me, signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
-    const v = await r.json() as { messagebox?: string; certificate?: Record<string, unknown> & { certifier?: string }; keyringForSubject?: Record<string, string>; error?: string };
-    if (r.status !== 200 || !v.certificate || v.certificate.certifier !== certifierKey) return { status: r.status, error: v.error ?? "no certificate" };
-    const c = v.certificate;
-    await w.acquireCertificate({ acquisitionProtocol: "direct", type: c.type, serialNumber: c.serialNumber, certifier: c.certifier, revocationOutpoint: c.revocationOutpoint, fields: c.fields, signature: c.signature, keyringRevealer: "certifier", keyringForSubject: v.keyringForSubject });
-    return { status: r.status, messagebox: v.messagebox, serialNumber: c.serialNumber as string };
-  }, [base, you, certifier] as const);
-  check(reg.status === 200 && db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you && reg.messagebox === `${base}/@you`,
-    `a registration signed over register you@localhost by the wallet in the tab: the host skein's app had the instance manager create your mailbox instance you@localhost (${reg.status} ${"error" in reg ? reg.error : reg.messagebox})`);
+  await page.waitForSelector("#register-status.ok, #register-status.bad", { timeout: 120_000 });
+  const regStatus = await page.locator("#register-status").innerText();
+  check(!(await page.locator("#register-status.bad").count()) && db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you && regStatus.includes(`${base}/@you`),
+    `the page's Register form: signed over register you@localhost by the wallet in the tab, the host skein's app had the instance manager create your mailbox instance you@localhost (${regStatus.replace(/\s+/g, " ").slice(0, 160)})`);
   stores.push(db.get("you")!.store);
   const held = await page.evaluate(async ([c, type]) => {
     const w = (window as unknown as { site: { wallet: { listCertificates(a: unknown): Promise<{ certificates: Array<Record<string, unknown>> }> } } }).site.wallet;
@@ -444,7 +447,7 @@ try {
   }, [base, you, certifier, HANDLE_CERTIFICATE_TYPE, cert!.serialNumber] as const);
   check(again.status === 200 && "held" in again && again.serialNumber !== cert!.serialNumber && again.held.length === 1 && again.held[0] === again.serialNumber,
     `the certificate removed from the wallet (relinquishCertificate), then registered again: a new serial (${"serialNumber" in again ? again.serialNumber : ""}), which the wallet acquires (${"error" in again ? again.error : `holds ${"held" in again ? again.held.length : 0}`})`);
-  await page.goto(`${base}/@host/${search}`);
+  await page.goto(`${sitePage}${search}`);
   await ready();
   await page.waitForSelector('tr[data-handle="you@localhost"]', { timeout: 60_000 });
   const handles = await page.locator("#handles").innerText();
@@ -481,7 +484,7 @@ try {
     `Find a handle: the host's search finds you by your profile's name; the result's profile verified in the page (${found.slice(0, 120)})`);
 
   // ------------------------------------------------ the Inbox (#99), opened on that messagebox
-  await page.goto(`${base}/@host/${search}#/inbox`);
+  await page.goto(`${sitePage}${search}#/inbox`);
   await ready();
   await page.waitForSelector("#inbox-from", { timeout: 60_000 });
   check(await page.locator("#inbox input[name=url]").inputValue() === `${base}/@you` && (await page.locator("#inbox-from").innerText()).includes("you@localhost"),
@@ -516,7 +519,7 @@ try {
   const row = await page.locator("#inbox-messages").innerText();
   check(listed === 1 && (await page.locator(`tr[data-message="${sent.id}"]`).count()) === 1 && /BRC-169 envelope of 2026-10-04T12:00:00Z: a payment of 50000 sats/.test(row),
     `the page lists what is waiting: @bsv/message-box-client's listMessagesLite against skein's messagebox, on your wallet's session (${row.replace(/\s+/g, " ").slice(0, 160)})`);
-  await page.goto(`${base}/@host/${search}#/inbox`);
+  await page.goto(`${sitePage}${search}#/inbox`);
   await ready();
   await page.waitForSelector("#inbox-messages", { timeout: 120_000 });
   check(await page.locator("#inbox input[name=url]").inputValue() === mailbox, "the mailbox's URL is kept in the browser: the Inbox opens on it and lists it");

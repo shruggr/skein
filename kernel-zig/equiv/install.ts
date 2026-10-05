@@ -3,11 +3,13 @@
 // body POSTed on the owner's session; src/testapps.ts ownerCli), into an
 // instance of the stock system on a router:
 //
-//   skein-static (shruggr/skein-static at a pinned commit, cloned by the
-//   install itself; or $SKEIN_STATIC_DIR; 0.2.0, the #77 shape): the head
-//   `static/app` is the app record (the manifest as installed, linking the
-//   tree; no alias head), its rows are served under /static/ (the files from
-//   `main`) out of the kernel's dispatch table; uninstalled, its rows are gone.
+//   skein-site (shruggr/skein-site at the commit src/testapps.ts pins, cloned
+//   by the install itself; or $SKEIN_SITE_DIR; 0.6.0, #125): the head
+//   `site/app` is the app record (the manifest as installed, linking the
+//   tree; no alias head), its one row is served under /site/ (the files of
+//   its own tree's www) out of the kernel's dispatch table; the owner's own
+//   row puts the same handler at `/` (`skein plan dispatch --http`), which an
+//   uninstall leaves; uninstalled, its rows are gone.
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
 //   start message schedules a heartbeat with the cron provider, whose tick
@@ -28,21 +30,19 @@
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/install.ts
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrivateKey } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
-import { dirBundles } from "../../src/client/client.ts";
+import { planMain } from "../../src/client/admin-cli.ts";
 import { main } from "../../src/host/cli.ts";
-import { ownerCli } from "../../src/testapps.ts";
+import { ownerCli, sendDir, SITE_APP } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
-const STATIC_REPO = "https://github.com/shruggr/skein-static";
-const STATIC_REV = process.env.SKEIN_STATIC_REV ?? "1d6f7d3cef4eeec23696556d277bd09d295ddf77";
 const here = dirname(fileURLToPath(import.meta.url));
 const demoDir = join(here, "../../programs/test/app-demo");
 let failures = 0;
@@ -61,12 +61,6 @@ try {
   await h.router.start();
   const owner = new RawBox(h.owner, `${h.base}/@inst`);
   await owner.send(inst, "peers", { op: "add", key: callerId, url: h.origin("caller") });
-  // `main`: a site for static to serve.
-  const site = join(work, "site");
-  mkdirSync(join(site, "www/docs"), { recursive: true });
-  writeFileSync(join(site, "www/index.html"), "<p>the site</p>\n");
-  writeFileSync(join(site, "www/docs/index.html"), "<p>docs</p>\n");
-  for (const b of (await dirBundles(site)).bundles) await owner.send(inst, "objects", b);
   await h.router.settled();
   store = h.db.get("inst")!.store;
 
@@ -94,23 +88,23 @@ try {
     return { status: r.status, body: await r.text() };
   };
 
-  // ------------------------------------------------ skein-static, from its repo
-  const staticSpec = process.env.SKEIN_STATIC_DIR ?? `${STATIC_REPO}#${STATIC_REV}`;
-  let code = await cli("install", staticSpec, "--instance", "inst", "--dry-run");
-  check(code === 0 && out.some((l) => l.includes("row       http /static/site* from anyone → static.get")) && out.some((l) => l.includes("row       http /static/ from anyone → static.get")), `the prompt shows static's rows under /static/ (${code}: ${out.filter((l) => l.includes("row ")).join(" | ")})`);
-  check((await record("static/app")) === undefined, "a dry run sends nothing");
-  code = await cli("install", staticSpec, "--instance", "inst");
-  check(code === 0, `skein plan install skein-static, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
-  const st = await record("static/app");
-  check(st?.kind === "app" && st.name === "static" && !!st.tree && !!(st.programs as Record<string, unknown>)?.static && st.version === "0.2.0" && (await record("static")) === undefined, `the head static/app is the app record (0.2.0), linking the tree and the program record; no alias head \`static\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
+  // ------------------------------------------------ skein-site, from its repo (#125)
+  const siteSpec = SITE_APP.dir ?? `${SITE_APP.repo}#${SITE_APP.rev}`;
+  let code = await cli("install", siteSpec, "--instance", "inst", "--dry-run");
+  check(code === 0 && out.some((l) => l.includes("row       http /site/* from anyone → site.get (root www)")), `the prompt shows the site's row under /site/ (${code}: ${out.filter((l) => l.includes("row ")).join(" | ")})`);
+  check((await record("site/app")) === undefined, "a dry run sends nothing");
+  code = await cli("install", siteSpec, "--instance", "inst");
+  check(code === 0, `skein plan install skein-site, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
+  const st = await record("site/app");
+  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.6.0" && (await record("site")) === undefined, `the head site/app is the app record (0.6.0), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
   const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
-  check((await appRows("static")).join(",") === "http /static/site*,http /static/", `the dispatch table has static's rows: ${(await appRows("static")).join(", ")}`);
-  let r = await get("/static/");
-  check(r.status === 200 && r.body === "<p>the site</p>\n", `GET /static/: main's www/index.html (${r.status})`);
-  r = await get("/static/site/docs/");
-  check(r.status === 200 && r.body === "<p>docs</p>\n", `GET /static/site/docs/: www/docs/index.html (${r.status})`);
-  r = await get("/site/");
-  check(r.status === 404, `GET /site/ (the manifest's own path, outside /static/): 404 (${r.status})`);
+  check((await appRows("site")).join(",") === "http /site/*", `the dispatch table has the site's row: ${(await appRows("site")).join(", ")}`);
+  let r = await get("/site/");
+  check(r.status === 200 && r.body.includes('src="app.js"'), `GET /site/: its own tree's www/index.html (${r.status})`);
+  r = await get("/site/app.js");
+  check(r.status === 200 && r.body.includes("skein-locators"), `GET /site/app.js: the page's script (${r.status})`);
+  r = await get("/");
+  check(r.status === 404, `GET / : nothing at the root until the owner says so (${r.status})`);
 
   // ------------------------------------------------ app-demo: start, ticks, calls
   code = await cli("install", demoDir, "--instance", "inst");
@@ -227,10 +221,39 @@ try {
   c = await call({ fn: "demo.counter.get" });
   check(c.status === 404, `after uninstall, /app-demo/call is no route: ${c.status}`);
   check((await record("app-demo/app"))?.kind === "app", "the head app-demo/app is left");
-  code = await cli("uninstall", "static", "--instance", "inst");
-  r = await get("/static/");
-  check(code === 0 && r.status === 404, `skein plan uninstall static: its routes are gone (${code}, GET /static/ ${r.status})`);
-  check((await appRows("static")).length === 0 && (await appRows("app-demo")).length === 0, "no app rows left in the dispatch table");
+  // The owner's own row (#125): the same handler at `/` — `skein plan dispatch --http`, sent as the owner.
+  const rootArgs = ["--http", "--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", h.db.get("inst")!.store];
+  const rootPlan = join(work, "root-row");
+  const plan = async (...args: string[]) => {
+    out.length = 0; err.length = 0;
+    const c = await planMain(args, { vars: {}, out: (l) => out.push(l), err: (l) => err.push(l) });
+    if (process.env.VERBOSE) for (const l of [...out, ...err]) process.stdout.write(`  | ${l}\n`);
+    return c;
+  };
+  const sendRoot = () => sendDir({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "inst", rootPlan);
+  code = await plan("dispatch", "add", ...rootArgs, "--out", rootPlan);
+  check(code === 0 && out.some((l) => /^dispatch add http \/\* from anyone → site\.site\.get \(.+\) \(root www\)$/.test(l)), `skein plan dispatch add --http … / site.site: the owner's row, planned (${code}: ${[...out, ...err].join(" | ")})`);
+  await sendRoot();
+  r = await get("/");
+  check(r.status === 200 && r.body.includes('src="app.js"'), `GET / : the site, by the owner's row (${r.status})`);
+  r = await get("/app.js");
+  check(r.status === 200 && r.body.includes("skein-locators"), `GET /app.js: its files at the root too (${r.status})`);
+  r = await get("/manifest.json");
+  check(r.status === 200 && r.body.includes("groupPermissions"), `GET /manifest.json: the page's grouped request, at the origin (${r.status})`);
+  c = await call({ fn: "demo.counter.get" });
+  check(c.status === 405, `a path no other row takes is the root row's (a catch-all prefix): POST /app-demo/call, app-demo gone, is the site handler's 405 (${c.status})`);
+  const ownerRow = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).find((x) => x.transport === "http" && x.address === "/");
+  check(!!ownerRow && ownerRow.app === undefined && ownerRow.prefix === true && ownerRow.root === "www", "the root row is the owner's (no app)");
+  code = await cli("uninstall", "site", "--instance", "inst");
+  r = await get("/site/");
+  check(code === 0 && r.status === 404, `skein plan uninstall site: its row is gone (${code}, GET /site/ ${r.status})`);
+  check((await appRows("site")).length === 0 && (await appRows("app-demo")).length === 0, "no app rows left in the dispatch table");
+  r = await get("/");
+  check(r.status === 200, `the owner's root row is the owner's: the uninstall leaves it (GET / ${r.status})`);
+  code = await plan("dispatch", "remove", ...rootArgs, "--out", rootPlan);
+  await sendRoot();
+  r = await get("/");
+  check(code === 0 && r.status === 404, `skein plan dispatch remove with the same arguments: the root row is gone (${code}, GET / ${r.status})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

@@ -4,6 +4,7 @@
 //   skein plan install <repo-url#commit | dir> <where> [--config json] [--out dir]
 //   skein plan uninstall <app> <where> [--out dir]
 //   skein plan dispatch add|remove [--sender key] <box> <handler> <where> [--out dir]
+//   skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
 //   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] <where> [--out dir]
 //   skein plan peers remove <key> <where> [--out dir]
 //   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
@@ -33,6 +34,9 @@ export const PLAN_USAGE = `usage:
   skein plan install <repo-url#commit | dir> <where> [--config json] [--out dir]   an app (docs/APPS.md §3): objects, head <app>/app, its dispatch rows, start
   skein plan uninstall <app> <where> [--out dir]                                     its stop, then its dispatch rows removed (the heads are left)
   skein plan dispatch add|remove [--sender key] <box> <handler> <where> [--out dir]  a mailbox row of the dispatch table (#77)
+  skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
+                                                                                     an http row (#125: e.g. an app's handler at /); <handler>: a program
+                                                                                     record CID, a genesis program, or <app>.<role> (the installed app's)
   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] <where> [--out dir]
   skein plan peers remove <key> <where> [--out dir]                                  an address-book entry (#70)
   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]             a directory into main (objects, head)
@@ -120,10 +124,30 @@ export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
         return 0;
       }
       case "dispatch": {
-        const { values: v, positionals: [op, box, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, sender: { type: "string" } } });
+        const { values: v, positionals: [op, box, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, sender: { type: "string" }, http: { type: "boolean" }, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
         if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(PLAN_USAGE); return 2; }
+        if (!v.http && (v.prefix || v.fn !== undefined || v.settings !== undefined)) { env.err("skein plan dispatch: --prefix, --fn and --settings are an http row's (--http)"); return 2; }
+        let settings: Record<string, unknown> | undefined;
+        if (v.settings !== undefined) {
+          try { settings = JSON.parse(v.settings) as Record<string, unknown>; } catch { settings = undefined; }
+          if (!settings || typeof settings !== "object" || Array.isArray(settings)) { env.err("skein plan dispatch --settings: a JSON object (the handler's own settings, e.g. {\"root\":\"www\"})"); return 2; }
+        }
         const t = await targetOf(v, env);
-        try { emit(planDispatch(t.recipient, { op, sender: v.sender, box: box!, handler }, t.view?.programs as Record<string, CID> | undefined), v.out, env); } finally { t.close(); }
+        try {
+          const programs = { ...(t.view?.programs as Record<string, CID> | undefined) };
+          // <app>.<role>: the installed app's program (its app record's `programs`).
+          const role = /^([a-z0-9][a-z0-9-]*)\.([A-Za-z0-9_-]+)$/.exec(handler);
+          if (role && !programs[handler]) {
+            if (!t.view) throw new Error(`handler ${handler}: an app's program needs the instance's view (--origin or --store), not --recipient`);
+            const { appRecordIn } = await import("../host/plan.ts");
+            const app = await appRecordIn(t.view, role[1]!);
+            if (!app) throw new Error(`handler ${handler}: no app ${role[1]} installed (no head ${role[1]}/app)`);
+            const cid = app.record.programs[role[2]!];
+            if (!cid) throw new Error(`handler ${handler}: app ${role[1]} has no program ${role[2]} (${Object.keys(app.record.programs).join(", ")})`);
+            programs[handler] = cid;
+          }
+          emit(planDispatch(t.recipient, { op, sender: v.sender, box: box!, handler, ...(v.http ? { http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } } : {}) }, programs), v.out, env);
+        } finally { t.close(); }
         return 0;
       }
       case "peers": {
