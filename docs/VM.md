@@ -166,11 +166,12 @@ stepped, no elevated scope exists. The host (transports + providers + store
 The dispatch table is one chain per instance: origin `{kind: "dispatch"}`,
 one update per change `{op: "add" | "remove", row, thread?, input, at}`,
 the rows the updates folded in order (`kernel-zig/src/dispatch.zig`;
-`src/runtime/dispatch.ts` reads it). A row:
+`src/runtime/dispatch.ts` reads it and matches with the same rules, both
+checked against `kernel-zig/test/dispatch-cases.json`). A row:
 
 ```
 {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+ sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 ```
 
 A route, a subscription and a libp2p topic or protocol differ only in where
@@ -182,17 +183,47 @@ row admits: `*` anyone (an open route; it takes events too), `event`
 (mailbox only, #79) events and never a message — the host's wiring into a
 box (a feed's header, the broadcaster's proof, a route's admit), so a box
 that takes events need not be open; a key that identity (a message's
-sender, or the BRC-104 session's; the instance's own key admits its own
-programs' messages, below "emit"), `session` (http only) any identity with
-a session. `program` is the handler, or the
-string `kernel`: an admin row, `fn` its operation. The rest is the
-handler's own (static's `root` and `index`, a route's `read` op, the
-install's `app`), carried to it as `match`. A row's key is (transport,
-address, prefix, sender): `add` replaces the row with that key in place, else
-appends; `remove` deletes it. **First match wins**, in table order; a reply
-routes before any row (docs/MESSAGES.md). Replay writes the same chain. No
-`local` row fires today: a provider's answer is a message, routed by its
-`mailbox` row (to review).
+sender, the BRC-104 session's, a libp2p peer's; the instance's own key
+admits its own programs' messages, below "emit"), `session` (http only)
+any identity with a session, `owner` (http only, #115) the instance's
+owner's session — the genesis's owner, else the claim's, so nobody before
+a claim. A row is the permission: who may read the explorer is the
+explorer row's sender (there is no reads table since #115). `program` is
+the handler, or the string `kernel`: an admin row, `fn` its operation. The
+rest is the handler's own (static's `root` and `index`, the install's
+`app`), carried to it as `match`. A row's key is (transport, address,
+prefix, sender): `add` replaces the row with that key in place, else
+appends; `remove` deletes it. Replay writes the same chain.
+
+**The kernel matches every transport** (#115, `dispatch.zig` `first`, one
+walk): **first match wins**, in table order, among the rows of the
+package's transport at its address whose sender rule takes who it is from;
+a reply routes before any row (docs/MESSAGES.md).
+
+- `mailbox`: a message (from its sender) or an event (no sender: a `*` or
+  `event` row) in a box; the row's address is the box or `*`.
+- `http`: the path the request names (`route`), exact rows first, then
+  prefix rows, longest first; who it is from is the identity it claims
+  (`x-bsv-auth-identity-key`), none without one. With no row, the kernel
+  says why: no row at the path (404), a row there needs a session and none
+  is claimed (401), none there takes the claimed identity (403). A
+  restrictive row does not shadow a less specific one: the request falls
+  through to the next row that takes it.
+- `libp2p`: the topic or `/<protocol>`, from the peer's key (its peer ID).
+- `local`: no row fires today: a provider's answer is a message, routed by
+  its `mailbox` row (to review).
+
+For a request the kernel hands the front door the row it matched (step
+input `match`, or `refused`), never the table. The front door's part is
+verification: the BRC-103 handshake, and for a row whose sender is not `*`
+the BRC-104 session and signature of the identity the kernel matched on
+(the claimed key must be the session's); a topic message's GossipSub
+signature. Then it runs the row's handler. Matching on the claim and then
+verifying it is the same as verifying and then matching: the handler runs
+only when the claim held. (A genesis written before #115 carries the front
+door's `reads` and pins a front door that matched for itself; its request
+steps still get `dispatch` and `reads`, and a row's `read` op is checked
+against those reads in the kernel's match.)
 
 - **The genesis carries the seed.** Every genesis that names an owner gets
   the owner's four admin rows first — `{mailbox, objects | head | dispatch |
@@ -540,8 +571,9 @@ the **request's thread**: origin `{kind: "thread", program: <middleware>,
 args: {request, transport}, launchedBy: <the request record>, input: <the
 entry>, at}`, a function of the entry, so the host can ask after it.
 
-- **Its steps' input** adds the dispatch table's rows (`dispatch`, #77) and
-  the genesis's `reads`, and on the first step `seen` (the entry that first admitted this very record, if the
+- **Its steps' input** adds the dispatch row the kernel matched for the
+  request (`match`, #115; for http with no row, `refused`: `path`,
+  `session` or `sender`; "The dispatch table" above), and on the first step `seen` (the entry that first admitted this very record, if the
   `unique` map holds it: a redelivered GossipSub message). They run on
   `callFuelLimit` (the budget the front door had as a call), not
   `fuelPerStep`.

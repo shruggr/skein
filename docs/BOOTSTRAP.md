@@ -45,8 +45,7 @@ images/default/
   bin/static.wasm                         shruggr/skein-static v0.2.1's module
   bin/*.json                              the program records' inputs and descriptions
   etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; the explorer at `/explore` (a
-                                          session, read op `explore`); static at `/`, `/manifest.json` (#97) and under `/site/` (root www)
-  etc/reads.json                          [{op: "explore", owner: true}]: the explorer is the owner's, whoever claims it (#92)
+                                          owner's, sender "owner": whoever claims it, #92, #115); static at `/`, `/manifest.json` (#97) and under `/site/` (root www)
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
   www/                                    the management site: shruggr/skein-site v0.5.2's tree, copied (the same git tree)
@@ -62,10 +61,10 @@ static are wired by the genesis (no app records), as any system tree wires
 its programs.
 
 - **The explorer** is a route in the image (`/explore`, the front door's
-  `explore`, `read: "explore"`) with the read rule `{op: "explore", owner:
-  true}`: the front door admits the caller whose session proves the
-  instance's owner as the step sees it — the genesis's, else the key in the
-  head `claim`. Before the claim it answers nobody (403).
+  `explore`) whose sender is `"owner"` (#115): the kernel's match takes the
+  caller who claims the instance's owner as it stands — the genesis's, else
+  the key in the head `claim` — and the front door verifies the session
+  proves it. Before the claim it answers nobody (403).
 - **The git app's tree** is in the image (`apps/git`), so its blocks are in
   every such store; it is not wired. The management page installs it from
   there as the owner: the plan over that subtree (`readStoredApp` +
@@ -154,7 +153,7 @@ etc/subscriptions.json   the form before #77, still read: [{sender?: key, box?, 
 etc/routes.json          the form before #77, still read (#40): [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}],
                          each an http row (auth none → sender "*", else "session") or, for a `libp2p:` path, a
                          libp2p row; default: the default http rows (root, index: the static handler's, #52)
-etc/reads.json           optional (#40): who may call a route marked `read: op`, [{caller?: key, op}]; default: the default reads
+etc/reads.json           the form before #115, still read: who may call a route marked `read: op`, [{caller?: key, op} | {owner: true, op}]; folded into those rows' senders at genesis; default: the default reads
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
 
@@ -165,12 +164,14 @@ etc/reads.json           optional (#40): who may call a route marked `read: op`,
   program the system lacks is dropped. A row whose key is an admin row's
   (the owner's `objects`, `head`, `dispatch`, `peers`) is left out: those are
   the kernel's.
-- **Rows and reads** (#40, #77) are the kernel's dispatch table and the
-  front door's reads (docs/MESSAGES.md): an `http` row is an exact address
-  or a prefix (exact first, then the longest prefix), the program and
-  function the front door calls with the request, sender `"*"` for an open
-  route (an overlay's, docs/OVERLAY.md), `"session"` for BRC-104, and
-  `read` an op the reads table must allow the caller. The default http rows
+- **Rows** (#40, #77, #115) are the kernel's dispatch table
+  (docs/MESSAGES.md): an `http` row is an exact address or a prefix (exact
+  first, then the longest prefix), the program and function the front door
+  calls with the request, sender `"*"` for an open route (an overlay's,
+  docs/OVERLAY.md), `"session"` for BRC-104, `"owner"` for the instance's
+  owner, or a key; a row's `read: op` names an op `etc/reads.json` must
+  allow the caller, folded into the row's sender at genesis (the genesis
+  has no reads table). The default http rows
   are the BRC-33 messagebox — `sendMessage`, `listMessages`,
   `acknowledgeMessage` at the root and under `/messagebox` (program
   `messagebox`) — and the explorer, prefix `/explore` (program `frontdoor`,

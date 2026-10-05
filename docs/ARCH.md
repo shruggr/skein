@@ -31,13 +31,16 @@ Inside:
   Bitcoin structures), chains, and the index (one Merkle search tree per
   query, one state record holding every root; `VM.md`, "The index");
 - the **scheduler**: consumes the log in order, one entry and one step at a
-  time, and routes by the dispatch table;
+  time, and routes by the dispatch table — every transport's packages
+  matched there, first match wins (#115);
 - **programs**: stepped by the scheduler, with imports for the virtual
   filesystem, reads by CID, heads, threads (`launch`, `await`, `deadline`,
   `call`), the signer (`wallet`) and `emit`;
 - **requests**: every package a transport carries in is an entry, and the
   instance's front door (a program) is stepped on it as the request's own
-  thread (`VM.md`, "Requests");
+  thread, handed the row the kernel matched; the front door verifies who
+  the package is from (BRC-103/104, GossipSub's signature) and runs the
+  row's handler (`VM.md`, "Requests");
 - **calls**: a program function run over current state with no entry and no
   writes, for host-side reads that are not requests (the explorer's;
   `VM.md`, "Calls");
@@ -164,8 +167,9 @@ with only the front door and the messagebox.
 
 A host is **transports + providers + store + oracle**. It verifies nothing
 and routes nothing: transports append whole packages as received, the
-instance's front door verifies them, and the kernel's dispatch table
-routes. A transport may ignore a package whose content the store already
+kernel's dispatch table picks each one's row (HTTP paths, libp2p topics
+and protocols, boxes alike), and the instance's front door verifies the
+package and runs the row's handler. A transport may ignore a package whose content the store already
 holds (deduplication by hash is not verification). The kernel's surface is
 five frames: in, **admit** (append an entry and run the steps it drives),
 **answer** (wait until a request's thread comes to rest), **call** (run a

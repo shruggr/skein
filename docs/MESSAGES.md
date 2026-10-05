@@ -56,15 +56,16 @@ the **address book**. The dispatch table is one chain of rows
 
 ```
 {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+ sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 ```
 
 — a box, an HTTP path (prefix or exact), a libp2p topic or `/<protocol>`;
 who may send there (`event`, #79: events only — the host's wiring and a
-route's admits, never a message); which program is stepped or called, or which of the
+route's admits, never a message; `owner`, #115: the instance's owner's
+session); which program is stepped or called, or which of the
 kernel's own operations runs. A route and a subscription differ only in
-where the address comes from; first match wins (docs/VM.md, "The dispatch
-table", for the full rules). A program never writes the table: there is no
+where the address comes from; the kernel matches every transport, first
+match wins (docs/VM.md, "The dispatch table", for the full rules). A program never writes the table: there is no
 `subscribe` import, no `routes` head. Every change is an **admin message**
 from the owner or a delegate at one of the kernel's admin boxes, which the
 kernel itself performs — no program is stepped:
@@ -114,9 +115,13 @@ http://<handle>.localhost:<port>/…     the instance's origin (the Host header)
 http://<host>:<port>/@<handle>/…       the same instance, a dev form: the host strips the prefix for the rows
 ```
 
-**Auth is by key.** The front door runs BRC-103/104 itself, in its step on
-the request: the handshake at `/.well-known/auth` and the verification of
-every general message, against the instance's session table (below). The
+**Auth is by key.** The kernel picks the request's row (#115: the
+dispatch table, on the identity the request claims in
+`x-bsv-auth-identity-key`) and hands the front door that row; the front
+door runs BRC-103/104 itself, in its step on the request: the handshake at
+`/.well-known/auth` and, for a row that is not open, the verification of
+the general message — its session holds the claimed identity and the
+signature verifies — against the instance's session table (below). The
 caller is the identity key the session proved; there is no account, no
 handle check, no envelope. Answers are signed on the session through the
 instance's oracle (the kernel's `wallet`, a recorded call of the step).
@@ -145,17 +150,25 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
     nonce is not remembered: a replayed read reads again); a replayed write
     is the same mail record, which the kernel admits once (the `unique` map).
     The records are prunable like any others; nothing prunes them yet.
-- **Routes are rows of the dispatch table** (#77, below): the `http` rows
+- **Routes are rows of the dispatch table** (#77, #115): the `http` rows
   `{transport: "http", address: <path>, prefix?: true, sender: "*" |
-  "session" | <key>, program: <cid>, fn, read?: <op>, …the handler's
-  settings}`, exact addresses first, then the longest prefix. `sender`
-  `"*"` is an open route (no session: an overlay's submit and lookup);
-  `"session"` needs a BRC-104 session, any identity; a key needs a session
-  proving that identity (another's is 403). The genesis seeds the default
-  rows; an app's install adds its rows under `/<app>/` through the kernel's
-  `dispatch` operation (docs/APPS.md §3); the front door reads the table as
-  it stands on every request. The handler is an in-VM call of `program`'s
-  `fn` in the front door's step; what it receives and returns is the
+  "session" | "owner" | <key>, program: <cid>, fn, …the handler's
+  settings}`. The kernel matches them (dispatch.zig `forHttp`): exact
+  addresses first, then prefixes, longest first; within each, the first row
+  in table order whose sender takes the identity the request claims.
+  `sender` `"*"` is an open route (no session is checked, the handler gets
+  no caller: an overlay's submit and lookup); `"session"` any identity
+  with a BRC-104 session; `"owner"` the instance's owner's (the genesis's,
+  else the claim's); a key that identity's. A request no row takes is
+  refused by the front door as the kernel says: no row at the path, 404;
+  a row there needs a session and the request has none, 401 (the stock
+  client shakes hands); none takes its identity, 403, signed on the
+  session. The genesis seeds the default rows; an app's install adds its
+  rows under `/<app>/` through the kernel's `dispatch` operation
+  (docs/APPS.md §3); the kernel matches against the table as it stands at
+  each step. The front door never sees the table: it gets the row
+  (`match`), verifies, and calls the row's handler, an in-VM call of
+  `program`'s `fn` in its step; what that receives and returns is the
   program-facing contract below ("Route handlers").
 - **Static files** (#52, `programs/static`): the handler for a site. A row
   `{transport: "http", address, prefix?, sender: "*", program: static, fn: "get",
@@ -170,14 +183,17 @@ instance's oracle (the kernel's `wallet`, a recorded call of the step).
   non-file (link, submodule), a `..` segment, a NUL or a bad escape (nothing
   outside the root is served); 405 for another method (`Allow: GET, HEAD`).
   A read: its request's entry, and no head moves.
-- **Reads** (the genesis's `reads`, from `etc/reads.json`): `[{caller?: <key>,
-  op}]` or `[{owner: true, op}]`. A route with `read: op` answers only a
-  caller the table allows (no caller: anyone; `owner: true`, #92: the
-  instance's owner as the step sees it — the genesis's, else the key in the
-  head `claim` — so nobody before a claim); others get 403, signed — a
-  refusal, recorded on the request's thread. The default reads: the owner may
-  `explore` (code genesis names the key; the default image says `owner:
-  true`).
+- **Reads are rows** (#115). There is no reads table: who may call a
+  route is its row's sender. The explorer's row is the owner's (code
+  genesis names the key; the default image says `sender: "owner"`, #92:
+  the owner as the kernel sees it at the request — the genesis's, else the
+  key in the head `claim` — so nobody before a claim); others get 403,
+  signed — a refusal, recorded on the request's thread. Granting another
+  key the explorer is the owner adding a row with that sender through
+  `dispatch`. A system tree's `etc/reads.json` (`[{caller?: <key>, op}]`
+  or `[{owner: true, op}]`, the form before #115) is still read: at
+  genesis each read becomes the sender of the rows marked `read: op`
+  (src/host/genesis.ts `foldReads`), and the genesis carries no `reads`.
 
 ### Route handlers: the program-facing contract (#68, #66)
 
@@ -1114,7 +1130,10 @@ request {kind: "p2p", topic, from: bytes (the peer ID's multihash), seqno: bytes
 answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
 ```
 
-- **Routing.** The dispatch table's `libp2p` rows: `{transport: "libp2p",
+- **Routing.** The kernel matches the dispatch table's `libp2p` rows (#115,
+  dispatch.zig `forLibp2p`: the first in table order at the topic or
+  protocol whose sender takes the peer's key, from `from`) and hands the
+  front door the row: `{transport: "libp2p",
   address: <topic>, sender: "*", program, fn}` for a topic, `address:
   "/<protocol>"` for a stream protocol (from `etc/dispatch.json`, or the
   older `etc/routes.json`'s `libp2p:` paths; a protocol's handler named in

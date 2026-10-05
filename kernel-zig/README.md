@@ -12,7 +12,11 @@ state and fuel on every replay, and the equivalence suite checks that Zig
 against Zig.
 
 The kernel at log format 8: one dispatch table routes (rows for boxes, HTTP
-paths, libp2p topics and protocols); the admin operations (`objects`,
+paths, libp2p topics and protocols), and the kernel matches every
+transport's packages against it, first match wins (#115, `dispatch.zig`:
+the front door is handed the matched row and only verifies who the package
+is from, BRC-103/104 or GossipSub's signature, then runs the row's
+handler); the admin operations (`objects`,
 `head`, `dispatch`, `peers`) are the kernel's own, on messages from the
 owner or a delegate, and so is the claim (#89: an image's genesis names no
 owner; a message at its claim row writes the owner's admin rows and removes
@@ -506,7 +510,10 @@ transport's middleware as the request's thread (`scheduler.zig`
 else its front door for `http`, `libp2p` and `local`), origin `{kind: "thread",
 program, args: {request, transport}, launchedBy: <record>, input: <entry>,
 at}` — so `requestThread(entry)` finds it again. Its steps run on
-`callFuelLimit`, read `dispatch` (the rows, #77), `reads` (and, first, `seen`), and what their
+`callFuelLimit`, read `match` — the dispatch row the kernel matched for the request (#115, `putMatch`:
+http by `route` and the claimed `x-bsv-auth-identity-key`, exact then longest prefix; libp2p by topic or
+protocol and the peer's key), or for http `refused` (`path` | `session` | `sender`) — (and, first,
+`seen`; a genesis before #115, which carries `reads`, also `dispatch` and `reads`), and what their
 stdout lists in `admit` is routed after the step (`routeAdmits`; a message
 or `p2p` event once: `markUnique`, the `unique` map). A step may `await` a
 thread's origin; `rested()` steps its awaiters with `resolved`.
@@ -526,7 +533,7 @@ until the earliest parked bound. The host holds a synchronous client on it
 now?}` → `{ok, result | error, fuel}` runs a program as a function over the
 current state (`scheduler.zig` `call`): its normal entry, with `input()` =
 `{kind: "call", fn, arg, caller?, now, self: {handle, domain, identity},
-owner, programs, peers, defaults, names, reads, dispatch,
+owner, programs, peers, defaults, names, reads (a genesis before #115), dispatch,
 pending, state}`; the result is its stdout, a non-zero exit the error (the
 last stderr line). Since #68 no request is a call: calls are host-side
 reads (the front door's fn `read`, the answer of a route that reads live

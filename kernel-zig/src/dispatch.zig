@@ -23,7 +23,8 @@
 //                                  or the claim (#89: an image's one row, from anyone)
 //          fn?: text,              http/libp2p: the handler's function; kernel: the operation
 //          …}                      a handler's own settings, carried to it as `match` (static's
-//                                  `root`, `index`; a route's `read` op; the install's `app`)
+//                                  `root`, `index`; the install's `app`; a `read` op, a genesis
+//                                  before #115's: checked against its `reads` in `takes`)
 //
 // The table is one chain per instance: origin {kind: "dispatch"}, one update
 // per change {op: "add" | "remove", row, thread?, input, at}; the rows are the

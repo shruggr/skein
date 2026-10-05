@@ -12,13 +12,12 @@ docs/BOOTSTRAP.md, "The default image".
   (`wasm/`), by CID; `scripts/pin-programs.sh` keeps them current.
 - `bin/static.wasm`: shruggr/skein-static v0.2.1's module.
 - `etc/dispatch.json`: the claim row, the messagebox's box and http rows, the
-  explorer at `/explore` (a session, read op `explore`), static at `/`
+  explorer at `/explore` (sender `"owner"`, #115: the instance's owner as
+  the kernel sees it at the request — the claim's key — and nobody before
+  the claim, #92), static at `/`
   (`www/index.html`), at `/manifest.json` (`www/manifest.json`, the
   wallet's grouped permission request for the page at the instance's own
   origin, #97) and under `/site/` (`www/`).
-- `etc/reads.json`: `{op: "explore", owner: true}` — the explorer answers
-  the instance's owner as the front door sees it at the request (the claim's
-  key), and nobody before the claim (#92).
 - `www/`: the management site, a copy of shruggr/skein-site v0.5.2's tree
   (the same git tree, `b6423d2…`): the management page, with the Inbox (#99),
   handles (#103) and their profiles and search (#104), and its
