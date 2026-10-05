@@ -330,7 +330,7 @@ node ../skein-sdk/wallet/vectors/gen-ts/run.mjs    # TS cross-check of the vecto
 (cd ../skein-sdk/wallet/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
 ```
 
-Vector counts (the SDK's `zig build test`, v0.4.0): tx 39 (fees 429), BEEF 27, merkle 43 (the
+Vector counts (the SDK's `zig build test`, v0.5.0): tx 39 (fees 429), BEEF 27, merkle 43 (the
 vector paths' nodes stored and every leaf's BUMP rebuilt from them; three
 transactions of one block proven by separate BUMPs in all six orders: one
 node set, each BUMP rebuilt byte for byte), headers 46, BRC-29 24, wire 13,
