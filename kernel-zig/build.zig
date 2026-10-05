@@ -44,7 +44,9 @@ pub fn build(b: *std.Build) void {
     link(b, mod, wt);
     sdkImports(b, mod, target, optimize);
 
-    const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod });
+    // LLVM and LLD in every mode: Zig's own x86_64 backend and linker (its Debug default there)
+    // leave every symbol of the static libwasmtime.a undefined.
+    const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod, .use_llvm = true, .use_lld = true });
     b.installArtifact(exe);
 
     const run = b.addRunArtifact(exe);
@@ -59,7 +61,7 @@ pub fn build(b: *std.Build) void {
     });
     link(b, tmod, wt);
     sdkImports(b, tmod, target, optimize);
-    const tests = b.addTest(.{ .root_module = tmod });
+    const tests = b.addTest(.{ .root_module = tmod, .use_llvm = true, .use_lld = true });
     const trun = b.addRunArtifact(tests);
     trun.setCwd(b.path("."));
     b.step("test", "run the unit tests").dependOn(&trun.step);
@@ -74,7 +76,9 @@ fn webKernel(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         // No DWARF in what the page downloads (4.2 → 2.7 MB); panics still report their message.
         .strip = true,
     });
-    const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod });
+    // LLVM and LLD in every mode: Zig's own x86_64 backend and linker (its Debug default there)
+    // leave every symbol of the static libwasmtime.a undefined.
+    const exe = b.addExecutable(.{ .name = "skein-kernel", .root_module = mod, .use_llvm = true, .use_lld = true });
     exe.entry = .disabled;
     exe.rdynamic = true;
     // The kernel's own stack (its shadow stack in linear memory): deep enough for the scheduler's recursion.
