@@ -27,8 +27,10 @@ So `up.sh` goes:
    knows: the rows are what a registration would make.
 2b. **The host skein** (#90): `skein-host init --owner <the owner's key>`,
    once — the operator's own instance (`host`), from the default image,
-   claimed for the owner before its hostname is published, the instance
-   manager in its address book (no other instance's book names it). Run
+   the instance manager in its address book (no other instance's book names
+   it). Its claim row admits anyone until the owner claims it from a wallet
+   (#127): `skein plan claim --recipient <its identity> --out claim`, then
+   `skein send <its origin> claim`, first thing once the host runs. Run
    again, it only says which instance it is. `skein-host list` shows it as
    kind `host`, so the steps below that walk the agents leave it out.
 3. **The host** (`skein-host run`, if nothing listens on :8100). It
@@ -55,7 +57,7 @@ So `up.sh` goes:
    again. The shell app's first install is the slow step: its modules are
    ~50 MB of messages.
 7. **The onboarding app** (#90, #113) into the host skein, as the owner, from
-   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.2.0`), with
+   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.3.0`; first the owner's claim of the host skein, #127), with
    `--config '{"onboard": {"domain": <SKEIN_HANDLE_DOMAIN, default
    localhost>, "origin": <the router's origin>}}'`: any wallet with a
    session then creates a skein of its own with `POST
@@ -606,7 +608,7 @@ where they use one. Unset means the default.
 | `SKEIN_OWNER`, `SKEIN_OWNER_HANDLE` | a new code genesis's owner key and its handle (default `david@localhost`); bin/skein-host fills the key from `owner.identity` |
 | `SKEIN_OWNER_MESSAGEBOX` | the owner's messagebox URL for new geneses (default: the owner's mailbox instance here) |
 | `SKEIN_INFER`, `SKEIN_INFER_HANDLE` | a new code genesis's inference peer key and handle (default `infer@localhost`); bin/skein-host fills the key from `infer.identity` |
-| `SKEIN_HOST_URL` | where `event`, `claim` and `import-handles` find the running host (default `http://127.0.0.1:8100`) |
+| `SKEIN_HOST_URL` | where `event` and `import-handles` find the running host (default `http://127.0.0.1:8100`) |
 | `SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`, `SKEIN_ARC_EVENTS_URL`, `SKEIN_ARC_CALLBACK_URL` | the host's Arcade ("The broadcaster" above); also read from `$SKEIN_HOME/host.env` |
 | `SKEIN_HEADERS_URL` | the host's headers feed (#102) |
 | `SKEIN_LIBP2P_LISTEN`, `_TLS_CERT`, `_TLS_KEY`, `_BOOTSTRAP`, `_DHT`, `_RELAYS`, `_MDNS` | the libp2p nodes ("libp2p" above) |

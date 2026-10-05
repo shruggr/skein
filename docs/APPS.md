@@ -316,8 +316,11 @@ anything — the worst it can do is ask.
 **Install after the claim** (#89). A skein started from the default image
 (docs/BOOTSTRAP.md "The default image") has no owner and no admin rows
 until it is claimed: an install into it is refused (`$owner` cannot
-resolve, and no row admits the messages). The claim (`skein-host claim
-<handle> <owner-key>`) writes the owner's admin rows; from then on the
+resolve, and no row admits the messages). The claim — the owner's own
+message in box `claim`, its sender the owner (#127: `skein plan claim`, then
+`skein send`; or, for a hosted registration, signed by the owner's wallet
+before the instance existed and forwarded by the host's instance manager) —
+writes the owner's admin rows; from then on the
 owner installs exactly as above — the wallet, the chain app, the shell app,
 the chat app, whatever the catalog offers. `$owner` in a manifest resolves
 to the claimed key (the head `claim`, read by the install).

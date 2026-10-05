@@ -90,13 +90,20 @@ kernel itself performs — no program is stepped:
 | `head` | `{name, tree}` | the head advanced to a record in the store (owner = the name's app) |
 | `dispatch` | `{op: "add" \| "remove", row}` | the row added (replacing the row with its key: transport, address, prefix, sender), or removed |
 | `peers` | `{op: "add", key, transport?, address? \| url?, role?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
-| `claim` | `{owner, messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): the owner's four admin rows added, and the explorer row with the owner's key (#121), the claim row removed, the head `claim` → the body, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned |
+| `claim` | `{messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): **the owner is the message's sender** (#127; a body's `owner` is not read) — the sender's four admin rows added, and the explorer row with the sender's key (#121), the claim row removed, the head `claim` → `{owner: <the sender>, messagebox?, handle?, domain?}`, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned or the sender is not a key |
 
 Every genesis that names an owner seeds the owner's four admin rows
 (`sender` the owner, `program` `kernel`); an image (the default image,
-docs/BOOTSTRAP.md) names none and seeds the claim row instead, which the
-host's instance manager delivers the owner's claim to as a `local` request
-(`skein-host claim`, or its `create`, #90) before the instance is published. Delegating administration is the owner adding a row
+docs/BOOTSTRAP.md) names none and seeds the claim row instead: the owner's
+own message takes it (#127) — sent to the instance (a bare image: the first
+claim's sender owns it; `skein plan claim`), or signed before the instance
+existed and forwarded by the host's instance manager as its first entry
+(`create`, #90), before the instance is published. A claim is the one
+message that may name **no recipient**: the mail record without
+`recipient`, box `claim`, signed as every message is (`[2, "metanet
+handles envelope"]`, key `send`, counterparty anyone — the sender's key
+alone checks it; SDK `message.zig` ≥ 0.6.1, the front door, the kernel's
+`isMail`). Any other message naming none is not admitted. Delegating administration is the owner adding a row
 with the same operation and another sender. A refused operation (a bad
 body, a record not in the store) is a log line and nothing written. The
 client commands: `skein plan install|uninstall|dispatch|peers|deploy`
@@ -726,7 +733,7 @@ message routes by `replyTo` to the thread awaiting it.
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
 | `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `status` (#65, below) |
-| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, claimed for `owner` before its hostname is published, then started (#90, below); image `mailbox` (#113) — a mailbox instance for `owner`, published at once, the same owner and handle again the same answer ("Mailbox instances", above). `domain`: the handle's domain, recorded with the row (default `localhost`) |
+| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?, claim?: {message, body: bytes}}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, `claim` (required: `owner`'s own signed claim, naming no recipient, #127) forwarded into it as its first entry and taken before its hostname is published, then started (#90, below); image `mailbox` (#113) — a mailbox instance for `owner`, published at once, the same owner and handle again the same answer ("Mailbox instances", above). `domain`: the handle's domain, recorded with the row (default `localhost`) |
 | | `start` | `{handle}` | `{handle, started: true, url}`: published and started |
 | | `stop` | `{handle}` | `{handle, stopped: true}`: unpublished and stopped |
 | `certifier` | `issue` | `{handle, domain, subject: bytes(33), serialNumber, issuance?}` | `{certificate, holder: {certificate, keyringForSubject}, serialNumber, issuance?}`: the handle certificate for handle@domain → subject under that serial, signed by the certifier key — the resolver's copy and the holder's (#113; "BRC-169 is discovery", below). Records nothing |
@@ -753,13 +760,14 @@ peers add <certifier key> certifier --transport local --role certifier
 host's manifest published as `metanet.trust.publicKey` before #113 — the
 master secret's child under `[2, "skein provider"]`, key ID `certifier`). A refusal is an answer: `{error}` for a handle that is not a
 hostname label or is taken, an owner that is not a key, another image, a
-refused claim; `start`/`stop` of the host skein itself. It also speaks
-first: the claim (#89), a message in box `claim`, body `{owner,
-messagebox?, handle?, domain?}`, into an image (`create`'s own, and
-`skein-host claim`). In `create` the row exists disabled until the kernel
-has processed the claim (the owner's admin rows written, the claim row
-removed), and only then is it enabled, which publishes the hostname: the
-claim is the instance's first entry after its genesis. The onboarding app
+refused claim, no claim, a claim whose sender is not `owner`; `start`/`stop`
+of the host skein itself. It signs no claim (#127): in `create` it forwards
+the owner's own — signed by the owner's wallet before the instance existed,
+naming no recipient — as a `local` request, unchanged. The row exists
+disabled until the kernel has processed the claim (the front door checked
+the signature; the signer's admin rows written, the claim row removed), and
+only then is it enabled, which publishes the hostname: the claim is the
+instance's first entry after its genesis. The onboarding app
 (shruggr/skein-onboard) is the host skein's program that asks it
 (docs/ARCH.md, "The host skein").
 

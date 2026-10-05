@@ -32,8 +32,9 @@ The kernel's four tables:
 The four admin operations are the kernel's own, taken on admin messages from
 the owner (or a key the owner delegated with another row). So is the
 claim: a skein started from the default image has no owner until a message
-at its claim row names one, and then the kernel writes that key's admin rows
-and removes the claim row. No program writes a kernel table. An app writes only heads under its own name; reads are
+reaches its claim row, and then the kernel writes the sender's admin rows
+(#127: the owner is the claim's sender, never a key in its body) and removes
+the claim row. No program writes a kernel table. An app writes only heads under its own name; reads are
 global by CID; a call to another app hands back CIDs, not data.
 
 ## Run a skein locally
@@ -69,18 +70,19 @@ git clone https://github.com/shruggr/skein && cd skein
 npm install
 (cd kernel-zig && mise exec -- zig build --release)   # kernel-zig/zig-out/bin/skein-kernel; fetches skein-sdk by URL+hash
 bin/skein-host add martha --image default            # an instance from the default image: identity derived from ~/.skein/master.key, no owner yet
-bin/skein-host claim martha <owner key hex>           # the owner's claim: the kernel writes the owner's admin rows, the claim row goes
 bin/skein-host run                                    # the host on :8100; martha at http://martha.localhost:8100 or /@martha
+bin/skein plan claim --recipient <martha's identity> --out claim   # the claim, as your wallet will send it
+bin/skein send http://martha.localhost:8100 claim     # sent by your wallet: you, its sender, own martha; the claim row goes
 ```
 
 The default image (`images/default`, docs/BOOTSTRAP.md) is the same for
 everyone: the front door, the messagebox, the static app serving the
 management site at `/` (shruggr/skein-site), the explorer for whoever
 claims it, the git app's tree (not installed), and one row to the kernel,
-`claim`, from anyone. `skein-host claim` is that claim, sent by the host's
-instance manager; with the host running it goes through its control socket.
-`--messagebox <url>` names where the instance reaches its owner (default:
-the owner's mailbox instance here, if any). A second claim is refused.
+`claim`, from anyone: the first claim's sender owns it (#127), so claim it
+first thing. The host holds no owner's key and sends no claim; `skein plan
+claim --messagebox <url>` names where the instance reaches its owner. A
+second claim is refused.
 
 A plain `skein-host add martha` (no `--image`) is code genesis, with the
 owner in it: `SKEIN_OWNER`, else `~/.skein/owner.identity` (the owner
@@ -125,24 +127,27 @@ skein**: the operator's instance, where the host keeps what is state or
 conversation (docs/ARCH.md, "The host skein").
 
 ```
-bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, claimed for you
+bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, for you to claim
 bin/skein-host run                                                                       # the host on :8100; the host skein at http://host.localhost:8100
-bin/skein plan install https://github.com/shruggr/skein-onboard#v0.2.0 --origin http://host.localhost:8100 \
+bin/skein plan claim --recipient <its identity> --out claim && bin/skein send http://host.localhost:8100 claim   # claim it first: your wallet's message, you own it
+bin/skein plan install https://github.com/shruggr/skein-onboard#v0.3.0 --origin http://host.localhost:8100 \
   --config '{"onboard": {"domain": "<the handle domain>"}}' --out plan                   # the onboarding app: the messages, read by your wallet
 bin/skein send http://host.localhost:8100 plan                                            # sent by your wallet (1sat authfetch), as you (the owner)
 ```
 
 - `init` creates the host skein once (handle `host`, or `--handle`), from
-  the default image, claimed for `--owner` (default `SKEIN_OWNER`) before
-  its hostname is published. Its address book alone names the **instance
+  the default image, for `--owner` (default `SKEIN_OWNER`) to claim from a
+  wallet (#127: its claim row admits anyone until then). Its address book alone names the **instance
   manager**, the host's provider that creates, starts and stops instances;
   the manager acts for no one else.
 - With the onboarding app installed, anyone with a wallet gets a skein: a
   BRC-104 session to the host skein and `POST /onboard/call {"fn":
-  "onboard.create", "args": {"handle": "alice"}}`. The answer, on the same
-  connection, is `{handle, identity, url}`: a new instance from the default
-  image, owned by the session's key, already claimed when its URL first
-  answers. Its owner installs apps into it from there (next sections). A
+  "onboard.create", "args": {"handle": "alice", "claim": …}}`, `claim` the
+  wallet's own signed claim naming no recipient (#127; skein-onboard's
+  README has its shape). The answer, on the same connection, is `{handle,
+  identity, url}`: a new instance from the default image, its claim
+  forwarded by the instance manager as its first entry — owned by the
+  signer, already claimed when its URL first answers. Its owner installs apps into it from there (next sections). A
   handle that is taken is refused (409).
 - **The management page.** Open the host skein's origin
   (`http://host.localhost:8100/`) with a BRC-100 wallet in the browser: it
@@ -338,7 +343,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-static](https://github.com/shruggr/skein-static) | static files from the `main` head's tree, at the http rows pointed at it | v0.2.0 |
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.3.0 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
-| [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager | v0.1.0 |
+| [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager (the wallet's signed claim forwarded, #127) | v0.3.0 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
 | [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site every skein from the default image serves: locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.5.2 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |

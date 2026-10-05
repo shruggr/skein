@@ -96,15 +96,18 @@ The claim row is
 { "transport": "mailbox", "address": "claim", "sender": "*", "program": "kernel", "fn": "claim" }
 ```
 
-A message in box `claim` whose body is `{owner: <key>, messagebox?: <url>,
-handle?, domain?}` is the kernel's `claim` operation (docs/VM.md). In one
-step, under the message's entry, the kernel:
+A message in box `claim` whose body is `{messagebox?: <url>, handle?,
+domain?}` is the kernel's `claim` operation (docs/VM.md). **Its sender is
+the owner** (#127): the key that signed it, never a key in the body (a
+body's `owner` is not read). In one step, under the message's entry, the
+kernel:
 
-1. adds the owner's four admin rows (`objects`, `head`, `dispatch`, `peers`,
-   each from `owner` to the kernel) and the explorer row (#121: `/explore` and below, the front door's `explore`, from `owner`);
+1. adds the sender's four admin rows (`objects`, `head`, `dispatch`, `peers`,
+   each from the sender to the kernel) and the explorer row (#121: `/explore` and below, the front door's `explore`, from the sender);
 2. removes the claim row;
-3. points the head `claim` at the body (what was claimed: how the kernel and
-   the host know the owner of an instance whose genesis names none);
+3. points the head `claim` at `{owner: <the sender>, messagebox?, handle?,
+   domain?}` (what was claimed: how the kernel and the host know the owner
+   of an instance whose genesis names none);
 4. with a `messagebox`, writes the owner's address-book entry (source
    `claim`), so that what the instance sends its owner can be delivered.
 
@@ -112,19 +115,29 @@ A second claim finds no row: recorded, nothing runs. A claim into an
 instance whose genesis names an owner, or whose table has an admin row
 already, is refused and nothing is written.
 
-The host delivers the claim with `skein-host claim <h> <owner-key>
-[--messagebox url] [--handle h@d]` (Router.claim). It is a signed message
-from the host's instance-manager provider (`manager`), appended as a `local`
-request: the body is what was asked. Without `--messagebox`, the owner's
-mailbox instance on this host is used if there is one. While `skein-host
-run` is up the claim goes through its control socket; otherwise the command
-runs a router of its own. The row admits anyone, so the race is closed by
-order: the instance manager's `create` (#90: `skein-host init` for the host
-skein, the onboarding app's request for anyone else) adds the row disabled,
-boots it from the image, delivers the claim and waits for the kernel to
-take it, and only then enables the row, which publishes its hostname. The
-claim is the instance's first entry after its genesis (docs/ARCH.md, "The
-host skein").
+The host holds no owner's key and signs no claim. The claim comes one of
+two ways:
+
+- **A bare image** (`skein-host add --image`, `skein-host init`): the row
+  admits anyone, and whoever sends the claim first owns the instance. It is
+  not meant to be secure: the operator claims a self-hosted instance from a
+  wallet, the first thing once it runs — `skein plan claim [--messagebox
+  url] [--handle h@d] --recipient <its identity> --out claim`, then `skein
+  send <its origin> claim` (#124's plan and send).
+- **A hosted registration** (the onboarding app's `onboard.create`): the
+  registrant's wallet signs the claim **before the instance exists** — a
+  message in box `claim` that names no recipient (the one message that may
+  name none; signed as every message is, counterparty anyone, so the
+  sender's key alone checks it) — and sends it in the request. The
+  instance manager's `create` (#90) adds the row disabled, boots it from
+  the image, **forwards that signed message** as a `local` request — the
+  instance's first entry after its genesis — and waits for the kernel to
+  take it; the front door checks the signature, the kernel takes the owner
+  from the signer. Only then is the row enabled, which publishes its
+  hostname, so nothing reaches the claim row first (it stays `*`). A claim
+  whose sender is not the registrant, or whose signature does not hold, is
+  refused and the instance is left unpublished (docs/ARCH.md, "The host
+  skein").
 
 ## The system tree
 
@@ -438,7 +451,6 @@ skein-host add <h> --boot <dir>                           Source A
 skein-host add <h> --boot <tree-cid> [--from store.db]    a tree already in a store
 skein-host add <h> --packet <file> [--scope cid] [--proofs roots.json]   Source B (tree or checkpoint)
 skein-host add <h> --image <default | dir | tree-cid [--from store.db]>  an image: no owner, the claim row (#89)
-skein-host claim <h> <owner-key> [--messagebox url] [--handle h@d]      the owner's claim into an image
 skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 ```
 
@@ -480,20 +492,28 @@ boot is written, and the process exits 0.
   `$owner` in an image refused.
 - `kernel-zig/equiv/claim.ts` (in `run.sh`): an instance from the default
   image serves the management site, answers nobody's explorer read and
-  refuses the owner's admin messages; `skein-host claim` over the control
-  socket writes the owner's admin rows, removes the claim row, sets the head
-  `claim` and the owner's address-book entry, and the owner reads the
-  explorer (another key does not); a second claim and a stranger's are refused; the owner installs
+  refuses the owner's admin messages; the owner's own claim (`skein plan
+  claim`, sent to `/sendMessage`; a key in its body not read) writes the
+  sender's admin rows, removes the claim row, sets the head `claim` and the
+  owner's address-book entry, and the owner reads the explorer (another key
+  does not); a stranger's claim after it is refused; the owner installs
   app-demo and calls it; an owned instance refuses a claim; `add --image
-  default` and the refused outpoint form; both stores replayed.
+  default` and the refused outpoint form; a claim signed before the
+  instance existed (no recipient), forwarded, makes its signer the owner,
+  and a recipient-less message in another box is not admitted; the stores
+  replayed.
 - `src/host/manager.test.ts`: the instance manager (#90) on signed
   messages: the host skein with the manager in its address book; `create`
-  claims the child before it is published (the claim its first entry), the
+  forwards the owner's own signed claim into the child before it is
+  published (#127: the claim its first entry; no claim, another key's or a
+  forged one refused, the child left unpublished), the
   child's book has no manager; refusals as answers; another instance's
   message not acted on; `stop`/`start`.
 - `kernel-zig/equiv/host.ts` (in `run.sh`, #90): `skein-host init`, the
-  onboarding app installed in the host skein, a client's session creates
-  alice through it, alice claimed for the client and answering at her url,
+  operator's claim from the operator's wallet (#127), the onboarding app
+  installed in the host skein, a client's session creates alice through it
+  with its own signed claim (none or another key's refused), alice claimed
+  by the client and answering at her url,
   the client installs app-demo in her; a second create refused; both stores
   replayed.
 - `kernel-zig/equiv/git-clone.ts` (in `run.sh`, #91): deploy by hash — the

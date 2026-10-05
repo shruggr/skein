@@ -3,8 +3,10 @@
 One genesis for everyone, with no owner in it (#89). It has the front door,
 the messagebox, the static app serving the management site, the explorer
 route for whoever claims it, the git app's tree (not installed), and one row
-to the kernel: `claim`, from anyone. The first claim names the owner: the
-kernel writes the owner's admin rows and removes the claim row. Nothing else
+to the kernel: `claim`, from anyone. The first claim's sender is the owner
+(#127: never a key in its body) — the owner's own message, or a claim the
+owner signed before the instance existed, which the host forwards into it:
+the kernel writes the owner's admin rows and removes the claim row. Nothing else
 is installed: the owner installs the rest, from the management page.
 docs/BOOTSTRAP.md, "The default image".
 

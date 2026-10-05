@@ -92,13 +92,12 @@ As README "Run a skein locally", with the headers feed set for the host:
 
 ```
 bin/skein-host add ov1 --image default
-bin/skein-host claim ov1 <owner key hex>
 SKEIN_HEADERS_URL=<an SSE stream of headers> bin/skein-host run
+bin/skein plan claim --recipient <ov1's identity> --out claim && bin/skein send http://ov1.localhost:8100 claim   # #127: your wallet's claim; you own ov1
 ```
 
 ```
-ov1: booted from the image baf4bcfb6esis6uqhtc6xoi4gtyvydibg24bfqva · 54 objects pre-filled · programs frontdoor, messagebox, static · … · no owner: claim it (skein-host claim)
-ov1: claimed by a49838c3 (bafyreiaxkxvwtu3ijwwn7s3otwayyma3mwgo2llypnxa6ise7y2wlwxjge): the owner's admin rows written, the claim row removed
+ov1: booted from the image baf4bcfb6esis6uqhtc6xoi4gtyvydibg24bfqva · 54 objects pre-filled · programs frontdoor, messagebox, static · … · no owner: claim it from your wallet (skein plan claim, skein send)
 skein-host: router at http://127.0.0.1:8100 · an instance at http://<handle>.localhost:8100 (or /@<handle>)
 skein-host: no Arcade (SKEIN_ARC_URL): a broadcast event is dropped; a new genesis names no status provider
 ```

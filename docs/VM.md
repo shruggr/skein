@@ -263,22 +263,33 @@ against those reads in the kernel's match.)
     row's record and module must be in the store).
   - `peers` — `{op: "add", key, transport?, address? | url?, role?, handle?,
     domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
-  - `claim` (#89) — `{owner, messagebox?, handle?, domain?}`, at an image's
-    claim row (from anyone): in one step the owner's four admin rows are
-    added, and (#121) the explorer row with the owner's key (`{http,
-    /explore, prefix, <owner>, <the genesis's front door>, explore}`; not
-    when the table holds a row for #115's `owner` symbol — an image written
-    before #121 — which reads the claim's key as before), the claim row is
-    removed, the head `claim` points at the body,
-    and with a `messagebox` the owner's address-book entry is written
-    (`source` "claim"). Refused when the genesis names an owner or the table
-    has an admin row; a second claim finds no row. The instance's owner —
-    the step and call input `owner` — is the genesis's, else the key the
-    head `claim` names (none before the claim). The host sends it as the
-    instance manager's `local` request (`skein-host claim`).
+  - `claim` (#89, #127) — `{messagebox?, handle?, domain?}`, at an image's
+    claim row (from anyone). **The owner is the message's sender** — the
+    verified signer — never a key in the body (a body's `owner` is not
+    read); a sender that is not an identity key is refused. In one step the
+    sender's four admin rows are added, and (#121) the explorer row with the
+    sender's key (`{http, /explore, prefix, <owner>, <the genesis's front
+    door>, explore}`; not when the table holds a row for #115's `owner`
+    symbol — an image written before #121 — which reads the claim's key as
+    before), the claim row is removed, the head `claim` points at
+    `{owner: <the sender>, messagebox?, handle?, domain?}` (what was
+    claimed), and with a `messagebox` the owner's address-book entry is
+    written (`source` "claim"). Refused when the genesis names an owner or
+    the table has an admin row; a second claim finds no row. The instance's
+    owner — the step and call input `owner` — is the genesis's, else the key
+    the head `claim` names (none before the claim). Two ways it arrives:
+    the owner's own message to the instance (a bare image: whoever sends the
+    claim first owns it — `skein plan claim`, then `skein send`); or a claim
+    the owner signed **before the instance existed**, naming no recipient —
+    the one message that may name none (the mail record without
+    `recipient`, signed as every message is: BRC-169's `[2, "metanet
+    handles envelope"]`, key `send`, counterparty anyone, so the sender's
+    key alone checks it) — which the host's instance manager forwards into
+    a new instance as its first entry, a `local` request (`create`, #90,
+    MESSAGES.md). The host signs nothing for the owner.
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
   [--sender key] <box> <handler>` send them, and `skein plan
-  install|uninstall|dispatch|peers|deploy` builds them for any BRC-100
+  install|uninstall|dispatch|peers|deploy|claim` builds them for any BRC-100
   wallet to send (#124). No reply. **No program reaches a kernel
   table** (#87): every program emits as the instance, and no default row
   admits the instance's own key to an admin box, so a program's message to
@@ -804,6 +815,7 @@ entry is one of
 entry  {kind: "log", prev, n, time, genesis | request+transport (+ door | refused, #121) | mail | event+box}
 mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, json?,
         session?: {payload, signature, nonce, yourNonce} | nonce?, signature?}
+        (#127: a claim, box `claim`, may name no recipient: signed before the instance existed, forwarded into it)
 ```
 
 - **`request`**: a package as a transport carried it in (an HTTP request, a

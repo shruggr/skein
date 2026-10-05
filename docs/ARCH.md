@@ -273,8 +273,8 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   front door verified on the request's thread (its `read` answer names
   it), not a header as the client sent it.
 - **The control socket** (`$SKEIN_HOME/host.sock`): `skein-host event`
-  sends a cron tick by hand through the running host, `skein-host claim` an
-  owner's claim into an image.
+  sends a cron tick by hand through the running host. (No claim: the host
+  holds no owner's key, #127.)
 
 `scripts/host/README.md` has the commands, ports and environment.
 
@@ -282,7 +282,9 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 
 The host runs one instance of its own: the **host skein**, the operator's.
 `skein-host init --owner <key>` creates it (handle `host` by default) from
-the default image and claims it for the operator's key, and host.db
+the default image, a bare image the operator then claims from a wallet
+(#127: `skein plan claim`, `skein send`; its claim row admits anyone until
+then, so the operator does it first), and host.db
 records which row it is (`skein-host list` shows it as kind `host`). It is
 an ordinary instance under the same transports, with one difference: its
 address book, and no other, has entries for the **instance manager** and
@@ -298,15 +300,19 @@ the host skein: its entry exists in the host skein's address book alone,
 and a message from any other sender is not acted on and not answered. Each
 message is answered with a signed message:
 
-- `create {handle, owner, image?, domain?}` → `{handle, identity, url}`. The row is
+- `create {handle, owner, image?, domain?, claim}` → `{handle, identity, url}`. The row is
   added disabled (no hostname) at `domain` (#113: the onboarding app's
   handle domain; when none is given, the host's: the onboarding app's
   `config.onboard.domain`, else the host name of `SKEIN_ROUTER_ORIGIN`), the identity derived from the master
   secret, the store booted from the image (`default`),
-  the kernel started, and the owner's claim delivered as a `local` request
-  from the manager. Only once the kernel has written the owner's admin rows
-  is the row enabled, which publishes the hostname: no request can reach
-  the claim row first. `url` is the instance's origin
+  the kernel started, and `claim` — the owner's own claim `{message, body}`,
+  signed by the owner's wallet before the instance existed and naming no
+  recipient (#127) — forwarded into it as a `local` request, its first
+  entry: the front door checks the signature, the kernel takes the owner
+  from the signer. The manager signs nothing for the owner; a claim whose
+  sender is not `owner` is refused. Only once the kernel has written the
+  owner's admin rows is the row enabled, which publishes the hostname: no
+  request can reach the claim row first. `url` is the instance's origin
   (`SKEIN_INSTANCE_ORIGIN`, default `http://<handle>.localhost:<port>`).
   Image `mailbox` (#113): a mailbox instance for `owner` (its owner in its
   genesis, no claim), published at once — what a registration asks for.
@@ -316,16 +322,18 @@ message is answered with a signed message:
 - A refusal is an answer `{error}`: a handle that is not a hostname label
   or is taken or reserved (`id`, `host`, and the first label of the
   router's own origin, which never routes to an instance), an owner that
-  is not a key, another image, a refused claim. Every row, however it is
+  is not a key, another image, no claim, another key's claim, a refused
+  claim (the instance left unpublished). Every row, however it is
   made, has a hostname label for a handle.
 
 The **onboarding app** (shruggr/skein-onboard), installed in the host
 skein, is how a stranger gets a skein: `POST /onboard/call {fn:
-"onboard.create", args: {handle, image?}}` over any BRC-104 session. Its
+"onboard.create", args: {handle, image?, claim}}` over any BRC-104 session,
+`claim` the caller's own signed claim (#127). Its
 handler records the request and launches a thread, and the client waits
 on that thread (#66). The thread applies the policy (free and ungated
 today; not a reserved name), emits `create` to the instance manager with
-the session's key as the owner, and rests. On the answer it points
+the session's key as the owner and the claim as it came, and rests. On the answer it points
 `onboard/instances/<handle>` at the manager's answer record, has the
 certifier sign the new skein's handle certificate (for its own identity)
 and records it, and finishes; the page gets `{handle, identity, url}`. The
@@ -368,8 +376,9 @@ first, then the tree's. Without a tree the host writes its default system
 in code through the same writer. A packet whose scope is a state record is
 a checkpoint. **The default image** (`images/default`, #89) is a tree whose
 genesis names no owner: it carries the claim row instead, and the first
-claim (the host's instance manager, `skein-host claim`) writes the owner's
-admin rows and removes the row. `BOOTSTRAP.md` has the detail.
+claim — its sender is the owner (#127): the owner's own message, or a claim
+the owner signed before the instance existed, forwarded by the instance
+manager — writes the owner's admin rows and removes the row. `BOOTSTRAP.md` has the detail.
 
 ## Files in and out
 
