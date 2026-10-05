@@ -32,10 +32,10 @@ export const CHAT_APP: PinnedApp = {
   rev: process.env.SKEIN_CHAT_REV ?? "a9491ee30668aeee5a44745403dadf7355825a51", dir: process.env.SKEIN_CHAT_DIR,
 };
 
-/** shruggr/skein-onboard (#90): the onboarding app, installed in the host skein. */
+/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169 (0.2.0). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
-  rev: process.env.SKEIN_ONBOARD_REV ?? "e142f8ea203a5846ac2de9d4c319669c59463af9", dir: process.env.SKEIN_ONBOARD_DIR,
+  rev: process.env.SKEIN_ONBOARD_REV ?? "7c0c8139a66d5cf0adb6ae37c58c8e92995d924c", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
 /** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered. */
@@ -72,10 +72,10 @@ export interface InstallHost { home: string; port: number; owner: WalletInterfac
  * <checkout> --instance <handle> --approve-all` (the instance's store must
  * exist: hydrate it first). Throws with the install's output when one fails.
  */
-export async function installApps(h: InstallHost, handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP]): Promise<void> {
+export async function installApps(h: InstallHost, handle: string, apps: PinnedApp[] = [SHELL_APP, CHAT_APP], extra: string[] = []): Promise<void> {
   for (const app of apps) {
     const out: string[] = [];
-    const code = await main(["install", appCheckout(app), "--instance", handle, "--approve-all"], {
+    const code = await main(["install", appCheckout(app), "--instance", handle, "--approve-all", ...extra], {
       vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => out.push(l), err: (l) => out.push(l),
       owner: { wallet: h.owner, box: (row) => new RawBox(h.owner, `http://127.0.0.1:${h.port}/@${row.handle}`) },
     });

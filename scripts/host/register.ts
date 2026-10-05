@@ -1,9 +1,13 @@
-// A mailbox instance for an identity outside the host (#40): the signed
-// registration the router takes at POST /account/register {username,
-// identityKey, signature} — signature by the identity's own wallet-api over
-// "register <username>" (protocol [2, "skein register"], keyID the username,
-// counterparty anyone). Prints the mailbox's URL; idempotent (409 = the name
-// is taken, by this key or another).
+// A mailbox instance for an identity outside the host (#40, #113): the signed
+// registration at POST /account/register {username, identityKey, signature},
+// which the router carries into the host skein, where the onboarding app
+// (shruggr/skein-onboard) checks it, asks the instance manager for the
+// mailbox and the certifier for the handle certificate. The signature is by
+// the identity's own wallet-api over "register <username>@<domain>"
+// (protocol [2, "skein register"], keyID the username, counterparty anyone);
+// the domain is the host's handle domain, read from /.well-known/skein-host.
+// Prints the mailbox's URL; the same name again is a new certificate for the
+// same mailbox (409: the name is another key's, or this key has another).
 //   node scripts/host/register.ts <wallet-url> <originator> <username> [host-url]
 import { HTTPWalletJSON, Utils } from "@bsv/sdk";
 
@@ -17,9 +21,10 @@ const wallet = new HTTPWalletJSON(originator, walletUrl, async (input, init) => 
   if (!res.ok) { const t = await res.clone().text(); if (t.includes("permission denied")) throw new Error(t); }
   return res;
 });
+const { domain } = await (await fetch(`${host}/.well-known/skein-host`)).json() as { domain: string };
 const { publicKey: identityKey } = await wallet.getPublicKey({ identityKey: true });
 const { signature } = await wallet.createSignature({
-  protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}`, "utf8"),
+  protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}@${domain}`, "utf8"),
 });
 const res = await fetch(`${host}/account/register`, {
   method: "POST",

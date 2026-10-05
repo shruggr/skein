@@ -233,9 +233,15 @@ export class BrowserHost {
     if (n) this.log(`installed ${n} modules`);
   }
 
-  /** This identity's mailbox instance on the host (messages to it wait there while the tab is closed): its URL. */
+  /**
+   * This identity's mailbox instance on the host (messages to it wait there
+   * while the tab is closed): its URL. #113: the host skein's onboarding app
+   * takes the registration, signed over `register <handle>@<domain>` — the
+   * host's handle domain, from /.well-known/skein-host.
+   */
   private async register(): Promise<string> {
-    const sig = await this.o.wallet.createSignature({ protocolID: [2, "skein register"], keyID: this.o.handle, counterparty: "anyone", data: [...new TextEncoder().encode(`register ${this.o.handle}`)] });
+    const { domain } = await (await fetch(`${this.origin}/.well-known/skein-host`)).json() as { domain: string };
+    const sig = await this.o.wallet.createSignature({ protocolID: [2, "skein register"], keyID: this.o.handle, counterparty: "anyone", data: [...new TextEncoder().encode(`register ${this.o.handle}@${domain}`)] });
     const r = await fetch(`${this.origin}/account/register`, { method: "POST", body: JSON.stringify({ username: this.o.handle, identityKey: this.identity, signature: [...sig.signature].map((b) => b.toString(16).padStart(2, "0")).join("") }) });
     const j = await r.json() as { messagebox?: string; error?: string };
     this.log(`register ${this.o.handle}: HTTP ${r.status}${j.messagebox ? ` · ${j.messagebox}` : ` ${j.error ?? ""}`}`);

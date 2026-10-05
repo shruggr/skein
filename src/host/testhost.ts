@@ -1,5 +1,8 @@
 // A test host (#40): a router over a temporary host.db and SKEIN_HOME, agents
-// and mailbox instances with keys of their own (the oracle's stand-in).
+// and mailbox instances with keys of their own (the oracle's stand-in). With no
+// host skein its own origin's BRC-169 requests are answered by a fixture over
+// host.db (fake-discovery.ts); `hostSkein()` makes the real one (#113): the host
+// skein with the onboarding app installed, which then answers them.
 
 import { existsSync, statSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -14,7 +17,8 @@ import { dirBundles } from "../client/client.ts";
 import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
 import { ephemeralWallet } from "../wallet.ts";
-import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../testapps.ts";
+import { CHAT_APP, installApps, ONBOARD_APP, SHELL_APP, type PinnedApp } from "../testapps.ts";
+import { fakeDiscovery } from "./fake-discovery.ts";
 import { anyOf, dirSource, wasmDirObjects } from "./boot.ts";
 import { HostDb } from "./instances.ts";
 import { Router } from "./router.ts";
@@ -61,7 +65,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 }
 
 /** A host with agents and mailbox instances, each instance's key its own (the oracle's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; trust?: Router["o"]["trust"] } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
@@ -78,8 +82,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
     // The host's headers feed (#102).
     ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
-    // The host's name, note and icon in the manifest (#104).
-    ...(o.trust ? { trust: o.trust } : {}),
+    // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
+    discovery: fakeDiscovery(db, () => router),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
     providerKeyFor: (name) => new Oracle(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
@@ -101,7 +105,21 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
       const d = await dirSource(dir);
       return await router.bootRow(handle, { kind: "tree", root: d.root, objects: anyOf(d.objects, wasmDirObjects(join(ROOT, "wasm"))) }, { image: true });
     },
-    mailbox(handle: string, whose: string) { router.addMailbox(handle, whose); db.add(handle, { identity: keyOf(handle).toPublicKey().toString() }); },
+    /** A mailbox instance's row (a fixture's: its genesis at first hydration; the product path is the manager's create, Router.createInstance image `mailbox`). */
+    mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); },
+    /**
+     * The host skein (#90, #113): `host` from the default image, claimed for
+     * the owner, the instance manager and the certifier in its address book;
+     * the onboarding app installed with `config` over its manifest's (default:
+     * domain `localhost`, origin this router's). Its own origin's BRC-169
+     * requests are then the app's.
+     */
+    async hostSkein(config: Record<string, unknown> = {}) {
+      const c = await router.createInstance("host", ownerId, { host: true });
+      await router.hydrate("host");
+      await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], ["--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, ...config } })]);
+      return c;
+    },
     origin: (handle: string) => router.originOf(handle),
     storeSize(handle: string) { const p = db.get(handle)!.store; return statSync(p).size + (existsSync(`${p}-wal`) ? statSync(`${p}-wal`).size : 0); },
     /**

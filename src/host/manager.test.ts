@@ -5,8 +5,10 @@
 // delivers its owner's claim as its first entry after the genesis, then
 // publishes it; a second `create` of the handle is refused (an answer); a
 // message from any other instance is not acted on and not answered; `stop`
-// unpublishes, `start` publishes again. (kernel-zig/equiv/host.ts runs the
-// whole flow through the onboarding app.)
+// unpublishes, `start` publishes again. #113: `create` records the domain it
+// is given; image `mailbox` makes a mailbox instance (what a registration
+// asks for), the same owner and handle again the same answer. (kernel-zig/
+// equiv/host.ts runs the whole flow through the onboarding app.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -79,8 +81,27 @@ test("the instance manager: create (claimed before published), refusals, the hos
   a = await send("host", "create", { handle: "carol", owner: "nope" });
   assert.match(String(a[0]?.body.error), /owner: not an identity key/);
   a = await send("host", "create", { handle: "carol", owner: client, image: "other" });
-  assert.match(String(a[0]?.body.error), /only the default image/);
+  assert.match(String(a[0]?.body.error), /the default image and mailbox instances/);
   assert.equal(h.db.get("carol"), undefined);
+  a = await send("host", "create", { handle: "carol", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "Not A Domain" });
+  assert.match(String(a[0]?.body.error), /domain .*a host name/);
+
+  // #113: the domain asked is the row's; image `mailbox` is a mailbox instance for the owner, published at once.
+  a = await send("host", "create", { handle: "dora", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "skein.test" });
+  assert.equal(h.db.get("dora")!.domain, "skein.test");
+  const mailer = PrivateKey.fromRandom().toPublicKey().toString();
+  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox", domain: "skein.test" });
+  assert.deepEqual([a[0]!.body.handle, a[0]!.body.url, hex(a[0]!.body.identity)], ["mel", h.origin("mel"), h.keyOf("mel").toPublicKey().toString()]);
+  const mel = h.db.get("mel")!;
+  assert.deepEqual([mel.kind, mel.owner, mel.domain, mel.status], ["mailbox", mailer, "skein.test", "enabled"]);
+  const mg = await (await h.router.hydrate("mel")).kernel.genesis() as { owner?: unknown };
+  assert.equal(hex(mg.owner), mailer, "its genesis names the owner (no claim)");
+  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
+  assert.equal(a[0]!.body.handle, "mel", "the same owner and handle again: the same answer");
+  a = await send("host", "create", { handle: "mel2", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
+  assert.match(String(a[0]?.body.error), /has a mailbox instance here already: mel/);
+  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(client, "hex")), image: "mailbox" });
+  assert.match(String(a[0]?.body.error), /handle mel is taken/);
 
   // Another instance (its own key, from its own handle) is not acted on, and not answered.
   h.agent("other");

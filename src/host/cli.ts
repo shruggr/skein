@@ -3,7 +3,8 @@
 // and the router (router.ts, #33) that serves every enabled row.
 //   skein-host init [--owner <hex>] [--handle host]   the host skein (#90): the operator's own instance
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-//   skein-host add <handle> --mailbox --owner <hex>   a mailbox instance (#40) for an identity outside the host
+//   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance (#40) for an identity outside the
+//                                     host: Router.createInstance with image `mailbox`, the instance manager's own create (#113)
 //   skein-host knows <handle> [a,b | --all | --none]
 //   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
 //   skein-host identity <handle> [--peer]   an instance's identity key (from the master secret); --peer: its libp2p peer ID
@@ -16,7 +17,9 @@
 //   skein-host dispatch <handle> add|remove [--sender key] <box> <handler-name-or-cid>
 //   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] | remove <key> | list
 //   skein-host event <handle> <box> [json]
-//   skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]
+//   skein-host install <repo-url[#rev] | dir> --instance <handle> [--config json] [--approve-all | --dry-run]
+//   skein-host import-handles         the host.db mailbox instances the host skein's onboarding app has no record
+//                                     of, adopted (#113: onboard.adopt as the owner): recorded and certified
 //   skein-host uninstall <app> --instance <handle> [--approve-all]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>
@@ -41,8 +44,11 @@
 // other instance's book names it), and recorded in host.db as the host skein.
 // Once; a second `init` says which instance it is. The operator then installs
 // the onboarding app into it (`skein-host install
-// https://github.com/shruggr/skein-onboard#v0.1.0 --instance host`;
-// scripts/host/up.sh does).
+// https://github.com/shruggr/skein-onboard#v0.2.0 --instance host --config
+// '{"onboard": {"domain": "<the handle domain>"}}'`; scripts/host/up.sh does).
+// The onboarding app is the host's BRC-169 server (#113): registrations,
+// the handle certificates (through the certifier provider), resolve, search,
+// the manifest — the router maps its own origin's requests onto it.
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the oracle's (oracle.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
@@ -90,12 +96,10 @@
 //   SKEIN_HOME            default ~/.skein; host.db and master.key live here
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
-//   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: what BRC-169 discovery
-//                         (/manifest.json, the resolve endpoint) publishes as the resolve URL, and the geneses' resolveOrigin
-//   SKEIN_HOST_NAME, SKEIN_HOST_NOTE, SKEIN_HOST_ICON   the host's name, a line about it and its icon's URL in the
-//                         manifest's metanet.trust (BRC-169 §5.1, #104); each optional, absent when unset
-//   SKEIN_ORDFS_URL       the ORDFS content route a handle's avatarURL is derived under (#104: <url>/<txid>_<vout>),
-//                         default https://api.1sat.app/content; empty: no avatarURL
+//   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: where BRC-169 discovery is
+//                         answered (the host skein's onboarding app, #113), and the geneses' resolveOrigin. The manifest's
+//                         URLs, the handle domain, the host's name, note and icon and the ORDFS route are the onboarding
+//                         app's config (config.onboard: domain, origin, name, note, icon, ordfs), written at install
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
 //   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
@@ -157,7 +161,7 @@ export interface Env {
 const USAGE = `usage:
   skein-host init [--owner <hex>] [--handle host]          the host skein (#90): the operator's instance, from the default image, claimed for --owner (default SKEIN_OWNER); once
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-  skein-host add <handle> --mailbox --owner <hex>         a mailbox instance for an identity outside the host (#40)
+  skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance for an identity outside the host (#40): the instance manager's create (#113)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
   skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
   skein-host identity <handle> [--peer]                   an instance's identity key; --peer: its libp2p peer ID (#51)
@@ -174,8 +178,9 @@ const USAGE = `usage:
   skein-host peers <handle> add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d]   an address-book entry (#70): how the agent reaches <key> (mailbox: a URL; libp2p: a peer ID or topic:<name>; local: a provider)
   skein-host peers <handle> remove <key>
   skein-host peers <handle> list                          its address book: key, transport, address, role, handle, source
-  skein-host install <repo-url[#rev] | dir> --instance <handle> [--approve-all | --dry-run]   an app (docs/APPS.md): check, show what it asks for, send as the owner
+  skein-host install <repo-url[#rev] | dir> --instance <handle> [--config json] [--approve-all | --dry-run]   an app (docs/APPS.md): check, show what it asks for, send as the owner; --config: merged over the manifest's config
   skein-host uninstall <app> --instance <handle> [--approve-all]                          its stop, then its dispatch rows removed (the heads are left)
+  skein-host import-handles                               the mailbox instances in host.db the host skein's onboarding app has no record of: adopted (onboard.adopt as the owner), so they resolve (#113)
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
@@ -207,18 +212,16 @@ export async function main(argv: string[], env: Env): Promise<number> {
         const f: RowFields = { domain: v.domain, identity: v.identity, wallet_url: v["wallet-url"], wallet_originator: v.originator, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (v.mailbox) {
-          // A mailbox instance (#40): the front door and the messagebox, keeping mail for --owner.
+          // A mailbox instance (#40): the front door and the messagebox, keeping mail for --owner. #113: the instance
+          // manager's own create (image `mailbox`), through a router of this command's own — the one creation path.
           if (!v.owner || !/^0[23][0-9a-f]{64}$/.test(v.owner)) { env.err("skein-host add --mailbox: --owner <identity key, hex>"); return 2; }
-          const other = db.mailboxOf(v.owner);
-          if (other && other.handle !== handle) { env.err(`skein-host add --mailbox: ${short(v.owner)} already has a mailbox instance, ${other.handle}`); return 1; }
-          f.kind = "mailbox";
-          f.owner = v.owner;
+          if ([v.boot, v.packet, v.image, v.identity, v.store, v.tree, v["wallet-url"]].some((x) => x !== undefined) || v.derive) { env.err("skein-host add --mailbox: only --owner and --domain"); return 2; }
+          return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
         // The identity is the oracle's (#18): derived from the master secret, key ID = the handle.
         if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Oracle(masterKey(env.vars, home)).identity(handle);
         if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
-        if (v.image !== undefined && v.mailbox) { env.err("skein-host add: --image is not a mailbox instance"); return 2; }
         if (v.image !== undefined && isOutpoint(v.image)) { env.err(`skein-host add --image ${v.image}: an image by outpoint is read through the ORDFS app, which is not built yet; give a directory or a tree CID`); return 2; }
         const r = db.add(handle, f);
         env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
@@ -293,6 +296,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
         return await installCmd(db, rest, env);
       case "uninstall":
         return await uninstallCmd(db, rest, env);
+      case "import-handles":
+        return await importHandlesCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -514,8 +519,29 @@ async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   }
   db.setStatus(handle, "enabled");
   env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, claimed by ${short(owner)} · at ${c.url} · the instance manager in its address book`);
-  env.out(`next: skein-host install https://github.com/shruggr/skein-onboard#v0.1.0 --instance ${c.handle} (the onboarding app; the router must be running)`);
+  env.out(`next: skein-host install https://github.com/shruggr/skein-onboard#v0.2.0 --instance ${c.handle} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' (the onboarding app: registration and BRC-169; the router must be running)`);
   return 0;
+}
+
+/**
+ * `skein-host add <handle> --mailbox --owner <hex> [--domain d]` (#40, #113):
+ * Router.createInstance with image `mailbox` — what the instance manager does
+ * for the onboarding app's registrations — through a router of this
+ * command's own. The same owner and handle again: kept (printed).
+ */
+async function mailboxCmd(db: HostDb, handle: string, owner: string, domain: string | undefined, env: Env): Promise<number> {
+  const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
+  try {
+    const c = await router.createInstance(handle, owner, { image: "mailbox", ...(domain ? { domain } : {}) });
+    const r = db.get(handle)!;
+    env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store} · ${short(c.identity)} · mailbox instance for ${short(owner)} at ${c.url}`);
+    return 0;
+  } catch (e) {
+    env.err(`skein-host add --mailbox: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await router.close();
+  }
 }
 
 /** An outpoint as an image is named on chain: `<txid>_<vout>` (or `.`/`:`). */
@@ -582,8 +608,13 @@ async function approved(v: { "approve-all"?: boolean }, env: Env, what: string):
 
 /** `skein-host install <repo-url | dir> --instance <handle>` (#72, #76): install.ts. */
 async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [spec, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, "approve-all": { type: "boolean" }, "dry-run": { type: "boolean" } } });
+  const { values: v, positionals: [spec, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { instance: { type: "string" }, config: { type: "string" }, "approve-all": { type: "boolean" }, "dry-run": { type: "boolean" } } });
   if (!spec || more.length || !v.instance) { env.err(USAGE); return 2; }
+  let config: Record<string, unknown> | undefined;
+  if (v.config !== undefined) {
+    try { config = JSON.parse(v.config) as Record<string, unknown>; } catch { config = undefined; }
+    if (!config || typeof config !== "object" || Array.isArray(config)) { env.err("skein-host install --config: a JSON object ({<program>: {…}}), merged over the manifest's config"); return 2; }
+  }
   const row = db.get(v.instance);
   if (!row) { env.err(`skein-host install: no instance ${v.instance}`); return 1; }
   if (row.kind === "mailbox") { env.err(`skein-host install: ${row.handle} is a mailbox instance`); return 1; }
@@ -592,6 +623,8 @@ async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number>
     if (!s.blocks) throw new Error(`no store at ${row.store} yet (run the instance once)`);
     const { fetchApp, readApp, instanceView, planInstall, describe, sendInstall } = await import("./install.ts");
     const tree = await readApp(fetchApp(spec));
+    // --config (#113): the installed config is the manifest's with these values over it (one level deep per program).
+    if (config) tree.checked.manifest.config = mergeConfig(tree.checked.manifest.config, config);
     const plan = await planInstall(tree, await instanceView(s.blocks), { modules: wasmDirObjects(WASM_DIR) });
     for (const l of describe(plan)) env.out(l);
     if (v["dry-run"]) return 0;
@@ -608,6 +641,46 @@ async function installCmd(db: HostDb, rest: string[], env: Env): Promise<number>
   } finally {
     await s.close?.();
   }
+}
+
+/**
+ * `skein-host import-handles` (#113): the mailbox instances host.db has and
+ * the host skein's onboarding app does not (a registration before the app
+ * took them), each adopted — `{fn: "onboard.adopt", args: {handle, owner}}`
+ * on /onboard/call over the owner's session: the app asks the instance
+ * manager (which answers for the existing row, at the app's domain), issues
+ * the certificate and records it, so the handle resolves. The running
+ * router serves the host skein.
+ */
+async function importHandlesCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  if (rest.length) { env.err(USAGE); return 2; }
+  const host = db.hostSkein();
+  if (!host) { env.err("skein-host import-handles: no host skein (skein-host init)"); return 1; }
+  const owner = await ownerOf(env, "skein-host import-handles");
+  if (typeof owner === "number") return owner;
+  const box = owner.box(host) as RawBox;
+  let failed = 0;
+  for (const r of db.list().filter((x) => x.kind === "mailbox" && x.owner)) {
+    const known = await fetch(`${box.url}/onboard/resolve?handle=${encodeURIComponent(r.handle)}`).then((x) => x.json() as Promise<{ identityKey?: string }>).catch(() => ({ identityKey: undefined }));
+    if (known.identityKey === r.owner) { env.out(`${r.handle}: recorded already`); continue; }
+    const res = await box.af.fetch(`${box.url}/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.adopt", args: { handle: r.handle, owner: r.owner } }) });
+    const text = await res.text();
+    let v: { result?: { domain?: string; serialNumber?: string }; error?: { message?: string } } = {};
+    try { v = JSON.parse(text); } catch { /* said below */ }
+    if (res.status === 200) env.out(`${r.handle}: adopted at ${v.result?.domain} · serial ${v.result?.serialNumber}`);
+    else { failed++; env.err(`${r.handle}: ${res.status} ${v.error?.message ?? text.slice(0, 200)}`); }
+  }
+  return failed ? 1 : 0;
+}
+
+/** A manifest's `config` with `over` merged in: per program, its keys over the manifest's. */
+export function mergeConfig(base: Record<string, unknown> | undefined, over: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, x] of Object.entries(over)) {
+    const b = out[k];
+    out[k] = x && typeof x === "object" && !Array.isArray(x) && b && typeof b === "object" && !Array.isArray(b) ? { ...b as Record<string, unknown>, ...x as Record<string, unknown> } : x;
+  }
+  return out;
 }
 
 /** `skein-host uninstall <app> --instance <handle>` (#72, #76, #77): stop, then its dispatch rows removed. */
@@ -833,12 +906,12 @@ export interface Host {
  * The oracle (#18, oracle.ts): every instance's wallet is a ProtoWallet over a
  * key derived from the router's master secret (key ID = the handle); the
  * router's BRC-104 identity is another child of it, and so are its providers'
- * keys (#70: the HTTP proxy, the waker, the cron provider, the libp2p node, the status provider)
- * and the certifier key (#100: BRC-169's trust anchor).
+ * keys (#70: the HTTP proxy, the waker, the cron provider, the libp2p node, the status provider,
+ * the instance manager, and the certifier, #113: its key the certifier key, BRC-169's trust anchor).
  */
-function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor" | "certifierKey"> {
+function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor"> {
   const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), providerKeyFor: (name) => oracle.providerKey(name), certifierKey: oracle.certifierKey() };
+  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), providerKeyFor: (name) => oracle.providerKey(name) };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */
@@ -854,8 +927,6 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
     libp2p: hostP2PConfig(v, home),
     headersFeed: v.SKEIN_HEADERS_URL || undefined,
-    trust: { name: v.SKEIN_HOST_NAME || undefined, note: v.SKEIN_HOST_NOTE || undefined, icon: v.SKEIN_HOST_ICON || undefined },
-    ...(v.SKEIN_ORDFS_URL !== undefined ? { ordfs: v.SKEIN_ORDFS_URL } : {}),
     arc: hostArcConfig(v, home),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };

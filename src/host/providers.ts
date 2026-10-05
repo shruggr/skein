@@ -71,10 +71,25 @@
 //                     taken handle, a bad owner key, another image, a refused claim
 //              start {handle}   → {handle, started: true, url}: published and started
 //              stop {handle}    → {handle, stopped: true}: unpublished and stopped
+//              create {handle, owner, image: "mailbox", domain?} (#113): a mailbox
+//                     instance for `owner` (the front door and the messagebox,
+//                     keeping its mail), published at once; the same owner and
+//                     handle again: the same answer (it exists). `domain` (both
+//                     images): the handle's domain, recorded with the row
 //              (`list` later.) It also speaks first: the claim — a message in box
 //              `claim`, body {owner, messagebox?, handle?, domain?}, into an image
 //              (Router.claim, `skein-host claim`, and create's own); the image's
 //              claim row admits anyone
+//   certifier  the host's BRC-169 certifier (#100, #113): the host skein's alone,
+//              as the manager. Its key is the certifier key, the manifest's
+//              metanet.trust.publicKey (the master's child, key ID `certifier`).
+//              issue {handle, domain, subject: bytes(33), serialNumber, issuance?}
+//              → {certificate, holder: {certificate, keyringForSubject}, serialNumber,
+//              issuance?}: the handle certificate for handle@domain → subject under
+//              that serial number, signed — plaintext fields (what resolve answers)
+//              and the subject's copy with encrypted fields and its keyring (what a
+//              wallet's acquireCertificate takes) — handles.ts. It records nothing:
+//              the host skein's onboarding app records the issue
 //
 // How this host obtains the providers' keys is its own business (oracle.ts:
 // children of its master secret); the instance knows them from its address
@@ -101,7 +116,9 @@ export interface MailRecord {
 export interface Outgoing { message: MailRecord; body: Uint8Array; transport: string; address: string }
 
 /** The stock providers' names (and the roles the address book gives them). */
-export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager"] as const;
+export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager", "certifier"] as const;
+/** The providers only the host skein's address book names (#90, #113): they act for it alone. */
+export const HOST_SKEIN_PROVIDERS: readonly ProviderName[] = ["manager", "certifier"];
 export type ProviderName = typeof PROVIDERS[number];
 
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number; maxBytes?: number };
@@ -127,6 +144,8 @@ export interface ProvidersOptions {
     from(): { handle: string; identity: string } | undefined;
     request(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
   };
+  /** The certifier (#113): an issue request from the host skein → the answer body (handles.ts). Absent: none. */
+  certifier?(box: string, body: Record<string, unknown>): Promise<Record<string, unknown>>;
   /** The libp2p host, when there is one: the instance's node does the work. */
   p2p?: {
     publish(handle: string, topic: string, body: Uint8Array): Promise<{ seqno: Uint8Array; recipients: number }>;
@@ -174,7 +193,7 @@ export class Providers {
   }
 
   /** The address book entries a genesis seeds for this host's providers (role = name). */
-  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => n !== "manager")): Array<{ key: Uint8Array; transport: "local"; address: string; role: string }> {
+  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => !HOST_SKEIN_PROVIDERS.includes(n))): Array<{ key: Uint8Array; transport: "local"; address: string; role: string }> {
     return names.map((n) => ({ key: Uint8Array.from(Buffer.from(this.key(n), "hex")), transport: "local" as const, address: n, role: n }));
   }
 
@@ -233,10 +252,10 @@ export class Providers {
     if (!PROVIDERS.includes(name)) throw new Error(`no provider ${out.address} on this host`);
     if (hex(out.message.recipient) !== this.key(name)) throw new Error(`the message is not for the ${name} provider`);
     if (!(await this.signed(out))) throw new Error("the message's signature does not verify: not acted on");
-    if (name === "manager") {
-      // #90: the host skein's alone — any other sender's message is not acted on, and not answered.
+    if (HOST_SKEIN_PROVIDERS.includes(name)) {
+      // #90, #113: the host skein's alone — any other sender's message is not acted on, and not answered.
       const host = this.o.manager?.from();
-      if (!host || handle !== host.handle || hex(out.message.sender) !== host.identity) throw new Error("the instance manager takes messages from the host skein only: not acted on");
+      if (!host || handle !== host.handle || hex(out.message.sender) !== host.identity) throw new Error(`the ${name === "manager" ? "instance manager" : name} takes messages from the host skein only: not acted on`);
     }
     let body: Record<string, unknown>;
     try { body = dagCbor.decode(out.body) as Record<string, unknown>; } catch { return await this.answer(handle, name, out.message, id, { error: "the body is not dag-cbor" }); }
@@ -249,6 +268,10 @@ export class Providers {
         case "cron": return await this.cron(handle, out.message, id, box, body);
         case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"status\")" });
         case "manager": return await this.answer(handle, "manager", out.message, id, await this.o.manager!.request(box, body));
+        case "certifier": {
+          if (!this.o.certifier) return await this.answer(handle, "certifier", out.message, id, { error: "this host has no certifier" });
+          return await this.answer(handle, "certifier", out.message, id, await this.o.certifier(box, body));
+        }
       }
     } catch (e) {
       await this.answer(handle, name, out.message, id, { error: (e as Error).message });

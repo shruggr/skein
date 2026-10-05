@@ -13,25 +13,21 @@
 //   http://<host>:<port>/@<handle>/…      the same instance for our own clients (a dev form): the router strips
 //                                         the prefix for the routes; the client signs the path it sent, and its
 //                                         handshake goes under the prefix (src/client/raw.ts).
-//   GET  /manifest.json                   BRC-169 §5.1: metanet.trust (the host's name, note, icon when set; publicKey:
-//                                         the certifier key), metanet.handles (resolve, search)
-//   GET  /.well-known/metanet-handles/resolve?handle=h   BRC-169 §5.2 (handles.ts): an agent's own identity; for a
-//                                         mailbox instance, its owner's — the instance's origin the messagebox, and
-//                                         the handle certificate the host issues for the binding; with the holder's
-//                                         signed profile (#104: the instance's head `profile`), `profile`,
-//                                         `displayName`, `avatarURL`
-//   GET  /.well-known/metanet-handles/search?q=&limit=   BRC-169 §5.6 (#104): this domain's handles whose handle or
-//                                         profile name contains q (any case), at most limit (≤ 100); each with its
-//                                         profile, as resolve has it
-//   GET  /bsvalias/id/<handle>@<domain>   paymail PKI (identity keys by handle)
-//   POST /account/register {username, identityKey, signature}   a mailbox instance for that identity (the
-//                                         signature: [2, "skein register"], key ID the username, counterparty
-//                                         anyone, over "register <username>"), its domain this request's host
-//                                         name; the answer carries the handle certificate for the key's wallet
-//                                         (#103, handles.ts issueSubjectCertificate)
+//   The host's own origin (a host name whose first label is no instance) is the host skein's BRC-169 server
+//   (#113): these requests go to the host skein, as any request goes to its instance, under the onboarding
+//   app's routes (shruggr/skein-onboard: it registers, certifies through the certifier provider, records and
+//   answers; DISCOVERY below):
+//   GET  /manifest.json                          → /onboard/manifest.json   BRC-169 §5.1
+//   GET  /.well-known/metanet-handles/resolve    → /onboard/resolve         BRC-169 §5.2
+//   GET  /.well-known/metanet-handles/search     → /onboard/search          BRC-169 §5.6
+//   POST /account/register                       → /onboard/register        a mailbox instance and its certificate
+//   POST /account/profile                        → /onboard/profile         a handle holder's signed profile
+//   GET  /bsvalias/id/<handle>[@<domain>]        → /onboard/bsvalias/id/…   the paymail PKI, from the same records
+//   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
 //   GET  /.well-known/skein-host          at every host name, an instance's too (#103): {origin, domain} — this
-//                                         router's origin and the domain it registers handles in, for a page an
-//                                         instance serves (the management site) to find the manifest and register
+//                                         router's origin and the handle domain (the onboarding app's
+//                                         config.onboard.domain), for a page an instance serves (the management
+//                                         site) to find the manifest and register
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
@@ -85,7 +81,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
-import { KeyDeriver, PrivateKey, ProtoWallet, Utils, type WalletInterface } from "@bsv/sdk";
+import { KeyDeriver, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
@@ -107,9 +103,7 @@ import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type Inbound
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { Providers, tooLarge, type HttpRequest, type HttpResponse, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
-import { HANDLES_VERSION, issueSubjectCertificate, manifest, profileFields, PROFILE_HEAD, RESOLVE_PATH, resolution, resolutionError, SEARCH_DEFAULT, SEARCH_MAX, SEARCH_PATH, type TrustInfo } from "./handles.ts";
-import { headTree } from "../runtime/heads.ts";
-import { decode } from "../runtime/cid.ts";
+import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -174,16 +168,11 @@ export interface RouterOptions {
    */
   providerKeyFor?(name: ProviderName): PrivateKey;
   /**
-   * The certifier key (#100, oracle.ts certifierKey): BRC-169's trust anchor,
-   * the manifest's `metanet.trust.publicKey`, which signs the handle
-   * certificate in every resolution (handles.ts). Absent: a key of this
-   * router's own, made fresh (a test's).
+   * Tests: the host's own origin's BRC-169 requests (DISCOVERY) answered
+   * when the host has no host skein — a fixture resolver over host.db
+   * (testhost.ts). A host's are always the host skein's.
    */
-  certifierKey?: PrivateKey;
-  /** The host's own name, note and icon in the manifest's `metanet.trust` (#104: SKEIN_HOST_NAME, SKEIN_HOST_NOTE, SKEIN_HOST_ICON). */
-  trust?: TrustInfo;
-  /** The ORDFS content route a profile's `avatarURL` is derived under (#104: SKEIN_ORDFS_URL); default handles.ts ORDFS_CONTENT; empty: no avatarURL. */
-  ordfs?: string;
+  discovery?(req: RouterRequest, url: URL): Promise<RouterResponse | undefined>;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
 }
@@ -203,9 +192,25 @@ const json = (status: number, v: unknown): RouterResponse => ({ status, headers:
 const KEY = /^0[23][0-9a-f]{64}$/;
 /** A handle as an instance's hostname label (#90: what the instance manager creates). */
 export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+/** The registration signature (#113: the onboarding app checks it): [2, "skein register"], key ID the username, counterparty anyone, over `register <username>@<domain>`. */
 export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
-/** Labels a registration may not take (#103): the router's own (`id` in production) and the host skein's. */
-export const RESERVED_HANDLES = new Set(["id", "host"]);
+/** A handle's domain as a manager's `create` takes it: a host name, lower case. */
+const DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
+/** The onboarding app (shruggr/skein-onboard, #90, #113): the host skein's app that serves BRC-169 on the host's own origin. */
+export const ONBOARD_APP = "onboard";
+/**
+ * The host's own origin's BRC-169 requests (#113) → the host skein's routes
+ * (the onboarding app's, under /onboard/): method + path → route.
+ */
+export const DISCOVERY: Record<string, string> = {
+  "GET /manifest.json": `/${ONBOARD_APP}/manifest.json`,
+  [`GET ${RESOLVE_PATH}`]: `/${ONBOARD_APP}/resolve`,
+  [`GET ${SEARCH_PATH}`]: `/${ONBOARD_APP}/search`,
+  "POST /account/register": `/${ONBOARD_APP}/register`,
+  "POST /account/profile": `/${ONBOARD_APP}/profile`,
+};
+/** The paymail PKI (`GET /bsvalias/id/<handle>[@<domain>]`) → the app's prefix row `/onboard/bsvalias/id/…`. */
+export const PAYMAIL_PREFIX = "/bsvalias/id/";
 /** The BRC-169 domain a host name stands for: a dev router at a loopback address answers for `localhost`. */
 export const domainOf = (hostname: string): string => {
   const h = hostname.toLowerCase();
@@ -281,7 +286,7 @@ export class Router {
   readonly p2p?: P2PHost;
   /** The host's providers (#70): what carries the instances' messages out. */
   readonly providers: Providers;
-  /** The certifier (#100): signs the BRC-169 handle certificates. */
+  /** The certifier (#100, #113): signs the BRC-169 handle certificates, for the host skein's onboarding app (the `certifier` provider). */
   readonly certifier: ProtoWallet;
   readonly loaded = new Map<string, Loaded>();
   private loading = new Map<string, Promise<Loaded>>();
@@ -309,7 +314,6 @@ export class Router {
   constructor(o: RouterOptions) {
     this.o = o;
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
-    this.certifier = new ProtoWallet(o.certifierKey ?? PrivateKey.fromRandom());
     this.feeds = new Feeds({
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
       maxQueue: o.feeds?.maxQueue, backoff: o.feeds?.backoff,
@@ -352,9 +356,12 @@ export class Router {
     }
     // Without a host's own provider keys: a router's own, fresh (a test's).
     const own = o.providerKeyFor ? undefined : new KeyDeriver(PrivateKey.fromRandom());
+    const keyOf = o.providerKeyFor ?? ((n: ProviderName) => own!.derivePrivateKey([2, "skein provider"], n, "self"));
+    // The certifier key is the certifier provider's (oracle.ts certifierKey: providerKey("certifier")).
+    this.certifier = new ProtoWallet(keyOf("certifier"));
     const p2p = this.p2p;
     this.providers = new Providers({
-      keyOf: o.providerKeyFor ?? ((n) => own!.derivePrivateKey([2, "skein provider"], n, "self")),
+      keyOf,
       append: (h, pkg) => this.appendLocal(h, pkg),
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
@@ -364,6 +371,8 @@ export class Router {
         from: () => { const r = this.o.db.hostSkein(); return r?.identity ? { handle: r.handle, identity: r.identity } : undefined; },
         request: (box, body) => this.manage(box, body),
       },
+      // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
+      certifier: (box, body) => certify(this.certifier, box, body),
       ...(p2p ? {
         p2p: {
           publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
@@ -635,52 +644,6 @@ export class Router {
   }
 
   /**
-   * The signed profile an instance's owner keeps under its head `profile`
-   * (#104), as resolve and search serve it for the handle's identity key:
-   * read from its store file, read-only, with no kernel (as `subscribes`);
-   * {} when there is none, or it does not verify (handles.ts profileFields).
-   */
-  async profileOf(handle: string, identityKey: string, domain: string): Promise<Record<string, unknown>> {
-    const row = this.o.db.get(handle);
-    if (!row || !existsSync(row.store)) return {};
-    let rec: unknown;
-    const s = openStoreFile(row.store, { readOnly: true });
-    try {
-      const root = await headTree(s, PROFILE_HEAD);
-      if (!root) return {};
-      rec = decode(await s.bytes(root)); // the record as stored (not the display form: its signature stays bytes)
-    } catch (e) {
-      this.say(handle, `profile: not read: ${(e as Error).message}`);
-      return {};
-    } finally { s.close(); }
-    return { ...await profileFields(rec, identityKey, domain, this.o.ordfs) };
-  }
-
-  /**
-   * BRC-169 §5.6 (#104): the enabled instances' handles at `domain` (host.db,
-   * as resolve answers them), in handle order, whose handle or profile name
-   * contains `q` (any case; an empty `q`: every one), at most `limit`
-   * (default 20, at most 100); `truncated` when more matched.
-   */
-  async search(q: string, limit: number, domain: string): Promise<Record<string, unknown>> {
-    const want = q.trim().toLowerCase();
-    const n = Math.min(SEARCH_MAX, Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : SEARCH_DEFAULT);
-    const results: Array<Record<string, unknown>> = [];
-    let truncated = false;
-    for (const row of this.o.db.list("enabled").sort((a, b) => (a.handle < b.handle ? -1 : a.handle > b.handle ? 1 : 0))) {
-      if (row.domain !== domain) continue;
-      const identityKey = this.o.db.identityOf(row.handle, domain);
-      if (!identityKey) continue;
-      const p = await this.profileOf(row.handle, identityKey, domain);
-      const name = typeof p.displayName === "string" ? p.displayName.toLowerCase() : "";
-      if (want && !row.handle.includes(want) && !name.includes(want)) continue;
-      if (results.length === n) { truncated = true; break; }
-      results.push({ handle: row.handle, identityKey, ...p });
-    }
-    return { metanetHandles: HANDLES_VERSION, results, truncated };
-  }
-
-  /**
    * Boot a row's empty store from a system tree or a checkpoint (issue #4,
    * boot.ts) before its first hydration; the row's identity is its oracle's.
    */
@@ -724,11 +687,11 @@ export class Router {
    * book, where its domain resolves, the host's defaults. No owner, no
    * owner's mailbox, no inference peer, no names: the image is the same for
    * everyone, and the owner comes with the claim (`claim`). `manager`
-   * (#90): the host skein's — the instance manager in its address book too
-   * (no other instance's book names it).
+   * (#90, #113): the host skein's — the instance manager and the certifier
+   * in its address book too (no other instance's book names them).
    */
   imageConfig(row: Pick<InstanceRow, "handle" | "domain">, identity: string, o: { manager?: boolean } = {}): Genesis2Config {
-    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const] : [])]);
+    const seed = this.providers.entries(["fetch", "waker", "cron", ...(this.p2p ? ["libp2p" as const] : []), ...(this.arc ? ["status" as const] : []), ...(o.manager ? ["manager" as const, "certifier" as const] : [])]);
     return {
       identity, handle: row.handle, domain: row.domain, resolveOrigin: this.origin(), addressBook: seed,
       providers: Object.fromEntries(seed.map((e) => [e.role, Buffer.from(e.key).toString("hex")])),
@@ -775,19 +738,29 @@ export class Router {
    * instance manager, and processed — the owner's admin rows written, the
    * claim row removed; only then (`publish`, default true) the row enabled,
    * which publishes its hostname. No request can reach the claim row first.
-   * `host`: the host skein — the instance manager in its address book, and
-   * recorded as the host skein (host.db). A refusal throws (a bad or taken
-   * handle, a bad key, another image, a refused claim: the row is left
-   * disabled, its store kept for a look).
+   * `host`: the host skein — the instance manager and the certifier in its
+   * address book, and recorded as the host skein (host.db). `domain`: the
+   * handle's domain, recorded with the row (default `localhost`). A refusal
+   * throws (a bad or taken handle, a bad key, another image, a refused claim:
+   * the row is left disabled, its store kept for a look).
+   *
+   * Image `mailbox` (#113): a mailbox instance for `owner` — the front door
+   * and the messagebox, its owner in its genesis (no claim) — published at
+   * once (`publish`). The same owner and handle again: the same answer (it
+   * exists, enabled again if it was not, at `domain` if given); a key with
+   * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
+   * registrations) and `skein-host add --mailbox` both come here.
    */
-  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean } = {}): Promise<{ handle: string; identity: string; url: string }> {
+  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
-    if (o.image !== undefined && o.image !== "default") throw new Error(`image ${JSON.stringify(o.image)}: this host has only the default image`);
+    if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
+    if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
+    if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (this.o.db.get(handle)) throw new Error(`handle ${handle} is taken`);
     const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
     if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
-    this.o.db.add(handle, { store, status: "disabled" });
+    this.o.db.add(handle, { store, status: "disabled", ...(o.domain ? { domain: o.domain } : {}) });
     this.unpublished.add(handle);
     try {
       await this.bootRow(handle, await imageSource(), { image: true, manager: o.host });
@@ -803,6 +776,29 @@ export class Router {
     } finally {
       this.unpublished.delete(handle);
     }
+  }
+
+  /** createInstance's image `mailbox` (#113). */
+  private async createMailbox(handle: string, owner: string, o: { publish?: boolean; domain?: string }): Promise<{ handle: string; identity: string; url: string }> {
+    const had = this.o.db.get(handle);
+    if (had) {
+      if (had.kind !== "mailbox" || had.owner !== owner) throw new Error(`handle ${handle} is taken`);
+      // The handle's domain is the asker's (a row registered before #113 took the request's host name).
+      if (o.domain && had.domain !== o.domain) this.o.db.add(handle, { domain: o.domain });
+      if (o.publish !== false && had.status !== "enabled") this.o.db.setStatus(handle, "enabled");
+      const identity = had.identity ?? await rootIdentity(await this.o.walletFor(had));
+      return { handle, identity, url: this.originOf(handle) };
+    }
+    const mine = this.o.db.list().find((r) => r.kind === "mailbox" && r.owner === owner);
+    if (mine) throw new Error(`${short(owner)} has a mailbox instance here already: ${mine.handle}`);
+    const store = join(this.o.home ?? ".", "instances", handle, "runtime.db");
+    if (existsSync(store)) throw new Error(`handle ${handle}: a store is at ${store} already`);
+    this.o.db.add(handle, { store, status: "disabled", kind: "mailbox", owner, ...(o.domain ? { domain: o.domain } : {}) });
+    await this.bootRow(handle, { kind: "code" });
+    const identity = this.o.db.get(handle)!.identity!;
+    if (o.publish !== false) this.o.db.setStatus(handle, "enabled");
+    this.say("router", `created mailbox instance ${handle}@${this.o.db.get(handle)!.domain} (${short(identity)}) for ${short(owner)}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}`);
+    return { handle, identity, url: this.originOf(handle) };
   }
 
   /** The owner's mailbox instance on this host, as a claim's `messagebox` (none: {}). */
@@ -821,7 +817,8 @@ export class Router {
     if (box === "create") {
       const owner = b.owner instanceof Uint8Array ? Buffer.from(b.owner).toString("hex") : typeof b.owner === "string" ? b.owner : "";
       if (b.image != null && typeof b.image !== "string") throw new Error("image: the image's name (text)");
-      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined });
+      if (b.domain != null && typeof b.domain !== "string") throw new Error("domain: a host name (text)");
+      const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}) });
       return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
     }
     if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
@@ -870,27 +867,6 @@ export class Router {
       libp2p: this.o.genesis?.libp2p, extraRoutes: this.o.genesis?.routes,
       ...facts,
     };
-  }
-
-  /**
-   * A mailbox instance for identity `owner` (#40): registering an outside
-   * identity is creating its mailbox instance — the front door and the
-   * messagebox, keeping mail for it from anyone. Its genesis is written at the
-   * first hydration. 409 if the handle is taken by someone else.
-   */
-  addMailbox(handle: string, owner: string, domain = "localhost"): InstanceRow {
-    const name = handle.trim().toLowerCase();
-    if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)) throw Object.assign(new Error("invalid username"), { status: 400 });
-    if (!KEY.test(owner)) throw Object.assign(new Error("invalid identity key"), { status: 400 });
-    const had = this.o.db.get(name);
-    if (had && !(had.kind === "mailbox" && had.owner === owner)) throw Object.assign(new Error(`username ${name} is taken`), { status: 409 });
-    const mine = this.o.db.mailboxOf(owner);
-    if (mine && mine.handle !== name) throw Object.assign(new Error(`already registered as ${mine.handle}`), { status: 409 });
-    if (had) return had;
-    const home = this.o.home ?? ".";
-    const row = this.o.db.add(name, { domain, kind: "mailbox", owner, store: join(home, "instances", name, "runtime.db") });
-    this.say("router", `mailbox instance ${name}@${domain} for ${short(owner)} at ${this.originOf(name)}`);
-    return row;
   }
 
   /**
@@ -1050,45 +1026,51 @@ export class Router {
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
-      const origin = this.origin();
-      return json(200, { origin, domain: domainOf(new URL(origin).hostname) });
+      return json(200, { origin: this.origin(), domain: await this.handleDomain() });
     }
     const t = this.target(url);
-    if (t) {
-      const p = this.forward(t.handle, t.route, url, req);
-      this.inflight.add(p);
-      try { return await p; } finally { this.inflight.delete(p); }
-    }
+    if (t) return await this.held(this.forward(t.handle, t.route, url, req));
     const path = url.pathname;
-    if (req.method === "GET" && path === "/manifest.json") {
-      const { publicKey } = await this.certifier.getPublicKey({ identityKey: true });
-      return json(200, manifest(publicKey, this.origin(), this.o.trust));
-    }
-    if (req.method === "GET" && path === SEARCH_PATH) {
-      return json(200, await this.search(url.searchParams.get("q") ?? "", Number(url.searchParams.get("limit") ?? SEARCH_DEFAULT), domainOf(url.hostname)));
-    }
-    if (req.method === "GET" && path === RESOLVE_PATH) {
-      // BRC-169 §5.2: the query carries the bare handle (the domain is this endpoint's, the one the manifest
-      // was fetched at); `handle@domain` is accepted too. A dev router at 127.0.0.1 answers for `localhost`.
-      const q = (url.searchParams.get("handle") ?? "").replace(/^@/, "");
-      const own = domainOf(url.hostname);
-      const [h0, d] = q.includes("@") ? q.split("@") : [q, own];
-      const handle = h0!.split("+")[0]!.toLowerCase(), domain = (d ?? own).toLowerCase();
-      if (!handle) return json(400, resolutionError("malformed-handle", "want ?handle=<handle>"));
-      const row = this.o.db.get(handle);
-      const key = this.o.db.identityOf(handle, domain);
-      if (!row || row.status !== "enabled" || !key) return json(404, resolutionError("handle-not-found", `no handle ${handle}@${domain} here`));
-      return json(200, await resolution(this.certifier, handle, domain, key, this.originOf(handle), await this.profileOf(handle, key, domain)));
-    }
-    const pki = /^\/bsvalias\/id\/([^/]+)$/.exec(path);
-    if (req.method === "GET" && pki) {
-      const [handle, domain = "localhost"] = decodeURIComponent(pki[1]!).split("@");
-      const key = this.o.db.identityOf(handle!, domain);
-      return key ? json(200, { bsvalias: "1.0", handle: `${handle}@${domain}`, pubkey: key }) : json(404, { error: "not found" });
+    // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
+    const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);
+    if (route) {
+      const host = this.o.db.hostSkein();
+      if (host?.status === "enabled") return await this.held(this.forward(host.handle, route, url, req));
+      const f = await this.o.discovery?.(req, url);
+      if (f) return f;
+      return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no host skein (skein-host init): no BRC-169 here" });
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
-    if (req.method === "POST" && path === "/account/register") return await this.register(req.body, domainOf(url.hostname));
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
+  }
+
+  /** A forwarded request, held among the in-flight ones (shutdown answers them 503). */
+  private async held(p: Promise<RouterResponse>): Promise<RouterResponse> {
+    this.inflight.add(p);
+    try { return await p; } finally { this.inflight.delete(p); }
+  }
+
+  /**
+   * The handle domain (#113): the host skein's onboarding app's
+   * `config.onboard.domain` (the app record, a kernel read), the one setting
+   * every handle here is at. With no host skein or no app: this router's
+   * origin's host name as a domain.
+   */
+  async handleDomain(): Promise<string> {
+    const fallback = domainOf(new URL(this.origin()).hostname);
+    const host = this.o.db.hostSkein();
+    if (host?.status !== "enabled") return fallback;
+    try {
+      const l = await this.hydrate(host.handle);
+      const root = await l.kernel.call("head", `${ONBOARD_APP}/app`) as CID | null;
+      if (!root) return fallback;
+      const rec = await l.kernel.store.get(root) as { config?: Record<string, { domain?: unknown } | undefined> };
+      const d = rec.config?.[ONBOARD_APP]?.domain;
+      return typeof d === "string" && d ? d.toLowerCase() : "localhost";
+    } catch (e) {
+      this.say("router", `the handle domain: not read from ${host.handle}: ${(e as Error).message}`);
+      return fallback;
+    }
   }
 
   /** Arcade's webhook (#58, arc.ts); 404 when the host has no Arcade. */
@@ -1096,37 +1078,6 @@ export class Router {
     if (!this.arc) return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no Arcade" });
     if (req.method === "POST") return await this.arc.callback(req.headers, req.body);
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no ${req.method} ${path}` });
-  }
-
-  /**
-   * POST /account/register {username, identityKey, signature}: a mailbox
-   * instance for a key its holder signed for, at `domain` (the request's host
-   * name). The answer (#103): {handle, domain, identityKey, messagebox,
-   * certificate, keyringForSubject} — the handle certificate for the key's
-   * wallet to keep (handles.ts issueSubjectCertificate). The same key and
-   * name again: the same handle, a certificate issued again. 409: the name is
-   * another's, an instance's, or reserved, or the key has another handle here.
-   */
-  private async register(raw: Uint8Array, domain: string): Promise<RouterResponse> {
-    let b: { username?: unknown; identityKey?: unknown; signature?: unknown };
-    try { b = JSON.parse(new TextDecoder().decode(raw)); } catch { return json(400, { error: "the body is not JSON" }); }
-    const username = typeof b.username === "string" ? b.username.trim().toLowerCase() : "";
-    const key = typeof b.identityKey === "string" ? b.identityKey : "";
-    const sig = typeof b.signature === "string" ? b.signature : "";
-    if (!KEY.test(key) || !/^[0-9a-f]+$/i.test(sig)) return json(400, { error: "want {username, identityKey, signature (hex)}" });
-    if (!HANDLE.test(username)) return json(400, { error: "the username is a host name label: a-z, 0-9 and -, at most 63" });
-    try {
-      const v = await new ProtoWallet("anyone").verifySignature({ protocolID: REGISTER_PROTOCOL, keyID: username, counterparty: key, data: Utils.toArray(`register ${username}`, "utf8"), signature: Utils.toArray(sig, "hex") });
-      if (!v.valid) throw new Error("invalid");
-    } catch { return json(401, { error: "the signature does not verify for that identity" }); }
-    if (RESERVED_HANDLES.has(username)) return json(409, { error: `username ${username} is reserved` });
-    try {
-      const row = this.addMailbox(username, key, domain);
-      const { certificate, keyringForSubject } = await issueSubjectCertificate(this.certifier, row.handle, row.domain, key);
-      return json(200, { handle: row.handle, domain: row.domain, identityKey: key, messagebox: this.originOf(row.handle), certificate, keyringForSubject });
-    } catch (e) {
-      return json((e as { status?: number }).status ?? 500, { error: (e as Error).message });
-    }
   }
 
   /**

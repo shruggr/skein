@@ -7,21 +7,24 @@
 // nothing; sessions are records and survive a killed kernel. The host's
 // headers feed (#102) reaches only the instances with a row taking events in
 // box `chain`, following their dispatch tables live. A registration from a
-// page (#103): signed by the key, answered with the handle certificate for
-// its wallet.
+// page (#103, #113): signed by the key over `register <name>@<domain>`,
+// carried by the router into the host skein, where the onboarding app asks
+// the instance manager for the mailbox and the certifier for the handle
+// certificate, records both and answers.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { MessageBoxClient } from "@bsv/message-box-client";
-import { MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { main } from "./cli.ts";
 import { testHost, until } from "./testhost.ts";
-import { HANDLE_CERTIFICATE_TYPE, NO_REVOCATION_OUTPOINT, serialOf } from "./handles.ts";
+import { HANDLE_CERTIFICATE_TYPE, NO_REVOCATION_OUTPOINT } from "./handles.ts";
+import { ephemeralWallet } from "../wallet.ts";
 
 test("router: the stock client by host name, our client by path prefix; the answer delivered into the owner's mailbox instance over http; list/ack; polls are entries that move nothing", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const h = await testHost(t);
@@ -195,65 +198,147 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   assert.ok(h.lines.includes(`[router] a: unsubscribed from the host's headers feed ${url}`));
 });
 
-test("router: POST /account/register (#103) — signed by the key; the mailbox instance at the request's domain, with the handle certificate for the key's wallet; the same key and name again the same handle; a taken, reserved or second name 409; /.well-known/skein-host at every host name", async (t) => {
+test("router: registration through the host skein (#113) — POST /account/register is an entry in the host skein, answered by its onboarding app; the instance manager creates the mailbox; a second registration a new serial, the record's trail two long; resolve the current certificate; a taken, second or reserved name 409; host.db and the host skein's records agree", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
-  const register = async (key: PrivateKey, username: string, signer = key) => {
-    const { signature } = await new ProtoWallet(signer).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}`, "utf8") });
-    const r = await fetch(`${h.base}/account/register`, { method: "POST", body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
-    return { status: r.status, body: await r.json() as Record<string, unknown> & { certificate: Record<string, unknown> & { fields: Record<string, string> }; keyringForSubject: Record<string, string> } };
+  await h.hostSkein();
+  const k = async () => (await h.router.hydrate("host")).kernel;
+  const head = async (name: string) => { const c = await (await k()).call("head", name) as CID | null; return c ? { cid: c, rec: await (await k()).store.get(c) as unknown as Record<string, unknown> } : undefined; };
+  const register = async (key: PrivateKey, username: string, o: { signer?: PrivateKey; text?: string } = {}) => {
+    const { signature } = await new ProtoWallet(o.signer ?? key).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(o.text ?? `register ${username}@localhost`, "utf8") });
+    const r = await fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+    return { status: r.status, body: await r.json() as Record<string, unknown> & { certificate: Record<string, unknown> & { fields: Record<string, string>; serialNumber: string }; keyringForSubject: Record<string, string> } };
   };
   const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
   const dave = PrivateKey.fromRandom(), daveId = dave.toPublicKey().toString();
   h.agent("alpha");
 
-  // Where a page served by an instance finds the router: answered at any host name, before an instance's routes.
+  // Where a page finds the router and the handle domain (the app's config): at any host name.
   for (const url of [`${h.base}/.well-known/skein-host`, `http://alpha.localhost:${h.router.port}/.well-known/skein-host`]) {
     const a = await h.router.dispatch({ method: "GET", url, headers: {}, body: new Uint8Array() });
-    assert.equal(a.status, 200);
     assert.deepEqual(JSON.parse(new TextDecoder().decode(a.body)), { origin: h.base, domain: "localhost" });
   }
 
-  // Signed by another key than the one named: refused.
-  assert.equal((await register(dave, "dave", PrivateKey.fromRandom())).status, 401);
+  // The signature covers the domain: the old text, another key, another domain — refused.
+  assert.equal((await register(dave, "dave", { text: "register dave" })).status, 401);
+  assert.equal((await register(dave, "dave", { signer: PrivateKey.fromRandom() })).status, 401);
+  assert.equal((await register(dave, "dave", { text: "register dave@id.skein.nexus" })).status, 401);
+  assert.equal(h.db.get("dave"), undefined);
 
+  const before = await h.entries("host");
   const first = await register(dave, "dave");
   assert.equal(first.status, 200, JSON.stringify(first.body));
   const { certificate: c, keyringForSubject, ...rest } = first.body;
   assert.deepEqual(rest, { handle: "dave", domain: "localhost", identityKey: daveId, messagebox: h.origin("dave") });
-  assert.equal(h.db.mailboxOf(daveId)?.handle, "dave");
-  assert.equal(h.db.identityOf("dave", "localhost"), daveId);
-  // The certificate as the wallet's acquireCertificate (direct) takes it: a MasterCertificate (a keyring entry per
-  // field), its signature, and fields the subject decrypts with the keyring (counterparty: the certifier).
+  // An entry in the host skein: the request as received (its path the client's, its route the app's).
+  const requests: Array<Record<string, unknown>> = [];
+  const s = (await k()).store;
+  for (let e: CID | null | undefined = await s.log.tip(); e;) {
+    const entry = await s.get(e) as unknown as { n: number; prev?: CID; request?: CID };
+    if (entry.n < before) break;
+    if (entry.request) requests.push(await s.get(entry.request) as unknown as Record<string, unknown>);
+    e = entry.prev ?? null;
+  }
+  assert.ok(requests.some((r) => r.kind === "http" && r.method === "POST" && r.path === "/account/register"), "the registration is a request entry in the host skein");
+  // The instance manager created the mailbox: a mailbox row for dave's key at the app's domain, published.
+  const row = h.db.get("dave")!;
+  assert.deepEqual([row.kind, row.owner, row.domain, row.status], ["mailbox", daveId, "localhost", "enabled"]);
+  const mgr = await head("onboard/instances/dave");
+  assert.equal(mgr?.rec.handle, "dave");
+  assert.equal(mgr?.rec.url, h.origin("dave"));
+  assert.equal(Buffer.from(mgr!.rec.identity as Uint8Array).toString("hex"), row.identity, "onboard/instances/dave → the manager's answer");
+  assert.equal((await fetch(`${h.base}/@dave/listMessages`, { method: "POST" })).status !== 404, true, "the mailbox instance answers at its origin");
+  // The holder's certificate, as a wallet's acquireCertificate (direct) takes it.
   assert.equal(c.type, HANDLE_CERTIFICATE_TYPE);
-  assert.equal(c.serialNumber, serialOf("dave", "localhost", daveId));
   assert.equal(c.subject, daveId);
   assert.equal(c.certifier, certifier);
   assert.equal(c.revocationOutpoint, NO_REVOCATION_OUTPOINT);
-  const m = new MasterCertificate(c.type as string, c.serialNumber as string, c.subject as string, c.certifier as string, c.revocationOutpoint as string, c.fields, keyringForSubject, c.signature as string);
+  const m = new MasterCertificate(c.type as string, c.serialNumber, c.subject as string, c.certifier as string, c.revocationOutpoint as string, c.fields, keyringForSubject, c.signature as string);
   assert.equal(await m.verify(), true);
-  assert.notEqual(c.fields.handle, Utils.toBase64(Utils.toArray("dave", "utf8")));
   assert.deepEqual({ ...await MasterCertificate.decryptFields(new ProtoWallet(dave), keyringForSubject, c.fields, certifier) }, { handle: "dave", domain: "localhost" });
+  // The answer is the app's record: onboard/handles/dave → the certificate record; its serial the hash of the issuance record.
+  const r1 = (await head("onboard/handles/dave"))!;
+  assert.equal(r1.rec.kind, "handle-certificate");
+  assert.equal(r1.rec.serialNumber, c.serialNumber);
+  assert.deepEqual((r1.rec.holder as { certificate: unknown }).certificate, c, "the answer is the certificate the app recorded");
+  assert.equal(Buffer.from(r1.rec.subject as Uint8Array).toString("hex"), daveId);
+  const issuance = r1.rec.issuance as CID;
+  assert.equal(c.serialNumber, Utils.toBase64(Array.from(issuance.multihash.digest)), "the serial number is the issuance record's hash");
+  assert.equal(r1.rec.prev, undefined);
 
-  // The same key and name again: the same handle and binding (the serial), a certificate issued again.
+  // The same key and name again: the same mailbox, a new certificate with a new serial; the trail two records long.
   const again = await register(dave, "dave");
-  assert.equal(again.status, 200);
-  assert.equal(again.body.handle, "dave");
-  assert.equal(again.body.certificate.serialNumber, c.serialNumber);
-  assert.equal(h.db.list().filter((r) => r.owner === daveId).length, 1);
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.notEqual(again.body.certificate.serialNumber, c.serialNumber);
+  const r2 = (await head("onboard/handles/dave"))!;
+  assert.equal(r2.rec.serialNumber, again.body.certificate.serialNumber);
+  assert.ok((r2.rec.prev as CID).equals(r1.cid), "the head's record names the first: two entries");
+  assert.equal(h.db.list().filter((x) => x.owner === daveId).length, 1, "one mailbox");
 
-  // 409: the key's second name; another key's name; an instance's handle; the reserved labels.
+  // Resolve answers the current certificate (plaintext fields), from the app's record.
+  const res = await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=dave`);
+  assert.equal(res.status, 200);
+  const ra = await res.json() as Record<string, unknown> & { certificate: Certificate };
+  assert.equal(ra.certificate.serialNumber, again.body.certificate.serialNumber);
+  assert.deepEqual([ra.identityKey, ra.messagebox, ra.domain], [daveId, h.origin("dave"), "localhost"]);
+  assert.equal(await new Certificate(ra.certificate.type, ra.certificate.serialNumber, ra.certificate.subject, ra.certificate.certifier, ra.certificate.revocationOutpoint, ra.certificate.fields, ra.certificate.signature).verify(), true);
+
+  // 409: another key's name; the key's second name; an instance's handle (the manager refuses); the reserved labels.
+  const eve = PrivateKey.fromRandom();
+  const taken = await register(eve, "dave");
+  assert.equal(taken.status, 409);
+  assert.match(String(taken.body.error), /dave is taken/);
   const second = await register(dave, "dave2");
   assert.equal(second.status, 409);
   assert.match(String(second.body.error), /already registered as dave/);
-  const eve = PrivateKey.fromRandom();
-  assert.equal((await register(eve, "dave")).status, 409);
-  assert.equal((await register(eve, "alpha")).status, 409);
+  const inst = await register(eve, "alpha");
+  assert.equal(inst.status, 409, JSON.stringify(inst.body));
+  assert.match(String(inst.body.error), /alpha is taken/);
   for (const name of ["id", "host"]) {
     const r = await register(eve, name);
     assert.equal(r.status, 409);
     assert.match(String(r.body.error), /reserved/);
   }
-  // Not a host name label.
   assert.equal((await register(eve, "e.ve")).status, 400);
-  assert.equal(h.db.mailboxOf(eve.toPublicKey().toString()), undefined);
+  assert.equal(h.db.list().filter((x) => x.owner === eve.toPublicKey().toString()).length, 0);
+
+  // host.db and the host skein's records agree: every handle the index names is a mailbox row of its subject at its domain, and the other way round.
+  const idx = (await head("onboard/index"))!.rec as { handles: Record<string, CID>; keys: Record<string, string> };
+  const recorded: string[] = [];
+  for (const [handle, cid] of Object.entries(idx.handles)) {
+    const rec = await (await k()).store.get(cid) as unknown as { subject: Uint8Array; domain: string; messagebox: string };
+    const r = h.db.get(handle)!;
+    assert.deepEqual([r.kind, r.owner, r.domain, h.origin(handle)], ["mailbox", Buffer.from(rec.subject).toString("hex"), rec.domain, rec.messagebox]);
+    assert.equal(idx.keys[r.owner!], handle);
+    recorded.push(handle);
+  }
+  assert.deepEqual(h.db.list().filter((x) => x.kind === "mailbox").map((x) => x.handle), recorded);
+});
+
+test("router: a mailbox registered before #113 (a host.db row the app has no record of) adopted by skein-host import-handles — onboard.adopt as the owner, the manager's answer for the row, at the app's domain; then it resolves, and the paymail PKI answers from the same record; adopt is the owner's", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
+  const h = await testHost(t);
+  await h.hostSkein();
+  const old = PrivateKey.fromRandom().toPublicKey().toString();
+  h.mailbox("olde", old);
+  h.db.add("olde", { domain: "id.skein.nexus" });
+  assert.equal((await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=olde`)).status, 404, "no record: not resolved");
+  const out: string[] = [];
+  const run = async () => await main(["import-handles"], {
+    vars: { SKEIN_HOME: h.home, HOME: h.home }, out: (l) => out.push(l), err: (l) => out.push(l),
+    owner: { wallet: h.owner, box: (row) => new RawBox(h.owner, `${h.base}/@${row.handle}`) },
+  });
+  assert.equal(await run(), 0, out.join("\n"));
+  assert.match(out.join("\n"), /olde: adopted at localhost · serial /);
+  assert.equal(h.db.get("olde")!.domain, "localhost", "the row's domain is the app's now");
+  const r = await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=olde`)).json() as { identityKey: string; messagebox: string; certificate: Certificate };
+  assert.deepEqual([r.identityKey, r.messagebox, r.certificate.subject], [old, h.origin("olde"), old]);
+  out.length = 0;
+  assert.equal(await run(), 0);
+  assert.deepEqual(out, ["olde: recorded already"]);
+  // The paymail PKI, from the app's record (the domain the app's when none is given).
+  for (const q of ["olde", "olde@localhost"]) assert.deepEqual(await (await fetch(`${h.base}/bsvalias/id/${q}`)).json(), { bsvalias: "1.0", handle: "olde@localhost", pubkey: old });
+  assert.equal((await fetch(`${h.base}/bsvalias/id/nobody`)).status, 404);
+  // Another key's session may not adopt.
+  const stranger = ephemeralWallet(PrivateKey.fromRandom());
+  const no = await new RawBox(stranger, `${h.base}/@host`).af.fetch(`${h.base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.adopt", args: { handle: "x", owner: old } }) });
+  assert.equal(no.status, 403);
 });
