@@ -282,6 +282,9 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 - Gotcha: after a kernel change, a stale `zig-out/bin/skein-kernel` makes
   `npm test` fail with "kernel probe: exited (1)" and can hang the host
   suite. Run `zig build` first.
+- CI (`.github/workflows/test.yml`) runs all four on Ubuntu for every push
+  and pull request, with the browser and component parts of the equivalence
+  suite skipped (no Playwright, Chromium, wasm-tools or adapter there).
 - `equiv/run.sh` clones the pinned sibling apps (skein-chain, skein-overlay,
   skein-static, skein-shell, skein-chat, skein-onboard, skein-git);
   `SKEIN_CHAIN_DIR`, `SKEIN_OVERLAY_DIR`, `SKEIN_STATIC_DIR`,
