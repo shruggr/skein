@@ -153,7 +153,7 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
                                    (#51: the host's libp2p node runs for the instance)
                                    scopes: {<program name>: [<head name | prefix/>]}}
                                    (#77: the heads a genesis-wired program may advance, over the default
-                                   scopes: frontdoor/, mailbox + outbound, wallet/, and chain/ for a
+                                   scopes: frontdoor/, mailbox, wallet/, and chain/ for a
                                    program named chain (#78: the chain module); a genesis-wired
                                    overlay engine and its lookup service programs need overlay/
                                    (#79: an overlay writes only under its name; kernel-zig/equiv/overlay.ts)

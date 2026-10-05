@@ -35,7 +35,10 @@ Inside:
   matched there, first match wins (#115);
 - **programs**: stepped by the scheduler, with imports for the virtual
   filesystem, reads by CID, heads, threads (`launch`, `await`, `deadline`,
-  `call`), the signer (`wallet`) and `emit`;
+  `call`), the signer (`wallet`), `emit` (a signed message, or an event:
+  an intention the runtime answers, a broadcast, a subscription, a beacon)
+  and `authfetch` (#126: the kernel's BRC-104 client, a recorded call — the
+  one direct HTTP path);
 - **requests**: every package a transport carries in is an entry, and the
   instance's front door (a program) is stepped on it as the request's own
   thread, handed the row the kernel matched; the front door verifies who
@@ -85,7 +88,11 @@ appends it. Inside a step, now is `max(last + 1, stamp + fuel)`: one
 nanosecond per unit of fuel, never repeating, never going back, recomputed
 exactly on replay. Random bytes are a stream keyed by the entry's and the
 thread's CIDs; nothing may use them for secrets, which the signer makes.
-Sleep and deadlines are messages to the waker provider.
+Sleep and deadlines are intentions (#126): the kernel records a
+`deadline` event the host's waker keeps, and its signed answer is an entry.
+**The signature boundary is absolute**: every request out is signed by the
+instance's key and recorded (an emit's signature, the host's signed request
+for an intention, authfetch's), and every answer in is signed.
 
 **Fuel** is on for every step and summed across everything in it; running
 out ends the step errored, deterministically, and it is never retried.
@@ -156,8 +163,10 @@ the inference peer (`bin/skein-infer`), other instances on any host, and
 the providers.
 
 **The address book** says who an instance can reach and how: key →
-`{transport: mailbox | libp2p | local, address, role?, handle?}`. The
-genesis seeds it (the host's providers by role, the owner's mailbox); after
+`{transport: mailbox | libp2p | local, address, handle?}` (#126: nothing
+finds a service by a role; `role` is still written for modules built
+before skein-sdk 0.7.0 until #126's last step). The genesis seeds it (the
+host's providers at `local` <name>, the owner's mailbox); after
 that it changes only through the kernel's `peers` operation, on a message
 signed by the owner (`skein plan peers`, sent by the owner's wallet) or by a key the owner added as a
 sender on the `peers` row. No program writes it: every program emits as the
@@ -210,10 +219,18 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   optional Kademlia DHT with topic rendezvous, mDNS, bootstrap peers,
   circuit relays. Each topic message or stream frame is appended as a
   request; the front door's verdict (accept, reject, ignore) is GossipSub's.
+  It beats the apps' beacons (#126: a body published on a topic every
+  `every` ms, nothing logged per beat, the topic not subscribed).
+- **authfetch's bytes** (#126): the kernel asks the host for one HTTP
+  exchange at a time (the serve frame `http`); the router carries it (its
+  own URLs in process), and signs and checks nothing — the kernel did.
 - **The providers** (`src/host/providers.ts`): recipients of what an
   instance emits, each with a key of its own (a child of the master secret)
-  and a `local` row in the address book. `fetch` (the web proxy), `waker`
-  (deadlines and sleeps), `cron` (`{fn: "tick", every | at, box, body?,
+  and a `local` row in the address book. `fetch` (the web proxy: it answers
+  `fetch` intentions, #126) and `waker` (`deadline` intentions: deadlines and
+  sleeps) — for an intention the host signs the request with the
+  instance's key and routes it as it is wired (`Providers.route`), and the
+  answer carries that request — `cron` (`{fn: "tick", every | at, box, body?,
   name}`; schedules in host.db), `libp2p` (publish, dial, send, close),
   `status` (Arcade's word on a transaction), `manager` (the instance
   manager: below, "The host skein"), `certifier` (#113: it signs handle
@@ -359,8 +376,10 @@ in a Worker, programs on V8 with fuel counted by instrumentation (the same
 numbers as wasmtime's), the store in IndexedDB, preview1 modules only
 (`web/kernel/host.ts`). One instance whose identity is the connected
 wallet's: `wallet` goes to the page's BRC-100 wallet, `emit` to the page's
-own providers (fetch, waker). In: the page's chat, a poll of the page
-identity's mailbox instance, and the waker's timers — each message a
+own providers (fetch, waker: the intentions, signed by the page's wallet as
+the instance), `http` (authfetch's bytes) to the page's fetch. In: the
+page's chat, a poll of the page identity's mailbox instance, and the
+waker's timers — each message a
 `local` request carrying a signed message (the page's own signed by its
 wallet, a polled one as the mailbox kept it), verified by the front door;
 the page admits no unsigned message. Nothing runs while the

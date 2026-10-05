@@ -6,11 +6,19 @@ network; messages are state.** Skein is a state process: every package a
 transport carries in is appended as received and the front door is stepped
 on it; sessions are state; a synchronous client waits on the thread. There
 is **one way out**: a step `emit`s a signed message to a key the address
-book names and ends waiting, and the answer is an entry. **Broadcast out and
-proof in are unauthenticated, self-validating events** through specific
-wiring (an optional status provider reports statuses as signed messages),
-and **scheduling is a message to a provider** (the waker, the cron
-provider). **The kernel is the machine, four tables and the signer**:
+book names, or an event, and ends waiting, and the answer is an entry.
+**Intentions** (#126) are events the runtime answers as it is wired — a
+`deadline`, a `fetch` (the host signs the request with the instance's key
+to its waker or its HTTP proxy, whose signed answer comes back); a program
+has no reason to know who those services are. **The signature boundary is
+absolute**: every request out is signed by the instance's key and
+recorded, every answer in is signed and admitted. The one direct HTTP path
+is the kernel's `authfetch` (BRC-104, signed and checked in the kernel, a
+recorded call); mail to a peer's messagebox goes that way. **Broadcast out
+and proof in are unauthenticated, self-validating events** through
+specific wiring (an optional status provider reports statuses as signed
+messages); a **beacon** is an event the libp2p node beats on its own clock;
+and **a schedule is a message to the cron provider**. **The kernel is the machine, four tables and the signer**:
 objects, heads with their owner, one dispatch table (routes, boxes and
 libp2p topics are its rows), the address book; the admin operations are the
 kernel's own, on messages from the owner or a delegate; an app writes only
@@ -184,10 +192,8 @@ envelope. Answers are signed on the session through the instance's signer
   in table order whose sender takes the identity the request claims.
   `sender` `"*"` is an open route (no session is checked, the handler gets
   no caller: an overlay's submit and lookup); `"session"` any identity
-  with a BRC-104 session; a key that identity's (#121: the owner's rows
-  name the owner's key; #115's `"owner"`, the instance's owner as the
-  kernel sees it, is still read in a row a log already holds, and nothing
-  writes it). `filter: "beef"` (#121): the door decodes the body's BEEF
+  with a BRC-104 session; a key that identity's (#121, #126: the owner's
+  rows name the owner's key; there is no `"owner"` sender symbol). `filter: "beef"` (#121): the door decodes the body's BEEF
   before the entry is written and the handler's `body` is the pointer
   record's CID (an overlay's submit). A request no row takes is
   refused by the front door as the kernel says: no row at the path, 404;
@@ -409,10 +415,11 @@ has the shapes).
   thread awaiting its `subject`, else to the first `mailbox` row **from
   anyone** whose address is the entry's box (or `*`); none: recorded,
   nothing runs. The handler gets `{event, box, subject?}`.
-- **Wakes and ticks are messages** (#69): a step's `deadline` and a shell's
-  `sleep` are wake-me messages to the waker, whose answer routes as a reply
-  (`woke`); a schedule is a message to the cron provider, whose ticks are
-  messages into the box it names. `skein-host event` sends a tick from the cron provider by hand.
+- **Wakes and ticks are signed messages** (#69, #126): a step's `deadline`
+  and a shell's `sleep` are `deadline` events the host's waker keeps; its
+  answer, a signed message naming the event and carrying the instance's
+  signed request for it, steps the thread (`woke`); a schedule is a message
+  to the cron provider, whose ticks are messages into the box it names. `skein-host event` sends a tick from the cron provider by hand.
 
 ## The messagebox
 
@@ -578,6 +585,10 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `broadcast` (#65) | `{kind: "broadcast", tx, beef?}` | its broadcaster posts the transaction to Arcade — below, "Broadcast out, proofs and statuses in"; re-offered at a start while the thread awaits it |
   | `subscribe` (#119) | `{kind: "event", event: "subscribe", app, topic, program, fn, filter?}` | a subscription: its libp2p node subscribes `topic`; the kernel delivers a message on it to `app`'s `program` at `fn` — "libp2p (#51)", below |
   | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | `app`'s subscription to `topic` ends; the node leaves the topic when nothing else takes it |
+  | `deadline` (#126) | `{kind: "event", event: "deadline", at, thread, step, app?}` — the kernel records it (the `deadline` import, a shell's sleep), never an emit | an intention: its waker answers at `at` (below, "Intentions"); re-offered at a start while the thread awaits it |
+  | `fetch` (#126) | `{kind: "event", event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?, thread, step, app?}` (`sk.fetch`; the kernel adds `thread`, `step`) | an intention: its HTTP proxy performs it and answers (below, "Intentions"); re-offered at a start while the thread awaits it |
+  | `beacon` (#126) | `{kind: "event", event: "beacon", app, topic, every, body}` | its libp2p node publishes `body` on `topic` every `every` ms, logging nothing per beat, without subscribing the topic — "libp2p (#51)", below |
+  | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
   | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing: a log line |
 
   A non-broadcast record is `{kind: "event", event, app?, …the emit's
@@ -593,7 +604,11 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   `/<protocol>`; a subscribe's `program` is a role in the app's record at
   `<app>/app` and its `fn` is not empty (`filter`, if any, a door filter the
   kernel has); an unsubscribe names a subscription the app has (an app
-  unsubscribes only its own).
+  unsubscribes only its own). It checks a `beacon` (an installed app's;
+  a topic; `every` from 1 000 ms to a day; `body` bytes, at most 64 KiB)
+  and an `unbeacon` (an installed app's; a topic), and a `fetch` (a method,
+  an http(s) `url`, headers text, a body bytes; `thread` and `step` are
+  its own).
 - **Errors** (the call's; the step may catch them): `emit: want {to:
   <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}, {event:
   "broadcast", tx: <cid>, beef?: bytes} or {event: <name>, …fields}` ·
@@ -611,7 +626,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   is not a CID`` · ``emit: no route to <hex>: not in the address book, and
   the genesis has no messagebox program to deliver it`` · `emit: <hex> is
   reached by mailbox, and the genesis has no messagebox program to deliver
-  it` · `emit: the oracle did not sign the message` · in a kernel call,
+  it` · `emit: the signer did not sign the message` · in a kernel call,
   `emit: a kernel call sends nothing (emit from a step)`.
 
 ### Awaiting the answer
@@ -623,7 +638,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 |---|---|
 | `reply: {message, body, box, sender, replyTo}` | a message from the recipient whose body names `replyTo: <the CID>` (`sk.replyOf`; `get` the body) |
 | `undelivered: {message, error}` | a `mailbox` recipient's delivery thread gave up: no answer can come |
-| `woke: true` | the waker's answer to the step's `deadline` |
+| `woke: true` | the waker's answer to the step's `deadline` (#126: its signed message naming the `deadline` event) |
 | `event: {event, box, subject}` | an event about a record the step awaits (#65: a transaction's proof, awaiting its CID) |
 | `message: {message, body, box, sender, subject}` | a subscribed sender's message about a record the step awaits (#65: a status provider's status) |
 
@@ -632,12 +647,38 @@ comes first steps the thread, which awaits again what it still needs. An
 answer nothing awaits any more is recorded and runs nothing. A reply is
 routed only if the awaited record is a message this instance sent **to the
 replying sender** — a provider answers as itself, so its key is what the
-address book names.
+address book names — or an intention this instance recorded, answered with
+the instance's own signed request for it to the replying sender (below).
 
-`deadline(until_ms)` is sugar over the same: when the step ends waiting it
-emits `{at: until_ms}` in box `wake` to the address book's `waker` and
-awaits it; the answer `{replyTo, at}` steps the thread with `woke: true`. A
-shell's `sleep` is the same message (#69, below "Scheduling").
+### Intentions: deadline and fetch (#126)
+
+A program says what it wants and awaits it; the runtime does it as it is
+wired, and the answer is an entry.
+
+| intention | recorded | awaited | answer (a `reply` or a wake) |
+|---|---|---|---|
+| `deadline(until_ms)` (and a shell's `sleep`) | when the step ends waiting: `{kind: "event", event: "deadline", at, thread, step, app?}`, in `emitted` and `awaits` | by the kernel | at `at`: `woke: true` (a shell carries on past its sleep); one stamped before `at` runs nothing |
+| `sk.fetch(a, method, url, headers, body)` / `sk.fetchWith(…, {timeout_ms, max_bytes})` | the emit `{event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?}` → `{kind: "event", event: "fetch", …, thread, step, app?}` | by the program (`sk.fetch` awaits its CID) | `reply: {message, body, box, sender, replyTo}`, the body `{replyTo, request, status, headers, body}` or `{replyTo, request, error}` (`sk.replyOf`) |
+
+**How it is answered.** The kernel hands the event to the host after the
+step's commit (transport `event`, address the name; again at a start while
+a thread awaits it). The host's wrapper — it holds the instance's signer —
+signs a request for it with the instance's key: the mail record `{kind:
+"mail", op: "put", sender: <the instance>, recipient: <the service's key>,
+box, body: <the event's CID>, nonce, signature}` (BRC-169's signing, as an
+emit's), and sends it where the host is wired (`Providers.route`: the
+reference host's own waker, box `wake`, and HTTP proxy, box `fetch`, both
+`local`; which service and which transport is host wiring — not an
+instance setting, not an address-book entry the program reads). The
+service answers with a signed message from its key, to the instance, in
+that box, its body `{replyTo: <the event's CID>, request: <that signed
+request>, …}`, appended as a `local` request. The front door checks the
+answer's signature; the kernel checks the request — the instance's own,
+signed, to the answering key, for that event — and steps the thread
+awaiting the event. Both signatures are in the log. A message naming the
+event without such a request is recorded and runs nothing. A log before
+#126 (a deadline was a wake-me message to the waker, answered by
+`replyTo`) replays as it was written.
 
 ### The address book
 
@@ -651,13 +692,17 @@ The head `peers` — who the instance can reach, and how:
 
 | transport | address | how a message goes out |
 |---|---|---|
-| `mailbox` | the recipient's messagebox URL | the instance's own **delivery thread** (below): BRC-103/104, through the `fetch` provider |
+| `mailbox` | the recipient's messagebox URL | the instance's own **delivery thread** (below): a BRC-104 POST with the kernel's `authfetch` |
 | `libp2p` | a peer ID, or `topic:<name>` | the host's libp2p node: the package `{message, body}` (dag-cbor) as one frame on `/skein/message/1.0.0`, or published on the topic; the libp2p provider answers in box `sent`: `{replyTo, sent: true}` or `{replyTo, seqno, recipients}`, or `{replyTo, error}` |
 | `local` | a provider's name on this host | handed to the provider |
 
-`role` is the part an entry plays for the instance — `fetch`, `waker`,
-`cron`, `libp2p`, `status`: how a program finds a provider (`sk.provider(a,
-role)`; `deadline` and a shell's sleep find the waker). Receiving needs none of this: a
+An entry is a key, a transport and an address (#126). Nothing in skein
+finds a service by a role: the kernel finds no waker (a deadline is an
+intention), and a program that messages one of its host's services reads
+the entry by where it is reached (`sk.peerAt(a, "local", "cron")`) or is
+given the key. (`role` is still written by the reference host's genesis and
+taken by the `peers` operation, for modules built before skein-sdk 0.7.0
+that find a provider by it — #126's last step removes it.) Receiving needs none of this: a
 sender is authenticated by its key (a BRC-104 session or the message's own
 signature) and admitted by a dispatch row, whether or not the instance can
 answer it.
@@ -683,7 +728,7 @@ recorded, nothing runs. A key the owner adds as a sender on the `peers` row
 may change it too; nothing else can.
 
 A later record for the same key replaces it (a party that moved hosts).
-`sk.peers`, `sk.peerOf(key)` and `sk.peerByHandle(handle, domain)` read it.
+`sk.peers`, `sk.peerOf(key)`, `sk.peerAt(transport, address)` and `sk.peerByHandle(handle, domain)` read it.
 
 **What the resolve program finds** it keeps under its own name (#87), not in
 the address book — the head `resolve/peers`:
@@ -727,8 +772,8 @@ message routes by `replyTo` to the thread awaiting it.
 
 | role | box | body | answer body (beside `replyTo`) |
 |---|---|---|---|
-| `fetch` | `fetch` | `{method, url, headers?: {name: value}, body?: bytes, timeoutMs?, maxBytes?}` | `{status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`). `maxBytes` (#91): a response body over it is not carried in, and the answer is `{error}` (the git app bounds its pack this way) |
-| `waker` | `wake` | `{at: ms}` | `{at}`, at `at` (#69, below) |
+| `fetch` | `fetch` | the instance's signed request for a `fetch` intention (#126: its body the event's CID; above, "Intentions") | `{replyTo: <the event>, request, status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`). `maxBytes` (#91): a response body over it is not carried in, and the answer is `{error}` (the git app bounds its pack this way). (A module built before skein-sdk 0.7.0 still emits `{method, url, …}` to it as a message; answered `{replyTo, status, headers, body}`) |
+| `waker` | `wake` | the instance's signed request for a `deadline` intention (#126) | `{replyTo: <the event>, request, at}`, at `at` (#69, below) |
 | `cron` | `cron` | `{fn: "tick", every: ms \| at: ms, box, body?, name}` · `{fn: "stop", name}` | `{name, next}` · `{name, stopped}`; then each tick, a message of its own into `box` (#69, below) |
 | `libp2p` | `publish` | `{topic, body: bytes}` | `{seqno: bytes(8), recipients}` |
 | | `dial` | `{peer, protocol}` | `{stream}`; then each frame read, in box `frame`: `{stream, body}`, and its end `{stream, closed: true, error?}` — all answering the dial |
@@ -747,8 +792,8 @@ the dag-cbor `{txid, topics: {<topic>: {outputsToAdmit, coinsToRetain}}}`;
 on `<topic>-proof` the dag-cbor `{txid, blockHash, blockHeight, bump:
 bytes}` (txid and block hash hex, display order).
 
-`sk.fetch(a, method, url, headers, body)` emits to the fetch provider and
-awaits it; the reply's body is the answer. A broadcast is not a message to
+`sk.fetch(a, method, url, headers, body)` records the `fetch` intention and
+awaits it; the reply's body is the answer (above, "Intentions"). A broadcast is not a message to
 anyone (#65, below); the chain app (#78) is the one program that emits it (#79: the wallet and the overlay apps send the chain app an `ingest` instead).
 
 **The instance manager** (#90) and **the certifier** (#113) are in the host
@@ -917,27 +962,21 @@ removes its judgements.
 
 ### Scheduling: the waker and the cron provider (#69)
 
-Scheduling is a message to a provider. The schedule originates in a step,
-never in host configuration; the wake or the tick comes back as a signed
-message from the provider's identity, verified at the front door like any
-message.
+A schedule originates in a step, never in host configuration; the wake or
+the tick comes back as a signed message from the service's identity,
+verified at the front door like any message.
 
-**The waker** (role `waker`, box `wake`):
+**The waker** (#126): a step's `deadline(until_ms)` and a shell's `sleep`
+are `deadline` intentions (above, "Intentions"). The host's waker keeps
+each in its own timers (once per event: a kernel's start hands over again
+what a waiting thread awaits) and at `at` answers with its signed message
+`{replyTo: <the event>, request, at}` in box `wake`: the thread steps with
+`woke: true` (one stamped before `at` runs nothing); a shell is re-executed
+from its origin and carries on past the sleep under that entry. (A wake-me
+message to it in box `wake`, `{at: ms}` — a kernel before #126 — is still
+answered `{replyTo, at}`.)
 
-| ask | body | answer |
-|---|---|---|
-| a step's `deadline(until_ms)` (sugar), or a program's own emit | `{at: ms}` | `{replyTo, at}` at `at` — steps the thread with `woke: true`; one stamped before `at` runs nothing |
-| a shell's `sleep` (the kernel emits it) | `{at: ms}` | the same; the shell is re-executed from its origin and carries on past the sleep under that entry |
-| anything else | | `{replyTo, error: "the waker takes {at: ms} in box \"wake\""}` |
-
-A shell's wake-me is signed through the signer (the call recorded on its
-waiting update with `emitted` and `awaits`). No waker in the address book:
-`deadline` fails (`deadline: no waker in the address book (an entry with
-role "waker")`), and a shell's sleep errors the shell (`sleep: no waker in
-the address book …`). The waker keeps what it owes in its own timers; at a
-start the kernel hands it again every wake-me a waiting thread still awaits.
-
-**The cron provider** (role `cron`, box `cron`):
+**The cron provider** (the host's, at `local` `cron`; box `cron`):
 
 ```
 tick  {fn: "tick", every: <ms> | at: <ms since the epoch>, box, body?: {…}, name}
@@ -966,48 +1005,51 @@ error → {replyTo, error}   ("the cron provider takes {fn: "tick", …} or {fn:
 address book with a transport: `local` (the host hands the message to its
 own provider, no transport, no handshake) or `mailbox` (the instance's own
 delivery thread carries it over BRC-103/104 to the provider's messagebox —
-a paid tick service, a waker elsewhere). The program does not know which:
-it emits to the key `sk.provider(a, "cron")` names and its ticks come back
-the same way. `src/peers/cron.ts` is a remote cron service: it collects its
+a paid tick service elsewhere). The program does not know which: it emits
+to the key it is given or the one its host serves (`sk.peerAt(a, "local",
+"cron")`; #126: no roles) and its ticks come back the same way. `src/peers/cron.ts` is a remote cron service: it collects its
 mailbox's `cron` box and answers, and ticks, at the sender's messagebox
 (its own address book's), on a BRC-104 session of its own.
 
-### The outbound BRC-103/104 pattern (delivery)
+### Delivery to a messagebox: authfetch (#70, #126)
 
 A `mailbox` recipient's message is delivered by the instance itself: the
 kernel launches the messagebox program as the message's **delivery thread**
 (origin `{program: messagebox, args: {message, transport: "mailbox"}}`),
-which is a BRC-103/104 client of the recipient's messagebox, its HTTP each
-an emit to the `fetch` provider (`programs/messagebox/deliver.zig`):
+which POSTs it with the kernel's **`authfetch`** (#126,
+`programs/messagebox/deliver.zig`):
 
 ```
-step 1   no session with that messagebox:  POST <url>/.well-known/auth (the BRC-103 initialRequest) → await
-step 2   the initialResponse: its signature over both nonces checked, the session kept;
-         the BRC-104-signed POST <url>/sendMessage, BRC-231 CBOR {message: {recipient, messageBox,
-         body, signature, subject?, nonce}} — the signed message itself → await
-step 3   the answer: its signature checked against the session; 200 → finished {delivered: <cid>, url}
-         (the recipient keeps the same record under the same CID). A 401: shake hands again, once.
+step 1   authfetch(<url>, {POST /sendMessage, content-type application/cbor, BRC-231 CBOR {message:
+         {recipient, messageBox, body, signature, subject?, nonce}} — the signed message itself});
+         200 → finished {delivered: <cid>, url, attempt} (the recipient keeps the same record under
+         the same CID)
 ```
 
-- **The session** is the instance's own, one per peer: head `outbound`,
-  `{kind: "outbound", sessions: [{key, session: <cid>}]}`, each `{kind:
-  "outbound-session", peer, url, ours, theirs, server, created}`. `server`
-  is the identity that answered the handshake — the recipient's own, or a
+- **The session** is the kernel's (docs/VM.md "authfetch"): per server base
+  URL, in memory, the BRC-103 handshake made when there is none and again
+  when the server answers 401; the request signed and the answer checked
+  through the signer; the exchange a recorded call on the step. `server` is
+  the identity that answered the handshake — the recipient's own, or a
   mailbox instance's for a mailbox kept for someone. Sending never tells
   the peer who we are beyond the session (no claim, no registration, #40).
+- **The message is still signed** (its `signature`, BRC-169's): #126 asks
+  for the BRC-104 request alone to be the signature, but a mailbox kept for
+  someone (the browser page's mailbox instance, #16) forwards the record to
+  its owner's instance, which must verify it by the sender's key alone; the
+  BRC-104 signature is verifiable only by the server it was made for. Kept
+  until that is decided (#126, "calls").
 - **Failure.** `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
   `defaults.sendRetryMs` later (default 30 000; a `deadline`) up to
   `defaults.sendAttempts` attempts in all (default 3); anything else, or
   the last attempt, ends the delivery thread errored, and the thread
   awaiting the message is stepped with `undelivered: {message, error}`.
-- **Two instances on one host** deliver to each other through the fetch
-  provider's in-process path; since nothing waits mid-step, two that send
-  to each other at once no longer wait on each other.
+- **Two instances on one host** deliver to each other through the router's
+  in-process path (authfetch's bytes go there too).
 
-A program that speaks another request/response protocol over HTTP follows
-the same shape: build and sign the request in a step, emit it to the
-`fetch` provider, await, check the answer in the next step, keep any
-session as a record.
+A program that speaks another request/response protocol to a BRC-104
+server uses `authfetch` the same way; a plain HTTP request is a `fetch`
+intention (the host's proxy, signed by the instance's key).
 
 ### Resolving a handle
 
@@ -1241,6 +1283,17 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   the fold in memory and folds again after a step that subscribed or
   unsubscribed; replay folds the same. A subscription whose app's record no
   longer names the role (an uninstall) delivers nothing.
+- **Beacons** (#126). An app declares once `beacon {topic, every: <ms>,
+  body: bytes}` (an event, checked as it is emitted: an installed app's, a
+  topic, `every` from 1 000 ms to a day, `body` at most 64 KiB) and stops it
+  with `unbeacon {topic}`; no answer comes. The instance's node publishes
+  `body` on `topic` every `every` ms on its own clock — GossipSub signs it
+  with the node's key — and logs nothing per beat; the beacon does not make
+  the node subscribe the topic (a node with nothing else to do is started
+  for it). Keyed by (app, topic) like a subscription; the host folds them
+  from the log (src/host/p2p.ts `beaconsOf`) and follows them live; an
+  app's beacons stop when its rows are gone (an uninstall). If the host is
+  down, nothing beats: a true heartbeat.
 - **What the node subscribes** (#72, #77, #119). The instance's node takes
   the genesis's `libp2p` (topics, protocols, listen), the topics and
   protocols named by the `libp2p` rows added since the genesis — an app's

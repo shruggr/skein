@@ -12,14 +12,18 @@
 //   libp2p   the instance's libp2p node: `topic:<name>` publishes the
 //            package, a peer ID gets it as one frame on /skein/message/1.0.0;
 //            the libp2p provider answers {replyTo, seqno, recipients} | {replyTo, sent: true}
-//   event    (#65) not a message: an unauthenticated, self-validating event
-//            (`address` its kind). The one is `broadcast` — {kind: "broadcast",
-//            tx: <cid>, beef?}, the transaction's bytes as `body` — handed to the
-//            host's broadcaster (arc.ts: a durable queue, retries, one Arcade
-//            session); none: dropped with a line (the instance abandons it)
+//   event    (#65, #119, #126) not a message: an event (`address` its name).
+//            `broadcast` — {kind: "broadcast", tx: <cid>, beef?}, the
+//            transaction's bytes as `body` — to the host's broadcaster (arc.ts: a
+//            durable queue, retries, one Arcade session; none: dropped with a line);
+//            `subscribe`/`unsubscribe`/`beacon`/`unbeacon` to the libp2p node;
+//            `deadline`/`fetch` are intentions (#126): the host signs the request
+//            for one with the instance's key and gives it to the service it is
+//            wired to (`route`: its waker, its HTTP proxy), whose signed answer
+//            names the event and carries the request (intention, below)
 //
 // (A `mailbox` recipient's message never comes here: the instance delivers
-// it itself, over its own BRC-103/104 session, through the `fetch` provider.)
+// it itself, with the kernel's authfetch, #126.)
 //
 // Every answer is a signed message from the provider to the instance — the
 // same record an `emit` makes, {kind: "mail", op: "put", sender, recipient,
@@ -34,15 +38,18 @@
 // The stock providers (box → body → answer body; every answer has `replyTo`,
 // and a failure is {replyTo, error}):
 //
-//   fetch      fetch {method, url, headers?, body?, timeoutMs?, maxBytes?}
-//              → {status, headers, body}: the HTTP proxy. A URL of this host's own
+//   fetch      a `fetch` intention's signed request (#126) → {replyTo: <the event>,
+//              request, status, headers, body}; a message fetch {method, url,
+//              headers?, body?, timeoutMs?, maxBytes?} (a module before skein-sdk
+//              0.7.0) → {status, headers, body}: the HTTP proxy. A URL of this host's own
 //              is answered in process (no socket); any other goes out when the host
 //              allows it (SKEIN_HTTP=fetch, or the router's `http` option). `body`
 //              is bytes either way. `maxBytes` (#91): a response body over it is
 //              not carried in — the answer is {error} (SKEIN_HTTP=fetch stops
 //              reading at the limit)
-//   waker      wake {at: ms}  → at `at`: {at}. What the kernel's `deadline`, and a shell's
-//              sleep, emit (#69)
+//   waker      a `deadline` intention's signed request (#126: a step's deadline, a
+//              shell's sleep) → at `at`: {replyTo: <the event>, request, at}; a
+//              wake-me message wake {at: ms} (a kernel before #126) → {at}
 //   cron       cron {fn: "tick", every | at, box, body?, name} → {name, next};
 //              then each tick, a message of its own (no `replyTo`) in `box`:
 //              {...body, kind: body.kind ?? "cron", name, due}

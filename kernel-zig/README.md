@@ -23,9 +23,11 @@ owner; a message at its claim row writes its sender's admin rows and
 removes the row, #127); a program advances only heads in its write scope (an
 app's `<app>/…`; a genesis-wired program's genesis `scopes`); every package
 a transport carries in is an entry and the front door is stepped on it; a
-step's one way out is `emit` (a signed message to a key the address book
-names, or a broadcast event), and the answer is an entry; a deadline or a
-shell's sleep is a wake-me message to the waker provider. The host
+step's way out is `emit` (a signed message to a key the address book
+names, or an event: an intention the runtime answers, a broadcast, a
+subscription, a beacon) and `authfetch` (#126: the kernel's BRC-104 client,
+a recorded call), and the answer is an entry; a deadline or a shell's sleep
+is a `deadline` event the host's waker keeps (#126). The host
 (`src/host/`, TypeScript) drives it over one channel per kernel; the host
 is transports + providers + store + signer and routes nothing. History: the
 format sections below say what each format changed.
@@ -230,14 +232,27 @@ What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's
   `event`, address the name (`handOverEvent`), once; the host wires a name
   or ignores it. The kernel keeps nothing else for it: a host that needs it
   after a restart reads the log.
-- **`deadline(until_ms)`**: the update carries `until`; when the step ends
-  waiting the kernel emits `{at}` in box `wake` to the address book's waker
-  (role `waker`) and awaits it; the waker's answer steps the thread with
-  `input.woke`. A shell's sleep is the same wake-me message.
+- **`deadline(until_ms)`** (#126): the update carries `until`; when the
+  step ends waiting the kernel records the event `{kind: "event", event:
+  "deadline", at, thread, step, app?}` (log.zig `deadlineRecord`), lists it
+  in `emitted` and awaits it — no signer call, no lookup. A shell's sleep is
+  the same event on its waiting update. The answer is the waker's signed
+  message naming the event and carrying the instance's signed request for
+  it (the host signs it; the scheduler's `intentionAnswer` checks both); it
+  steps the thread with `input.woke`. A `fetch` event (`sk.fetch`) is the
+  same kind of intention (the kernel adds `thread` and `step`), answered by
+  the host's HTTP proxy with `input.reply`. `beacon`/`unbeacon` events are
+  checked as they are emitted (`subscriptions.zig` `beaconProblem`).
+- **`authfetch(req)`** (#126, `authfetch.zig`): the BRC-103/104 client in
+  the kernel — the session per server base URL (in memory), the request
+  signed and the answer checked through the signer, the bytes moved by the
+  host (`Peers.http`: the serve frame `http`). One recorded call, `{kind:
+  "authfetch", thread, step, i, request, answer | error, calls}`, served
+  from the witness on replay.
 
-There is no `http` or `libp2p` import (format 6 removed them, and the
-host's attestations with them): HTTP and libp2p are providers a step emits
-to (`src/host/providers.ts`).
+There is no plain `http` or `libp2p` import (format 6 removed them, and the
+host's attestations with them): plain HTTP is an intention the host's proxy
+answers, libp2p a service a step emits to (`src/host/providers.ts`).
 
 ## For the bootstrap loader (issue #4)
 
@@ -284,7 +299,7 @@ A component targets `skein:kernel/handler` in the SDK's `wit/skein.wit`
 
 - WASI 0.2.12: `cli`, `clocks`, `filesystem`, `io` and `random`;
 - the interface `skein:kernel/skein`: the preview1 `skein` calls, including
-  `emit` and `deadline` (there is no `wasi:http`: #70, below);
+  `emit`, `deadline` and `authfetch` (there is no `wasi:http`: #70, below);
 - the export `wasi:cli/run`.
 
 Imports the kernel does not answer, such as sockets, link as traps.
@@ -508,11 +523,14 @@ feed's or a proof's event; never a `mail` entry, K2; it answers the CID
 of the entry written, the admission or the refusal), `answer` (#66, below),
 `call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the host answers from the instance's
-ProtoWallet, the signer), and tells `emit` (#70: `{message, body,
-transport, address}`, a committed message for a `local` or `libp2p`
-recipient, which the host's providers carry out — a step's deadline's
-and a shell's sleep's wake-me among them, #69 — or, transport `event`, a
-broadcast for the host's broadcaster, #65) and `stop`. There is no `send` and no
+ProtoWallet, the signer) and `http` (#126: one exchange for authfetch,
+`{method, url, headers, body, timeoutMs?}` → `{status, headers, body}` |
+`{error}`), and tells `emit` (#70: `{message, body, transport, address}`, a
+committed message for a `local` or `libp2p` recipient, which the host's
+providers carry out — or, transport `event`, an event: a broadcast for the
+host's broadcaster, #65; a `deadline` or `fetch` intention for its waker or
+HTTP proxy, #126; a subscription or a beacon for its libp2p node) and
+`stop`. There is no `send` and no
 `resolve` (#40): an instance delivers its mailbox messages itself, by its
 delivery threads. The host starts the process when a message or a
 read needs the instance and closes its stdin when it has been idle; the
@@ -597,7 +615,7 @@ reads (the front door's fn `read`, the answer of a route that reads live
 state, after its request's thread; the broadcaster's questions later, #65).
 No entry and no writes: `put`/`putblock` go to the call's write cache,
 dropped with it, `keep`/`launch`/`await`/`advance`/
-`emit`/`deadline` are refused (a call sends nothing), `wallet`
+`emit`/`deadline`/`authfetch` are refused (a call sends nothing), `wallet`
 is answered by the host and not recorded, random is real. Fuel is limited by
 `defaults.callFuelLimit` (default 10^10) and reported. The `call` import
 (preview1 `call(prog, prog_len, fn, fn_len, arg, arg_len, out, cap)`, WIT
@@ -726,7 +744,7 @@ Imports: `skein_engine` (`compile`, `instantiate`, `run`, `release`,
 `fuel_get`/`fuel_set`, `mem_read`/`mem_write`, `error_len`/`error_take`),
 `skein_store` (`get`/`take`, `has`, `put`, `begin`/`commit`/`rollback`,
 `pointer_get`/`pointer_set`), `skein_peer` (`request(op, v)` → the answer,
-blocking, for `wallet`; `notify(op, v)` for `emit` (a wake-me among them),
+blocking, for `wallet` and `http` (#126: authfetch's bytes, the page's fetch); `notify(op, v)` for `emit` (an intention among them),
 `say`, `panic`; `take`).
 
 **Programs on V8.** The kernel hands the shim a program's bytes; the shim
@@ -876,9 +894,10 @@ re-genesis when they move to this build).
 | `replay.zig`, `cmd_shell.zig` | `skein-kernel replay` (was `skein-dev replay`); the shell test driver |
 | `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (fuel accounting as a query over the log); the fuel unit tests (issue #5) |
 | `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
-| `addressbook.zig` | the address book (#70, #77): the head `peers`, lookup by key and by role, the genesis's seed, the kernel's `peers` operation (`write`) |
+| `addressbook.zig` | the address book (#70, #77): the head `peers`, lookup by key, the genesis's seed, the kernel's `peers` operation (`write`) |
+| `authfetch.zig` | `authfetch` (#126): the BRC-103/104 client — sessions per base URL, the SimplifiedFetchTransport framing, the signer's frames |
 | `beef.zig`, `door.zig`, `door_test.zig` | the door (#121): BEEF's pattern table, decoder and encoder, the BUMP's nodes and root; the row filters (`beef`) over a package, against `chain/state`'s headers; `restore` |
-| `signer.zig` | the signer's signature of an emitted message (#70): the BRC-100 `createSignature` frame, its answer |
+| `signer.zig` | the kernel's own BRC-100 frames (#70, #126): `createSignature` (an emitted message), `createHmac` and `verifySignature` (authfetch), the answer |
 
 ## What is not the same, or not here
 
@@ -892,8 +911,8 @@ re-genesis when they move to this build).
 - **Sleeping shells** are not parked mid-instance (no JSPI): the run is
   abandoned at the sleep after writing `waiting`, and the wake re-executes the
   thread from its origin, verifying every update against its chain — the
-  restart path — and carries on under the waker's answer (#69: the sleep is a
-  wake-me message to the waker). Same records; a re-execution per wake.
+  restart path — and carries on under the waker's answer (#69, #126: the
+  sleep is a `deadline` event). Same records; a re-execution per wake.
 - **Messages that only exist as JavaScript text**: trap messages are mapped
   to V8's wording for the common traps (unreachable, out-of-bounds memory,
   division, conversion, indirect calls; stack overflow as V8's RangeError);

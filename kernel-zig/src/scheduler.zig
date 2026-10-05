@@ -27,11 +27,15 @@
 // transport's middleware (the messagebox program) is launched as the
 // message's delivery thread. A key the address book does not name goes to
 // that middleware too (#87): it reads the resolve program's record of it. The answer comes back as an entry that steps
-// the thread awaiting it; nothing outside is asked mid-step but the signer.
+// the thread awaiting it. An event is addressed to no one: the host's wiring carries it — among
+// them the intentions (#126: a `deadline`, a `fetch`), which the host answers with a signed
+// message carrying the instance's own signed request for them (intentionAnswer). Nothing outside
+// is asked mid-step but the signer and, through `authfetch` (#126, authfetch.zig), a BRC-104
+// server — both recorded calls, served from the witness on replay.
 //
 // A shell thread that sleeps is not parked mid-instance (there is no JSPI
 // here). The run is abandoned at the sleep, having written its `waiting`
-// update, and when the wake entry comes the thread is re-executed from its
+// update (its `deadline` event, #126), and when the wake comes the thread is re-executed from its
 // origin — verifying every update it recomputes against its chain — and
 // carries on past the sleep under the wake entry. Same updates, same CIDs; a
 // sleeping shell costs a re-execution per wake.
@@ -1946,7 +1950,7 @@ pub const Runtime = struct {
         var line = std.array_list.Managed(u8).init(a);
         const w = &line;
         try w.print("{s} {s} step {d} → {s}", .{ short(a, origin), name, n, state });
-        if (st.calls.items.len > 0) try w.print(" · {d} oracle", .{st.calls.items.len});
+        if (st.calls.items.len > 0) try w.print(" · {d} signer", .{st.calls.items.len});
         if (!errored and st.emitted.items.len > 0) {
             try w.appendSlice(" · emitted ");
             for (st.emitted.items, 0..) |c, i| try w.print("{s}{s}", .{ if (i > 0) "," else "", short(a, c) });
@@ -2320,7 +2324,7 @@ pub const Runtime = struct {
         const pre = cbor.encode(a, rec.value()) catch return error.OutOfMemory;
         const frame = signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, pre) catch return error.OutOfMemory;
         const res = try signerCall(st, imp, frame);
-        const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the oracle did not sign the message");
+        const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the signer did not sign the message");
         try rec.put("signature", .{ .bytes = sig });
         st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
         const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
@@ -2456,11 +2460,11 @@ pub const Runtime = struct {
             // The router gone mid-call is the environment failing, not the step: nothing is
             // recorded, and the thread runs again at the next hydration (#33).
             result = rt.peers.wallet.?(rt.peers.ctx, a, frame) catch |err| return if (err == error.PeerGone)
-                imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (oracle): the router is gone", .{ short(a, st.origin), st.n, i }))
+                imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (signer): the router is gone", .{ short(a, st.origin), st.n, i }))
             else
                 imp.failFmt("{s}", .{@errorName(err)});
         } else {
-            return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (oracle): no wallet and no recorded answer", .{ short(a, st.origin), st.n, i }));
+            return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (signer): no wallet and no recorded answer", .{ short(a, st.origin), st.n, i }));
         }
         var rec = cbor.MapBuilder.init(a);
         try rec.put("kind", cbor.string("oracle"));
@@ -2715,7 +2719,7 @@ pub const Runtime = struct {
             allowed = true;
         };
         if (!allowed) return imp.failFmt("wallet: call {s} is not allowed to programs", .{if (frame.len > 0) try std.fmt.allocPrint(cs.a, "{d}", .{frame[0]}) else "undefined"});
-        const f = cs.rt.peers.wallet orelse return imp.failWith("wallet: this host has no oracle");
+        const f = cs.rt.peers.wallet orelse return imp.failWith("wallet: this host has no signer");
         return f(cs.rt.peers.ctx, cs.a, frame) catch |err| imp.failFmt("wallet: {s}", .{@errorName(err)});
     }
     /// A call within a call: the same world (records put, fuel, clock), its own fn and arg.

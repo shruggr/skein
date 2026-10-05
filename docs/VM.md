@@ -115,7 +115,7 @@ writes the same chain. A name never moved has no chain.
   program's write scope: an app's program (its record's `app`, written by the
   install) writes `<app>/…` and nothing else; a program the genesis wired
   (no app record) writes only what the genesis's `scopes` list under its
-  name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox", "outbound"],
+  name (`{frontdoor: ["frontdoor/"], messagebox: ["mailbox"],
   resolve: ["resolve/"], wallet: ["wallet/"], chain: ["chain/"]}` by default;
   `chain` since #78, the chain module wired at boot; `wallet/` since #79;
   `resolve/` since #87, its records of what it found) — a bare head name, or a
@@ -261,17 +261,19 @@ against those reads in the kernel's match.)
     (owner = the name's app).
   - `dispatch` — `{op: "add" | "remove", row}`: the table changed (a program
     row's record and module must be in the store).
-  - `peers` — `{op: "add", key, transport?, address? | url?, role?, handle?,
+  - `peers` — `{op: "add", key, transport?, address? | url?, handle?,
     domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
+    An entry is a key, a transport and an address (#126: nothing finds a
+    service by a role; a `role` an older client sends is still stored, for
+    modules built before skein-sdk 0.7.0, until #126's last step).
   - `claim` (#89, #127) — `{messagebox?, handle?, domain?}`, at an image's
     claim row (from anyone). **The owner is the message's sender** — the
     verified signer — never a key in the body (a body's `owner` is not
     read); a sender that is not an identity key is refused. In one step the
     sender's four admin rows are added, and (#121) the explorer row with the
     sender's key (`{http, /explore, prefix, <owner>, <the genesis's front
-    door>, explore}`; not when the table holds a row for #115's `owner`
-    symbol — an image written before #121 — which reads the claim's key as
-    before), the claim row is removed, the head `claim` points at
+    door>, explore}`; #126: there is no `owner` sender symbol any more —
+    every sender is a key), the claim row is removed, the head `claim` points at
     `{owner: <the sender>, messagebox?, handle?, domain?}` (what was
     claimed), and with a `messagebox` the owner's address-book entry is
     written (`source` "claim"). Refused when the genesis names an owner or
@@ -330,13 +332,20 @@ these imports:
 - the record store, read-only, by CID (`get`): global, holding a CID is the permission;
 - the connected wallet's BRC-100 operations (sign, verify, encrypt, decrypt,
   derive): the signer, answered synchronously and recorded;
-- **`emit`** (#70): a signed message to a recipient the address book names —
-  the one way out (below, "emit");
+- **`emit`** (#70): a signed message to a recipient the address book names,
+  or an event — an intention the runtime answers (#126: a `deadline`, a
+  `fetch`) or one it acts on (a broadcast, a subscription, a beacon) — the
+  way out (below, "emit");
+- **`authfetch`** (#126): a BRC-104 request to a server, signed and checked in
+  the kernel through the signer, a recorded call — the one direct HTTP path
+  (below, "authfetch");
 - the entry's time stamp, advanced by fuel (below, "The clock inside a step runs on fuel").
 
-Not provided: wall clock, random, threads, network, host filesystem. A WASI
-program with only these imports is deterministic by construction, so replay
-re-executes it and gets the same tree and the same output.
+Not provided: wall clock, random, threads, plain network, host filesystem.
+A WASI program with only these imports is deterministic by construction, so
+replay re-executes it and gets the same tree and the same output (the
+signer's answers and authfetch's exchanges are served from the recorded
+calls).
 
 The LLM-facing `bash` tool is a **wasm shell**: a bash-compatible shell
 compiled to WASI (brush) running programs that are themselves WASI modules
@@ -403,20 +412,28 @@ status as 1, because `wasi:cli/exit` is ok/err.
 
 ### emit: the one way out (#70, #67)
 
-A step never asks the world anything mid-step but the signer. **External
-communication is a thread**: the step emits a signed message, ends
-`waiting` on what it expects, and the answer arrives as an entry that steps
-the thread again. There is no `http` import, no `libp2p` import and no
-`wasi:http` (format 6 removed them, and with them the recorded http/libp2p
-calls and the host's attestation of them, #62); a program reaches the
-network by emitting to a provider — the HTTP proxy, the libp2p node — whose
-answer is a signed message like any other.
+A step never asks the world anything mid-step but the signer and, through
+the kernel, a BRC-104 server (`authfetch`, #126 — both recorded calls).
+**External communication is a thread**: the step emits a signed message or
+records an intention, ends `waiting` on what it expects, and the answer
+arrives as an entry that steps the thread again. There is no plain `http`
+import, no `libp2p` import and no `wasi:http` (format 6 removed them, and
+with them the recorded http/libp2p calls and the host's attestation of
+them, #62). **The signature boundary is absolute** (#126): every request out
+is signed by the instance's key and recorded, every answer in is signed and
+admitted by a row or by the instance's own signed request it answers. A
+program reaches the network by an intention the runtime answers (`fetch`:
+the host signs the request with the instance's key to its HTTP proxy, whose
+signed answer comes back), by a message to a service (the libp2p node, the
+cron provider), or by `authfetch` (signed in the kernel).
 
 ```
 emit(message) → <cid>     preview1: skein.emit(msg, len, out, cap) → n (the CID, binary; n < 0: the error)
                           WIT:      emit: func(message: list<u8>) -> result<cid, string>
 message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
-          or an event (#65, #119): {event: "broadcast", tx: <cid>, beef?: bytes}
+          or an event (#65, #119, #126): {event: "broadcast", tx: <cid>, beef?: bytes}
+                                   {event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?}
+                                   {event: "beacon", topic, every, body} | {event: "unbeacon", topic}
                                    {event: <any other name>, …fields}
 ```
 
@@ -464,8 +481,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
 - It goes out **when the step ends without error** (an errored step's
   emits are dropped), by the recipient's transport (docs/MESSAGES.md, "The
   address book"): a `mailbox` recipient's by the instance's own delivery
-  thread (the messagebox program, launched by the kernel: the instance holds
-  its own BRC-103/104 sessions), a `local` provider's, a `libp2p`
+  thread (the messagebox program, launched by the kernel, POSTs it with
+  `authfetch`: the kernel holds the BRC-103/104 sessions, #126), a `local` provider's, a `libp2p`
   recipient's or the instance's own (the loopback, `local` to `self`)
   handed to the host once the step is committed (the serve frame `emit`). At a start the kernel hands over again what a waiting
   thread still awaits (a host restart loses nothing a provider had); a host
@@ -506,9 +523,25 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
     to that subscription's program and fn through the door, as a row's
     handler would; a row at the topic wins. The host's libp2p node
     subscribes the topics they take (docs/MESSAGES.md "libp2p (#51)").
+  - `fetch` (#126) is an **intention**: `{event: "fetch", method, url,
+    headers?: {name: text}, body?: bytes, timeoutMs?, maxBytes?}` → the
+    record `{kind: "event", event: "fetch", …, thread, step, app?}` (the
+    kernel adds `thread` and `step`: the request is this step's own; its shape
+    is checked as it is emitted). The step awaits its CID (sk.fetch does). The
+    runtime answers it as the host is wired (below, "Intentions").
+  - `beacon` / `unbeacon` (#126): `{event: "beacon", topic, every: <ms ≥
+    1000, ≤ a day>, body: bytes (≤ 64 KiB)}` declares once that the
+    instance's libp2p node publishes `body` on `topic` every `every` ms;
+    `{event: "unbeacon", topic}` stops it. Like a subscription: an
+    installed app's (refused otherwise), keyed by (app, topic), folded by the
+    host from the log; no answer comes. The node beats on its own clock
+    (GossipSub signs each publish with its key), logs nothing per beat and
+    does not subscribe the topic; a beacon stands until its app's unbeacon
+    or its app's uninstall (no row of the app left). "If the server goes
+    down, it will not be pinging that beacon": a true heartbeat.
   - The events the reference host wires today: `broadcast` (Arcade),
-    `subscribe` / `unsubscribe` (its libp2p node subscribes and leaves the
-    topics).
+    `subscribe` / `unsubscribe` and `beacon` / `unbeacon` (its libp2p
+    node), `deadline` and `fetch` (intentions: its waker, its HTTP proxy).
 - **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
   <dag-cbor bytes>, subject?: <cid>}, {event: "broadcast", tx: <cid>, beef?:
   bytes} or {event: <name>, …fields}` · ``emit: event <name>: a name is not
@@ -525,9 +558,12 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   `… not canonical dag-cbor` · ``emit: `subject` is not a CID`` · ``emit:
   no route to <hex>: not in the address book, and the genesis has no
   messagebox program to deliver it`` · `emit: <hex> is reached by mailbox, and the
-  genesis has no messagebox program to deliver it` · `emit: the oracle did
-  not sign the message` · in a kernel call, `emit: a kernel call sends
-  nothing (emit from a step)`.
+  genesis has no messagebox program to deliver it` · `emit: the signer did
+  not sign the message` · `emit: fetch: <why>` (a fetch that is
+  not one) · a refused beacon (`emit: beacon: every <n> ms: from 1000 ms to
+  a day`, `emit: beacon: \`body\` is the bytes published at each beat`, `emit:
+  <beacon|unbeacon>: the emitting program is not installed …`) · in a kernel
+  call, `emit: a kernel call sends nothing (emit from a step)`.
 
 **Awaiting the answer.** `await` the message's CID and end the step: it
 ends `waiting` with the CID in `awaits`. The answer is a message from the
@@ -540,23 +576,76 @@ recorded and runs nothing). A message to a `mailbox` recipient whose
 delivery gives up (its delivery thread errors) steps the thread awaiting it
 with `undelivered: {message, error}`: no answer can come.
 
-**deadline** stays, as sugar: `deadline(until_ms)` records the deadline
-(`until` on the update) and, when the step ends waiting, emits `{at:
-until_ms}` in box `wake` to the address book's **waker** (the entry with
-role `waker`) and awaits it. The waker's answer `{replyTo, at}` steps the
-thread with `woke: true`; one stamped before `at` runs nothing. Errors:
-`deadline: not after the step's time`, `deadline: no waker in the address
-book (an entry with role "waker")`. **A shell's `sleep`** is the same
-message (#69): the kernel signs the wake-me through the signer (the call on
-the shell's waiting update, with the message in `emitted` and `awaits`),
-and the waker's answer re-executes the shell from its origin, which carries
-on past the sleep under that entry (no waker: the shell errors, `sleep: no
-waker in the address book …`). There is no `wake` entry (format 7) and the
-kernel keeps no sleepers of its own: the waker holds what it owes, and at a
-start the kernel hands it again every wake-me a waiting thread still
-awaits. (The index's `sleepers` map — until ‖ origin of every thread
-resting with a deadline — stays as a derived read for `skein-kernel dump`;
-nothing wakes from it.)
+**Intentions** (#126): a program says what it wants; how it is done is the
+runtime's wiring. A program has no reason to know who the waker or the HTTP
+proxy is.
+
+- **deadline**: `deadline(until_ms)` records `until` on the update and,
+  when the step ends waiting, the event `{kind: "event", event: "deadline",
+  at: until_ms, thread, step, app?}` — listed in `emitted` and awaited (no
+  signer call, no message). **A shell's `sleep`** is the same event on the
+  shell's waiting update (#69). Errors: `deadline: not after the step's time`.
+- **fetch**: the `fetch` event above, awaited.
+- **The answer.** The host's wrapper signs a request for the intention with
+  the instance's key — the mail record `{kind: "mail", op: "put", sender:
+  <the instance>, recipient: <the service>, box, body: <the event's CID>,
+  nonce, signature}` — and sends it where the host is wired (the reference
+  host: its own waker, box `wake`; its HTTP proxy, box `fetch`; another
+  host could send it to a remote service by mailbox or BRC-104). The
+  service answers with a signed message from its key whose body names the
+  event (`replyTo`) and carries that request (`request`), admitted as a
+  `local` request: the front door checks its signature, and the kernel
+  checks that `request` is this instance's own, signed, to the answering
+  key, for that event (the instance asked that key). Both are in the log.
+  The thread awaiting the event steps: at a deadline with `woke: true` (one
+  stamped before `at` runs nothing; a shell is re-executed from its origin
+  and carries on past its sleep under that entry), at a fetch with `reply:
+  {message, body, box, sender, replyTo}`, the body `{replyTo, request,
+  status, headers, body}` or `{replyTo, request, error}`. Anything else
+  naming the event is recorded and runs nothing.
+- At a start the kernel hands over again every event a waiting thread still
+  awaits (a host restart loses no timer); a host acts on one once. There is
+  no `wake` entry (format 7) and the kernel keeps no sleepers of its own.
+  (The index's `sleepers` map — until ‖ origin of every thread resting with
+  a deadline — stays as a derived read for `skein-kernel dump`; nothing
+  wakes from it.) A log written before #126 (a deadline was a signed
+  wake-me to the waker, answered by `replyTo`) replays as it was written.
+
+### authfetch: the kernel's BRC-104 client (#126)
+
+```
+authfetch(request) → answer   preview1: skein.authfetch(req, len, out, cap) → n (n < 0: the error)
+                              WIT:      authfetch: func(request: list<u8>) -> result<list<u8>, string>
+request   dag-cbor {url: <the server's base URL>, method? (POST), path? (/; its ?query too),
+                    headers?: {name: text}, body?: bytes, timeoutMs?}
+answer    dag-cbor {status, headers: {name: text}, body: bytes}
+```
+
+The kernel is the client (kernel-zig/src/authfetch.zig): the BRC-103
+session with the server at `url` (the handshake at `<url>/.well-known/auth`,
+kept in memory per base URL, made again when the server answers 401 or the
+process restarts), the request signed BRC-104's way (the
+SimplifiedFetchTransport framing: a stock server takes it), the answer's
+signature and identity checked — all through the signer. The runtime only
+moves bytes (the serve frame `http` the kernel asks the host: `{method,
+url, headers, body, timeoutMs?}` → `{status, headers, body}` | `{error}`).
+A 2xx answer must be signed; a failure from something in front of the
+server may come unsigned and is returned as it is. No answer at all is a
+failure whose message starts `transient: `.
+
+The whole exchange is **one recorded call** at (thread, step, i), as a
+signer call is: `{kind: "authfetch", thread, step, i, request: bytes, answer?:
+bytes | error?: text, calls: [{request, result}]}` (`calls`: every signer
+frame it made). Replay serves the answer or the failure from the witness
+and asks no one; a differing request is a divergence. The nonces and the
+request id are real randomness (replay never makes them). A kernel `call`
+refuses it (`authfetch: a kernel call talks to no one`). Errors: `authfetch:
+want {url, …}` and the request's other shape errors, `authfetch: this host
+carries no HTTP`, `transient: …`, `authfetch: …: the answer is not signed` |
+`… does not verify` | `… is from another identity than the session's`.
+
+The messagebox's delivery uses it: a message to a `mailbox` recipient is
+POSTed to `<url>/sendMessage` with authfetch (docs/MESSAGES.md).
 
 **Broadcast out is an event** (#65): `emit({event: "broadcast", tx:
 <cid>, beef?: bytes})` lists `{kind: "broadcast", tx, beef?}` in the
@@ -568,13 +657,14 @@ program that does this is the chain app's (shruggr/skein-chain); the
 wallet and the overlay apps send it an `ingest` instead and await its
 answers. docs/MESSAGES.md, "Broadcast out, proofs and statuses in".
 
-**Components** (WASI 0.2) import `emit` from `skein:kernel/skein` like
-every other call; the world has no `wasi:http`. `kernel-zig/test/components/
-fetch.wasm` (programs/test/fetch) is the fixture: it emits a GET to the `fetch`
-provider and writes the answer's body on its next step.
+**Components** (WASI 0.2) import `emit` and `authfetch` from
+`skein:kernel/skein` like every other call; the world has no `wasi:http`.
+`kernel-zig/test/components/fetch.wasm` (programs/test/fetch) is the
+fixture: it records a `fetch` intention for a GET and writes the answer's
+body on its next step.
 
 The program-facing contract — the address book's shape, each provider's
-boxes and answers, the outbound BRC-103/104 pattern — is docs/MESSAGES.md,
+boxes and answers, intentions, delivery to a messagebox (authfetch) — is docs/MESSAGES.md,
 "Outbound: emit, the address book and the providers".
 
 ### Calls: reading the state without an entry (#40)
@@ -598,7 +688,7 @@ function over the current state and return a value. It writes nothing.
 - **No entry, no writes.** `get`, `head` and the store read as they stand;
   `put` and `putblock` keep their records in the call's write cache only (so
   a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`,
-  `emit` and `deadline` are refused (a call sends nothing). The signer
+  `emit`, `deadline` and `authfetch` are refused (a call sends nothing). The signer
   (`wallet`) is answered by the host and **not recorded**.
 - **No determinism.** Nothing replays a call, so it needs none: its clock is
   the host's `now` (plus fuel, as in a step), its random is real entropy
@@ -800,9 +890,9 @@ replay and a fresh run read the same times. Time moves with work — a program
 that waits on the clock inside a step (a busy-wait, a timeout loop) sees it
 pass and ends on its own instead of spinning until fuel runs out, and
 mid-step timestamps spread with real work. A shell's sleep takes its
-deadline from this clock and rests the thread on a wake-me to the waker
-(#69); the waker's answer's stamp starts the next segment, its fuel counted
-from zero. (Before #38: the stamp, then
+deadline from this clock and rests the thread on a `deadline` event (#69,
+#126); the answer's stamp starts the next segment, its fuel counted from
+zero. (Before #38: the stamp, then
 +1 ns per read.)
 
 ## Messages
@@ -844,7 +934,7 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
   broadcaster), or one a front door's step routes (`:ack`, an accepted
   libp2p message, a gossiped `submit`), routed by its `subject` or by the
   first `mailbox` row from anyone on its box.
-  (No `wake` entry since format 7: wakes and ticks are providers' messages, #69.)
+  (No `wake` entry since format 7: wakes and ticks are providers' signed messages, #69, #126.)
 - **`genesis`**: who the instance is, its programs, the dispatch table's
   seed, the write scopes of its genesis-wired programs, its reads.
 
@@ -862,8 +952,8 @@ format is refused (start a new store).
 Time cannot be computed inside, so it is an input: the host stamps each
 entry when it appends it, and inside a step the clock is that stamp plus
 the fuel burnt so far ("The clock inside a step runs on fuel", above).
-Sleep and deadlines are messages to the waker provider, whose answer is an
-entry. A gib checkpoint can bind a state hash to a block time, which anyone
+Sleep and deadlines are intentions the runtime keeps (#126: the `deadline`
+event), and their answer is an entry: the waker's signed message. A gib checkpoint can bind a state hash to a block time, which anyone
 can verify.
 
 ## Threads and steps
