@@ -50,10 +50,10 @@ export const GIT_APP: PinnedApp = {
   rev: process.env.SKEIN_GIT_REV ?? "b571f42fe80fc348206bea65ac810f02a162c511", dir: process.env.SKEIN_GIT_DIR,
 };
 
-/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.0). */
+/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.1). */
 export const SITE_APP: PinnedApp = {
   name: "site", repo: "https://github.com/shruggr/skein-site",
-  rev: process.env.SKEIN_SITE_REV ?? "aa98eef4002cfb73203f6119e1af6a59c058acba", dir: process.env.SKEIN_SITE_DIR,
+  rev: process.env.SKEIN_SITE_REV ?? "47581ca0fafe88223864b576ac149007c51b77cd", dir: process.env.SKEIN_SITE_DIR,
 };
 
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */

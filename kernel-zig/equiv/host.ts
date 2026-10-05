@@ -19,7 +19,7 @@
 //   from the default image and forwarded the client's claim (alice's first
 //   entry after its genesis) before publishing her hostname; the host signed
 //   nothing for the client. A create with no claim, or another key's, is refused.
-//   alice serves the management site at her URL, is claimed for the client's key,
+//   alice answers at her URL (no page there, #125), is claimed for the client's key,
 //   and the client installs programs/test/app-demo into her and calls it. The
 //   host skein records her under onboard/instances/alice (the manager's
 //   answer record). A second create of "alice" is refused (409, the
@@ -158,8 +158,9 @@ try {
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
   check(first[0]?.transport === "local", "the forwarded claim is alice's first entry after her genesis: her hostname was published after it");
   check(!(await genesisBook("alice")).includes("manager"), "alice's address book has no instance manager");
-  const page = await fetch(`${res?.url}/`);
-  check(page.status === 200 && (await page.text()).includes('src="site/app.js"'), `alice answers at her url with the management site: GET ${res?.url}/ → ${page.status}`);
+  // #125: an image serves no page; her explorer row (her owner's key) answers at her url, wanting a session.
+  const page = await fetch(`${res?.url}/explore`);
+  check(page.status === 401, `alice answers at her url (nothing at /: #125): GET ${res?.url}/explore with no session → ${page.status}`);
   const rec = await (await k("host")).call("head", "onboard/instances/alice") as CID | null;
   const answer = rec ? await (await k("host")).store.get(rec) as { handle?: string; identity?: unknown; url?: string; replyTo?: unknown } : undefined;
   check(answer?.handle === "alice" && hex(answer.identity) === res?.identity && answer.url === res?.url && !!answer.replyTo, "the host skein records her: onboard/instances/alice → the instance manager's answer record");

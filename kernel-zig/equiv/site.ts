@@ -3,6 +3,8 @@
 // providers, the instance manager), with its host skein:
 //
 //   `skein-host init --owner <you>` creates the host skein from the default
+//   image, which you claim from your wallet (#127: `skein plan claim`, the
+//   sender owning it); the default
 //   image (no site, no static, #125: the explorer route for its owner and the
 //   git app's tree under apps/git); you install the onboarding app and the
 //   management site (shruggr/skein-site, an app: its page at /site/) into it
@@ -79,7 +81,8 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { appCheckout, ONBOARD_APP, ownerCli, sendDir, SITE_APP } from "../../src/testapps.ts";
+import { appCheckout, ONBOARD_APP, ownerCli, sendDir, sendPlan, SITE_APP } from "../../src/testapps.ts";
+import { planClaim } from "../../src/client/admin.ts";
 import { planMain } from "../../src/client/admin-cli.ts";
 import { HANDLE_CERTIFICATE_TYPE } from "../../src/host/handles.ts";
 import { decodeProfile } from "@1sat/utils";
@@ -252,6 +255,9 @@ try {
   stores.push(db.get("host")!.store);
   host = await runHost(db, { vars: { ...vars, SKEIN_OWNER: you }, out, err: out });
   const router = host.router;
+  // #127: the host skein is a bare image; you claim it from your wallet (skein plan claim, skein send): the sender owns it.
+  await sendPlan({ port, owner: ephemeralWallet(youKey), settled: () => router.settled() }, "host", planClaim(db.get("host")!.identity!));
+  check(((await (await router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>).some((x) => x.program === "kernel" && x.address === "objects" && hex(x.sender) === you), "you claim the host skein from your wallet (#127)");
   // #113: the handle domain and the host's origin in the app's config; #104: the host's name in the manifest, no
   // avatarURL (nothing fetched from a public ORDFS gateway).
   r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
