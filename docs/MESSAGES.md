@@ -319,8 +319,10 @@ steps on it (the genesis's front door for `http`, `libp2p` and `local`; a
 genesis may name others in `middleware: {<transport>: <program>}`). A
 `local` request is a provider's answer on this host (below, "Outbound"): the
 front door checks the message's signature against its sender and that its
-body is the one named, and admits it. A mail entry is what a host that admits a message directly
-writes (the browser's); the node host's messages arrive inside requests. A
+body is the one named, and admits it. No host admits a message directly
+(K2): `admit` refuses a `mail` entry, and every message arrives inside a
+request — the browser host's as `local` requests carrying a signed message.
+A mail entry is only in a log written before that. A
 store in an older format is refused for running (`kernel-zig/src/log.zig`
 has the shapes).
 

@@ -52,9 +52,14 @@ performs itself on a message at an admin row from the owner or a delegate.
 No program writes a kernel table. (`VM.md`, "The dispatch table, and the
 kernel's four tables".)
 
-**Write scope by name, reads by CID.** An app's programs `advance` only
-heads under the app's name (`chain/state`, `wallet/state`,
-`overlay/ls_demo`). Any program reads any record whose CID it holds. A
+**Write scope by name, reads by CID.** No app writes another app's data,
+and the kernel enforces it: an app's programs `advance` only heads under
+the app's name (`chain/state`, `wallet/state`, `overlay/ls_demo`). The
+scope is read from a program record only when the owner installed that
+record — a genesis program, a dispatch row's program, or one listed in its
+app's record at `<app>/app` — so a record a program puts itself, claiming
+another app's name, runs when launched or called and writes no head
+(`VM.md`, "Heads"). Any program reads any record whose CID it holds. A
 program that needs a pointer it does not hold calls the owning app, and
 calls hand back CIDs, not data.
 
@@ -163,7 +168,11 @@ holds (deduplication by hash is not verification). The kernel's surface is
 five frames: in, **admit** (append an entry and run the steps it drives),
 **answer** (wait until a request's thread comes to rest), **call** (run a
 function, no entry, no writes); out, **wallet** (signing requests) and
-**emit** (what a committed step sent).
+**emit** (what a committed step sent). `admit` takes requests and events,
+never a message as the host's word: a message comes in inside the package
+that carried it, and the front door verifies it. The host's `append` frame
+writes only the genesis entry, as the log's first; every other entry is
+admitted.
 
 The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 
@@ -298,7 +307,10 @@ numbers as wasmtime's), the store in IndexedDB, preview1 modules only
 (`web/kernel/host.ts`). One instance whose identity is the connected
 wallet's: `wallet` goes to the page's BRC-100 wallet, `emit` to the page's
 own providers (fetch, waker). In: the page's chat, a poll of the page
-identity's mailbox instance, and the waker's timers. Nothing runs while the
+identity's mailbox instance, and the waker's timers — each message a
+`local` request carrying a signed message (the page's own signed by its
+wallet, a polled one as the mailbox kept it), verified by the front door;
+the page admits no unsigned message. Nothing runs while the
 tab is closed. Logs cross between browser and native in both directions.
 
 ## Genesis

@@ -407,11 +407,15 @@ result.
   admin message finds no row: recorded, nothing runs. Granting another identity the right to install or reconfigure
   is a `dispatch` row by the owner — explicit, logged.
 - **An app writes only heads under its own name.** That is the whole
-  write-scope rule: `advance` is allowed when the head's name is
-  `<app>/…` for the stepping program's app (its record's `app`). Two apps
-  cannot write each other's heads; they read each other's freely, by CID.
-  A genesis-wired program writes only what its genesis `scopes` name. No
-  exceptions (#79).
+  write-scope rule, enforced by the kernel: `advance` is allowed when the
+  head's name is `<app>/…` for the stepping program's app (its record's
+  `app`). Two apps cannot write each other's heads; they read each other's
+  freely, by CID. A genesis-wired program writes only what its genesis
+  `scopes` name. No exceptions (#79). The scope comes only from a record
+  the owner installed — a genesis program, a dispatch row's program, or one
+  listed in the app record at `<app>/app` (K1): a record a program puts
+  itself, claiming another app (`app: "chain"`) or a genesis-wired name,
+  runs when launched or called and writes no head (docs/VM.md "Heads").
 - **Reads are global.** Holding a CID is the permission. Data meant to be
   private is encrypted; nothing in the store is unreadable to a program
   that can name its CID.
@@ -659,6 +663,8 @@ bounded at 64 MiB).
 | part | status |
 |---|---|
 | heads with owners; `head`/`advance`/`get`; the write scope by name; the kernel's `objects`, `head`, `dispatch`, `peers` operations | built (#77) |
+| the write scope read only from installed program records (genesis programs, dispatch rows' programs, `<app>/app`'s `programs`); a record a program puts runs and writes no head | built, enforced (K1: kernel-zig/src/scheduler.zig `installedAs`; kernel-zig/equiv/install.ts, the forgery) |
+| no message admitted as the host's word: `admit` takes no `mail` entry; the browser host appends signed messages as `local` requests; `append` writes only the genesis entry | built, enforced (K2, K24: src/host/admission.test.ts) |
 | the dispatch table (routes, boxes, libp2p topics as rows); route handler contract; synchronous answer on thread completion | built (#68/#66, #77) |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `<app>/ls_<service>`; the contract as a Zig module | built (#50, #79: skein-overlay 0.3.0) |
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |

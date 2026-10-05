@@ -124,6 +124,22 @@ writes the same chain. A name never moved has no chain.
   program records, the alias head `<app>` and the resolve program's
   `peers` scope are gone). Anything else is `advance: <name> is outside the
   write scope of <program>`.
+- **Only an installed record has a scope** (K1, enforced). A record's `app`
+  and `name` are its own claims, and any step can `put` a program record,
+  so the kernel reads a scope from a record only when the owner installed
+  that record: a **genesis program** (the genesis's `programs` or
+  `middleware`), the **program of a dispatch row** (only the owner's admin
+  messages change the table), or one **listed under `programs` in the app
+  record at `<app>/app`** for the `app` it names — which writes `<app>/…`
+  only (that head is the install's, or the app's own: an app can grant only
+  its own scope). Any other record runs — `launch` and `call` take any
+  program record (reads are global, holding a CID is the permission) — and
+  writes no head: its `advance` is `advance: <name> is outside the write
+  scope of <program>: its program record <cid> is not installed …`. The
+  kernel looks this up at the record's first `advance` in a step, over the
+  tables as they stand at that point in the log (the same on replay), and
+  keeps the answer for the rest of the step
+  (`kernel-zig/src/scheduler.zig` `installedAs`).
 - The owner moves one by sending `{name, tree}` to the admin box `head`
   (`skein head <name> <tree>`): the kernel's own `head` operation (below,
   "The dispatch table") advances it — no program runs. The app's root head
@@ -491,7 +507,10 @@ function over the current state and return a value. It writes nothing.
   `call` the callee reads only, in the same world (the records put, the
   fuel). From a **step** the callee is part of the step: its recorded calls,
   kept records, launches and head moves are the step's, on the step's fuel,
-  and replay re-runs it with the step. A step sees its own head moves: a
+  and replay re-runs it with the step. The callee writes in its own scope
+  ("Heads"): a callee record the owner did not install has none, so a call
+  runs any program but lends no scope — not the caller's, and not one its
+  record claims. A step sees its own head moves: a
   head a callee advanced reads back as moved in the rest of the step. Calls
   nest to depth 8; an answer is at most 64 MiB.
 - **What calls are for** (#68). Not requests: every request is an entry
@@ -612,9 +631,13 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
   proven by the BRC-104 session it came on (`session` keeps the signed
   request, so the log verifies with keys alone) or, for a message another
   instance or a provider emitted, by its own `signature` (#70, "emit"
-  above); its body is a record of its own. The node host's messages arrive in
-  requests, and the front door's step routes them; a host may admit one as
-  an entry of its own (`admit(entry, {body})`: the browser's). The mail
+  above); its body is a record of its own. Every host's messages arrive in
+  requests, and the front door's step routes them: `admit` refuses a `mail`
+  entry (K2) — a message is never the host's word. A signed message comes
+  in as a `local` request `{kind: "message", message, body}`, its signature
+  checked by the front door (the browser host's own messages, signed by its
+  wallet, and the ones it polls from its mailbox instance). A `mail` entry
+  in a log written before that still processes on replay. The mail
   record's CID is the message's id — what the sender computes too, and what
   a reply's `replyTo` names; the same record is admitted once (the `unique`
   map). It is routed to

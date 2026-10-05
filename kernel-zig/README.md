@@ -470,11 +470,13 @@ skein-host run (the host, src/host/router.ts) ──spawn on demand──▶ ske
 ```
 
 The host speaks to the kernel through `src/host/kernel.ts`: it asks `tip`,
-`get`, `put`, `has`, `putblock`, `restore`, `append`, `genesis`, `programs`
+`get`, `put`, `has`, `putblock`, `restore`, `append` (K24: the genesis
+entry only, as the log's first; every other entry is admitted), `genesis`, `programs`
 (the pinned program records, for a new genesis), `head`, `boxes`,
 `dispatch` (#77: `{tip, rows}`, the dispatch table as it stands — the
 host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, body?}`: the one call in that writes — a
-request as received, #68, a feed's or a proof's event), `answer` (#66, below),
+request as received, #68, a feed's or a proof's event; never a `mail`
+entry, K2), `answer` (#66, below),
 `call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the host answers from the instance's
 ProtoWallet, the oracle), and tells `emit` (#70: `{message, body,
@@ -711,9 +713,11 @@ as the 1sat-sdk test-app boots one); `emit` → the page's own providers (#70: `
 a page-local master), by which the instance's own programs deliver its
 messages (the messagebox's delivery threads, a BRC-104 client through the
 `fetch` provider) and resolve handles (the resolve program). The call in: the page's chat (a message from the user,
-admitted directly as a mail record), a poll of this identity's mailbox
+signed by the wallet and appended as a `local` request — K2: `admit` takes
+no mail entry, the front door verifies every message), a poll of this identity's mailbox
 instance on the host (registered by the page; `listMessages` on a BRC-104
-session, each message admitted and acknowledged once durable; what the
+session, each signed message appended the same way, as the mailbox kept it,
+and acknowledged once durable; an unsigned one is not admitted; what the
 instance sends its owner lands there too and is shown), and a timer for
 wakes. An intermittent host: nothing runs while the tab is closed; inbound
 waits in the mailbox instance, wakes fire late at the next open.
