@@ -175,7 +175,7 @@ checked against `kernel-zig/test/dispatch-cases.json`). A row:
  filter?: "beef", …settings}
 ```
 
-A route, a subscription and a libp2p topic or protocol differ only in where
+A route, a box and a libp2p topic or protocol differ only in where
 the address comes from: a `mailbox` row's address is a box (`*`: any box, a
 mailbox instance's catch-all); an `http` row's a path (`prefix: true` for a
 prefix; exact paths match first, then the longest prefix); a `libp2p` row's
@@ -215,7 +215,8 @@ a reply routes before any row (docs/MESSAGES.md).
   is claimed (401), none there takes the claimed identity (403). A
   restrictive row does not shadow a less specific one: the request falls
   through to the next row that takes it.
-- `libp2p`: the topic or `/<protocol>`, from the peer's key (its peer ID).
+- `libp2p`: the topic or `/<protocol>`, exactly, from the peer's key (its peer ID); a topic no row
+  is at goes to the app that subscribed it (#119, "emit" below), and a row at the topic wins.
 - `local`: no row fires today: a provider's answer is a message, routed by
   its `mailbox` row (to review).
 
@@ -477,17 +478,36 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
     installed** (#114's rule: a genesis program, a dispatch row's program,
     or one listed in its app's record at `<app>/app`). An uninstalled
     record's event — one a step put and launched or called — carries no
-    `app`, and a host scoping by app ignores it. An emit naming `kind` or
+    `app`, and a host following events by app ignores it. An emit naming `kind` or
     `app` itself is refused. Handed over once (the host recovers by reading
     the log, not by a re-offer). Replay puts the same records.
+  - `subscribe` / `unsubscribe` (#119) are **subscriptions**, and the kernel
+    reads them too. `{event: "subscribe", topic, program: <role>, fn,
+    filter?}` says: deliver a libp2p message on `topic` to this app's
+    `program` (a role in its record at `<app>/app`) at `fn`; `{event:
+    "unsubscribe", topic}` ends it. The kernel checks each as it is emitted
+    (an installed app's program; a topic, not a `/<protocol>`; the role is
+    the app's and `fn` not empty; an unsubscribe of the app's own
+    subscription) and refuses the emit otherwise. The subscriptions are the
+    fold of these records in log order — derived, never written; a
+    subscription is keyed by (app, topic), and the first standing one for a
+    topic delivers. An inbound message on a topic no dispatch row is at goes
+    to that subscription's program and fn through the door, as a row's
+    handler would; a row at the topic wins. The host's libp2p node
+    subscribes the topics they take (docs/MESSAGES.md "libp2p (#51)").
   - The events the reference host wires today: `broadcast` (Arcade),
-    `subscribe` / `unsubscribe` `{topic}` (its libp2p node, scoped to the
-    emitting app: docs/MESSAGES.md "libp2p (#51)").
+    `subscribe` / `unsubscribe` (its libp2p node subscribes and leaves the
+    topics).
 - **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
   <dag-cbor bytes>, subject?: <cid>}, {event: "broadcast", tx: <cid>, beef?:
   bytes} or {event: <name>, …fields}` · ``emit: event <name>: a name is not
   empty and has no space or NUL`` · ``emit: an event's `kind` and `app` are
-  the kernel's to set`` · `emit: the message is not dag-cbor`
+  the kernel's to set`` · a refused subscription (`emit: subscribe names
+  its program: …`, `emit: subscribe: "<role>" is not a program of app
+  <app> …`, `emit: subscribe names the function delivered to …`, `emit:
+  <subscribe|unsubscribe>: topic "<t>" is not a topic …`, `emit:
+  unsubscribe: app <app> has no subscription to <t> …`, `emit: <…>: the
+  emitting program is not installed …`) · `emit: the message is not dag-cbor`
   · ``emit: `to` is not an identity key (33 bytes): emit to a key, not a
   handle (resolve the handle first)`` · `emit: the box is empty or starts
   with ':' (reserved)` · `emit: the body is not dag-cbor` | `… not IPLD` |

@@ -71,7 +71,7 @@ the **address book**. The dispatch table is one chain of rows
  filter?: "beef", …settings}
 ```
 
-— a box, an HTTP path (prefix or exact), a libp2p topic (prefix or exact, #119) or `/<protocol>`;
+— a box, an HTTP path (prefix or exact), a libp2p topic or `/<protocol>` (exact);
 who may send there (`event`, #79: events only — the host's wiring and a
 route's admits, never a message; every other sender is a key, #121: the
 owner's rows name the owner's key, an image's the claim's — #115's `owner`
@@ -567,22 +567,34 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | event | record | the host |
   |---|---|---|
   | `broadcast` (#65) | `{kind: "broadcast", tx, beef?}` | its broadcaster posts the transaction to Arcade — below, "Broadcast out, proofs and statuses in"; re-offered at a start while the thread awaits it |
-  | `subscribe` (#119) | `{kind: "event", event: "subscribe", app, topic}` | its libp2p node subscribes `topic` for `app`, when one of that app's libp2p rows takes it — "libp2p (#51)", below |
-  | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | the node drops `topic` from `app`'s asked set |
+  | `subscribe` (#119) | `{kind: "event", event: "subscribe", app, topic, program, fn, filter?}` | a subscription: its libp2p node subscribes `topic`; the kernel delivers a message on it to `app`'s `program` at `fn` — "libp2p (#51)", below |
+  | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | `app`'s subscription to `topic` ends; the node leaves the topic when nothing else takes it |
   | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing: a log line |
 
   A non-broadcast record is `{kind: "event", event, app?, …the emit's
   fields}`: `app` is the kernel's, the `app` of the emitting program's record
   when that record is installed (#114: a genesis program, a dispatch row's,
   or one listed at `<app>/app`); an uninstalled record's event names no app,
-  and a host scoping by app (the libp2p node) ignores it. An emit naming
+  and a host that follows events by app (the libp2p node) ignores it. An emit naming
   `kind` or `app` is refused. It is handed over once; a host that needs it
-  after a restart reads it from the log (the kernel keeps nothing else).
+  after a restart reads it from the log (the kernel writes nothing else).
+  The kernel checks `subscribe` / `unsubscribe` as they are emitted — the
+  emit fails with its reason, and nothing is listed: the emitting program is
+  an installed app's; `topic` is text with no space or NUL and not a
+  `/<protocol>`; a subscribe's `program` is a role in the app's record at
+  `<app>/app` and its `fn` is not empty (`filter`, if any, a door filter the
+  kernel has); an unsubscribe names a subscription the app has (an app
+  unsubscribes only its own).
 - **Errors** (the call's; the step may catch them): `emit: want {to:
   <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}, {event:
   "broadcast", tx: <cid>, beef?: bytes} or {event: <name>, …fields}` ·
   ``emit: event <name>: a name is not empty and has no space or NUL`` ·
-  ``emit: an event's `kind` and `app` are the kernel's to set`` · `emit: the
+  ``emit: an event's `kind` and `app` are the kernel's to set`` · `emit:
+  subscribe names its program: …` | `emit: subscribe: "<role>" is not a
+  program of app <app> …` | `emit: subscribe names the function delivered to
+  …` | `emit: <subscribe|unsubscribe>: topic "<t>" is not a topic …` | `emit:
+  unsubscribe: app <app> has no subscription to <t> …` | `emit: <…>: the
+  emitting program is not installed …` · `emit: the
   message is not dag-cbor` · ``emit: `to` is not an identity key (33
   bytes): emit to a key, not a handle (resolve the handle first)`` · `emit:
   the box is empty or starts with ':' (reserved)` · `emit: the body is not
@@ -1185,53 +1197,57 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
 ```
 
 - **Routing.** The kernel matches the dispatch table's `libp2p` rows (#115,
-  dispatch.zig `forLibp2p`) and hands the front door the row: a topic as an
-  http path is matched (#119) — rows whose address is the topic first, then
-  rows with `prefix: true`, the longest address the topic starts with
-  first; a `/<protocol>` exactly; within each, the first in table order
+  dispatch.zig `forLibp2p`) and hands the front door the row: the first row
+  in table order whose address is the topic or `/<protocol>` exactly and
   whose sender takes the peer's key (from `from`). `{transport: "libp2p",
-  address: <topic>, prefix?: true, sender: "*", program, fn}` for a topic
-  (one owner-approved `tm_` prefix row takes every `tm_<txid>` token
-  topic), `address: "/<protocol>"` for a stream protocol (no prefix) (from `etc/dispatch.json`, or the
+  address: <topic>, sender: "*", program, fn}` for a topic, `address:
+  "/<protocol>"` for a stream protocol (from `etc/dispatch.json`, or the
   older `etc/routes.json`'s `libp2p:` paths; a protocol's handler named in
   `etc/config.json` `libp2p.protocols` becomes its row; or installed by an
-  app, #72). No row: `ignore`. The handler gets `match`, the row that
-  matched, as an HTTP row's handler does.
-- **What the node subscribes** (#72, #77). The instance's node takes the
-  genesis's `libp2p` (topics, protocols, listen) plus the topics and
+  app, #72: a manifest's pre-configured topic, OpNS style). A topic no row
+  is at is matched by a **subscription** (below). Neither: `ignore`. The
+  handler gets `match`, the row that matched, as an HTTP row's handler does.
+- **Subscriptions** (#119). An app takes a topic at run time by emitting
+  `subscribe {topic, program, fn, filter?}` (an event: "Outbound: emit",
+  above), and gives it up with `unsubscribe {topic}`; nothing is declared in
+  its manifest. A subscription is the delivery record: the kernel delivers a
+  message on that exact topic to the app's `program` (a role in its record
+  at `<app>/app`, resolved when the message comes) at `fn` — the front door
+  is handed `{transport: "libp2p", address: <topic>, sender: "*", program:
+  <the role's record>, fn, app, filter?}` as `match`, and the door, its
+  filter and the handler's call run exactly as for a row. No row is needed
+  or consulted for it. A subscription is the app's own, keyed by (app,
+  topic): an app's subscribe replaces its own; another app's subscribe of the
+  same topic is that app's and does not take the topic — the first standing
+  subscription delivers; an unsubscribe ends only the emitting app's. **A
+  topic with both a row and a subscription: the row wins** (a row at the
+  topic, whatever its sender rule, and the subscription delivers nothing).
+  The subscriptions are derived, never written: the fold, in log order, of
+  every `subscribe` / `unsubscribe` record the steps' updates list in
+  `emitted` — by the processed entry's `n`, the step's `at`, the thread's
+  `at`, the thread's CID, the step's place in its thread, the event's place
+  in `emitted` (kernel-zig/src/subscriptions.zig `fold`). The kernel keeps
+  the fold in memory and folds again after a step that subscribed or
+  unsubscribed; replay folds the same. A subscription whose app's record no
+  longer names the role (an uninstall) delivers nothing.
+- **What the node subscribes** (#72, #77, #119). The instance's node takes
+  the genesis's `libp2p` (topics, protocols, listen), the topics and
   protocols named by the `libp2p` rows added since the genesis — an app's
   install (src/host/p2p.ts `libp2pConfig`); a genesis row alone subscribes
-  nothing: a tree says what its node takes in `config.libp2p`. After the kernel has processed what the host handed it,
-  the host reads the table (the kernel's `dispatch` frame); when its chain's
-  tip moved, it declares the config again: new topics subscribed and
-  protocols handled, removed ones unsubscribed and unhandled, on the
+  nothing: a tree says what its node takes in `config.libp2p` — and every
+  topic a subscription takes. After the kernel has processed what the host
+  handed it, the host reads the table (the kernel's `dispatch` frame); when
+  its chain's tip moved, it declares the config again: new topics subscribed
+  and protocols handled, removed ones unsubscribed and unhandled, on the
   running node — started if the instance had none, stopped when nothing is
-  left. No restart. A `prefix` row's address is not a topic: it is
-  subscribed to nothing by itself.
-- **Topics an app asks for** (#119). An app's installed program emits
-  `subscribe {topic}` / `unsubscribe {topic}` (an event: "Outbound: emit",
-  above); the kernel records `{kind: "event", event, app, topic}` on the
-  step's update and hands it to the host after the commit. The node keeps
-  an asked set per app (a subscribe adds, an unsubscribe removes) and
-  subscribes the asked topics that are **the app's own**: a topic is app
-  X's when the most specific libp2p rows taking it — the rows whose address
-  is the topic, else the `prefix` rows with the longest address the topic
-  starts with (forLibp2p's order, the sender aside) — include one whose
-  program record's `app` is X. So an app with a `tm_` prefix row may
-  subscribe any `tm_<txid>`, and another app's exact row for one topic
-  makes that topic the other app's. Any other subscribe is refused with a
-  log line, and nothing is subscribed; an event with no `app` (an
-  uninstalled program record's) is ignored; a `/<protocol>` is not
-  subscribed by event. The scope is applied against the rows as they stand
-  — at the event, and whenever the table changes — so an uninstall takes
-  the app's asked topics with its rows. A topic subscribed this way is
-  validated and routed like any other (the kernel's row, the front door).
-  **After a restart the host recovers by reading** (David, 2026-10-05):
-  at hydrate, beside reading the dispatch table, it folds the instance's
-  log — every `subscribe` / `unsubscribe` record the steps' updates list in
-  `emitted`, in log order (src/host/p2p.ts `askedTopics`, router.ts
-  `foldAsked`) — into the asked sets. The app does not emit again and the
-  kernel keeps nothing extra; another host may keep them otherwise.
+  left. No restart. A `subscribe` / `unsubscribe` event handed over after
+  its step's commit changes the subscriptions the host follows and declares
+  the config again the same way; the host does not route: an inbound message
+  goes to the kernel, which finds the row or the subscription. **After a
+  restart the host recovers by reading** (David, 2026-10-05): at hydrate,
+  beside reading the dispatch table, it folds the log the kernel's way
+  (src/host/p2p.ts `subscriptionsOf`). The app does not emit again and the
+  kernel writes nothing for it; another host may keep them otherwise.
 - **Verify at the door** (#121). For a topic message the front door's fn
   `verify` checks, from the request alone and before its entry is written,
   that `from` is a secp256k1 peer ID (identity multihash of

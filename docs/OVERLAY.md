@@ -48,24 +48,29 @@ overlay apps on one instance.
 
 ## How an overlay app activates a token topic live (#119)
 
-A topic per token (`tm_<txid>`) is not known at install, so it cannot be a
-row of its own. The app's manifest declares one libp2p **prefix row** —
-`{transport: "libp2p", address: "tm_", prefix: true, sender: "*",
-program: <role>, fn}` — which the owner approves at the install like any
-row. That row subscribes nothing by itself; it makes every `tm_…` topic the
-app's to route (the kernel's `forLibp2p`: an exact row first, then the
-longest prefix) and the app's to ask for.
+A topic per token (`tm_<txid>`) is not known at install, so nothing about
+it is in the manifest: no row, no declaration. The overlay app (Mandala, an
+AMM) has calls for its users to **register** and **deregister** a topic.
 
-When the app learns of a token, its installed program emits
-`{event: "subscribe", topic: "tm_<txid>"}` (and `unsubscribe` when it is
-done with it). The kernel records the event on the step's update with the
-app's name; after the commit the host's libp2p node subscribes the topic
-for that app — only if the app's rows take it (another app's exact row for
-that topic, or its longer prefix, makes it the other app's: refused, a log
-line). A message gossiped on the topic is then validated and routed to the
-app's row like any topic message. After a host restart the node reads the
-subscriptions back from the log at hydrate; the app does nothing.
-docs/MESSAGES.md "libp2p (#51)", "Topics an app asks for".
+- **Register** emits a subscription: `{event: "subscribe", topic:
+  "tm_<txid>", program: <the engine's role>, fn: "submit"}` — and one each
+  for `tm_<txid>-admit` (fn `peerAdmit`) and `tm_<txid>-proof` (fn
+  `peerProof`); `filter: "beef"` where the handler takes BEEF, as the
+  derived rows carry it. The kernel checks it (the program is the app's, the
+  fn named, the topic not a `/<protocol>`) and records it on the step's
+  update with the app's name.
+- **Deregister** emits `{event: "unsubscribe", topic}` for each; the app
+  ends only its own subscriptions.
+
+After the commit the host's libp2p node subscribes the topic. A message
+gossiped on it is handed to the kernel, which delivers it by the
+subscription — that app's program at that fn, through the door as a row's
+handler would run — with no dispatch row involved. If a row is at the same
+topic (a manifest's pre-configured topic), the row wins. Another app's
+subscription to the same topic is its own and does not take the topic from
+the first. After a host restart the node and the kernel read the
+subscriptions back from the log; the app does nothing.
+docs/MESSAGES.md "libp2p (#51)", "Subscriptions".
 
 ## Installing an overlay
 
