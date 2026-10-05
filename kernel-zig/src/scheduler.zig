@@ -129,8 +129,9 @@ pub const Witness = struct {
 /// `local` (a provider on the host: `address` its name) or `libp2p` (a peer
 /// ID, or `topic:<name>`) — `message` the signed mail record's dag-cbor (its
 /// CID is the message's id), `body` its body's — or (#65) an event, transport
-/// `event`, `address` its kind (`broadcast`): `message` the event record's
-/// dag-cbor, `body` the transaction's bytes.
+/// `event`, `address` its name (`broadcast`, or any other, #119): `message`
+/// the event record's dag-cbor, `body` a broadcast's transaction bytes (empty
+/// for any other event).
 pub const Outgoing = struct { message: []const u8, body: []const u8, transport: []const u8, address: []const u8 };
 
 /// The peers the runtime calls out to (all optional; replay has none but the witness).
@@ -295,6 +296,9 @@ pub const Runtime = struct {
                 if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m);
                 continue;
             }
+            // #119: any other event is handed over once, after its step's commit; a host that
+            // needs it again (a restart) reads it from the log.
+            if (isEvent(m)) continue;
             if (!cidIn(tip.get("awaits"), c)) continue;
             try rt.handOver(a, c, null);
         }
@@ -307,17 +311,23 @@ pub const Runtime = struct {
         return Value.cidOf(m.get("tx")) != null and m.get("recipient") == null;
     }
 
-    /// Queue an event for the host (#65): transport "event", address its kind;
-    /// `message` the record's dag-cbor, `body` the transaction's bytes.
+    /// Any other event (#119): {kind: "event", event: <name>, app?, …the emit's fields} (log.zig eventRecord).
+    const isEvent = logm.isEvent;
+
+    /// Queue an event for the host (#65, #119): transport "event", address its
+    /// name (`broadcast`, or the record's `event`); `message` the record's
+    /// dag-cbor, `body` a broadcast's transaction bytes (empty for any other).
     fn handOverEvent(rt: *Runtime, a: std.mem.Allocator, c: []const u8, m: Value) !void {
         if (rt.peers.emit == null) return;
         const bytes = (try rt.store.bytes(a, c)) orelse return;
-        const tx = (try rt.store.bytes(a, Value.cidOf(m.get("tx")).?)) orelse return;
+        const broadcast = isBroadcast(m);
+        const tx: []const u8 = if (broadcast) (try rt.store.bytes(a, Value.cidOf(m.get("tx")).?)) orelse return else "";
+        const name = if (broadcast) "broadcast" else Value.str(m.get("event")) orelse return;
         try rt.outbox.append(.{
             .message = try rt.gpa.dupe(u8, bytes),
             .body = try rt.gpa.dupe(u8, tx),
             .transport = try rt.gpa.dupe(u8, "event"),
-            .address = try rt.gpa.dupe(u8, "broadcast"),
+            .address = try rt.gpa.dupe(u8, name),
         });
     }
 
@@ -628,8 +638,8 @@ pub const Runtime = struct {
         for (emitted) |mc| {
             if (rt.stopped) return;
             const m = rt.store.getOpt(a, mc) orelse continue;
-            if (isBroadcast(m)) {
-                // #65: an event, addressed to no one: the host's wiring carries it.
+            if (isBroadcast(m) or isEvent(m)) {
+                // #65, #119: an event, addressed to no one: the host's wiring carries it, or ignores it.
                 try rt.handOverEvent(a, mc, m);
                 continue;
             }
@@ -1823,7 +1833,7 @@ pub const Runtime = struct {
     fn hEmit(imp: *program.Imports, msg: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
         const a = st.a;
-        const want = "emit: want {to: <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>} or {event: \"broadcast\", tx: <cid>, beef?: bytes}";
+        const want = "emit: want {to: <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}, {event: \"broadcast\", tx: <cid>, beef?: bytes} or {event: <name>, …fields}";
         const m = cbor.decode(a, msg) catch return imp.failWith("emit: the message is not dag-cbor");
         if (m != .map) return imp.failWith(want);
         if (m.get("event")) |ev| return emitEvent(st, imp, m, ev);
@@ -1844,24 +1854,52 @@ pub const Runtime = struct {
         return emitMessage(st, imp, to, box, blk, subject);
     }
 
-    /// An event out (#65): unauthenticated and self-validating, addressed to
-    /// no one — the host carries it by whatever wiring it has. The one event
-    /// is `broadcast`: {event: "broadcast", tx: <a transaction's CID, held>,
-    /// beef?: bytes (its Atomic BEEF: the ancestry a broadcaster needs)} →
-    /// the record {kind: "broadcast", tx, beef?}, listed on the update with the
-    /// messages (`emitted`) and handed to the host once the step is committed.
-    /// No signature, no signer call: the transaction proves itself.
+    /// An event out (#65, #119): addressed to no one — the host carries it by
+    /// whatever wiring it has for its name, or ignores it. Listed on the
+    /// update with the messages (`emitted`) and handed to the host once the
+    /// step is committed; no signature, no signer call.
+    ///
+    /// `broadcast` (#65): {event: "broadcast", tx: <a transaction's CID, held>,
+    /// beef?: bytes (its Atomic BEEF: the ancestry a broadcaster needs)} → the
+    /// record {kind: "broadcast", tx, beef?} (the transaction proves itself;
+    /// handed over again at a start while the thread awaits it).
+    ///
+    /// Any other name (#119): {event: <name>, …fields} → the record
+    /// {kind: "event", event: <name>, app?: <the emitting app>, …fields}: the
+    /// emit's other fields as they are, and `app` the record's `app` of the
+    /// program emitting (the thread's, or an in-VM callee's) when that record
+    /// is installed (installedAs, #114's rule). An uninstalled record's event
+    /// names no app (a host scoping by app ignores it). `kind` and `app` are
+    /// the kernel's to set. Handed over once; nothing is kept for it but the record.
     fn emitEvent(st: *StepState, imp: *program.Imports, m: Value, ev: Value) program.Err![]const u8 {
         const a = st.a;
-        const name = Value.str(ev) orelse return imp.failWith("emit: `event` is a name (the one event is \"broadcast\")");
-        if (!std.mem.eql(u8, name, "broadcast")) return imp.failFmt("emit: no event {s} (the one event is \"broadcast\")", .{try json.quoted(a, name)});
+        const name = Value.str(ev) orelse return imp.failWith("emit: `event` is a name");
+        if (!dispatch.isBox(name)) return imp.failFmt("emit: event {s}: a name is not empty and has no space or NUL", .{try json.quoted(a, name)});
+        if (!std.mem.eql(u8, name, "broadcast")) return emitOther(st, imp, m, name);
         const tx = Value.cidOf(m.get("tx")) orelse return imp.failWith("emit: a broadcast names its transaction: {event: \"broadcast\", tx: <cid>, beef?: bytes}");
         if (cidm.codecOf(tx) != cidm.BITCOIN_TX or !(st.rt.store.has(tx) catch false)) return imp.failFmt("emit: {s} is not a transaction in the store (put it first)", .{fmtCid(a, tx)});
         var rec = cbor.MapBuilder.init(a);
         try rec.put("kind", cbor.string("broadcast"));
         try rec.put("tx", cbor.cidv(tx));
         if (m.get("beef")) |b| if (b != .null) try rec.put("beef", .{ .bytes = Value.bytesOf(b) orelse return imp.failWith("emit: `beef` is bytes (an Atomic BEEF)") });
-        const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
+        return listEvent(st, imp, rec.value());
+    }
+
+    fn emitOther(st: *StepState, imp: *program.Imports, m: Value, name: []const u8) program.Err![]const u8 {
+        const a = st.a;
+        const run_ = &st.progs.items[st.progs.items.len - 1];
+        if (run_.install == null) run_.install = st.rt.installedAs(a, run_.cid, run_.record) catch return imp.failWith("store error");
+        const app: ?[]const u8 = if (run_.install.? == .none) null else Value.str(run_.record.get("app"));
+        const rec = logm.eventRecord(a, m, name, app) catch |err| switch (err) {
+            error.Reserved => return imp.failWith("emit: an event's `kind` and `app` are the kernel's to set"),
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        return listEvent(st, imp, rec);
+    }
+
+    /// Put an event record and list it on the update (once per step).
+    fn listEvent(st: *StepState, imp: *program.Imports, rec: Value) program.Err![]const u8 {
+        const c = st.rt.store.put(st.a, rec) catch return imp.failWith("emit: the event is not IPLD, or a store error");
         for (st.emitted.items) |x| if (std.mem.eql(u8, x, c)) return c;
         try st.emitted.append(c);
         return c;

@@ -22,6 +22,7 @@ test {
     _ = @import("wasm_fuel.zig");
     _ = @import("wasm_fuel_test.zig");
     _ = @import("dispatch.zig");
+    _ = @import("log.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {

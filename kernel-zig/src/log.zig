@@ -72,6 +72,68 @@ const dispatch = @import("dispatch.zig");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
+/// An event a program emits (#119), other than `broadcast`: {event: <name>,
+/// …fields} → the record {kind: "event", event: <name>, app?: <app>, …fields}
+/// — the emit's other fields as they are; `app` the emitting program's app
+/// when its record is installed (the scheduler's installedAs), else none.
+/// `kind` and `app` are the kernel's: an emit naming either is refused.
+pub fn eventRecord(a: std.mem.Allocator, emit: Value, name: []const u8, app: ?[]const u8) error{ Reserved, OutOfMemory }!Value {
+    if (emit.get("kind") != null or emit.get("app") != null) return error.Reserved;
+    var rec = cbor.MapBuilder.init(a);
+    try rec.put("kind", cbor.string("event"));
+    try rec.put("event", cbor.string(name));
+    if (app) |x| try rec.put("app", cbor.string(x));
+    if (emit == .map) for (emit.map) |e| {
+        const k = e.key;
+        if (std.mem.eql(u8, k, "event")) continue;
+        try rec.put(k, e.value);
+    };
+    return rec.value();
+}
+
+/// Whether a record is an emitted event of #119's kind ({kind: "event", event: <name>, …}).
+pub fn isEvent(m: Value) bool {
+    if (m != .map) return false;
+    if (!std.mem.eql(u8, Value.str(m.get("kind")) orelse "", "event")) return false;
+    return Value.str(m.get("event")) != null;
+}
+
+test "eventRecord (#119): the name, the app when installed, the emit's fields; kind and app are the kernel's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var m = cbor.MapBuilder.init(a);
+    try m.put("event", cbor.string("subscribe"));
+    try m.put("topic", cbor.string("tm_ab"));
+    const emit = m.value();
+    const rec = try eventRecord(a, emit, "subscribe", "overlay");
+    try std.testing.expect(isEvent(rec));
+    try std.testing.expectEqualStrings("event", Value.str(rec.get("kind")).?);
+    try std.testing.expectEqualStrings("subscribe", Value.str(rec.get("event")).?);
+    try std.testing.expectEqualStrings("overlay", Value.str(rec.get("app")).?);
+    try std.testing.expectEqualStrings("tm_ab", Value.str(rec.get("topic")).?);
+    // An uninstalled record's event: no app.
+    const bare = try eventRecord(a, emit, "subscribe", null);
+    try std.testing.expect(bare.get("app") == null);
+    // Same emit, same app: the same record (replay puts the same CID).
+    try std.testing.expectEqualSlices(u8, try cbor.cidOfValue(a, rec), try cbor.cidOfValue(a, try eventRecord(a, emit, "subscribe", "overlay")));
+    // A made-up name nobody wires is a record like any other.
+    var n = cbor.MapBuilder.init(a);
+    try n.put("event", cbor.string("made-up"));
+    try std.testing.expect(isEvent(try eventRecord(a, n.value(), "made-up", null)));
+    var f = cbor.MapBuilder.init(a);
+    try f.put("event", cbor.string("subscribe"));
+    try f.put("app", cbor.string("someone-else"));
+    try std.testing.expectError(error.Reserved, eventRecord(a, f.value(), "subscribe", "overlay"));
+    var k = cbor.MapBuilder.init(a);
+    try k.put("event", cbor.string("x"));
+    try k.put("kind", cbor.string("mail"));
+    try std.testing.expectError(error.Reserved, eventRecord(a, k.value(), "x", null));
+    var b = cbor.MapBuilder.init(a);
+    try b.put("kind", cbor.string("broadcast"));
+    try std.testing.expect(!isEvent(b.value()));
+}
+
 pub fn stampOf(v: ?Value) ?syscalls.Stamp {
     const t = v orelse return null;
     if (t != .array or t.array.len != 2) return null;
