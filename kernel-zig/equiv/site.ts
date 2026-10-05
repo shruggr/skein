@@ -267,9 +267,9 @@ try {
   const missing = wanted.filter(([l, n, c]) => !has(l, n, c)).map(([l, n]) => `[${l}, ${n}]`);
   const cps = (pmf.metanet?.counterpartyPermissions?.protocols ?? []).map((p) => p.protocolName);
   check(pm.status === 200 && /json/.test(pm.type) && !pmf.metanet?.handles && missing.length === 0 && g.protocolPermissions?.length === wanted.length
-    && g.basketAccess?.length === 1 && g.basketAccess[0]!.basket === "skein-locators" && (g.spendingAuthorization?.amount ?? 0) > 0
+    && g.basketAccess?.length === 1 && g.basketAccess[0]!.basket === "skein-locators" && g.spendingAuthorization === undefined
     && cps.join(",") === "auth message signature,certificate field encryption",
-    `GET /manifest.json at the host skein's origin is the site's (${pm.type}): ${g.protocolPermissions?.length} protocols${missing.length ? ` (missing ${missing.join(", ")})` : ""}, basket ${g.basketAccess?.map((b) => b.basket).join(",")}, ${g.spendingAuthorization?.amount} sats; counterparty protocols ${cps.join(", ")}`);
+    `GET /manifest.json at the host skein's origin is the site's (${pm.type}): ${g.protocolPermissions?.length} protocols${missing.length ? ` (missing ${missing.join(", ")})` : ""}, basket ${g.basketAccess?.map((b) => b.basket).join(",")}, spending ${g.spendingAuthorization === undefined ? "none (0.5.2)" : "present"}; counterparty protocols ${cps.join(", ")}`);
   const rm = await atOrigin("127.0.0.1", "/manifest.json");
   const rmf = JSON.parse(rm.body) as { metanet?: { trust?: { publicKey?: string }; handles?: { resolve?: string }; groupPermissions?: unknown } };
   check(rm.status === 200 && !!rmf.metanet?.trust?.publicKey && rmf.metanet.handles?.resolve === `${base}/.well-known/metanet-handles/resolve` && !rmf.metanet.groupPermissions,
