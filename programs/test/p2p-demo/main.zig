@@ -3,9 +3,10 @@
 //! kernel-zig/test/p2p/p2p-demo.wasm (committed; src/host/p2p-router.test.ts
 //! and kernel-zig/equiv/libp2p.ts run it).
 //!
-//! Outbound is a thread (#67): each operation is a message to the address
-//! book's `libp2p` provider, and its answer — a signed message replying to
-//! it — the entry that steps the thread again.
+//! Outbound is a thread (#67): each operation is a message to the host's
+//! libp2p service (the address book's entry at `local` `libp2p`; #126: no
+//! roles), and its answer — a signed message replying to it — the entry that
+//! steps the thread again.
 //!
 //! As a step (a box's handler; the message body a dag-cbor record):
 //!   {op: "publish", topic, text}          emit publish {topic, body} → await; the answer
@@ -42,9 +43,14 @@ fn map(a: Allocator, es: []const cbor.Entry) !Value {
     return .{ .map = try a.dupe(cbor.Entry, es) };
 }
 
-/// A message to the libp2p provider in `box`, awaited: its CID.
+/// The host's libp2p service: the address book's entry at `local` `libp2p`.
+fn libp2p(a: Allocator) ![]const u8 {
+    return (try sk.peerAt(a, "local", "libp2p")) orelse sk.report("no libp2p service on this host (local libp2p)");
+}
+
+/// A message to the libp2p service in `box`, awaited: its CID.
 fn ask(a: Allocator, box: []const u8, body: Value) ![]const u8 {
-    const id = try sk.emit(a, try sk.provider(a, "libp2p"), box, body, null);
+    const id = try sk.emit(a, try libp2p(a), box, body, null);
     try sk.awaitRecord(id);
     return id;
 }
@@ -103,7 +109,7 @@ fn run(a: Allocator) !void {
         if (r.body.get("closed") != null) return sk.report("the stream closed with no reply");
         const b = Value.bytesOf(r.body.get("body")) orelse return sk.report("frame: no body");
         // Close it (its answer is not awaited) and finish with the reply.
-        _ = try sk.emit(a, try sk.provider(a, "libp2p"), "close", try map(a, &.{.{ .key = "stream", .value = cbor.int(id) }}), null);
+        _ = try sk.emit(a, try libp2p(a), "close", try map(a, &.{.{ .key = "stream", .value = cbor.int(id) }}), null);
         return out(try std.fmt.allocPrint(a, "reply {s}\n", .{b}));
     }
 

@@ -1,6 +1,7 @@
 // The cron provider (#69): scheduling is a message to a provider. A program
-// that wants to be ticked emits, to the cron provider's key (the address
-// book's entry with role `cron`), box `cron`:
+// that wants to be ticked emits, to the cron provider's key (#126: the
+// address book's entry reached at `local` `cron`, or a key its owner gives
+// it), box `cron`:
 //
 //   {fn: "tick", every: <ms> | at: <ms since the epoch>, box, body?: {…}, name}
 //   {fn: "stop", name}

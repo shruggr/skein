@@ -2,19 +2,20 @@
 //! builds it into programs/test/cron-demo/cron-demo.wasm (committed;
 //! src/host/cron.test.ts and kernel-zig/equiv/serve.ts run it).
 //!
-//! Scheduling is a message to a provider: the program finds the cron
-//! provider in its address book (role `cron`) — on this host (`local`) or a
-//! remote one (`mailbox`): the program does not care — and emits to it. Two
-//! kinds of message start its threads, by subscription:
+//! Scheduling is a message to a provider: the owner's schedule names the cron
+//! service's key (`cron`), else the program takes the one its host serves
+//! (the address book's entry at `local` `cron`; #126: no roles) — on this host
+//! or a remote one (`mailbox`): the program does not care — and emits to it.
+//! Two kinds of message start its threads, by subscription:
 //!
-//!   box `schedule` (its owner's)  {name, every?: ms, at?: ms, box?: "tick", rest?: ms, stop?: true}
+//!   box `schedule` (its owner's)  {name, every?: ms, at?: ms, box?: "tick", rest?: ms, stop?: true, cron?: bytes(33)}
 //!       emits {fn: "tick", every | at, box, body: {rest}, name} — or {fn: "stop", name} — to
 //!       the cron provider, rests on the answer, and finishes with stdout
 //!       "scheduled <name> next <ms>" | "stopped <name> <true|false>" (an error answer: the
 //!       thread errors with it)
 //!   a tick, in its box (from the cron provider)  {kind: "cron", name, due, rest?}
 //!       rests on a deadline `rest` ms (default 200) after the step's stamp — stdout
-//!       "resting <name> due <due>" — and, woken by the waker, finishes with stdout
+//!       "resting <name> due <due>" — and, woken at it, finishes with stdout
 //!       "woke <name> due <due>"
 const std = @import("std");
 const cbor = @import("cbor");
@@ -70,6 +71,7 @@ fn schedule(a: Allocator, in: Value, body: Value) !void {
         if (body.get("rest")) |r| try tb.put("rest", r);
         try q.put("body", tb.value());
     }
-    const id = try sk.emit(a, try sk.provider(a, "cron"), "cron", q.value(), null);
+    const svc = Value.bytesOf(body.get("cron")) orelse (try sk.peerAt(a, "local", "cron")) orelse return sk.report("no cron service: the schedule names none (`cron`) and the host serves none (local cron)");
+    const id = try sk.emit(a, svc, "cron", q.value(), null);
     try sk.awaitRecord(id);
 }

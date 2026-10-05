@@ -156,7 +156,9 @@ fn other(a: Allocator, in: Value, body: Value) !void {
     } else if (eql(u8, kind, "app-demo-stop")) {
         try q.put("fn", cbor.string("stop"));
     } else return sk.report("not a call, a start or a stop");
-    const id = try sk.emit(a, try sk.provider(a, "cron"), "cron", q.value(), null);
+    // #126: no roles — the cron service is the one the host serves (the address book reaches it at `local` `cron`).
+    const svc = (try sk.peerAt(a, "local", "cron")) orelse return sk.report("no cron service on this host (local cron)");
+    const id = try sk.emit(a, svc, "cron", q.value(), null);
     try sk.awaitRecord(id);
 }
 

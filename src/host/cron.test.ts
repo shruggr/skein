@@ -257,9 +257,10 @@ test("cron, remote: the same program, the cron provider reached by mailbox over 
   // The owner, as admin: the cron provider is the remote service now, by mailbox (the host's own taken out).
   const owner = new RawBox(a.owner, a.origin("cronny"));
   await owner.send(id, "peers", { op: "remove", key: Uint8Array.from(Buffer.from(a.router.providers.key("cron"), "hex")) });
-  await owner.send(id, "peers", { op: "add", key: Uint8Array.from(Buffer.from(svc, "hex")), transport: "mailbox", address: b.origin("cronsvc"), role: "cron" });
+  await owner.send(id, "peers", { op: "add", key: Uint8Array.from(Buffer.from(svc, "hex")), transport: "mailbox", address: b.origin("cronsvc") });
   await a.router.settled();
-  await owner.send(id, "schedule", { name: "beat", every: 60_000, rest: 100 });
+  // #126: no roles — the owner's schedule names the service's key.
+  await owner.send(id, "schedule", { name: "beat", every: 60_000, rest: 100, cron: Uint8Array.from(Buffer.from(svc, "hex")) });
   const said = (re: RegExp) => a.lines.some((l) => re.test(l));
   await until("the remote tick's thread woke", () => a.lines.filter((l) => /^\[cronny\] \S+ cron-demo step 2 → finished/.test(l)).length >= 2 || undefined, 60_000);
   assert.ok(said(/^\[cronny\] \S+ cron-demo step 2 → finished/), "the schedule's answer came back (a message from the service's key, replyTo the request)");

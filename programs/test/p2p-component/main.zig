@@ -49,7 +49,7 @@ fn get(a: std.mem.Allocator, id: []const u8) !Value {
     return cbor.decode(a, got.ptr[0..got.len]);
 }
 
-/// The key of the address book's `libp2p` provider (role "libp2p" under the head `peers`).
+/// The key of the host's libp2p service: the address book's entry at `local` `libp2p` (#126: no roles).
 fn provider(a: std.mem.Allocator) ![]const u8 {
     var name: c.program_string_t = .{ .ptr = @constCast("peers".ptr), .len = 5 };
     var root: c.skein_kernel_skein_option_cid_t = undefined;
@@ -59,7 +59,7 @@ fn provider(a: std.mem.Allocator) ![]const u8 {
     const book = try get(a, root.val.ptr[0..root.val.len]);
     for ((book.get("peers") orelse return error.NoProvider).array) |e| {
         const p = try get(a, Value.cidOf(e.get("peer")) orelse continue);
-        if (std.mem.eql(u8, Value.str(p.get("role")) orelse "", "libp2p")) return Value.bytesOf(p.get("key")) orelse error.NoProvider;
+        if (std.mem.eql(u8, Value.str(p.get("transport")) orelse "", "local") and std.mem.eql(u8, Value.str(p.get("address")) orelse "", "libp2p")) return Value.bytesOf(p.get("key")) orelse error.NoProvider;
     }
     return error.NoProvider;
 }

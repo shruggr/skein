@@ -1,11 +1,12 @@
-//! fetch (issue #15, #70): GET a URL and write the body to stdout — a WASI
-//! 0.2 component, a test fixture for a component's `emit`
+//! fetch (issue #15, #70, #126): GET a URL and write the body to stdout — a
+//! WASI 0.2 component, a test fixture for a component's `emit`
 //! (skein:kernel/skein, through wit-bindgen's C bindings). There is no
-//! network import (#67): the request is a message to the address book's
-//! `fetch` provider (the host's HTTP proxy) — {method: "GET", url} in box
-//! "fetch" — and the step ends awaiting it; the provider's answer, a signed
-//! message {replyTo, status, headers, body} (or {replyTo, error}), is the
-//! entry that steps the thread again, and that step writes the body.
+//! network import for plain HTTP (#67): the request is an intention — the
+//! event {event: "fetch", method: "GET", url} — which the step awaits; the
+//! runtime sends it, signed with the instance's key, to its HTTP proxy, whose
+//! signed answer {replyTo, request, status, headers, body} (or {replyTo,
+//! request, error}) is the entry that steps the thread again, and that step
+//! writes the body.
 //!
 //! As a handler step: the URL is the `url` of the step's message body
 //! (dag-cbor {url}, input.args.body). Called again with the answer
@@ -53,21 +54,6 @@ fn get(a: std.mem.Allocator, id: []const u8) !Value {
     return cbor.decode(a, got.ptr[0..got.len]);
 }
 
-/// The key of the address book's `fetch` provider (the entry with role "fetch" under the head `peers`).
-fn fetchProvider(a: std.mem.Allocator) ![]const u8 {
-    var name: c.program_string_t = .{ .ptr = @constCast("peers".ptr), .len = 5 };
-    var root: c.skein_kernel_skein_option_cid_t = undefined;
-    var err: c.program_string_t = undefined;
-    if (!c.skein_kernel_skein_head(&name, &root, &err)) return failed(err);
-    if (!root.is_some) return error.NoFetchProvider;
-    const book = try get(a, root.val.ptr[0..root.val.len]);
-    for ((book.get("peers") orelse return error.NoFetchProvider).array) |e| {
-        const p = try get(a, Value.cidOf(e.get("peer")) orelse continue);
-        if (std.mem.eql(u8, Value.str(p.get("role")) orelse "", "fetch")) return Value.bytesOf(p.get("key")) orelse error.NoFetchProvider;
-    }
-    return error.NoFetchProvider;
-}
-
 fn run(a: std.mem.Allocator) !void {
     var in_bytes: c.program_list_u8_t = undefined;
     c.skein_kernel_skein_input(&in_bytes);
@@ -89,18 +75,15 @@ fn run(a: std.mem.Allocator) !void {
         return;
     };
 
-    // The first step: emit the GET to the fetch provider and await its answer.
+    // The first step: the GET as an intention (the `fetch` event), awaited.
     const args = in.get("args") orelse return error.NoUrl;
     const body = try get(a, Value.cidOf(args.get("body")) orelse return error.NoUrl);
     const url = Value.str(body.get("url")) orelse return error.NoUrl;
     var req = cbor.MapBuilder.init(a);
+    try req.put("event", cbor.string("fetch"));
     try req.put("method", cbor.string("GET"));
     try req.put("url", cbor.string(url));
-    var msg = cbor.MapBuilder.init(a);
-    try msg.put("to", .{ .bytes = try fetchProvider(a) });
-    try msg.put("box", cbor.string("fetch"));
-    try msg.put("body", .{ .bytes = try cbor.encode(a, req.value()) });
-    const bytes = try cbor.encode(a, msg.value());
+    const bytes = try cbor.encode(a, req.value());
     var m: c.program_list_u8_t = .{ .ptr = @constCast(bytes.ptr), .len = bytes.len };
     var id: c.skein_kernel_skein_cid_t = undefined;
     var err: c.program_string_t = undefined;
