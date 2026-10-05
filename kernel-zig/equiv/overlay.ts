@@ -1045,7 +1045,7 @@ check(eq(report.afterReject, [["t1", 0, true]]), `#79: a DOUBLE_SPEND_ATTEMPTED 
 check(eq(report.t2Settled, [[false, false, true]]), `the chain state: the spend rejected, nothing pending (${JSON.stringify(report.t2Settled)})`);
 check(Array.isArray(report.resubmitRejected) && report.resubmitRejected[0] === 200 && report.resubmitRejected[1] === "empty-steak", `a rejected transaction admits nothing on resubmission (200, empty STEAK) (${JSON.stringify(report.resubmitRejected)})`);
 check(Array.isArray(report.badBeef) && report.badBeef[0] === 400 && report.unknownService === 400, `refusals: a bad BEEF, an unknown service (${JSON.stringify([report.badBeef, report.unknownService])})`);
-check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Demo tokens: outputs whose script starts <\"tm_demo\"> OP_DROP." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the program records (${JSON.stringify([report.topics, report.lookups])})`);
+check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Example tokens: outputs starting <\"tm_demo\"> OP_DROP with at least 1 satoshi." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the programs' own metadata (skein-overlay#2) (${JSON.stringify([report.topics, report.lookups])})`);
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
 {
   const [b, a, n, still, local] = (report.readsWrite ?? []) as [number, number, number, boolean, number];
