@@ -56,11 +56,16 @@ So `up.sh` goes:
    `#v0.1.0`). Installing what an instance already has sends only the head
    again. The shell app's first install is the slow step: its modules are
    ~50 MB of messages.
-7. **The onboarding app** (#90) into the host skein, as the owner, from
-   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.1.0`): any wallet
-   with a session then creates a skein of its own with `POST
+7. **The onboarding app** (#90, #113) into the host skein, as the owner, from
+   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.2.0`), with
+   `--config '{"onboard": {"domain": <SKEIN_HANDLE_DOMAIN, default
+   localhost>, "origin": <the router's origin>}}'`: any wallet with a
+   session then creates a skein of its own with `POST
    http://host.localhost:8100/onboard/call {"fn": "onboard.create", "args":
-   {"handle": "…"}}` (docs/ARCH.md, "The host skein").
+   {"handle": "…"}}` (docs/ARCH.md, "The host skein"), and any wallet
+   registers a handle and its mailbox at the router's `POST
+   /account/register`. Then `skein-host import-handles` adopts step 2's
+   mailboxes (the app records and certifies them, so they resolve).
 
 An agent whose genesis names no owner messagebox is logged at every
 hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
@@ -106,16 +111,21 @@ calls the host makes (the explorer's reads) are charged to the **fuel
 ledger** (host.db `fuel_ledger`, by instance, caller and route; `skein-host
 ledger [handle]`).
 
-The host's own endpoints:
+The host's own endpoints. The BRC-169 rows are the host skein's onboarding
+app's (#113): the router maps these paths at its own origin onto the host
+skein's `/onboard/…` routes, each request an entry there; with no host
+skein they are 404 (docs/MESSAGES.md, "Mailbox instances", "BRC-169 is
+discovery").
 
 | | |
 |---|---|
-| `GET /manifest.json` | BRC-169 §5.1: `metanet.trust` (`name`, `note`, `icon` from `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE`, `SKEIN_HOST_ICON` when set; `publicKey`, the certifier key), `metanet.handles` (`version`, `resolve`, `search`) |
-| `GET /.well-known/metanet-handles/resolve?handle=<h>[@<d>]` | BRC-169 §5.2 `{metanetHandles, handle, domain, identityKey, certificate, messagebox, ttl, revoked}`: an agent's own identity and origin; for a mailbox instance, its owner's key and the instance's origin; `certificate` the BRC-52 handle certificate the host issues (revocation not implemented: the host has no wallet); with the holder's signed profile (the instance's head `profile`, #104) also `profile {record, signature, protocolID, keyID}`, `displayName`, `avatarURL` (docs/MESSAGES.md, "BRC-169 is discovery") |
-| `GET /.well-known/metanet-handles/search?q=<text>&limit=<n>` | BRC-169 §5.6 (#104) `{metanetHandles, results: [{handle, identityKey, displayName?, avatarURL?, profile?}], truncated}`: the handles at the request's domain whose handle or profile name contains `q` (any case), at most `limit` (default 20, at most 100) |
-| `GET /bsvalias/id/<handle>@<domain>` | paymail PKI (identity keys by handle) |
-| `POST /account/register {username, identityKey, signature}` | a mailbox instance for that identity at the request's domain: the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username (a host name label), counterparty anyone, over `register <username>` → `{handle, domain, identityKey, messagebox, certificate, keyringForSubject}`, the handle certificate for the wallet's `acquireCertificate` (#103); the same key and name again, the same handle; 409 if the name is taken, reserved (`id`, `host`) or the key has another |
-| `GET /.well-known/skein-host` | at every host name, an instance's origin too: `{origin, domain}` — where the management page finds the manifest and the register route (#103) |
+| `GET /manifest.json` | BRC-169 §5.1: `metanet.trust` (`name`, `note`, `icon` from the app's config when set; `publicKey`, the certifier key), `metanet.handles` (`version`, `resolve`, `search` under the app's configured origin) |
+| `GET /.well-known/metanet-handles/resolve?handle=<h>[@<d>]` | BRC-169 §5.2 `{metanetHandles, handle, domain, identityKey, certificate, messagebox, ttl, revoked}` from the app's record of the handle: a mailbox instance's owner's key and the instance's origin, an onboarded skein's own identity; `certificate` as the certifier signed it (revocation not implemented: the host has no wallet); with the holder's signed profile (#104, kept by the app) also `profile {record, signature, protocolID, keyID}`, `displayName`, `avatarURL` |
+| `GET /.well-known/metanet-handles/search?q=<text>&limit=<n>` | BRC-169 §5.6 (#104) `{metanetHandles, results: [{handle, identityKey, displayName?, avatarURL?, profile?}], truncated}`: the app's handles whose handle or profile name contains `q` (any case), at most `limit` (default 20, at most 100) |
+| `GET /bsvalias/id/<handle>[@<domain>]` | paymail PKI (identity keys by handle, from the app's records) |
+| `POST /account/register {username, identityKey, signature}` | a mailbox instance for that identity at the handle domain (the app's `config.onboard.domain`): the signature by its own wallet, protocol `[2, "skein register"]`, key ID the username (a host name label), counterparty anyone, over `register <username>@<domain>` → `{handle, domain, identityKey, messagebox, certificate, keyringForSubject}`, the handle certificate for the wallet's `acquireCertificate` (#103); the same key and name again, a new certificate (a new serial) for the same mailbox; 409 if the name is taken, reserved (`id`, `host`) or the key has another |
+| `POST /account/profile {handle, record, signature}` | the handle holder's signed profile (#104), kept by the app and served with resolve and search |
+| `GET /.well-known/skein-host` | at every host name, an instance's origin too: `{origin, domain}` — the router's origin and the handle domain, where the management page finds the manifest and the register route (#103) |
 | `POST /arc/callback` | Arcade's webhook (`Authorization: Bearer <SKEIN_ARC_TOKEN>`) |
 
 The instances' outbound HTTP (a messagebox delivery thread, a resolve) is a
@@ -165,7 +175,10 @@ instance of its own with only the front door and the messagebox, keeping
 every message sent to it (docs/BOOTSTRAP.md). `skein-host add <handle>
 --mailbox --owner <key>` makes one; so does a signed registration
 (`POST /account/register`: the front end's Register, for a key this machine does not
-know). `up.sh` makes `david`'s and `infer`'s with `add`. `skein-host mailboxes` lists them (whose, the key their front door signs
+know; #113: the host skein's onboarding app takes it and asks the instance
+manager, whose `create` with image `mailbox` is the one creation path —
+`add --mailbox` calls it too). `up.sh` makes `david`'s and `infer`'s with `add`, then
+adopts them into the app (`skein-host import-handles`). `skein-host mailboxes` lists them (whose, the key their front door signs
 sessions with, and where); `skein-host list` prints that key for every row
 (its fifth column), which is what `grants.sh` grants toward. The
 owner's is where every instance delivers what it sends him: a new genesis

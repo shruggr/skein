@@ -69,17 +69,19 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   secret every instance key derives from), `host.db` (instances, queues, the
   fuel ledger), `instances/<handle>/runtime.db` (each instance's store),
   `logs/host.log`.
-- The host answers BRC-169 for its instances on its own origin
-  (`SKEIN_ROUTER_ORIGIN`): `/manifest.json` names its certifier key (a child
-  of `master.key`) as `metanet.trust.publicKey`, and
-  `/.well-known/metanet-handles/resolve` answers a handle's identity key and
-  messagebox with the BRC-52 handle certificate the host issues. Revocation
-  is not implemented (the host has no wallet): the certificate's revocation
-  outpoint is BRC-52's disabled sentinel. `SKEIN_HOST_NAME`,
-  `SKEIN_HOST_NOTE` and `SKEIN_HOST_ICON` (each optional) give the
-  manifest's `metanet.trust` the host's name, a line about it and its
-  icon's URL; `/.well-known/metanet-handles/search?q=&limit=` (advertised
-  as `metanet.handles.search`) finds handles by name (#104).
+- BRC-169 on the host's own origin (`SKEIN_ROUTER_ORIGIN`) is the host
+  skein's onboarding app (shruggr/skein-onboard, #113): the router carries
+  `/manifest.json`, `/.well-known/metanet-handles/resolve` and `/search`,
+  `/bsvalias/id/…`, `POST /account/register` and `POST /account/profile`
+  into the host skein. The app registers handles (a mailbox instance from
+  the instance manager, signed over `register <name>@<domain>`), has the
+  host's certifier (a child of `master.key`, never in an instance) sign each
+  handle certificate under a serial of its own, records every issue, and
+  answers resolve, search and the manifest from those records. The handle
+  domain, the host's name, note and icon are the app's config
+  (`skein-host install … --config '{"onboard": {"domain": "…"}}'`).
+  Revocation is not implemented (the host has no wallet): the certificate's
+  revocation outpoint is BRC-52's disabled sentinel.
 - Code genesis (no `--image`) is written at its first start: the owner, the
   owner's admin rows, the boundary programs (front door, messagebox,
   resolve) and their rows, and the host's providers in its address book.
@@ -180,8 +182,9 @@ bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs
   (`application/cbor`, BRC-231) or JSON. A message's id is the CID of its
   record; an answer names it in `replyTo`.
 - What an instance sends you goes to your mailbox instance (an instance with
-  only the front door and the messagebox: `skein-host add <h> --mailbox
-  --owner <key>`).
+  only the front door and the messagebox): a registration makes one (#113),
+  or `skein-host add <h> --mailbox --owner <key>` on a host with no host
+  skein.
 - libp2p: an instance with libp2p rows gets a node in the host; topic
   messages and stream frames go through the same front door.
 - App routes live under `/<app>/` (an overlay's `/<app>/submit`,

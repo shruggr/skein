@@ -273,14 +273,20 @@ sends the messages, signed by the wallet on a BRC-104 session.
   (`@bsv/message-box-client`), and Sync — `@1sat/actions`' `syncMetanetInbox`
   (always `metanet_inbox`) with the wallet in the browser, against a mailbox
   URL you give it — by default the one your handle resolves to.
-- **Handles** (#103, skein-site 0.3.0): "Register a handle" on the host's
-  router (`/account/register`, signed by your wallet); the handle
-  certificate kept in your wallet (`acquireCertificate`, direct); "Your
-  handles" from `listCertificates`.
+- **Handles** (#103, skein-site 0.3.0): "Register a handle" on the host
+  (`/account/register`, signed by your wallet); the handle certificate kept
+  in your wallet (`acquireCertificate`, direct); "Your handles" from
+  `listCertificates`. #113: the host skein's onboarding app takes it now, and
+  the signature covers the domain (`register <name>@<domain>`, the domain
+  from `/.well-known/skein-host`): skein-site 0.5.2 signs `register <name>`
+  and is refused until it follows docs/MESSAGES.md "Mailbox instances".
 - **Profiles** (#104, skein-site 0.4.0): each handle's Profile form (a name,
   an avatar outpoint) signed by your wallet and written to your mailbox
   instance (`objects`, `head profile`); handles shown with their avatar or
-  an identicon; "Find a handle" over the host's search endpoint.
+  an identicon; "Find a handle" over the host's search endpoint. #113: the
+  host serves the profile the onboarding app keeps, posted to
+  `/account/profile` (docs/MESSAGES.md "Mailbox instances"); the mailbox
+  instance's head is read no more, so the form has to post there.
 - **One grouped permission request** (#97, skein-site 0.5.0): the site's
   `manifest.json`, served at `/manifest.json` of the skein's own origin, asks
   a BRC-100 wallet once for the page's protocols, its basket and a spending

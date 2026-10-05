@@ -22,7 +22,7 @@ gets the **default system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
 `STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
 hydration of an empty store calls `boot` with this source. A **mailbox
-instance** (#40, `skein-host add <h> --mailbox --owner <key>`) is code genesis
+instance** (#40; #113: the instance manager's `create` with image `mailbox`, which a registration asks for and `skein-host add <h> --mailbox --owner <key>` calls) is code genesis
 too, with only the kernel's `frontdoor` and `messagebox` programs,
 `MAILBOX_DISPATCH` (`:ack` → messagebox, every message from anyone in any
 box (`*`) → messagebox), the default http rows and reads, and no peers or

@@ -46,9 +46,14 @@
 #      agent gets the shell app and the chat app (`skein-host install`, as the
 #      owner, at the tags SKEIN_SHELL_APP / SKEIN_CHAT_APP name). Installing
 #      what an instance has sends only the head again.
-#   7. the onboarding app (#90) into the host skein (SKEIN_ONBOARD_APP, default
-#      shruggr/skein-onboard#v0.1.0): POST /@host/onboard/call creates a
-#      skein for any wallet with a session, through the instance manager.
+#   7. the onboarding app (#90, #113) into the host skein (SKEIN_ONBOARD_APP,
+#      default shruggr/skein-onboard#v0.2.0), its config the handle domain
+#      (SKEIN_HANDLE_DOMAIN, default localhost) and the router's origin:
+#      POST /@host/onboard/call creates a skein for any wallet with a session,
+#      through the instance manager; POST /account/register (signed over
+#      `register <name>@<domain>`) a mailbox; it answers BRC-169. Then
+#      `skein-host import-handles`: the mailboxes of step 2, which the app
+#      did not make, recorded and certified so they resolve.
 #
 # Nothing is registered, and nothing registers itself: the mailbox rows of
 # step 2 are what a registration (register.ts, POST /account/register) would
@@ -146,7 +151,9 @@ echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer know
 
 # 7. The onboarding app (#90) into the host skein.
 if [ -n "$hostskein" ]; then
-  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.1.0}"
-  host install "$onboard" --instance "$hostskein" --approve-all > /dev/null || echo "install $onboard into $hostskein failed (above)" >&2
-  echo "the host skein: @$hostskein, the onboarding app at $(origin "$hostskein")/onboard/call"
+  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.2.0}"
+  config="{\"onboard\": {\"domain\": \"${SKEIN_HANDLE_DOMAIN:-localhost}\", \"origin\": \"${SKEIN_ROUTER_ORIGIN:-http://127.0.0.1:$port}\"}}"
+  host install "$onboard" --instance "$hostskein" --config "$config" --approve-all > /dev/null || echo "install $onboard into $hostskein failed (above)" >&2
+  host import-handles > /dev/null || echo "import-handles failed (above)" >&2
+  echo "the host skein: @$hostskein, the onboarding app at $(origin "$hostskein")/onboard/call; handles @${SKEIN_HANDLE_DOMAIN:-localhost}"
 fi

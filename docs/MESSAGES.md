@@ -403,25 +403,78 @@ message from anyone in any box (`*`) to the messagebox, for its owner. Its
 sessions are records like any instance's (#68). It has an identity of its own (its oracle's key;
 the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
-- `skein-host add <handle> --mailbox --owner <key>` makes one; `skein-host
-  mailboxes` lists them.
-- `POST /account/register {username, identityKey, signature}` on the host
-  makes one for the caller: `signature` (hex) under `[2, "skein register"]`,
-  key ID the username, counterparty anyone, over `register <username>` —
-  proof that the key's holder asked. The username is a host name label;
-  its domain is the request's host name (127.0.0.1 is `localhost`). The
-  answer (#103): `{handle, domain, identityKey, messagebox: <its origin>,
-  certificate, keyringForSubject}` — the handle certificate for the key's
-  wallet to keep (below, "BRC-169 is discovery"). The same key and name
-  again: the same handle, the certificate issued again. 409: the name is
-  another key's or an instance's, it is `id` or `host`, or the key already
-  has another handle here.
-- `GET /.well-known/skein-host` is answered by the router at every host
-  name, an instance's origin too: `{origin, domain}`, the router's origin
-  and the domain it registers in. It is how a page an instance serves (the
-  management site) finds the host's manifest and its register route.
-- The host's resolve endpoint answers a mailbox instance's handle with its
-  owner's key and the instance's origin.
+Every mailbox instance is made by the instance manager's `create` with image
+`mailbox` (#113, `Router.createInstance`; "The providers", below): the row
+`kind: mailbox`, its owner and domain, the store booted with the owner in its
+genesis (no claim), published at once. The same owner and handle again
+answers for the row that is there; a key with another mailbox here is
+refused. Two callers:
+
+- **A registration** (#103, #113), the user's path. The host's own origin
+  carries it into the host skein, where the onboarding app
+  (shruggr/skein-onboard ≥ 0.2.0) takes it. The contract, exactly:
+
+  1. `GET <host>/.well-known/skein-host` → `{origin, domain}`: the router's
+     origin and the **handle domain** — the onboarding app's
+     `config.onboard.domain`, the one setting every handle on the host is at
+     (`skein.nexus` in production: `handle@skein.nexus`). Answered at every
+     host name, an instance's origin too, so a page an instance serves finds
+     it on its own origin.
+  2. The wallet signs the UTF-8 text `register <username>@<domain>` (the
+     domain from step 1, lower case) with `createSignature({protocolID: [2,
+     "skein register"], keyID: <username>, counterparty: "anyone", data})`.
+     The domain is in the text, so a signature for one host is not good at
+     another.
+  3. `POST <origin>/account/register`, body JSON `{username, identityKey,
+     signature}`: `username` a host name label (a-z, 0-9, `-`, 1 to 63, not
+     starting or ending with `-`), `identityKey` the key (hex, 33 bytes),
+     `signature` hex DER. The router appends it to the host skein as a
+     request entry (route `/onboard/register`); nothing in the router
+     checks it.
+  4. The answer, when the app's thread has asked the instance manager for
+     the mailbox and the certifier for the certificate and recorded both:
+     `200 {handle, domain, identityKey, messagebox: <the mailbox's origin>,
+     certificate, keyringForSubject}` — the handle certificate for the key's
+     wallet to keep (`acquireCertificate`, `acquisitionProtocol: "direct"`,
+     `keyringRevealer: "certifier"`; "BRC-169 is discovery", below).
+     Refusals are `{error}`: 400 not JSON, not the three fields, not a
+     label; 401 the signature does not verify for that key over that text;
+     409 the name is reserved (`id`, `host`), is another key's (a handle
+     here or an instance's), or the key holds another handle here (one key,
+     one handle); 500 the thread failed.
+
+  **The same key and name again** registers nothing new: the mailbox stands,
+  and a new certificate is issued under a **new serial number** (each issue
+  has its own: the hash of its issuance record), so a wallet that removed the
+  earlier one (`relinquishCertificate`, which the toolbox keeps as a deleted
+  row unique on type, certifier and serial) can acquire it again. The earlier
+  certificate stays in the host skein's records, the trail revocation will
+  use.
+
+  **The profile** (#104) goes to the same app: `POST <origin>/account/profile`,
+  body JSON `{handle, record: <base64 of the DAG-CBOR profile bytes>,
+  signature: <hex DER>}` — the record `{domain, name?, avatar?}`
+  (`@1sat/utils` `encodeProfile`), its `domain` the handle domain, signed by
+  the handle's key with `createSignature({protocolID: [1, "metanet handles
+  profile"], keyID: "1", counterparty: "anyone", data: <the bytes>})` →
+  `200 {handle, profile, displayName?, avatarURL?}`; 401 another key's
+  signature, 400 another domain or shape, 404 no such handle. The app keeps
+  it (`onboard/profiles/<handle>`); resolve and search serve it. (Before
+  #113 the page wrote it to the mailbox instance's head `profile`; the host
+  reads that no more.)
+- **The operator**, out of band: `skein-host add <handle> --mailbox --owner
+  <key> [--domain d]` calls the same `createInstance` through a router of
+  its own — for a host with no host skein (a dev host, `up.sh`'s `david` and
+  `infer`). Such a mailbox has no record in the onboarding app, so it is not
+  certified and does not resolve until it is adopted: `skein-host
+  import-handles` sends `{fn: "onboard.adopt", args: {handle, owner}}` to
+  `/onboard/call` as the host skein's owner for each mailbox row the app has
+  no record of (registrations made before #113 too); the app records and
+  certifies it at its domain as a registration would. `skein-host mailboxes`
+  lists them.
+
+The host's resolve endpoint answers a mailbox instance's handle with its
+owner's key and the instance's origin.
 
 ## Outbound: emit, the address book and the providers
 
@@ -569,9 +622,10 @@ BRC-169 envelope's sender — only if it resolves to the sender, source
 ### The providers
 
 A provider is a recipient with an identity of its own that carries a
-message out and answers. The reference host runs six
-(`src/host/providers.ts`): `fetch`, `waker`, `cron`, `libp2p`, `status` and
-`manager` (the instance manager, #90: the host skein's only); their
+message out and answers. The reference host runs seven
+(`src/host/providers.ts`): `fetch`, `waker`, `cron`, `libp2p`, `status`,
+`manager` (the instance manager, #90) and `certifier` (#113) — the last two
+the host skein's only; their
 keys are the host's business (children of its master secret), the instance
 knows them from its address book. Every answer is a signed message from
 the provider to the instance — the same record an `emit` makes, signed the
@@ -591,9 +645,10 @@ message routes by `replyTo` to the thread awaiting it.
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
 | `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `status` (#65, below) |
-| `manager` | `create` | `{handle, owner: bytes(33), image?}` | `{handle, identity: bytes(33), url}`: a new instance from the image (only `default`), claimed for `owner` before its hostname is published, then started (#90, below) |
+| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, claimed for `owner` before its hostname is published, then started (#90, below); image `mailbox` (#113) — a mailbox instance for `owner`, published at once, the same owner and handle again the same answer ("Mailbox instances", above). `domain`: the handle's domain, recorded with the row (default `localhost`) |
 | | `start` | `{handle}` | `{handle, started: true, url}`: published and started |
 | | `stop` | `{handle}` | `{handle, stopped: true}`: unpublished and stopped |
+| `certifier` | `issue` | `{handle, domain, subject: bytes(33), serialNumber, issuance?}` | `{certificate, holder: {certificate, keyringForSubject}, serialNumber, issuance?}`: the handle certificate for handle@domain → subject under that serial, signed by the certifier key — the resolver's copy and the holder's (#113; "BRC-169 is discovery", below). Records nothing |
 
 The overlay's gossip (#74, docs/OVERLAY.md "Gossip") is `publish`
 messages, not awaited (the answer is recorded and runs nothing): on
@@ -606,11 +661,15 @@ bytes}` (txid and block hash hex, display order).
 awaits it; the reply's body is the answer. A broadcast is not a message to
 anyone (#65, below); the chain app (#78) is the one program that emits it (#79: the wallet and the overlay apps send the chain app an `ingest` instead).
 
-**The instance manager** (#90) is in the host skein's address book alone
-(`skein-host init` writes that genesis; no other instance's book names it),
-and it acts only on a message from the host skein's identity, sent from
-the host skein: any other is not acted on and not answered (a line in the
-host's log). A refusal is an answer: `{error}` for a handle that is not a
+**The instance manager** (#90) and **the certifier** (#113) are in the host
+skein's address book alone (`skein-host init` writes that genesis; no
+other instance's book names them), and they act only on a message from the
+host skein's identity, sent from the host skein: any other is not acted on
+and not answered (a line in the host's log). A host skein made before #113
+has no `certifier` entry: `skein-host peers host add <certifier key>
+certifier --transport local --role certifier` adds it (the key: what the
+host's manifest published as `metanet.trust.publicKey` before #113 — the
+master secret's child under `[2, "skein provider"]`, key ID `certifier`). A refusal is an answer: `{error}` for a handle that is not a
 hostname label or is taken, an owner that is not a key, another image, a
 refused claim; `start`/`stop` of the host skein itself. It also speaks
 first: the claim (#89), a message in box `claim`, body `{owner,
@@ -882,89 +941,131 @@ and its answer the next step, and keeps `{kind: "resolution", transport:
 is neither checked nor kept: the program reads `identityKey` and
 `messagebox`.
 
-A wallet finds its own handles in itself (§4.6, §5.8 path 1; #103). A
-registration's answer carries the handle certificate for its subject to
-keep: the same binding (type, serial number, certifier) issued with the
-SDK's `MasterCertificate.issueCertificateForSubject` — BRC-52 field
-encryption, and `keyringForSubject`, the field keys encrypted for the
-subject — because a BRC-100 wallet's `acquireCertificate` with
-`acquisitionProtocol: "direct"` takes only that (wallet-toolbox rebuilds a
-`MasterCertificate`, which wants a keyring entry per field, and decrypts the
-fields with it). The management page passes it with `keyringRevealer:
-"certifier"`; later `listCertificates({certifiers: [<the manifest's
-certifier>], types: [<the handle type>]})` returns it, its `keyring`
-decrypts `handle` and `domain` (`MasterCertificate.decryptFields`, the
-certifier as counterparty), and a resolve gives the messagebox. The field
-ciphertexts differ on every issue; the resolve answer's certificate stays
-plaintext, so any resolver can check §4.1's rule 3.
+**The host's BRC-169 server is the host skein's onboarding app** (#113,
+shruggr/skein-onboard ≥ 0.2.0). The router answers none of it: a request
+at the host's own origin (a host name whose first label is no instance) for
+one of these goes to the host skein, as any request goes to its instance —
+appended as a request entry, the app's route handler answering:
 
-**The profile** (#104). A handle holder's profile is the record the OpNS
-name coin carries in its `profile` field (1sat-sdk#83): DAG-CBOR `{domain,
-name?, avatar?}`, written and read with `@1sat/utils`' `encodeProfile` and
-`decodeProfile`; `avatar` is the 36-byte outpoint of an image inscription
-(`@1sat/templates`' `outpointToBytes`, from `txid_vout` or `txid.vout`).
-The holder's wallet signs those bytes with `createSignature` under
-`[1, "metanet handles profile"]`, key ID `1`, counterparty anyone, so anyone
-with the identity key verifies it. The owner of a mailbox instance keeps it
-there with two admin messages and no program: `objects` with the record
-`{profile: <the bytes>, signature: <DER>}`, then `head` `{name: "profile",
-tree: <its CID>}` (the management page's Profile form does both). The host
-reads that head from the instance's store file (read-only, no kernel) and
-adds to the resolve answer (§5.1 item 3: clients ignore fields they do not
-know)
+| at the host's origin | the host skein's route |
+|---|---|
+| `GET /manifest.json` | `/onboard/manifest.json` |
+| `GET /.well-known/metanet-handles/resolve` | `/onboard/resolve` |
+| `GET /.well-known/metanet-handles/search` | `/onboard/search` |
+| `GET /bsvalias/id/<handle>[@<domain>]` | `/onboard/bsvalias/id/…` (a prefix row) |
+| `POST /account/register` | `/onboard/register` ("Mailbox instances", above) |
+| `POST /account/profile` | `/onboard/profile` |
+
+A host with no host skein answers them 404. The app's configuration
+(`config.onboard` of its installed manifest, written by `skein-host install
+… --config '{"onboard": {…}}'`): `domain`, the **handle domain** (default
+`localhost`); `origin`, where the manifest says resolve and search are
+(default `https://<domain>`); `name`, `note`, `icon`, the host's
+presentation in `metanet.trust` (§5.1); `ordfs`, the ORDFS content route
+`avatarURL` is derived under (default `https://api.1sat.app/content`; empty:
+none). The domain is never the request's host name: one setting, used by
+register, resolve, search, the paymail PKI and the manager's `create` (the
+row's domain).
+
+**The records** (the app's heads, its write scope `onboard/…`):
+
+```
+onboard/instances/<handle>  → the instance manager's answer record ({handle, identity, url}, signed)
+onboard/handles/<handle>    → the current certificate record:
+    {kind: "handle-certificate", handle, domain, subject: bytes(33), messagebox, issuedAt,
+     serialNumber, issuance: <issuance record>, prev?: <the certificate record before>,
+     certificate: <the resolver's copy>, holder: {certificate, keyringForSubject}}
+onboard/profiles/<handle>   → {kind: "handle-profile", handle, subject, profile: bytes, signature: bytes}
+onboard/index               → {kind: "onboard-index", handles: {<handle>: <certificate record>},
+                               keys: {<subject hex>: <handle>}}
+```
+
+**Issuing a certificate** (a registration, an adoption, and `onboard.create`
+for the new skein's own identity). The app's thread puts the **issuance
+record** `{kind: "handle-issuance", handle, domain, subject, messagebox,
+issuedAt, request, prev?}`; the serial number is base64 of its SHA-256 (the
+digest its CID names), so every issue has its own. It asks the host's
+**certifier** (a provider the host skein's address book alone names, as the
+instance manager; "The providers", below) `issue {handle, domain, subject,
+serialNumber, issuance}`; the certifier signs and records nothing. Its
+answer `{certificate, holder: {certificate, keyringForSubject},
+serialNumber, issuance}` becomes the certificate record, the head
+`onboard/handles/<handle>` moves to it, and the index follows. The key stays
+with the host (the certifier key, the master's child under `[2, "skein
+provider"]`, key ID `certifier`); the request and the signed answer are
+entries in the host skein.
+
+The two copies of one issue are the same binding (type §4.5's, serial
+number, subject the identity key, certifier the certifier key, revocation
+outpoint):
+
+- **the resolver's copy** (`certificate`): the SDK's `Certificate.sign`,
+  `fields.handle` and `fields.domain` Base64 of the plaintext (as §A.3; not
+  BRC-52 field encryption, so any resolver can check them, §4.1 rule 3);
+- **the holder's copy** (`holder`, #103): `MasterCertificate.issueCertificateForSubject`
+  — BRC-52 field encryption and `keyringForSubject`, the field keys
+  encrypted for the subject — because a BRC-100 wallet's
+  `acquireCertificate` (direct) takes only that (wallet-toolbox rebuilds a
+  `MasterCertificate`, which wants a keyring entry per field). The page
+  passes it with `keyringRevealer: "certifier"`; later
+  `listCertificates({certifiers: [<the manifest's certifier>], types: [<the
+  handle type>]})` returns it, its `keyring` decrypts `handle` and `domain`
+  (`MasterCertificate.decryptFields`, the certifier as counterparty), and a
+  resolve gives the messagebox.
+
+**Revocation is not implemented: the host has no wallet.** The
+`revocationOutpoint` is BRC-52's disabled sentinel (64 zeros, `.0`), not an
+outpoint the certifier controls (§4.1, §4.2); the five-minute `ttl` is all
+that bounds a resolver's copy. Every issue is kept (each record's `prev`),
+which is what revocation will use.
+
+**The manifest** (§5.1): `metanet.trust` — `name`, `note`, `icon` from the
+app's config, each only when set, and `publicKey`, the certifier key (the
+address book's `certifier` entry) — and `metanet.handles` (`version` "1.0",
+`resolve` and `search` under the configured origin).
+
+**Resolve** (§5.2): `GET /.well-known/metanet-handles/resolve?handle=<handle>`
+(or `<handle>@<domain>`, `@` first or not, a `+tag` dropped, any case;
+without a domain, the handle domain) → `{metanetHandles: "1.0", handle,
+domain, identityKey, certificate, messagebox, ttl: 300, revoked: false}` from
+the handle's current certificate record: `certificate` the resolver's copy
+as issued (not signed again per request), `identityKey` its subject — a
+mailbox instance's owner, or an onboarded skein's own identity — and
+`messagebox` the instance's origin. Errors are §5.3's (`400
+malformed-handle`; `404 handle-not-found`, another domain included). With
+a kept profile (#104) the answer adds (§5.1 item 3: clients ignore fields
+they do not know)
 
 ```
 profile: {record: <base64 of the DAG-CBOR bytes>, signature: <hex DER>,
           protocolID: [1, "metanet handles profile"], keyID: "1"}
 displayName: <the name>                      §5.6's hints, derived for
-avatarURL: <SKEIN_ORDFS_URL>/<txid>_<vout>   standard clients; unattested
+avatarURL: <ordfs>/<txid>_<vout>             standard clients; unattested
 ```
 
-only when the signature verifies for the handle's identity key and the
-record's `domain` is the handle's; otherwise none of the three. `avatarURL`
-is the avatar's content at an ORDFS gateway: the host runs none, so the
-default is the public one at `https://api.1sat.app/content`
-(`SKEIN_ORDFS_URL`; empty: no `avatarURL`). Our page verifies `profile`
-itself against the identity key and shows it as signed by the handle's key;
-the hints only without one, as unattested (§2.4 item 8).
+The profile is the record the OpNS name coin carries in its `profile` field
+(1sat-sdk#83): DAG-CBOR `{domain, name?, avatar?}`, written and read with
+`@1sat/utils`' `encodeProfile` and `decodeProfile`; `avatar` is the 36-byte
+outpoint of an image inscription (`@1sat/templates`' `outpointToBytes`).
+The app checks it when it is posted (the signature for the handle's key,
+its `domain` the handle domain) and serves it only for that key. Our page
+verifies `profile` itself against the identity key and shows it as signed
+by the handle's key; the hints only without one, as unattested (§2.4 item
+8).
 
-**Search** (§5.6, #104). `GET /.well-known/metanet-handles/search?q=&limit=`,
-advertised in the manifest as `metanet.handles.search`: the handles resolve
-answers at the request's domain (host.db's enabled instances), in handle
-order, whose handle or profile name contains `q` (any case; an empty `q`
-lists them all), at most `limit` (default 20, at most 100) →
-`{metanetHandles: "1.0", results: [{handle, identityKey, displayName?,
-avatarURL?, profile?}], truncated}` — each result's profile as resolve has
-it. Results are hints: no certificate comes with them. The page's "Find a
-handle" asks this page's host only, on an explicit Search.
+**Search** (§5.6, #104): `GET /.well-known/metanet-handles/search?q=&limit=`
+→ `{metanetHandles: "1.0", results: [{handle, identityKey, displayName?,
+avatarURL?, profile?}], truncated}`: the handles the app has records of, in
+handle order, whose handle or profile name contains `q` (any case; an empty
+`q` lists them all), at most `limit` (default 20, at most 100). Results are
+hints: no certificate comes with them.
 
-**The host's presentation** (§5.1). `metanet.trust` carries `name`, `note`
-and `icon` from `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE` and `SKEIN_HOST_ICON`,
-each only when set, beside `publicKey`.
+**The paymail PKI**: `GET /bsvalias/id/<handle>[@<domain>]` → `{bsvalias:
+"1.0", handle: "<handle>@<domain>", pubkey}` from the same records (without
+a domain, the handle domain); 404 `{error: "not found"}`.
 
-The host is the certifier for its instances (#100, `src/host/handles.ts`).
-`/manifest.json` publishes `metanet.trust.publicKey` — the certifier key,
-the master's child under `[2, "skein provider"]`, key ID `certifier`; not a
-provider, and in no address book — and `metanet.handles` (`version` "1.0",
-`resolve`, `search`). `GET /.well-known/metanet-handles/resolve?handle=<handle>` (or
-`<handle>@<domain>`; without one, the domain is the request's hostname, and
-127.0.0.1 is `localhost`) answers §5.2's
-`{metanetHandles: "1.0", handle, domain, identityKey, certificate,
-messagebox, ttl: 300, revoked: false}`: an agent's own identity, a mailbox
-instance's owner's, and the instance's origin as the messagebox. The
-certificate is the BRC-52 handle certificate (§4.1) the host issues for
-that binding with the SDK's `Certificate.sign`: type §4.5's, subject the
-identity key, certifier the certifier key, `fields.handle` and
-`fields.domain` Base64 of the plaintext (as §A.3; not BRC-52 field
-encryption, so any resolver can check them), serial number
-SHA-256(`<handle>@<domain> <identityKey>`) — the same certificate on every
-resolve. **Revocation is not implemented: the host has no wallet.** The
-`revocationOutpoint` is BRC-52's disabled sentinel (64 zeros, `.0`), not an
-outpoint the certifier controls (§4.1, §4.2); the five-minute `ttl` is all
-that bounds a resolver's copy of a binding host.db no longer holds. Errors
-are §5.3's (`400 malformed-handle`, `404 handle-not-found`). The host also
-answers the paymail PKI (`/bsvalias/id`). An emitted message is signed the
-way BRC-169 signs an envelope (above), so a BRC-169 peer can check it.
+An emitted message is signed the way BRC-169 signs an envelope (above), so
+a BRC-169 peer can check it.
 
 ## Calls
 

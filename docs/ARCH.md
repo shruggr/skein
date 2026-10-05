@@ -200,7 +200,8 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   (deadlines and sleeps), `cron` (`{fn: "tick", every | at, box, body?,
   name}`; schedules in host.db), `libp2p` (publish, dial, send, close),
   `status` (Arcade's word on a transaction), `manager` (the instance
-  manager: below, "The host skein"). Each answer is a signed
+  manager: below, "The host skein"), `certifier` (#113: it signs handle
+  certificates for the host skein's onboarding app). Each answer is a signed
   message appended as a `local` request. A provider may also be remote (a
   cron service reached by mailbox, `src/peers/cron.ts`). A message the
   instance sends itself loops back through the host as transport `local`,
@@ -237,17 +238,19 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   length-prefixed dag-cbor frames on stdin/stdout), started on demand and
   not stopped unless `SKEIN_IDLE_MS` is set. Recovery after a crash is
   replay at hydrate time: a step that was cut off runs again.
-- **Discovery**: the host publishes BRC-169 for its instances
-  (`/manifest.json`, `/.well-known/metanet-handles/resolve`) and the paymail
-  PKI, on the router's own origin — a hostname whose first label is no
-  instance; `SKEIN_ROUTER_ORIGIN` (default `http://127.0.0.1:<port>`) is what
-  the manifest publishes as the resolve URL and what geneses record as
-  `resolveOrigin`. The host is the certifier (#100): the manifest's
-  `metanet.trust.publicKey` is its certifier key (a child of the master
-  secret), and each resolution carries the BRC-52 handle certificate it
-  issues for the binding. Revocation is not implemented — the host has no
-  wallet: the certificate's revocation outpoint is BRC-52's disabled
-  sentinel (docs/MESSAGES.md, "BRC-169 is discovery").
+- **Discovery** (#113): BRC-169 for the host's handles (`/manifest.json`,
+  `/.well-known/metanet-handles/resolve` and `/search`, the paymail PKI)
+  and registration (`POST /account/register`, `/account/profile`) are
+  answered by the host skein's onboarding app; the router's own origin — a
+  hostname whose first label is no instance — maps those paths onto the
+  host skein's routes, as transport only (each request an entry there).
+  `SKEIN_ROUTER_ORIGIN` (default `http://127.0.0.1:<port>`) is where they
+  are and what geneses record as `resolveOrigin`. The certifier key (a
+  child of the master secret, the `certifier` provider's) is
+  `metanet.trust.publicKey`; the app records every certificate it has
+  signed, each with a serial of its own. Revocation is not implemented — the
+  host has no wallet: the certificate's revocation outpoint is BRC-52's
+  disabled sentinel (docs/MESSAGES.md, "BRC-169 is discovery").
 - **The fuel ledger**: a request's fuel is on its thread's updates in the
   log; the host's own kernel calls (the explorer's reads) are charged in
   host.db (`skein-host ledger`).
@@ -264,11 +267,12 @@ The host runs one instance of its own: the **host skein**, the operator's.
 the default image and claims it for the operator's key, and host.db
 records which row it is (`skein-host list` shows it as kind `host`). It is
 an ordinary instance under the same transports, with one difference: its
-address book, and no other, has an entry for the **instance manager**.
-What about the host is state or conversation belongs in it (today: the
-onboarding app and the instances it created); the HTTP transport and the
-libp2p node stay native, and host.db keeps its side tables (instances, the
-fuel ledger, cron, the broadcast queue).
+address book, and no other, has entries for the **instance manager** and
+the **certifier** (#113). What about the host is state or conversation
+belongs in it (today: the onboarding app, the instances it created, the
+handles it registered and the certificates issued for them); the HTTP
+transport and the libp2p node stay native, and host.db keeps its side
+tables (instances, the fuel ledger, cron, the broadcast queue).
 
 The **instance manager** (provider `manager`, a key of its own like the
 others) creates, starts and stops this host's instances. It acts only for
@@ -276,14 +280,17 @@ the host skein: its entry exists in the host skein's address book alone,
 and a message from any other sender is not acted on and not answered. Each
 message is answered with a signed message:
 
-- `create {handle, owner, image?}` → `{handle, identity, url}`. The row is
-  added disabled (no hostname), the identity derived from the master
-  secret, the store booted from the image (`default`, the only one so far),
+- `create {handle, owner, image?, domain?}` → `{handle, identity, url}`. The row is
+  added disabled (no hostname) at `domain` (#113: the onboarding app's
+  handle domain), the identity derived from the master
+  secret, the store booted from the image (`default`),
   the kernel started, and the owner's claim delivered as a `local` request
   from the manager. Only once the kernel has written the owner's admin rows
   is the row enabled, which publishes the hostname: no request can reach
   the claim row first. `url` is the instance's origin
   (`SKEIN_INSTANCE_ORIGIN`, default `http://<handle>.localhost:<port>`).
+  Image `mailbox` (#113): a mailbox instance for `owner` (its owner in its
+  genesis, no claim), published at once — what a registration asks for.
 - `start {handle}` → `{handle, started: true, url}`; `stop {handle}` →
   `{handle, stopped: true}`: published and started, or unpublished and
   stopped. Not the host skein itself.
@@ -295,11 +302,25 @@ skein, is how a stranger gets a skein: `POST /onboard/call {fn:
 "onboard.create", args: {handle, image?}}` over any BRC-104 session. Its
 handler records the request and launches a thread, and the client waits
 on that thread (#66). The thread applies the policy (free and ungated
-today), emits `create` to the instance manager with the session's key as
-the owner, and rests. On the answer it points `onboard/instances/<handle>`
-at the manager's answer record and finishes, and the page gets `{handle,
-identity, url}`. The management page calls it (shruggr/skein-site, #92:
-docs/APPS.md §3 "The management page"), served by the host skein itself.
+today; not a reserved name), emits `create` to the instance manager with
+the session's key as the owner, and rests. On the answer it points
+`onboard/instances/<handle>` at the manager's answer record, has the
+certifier sign the new skein's handle certificate (for its own identity)
+and records it, and finishes; the page gets `{handle, identity, url}`. The
+management page calls it (shruggr/skein-site, #92: docs/APPS.md §3 "The
+management page"), served by the host skein itself.
+
+The same app is the host's **BRC-169 server and registrar** (#113,
+skein-onboard 0.2.0): a registration (`POST /account/register` at the
+host's origin, signed over `register <name>@<domain>`) is a thread that
+asks the manager for a mailbox instance (`create`, image `mailbox`) and the
+certifier for the certificate (`issue`), records the certificate under
+`onboard/handles/<handle>` (each issue a new serial: the hash of its
+issuance record; `prev` the trail) and answers the holder's copy;
+resolve, search, the manifest and the paymail PKI read those records. The
+handle domain is its `config.onboard.domain`, the one setting. The message
+sequence and the records: docs/MESSAGES.md "Mailbox instances" and
+"BRC-169 is discovery".
 
 ## The browser host
 
