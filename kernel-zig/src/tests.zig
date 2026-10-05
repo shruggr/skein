@@ -56,7 +56,10 @@ test "dag-cbor: every TS encoding round-trips to the same bytes and CID" {
     }
 }
 
-test "anyone signatures and envelopes verify as in TS" {
+// The envelope vectors (fixtures.json `envelope`, format2.json `envelope` and
+// `tampered`) are checked by src/envelope-vectors.test.ts: the kernel has no
+// envelope module (the SDK's lib/message.zig verifies messages).
+test "anyone signatures and JCS as in TS" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -66,11 +69,6 @@ test "anyone signatures and envelopes verify as in TS" {
         const ok = secp.verifyAnyone(o.get("identity").?.string, @intCast(o.get("level").?.integer), o.get("name").?.string, o.get("keyId").?.string, try unhex(a, o.get("data").?.string), try unhex(a, o.get("sig").?.string));
         try std.testing.expectEqual(o.get("ok").?.bool, ok);
     }
-    const env = f.object.get("envelope").?.object;
-    const signed = try cbor.decode(a, try unhex(a, env.get("signed").?.string));
-    const envelope = @import("envelope.zig");
-    try std.testing.expectEqualStrings(env.get("jcs").?.string, try envelope.canonical(a, signed));
-    try std.testing.expectEqual(env.get("ok").?.bool, envelope.verify(a, signed));
     for (f.object.get("jcs").?.array.items) |c| {
         const v = try cbor.decode(a, try unhex(a, c.object.get("hex").?.string));
         var out = std.array_list.Managed(u8).init(a);
@@ -79,24 +77,13 @@ test "anyone signatures and envelopes verify as in TS" {
     }
 }
 
-test "format 2 (issue #33): §7.3 envelopes verify over the dag-cbor preimage; genesis keys are bytes; entries unsigned" {
+test "format 2 (issue #33): genesis keys are bytes; entries unsigned" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "test/format2.json", a, .limited(1 << 20));
     const f = (try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{})).object;
-    const envelope = @import("envelope.zig");
     const logm = @import("log.zig");
-    const e = f.get("envelope").?.object;
-    const signed = try cbor.decode(a, try unhex(a, e.get("signed").?.string));
-    const full = try cbor.decode(a, try unhex(a, e.get("full").?.string));
-    try std.testing.expectEqual(envelope.Form.cbor, envelope.formOf(signed).?);
-    try std.testing.expect(envelope.isSigned(signed) and !envelope.isEnvelope(signed) and envelope.isEnvelope(full));
-    try std.testing.expect(envelope.verify(a, signed));
-    try std.testing.expect(envelope.verify(a, full)); // the BRC-78 sender is the signer
-    try std.testing.expect(envelope.hashMatches(signed, try unhex(a, e.get("body").?.string)));
-    try std.testing.expect(!envelope.hashMatches(signed, "other"));
-    try std.testing.expect(!envelope.verify(a, try cbor.decode(a, try unhex(a, f.get("tampered").?.string))));
     try std.testing.expect(logm.isGenesis(try cbor.decode(a, try unhex(a, f.get("genesis").?.string))));
     try std.testing.expect(!logm.isGenesis(try cbor.decode(a, try unhex(a, f.get("genesisWithHost").?.string))));
     try std.testing.expect(logm.isLogEntry(try cbor.decode(a, try unhex(a, f.get("entry").?.string))));

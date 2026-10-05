@@ -1,7 +1,7 @@
 // The host's management database (#23): which instances this host runs, one
 // row each, in $SKEIN_HOME/host.db. Host-side state, outside every instance's
 // graph: nothing in src/runtime reads it. Rows get here by hand (`skein-host
-// add`), by script (scripts/host/instance.sh) or later by an API; `skein-host
+// add`), by the instance manager (`create`, #90), or by registration; `skein-host
 // run` (the router, router.ts) serves every enabled row.
 //
 // #40: a row is an agent (its own identity) or a **mailbox instance** — an
@@ -24,9 +24,7 @@ const DDL = `
 CREATE TABLE IF NOT EXISTS instances (
   handle            TEXT PRIMARY KEY,                 -- the BRC-169 handle's user part, e.g. martha
   domain            TEXT NOT NULL DEFAULT 'localhost',
-  identity          TEXT,                             -- the instance wallet's identity key, hex; filled once the wallet exists
-  wallet_url        TEXT,                             -- its BRC-100 endpoint, e.g. http://127.0.0.1:3401
-  wallet_originator TEXT NOT NULL DEFAULT 'skein',
+  identity          TEXT,                             -- the instance's identity key, hex: the signer's child for the handle
   store             TEXT NOT NULL,                    -- its runtime.db
   tree              TEXT,                             -- the root CID of the directory last deployed into it (skein-host deploy)
   source            TEXT,                             -- that directory, for skein-host deploy --all
@@ -98,8 +96,6 @@ export interface InstanceRow {
   handle: string;
   domain: string;
   identity: string | null;
-  wallet_url: string | null;
-  wallet_originator: string;
   store: string;
   tree: string | null;
   source: string | null;
@@ -115,7 +111,7 @@ export interface InstanceRow {
 /** The fields `add` sets; absent ones keep their value (or the column's default on insert). */
 export type RowFields = Partial<Omit<InstanceRow, "handle" | "created_at">>;
 
-const FIELDS = ["domain", "identity", "wallet_url", "wallet_originator", "store", "tree", "source", "knows", "status", "kind", "owner"] as const;
+const FIELDS = ["domain", "identity", "store", "tree", "source", "knows", "status", "kind", "owner"] as const;
 
 /** The handles a row knows: a list, or "all" (every other enabled row). */
 export function knowsOf(row: Pick<InstanceRow, "knows">): string[] | "all" {
@@ -139,7 +135,9 @@ export class HostDb {
     this.db.exec("PRAGMA busy_timeout = 5000;"); // `run` holds it open while `deploy`/`add` write
     if (o.readOnly) return;
     this.db.exec(DDL);
-    // Older files: columns added since.
+    // Older files: columns added since. Files from before #33 also carry
+    // wallet_url and wallet_originator (an instance's own wallet-api): nothing
+    // reads them, and an insert leaves them to their defaults.
     const cols = new Set(this.db.prepare("PRAGMA table_info(instances)").all().map((c) => c.name));
     if (!cols.has("source")) this.db.exec("ALTER TABLE instances ADD COLUMN source TEXT");
     if (!cols.has("knows")) this.db.exec("ALTER TABLE instances ADD COLUMN knows TEXT");

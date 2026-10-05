@@ -1,4 +1,5 @@
-// Fixtures for the Zig kernel's unit tests (src/tests.zig), made by the
+// Fixtures for the Zig kernel's unit tests (src/tests.zig; the envelope by
+// src/envelope-vectors.test.ts), made by the
 // TypeScript formats (src/runtime): dag-cbor encodings and CIDs, the canonical
 // form of non-canonical input, "anyone" signatures (log entries, envelopes),
 // JCS, the entropy stream, a shell program record's shape (#83), the fixed origins

@@ -45,8 +45,17 @@ import { CID } from "multiformats/cid";
 import { isoTime, open, seal, type Envelope } from "../envelope.ts";
 import { asEnvelope, inspect, isCborEnvelope, openCbor, sealCbor, wrapCbor, type AnyEnvelope } from "../envelope-cbor.ts";
 import { encode } from "../runtime/cid.ts";
-import type { Listed, MessageBox } from "../host/brc231.ts";
 import type { Listed as RawListed } from "../client/raw.ts";
+
+/** One listed message: BRC-33 fields as the messagebox reports them. */
+export interface Listed { messageId: string; sender?: string; body: unknown; created_at?: string }
+
+/** The part of a BRC-33 messagebox a peer uses, as one identity. */
+export interface MessageBox {
+  list(box: string): Promise<Listed[]>;
+  ack(ids: string[]): Promise<void>;
+  send(m: { recipient: string; box: string; body: object }): Promise<void>;
+}
 
 /** The raw transport (#40): its own mailbox, a session per peer messagebox, its address book. */
 export interface RawTransport {

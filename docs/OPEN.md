@@ -87,8 +87,6 @@ record.
 ## Known leftovers in the tree
 
 Dead or legacy code, not yet removed: `host-go/` (a shell experiment, not a
-host); `scripts/host/{messagebox.sh, messagebox-migrate.mjs,
-grants-legacy.sh, register.ts, web.sh}` and the instance/host wallets in
-`wallets.sh` (the pre-#33 layout); `src/runtime/log.ts`, a format-1 reader
+host); `src/runtime/log.ts`, a format-1 reader
 the node host still imports; `attested` in `src/runtime/records.ts` and
 `types.ts`.

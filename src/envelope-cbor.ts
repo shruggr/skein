@@ -6,7 +6,7 @@
 // "metanet handles envelope"], key "send", counterparty anyone). A signature is
 // over the encoding it was made in, so a relay delivers an envelope in the
 // encoding it was submitted in and never transcodes; the kernel keeps each in
-// its own form (kernel-zig/src/envelope.zig). A message's id is the CID of its
+// its own form (the SDK's lib/message.zig). A message's id is the CID of its
 // signed part as kept.
 
 import { createHash, randomBytes } from "node:crypto";

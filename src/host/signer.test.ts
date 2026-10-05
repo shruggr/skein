@@ -27,5 +27,4 @@ test("signer: one master secret (a 0600 file made once, or SKEIN_MASTER_KEY); pe
   const p = await new ProtoWallet(other).decrypt({ protocolID: [2, "message encryption"], keyID: "k", counterparty: publicKey, ciphertext: c.ciphertext });
   assert.deepEqual([...p.plaintext], [1, 2, 3]);
   await assert.rejects(w.createAction({ description: "no", outputs: [] } as never), /not supported/, "no actions: signing only");
-  assert.notEqual((await o.routerWallet().getPublicKey({ identityKey: true })).publicKey, publicKey);
 });

@@ -8,8 +8,6 @@
 # router's signer signs for them. Idempotent (the owner's are reset first).
 # Run again after `skein-host add` (a new instance is a new counterparty).
 #   scripts/host/grants.sh
-# (The grants of the pre-router layout — the instance wallet 3321 and the
-# host wallet 3324 — are in grants-legacy.sh.)
 set -euo pipefail
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 root="$(cd "$here/../.." && pwd)"

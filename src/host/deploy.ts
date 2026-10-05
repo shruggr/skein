@@ -188,7 +188,7 @@ export async function writeAddresses(o: { row: InstanceRow; owner: WalletInterfa
 /** The genesis checks; the store if it has a log. */
 async function checked(o: { row: InstanceRow; owner: WalletInterface; store?: Store }): Promise<Store | undefined> {
   const { row } = o;
-  if (!row.identity) throw new Error(`${row.handle}: no identity yet (scripts/host/instance.sh, or \`skein-host run\` once)`);
+  if (!row.identity) throw new Error(`${row.handle}: no identity yet (\`skein-host add --derive\`, or \`skein-host run\` once)`);
   const me = await rootIdentity(o.owner);
   const store = o.store && (await o.store.log.tip()) ? o.store : undefined;
   if (store) {

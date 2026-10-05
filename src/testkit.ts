@@ -2,7 +2,7 @@
 // anything that runs.
 
 import type { CID } from "multiformats/cid";
-import type { Listed, MessageBox } from "./host/brc231.ts";
+import type { Listed, MessageBox } from "./peers/infer.ts";
 import type { Stamp } from "./runtime/syscalls.ts";
 import { dirBundles } from "./client/client.ts";
 

@@ -78,11 +78,10 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
 
-The scripts `messagebox.sh`, `messagebox-migrate.mjs`, `instance.sh`,
-`grants-legacy.sh`, `register.ts` and `web.sh`, and `wallets.sh` with no
-arguments (which also starts an instance wallet on 3321 and a host wallet on
-3324), belong to the layout before #33 and are not used. Instances need no
-wallet and no grants: the host's signer signs for them.
+Instances need no wallet and no grants: the host's signer signs for them.
+The scripts of the layout before #33 (an instance wallet on 3321, a host
+wallet on 3324, the `1sat serve` messagebox) are gone; `register.ts` is a
+client of `POST /account/register`.
 
 ## The HTTP transport
 
@@ -342,7 +341,7 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 | `kind` | `agent`, or `mailbox` (a mailbox instance, #40: the front door and the messagebox, keeping mail for `owner`) |
 | `owner` | a mailbox instance's: the identity (hex) whose mailbox it is |
 | `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the signer's, BRC-42 child, key ID the handle) |
-| `wallet_url`, `wallet_originator` | unused (the layout before #33) |
+| `wallet_url`, `wallet_originator` | only in files made before #33: nothing reads them, and new files lack them |
 | `store` | its store file (default `~/.skein/instances/<handle>/runtime.db`) |
 | `tree` | the root CID of the directory last deployed into it (`skein-host deploy`) |
 | `source` | that directory, which `deploy --all` sends again |

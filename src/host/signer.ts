@@ -5,11 +5,10 @@
 // decrypt, createHmac (and their verify halves), no storage, no actions. The
 // instance's identity key is that child's public key; provisioning an
 // instance is picking an id. The router answers the kernel's `wallet` import
-// from it in process (kernel.ts), and authenticates its own transport (BRC-104)
-// as a second child, [2, "skein router"] / "messagebox". Its libp2p host (#51)
-// signs as a third per instance: [2, "skein instance"], key ID
+// from it in process (kernel.ts); the router has no identity of its own. Its
+// libp2p host (#51) signs as a second child per instance: [2, "skein instance"], key ID
 // `libp2p:<handle>`, self (peerKey). Its providers (#70: the HTTP proxy,
-// the waker, the libp2p node, the broadcaster — providers.ts) are fourth
+// the waker, the libp2p node, the broadcaster — providers.ts) are third
 // children, one per provider for the whole host: [2, "skein provider"], key
 // ID = the provider's name (providerKey). The host's BRC-169 certifier key
 // (#100: the manifest's `metanet.trust.publicKey`, the signer of the handle
@@ -27,7 +26,6 @@ import { KeyDeriver, PrivateKey, type WalletInterface, type WalletProtocol } fro
 import { ephemeralWallet } from "../wallet.ts";
 
 export const INSTANCE_PROTOCOL: WalletProtocol = [2, "skein instance"];
-export const ROUTER_PROTOCOL: WalletProtocol = [2, "skein router"];
 export const PROVIDER_PROTOCOL: WalletProtocol = [2, "skein provider"];
 
 /** The master secret: SKEIN_MASTER_KEY, else the file (created if absent). */
@@ -92,13 +90,6 @@ export class Signer {
   /** The certifier key (#100): BRC-169's trust anchor, providerKey("certifier"). */
   certifierKey(): PrivateKey {
     return this.providerKey("certifier");
-  }
-
-  /** The router's own transport identity (BRC-104 server key). */
-  routerWallet(): WalletInterface {
-    let w = this.wallets.get("\0router");
-    if (!w) this.wallets.set("\0router", (w = ephemeralWallet(this.deriver.derivePrivateKey(ROUTER_PROTOCOL, "messagebox", "self"))));
-    return w;
   }
 }
 

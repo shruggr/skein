@@ -1,6 +1,7 @@
 // Vectors for the format-2 unit test (issue #33, src/tests.zig): made by the
 // router's TypeScript (src/envelope-cbor.ts, src/host/genesis.ts), checked by
-// the kernel. Writes test/format2.json.
+// the kernel (genesis, entries) and src/envelope-vectors.test.ts (the
+// envelopes). Writes test/format2.json.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/test/format2.ts
 

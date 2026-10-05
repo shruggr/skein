@@ -127,7 +127,7 @@ async function programsOf(store: Store): Promise<Record<string, CID>> {
 const mainIs = (store: Store, root: string) => until(`main at ${root}`, async () => (await headTree(store, MAIN))?.toString() === root ? true : undefined);
 
 const rowOf = (handle: string, identity: string | null = null, tree: string | null = null): InstanceRow => ({
-  handle, domain: "localhost", identity, wallet_url: null, wallet_originator: "skein", store: `${handle}.db`, tree, source: null, knows: null, status: "enabled", created_at: iso(T0),
+  handle, domain: "localhost", identity, store: `${handle}.db`, tree, source: null, knows: null, status: "enabled", created_at: iso(T0),
 });
 
 /** Every path in a tree, "/"-separated, files only. */

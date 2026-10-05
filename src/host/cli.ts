@@ -203,13 +203,13 @@ export async function main(argv: string[], env: Env): Promise<number> {
         const { values: v, positionals: [handle] } = parseArgs({
           args: rest, allowPositionals: true,
           options: {
-            domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, "wallet-url": { type: "string" }, originator: { type: "string" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" },
+            domain: { type: "string" }, identity: { type: "string" }, derive: { type: "boolean" }, store: { type: "string" }, tree: { type: "string" }, knows: { type: "string" }, disabled: { type: "boolean" },
             boot: { type: "string" }, from: { type: "string" }, packet: { type: "string" }, scope: { type: "string" }, proofs: { type: "string" }, image: { type: "string" },
             mailbox: { type: "boolean" }, owner: { type: "string" },
           },
         });
         if (!handle) { env.err(USAGE); return 2; }
-        const f: RowFields = { domain: v.domain, identity: v.identity, wallet_url: v["wallet-url"], wallet_originator: v.originator, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
+        const f: RowFields = { domain: v.domain, identity: v.identity, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (v.mailbox) {
           // A mailbox instance (#40): the front door and the messagebox, keeping mail for --owner. #113: the instance
@@ -224,7 +224,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
         if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
         if (v.image !== undefined && isOutpoint(v.image)) { env.err(`skein-host add --image ${v.image}: an image by outpoint is read through the ORDFS app, which is not built yet; give a directory or a tree CID`); return 2; }
         const r = db.add(handle, f);
-        env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.wallet_url ? ` · wallet ${r.wallet_url}` : ""}${r.identity ? ` · ${short(r.identity)}` : ""}`);
+        env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store}${r.identity ? ` · ${short(r.identity)}` : ""}`);
         if (v.boot || v.packet || v.image !== undefined) {
           // The loader (#4): pre-fill the new store and write its genesis from the tree (or restore a checkpoint).
           // A one-shot (#61): the router it boots through is closed before `add` returns, so the process exits.
@@ -265,7 +265,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
         const door = frontDoorKeys(env.vars, home);
         const peer = peerIds(env.vars, home);
         const host = db.setting("host_skein");
-        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.handle === host ? "host" : r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : r.wallet_url ?? "-", r.store, r.tree ?? "-", peer(r)].join("\t"));
+        for (const r of db.list()) env.out([`${r.handle}@${r.domain}`, r.handle === host ? "host" : r.kind ?? "agent", r.status, r.identity ?? "-", door(r), r.kind === "mailbox" ? `owner ${r.owner}` : "-", r.store, r.tree ?? "-", peer(r)].join("\t"));
         return 0;
       }
       case "enable": case "disable": case "remove": {

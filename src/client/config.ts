@@ -27,7 +27,7 @@ function read(file: string): string | undefined {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ClientConfig {
   const home = env.SKEIN_HOME ?? join(homedir(), ".skein");
   const identityKey = env.SKEIN_INSTANCE_IDENTITY ?? read(join(home, "instance.identity"));
-  if (!identityKey) throw new Error(`no instance identity: run scripts/host/wallets.sh (writes ${join(home, "instance.identity")}) or set SKEIN_INSTANCE_IDENTITY`);
+  if (!identityKey) throw new Error(`no instance identity: write \`skein-host identity <handle>\` to ${join(home, "instance.identity")}, or set SKEIN_INSTANCE_IDENTITY`);
   const [handle, domain] = (env.SKEIN_INSTANCE_HANDLE ?? "skein@localhost").split("@");
   const host = (env.SKEIN_HOST_URL ?? "http://127.0.0.1:8100").replace(/\/+$/, "");
   return {
