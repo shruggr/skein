@@ -21,7 +21,7 @@ import { encode } from "../runtime/cid.ts";
 import { dirSource } from "./boot.ts";
 import { HostDb } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
-import { Oracle } from "./oracle.ts";
+import { Signer } from "./signer.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, type MailRecord } from "./providers.ts";
 import { Router } from "./router.ts";
 import { until } from "./testhost.ts";
@@ -43,14 +43,14 @@ test("emit: a deadline is a signed wake-me to the waker, kept across a host rest
   await fs.writeFile(join(dir, "etc/subscriptions.json"), JSON.stringify([{ box: "tick", handler: "cron-demo" }]));
   const db = new HostDb(join(home, "host.db"));
   t.after(() => db.close());
-  const oracle = new Oracle(PrivateKey.fromRandom());
+  const signer = new Signer(PrivateKey.fromRandom());
   const owner = PrivateKey.fromRandom().toPublicKey().toString();
   const lines: string[] = [];
   const make = () => new Router({
-    db, walletFor: (row) => oracle.wallet(row.handle), providerKeyFor: (n) => oracle.providerKey(n), owner, home, idleMs: 0, cron: false,
+    db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), owner, home, idleMs: 0, cron: false,
     kernel: { env: { SKEIN_HOME: home } }, log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
-  db.add("w", { store: join(home, "instances/w/runtime.db"), identity: oracle.identity("w") });
+  db.add("w", { store: join(home, "instances/w/runtime.db"), identity: signer.identity("w") });
   let router = make();
   t.after(() => router.stop());
   const d = await dirSource(dir);
@@ -62,7 +62,7 @@ test("emit: a deadline is a signed wake-me to the waker, kept across a host rest
   await router.settled();
   const k = (await router.hydrate("w")).kernel;
   const rested = lines.find((l) => /^\[w\] \S+ cron-demo step 1 → waiting · 1 oracle · emitted \S+ · awaits \S+$/.test(l));
-  assert.ok(rested, `step 1 signed (one oracle call) and emitted its wake-me, and awaits it:\n${lines.filter((l) => l.startsWith("[w]")).join("\n")}`);
+  assert.ok(rested, `step 1 signed (one signer call) and emitted its wake-me, and awaits it:\n${lines.filter((l) => l.startsWith("[w]")).join("\n")}`);
   const [emitted, awaited] = [/emitted (\S+)/.exec(rested!)![1], /awaits (\S+)/.exec(rested!)![1]];
   assert.equal(emitted, awaited, "it awaits the message it emitted");
 
@@ -72,7 +72,7 @@ test("emit: a deadline is a signed wake-me to the waker, kept across a host rest
   const entries = await Promise.all(book.peers.map(async (p) => await k.store.get(p.peer) as unknown as { key: Uint8Array; role?: string; transport: string; address: string; source: string }));
   const waker = entries.find((e) => e.role === "waker")!;
   assert.ok(waker && waker.transport === "local" && waker.address === "waker" && waker.source === "genesis", "the genesis seeded the host's waker");
-  assert.equal(Buffer.from(waker.key).toString("hex"), oracle.providerKey("waker").toPublicKey().toString(), "the waker's key: the host's provider key");
+  assert.equal(Buffer.from(waker.key).toString("hex"), signer.providerKey("waker").toPublicKey().toString(), "the waker's key: the host's provider key");
 
   // A forged answer — signed by another key, claiming to be the waker's — is refused; nothing runs.
   const tip = await k.store.log.tip();
@@ -82,11 +82,11 @@ test("emit: a deadline is a signed wake-me to the waker, kept across a host rest
   assert.equal(wakeMe.message.box, "wake");
   assert.ok(Buffer.from(wakeMe.message.recipient).equals(Buffer.from(waker.key)), "to the waker");
   assert.ok(wakeMe.cid.toString().endsWith(emitted!), "the message the step emitted");
-  const signedOk = await new ProtoWallet("anyone").verifySignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: oracle.identity("w"), data: [...dagCbor.encode(Object.fromEntries(Object.entries(wakeMe.message).filter(([key]) => key !== "signature")))], signature: [...wakeMe.message.signature] });
+  const signedOk = await new ProtoWallet("anyone").verifySignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: signer.identity("w"), data: [...dagCbor.encode(Object.fromEntries(Object.entries(wakeMe.message).filter(([key]) => key !== "signature")))], signature: [...wakeMe.message.signature] });
   assert.ok(signedOk.valid, "signed by the instance, BRC-169's way (anyone can check it)");
   const forger = new ProtoWallet(PrivateKey.fromRandom());
   const fbody = dagCbor.encode({ replyTo: wakeMe.cid, at: Date.now() });
-  const unsigned = { kind: "mail" as const, op: "put" as const, sender: waker.key, recipient: Uint8Array.from(Buffer.from(oracle.identity("w"), "hex")), box: "wake", body: encode(dagCbor.decode(fbody)).cid, nonce: new Uint8Array(16) };
+  const unsigned = { kind: "mail" as const, op: "put" as const, sender: waker.key, recipient: Uint8Array.from(Buffer.from(signer.identity("w"), "hex")), box: "wake", body: encode(dagCbor.decode(fbody)).cid, nonce: new Uint8Array(16) };
   const { signature } = await forger.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
   await router.appendLocal("w", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) } as MailRecord, body: fbody });
   await router.settled();

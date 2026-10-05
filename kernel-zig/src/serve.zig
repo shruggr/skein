@@ -9,7 +9,7 @@
 // waits on a request's thread (`answer`, #66: parked here until the thread
 // comes to rest, or its bound), makes `call`s (#40: a program's function
 // over the state, for host-side reads), answers the kernel's `wallet`
-// requests (the oracle), and carries out what the kernel tells it of
+// requests (the signer), and carries out what the kernel tells it of
 // (`emit`: #70, a signed message for a local provider or the libp2p node,
 // the answer coming back as an entry; #65, a broadcast event). Nothing here
 // keeps time: a step's deadline and a shell's sleep are wake-me messages to

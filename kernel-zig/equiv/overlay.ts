@@ -53,7 +53,7 @@ import { HostDb } from "../../src/host/instances.ts";
 import { buildTree, derive, openStoreFile } from "../../src/runtime/index-store.ts";
 import { libp2pKey, peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
-import { Oracle } from "../../src/host/oracle.ts";
+import { Signer } from "../../src/host/signer.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
@@ -193,7 +193,7 @@ const owner = key("2222").toPublicKey().toString();
 const arcade = await FakeArcade.start();
 const posted = (txid: string) => arcade.posts.filter((b) => FakeArcade.txOf(b).id("hex") === txid);
 const router = new Router({
-  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
+  db: hostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
   // #66: a client waits on its request's thread; the gate's pending broadcast answers 503 + Retry-After at this bound.
   answerWaitMs: 6000,
   kernel: { command: kernel, env: { SKEIN_HOME: home } },
@@ -218,7 +218,7 @@ const noarcDb = join(home, "instances/noarc/runtime.db");
 const noarcHostDb = new HostDb(join(home, "noarc-host.db"));
 noarcHostDb.add("noarc", { store: noarcDb });
 const noarcRouter = new Router({
-  db: noarcHostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
+  db: noarcHostDb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
   answerWaitMs: 300,
   kernel: { command: kernel, env: { SKEIN_HOME: home } },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [noarc:${s}] ${l}\n`); },
@@ -685,7 +685,7 @@ const freePort = () => new Promise<number>((resolve, reject) => {
 const G = ["ga", "gb", "gc"] as const;
 type GH = typeof G[number];
 const gDb: Record<GH, string> = { ga: join(home, "instances/ga/runtime.db"), gb: join(home, "instances/gb/runtime.db"), gc: join(home, "instances/gc/runtime.db") };
-const p2pOracle = new Oracle(new PrivateKey("a77e57", 16));
+const p2pSigner = new Signer(new PrivateKey("a77e57", 16));
 const gossipTree = (dir: string, topics: string[]) => {
   cpSync(sys, dir, { recursive: true });
   const c = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8")) as Record<string, unknown>;
@@ -701,7 +701,7 @@ const arcade74 = await FakeArcade.start();
 const gr = (h: GH) => g[h]!.r;
 try {
   const ports: Record<GH, number> = { ga: await freePort(), gb: await freePort(), gc: await freePort() };
-  const idOf = (h: GH) => peerIdOf(p2pOracle.peerKey(h)).toString();
+  const idOf = (h: GH) => peerIdOf(p2pSigner.peerKey(h)).toString();
   for (const h of G) {
     const hdb = new HostDb(join(home, `${h}-host.db`));
     hdb.add(h, { store: gDb[h] });
@@ -709,7 +709,7 @@ try {
       hdb,
       r: new Router({
         db: hdb, walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0,
-        providerKeyFor: (n) => p2pOracle.providerKey(n), peerKeyFor: (x) => p2pOracle.peerKey(x), answerWaitMs: 6000,
+        providerKeyFor: (n) => p2pSigner.providerKey(n), peerKeyFor: (x) => p2pSigner.peerKey(x), answerWaitMs: 6000,
         kernel: { command: kernel, env: { SKEIN_HOME: home } },
         ...(h === "ga" ? { arc: { url: arcade74.url, token: "the-ga-arcade-token", events: arcade74.eventsUrl }, arcRetry: { min: 500, max: 2000 } } : {}),
         libp2p: { listen: [`/ip4/127.0.0.1/tcp/${ports[h]}`], bootstrap: G.filter((x) => x !== h).map((x) => `/ip4/127.0.0.1/tcp/${ports[x]}/p2p/${idOf(x)}`), dht: "off", relays: [], mdns: false },
@@ -757,7 +757,7 @@ try {
   };
   const disp = (b: Uint8Array) => Buffer.from(b).reverse().toString("hex");
   const blockCid = (raw: Uint8Array) => String(CID.createV1(0xb0, Digest.create(0x56, sha256d(raw))));
-  const peerKeyHex = (h: GH) => p2pOracle.peerKey(h).toPublicKey().toString();
+  const peerKeyHex = (h: GH) => p2pSigner.peerKey(h).toPublicKey().toString();
   // Published messages: the libp2p provider's `publish` answers are recorded; count the overlay's emits by topic.
   const publishedBy = async (h: GH) => {
     const v = openStoreFile(gDb[h], { readOnly: true });
@@ -860,7 +860,7 @@ try {
     const e = await kb.store.get(c) as unknown as { request?: CID; transport?: string; prev?: CID };
     if (e.request && e.transport === "libp2p") {
       const rec = await kb.store.get(e.request) as unknown as { kind: string; topic: string; from: Uint8Array; seqno: Uint8Array; signature: Uint8Array; body: Uint8Array };
-      if (rec.kind === "p2p" && rec.topic === "tm_demo" && Buffer.from(rec.from).equals(Buffer.from(peerIdOf(p2pOracle.peerKey("ga")).toMultihash().bytes))) original = rec;
+      if (rec.kind === "p2p" && rec.topic === "tm_demo" && Buffer.from(rec.from).equals(Buffer.from(peerIdOf(p2pSigner.peerKey("ga")).toMultihash().bytes))) original = rec;
     }
     c = e.prev;
   }

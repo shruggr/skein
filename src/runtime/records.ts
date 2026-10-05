@@ -196,13 +196,15 @@ export function isEmit(x: unknown): x is Emit {
 }
 
 /**
- * An oracle call's record (format 6, #67: the one call a step makes out
+ * A signer call's record (format 6, #67: the one call a step makes out
  * mid-step): a BRC-100 wire request frame and its result frame, at (thread,
  * step, i). Referenced, in order, from the step's update (`calls`); on replay
  * the answer is served from here, not a wallet. (Before format 6 these were
  * `attested` records, with `http` and `libp2p` calls beside the wallet's.)
+ * The record's kind is still the string `oracle`, the signer's old name: it
+ * is part of the format, so the rename left it as it was.
  */
-export type OracleCall = {
+export type SignerCall = {
   kind: "oracle";
   thread: CID;
   step: number;
@@ -211,7 +213,7 @@ export type OracleCall = {
   result: Uint8Array;
 };
 
-export function isOracleCall(x: unknown): x is OracleCall {
+export function isSignerCall(x: unknown): x is SignerCall {
   return isObj(x) && x.kind === "oracle" && isCID(x.thread) && typeof x.step === "number" && typeof x.i === "number"
     && x.request instanceof Uint8Array && x.result instanceof Uint8Array;
 }
@@ -219,7 +221,7 @@ export function isOracleCall(x: unknown): x is OracleCall {
 /**
  * Wallet wire calls a program may make (BRC-100 call codes): key derivation
  * and crypto only — no actions, no certificates (the kernel's scheduler.zig
- * `wallet_calls`). By code, for showing an oracle call.
+ * `wallet_calls`). By code, for showing a signer call.
  */
 export const WALLET_CALLS: ReadonlyMap<number, string> = new Map([
   [8, "getPublicKey"], [11, "encrypt"], [12, "decrypt"], [13, "createHmac"], [14, "verifyHmac"], [15, "createSignature"], [16, "verifySignature"],

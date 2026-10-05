@@ -18,7 +18,7 @@ Three layers:
 |---|---|---|
 | **kernel** | the machine (store, log, scheduler, WASI, fuel) and its four tables, plus the signer import (`wallet`). One implementation, Zig over wasmtime; it also builds for the browser | `kernel-zig/` |
 | **apps** | everything else, each a tree of WASI programs installed under its own name: the front door, messagebox, resolve, wallet, chain, static sites, overlays, the shell, chat, your own | `programs/` here (the boundary programs and the wallet); the rest in sibling repos |
-| **hosts** | whatever drives a kernel from outside: transports, providers, a store and the signer (the oracle). The host judges nothing and routes nothing | `src/host/` (the node host, `skein-host`); `web/kernel/` (the browser host) |
+| **hosts** | whatever drives a kernel from outside: transports, providers, a store and the signer. The host judges nothing and routes nothing | `src/host/` (the node host, `skein-host`); `web/kernel/` (the browser host) |
 
 The kernel's four tables:
 
@@ -318,7 +318,7 @@ kernel-zig/      the kernel: skein-kernel serve | replay | shell | dump | fuel; 
 images/default/  the default image (#89): a system tree with no owner and the claim row; the site in www/, the git app's tree in apps/git (#92)
 programs/        frontdoor, messagebox, resolve, wallet (Zig over skein-sdk); test/ (fixtures, app-demo)
 wasm/            the committed modules the kernel pins (kernel-zig/src/programs.zig), see wasm/README.md
-src/host/        the node host: skein-host (cli.ts), the HTTP transport, providers, feeds, broadcaster, libp2p node, oracle, install
+src/host/        the node host: skein-host (cli.ts), the HTTP transport, providers, feeds, broadcaster, libp2p node, signer, install
 src/runtime/     the formats and a store reader in TypeScript (no machine)
 src/client/      bin/skein: import, run, chat, inbox, dispatch
 src/peers/       bin/skein-infer (the inference peer), a remote cron provider
@@ -344,9 +344,9 @@ scripts/         program builds and pins, sdk-local.sh; host/ (the dev stack)
 | [src/client/README.md](src/client/README.md) | the client |
 | [docs/OPEN.md](docs/OPEN.md) | open questions still live from building |
 
-Vocabulary: the **host** is transports + providers + store + oracle (there
+Vocabulary: the **host** is transports + providers + store + signer (there
 is no "router"; the dispatch table routes); the **kernel** is the machine,
-the four tables and the oracle import; **admin operations** are kernel
+the four tables and the signer import; **admin operations** are kernel
 operations, not programs; every other thing is an **app** under its own
 name; a **box** is a mailbox address in the dispatch table; **emit** is the
 one way out (a signed message to a key in the address book, or a broadcast

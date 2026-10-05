@@ -290,11 +290,12 @@ pub fn isGenesis(x: ?Value) bool {
     return true;
 }
 
-/// An oracle call a step made (#67: the one recorded call left): {kind:
+/// A signer call a step made (#67: the one recorded call left): {kind:
 /// "oracle", thread, step, i, request: bytes (the BRC-100 wire frame),
 /// result: bytes (its answer)}. Replay serves `result` for the call at (thread,
-/// step, i) and never asks a wallet (records.ts isOracleCall).
-pub fn isOracleCall(x: ?Value) bool {
+/// step, i) and never asks a wallet (records.ts isSignerCall). The kind
+/// keeps the signer's old name, `oracle`: it is part of the format.
+pub fn isSignerCall(x: ?Value) bool {
     const a = x orelse return false;
     if (a != .map) return false;
     if (!std.mem.eql(u8, Value.str(a.get("kind")) orelse return false, "oracle")) return false;

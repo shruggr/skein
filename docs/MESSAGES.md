@@ -10,12 +10,12 @@ book names and ends waiting, and the answer is an entry. **Broadcast out and
 proof in are unauthenticated, self-validating events** through specific
 wiring (an optional status provider reports statuses as signed messages),
 and **scheduling is a message to a provider** (the waker, the cron
-provider). **The kernel is the machine, four tables and the oracle**:
+provider). **The kernel is the machine, four tables and the signer**:
 objects, heads with their owner, one dispatch table (routes, boxes and
 libp2p topics are its rows), the address book; the admin operations are the
 kernel's own, on messages from the owner or a delegate; an app writes only
 heads under its own name. The host is transports + providers + store +
-oracle; it routes nothing ("The dispatch table", below).
+signer; it routes nothing ("The dispatch table", below).
 
 ## The persistence rule (#68: skein is a state process)
 
@@ -124,7 +124,7 @@ the general message — its session holds the claimed identity and the
 signature verifies — against the instance's session table (below). The
 caller is the identity key the session proved; there is no account, no
 handle check, no envelope. Answers are signed on the session through the
-instance's oracle (the kernel's `wallet`, a recorded call of the step).
+instance's signer (the kernel's `wallet`, a recorded call of the step).
 
 - **Sessions are state** (#68). The BRC-103 session table is records the
   front door reads and writes; a handshake is a request like any other,
@@ -276,7 +276,7 @@ It answers (dag-cbor on stdout), one of:
   state — and signs its answer on the session (not recorded).
 - **Replay.** The handler runs again in the request's steps on replay, over
   the same state at the same place in the log, and must answer the same;
-  its recorded calls (the oracle's signatures) are served from the log.
+  its recorded calls (the signer's signatures) are served from the log.
 
 ### A synchronous client waits on the thread (#66)
 
@@ -416,7 +416,7 @@ An identity outside the host — David's wallet, the inference peer, a browser
 tab — gets its mail kept by a **mailbox instance**: an instance with only the
 front door and the messagebox, whose dispatch rows send `:ack` and every
 message from anyone in any box (`*`) to the messagebox, for its owner. Its
-sessions are records like any instance's (#68). It has an identity of its own (its oracle's key;
+sessions are records like any instance's (#68). It has an identity of its own (its signer's key;
 the BRC-104 counterparty), and keeps the owner's mail as the owner's.
 
 Every mailbox instance is made by the instance manager's `create` with image
@@ -512,7 +512,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 ```
 
 - The kernel builds the record (`sender` the instance, `recipient` = `to`),
-  signs it through the oracle — DER ECDSA by the sender's BRC-42 child for
+  signs it through the signer — DER ECDSA by the sender's BRC-42 child for
   `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone,
   over the dag-cbor of the record without `signature` (BRC-169 §7.2/§7.3's
   signing on skein's record; anyone verifies it with the sender's key) —
@@ -522,7 +522,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   send two messages.
 - It goes out **when the step ends without error** (an errored step sends
   nothing), listed on the step's update as `emitted`. Replay re-signs from
-  the recorded oracle answer and sends nothing. At a start the kernel hands
+  the recorded signer answer and sends nothing. At a start the kernel hands
   over again every emitted message a waiting thread still awaits; a host
   acts on a message once.
 - **An event instead of a message** (#65): `emit({event: "broadcast", tx,
@@ -698,7 +698,7 @@ claim is the instance's first entry after its genesis. The onboarding app
 (docs/ARCH.md, "The host skein").
 
 **How a host obtains its providers' keys is its own business**, not core:
-the reference host derives them from its master secret (`src/host/oracle.ts`
+the reference host derives them from its master secret (`src/host/signer.ts`
 `providerKey`: a BRC-42 child under `[2, "skein provider"]`, key ID the
 name); the browser page from a secret it keeps. A system tree names a
 provider as a row's sender by `$<name>` (`$status`, `$cron`), which the
@@ -756,7 +756,7 @@ record  {kind: "broadcast", tx: <cid>, beef?: bytes}                     (Zig: s
 
 - `tx` is a `bitcoin-tx` CID of a transaction in the store; `beef` (its
   Atomic BEEF) gives a broadcaster the ancestry it needs (Extended Format).
-  No recipient, no signature, no oracle call. The record is listed in the
+  No recipient, no signature, no signer call. The record is listed in the
   step's `emitted` with the messages, recorded, never re-executed on replay,
   and goes out when the step ends without error — handed to the host
   (transport `event`) — and again at a start while the thread awaits the
@@ -853,7 +853,7 @@ message.
 | a shell's `sleep` (the kernel emits it) | `{at: ms}` | the same; the shell is re-executed from its origin and carries on past the sleep under that entry |
 | anything else | | `{replyTo, error: "the waker takes {at: ms} in box \"wake\""}` |
 
-A shell's wake-me is signed through the oracle (the call recorded on its
+A shell's wake-me is signed through the signer (the call recorded on its
 waiting update with `emitted` and `awaits`). No waker in the address book:
 `deadline` fails (`deadline: no waker in the address book (an entry with
 role "waker")`), and a shell's sleep errors the shell (`sleep: no waker in

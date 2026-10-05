@@ -27,7 +27,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Router } from "../../src/host/router.ts";
 import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
-import { Oracle } from "../../src/host/oracle.ts";
+import { Signer } from "../../src/host/signer.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { DEFAULTS } from "../../src/runtime/log.ts";
 import { CHAT_APP, installApps, SHELL_APP, type PinnedApp } from "../../src/testapps.ts";
@@ -80,7 +80,7 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
   const ownerKey = key();
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const router: Router = new Router({
-    db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home, providerKeyFor: (n) => new Oracle(new PrivateKey("a77e57", 16)).providerKey(n),
+    db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home, providerKeyFor: (n) => new Signer(new PrivateKey("a77e57", 16)).providerKey(n),
     // No host skein here (#113): the handles resolve over host.db (a fixture).
     discovery: fakeDiscovery(db, () => router),
     owner: ownerId, infer: o.infer?.toPublicKey().toString(), idleMs: 0, now: clock.now, ledgerMs: 3_600_000,

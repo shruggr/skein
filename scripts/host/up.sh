@@ -3,14 +3,14 @@
 #
 #   router    skein-host run  (background)    127.0.0.1:8100  the reverse proxy to every instance's front door
 #                                                              (http://<handle>.localhost:8100 or /@<handle>, #40), the
-#                                                              instances' oracle and kernels (started on demand), the waker;
+#                                                              instances' signer and kernels (started on demand), the waker;
 #                                              127.0.0.1:4600  host page and /roster.json
 #   owner     1sat serve wallet-api            127.0.0.1:3322  the dev owner's wallet (a client)
 #   infer     1sat serve wallet-api            127.0.0.1:3323  the inference peer's wallet (a client)
 #
 # No `1sat serve` messagebox, no wallet-api per instance, no host wallet: each
 # instance is an HTTP server (its front door); instances sign through the
-# router's oracle (master secret ~/.skein/master.key). The order matters
+# router's signer (master secret ~/.skein/master.key). The order matters
 # (README.md, "Bring-up order"):
 #
 #   1. the client wallets (their identity files: owner.identity, infer.identity)

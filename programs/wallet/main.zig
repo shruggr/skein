@@ -41,7 +41,7 @@
 //!   {op: "signAction", reference}                BRC-100 signAction for a draft (signAndProcess: false)
 //!   {op: "list", basket?, includeSpent?}        our outputs in a basket (default "default")
 //!
-//! Recorded calls: the oracle over the `wallet` import (getPublicKey,
+//! Recorded calls: the signer over the `wallet` import (getPublicKey,
 //! createSignature: no key is ever here). Every step stores a result record,
 //! keeps it in the thread, and prints its CID (hex) on stdout; the result
 //! names the transactions it is about as `refs` with rel `mentions`.
@@ -119,8 +119,8 @@ const VmStore = struct {
     }
 };
 
-/// The signing oracle over the `wallet` import (getPublicKey, createSignature).
-const VmOracle = struct {
+/// The signer over the `wallet` import (getPublicKey, createSignature).
+const VmSigner = struct {
     var dummy: u8 = 0;
     fn derive(_: *anyopaque, arena: std.mem.Allocator, key_id: []const u8, sender: [33]u8) anyerror![33]u8 {
         const frame = try w.wire.getPublicKeyFrame(arena, w.brc29.security_level, w.brc29.protocol_name, key_id, sender, true);
@@ -130,7 +130,7 @@ const VmOracle = struct {
             return e;
         };
     }
-    /// A wire frame to the oracle and its result frame (getPublicKey, createSignature: attested).
+    /// A wire frame to the signer and its result frame (getPublicKey, createSignature: attested).
     fn call(_: *anyopaque, arena: std.mem.Allocator, frame: []const u8) anyerror![]const u8 {
         const res = try result(arena, sk.wallet, .{ frame.ptr, @as(u32, @intCast(frame.len)) });
         if (w.wire.errorMessage(res)) |m| std.log.err("oracle: {s}", .{m});
@@ -550,7 +550,7 @@ const Wallet = struct {
             if (o.payment) |p| {
                 if (o.insertion != null) return error.BadOutputSpec;
                 const key_id = try w.brc29.keyId(a, p.derivation_prefix, p.derivation_suffix);
-                const key = try VmOracle.derive(undefined, a, key_id, p.sender_identity_key);
+                const key = try VmSigner.derive(undefined, a, key_id, p.sender_identity_key);
                 if (!w.brc29.pays(script, key)) return error.NotOurPayment;
                 try fields.appendSlice(a, &.{
                     .{ .key = "basket", .value = .{ .text = "default" } },
@@ -744,7 +744,7 @@ fn run(a: std.mem.Allocator) !void {
         });
         to_ingest = tx.bytes;
     } else if (eql(u8, op, "createAction") or eql(u8, op, "signAction")) {
-        var ws = w.builder.WireSigner{ .ctx = &VmOracle.dummy, .call = VmOracle.call };
+        var ws = w.builder.WireSigner{ .ctx = &VmSigner.dummy, .call = VmSigner.call };
         const created = if (eql(u8, op, "createAction")) blk: {
             const opts = body.get("options");
             // The change key: a fresh BRC-29 derivation of our own, drawn from the thread's random (replayable).

@@ -1,5 +1,5 @@
 // A test host (#40): a router over a temporary host.db and SKEIN_HOME, agents
-// and mailbox instances with keys of their own (the oracle's stand-in). With no
+// and mailbox instances with keys of their own (the signer's stand-in). With no
 // host skein its own origin's BRC-169 requests are answered by a fixture over
 // host.db (fake-discovery.ts); `hostSkein()` makes the real one (#113): the host
 // skein with the onboarding app installed, which then answers them.
@@ -22,7 +22,7 @@ import { fakeDiscovery } from "./fake-discovery.ts";
 import { anyOf, dirSource, wasmDirObjects } from "./boot.ts";
 import { HostDb } from "./instances.ts";
 import { Router } from "./router.ts";
-import { Oracle } from "./oracle.ts";
+import { Signer } from "./signer.ts";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "../..");
 
@@ -64,7 +64,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
   return out;
 }
 
-/** A host with agents and mailbox instances, each instance's key its own (the oracle's stand-in). */
+/** A host with agents and mailbox instances, each instance's key its own (the signer's stand-in). */
 export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
@@ -85,7 +85,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
     discovery: fakeDiscovery(db, () => router),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
-    providerKeyFor: (name) => new Oracle(providerMaster).providerKey(name),
+    providerKeyFor: (name) => new Signer(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
   t.after(async () => { await router.stop(); db.close(); });

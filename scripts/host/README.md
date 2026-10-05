@@ -73,7 +73,7 @@ hydration (`[<handle>] WARNING: its genesis names no owner messagebox …` in
 
 | process | address | what | log |
 |---|---|---|---|
-| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600 | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the oracle (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65, #90: `fetch`, `waker`, `cron`, `libp2p`, `status`, the instance manager `manager` (the host skein's only), each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
+| host `bin/skein-host run` | 127.0.0.1:8100 (and ::1), host page 127.0.0.1:4600 | the HTTP transport: each instance is an HTTP server, its front door, at `http://<handle>.localhost:8100` (or `http://127.0.0.1:8100/@<handle>`); each instance's kernel started on demand (`skein-kernel serve`; not stopped when idle unless `SKEIN_IDLE_MS` is set), the signer (instance keys from `~/.skein/master.key`), the providers (#70, #69, #65, #90: `fetch`, `waker`, `cron`, `libp2p`, `status`, the instance manager `manager` (the host skein's only), each with a key of its own from the same master), the fuel ledger, the instances' feeds (SSE headers), the broadcaster (#58, #65: the broadcast events' queue to the host's Arcade, one status subscription), the libp2p nodes (#51: one per instance that has libp2p rows or declares `libp2p`, below) | `~/.skein/logs/host.log` |
 | owner (David) wallet `1sat serve wallet-api` | 127.0.0.1:3322 | the dev owner's wallet (HOME `~/.skein/owner-home`, key `~/.skein/owner-wallet.env`): a client | `~/.skein/logs/wallet-owner.log` |
 | infer peer wallet `1sat serve wallet-api` | 127.0.0.1:3323 | the inference peer's wallet (HOME `~/.skein/infer-home`, key `~/.skein/infer-wallet.env`): a client | `~/.skein/logs/wallet-infer.log` |
 | inference peer `bin/skein-infer` | — | polls its own mailbox instance (`SKEIN_MAILBOX_URL`, e.g. `http://127.0.0.1:8100/@infer`) and answers `completions` into the sender's messagebox as its address book names it (`~/.skein/infer-peers.json`, `SKEIN_INFER_PEERS`), raw BRC-33 on BRC-104 sessions | as run |
@@ -82,7 +82,7 @@ The scripts `messagebox.sh`, `messagebox-migrate.mjs`, `instance.sh`,
 `grants-legacy.sh`, `register.ts` and `web.sh`, and `wallets.sh` with no
 arguments (which also starts an instance wallet on 3321 and a host wallet on
 3324), belong to the layout before #33 and are not used. Instances need no
-wallet and no grants: the host's oracle signs for them.
+wallet and no grants: the host's signer signs for them.
 
 ## The HTTP transport
 
@@ -341,7 +341,7 @@ Every instance is a row in the host's management database, `~/.skein/host.db`
 | `domain` | default `localhost` |
 | `kind` | `agent`, or `mailbox` (a mailbox instance, #40: the front door and the messagebox, keeping mail for `owner`) |
 | `owner` | a mailbox instance's: the identity (hex) whose mailbox it is |
-| `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the oracle's, BRC-42 child, key ID the handle) |
+| `identity` | the instance's identity key: derived from `~/.skein/master.key` by `add` (the signer's, BRC-42 child, key ID the handle) |
 | `wallet_url`, `wallet_originator` | unused (the layout before #33) |
 | `store` | its store file (default `~/.skein/instances/<handle>/runtime.db`) |
 | `tree` | the root CID of the directory last deployed into it (`skein-host deploy`) |

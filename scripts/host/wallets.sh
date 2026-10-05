@@ -17,7 +17,7 @@
 #   scripts/host/wallets.sh owner infer   # only these (what up.sh starts since #33)
 #
 # Since the router (#33) the instance (3321) and host (3324) wallets are
-# LEGACY: instances sign through the router's oracle (src/host/oracle.ts) and
+# LEGACY: instances sign through the router's signer (src/host/signer.ts) and
 # entries are unsigned. Only the clients' wallets remain: the dev owner (3322)
 # and the inference peer (3323).
 set -euo pipefail

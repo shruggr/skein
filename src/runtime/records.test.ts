@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { BigNumber, ECDSA, PrivateKey, PublicKey, Signature } from "@bsv/sdk";
 import { decode, encode } from "./cid.ts";
 import {
-  isDispatchRow, isEmit, isGenesis, isMessage, isOracleCall, isProgram, messageBytes, messageDigest, program,
+  isDispatchRow, isEmit, isGenesis, isMessage, isSignerCall, isProgram, messageBytes, messageDigest, program,
   signMessage, verifyMessage, type Genesis, type Message,
 } from "./records.ts";
 import { ephemeralWallet, identityOf, signerFor } from "../wallet.ts";
@@ -83,13 +83,13 @@ test("program and genesis: validated", () => {
   assert.ok(!isGenesis({ ...g, scopes: { w: [""] } }));
 });
 
-test("emit and oracle-call records: validated", () => {
+test("emit and signer-call records: validated", () => {
   const to = PrivateKey.fromRandom().toPublicKey().toString();
   const envelope = { metanetHandles: "1.0", content: "QkIQMw==" };
   assert.ok(isEmit({ kind: "emit", to, box: "results", body: wasm, envelope }));
   assert.ok(!isEmit({ kind: "emit", to, box: "", body: wasm, envelope }));
   assert.ok(!isEmit({ kind: "emit", to, box: "results", body: wasm }), "the program seals: an emit carries its envelope");
-  assert.ok(isOracleCall({ kind: "oracle", thread: wasm, step: 1, i: 0, request: new Uint8Array(3), result: new Uint8Array(70) }));
-  assert.ok(!isOracleCall({ kind: "attested", thread: wasm, step: 1, i: 0, op: "http", request: new Uint8Array(3), result: new Uint8Array(70) }), "format 6 (#67): no recorded http calls; the oracle's answers alone are recorded");
-  assert.ok(!isOracleCall({ kind: "oracle", thread: wasm, step: 1, i: 0, request: wasm, result: new Uint8Array(70) }), "the request is a wire frame");
+  assert.ok(isSignerCall({ kind: "oracle", thread: wasm, step: 1, i: 0, request: new Uint8Array(3), result: new Uint8Array(70) }));
+  assert.ok(!isSignerCall({ kind: "attested", thread: wasm, step: 1, i: 0, op: "http", request: new Uint8Array(3), result: new Uint8Array(70) }), "format 6 (#67): no recorded http calls; the signer's answers alone are recorded");
+  assert.ok(!isSignerCall({ kind: "oracle", thread: wasm, step: 1, i: 0, request: wasm, result: new Uint8Array(70) }), "the request is a wire frame");
 });

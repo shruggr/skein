@@ -5,7 +5,7 @@
 # the router's messagebox — BRC-104 with the instances' own identities since
 # #33 part 2 (the front instance at the bare URL, each instance on its own
 # origin) — and exchange envelopes with every instance in host.db. Instances have no wallet-api: the
-# router's oracle signs for them. Idempotent (the owner's are reset first).
+# router's signer signs for them. Idempotent (the owner's are reset first).
 # Run again after `skein-host add` (a new instance is a new counterparty).
 #   scripts/host/grants.sh
 # (The grants of the pre-router layout — the instance wallet 3321 and the

@@ -4,9 +4,9 @@ What is built for issue #29 and re-split by #79 (both merged). The design is the
 (2026-09-28)", "Browser with Yours") as revised in its comments (Q3/Q5, "drop
 the checkpoint op", "no messagebox for ARC or ChainTracks"); this file
 describes what exists. A wallet is two things: a **root key**, which stays
-outside as the per-instance **signing oracle** (a ProtoWallet, #18), and
+outside as the per-instance **signer** (a ProtoWallet, #18), and
 **wallet state**, which lives inside as records. Nothing in the VM holds a
-key: every key operation is a call to the oracle.
+key: every key operation is a call to the signer.
 
 **Since #79 the wallet keeps only its own records, under its own name**
 (`wallet/state`: actions, coins, its own spends, drafts) **and the chain is
@@ -92,7 +92,7 @@ Output `protocol`s: `"wallet payment"` (a BRC-29 payment to us: basket
 `"wallet change"` (our change: basket `default`, `derivationPrefix`,
 `derivationSuffix`, counterparty self), `"basket insertion"` (its `basket`,
 `tags`, `customInstructions?`). Only the first two are spent by the builder:
-the wallet holds their keys (through the oracle).
+the wallet holds their keys (through the signer).
 
 ### Index maps
 
@@ -226,7 +226,7 @@ the action and its coins and ingests the BEEF at the chain app (which runs
 the same SPV, records it, and broadcasts it if it is unproven). The subject
 may be unmined: its coins are spendable at once.
 
-## The builder and the oracle
+## The builder and the signer
 
 `createAction` (BRC-100's, for the wallet's own funds): inputs are our
 spendable `default`-basket outputs (payments and change), largest first,
@@ -248,18 +248,18 @@ and signs it. `options.noSend: true` records without handing it to the
 chain app. Caller-supplied inputs,
 `lockTime`, `randomizeOutputs`, `sendWith` are not taken.
 
-**Every key operation is an oracle call** over the `wallet` import (BRC-100
-wire frames, recorded as `oracle` records): `getPublicKey` (call 8; forSelf; counterparty the
+**Every key operation is a signer call** over the `wallet` import (BRC-100
+wire frames, recorded as `oracle` records, the kind keeping the signer's old name): `getPublicKey` (call 8; forSelf; counterparty the
 payment's sender, or self for change) for each input's key and the change
 key, and `createSignature` (call 15) with `hashToDirectlySign` = the input's
 BIP143/ForkID sighash (`ALL|FORKID`) — go-sdk's own pattern
-(transaction/template/pushdrop). The oracle sees a key reference and a
+(transaction/template/pushdrop). The signer sees a key reference and a
 32-byte hash, nothing else; the unlocking script is `<DER ‖ 0x41> <pubkey>`.
 `vectors/signing.json` (go-sdk ProtoWallet) fixes every frame, preimage,
 sighash, fee, change amount and the final transaction; the wallet reproduces
 them byte for byte.
 
-`internalize` asks the oracle only `getPublicKey` (the BRC-29 payee key).
+`internalize` asks the signer only `getPublicKey` (the BRC-29 payee key).
 This is how Yours funds skein ("Browser with Yours"): a BRC-29 payment to a
 key derived for skein, internalized here as skein's own UTXO.
 

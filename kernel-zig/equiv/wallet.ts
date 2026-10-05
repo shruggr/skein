@@ -9,13 +9,13 @@
 // `ingest` message to the instance itself (the host's loopback), then waits
 // on the chain app's answers — accepted, proven, rejected. The wallet never
 // broadcasts; the chain app does. Then the stores are replayed Zig against
-// Zig (equiv/replays.ts): the oracle's answers come from the recorded calls.
+// Zig (equiv/replays.ts): the signer's answers come from the recorded calls.
 //
 // The chain is regtest from its genesis: headers 1..102 on the feed; the
 // owner funds the instance with a BRC-29 payment (internalize: SPV against
 // the chain state's headers, then ingested — the chain app broadcasts it);
 // the instance pays a second instance, the payee, with a BRC-29 payment
-// (createAction: signed through the oracle, its step emits the ingest
+// (createAction: signed through the signer, its step emits the ingest
 // message — no broadcast event of its own — and rests awaiting it): the
 // chain app broadcasts it, Arcade's RECEIVED makes it `accepted` (the same
 // thread steps), MINED with the merkle path makes it `proven` (the thread
@@ -414,7 +414,7 @@ if (db) {
   const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db, payeeDb], { encoding: "utf8" });
   process.stdout.write(r.stdout);
   if (r.status !== 0) process.stdout.write(r.stderr);
-  check(r.status === 0 && /identical .*the source store reproduced exactly/.test(r.stdout), "both stores replay to themselves exactly: the oracle's answers from the recorded calls");
+  check(r.status === 0 && /identical .*the source store reproduced exactly/.test(r.stdout), "both stores replay to themselves exactly: the signer's answers from the recorded calls");
 }
 
 if (process.env.SKEIN_WALLET_REPORT) writeFileSync(process.env.SKEIN_WALLET_REPORT, JSON.stringify(report));

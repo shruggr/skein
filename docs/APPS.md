@@ -20,7 +20,7 @@ the shell's file system; an app's are `<app>/…`); a **box** is a message
 destination inside the instance, routed by the dispatch table; the
 **owner** is the identity whose admin rows every genesis carries (the
 kernel's own operations `objects`, `head`, `dispatch`, `peers`). The host
-is transports + providers + store + oracle; it routes nothing.
+is transports + providers + store + signer; it routes nothing.
 
 ## 1. An app is a tree under its own name
 

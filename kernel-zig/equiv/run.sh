@@ -73,7 +73,7 @@ else
   echo "FAIL refused for another reason: $(cat "$work/old.err")"; status=1
 fi
 
-echo "== the wallet in the VM (#29, #79): its own records under wallet/state over the chain app (shruggr/skein-chain at wallet.ts's pinned commit, or \$SKEIN_CHAIN_DIR): oracle signing, every transaction ingested by a message to the instance itself, the chain app broadcasting to a fake Arcade and answering accepted/proven/rejected; settlement and a reorg read from chain/state; replayed"
+echo "== the wallet in the VM (#29, #79): its own records under wallet/state over the chain app (shruggr/skein-chain at wallet.ts's pinned commit, or \$SKEIN_CHAIN_DIR): signer signing, every transaction ingested by a message to the instance itself, the chain app broadcasting to a fake Arcade and answering accepted/proven/rejected; settlement and a reorg read from chain/state; replayed"
 # Issue #34: its component build too, when wasm-tools and the preview1 adapter are there (wallet.ts compares the ABIs).
 if command -v wasm-tools > /dev/null; then
   (cd "$kz/../programs/wallet" && mise exec -- zig build component) || { echo "FAIL the wallet's component build"; status=1; }
@@ -85,7 +85,7 @@ echo "== bootstrap (#4): a system tree from a directory and from a packet, chatt
 echo "== a component's emit (#15, #70): the fetch component through the router's fetch provider, its answer an entry; replayed with no host to ask"
 "${node[@]}" "$kz/equiv/fetch.ts" || status=1
 
-echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip (over the libp2p provider, #70); replayed natively and in the browser; a live step with no oracle in the browser"
+echo "== libp2p (#51): two routers — publish, validate, admit, reject (recorded), a stream round trip (over the libp2p provider, #70); replayed natively and in the browser; a live step with no signer in the browser"
 "${node[@]}" "$kz/equiv/libp2p.ts" || status=1
 
 echo "== overlay services (#36, #79): the app shruggr/skein-overlay (#71: cloned at overlay.ts's pinned commit, or \$SKEIN_OVERLAY_DIR) and the chain app in a tree; submit/lookup through the router with the stock SDK clients; the gate (the chain app's answer); the gossip; replayed"

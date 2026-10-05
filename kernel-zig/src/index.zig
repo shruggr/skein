@@ -84,11 +84,11 @@ pub const STATE_KIND = "skein-state";
 /// 5 = every package a transport carries in is a `request` entry, the middleware stepped on it; sessions
 /// are records (head `sessions`); a message or event a middleware routes is unique by the `unique` map (#68);
 /// 6 = one outbound primitive, `emit` (#70, #67): a step's update lists the signed messages it emitted
-/// (`emitted`), no recorded `http`/`libp2p` calls and no attestations; the oracle's answers are `oracle`
+/// (`emitted`), no recorded `http`/`libp2p` calls and no attestations; the signer's answers are `oracle`
 /// records; the address book (head `peers`) names each recipient's transport; the genesis names no `attest` key;
 /// 7 = broadcast out is an event (#65): `emitted` may list a `broadcast` record ({kind, tx, beef?}) beside the
 /// messages; no `wake` entries (#69: a step's deadline and a shell's sleep are wake-me messages to the waker,
-/// a shell's waiting update listing its wake-me in `emitted`/`awaits` and the oracle call in `calls`); the
+/// a shell's waiting update listing its wake-me in `emitted`/`awaits` and the signer call in `calls`); the
 /// genesis names no `jobs` (a schedule is a message to the cron provider);
 /// 8 = the kernel's four tables (#77): one dispatch chain ({kind: "dispatch"}: rows {transport, address,
 /// sender, program, fn?}) replaces the subscriptions chain, the genesis's `routes` and the head `routes`; the

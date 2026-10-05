@@ -112,7 +112,7 @@ type Named = { handle: string; domain: string };
 
 export interface RouterOptions {
   db: HostDb;
-  /** Each row's oracle: the wallet its kernel's `wallet` import is answered from. */
+  /** Each row's signer: the wallet its kernel's `wallet` import is answered from. */
   walletFor(row: InstanceRow): Promise<WalletInterface> | WalletInterface;
   /** A new agent's genesis: its owner (required to write one), the inference peer, their names. */
   owner?: string;
@@ -160,10 +160,10 @@ export interface RouterOptions {
   kernel?: { command?: string; env?: Record<string, string | undefined> };
   /** The libp2p host (#51, p2p.ts): its host-wide settings (default: loopback TCP + WS, no DHT, no mDNS). */
   libp2p?: P2PHostConfig;
-  /** An instance's libp2p peer key (oracle.ts peerKey). Absent: no libp2p host; the kernels' `libp2p` is refused. */
+  /** An instance's libp2p peer key (signer.ts peerKey). Absent: no libp2p host; the kernels' `libp2p` is refused. */
   peerKeyFor?(handle: string): PrivateKey;
   /**
-   * A provider's key (#70, oracle.ts providerKey: the HTTP proxy `fetch`, the
+   * A provider's key (#70, signer.ts providerKey: the HTTP proxy `fetch`, the
    * `waker`, `cron`, `libp2p`, `status`), which each new genesis's address
    * book names. Absent: keys of this router's own, made fresh (a test's; a
    * restarted router would not be the providers its instances know).
@@ -359,7 +359,7 @@ export class Router {
     // Without a host's own provider keys: a router's own, fresh (a test's).
     const own = o.providerKeyFor ? undefined : new KeyDeriver(PrivateKey.fromRandom());
     const keyOf = o.providerKeyFor ?? ((n: ProviderName) => own!.derivePrivateKey([2, "skein provider"], n, "self"));
-    // The certifier key is the certifier provider's (oracle.ts certifierKey: providerKey("certifier")).
+    // The certifier key is the certifier provider's (signer.ts certifierKey: providerKey("certifier")).
     this.certifier = new ProtoWallet(keyOf("certifier"));
     const p2p = this.p2p;
     this.providers = new Providers({
@@ -591,7 +591,7 @@ export class Router {
     if (!row || (row.status !== "enabled" && !this.unpublished.has(handle))) throw new Error(`no enabled instance ${handle}`);
     const wallet = await this.o.walletFor(row);
     const identity = await rootIdentity(wallet);
-    if (row.identity && row.identity !== identity) throw new Error(`its oracle is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
+    if (row.identity && row.identity !== identity) throw new Error(`its signer is ${short(identity)}, not the recorded identity ${short(row.identity)}`);
     const kernel = new Kernel({
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       log: (line) => this.say(handle, line),
@@ -610,7 +610,7 @@ export class Router {
       }
       g = await kernel.genesis() as { identity?: unknown } | null;
       if (!g) throw new Error("the store's log does not start with a genesis this kernel reads (format 3, #40): start a new store (re-genesis)");
-      if (keyHex(g.identity) !== identity) throw new Error(`the oracle (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
+      if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
       await kernel.running(identity);
       void kernel.idle().catch(() => {}); // busy until what start resumed is done
@@ -647,7 +647,7 @@ export class Router {
 
   /**
    * Boot a row's empty store from a system tree or a checkpoint (issue #4,
-   * boot.ts) before its first hydration; the row's identity is its oracle's.
+   * boot.ts) before its first hydration; the row's identity is its signer's.
    */
   async bootRow(handle: string, src: BootSource, o: { image?: boolean; manager?: boolean } = {}): Promise<Booted> {
     const row = this.o.db.get(handle);
@@ -734,7 +734,7 @@ export class Router {
    * A new instance from an image, owned by `owner` (#90: the instance
    * manager's `create`; `skein-host init` for the host skein). In this order:
    * the row, disabled (no hostname: nothing reaches it); its identity
-   * derived (the oracle's, key ID = the handle) and its store booted from the
+   * derived (the signer's, key ID = the handle) and its store booted from the
    * image (only `default`, the default image, so far); its kernel started
    * unpublished; the owner's claim delivered as a `local` request from the
    * instance manager, and processed — the owner's admin rows written, the

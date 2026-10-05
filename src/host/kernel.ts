@@ -7,7 +7,7 @@
 //                        proof's event) · answer (#66: wait on the thread a request entry launched; its answer once it
 //                        comes to rest, or its state at the wait's bound) · call (#40: a program's function
 //                        over the state, no entry, no writes: host-side reads only) · idle · start · running
-//   the kernel asks      wallet (a BRC-100 wire frame → its answer: the oracle; the one call a step
+//   the kernel asks      wallet (a BRC-100 wire frame → its answer: the signer; the one call a step
 //                        makes out mid-step, #67)
 //   the kernel tells     emit (#70: a signed message for the host to carry out — {message, body,
 //                        transport, address}, a `local` provider's or the libp2p node's, the answer
@@ -46,7 +46,7 @@ export interface KernelOptions {
   db: string;
   handle: string;
   domain: string;
-  /** Answers the kernel's `wallet` frames: the instance's oracle. Absent: every wallet call fails. */
+  /** Answers the kernel's `wallet` frames: the instance's signer. Absent: every wallet call fails. */
   wallet?: WalletInterface;
   /** A message (#70) or an event (#65) the kernel hands over to carry out (the `emit` notice): a `local` provider's, the libp2p node's, the broadcaster's (providers.ts). Absent: dropped. */
   emit?(o: Outgoing): void;
@@ -192,7 +192,7 @@ export class Kernel {
   }
   /**
    * The kernel's `call` (#40): a program's function (by CID, or a genesis
-   * program's name) over the current state — no entry, no writes, the oracle
+   * program's name) over the current state — no entry, no writes, the signer
    * and http answered but not recorded; fuel-limited (`callFuelLimit`). The
    * result is what the program wrote to stdout; `fuel` is reported either way
    * (the router's ledger).

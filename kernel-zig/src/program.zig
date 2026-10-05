@@ -11,7 +11,7 @@
 //                                  <cid>} → the signed message's CID (binary). The
 //                                  recipient must be in the address book (head
 //                                  `peers`); the kernel signs the message through
-//                                  the oracle (a recorded call), lists it on the
+//                                  the signer (a recorded call), lists it on the
 //                                  step's update (`emitted`) and sends it by the
 //                                  recipient's transport when the step ends without
 //                                  error. The answer is an entry (await the CID)

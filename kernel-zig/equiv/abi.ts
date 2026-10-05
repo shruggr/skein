@@ -6,7 +6,7 @@
 // field except `fuel` and `prev` (the previous update's CID, which covers its
 // fuel): the component's adapter and canonical-ABI glue are
 // instructions of their own, so its fuel is its own), the same log lines and
-// emits, and no DIVERGED: the attested calls (the oracle, http) are asked
+// emits, and no DIVERGED: the attested calls (the signer, http) are asked
 // with the very same requests, so the replay finds every answer in the
 // record. The component's replay is then run again and must reproduce itself
 // exactly, fuel and state record included.

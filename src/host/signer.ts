@@ -1,4 +1,4 @@
-// The signing oracle (#18, #29): one master secret held by the router, and
+// The signer (#18, #29): one master secret held by the router, and
 // per instance a root key derived from it with BRC-42/43 — protocol
 // [2, "skein instance"], key ID = the instance id (its handle), counterparty
 // self — behind a ProtoWallet: getPublicKey, createSignature, encrypt,
@@ -41,7 +41,7 @@ export function masterKey(vars: Record<string, string | undefined>, home: string
   return PrivateKey.fromHex(readFileSync(file, "utf8").trim());
 }
 
-export class Oracle {
+export class Signer {
   private readonly deriver: KeyDeriver;
   private readonly wallets = new Map<string, WalletInterface>();
 
@@ -71,7 +71,7 @@ export class Oracle {
     return this.instanceKey(id).toPublicKey().toString();
   }
 
-  /** The instance's oracle: a ProtoWallet over its root key (a WalletInterface whose actions reject). */
+  /** The instance's signer: a ProtoWallet over its root key (a WalletInterface whose actions reject). */
   wallet(id: string): WalletInterface {
     let w = this.wallets.get(id);
     if (!w) this.wallets.set(id, (w = ephemeralWallet(this.instanceKey(id))));

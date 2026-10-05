@@ -11,7 +11,7 @@
 //     alpha's store with one more message for its p2p-demo handler (the
 //     owner's signed message appended natively as a `local` request, K2, not
 //     processed), then loaded into a Worker and drained. This
-//     page answers no oracle, so the message cannot be signed: the step ends
+//     page answers no signer, so the message cannot be signed: the step ends
 //     errored and nothing is handed to the tab (no `emit` notice).
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/libp2p.ts
@@ -58,7 +58,7 @@ try {
     process.stdout.write(r.stdout.split("\n").map((l) => (l ? `  ${l}\n` : "")).join(""));
     check(r.status === 0, "the browser build replays both stores (the libp2p provider's answers are entries) exactly as natively");
 
-    // ---------------------------------------------------------------- a live step in a tab with no oracle
+    // ---------------------------------------------------------------- a live step in a tab with no signer
     // One more message for alpha's p2p-demo box, admitted natively but not processed (no `start`).
     const live = join(work, "live.db");
     copyFileSync(join(work, "alpha.db"), live);
@@ -119,9 +119,9 @@ try {
       await browser.close();
       server.close();
     }
-    // This page answers no oracle (no onRequest): the emit cannot be signed, so the step errors and nothing goes out.
+    // This page answers no signer (no onRequest): the emit cannot be signed, so the step errors and nothing goes out.
     const step = said.find((l) => /p2p-demo step 1 → /.test(l));
-    check(!!step && /→ errored/.test(step) && !/emitted/.test(step), `the live step in the browser, with no oracle: the publish cannot be signed, the step errored, nothing emitted (${step ?? said.slice(-3).join(" | ")})`);
+    check(!!step && /→ errored/.test(step) && !/emitted/.test(step), `the live step in the browser, with no signer: the publish cannot be signed, the step errored, nothing emitted (${step ?? said.slice(-3).join(" | ")})`);
     check(!said.some((l) => l.startsWith("EMIT ")), "nothing handed to the tab to carry out (an errored step emits nothing)");
     const dump = JSON.parse(execFileSync(kernelBin, ["dump", join(work, "live.web.db")], { maxBuffer: 1 << 30 }).toString()) as { entries: unknown[] };
     check(dump.entries.length > 0, `the tab's store reads back natively (${dump.entries.length} entries)`);

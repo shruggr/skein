@@ -153,7 +153,7 @@ writes the same chain. A name never moved has no chain.
 
 ### The dispatch table, and the kernel's four tables (#77, format 8)
 
-The kernel is the machine, four tables and the `wallet` (oracle) import.
+The kernel is the machine, four tables and the `wallet` (signer) import.
 The tables are **objects** (the store: blocks by CID, global, unowned),
 **heads** (name → root, with its owner, above), the **dispatch table** and
 the **address book** (`peers`, docs/MESSAGES.md). No program import reaches
@@ -161,7 +161,7 @@ a table: a step's writes are its `put`/`keep` records and the heads in its
 scope; everything else is an **admin operation the kernel itself performs**
 on a message at an admin box from the owner or a delegate — no program is
 stepped, no elevated scope exists. The host (transports + providers + store
-+ oracle) routes nothing: the dispatch table does.
++ signer) routes nothing: the dispatch table does.
 
 The dispatch table is one chain per instance: origin `{kind: "dispatch"}`,
 one update per change `{op: "add" | "remove", row, thread?, input, at}`,
@@ -302,7 +302,7 @@ these imports:
 - stdio (stdin from the pipeline, stdout and stderr captured);
 - the record store, read-only, by CID (`get`): global, holding a CID is the permission;
 - the connected wallet's BRC-100 operations (sign, verify, encrypt, decrypt,
-  derive): the oracle, answered synchronously and recorded;
+  derive): the signer, answered synchronously and recorded;
 - **`emit`** (#70): a signed message to a recipient the address book names —
   the one way out (below, "emit");
 - the entry's time stamp, advanced by fuel (below, "The clock inside a step runs on fuel").
@@ -376,7 +376,7 @@ status as 1, because `wasi:cli/exit` is ok/err.
 
 ### emit: the one way out (#70, #67)
 
-A step never asks the world anything mid-step but the oracle. **External
+A step never asks the world anything mid-step but the signer. **External
 communication is a thread**: the step emits a signed message, ends
 `waiting` on what it expects, and the answer arrives as an entry that steps
 the thread again. There is no `http` import, no `libp2p` import and no
@@ -416,8 +416,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   `box` is not empty and does not start with `:`. `body` is the canonical
   dag-cbor of the body record. `subject` names what the message is about
   (a transaction's CID); a provider's answer carries it back.
-- The kernel builds the **message record**, signs it through the oracle
-  (a recorded call, an `oracle` record, as a program's own `wallet` calls
+- The kernel builds the **message record**, signs it through the signer
+  (a recorded call, an `oracle` record — the kind keeps the signer's old name — as a program's own `wallet` calls
   are), puts it and the body, lists its CID on the step's update
   (`emitted`) and returns the CID — the message's id, what a reply's
   `replyTo` names:
@@ -441,7 +441,7 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   recipient's or the instance's own (the loopback, `local` to `self`)
   handed to the host once the step is committed (the serve frame `emit`). At a start the kernel hands over again what a waiting
   thread still awaits (a host restart loses nothing a provider had); a host
-  acts on a message once. Replay re-signs from the recorded oracle answer
+  acts on a message once. Replay re-signs from the recorded signer answer
   and sends nothing.
 - **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
   <dag-cbor bytes>, subject?: <cid>}` · `emit: the message is not dag-cbor`
@@ -473,7 +473,7 @@ role `waker`) and awaits it. The waker's answer `{replyTo, at}` steps the
 thread with `woke: true`; one stamped before `at` runs nothing. Errors:
 `deadline: not after the step's time`, `deadline: no waker in the address
 book (an entry with role "waker")`. **A shell's `sleep`** is the same
-message (#69): the kernel signs the wake-me through the oracle (the call on
+message (#69): the kernel signs the wake-me through the signer (the call on
 the shell's waiting update, with the message in `emitted` and `awaits`),
 and the waker's answer re-executes the shell from its origin, which carries
 on past the sleep under that entry (no waker: the shell errors, `sleep: no
@@ -524,7 +524,7 @@ function over the current state and return a value. It writes nothing.
 - **No entry, no writes.** `get`, `head` and the store read as they stand;
   `put` and `putblock` keep their records in the call's write cache only (so
   a program can build a record and read it back), and `keep`, `launch`, `await`, `advance`,
-  `emit` and `deadline` are refused (a call sends nothing). The oracle
+  `emit` and `deadline` are refused (a call sends nothing). The signer
   (`wallet`) is answered by the host and **not recorded**.
 - **No determinism.** Nothing replays a call, so it needs none: its clock is
   the host's `now` (plus fuel, as in a step), its random is real entropy
@@ -620,7 +620,7 @@ corpus replays in Chrome with identical updates and state.
 
 Fuel accounting is a query over the log: the sum of `fuel` per thread, instance or
 period (`skein-kernel fuel <db> [--since n]`), verifiable by anyone who
-replays the log. Fuel does not cover host time outside the VM (oracle,
+replays the log. Fuel does not cover host time outside the VM (signer,
 peers, providers); storage and messages are visible in the log already.
 
 ### The clock inside a step runs on fuel
@@ -745,7 +745,7 @@ recorded, nothing runs.
 ## Host
 
 Everything that is not the machine is the host: transports + providers +
-store + oracle (`ARCH.md`, "The host"). Its surfaces into the machine are
+store + signer (`ARCH.md`, "The host"). Its surfaces into the machine are
 the kernel's frames: admit, answer and call in; `wallet` (the signer) and
 `emit` out. There is no execution service: commands run inside. The
 boundary is a wire protocol (dag-cbor frames, WASI imports), not a language

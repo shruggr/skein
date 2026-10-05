@@ -5,7 +5,7 @@
 // (shruggr/skein-onboard) registers the handle, puts the issuance record,
 // takes its hash as the serial number, asks the certifier provider to sign
 // (`issue`, providers.ts), and records the answer under its own head. The key
-// stays here, outside every instance: the certifier key (oracle.ts
+// stays here, outside every instance: the certifier key (signer.ts
 // certifierKey: the master secret's child under [2, "skein provider"], key ID
 // `certifier`), which the manifest the app serves publishes as
 // `metanet.trust.publicKey` (the address book's `certifier` entry).

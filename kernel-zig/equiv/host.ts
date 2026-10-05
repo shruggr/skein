@@ -1,5 +1,5 @@
 // The host skein, the instance manager and the onboarding app (#90), end to
-// end on a host as `skein-host run` runs it (runHost: the oracle over a
+// end on a host as `skein-host run` runs it (runHost: the signer over a
 // master secret, the control socket, the providers):
 //
 //   `skein-host init --owner <operator>` creates the host skein from the
@@ -40,7 +40,7 @@ import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { masterKey, Oracle } from "../../src/host/oracle.ts";
+import { masterKey, Signer } from "../../src/host/signer.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { appCheckout, ONBOARD_APP } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -142,10 +142,10 @@ try {
   // ------------------------------------------------ BRC-169: alice resolves (#100)
   // What 1sat-sdk's resolveHandle checks (the manifest's metanet.handles.version major 1, the certificate's
   // subject = the identityKey), and the certificate itself: the SDK verifies it, its certifier is the
-  // manifest's trust key, the oracle's certifier key.
+  // manifest's trust key, the signer's certifier key.
   const manifest = await (await fetch(`${base}/manifest.json`)).json() as { metanet?: { trust?: { publicKey?: string }; handles?: { version?: string; resolve?: string } } };
-  const certifierKey = new Oracle(masterKey(vars, home)).certifierKey().toPublicKey().toString();
-  check(manifest.metanet?.handles?.version?.split(".")[0] === "1" && manifest.metanet.trust?.publicKey === certifierKey, `the manifest: metanet.handles.version ${manifest.metanet?.handles?.version}, metanet.trust.publicKey the oracle's certifier key`);
+  const certifierKey = new Signer(masterKey(vars, home)).certifierKey().toPublicKey().toString();
+  check(manifest.metanet?.handles?.version?.split(".")[0] === "1" && manifest.metanet.trust?.publicKey === certifierKey, `the manifest: metanet.handles.version ${manifest.metanet?.handles?.version}, metanet.trust.publicKey the signer's certifier key`);
   const rs = await fetch(`${manifest.metanet?.handles?.resolve}?handle=alice`);
   const ra = await rs.json() as { metanetHandles?: string; identityKey?: string; messagebox?: string; ttl?: number; revoked?: boolean; certificate?: Certificate };
   check(rs.status === 200 && ra.metanetHandles === "1.0" && ra.identityKey === res?.identity && ra.messagebox === res?.url && typeof ra.ttl === "number" && ra.revoked === false, `GET <resolve>?handle=alice: §5.2's answer (${rs.status})`);

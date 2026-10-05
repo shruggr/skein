@@ -31,7 +31,7 @@ import { rawCid } from "../runtime/programs.ts";
 import { program } from "../runtime/records.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { HostDb } from "./instances.ts";
-import { Oracle } from "./oracle.ts";
+import { Signer } from "./signer.ts";
 import { keyOfPeerId, peerIdOf } from "./p2p.ts";
 import { Router } from "./router.ts";
 import type { Kernel } from "./kernel.ts";
@@ -102,18 +102,18 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   t.after(() => rmSync(home, { recursive: true, force: true }));
   process.env.SKEIN_EXTRA_MODULES = DEMO_WASM; // the kernels install it (not pinned)
   const kernel = join(ROOT, "kernel-zig/zig-out/bin/skein-kernel");
-  const oracle = new Oracle(PrivateKey.fromHex("55".repeat(32)));
+  const signer = new Signer(PrivateKey.fromHex("55".repeat(32)));
   const ownerKey = new PrivateKey("2222", 16);
   const ownerId = ownerKey.toPublicKey().toString();
   const [pa, pb] = [await freePort(), await freePort()];
-  const idA = peerIdOf(oracle.peerKey("alpha")).toString(), idB = peerIdOf(oracle.peerKey("beta")).toString();
+  const idA = peerIdOf(signer.peerKey("alpha")).toString(), idB = peerIdOf(signer.peerKey("beta")).toString();
   const lines: string[] = [];
 
   const mk = (handle: string, listen: string, bootstrap: string, genesis: ConstructorParameters<typeof Router>[0]["genesis"]) => {
     const db = new HostDb(join(home, `${handle}-host.db`));
     db.add(handle, { store: join(home, handle, "runtime.db") });
     const r = new Router({
-      db, walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (h) => oracle.peerKey(h), providerKeyFor: (n) => oracle.providerKey(n), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
+      db, walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (h) => signer.peerKey(h), providerKeyFor: (n) => signer.providerKey(n), home, owner: ownerId, idleMs: 0, ledgerMs: 200,
       kernel: { command: kernel, env: { SKEIN_HOME: home } },
       libp2p: { listen: [listen], bootstrap: [bootstrap], dht: "off", relays: [], mdns: false }, libp2pDiscoveryMs: 300,
       genesis,
@@ -175,7 +175,7 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
   assert.equal(ev.topic, TOPIC);
   assert.equal(new TextDecoder().decode(ev.body), "hello");
   assert.equal(peerIdFromMultihash(Digest.decode(ev.from)).toString(), idA, "from: alpha's peer ID");
-  assert.equal(keyOfPeerId(ev.from), oracle.peerKey("alpha").toPublicKey().toString(), "the publisher's key, out of the entry");
+  assert.equal(keyOfPeerId(ev.from), signer.peerKey("alpha").toPublicKey().toString(), "the publisher's key, out of the entry");
   assert.equal(ev.seqno.length, 8);
   assert.ok(await reverify(ev), "the entry re-verifies from the log alone (GossipSub's signature over topic, seqno, from, body)");
   assert.ok(!(await reverify({ ...ev, body: new TextEncoder().encode("hellp") })), "and a changed body does not");

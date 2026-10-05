@@ -27,7 +27,7 @@
 // transport's middleware (the messagebox program) is launched as the
 // message's delivery thread. A key the address book does not name goes to
 // that middleware too (#87): it reads the resolve program's record of it. The answer comes back as an entry that steps
-// the thread awaiting it; nothing outside is asked mid-step but the oracle.
+// the thread awaiting it; nothing outside is asked mid-step but the signer.
 //
 // A shell thread that sleeps is not parked mid-instance (there is no JSPI
 // here). The run is abandoned at the sleep, having written its `waiting`
@@ -42,7 +42,7 @@ const json = @import("json.zig");
 const secp = @import("secp");
 const logm = @import("log.zig");
 const addressbook = @import("addressbook.zig");
-const oracle = @import("oracle.zig");
+const signer = @import("signer.zig");
 const heads = @import("heads.zig");
 const dispatch = @import("dispatch.zig");
 const programs = @import("programs.zig");
@@ -89,7 +89,7 @@ const CALL_OUTPUT_LIMIT = 64 << 20;
 /// BRC-100 wire call codes a program may make: key derivation and crypto only.
 const wallet_calls = [_]u8{ 8, 11, 12, 13, 14, 15, 16 };
 
-/// The oracle's answers by (thread, step, i): what replay serves instead of a wallet.
+/// The signer's answers by (thread, step, i): what replay serves instead of a wallet.
 pub const Witness = struct {
     arena: std.heap.ArenaAllocator,
     map: std.StringHashMap(Value),
@@ -98,7 +98,7 @@ pub const Witness = struct {
         return std.fmt.allocPrint(a, "{x} {d} {d}", .{ thread, step, i });
     }
 
-    /// Every oracle record the source's thread chains list (scheduler.ts witnessFrom).
+    /// Every signer record the source's thread chains list (scheduler.ts witnessFrom).
     pub fn from(gpa: std.mem.Allocator, s: Store) !*Witness {
         const w = try gpa.create(Witness);
         w.* = .{ .arena = std.heap.ArenaAllocator.init(gpa), .map = std.StringHashMap(Value).init(gpa) };
@@ -111,7 +111,7 @@ pub const Witness = struct {
                 for (calls.array) |c| {
                     if (c != .cid) continue;
                     const av = s.getOpt(a, c.cid);
-                    if (!logm.isOracleCall(av)) continue;
+                    if (!logm.isSignerCall(av)) continue;
                     const k = try key(a, Value.cidOf(av.?.get("thread")).?, Value.intOf(av.?.get("step")) orelse -1, Value.intOf(av.?.get("i")) orelse -1);
                     try w.map.put(k, av.?);
                 }
@@ -1390,7 +1390,7 @@ pub const Runtime = struct {
         // request's thread (#68: the middleware and the handler it calls) keeps the budget the front
         // door had as a call, `callFuelLimit`; every other step `fuelPerStep`.
         var meter = engine.Meter.init(if (request_input != null) callFuelLimit(rt.genesis) else fuelPerStep(rt.genesis));
-        // The oracle calls the step made, kept even when it fails: an
+        // The signer calls the step made, kept even when it fails: an
         // errored update lists them, so a replay has their answers.
         var calls = std.array_list.Managed([]const u8).init(a);
         blk: {
@@ -1812,13 +1812,13 @@ pub const Runtime = struct {
             allowed = true;
         };
         if (!allowed) return imp.failFmt("wallet: call {s} is not allowed to programs", .{if (frame.len > 0) try std.fmt.allocPrint(st.a, "{d}", .{frame[0]}) else "undefined"});
-        return oracleCall(st, imp, frame);
+        return signerCall(st, imp, frame);
     }
 
     /// The `emit` import (#70): dag-cbor {to: bytes(33), box, body: bytes (a
     /// dag-cbor record, canonical), subject?: <cid>} → the message's CID. The
     /// recipient must have a route (routeTo: the address book as this step
-    /// leaves it, else the mailbox transport's delivery thread); the message is signed through the oracle (a recorded call), put, and
+    /// leaves it, else the mailbox transport's delivery thread); the message is signed through the signer (a recorded call), put, and
     /// listed on the update; it goes out when the step ends without error.
     fn hEmit(imp: *program.Imports, msg: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
@@ -1850,7 +1850,7 @@ pub const Runtime = struct {
     /// beef?: bytes (its Atomic BEEF: the ancestry a broadcaster needs)} →
     /// the record {kind: "broadcast", tx, beef?}, listed on the update with the
     /// messages (`emitted`) and handed to the host once the step is committed.
-    /// No signature, no oracle call: the transaction proves itself.
+    /// No signature, no signer call: the transaction proves itself.
     fn emitEvent(st: *StepState, imp: *program.Imports, m: Value, ev: Value) program.Err![]const u8 {
         const a = st.a;
         const name = Value.str(ev) orelse return imp.failWith("emit: `event` is a name (the one event is \"broadcast\")");
@@ -1898,9 +1898,9 @@ pub const Runtime = struct {
         h.final(&d);
         try rec.put("nonce", .{ .bytes = try a.dupe(u8, d[0..16]) });
         const pre = cbor.encode(a, rec.value()) catch return error.OutOfMemory;
-        const frame = oracle.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, pre) catch return error.OutOfMemory;
-        const res = try oracleCall(st, imp, frame);
-        const sig = oracle.signatureOf(res) orelse return imp.failWith("emit: the oracle did not sign the message");
+        const frame = signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, pre) catch return error.OutOfMemory;
+        const res = try signerCall(st, imp, frame);
+        const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the oracle did not sign the message");
         try rec.put("signature", .{ .bytes = sig });
         st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
         const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
@@ -1938,11 +1938,11 @@ pub const Runtime = struct {
         return out;
     }
 
-    /// An oracle call's answer, recorded (#67: the one call a step makes out
+    /// A signer call's answer, recorded (#67: the one call a step makes out
     /// mid-step): the witness's on replay (a differing request is a
     /// divergence), else the wallet's. The record: {kind: "oracle", thread,
     /// step, i, request, result}.
-    fn oracleCall(st: *StepState, imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
+    fn signerCall(st: *StepState, imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
         const rt = st.rt;
         const a = st.a;
         const i = st.calls.items.len;
@@ -2064,7 +2064,7 @@ pub const Runtime = struct {
     /// `put` keeps records in memory for the call only; heads, the store and
     /// the log are read as they stand (plus the entries admitted and not yet
     /// processed, `pending`, and the committed state record, `state`). The
-    /// oracle (`wallet`) and `http` are answered by the host and not recorded,
+    /// signer (`wallet`) and `http` are answered by the host and not recorded,
     /// so a call is not deterministic and nothing replays it. Fuel is limited
     /// by `callFuelLimit` and reported.
     pub fn call(rt: *Runtime, a: std.mem.Allocator, prog: []const u8, func: []const u8, arg: []const u8, caller: ?[]const u8, now: i64) !CallResult {
@@ -2203,7 +2203,7 @@ pub const Runtime = struct {
         if (!heads.isHeadName(name)) return imp.failFmt("head: bad name {s}", .{try json.quoted(cs.a, name)});
         return heads.headTree(cs.a, cs.rt.store, name) catch imp.failWith("store error");
     }
-    /// The oracle, answered by the host and not recorded (a call is never replayed).
+    /// The signer, answered by the host and not recorded (a call is never replayed).
     fn cWallet(imp: *program.Imports, frame: []const u8) program.Err![]const u8 {
         const cs = callOf(imp);
         var allowed = false;
@@ -2473,7 +2473,7 @@ pub const Runtime = struct {
 
     /// A sleep: at once if not after "now"; else rest `waiting` until it. The
     /// wait is a message to the waker (#69, as a step's `deadline` is):
-    /// "wake me at `until`", signed through the oracle (a recorded call),
+    /// "wake me at `until`", signed through the signer (a recorded call),
     /// listed on the waiting update (`emitted`) and awaited (`awaits`). The
     /// waker's answer re-executes the shell from its origin, and it carries on
     /// past the sleep under that answer's entry. Re-executing, the waiting
@@ -2532,9 +2532,9 @@ pub const Runtime = struct {
     }
 
     /// A shell's wake-me (#69): {at: until} in box `wake` to the address
-    /// book's waker, signed as `emit` signs, the oracle call recorded at
+    /// book's waker, signed as `emit` signs, the signer call recorded at
     /// (thread, the waiting update's seq, 0) — replay serves it from the
-    /// witness. → the message's CID and the oracle record's.
+    /// witness. → the message's CID and the signer record's.
     fn shellWakeMe(rt: *Runtime, t: *ShellRun, until: i64) !struct { message: []const u8, call: []const u8 } {
         const a = t.a;
         const root = try rt.store.headTree(a, addressbook.HEAD);
@@ -2562,7 +2562,7 @@ pub const Runtime = struct {
         var d: [32]u8 = undefined;
         h.final(&d);
         try rec.put("nonce", .{ .bytes = try a.dupe(u8, d[0..16]) });
-        const frame = try oracle.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, try cbor.encode(a, rec.value()));
+        const frame = try signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, try cbor.encode(a, rec.value()));
         var result: []const u8 = undefined;
         const w: ?Value = if (rt.witness) |wi| try wi.find(a, t.origin, seq, 0) else null;
         if (w) |x| {
@@ -2580,7 +2580,7 @@ pub const Runtime = struct {
             t.diverged = try std.fmt.allocPrint(a, "{s} update {d} (sleep): no wallet and no recorded answer", .{ short(a, t.origin), seq });
             return error.Diverged;
         }
-        const sig = oracle.signatureOf(result) orelse {
+        const sig = signer.signatureOf(result) orelse {
             t.sleep_error = "sleep: the oracle did not sign the wake-me";
             return error.NoWaker;
         };

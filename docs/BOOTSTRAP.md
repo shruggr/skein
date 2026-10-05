@@ -396,7 +396,7 @@ pointer onto the record. The index is **read, not rebuilt**. `restore` only
 works on an empty store, and only for this kernel's format. Old spine nodes and
 state records (the index history) are left behind. `pack <handle> --checkpoint`
 writes one. The restored instance keeps its identity: it must be served by the
-same master key and handle (the host checks the oracle against the genesis).
+same master key and handle (the host checks the signer against the genesis).
 
 ### Writing packets
 

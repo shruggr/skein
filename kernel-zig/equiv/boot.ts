@@ -32,7 +32,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { main } from "../../src/host/cli.ts";
 import { keyHex } from "../../src/host/genesis.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { masterKey, Oracle } from "../../src/host/oracle.ts";
+import { masterKey, Signer } from "../../src/host/signer.ts";
 import { decodePacket } from "../../src/host/packet.ts";
 import { rawCid } from "../../src/host/boot.ts";
 import { decode } from "../../src/runtime/cid.ts";
@@ -79,9 +79,9 @@ const COMPONENT = process.env.SKEIN_WALLET_COMPONENT ?? join(here, "../../progra
 const withComponent = existsSync(COMPONENT);
 let router: Router | undefined;
 const routerFor = (h: string, db: HostDb) => {
-  const oracle = new Oracle(masterKey({}, h));
+  const signer = new Signer(masterKey({}, h));
   const r: Router = new Router({
-    db, walletFor: (row) => oracle.wallet(row.handle), providerKeyFor: (n) => oracle.providerKey(n), home: h, port,
+    db, walletFor: (row) => signer.wallet(row.handle), providerKeyFor: (n) => signer.providerKey(n), home: h, port,
     // No host skein here (#113): the handles resolve over host.db (a fixture).
     discovery: fakeDiscovery(db, () => r),
     owner: ownerId, infer: inferId, idleMs: 0, kernel: { command: kernel, env: { SKEIN_HOME: h } },

@@ -1,4 +1,4 @@
-// The kernel's own BRC-100 wire frames to the oracle (#70): what `emit` signs
+// The kernel's own BRC-100 wire frames to the signer (#70): what `emit` signs
 // a message with. The same framing as a program's (the SDK's lib/brc104.zig
 // keyParams): the call code, an empty originator, security level, protocol,
 // key ID, counterparty, privileged false; the answer frame is 0 ‖ payload on
@@ -30,7 +30,7 @@ fn varint(a: std.mem.Allocator, out: *std.array_list.Managed(u8), v: u64) !void 
     }
 }
 
-/// createSignature (call 15) at security level 2 over `data` (the oracle hashes it with sha256).
+/// createSignature (call 15) at security level 2 over `data` (the signer hashes it with sha256).
 pub fn createSignatureFrame(a: std.mem.Allocator, protocol: []const u8, key_id: []const u8, cp: Counterparty, data: []const u8) ![]u8 {
     var f = std.array_list.Managed(u8).init(a);
     try f.appendSlice(&.{ 15, 0 }); // the call, an empty originator

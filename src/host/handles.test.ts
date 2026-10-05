@@ -17,7 +17,7 @@ import { decodeProfile, encodeProfile } from "@1sat/utils";
 import { Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import { certify, HANDLE_CERTIFICATE_TYPE, issueHandleCertificate, issueSubjectCertificate, NO_REVOCATION_OUTPOINT } from "./handles.ts";
 import { KERNEL_BIN } from "./kernel.ts";
-import { Oracle } from "./oracle.ts";
+import { Signer } from "./signer.ts";
 import { testHost } from "./testhost.ts";
 
 const b64 = (s: string) => Utils.toBase64(Utils.toArray(s, "utf8"));
@@ -46,7 +46,7 @@ test("handles: the handle-certificate type is §4.5's; the SDK signs A.3's certi
 });
 
 test("handles: the resolver's copy verifies against the certifier key, under the serial it is given, with the disabled revocation outpoint", async () => {
-  const certifierKey = new Oracle(PrivateKey.fromRandom()).certifierKey();
+  const certifierKey = new Signer(PrivateKey.fromRandom()).certifierKey();
   const certifier = new ProtoWallet(certifierKey);
   const subject = PrivateKey.fromRandom().toPublicKey().toString();
   const sn = serial();
@@ -68,7 +68,7 @@ test("handles: the resolver's copy verifies against the certifier key, under the
 });
 
 test("handles: the holder's copy (#103) is the binding's certificate with encrypted fields and a keyring for its subject; only the subject reads it", async () => {
-  const certifier = new ProtoWallet(new Oracle(PrivateKey.fromRandom()).certifierKey());
+  const certifier = new ProtoWallet(new Signer(PrivateKey.fromRandom()).certifierKey());
   const { publicKey: certifierKey } = await certifier.getPublicKey({ identityKey: true });
   const subjectKey = PrivateKey.fromRandom(), subject = subjectKey.toPublicKey().toString();
   const sn = serial();

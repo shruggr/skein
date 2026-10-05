@@ -91,7 +91,7 @@
 //              wallet's acquireCertificate takes) — handles.ts. It records nothing:
 //              the host skein's onboarding app records the issue
 //
-// How this host obtains the providers' keys is its own business (oracle.ts:
+// How this host obtains the providers' keys is its own business (signer.ts:
 // children of its master secret); the instance knows them from its address
 // book (the genesis seeds them: `addressBook`, role = the provider's name).
 

@@ -12,7 +12,7 @@ end to end, and what state lives where (open it in a browser).
 Three layers:
 
 1. **The kernel** (`kernel-zig/`): the machine, its four tables, and the
-   `wallet` import that reaches the host's signer (the oracle).
+   `wallet` import that reaches the host's signer.
 2. **Apps**: everything else, each a tree of WASI programs installed under
    its own name.
 3. **Hosts**: whatever drives a kernel from outside. The node host
@@ -165,7 +165,7 @@ with only the front door and the messagebox.
 
 ## The host
 
-A host is **transports + providers + store + oracle**. It verifies nothing
+A host is **transports + providers + store + signer**. It verifies nothing
 and routes nothing: transports append whole packages as received, the
 kernel's dispatch table picks each one's row (HTTP paths, libp2p topics
 and protocols, boxes alike), and the instance's front door verifies the
@@ -232,7 +232,7 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 - **The store**: one SQLite file per instance
   (`$SKEIN_HOME/instances/<handle>/runtime.db`), written by the kernel
   process.
-- **The oracle** (`src/host/oracle.ts`): one master secret
+- **The signer** (`src/host/signer.ts`): one master secret
   (`$SKEIN_HOME/master.key`); each instance's root key is a BRC-42 child of
   it (key ID = the handle), answered by a ProtoWallet in the host process.
   The kernel and programs see only public keys and the signatures they ask

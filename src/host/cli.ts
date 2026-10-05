@@ -50,7 +50,7 @@
 // the handle certificates (through the certifier provider), resolve, search,
 // the manifest — the router maps its own origin's requests onto it.
 // `add` inserts, or updates the given fields of an existing row. A new row's
-// identity is the oracle's (oracle.ts, #18): derived from the router's master
+// identity is the signer's (signer.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
 // on an existing row (its store must then be a new one: re-genesis). `deploy`
 // sends a directory into an instance through its `objects` box as the owner
@@ -91,7 +91,7 @@
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
 // started on demand and stopped when idle, the providers (the waker, the cron
-// provider among them), the oracle, the fuel ledger; plus the host page. It
+// provider among them), the signer, the fuel ledger; plus the host page. It
 // reads (bin/skein-host fills it from $SKEIN_HOME):
 //   SKEIN_HOME            default ~/.skein; host.db and master.key live here
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
@@ -136,7 +136,7 @@ import { openStoreFile } from "../runtime/index-store.ts";
 import { rootIdentity } from "../runtime/identity.ts";
 import type { Store } from "../runtime/store.ts";
 import { remoteWallet, type WalletInterface } from "../wallet.ts";
-import { masterKey, Oracle } from "./oracle.ts";
+import { masterKey, Signer } from "./signer.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
@@ -219,8 +219,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
-        // The identity is the oracle's (#18): derived from the master secret, key ID = the handle.
-        if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Oracle(masterKey(env.vars, home)).identity(handle);
+        // The identity is the signer's (#18): derived from the master secret, key ID = the handle.
+        if (f.identity === undefined && (v.derive || !db.get(handle)?.identity)) f.identity = new Signer(masterKey(env.vars, home)).identity(handle);
         if ([v.boot, v.packet, v.image].filter((x) => x !== undefined).length > 1) { env.err("skein-host add: one of --boot, --packet, --image"); return 2; }
         if (v.image !== undefined && isOutpoint(v.image)) { env.err(`skein-host add --image ${v.image}: an image by outpoint is read through the ORDFS app, which is not built yet; give a directory or a tree CID`); return 2; }
         const r = db.add(handle, f);
@@ -245,12 +245,12 @@ export async function main(argv: string[], env: Env): Promise<number> {
       case "init":
         return await initCmd(db, rest, env);
       case "identity": {
-        // The oracle's key (oracle.ts) for an instance: the BRC-104 identity its front door answers as.
+        // The signer's key (signer.ts) for an instance: the BRC-104 identity its front door answers as.
         const [handle, flag, ...more] = rest;
         if (!handle || more.length || (flag !== undefined && flag !== "--peer")) { env.err(USAGE); return 2; }
-        const oracle = new Oracle(masterKey(env.vars, home));
+        const signer = new Signer(masterKey(env.vars, home));
         // The libp2p peer ID (#51): the identity multihash of the peer key, a child of the master with key ID libp2p:<handle>.
-        env.out(flag ? peerIdOf(oracle.peerKey(handle)).toString() : oracle.identity(handle));
+        env.out(flag ? peerIdOf(signer.peerKey(handle)).toString() : signer.identity(handle));
         return 0;
       }
       case "mailboxes": {
@@ -315,23 +315,23 @@ const handles = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean)
 
 /**
  * The key each row's front door signs its BRC-104 sessions with (#40): the
- * oracle's, derived from the master secret with key ID = the handle — for an
+ * signer's, derived from the master secret with key ID = the handle — for an
  * agent and a mailbox instance alike, and before the row was ever hydrated.
  * The master secret is only read here, never made: with none, "-".
  */
 function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => string {
   const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
   if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
-  const oracle = new Oracle(masterKey(vars, home));
-  return (row) => oracle.identity(row.handle);
+  const signer = new Signer(masterKey(vars, home));
+  return (row) => signer.identity(row.handle);
 }
 
 /** Each row's libp2p peer ID (#51): derived from the master secret (key ID libp2p:<handle>), whether or not it runs a node; "-" with no master secret. */
 function peerIds(vars: Env["vars"], home: string): (row: InstanceRow) => string {
   const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
   if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";
-  const oracle = new Oracle(masterKey(vars, home));
-  return (row) => peerIdOf(oracle.peerKey(row.handle)).toString();
+  const signer = new Signer(masterKey(vars, home));
+  return (row) => peerIdOf(signer.peerKey(row.handle)).toString();
 }
 
 function knowsCmd(db: HostDb, rest: string[], env: Env): number {
@@ -903,15 +903,15 @@ export interface Host {
 }
 
 /**
- * The oracle (#18, oracle.ts): every instance's wallet is a ProtoWallet over a
+ * The signer (#18, signer.ts): every instance's wallet is a ProtoWallet over a
  * key derived from the router's master secret (key ID = the handle); the
  * router's BRC-104 identity is another child of it, and so are its providers'
  * keys (#70: the HTTP proxy, the waker, the cron provider, the libp2p node, the status provider,
  * the instance manager, and the certifier, #113: its key the certifier key, BRC-169's trust anchor).
  */
 function wallets(v: Env["vars"], home: string): Pick<RouterOptions, "walletFor" | "peerKeyFor" | "providerKeyFor"> {
-  const oracle = new Oracle(masterKey(v, home));
-  return { walletFor: (row) => oracle.wallet(row.handle), peerKeyFor: (handle) => oracle.peerKey(handle), providerKeyFor: (name) => oracle.providerKey(name) };
+  const signer = new Signer(masterKey(v, home));
+  return { walletFor: (row) => signer.wallet(row.handle), peerKeyFor: (handle) => signer.peerKey(handle), providerKeyFor: (name) => signer.providerKey(name) };
 }
 
 /** The router's options from the environment (`run`, and `add --boot/--packet`, which boots through it). */

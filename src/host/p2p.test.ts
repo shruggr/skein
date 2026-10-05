@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateKey, ProtoWallet } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
-import { INSTANCE_PROTOCOL, Oracle } from "./oracle.ts";
+import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
 import { hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -29,7 +29,7 @@ async function until<T>(f: () => T | undefined | false, what: string, ms = 15_00
 
 test("p2p: the peer key is a child of the master (key ID libp2p:<handle>), and the peer ID carries its compressed key", async () => {
   const master = PrivateKey.fromHex("33".repeat(32));
-  const o = new Oracle(master);
+  const o = new Signer(master);
   const k = o.peerKey("martha");
   const { publicKey } = await new ProtoWallet(master).getPublicKey({ protocolID: INSTANCE_PROTOCOL, keyID: "libp2p:martha", counterparty: "self" });
   assert.equal(k.toPublicKey().toString(), publicKey, "[2, \"skein instance\"] / libp2p:martha / self");
@@ -58,7 +58,7 @@ test("p2p: host-wide settings from the environment, else host.env; an instance's
 
 test("p2p: two nodes — a topic message through the validator, a stream round trip whose frames come back through `frames`, a message on /skein/message/1.0.0 needing no declaration", async (t) => {
   const master = PrivateKey.fromHex("44".repeat(32));
-  const o = new Oracle(master);
+  const o = new Signer(master);
   const calls: Array<{ handle: string; call: InboundCall }> = [];
   const inbound = async (handle: string, call: InboundCall): Promise<InboundAnswer> => {
     calls.push({ handle, call });
@@ -118,7 +118,7 @@ test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #7
   assert.deepEqual(libp2pConfig({ libp2p: { topics: ["tm_demo", "g"], listen: ["/ip4/127.0.0.1/tcp/1"] } }, rows), { topics: ["tm_demo", "g", "tm_demo-admit"], protocols: ["/amm/1/swap"], listen: ["/ip4/127.0.0.1/tcp/1"] }, "the genesis's, then the rows', once each");
   assert.deepEqual(libp2pConfig({ libp2p: { topics: ["g"] }, dispatch: [{ transport: "libp2p", address: "tm_demo" }] }, rows), { topics: ["g", "tm_demo-admit"], protocols: ["/amm/1/swap"] }, "a genesis row alone subscribes nothing: the tree's config.libp2p says what the node takes");
 
-  const o = new Oracle(PrivateKey.fromHex("45".repeat(32)));
+  const o = new Signer(PrivateKey.fromHex("45".repeat(32)));
   const calls: InboundCall[] = [];
   const mk = (bootstrap: string[] = []) => new P2PHost({
     host: { listen: ["/ip4/127.0.0.1/tcp/0"], bootstrap, dht: "off", relays: [], mdns: false },

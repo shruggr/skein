@@ -47,7 +47,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { main } from "../../src/host/cli.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { Oracle } from "../../src/host/oracle.ts";
+import { Signer } from "../../src/host/signer.ts";
 import { peerIdOf } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -110,17 +110,17 @@ function mine(prev: Uint8Array, merkleRoot: Uint8Array, time: number): Uint8Arra
 const key = (h: string) => new PrivateKey(h, 16);
 const ownerKey = key("2222");
 const owner = ownerKey.toPublicKey().toString();
-const oracle = new Oracle(new PrivateKey("a77e57", 16));
+const signer = new Signer(new PrivateKey("a77e57", 16));
 const arcade = await FakeArcade.start();
 const ports = { a: await freePort(), b: await freePort() };
-const idOf = (h: string) => peerIdOf(oracle.peerKey(h)).toString();
+const idOf = (h: string) => peerIdOf(signer.peerKey(h)).toString();
 const hdbA = new HostDb(join(home, "host.db"));
 hdbA.add("ov", { store: join(home, "instances/ov/runtime.db") });
 // An instance with no chain app: the overlay (requires chain/1) is refused there.
 hdbA.add("bare", { store: join(home, "instances/bare/runtime.db") });
 const hdbB = new HostDb(join(home, "pub-host.db"));
 hdbB.add("pub", { store: join(home, "instances/pub/runtime.db") });
-const common = { walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n: string) => oracle.providerKey(n), peerKeyFor: (x: string) => oracle.peerKey(x), answerWaitMs: 6000, kernel: { command: kernel, env: { SKEIN_HOME: home } }, libp2pDiscoveryMs: 300 };
+const common = { walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n: string) => signer.providerKey(n), peerKeyFor: (x: string) => signer.peerKey(x), answerWaitMs: 6000, kernel: { command: kernel, env: { SKEIN_HOME: home } }, libp2pDiscoveryMs: 300 };
 const log = (who: string) => (s: string, l: string) => { if (process.env.VERBOSE) process.stdout.write(`  | [${who}:${s}] ${l}\n`); };
 // A: the stock system; its genesis's defaults name the network only (no overlay config, no libp2p).
 const rA = new Router({

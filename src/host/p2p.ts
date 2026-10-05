@@ -6,7 +6,7 @@
 // with its own peer key, all inside the router process:
 //
 //   peer key   a secp256k1 key derived from the master secret with BRC-42/43
-//              ([2, "skein instance"], key ID `libp2p:<handle>`, self — oracle.ts
+//              ([2, "skein instance"], key ID `libp2p:<handle>`, self — signer.ts
 //              peerKey): a child, never a wallet root. The peer ID is the identity
 //              multihash of the key's protobuf (type secp256k1, the 33-byte
 //              compressed key), so the key reads straight out of the peer ID.
@@ -120,7 +120,7 @@ export const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
 
 export interface P2POptions {
   host: P2PHostConfig;
-  /** The instance's peer key (oracle.ts peerKey). */
+  /** The instance's peer key (signer.ts peerKey). */
   keyOf(handle: string): PrivateKey;
   /** One front-door call for an inbound message or frame (Router.p2pInbound). */
   inbound(handle: string, call: InboundCall): Promise<InboundAnswer>;

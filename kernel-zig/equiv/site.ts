@@ -1,5 +1,5 @@
 // The management site (#92), driven in headless Chrome over a host as
-// `skein-host run` runs it (runHost: the oracle over a master secret, the
+// `skein-host run` runs it (runHost: the signer over a master secret, the
 // providers, the instance manager), with its host skein:
 //
 //   `skein-host init --owner <you>` creates the host skein from the default
