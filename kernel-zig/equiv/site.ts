@@ -363,7 +363,7 @@ try {
   await page.click("tr[data-catalog=git] button");
   await prompted();
   const gitPlan = await page.locator("#plan").innerText();
-  check(/install git 0\.1\.0/.test(gitPlan) && /row +mailbox git from \$owner → git/.test(gitPlan) && /objects ×1/.test(gitPlan), `the prompt for the git app (from alice's image, apps/git): ${gitPlan.split("\n").filter((l) => /install|row|messages/.test(l)).join(" | ")}`);
+  check(/install git 0\.1\.1/.test(gitPlan) && /row +mailbox git from \$owner → git/.test(gitPlan) && /objects ×1/.test(gitPlan), `the prompt for the git app (from alice's image, apps/git): ${gitPlan.split("\n").filter((l) => /install|row|messages/.test(l)).join(" | ")}`);
   await page.click("#approve");
   await page.waitForSelector("tr[data-app=git]", { timeout: 120_000 });
   check(true, "the git app installed from the page (objects, head, dispatch, start, signed by your wallet)");

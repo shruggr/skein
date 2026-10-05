@@ -10,7 +10,6 @@
 // another commit. A pinned commit is fetched once into
 // <tmpdir>/skein-apps/<name>-<rev> and reused. Not part of anything that runs.
 
-import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -39,22 +38,16 @@ export const CHAT_APP: PinnedApp = {
   rev: process.env.SKEIN_CHAT_REV ?? "a9491ee30668aeee5a44745403dadf7355825a51", dir: process.env.SKEIN_CHAT_DIR,
 };
 
-/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0). */
+/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
-  rev: process.env.SKEIN_ONBOARD_REV ?? "7202d9541a66dde5fcdf04a5242c0af29bf7a810", dir: process.env.SKEIN_ONBOARD_DIR,
+  rev: process.env.SKEIN_ONBOARD_REV ?? "454954aac0541e1d4f16b902e586d0c10124a9e8", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
-/**
- * shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered.
- * #126: its fetch is an intention (skein-sdk 0.7.0); skein-git's pinned commit predates it (it finds a
- * `fetch` provider by role, and the address book has none), so the default is the default image's copy,
- * rebuilt on 0.7.0 (images/default/apps/git), until skein-git follows. SKEIN_GIT_REV or SKEIN_GIT_DIR pick another.
- */
+/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1). */
 export const GIT_APP: PinnedApp = {
   name: "git", repo: "https://github.com/shruggr/skein-git",
-  rev: process.env.SKEIN_GIT_REV ?? "b571f42fe80fc348206bea65ac810f02a162c511",
-  dir: process.env.SKEIN_GIT_DIR ?? (process.env.SKEIN_GIT_REV ? undefined : fileURLToPath(new URL("../images/default/apps/git", import.meta.url))),
+  rev: process.env.SKEIN_GIT_REV ?? "66d77ccf68782e95d74a4c88dfd65b800b98c358", dir: process.env.SKEIN_GIT_DIR,
 };
 
 /** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.1). */

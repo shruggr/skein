@@ -57,7 +57,7 @@ So `up.sh` goes:
    again. The shell app's first install is the slow step: its modules are
    ~50 MB of messages.
 7. **The onboarding app** (#90, #113) into the host skein, as the owner, from
-   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.3.0`; first the owner's claim of the host skein, #127), with
+   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.3.2`; first the owner's claim of the host skein, #127), with
    `--config '{"onboard": {"domain": <SKEIN_HANDLE_DOMAIN, default
    localhost>, "origin": <the router's origin>}}'`: any wallet with a
    session then creates a skein of its own with `POST

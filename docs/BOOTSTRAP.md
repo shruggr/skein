@@ -47,7 +47,7 @@ images/default/
                                           writes it with the owner's key); nothing at `/` (#125)
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  apps/git/                               the git app: shruggr/skein-git v0.1.0's tree, copied, not wired
+  apps/git/                               the git app: shruggr/skein-git v0.1.1's tree, copied, not wired
 ```
 
 It has the four tables and the programs needed to be reachable and to

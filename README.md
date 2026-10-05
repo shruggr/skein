@@ -131,7 +131,7 @@ conversation (docs/ARCH.md, "The host skein").
 bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, for you to claim
 bin/skein-host run                                                                       # the host on :8100; the host skein at http://host.localhost:8100
 bin/skein plan claim --recipient <its identity> --out claim && bin/skein send http://host.localhost:8100 claim   # claim it first: your wallet's message, you own it
-bin/skein plan install https://github.com/shruggr/skein-onboard#v0.3.0 --origin http://host.localhost:8100 \
+bin/skein plan install https://github.com/shruggr/skein-onboard#v0.3.2 --origin http://host.localhost:8100 \
   --config '{"onboard": {"domain": "<the handle domain>"}}' --out plan                   # the onboarding app: the messages, read by your wallet
 bin/skein send http://host.localhost:8100 plan                                            # sent by your wallet (1sat authfetch), as you (the owner)
 ```
@@ -343,7 +343,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.7.0 |
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.1.1 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
-| [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager (the wallet's signed claim forwarded, #127) | v0.3.0 |
+| [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager (the wallet's signed claim forwarded, #127) | v0.3.2 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
 | [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site, an app (#125: its page at `/site/`, served from its own tree by skein-sdk's `files`; the owner may add a row for `/`): locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.6.1 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |

@@ -41,7 +41,7 @@
 // thing once the router runs. Once; a second `init` says which instance it
 // is. The operator, as the owner, then installs the onboarding app into it
 // from a wallet (#124: `skein
-// plan install https://github.com/shruggr/skein-onboard#v0.3.0 --origin
+// plan install https://github.com/shruggr/skein-onboard#v0.3.2 --origin
 // <the host skein's origin> --config '{"onboard": {"domain": "<the handle
 // domain>"}}' --out plan` and `skein send <origin> plan`, or the management
 // page). The onboarding app is the host's BRC-169 server (#113): registrations,
@@ -426,7 +426,7 @@ async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   db.setStatus(handle, "enabled");
   env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, for ${short(owner)} to claim · at ${c.url} · the instance manager in its address book`);
   env.out(`next, as the owner (#127; the router running), first: skein plan claim --recipient ${c.identity} --out claim, then skein send ${c.url} claim (its claim row admits anyone until then: the first claim's sender owns it)`);
-  env.out(`then (#124): skein plan install https://github.com/shruggr/skein-onboard#v0.3.0 --origin ${c.url} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' --out plan, then skein send ${c.url} plan (the onboarding app: registration and BRC-169)`);
+  env.out(`then (#124): skein plan install https://github.com/shruggr/skein-onboard#v0.3.2 --origin ${c.url} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' --out plan, then skein send ${c.url} plan (the onboarding app: registration and BRC-169)`);
   return 0;
 }
 
