@@ -170,6 +170,14 @@ const Reader = struct {
     }
 };
 
+/// One BUMP (BRC-74) from its bytes alone (a pointer record's `path` block).
+pub fn bumpOf(a: std.mem.Allocator, bytes: []const u8) Error!Bump {
+    var r = Reader{ .b = bytes };
+    const p = try r.bump(a);
+    if (r.i != bytes.len) return error.Malformed;
+    return p;
+}
+
 pub fn txidOf(raw: []const u8) [32]u8 {
     return cidm.dblSha256(raw);
 }

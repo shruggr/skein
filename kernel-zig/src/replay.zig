@@ -17,6 +17,7 @@ const programs = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
 const tree = @import("tree.zig");
+const beefm = @import("beef.zig");
 const SqliteStore = @import("sqlite_store.zig").SqliteStore;
 const Value = cbor.Value;
 
@@ -106,6 +107,8 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
             if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
         };
+        // #121: what the door put for a request, beside it.
+        if (Value.cidOf(e.get("request"))) |rc| if (src.getOpt(a, rc)) |req| try copyDoor(a, src, dst, req);
         switch (try dst.logAppend(a, e)) {
             .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,
             .rejected => |r| {
@@ -113,6 +116,47 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
                 return error.Rejected;
             },
         }
+    }
+}
+
+/// What the door put for a request (#121), beside it: every pointer record the package links (and,
+/// for a signed message carried in, the body the door put — the package's `body` bytes — and the
+/// records it links), each with the blocks it names: its transactions, its BUMPs' bytes, and the
+/// merkle nodes each BUMP the door checked reveals.
+fn copyDoor(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, req: Value) !void {
+    try copyLinked(a, src, dst, req);
+    if (std.mem.eql(u8, Value.str(req.get("kind")) orelse "", "message")) if (Value.bytesOf(req.get("body"))) |bb| {
+        const body = cbor.decode(a, bb) catch return;
+        const bc = try cbor.cidOfValue(a, body);
+        if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
+        try copyLinked(a, src, dst, body);
+    };
+}
+
+fn copyLinked(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, v: Value) anyerror!void {
+    switch (v) {
+        .cid => |c| {
+            const rec = src.getOpt(a, c) orelse return;
+            if (!beefm.isRecord(rec)) return;
+            try dst.putBlock(c, (try src.bytes(a, c)).?);
+            if (rec.get("txs")) |ts| if (ts == .array) for (ts.array) |t| if (Value.cidOf(t)) |tc| {
+                if (try src.bytes(a, tc)) |b| try dst.putBlock(tc, b);
+            };
+            if (rec.get("bumps")) |bs| if (bs == .array) for (bs.array) |b| {
+                const pc = Value.cidOf(b.get("path")) orelse continue;
+                const pb = (try src.bytes(a, pc)) orelse continue;
+                try dst.putBlock(pc, pb);
+                if (Value.cidOf(b.get("block")) == null) continue;
+                const rev = beefm.reveal(a, beefm.bumpOf(a, pb) catch continue) catch continue;
+                for (rev.nodes) |n| {
+                    const nc = try beefm.txCid(a, n.hash);
+                    if (try src.bytes(a, nc)) |x| try dst.putBlock(nc, x);
+                }
+            };
+        },
+        .map => |m| for (m) |e| try copyLinked(a, src, dst, e.value),
+        .array => |xs| for (xs) |x| try copyLinked(a, src, dst, x),
+        else => {},
     }
 }
 

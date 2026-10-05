@@ -16,7 +16,7 @@
 //   skein_modules() → n                             dag-cbor [{name, cid}]: the pinned modules and files to install
 //   skein_put_block(cid, n, bytes, n) → 0 | < 0     a block, checked against its CID (install, import)
 //   skein_get_block(cid, n) → n | -1                a block's bytes
-//   skein_admit(frame, n) → n                       serve's `admit` ({entry, body?}): the one call in that writes; not yet processed
+//   skein_admit(frame, n) → n                       serve's `admit` ({entry, request?}): the one call in that writes; not yet processed
 //   skein_start() → n                               resume what the last run left (serve's `start`)
 //   skein_drain() → n                               process everything admitted (the step loop)
 //   skein_state() → n                               dag-cbor {state, log, cursor}

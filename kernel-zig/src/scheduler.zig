@@ -485,7 +485,7 @@ pub const Runtime = struct {
             if (record) |r| {
                 // #121: the record comes with the frame, the entry naming it by its CID.
                 if (!std.mem.eql(u8, try cbor.cidOfValue(a, r), rc)) return .{ .invalid = "admit: the request record is not the one the entry names (its CID)" };
-                if (!logm.isRequest(transport, r)) return .{ .invalid = "admit: a request record in its transport's shape (docs/VM.md, \"Requests\")" };
+                if (!logm.isRequest(transport, r)) return .{ .invalid = try std.fmt.allocPrint(a, "admit: a request record in its transport's shape (docs/VM.md, \"Requests\"): transport {s}, kind {s}", .{ transport, Value.str(r.get("kind")) orelse "?" }) };
                 return null;
             }
             if (!logm.isRequest(transport, rt.store.getOpt(a, rc))) return .{ .invalid = "admit: a request entry names its request record, put first or sent with the frame (`request`), in its transport's shape (docs/VM.md, \"Requests\")" };
@@ -544,6 +544,9 @@ pub const Runtime = struct {
         var d = cbor.MapBuilder.init(a);
         try d.put("verified", said.get("verified"));
         var rec = record;
+        // A signed message (`local`): the row is its mailbox row (sender, box), as processMail routes
+        // it — none for a reply — and a filter runs on its body's fields (`mailFilter`).
+        if (std.mem.eql(u8, transport, "local")) return rt.mailFilter(a, entry, record, &d);
         if (m.row) |row| if (Value.str(row.get("filter"))) |f| {
             if (!doorm.isFilter(f)) return refusedEntry(a, entry, try rt.store.put(a, record), "filter", try std.fmt.allocPrint(a, "the row names a filter this kernel has not: {s}", .{f}), 500, null);
             const x = try doorm.filterBeef(a, rt.store, record);
@@ -560,6 +563,66 @@ pub const Runtime = struct {
             }
         };
         return withRequest(a, entry, try rt.store.put(a, rec), d.value(), null);
+    }
+
+    /// The door's filter for a signed message carried in (`local`, #121): the message's own row —
+    /// the first `mailbox` row taking (sender, box), for a message to this instance that names no
+    /// `replyTo` (a reply goes to the thread awaiting it, through no row) — and, if that row names
+    /// a filter, the filter over the fields of the message's body. The mail record is not touched:
+    /// its CID is the message's id (what a reply names) and its signature covers its body's CID.
+    /// The body as the door hands it back goes in the package and the store, and the entry says
+    /// which body stands for which (`door.bodies: [{of: <the body the record names>, is: <the
+    /// body put>}]`): the kernel routes the message with that body (`bodyFor`), and the bytes the
+    /// record names are the restored body's (door.zig restore), so the signature still verifies.
+    fn mailFilter(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: Value, d: *cbor.MapBuilder) !Value {
+        // The package as received, when no filter applies (put only then: a filtered one's bytes are never stored).
+        const pass = struct {
+            fn f(r: *Runtime, al: std.mem.Allocator, en: Value, rec: Value, dv: Value) !Value {
+                return withRequest(al, en, try r.store.put(al, rec), dv, null);
+            }
+        }.f;
+        const m = record.get("message") orelse return pass(rt, a, entry, record, d.value());
+        const bytes = Value.bytesOf(record.get("body")) orelse return pass(rt, a, entry, record, d.value());
+        const recipient = Value.bytesOf(m.get("recipient")) orelse return pass(rt, a, entry, record, d.value());
+        if (!std.mem.eql(u8, recipient, rt.identity())) return pass(rt, a, entry, record, d.value());
+        const body = cbor.decode(a, bytes) catch return pass(rt, a, entry, record, d.value());
+        if (body.get("replyTo") != null) return pass(rt, a, entry, record, d.value());
+        const row = dispatch.forMail((try dispatch.current(a, rt.store)) orelse &.{}, Value.bytesOf(m.get("sender")).?, Value.str(m.get("box")) orelse "") orelse return pass(rt, a, entry, record, d.value());
+        const f = Value.str(row.value.get("filter")) orelse return pass(rt, a, entry, record, d.value());
+        if (!doorm.isFilter(f)) return refusedEntry(a, entry, try rt.store.put(a, record), "filter", try std.fmt.allocPrint(a, "the row names a filter this kernel has not: {s}", .{f}), 500, null);
+        const x = try doorm.filterBeef(a, rt.store, body);
+        try d.put("filter", cbor.string(f));
+        var rec = record;
+        if (x.beefs.len > 0) {
+            const bs = try a.alloc(Value, x.beefs.len);
+            for (x.beefs, bs) |c, *v| v.* = cbor.cidv(c);
+            try d.put("beefs", .{ .array = bs });
+            const blk = try cbor.block(a, x.value);
+            try rt.store.putBlock(blk.cid, blk.bytes);
+            var r = cbor.MapBuilder.init(a);
+            for (record.map) |e| try r.put(e.key, e.value);
+            try r.put("body", .{ .bytes = blk.bytes });
+            rec = r.value();
+            var pair = cbor.MapBuilder.init(a);
+            try pair.put("of", m.get("body"));
+            try pair.put("is", cbor.cidv(blk.cid));
+            try d.put("bodies", .{ .array = try a.dupe(Value, &.{pair.value()}) });
+        }
+        if (x.refused) |why| {
+            rt.say("door: a message in {s} refused by its row's filter {s}: {s}", .{ Value.str(m.get("box")) orelse "?", f, why });
+            return refusedEntry(a, entry, try rt.store.put(a, rec), "filter", why, 400, null);
+        }
+        return withRequest(a, entry, try rt.store.put(a, rec), d.value(), null);
+    }
+
+    /// The body a routed message is handled with (#121): the one the door put for it (its entry's
+    /// `door.bodies`), else the one its record names.
+    fn bodyFor(ctx: Ctx, body: []const u8) []const u8 {
+        const d = ctx.e.get("door") orelse return body;
+        const bs = d.get("bodies") orelse return body;
+        if (bs != .array) return body;
+        for (bs.array) |p| if (Value.cidOf(p.get("of"))) |of| if (std.mem.eql(u8, of, body)) return Value.cidOf(p.get("is")) orelse body;
+        return body;
     }
 
     fn refusedEntry(a: std.mem.Allocator, entry: Value, rc: []const u8, stage: []const u8, reason: []const u8, status: i128, code: ?[]const u8) !Value {
@@ -924,7 +987,8 @@ pub const Runtime = struct {
                     rt.say("#{d}: a routed message is not a mail record; dropped", .{n});
                     continue;
                 }
-                const bc = Value.cidOf(mv.get("body")).?;
+                // #121: the body the door put for the message (its filter rewrote one), else the one it names.
+                const bc = bodyFor(ctx, Value.cidOf(mv.get("body")).?);
                 if (Value.bytesOf(x.get("body"))) |bb| {
                     const bv = cbor.decode(a, bb) catch {
                         rt.say("#{d}: a routed message's body is not dag-cbor; dropped", .{n});
@@ -991,7 +1055,8 @@ pub const Runtime = struct {
         const sender = Value.bytesOf(m.get("sender")).?;
         const recipient = Value.bytesOf(m.get("recipient")).?;
         const box = Value.str(m.get("box")).?;
-        const body = Value.cidOf(m.get("body")).?;
+        // #121: the body the door put for it, when its row's filter rewrote one (bodyFor).
+        const body = bodyFor(ctx, Value.cidOf(m.get("body")).?);
         const what = try std.fmt.allocPrint(a, "#{d} message {s} in {s} from {s}", .{ n, short(a, mc), box, shortKey(sender) });
         if (std.mem.eql(u8, recipient, rt.identity())) {
             switch (rt.replyToOf(a, body)) {
