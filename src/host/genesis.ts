@@ -11,7 +11,7 @@
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
 //             addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
 //   row      {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
-//             sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+//             sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, filter?: "beef", …settings}
 //            (`dispatch`, #77: the seed of the kernel's dispatch table, docs/MESSAGES.md "The dispatch
 //            table" — the admin rows (boxes objects, head, dispatch, peers → the kernel, from the owner),
 //            the boxes programs take (a subscription of old), the HTTP paths and libp2p topics and
@@ -229,7 +229,7 @@ export interface PathRowSpec { path?: string; prefix?: string; program: string; 
  * instance's owner as the kernel sees it at the request (the genesis's, else
  * the claim's): how an image, which names no owner, gives its owner the
  * explorer. Folded into the rows at genesis (foldReads): the row's sender
- * becomes the caller (`owner: true` the sender "owner"); the genesis carries
+ * becomes the caller (`owner: true` the owner's key; #121: nothing in an image — the claim writes the explorer row with the owner's key); the genesis carries
  * no `reads`.
  */
 export interface ReadSpec { caller?: string; owner?: true; op: string }
@@ -350,11 +350,21 @@ export class NoProvider extends Error {
   constructor(provider: string) { super(`no provider ${provider} on this host`); this.provider = provider; }
 }
 
-/** A row's sender resolved (`*` anyone, `event`, `session`, `owner`, a key), or null when it names a provider this host has not (left out, with a warning). */
+/**
+ * A row's sender resolved (`*` anyone, `event`, `session`, a key), or null
+ * when it names a provider this host has not, or (#121) `owner` in an image:
+ * left out, with a warning. Every sender is a key: `owner` (#115's symbol)
+ * is the owner's key when the genesis names one; an image's owner comes with
+ * the claim, which writes the owner's explorer row itself.
+ */
 function senderOf(sender: string | undefined, c: Genesis2Config): Sender | null {
   if (!sender || sender === "*") return "*";
   if (sender === "session") return "session";
-  if (sender === "owner") return "owner";
+  if (sender === "owner") {
+    if (c.owner) return keyBytes(c.owner);
+    c.warn?.("a dispatch row from \"owner\" is left out: an image names no owner (#121: the claim writes the owner's explorer row with the owner's key)");
+    return null;
+  }
   if (sender === "event") return "event";
   try { return keyOf(sender, c); } catch (e) {
     if (!(e instanceof NoProvider)) throw e;
@@ -442,8 +452,8 @@ export function resolveReads(c: Pick<Genesis2Config, "owner" | "infer">, reads: 
 /**
  * The reads folded into the rows (#115): an http row naming a `read` op (and
  * a sender other than `*`, which no read ever limited) becomes one row per
- * read that allows the op — its sender the read's caller, "owner" for
- * `owner: true`, the row's own for a read with no caller — without the
+ * read that allows the op — its sender the read's caller, the owner's key for
+ * `owner: true` (#121: an image, no owner, leaves the row out — the claim writes the owner's explorer row), the row's own for a read with no caller — without the
  * `read`. A row whose sender is a key keeps it only for a read with no
  * caller, that caller, or `owner: true` when the key is the owner's. A row no
  * read allows is left out (nobody could call it). The rest are unchanged.
@@ -456,7 +466,9 @@ export function foldReads(rows: DispatchRow[], reads: Read[], owner?: string): D
     const { read: op, ...row } = r;
     for (const x of reads) {
       if (x.op !== op && x.op !== "*") continue;
-      const sender = x.owner ? "owner" : x.caller ?? row.sender;
+      // #121: every sender is a key — `owner: true` is the owner's key; an image (no owner) leaves the row out (the claim writes the owner's explorer row).
+      if (x.owner && !owner) continue;
+      const sender = x.owner ? keyBytes(owner!) : x.caller ?? row.sender;
       if (row.sender instanceof Uint8Array) {
         const k = keyHex(row.sender);
         if (x.owner ? k === owner : x.caller === undefined || keyHex(x.caller) === k) push(row as DispatchRow);
@@ -576,7 +588,7 @@ export async function writeGenesis(k: Kernel, c: Genesis2Config, time: Stamp = c
 }
 
 /** Admit the next entry over `body` (unsigned), retrying if the tip moved under it. */
-export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array } = {}, time: Stamp = clockNow()): Promise<CID> {
+export async function admit2(k: Kernel, body: EntryBody | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}, time: Stamp = clockNow()): Promise<CID> {
   for (let tries = 0; ; tries++) {
     try {
       return await k.admit(await nextEntry(k.store, body as EntryBody, time), records);

@@ -78,14 +78,21 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   assert.deepEqual(g.dispatch.filter((r: { program: unknown }) => r.program === "kernel"), [{ transport: "mailbox", address: "claim", sender: "*", program: "kernel", fn: "claim" }], "the one kernel row: the claim row, from anyone");
   assert.deepEqual(g.names, [], "no names");
   assert.equal(g.reads, undefined, "#115: no reads table: a read permission is the row's sender");
-  assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; sender: unknown; read?: string }) => r.transport === "http" && r.address === "/explore" && r.prefix === true && r.sender === "owner" && r.read === undefined), "#92, #115: the explorer route is the owner's, whoever claims it (the kernel reads the owner at the request)");
+  assert.ok(!g.dispatch.some((r: { address: string }) => r.address === "/explore"), "#121: no explorer row in an image — every sender is a key, and the claim writes the owner's");
+  assert.ok(!g.dispatch.some((r: { sender: unknown }) => r.sender === "owner"), "#121: no `owner` symbol");
   // A tree that still writes etc/reads.json (the form before #115): folded into the rows that name the op.
   const old = genesisRecord(c, resolveSystem(c, programs, [], s.config, root, [{ prefix: "/old", program: "frontdoor", fn: "explore", read: "explore" }], [{ owner: true, op: "explore" }, { caller: key(), op: "*" }], []));
   const olds = (old.dispatch as Array<{ address: string; sender: unknown; read?: string }>).filter((r) => r.address === "/old");
-  assert.equal(olds.length, 2, "one row per read that allows the op");
-  assert.equal(olds[0]!.sender, "owner");
-  assert.ok(olds[1]!.sender instanceof Uint8Array);
+  assert.equal(olds.length, 1, "one row per read that allows the op; #121: `owner: true` in an image is nobody's until the claim");
+  assert.ok(olds[0]!.sender instanceof Uint8Array);
   assert.ok(olds.every((r) => r.read === undefined));
+  // With an owner, `owner: true` is the owner's key.
+  const ownerKey = key();
+  const co = { ...c, owner: ownerKey };
+  const owned = genesisRecord(co, resolveSystem(co, programs, [], s.config, root, [{ prefix: "/old", program: "frontdoor", fn: "explore", read: "explore" }], [{ owner: true, op: "explore" }], []));
+  const ownedRows = (owned.dispatch as Array<{ address: string; sender: unknown }>).filter((r) => r.address === "/old");
+  assert.equal(ownedRows.length, 1);
+  assert.equal(Buffer.from(ownedRows[0]!.sender as Uint8Array).toString("hex"), ownerKey, "#121: the owner's real key");
   assert.ok(g.dispatch.some((r: { transport: string; address: string; root?: string }) => r.transport === "http" && r.address === "/" && r.root === "www"), "the static app at /");
   assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; root?: string }) => r.transport === "http" && r.address === "/site" && r.prefix === true && r.root === "www"), "#92: and the site's files under /site/");
   assert.throws(() => resolveReads({}, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);
