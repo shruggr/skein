@@ -1,12 +1,13 @@
 // A component's emit end to end (issues #15, #70, #67): the `fetch`
 // component (programs/test/fetch, Zig, a WASI 0.2 component, a test fixture) as
 // the handler of a box, run by the Zig kernel the router drives. The owner
-// sends {url}; the component emits {method: "GET", url} to the address
-// book's `fetch` provider (the host's HTTP proxy, whose network here is a
-// stand-in) and its step ends waiting; the provider's answer — a signed
-// message, {replyTo, status, headers, body}, appended as a `local` request —
-// steps the thread again, and the body comes back on that step's stdout.
-// The first step's update lists the message it emitted; nothing of the
+// sends {url}; the component records the intention {event: "fetch", method:
+// "GET", url} (#126) and its step ends waiting; the host signs the request
+// for it with the instance's key to its HTTP proxy (whose network here is a
+// stand-in), and the proxy's answer — a signed message, {replyTo, request,
+// status, headers, body}, appended as a `local` request — steps the thread
+// again, and the body comes back on that step's stdout.
+// The first step's update lists the event it recorded; nothing of the
 // network is recorded but the answer's entry. A replay of the store
 // (equiv/replays.ts: no router, no provider) reproduces it exactly: replay
 // never touches the network.
@@ -117,10 +118,10 @@ try {
   check(ok.length === 2 && first.state === "waiting", `step 1 emits and waits (${ok.map((u) => u.state).join(" → ")})`);
   check(last.state === "finished" && text(last.result?.stdout) === "hello from the network\n", `step 2, on the provider's answer: the body on stdout (${last.state}, ${JSON.stringify(text(last.result?.stdout))})`);
   check(asked.length === 1 && asked[0]!.method === "GET" && asked[0]!.url === "https://files.test/hello.txt" && asked[0]!.body === undefined, `the provider asked its network once (${JSON.stringify(asked[0])})`);
-  const sent = first.emitted?.length === 1 ? await view.get(first.emitted[0]!) as { kind: string; box: string; body: CID; signature?: Uint8Array } : undefined;
-  const req = sent ? await view.get(sent.body) as { method?: string; url?: string } : undefined;
-  check(sent?.kind === "mail" && sent.box === "fetch" && (sent.signature?.length ?? 0) > 60 && req?.method === "GET" && req.url === "https://files.test/hello.txt",
-    `the update lists the signed message it emitted: GET in box fetch (${sent?.kind} ${sent?.box}, signature ${sent?.signature?.length}, ${req?.method} ${req?.url})`);
+  // #126: the step lists its intention, the `fetch` event (no message, no signature in the step).
+  const sent = first.emitted?.length === 1 ? await view.get(first.emitted[0]!) as { kind: string; event: string; method?: string; url?: string; step?: number } : undefined;
+  check(sent?.kind === "event" && sent.event === "fetch" && sent.method === "GET" && sent.url === "https://files.test/hello.txt" && sent.step === 1,
+    `the update lists the fetch intention it recorded: GET (${sent?.kind} ${sent?.event}, ${sent?.method} ${sent?.url})`);
 
   const nf = await fetchVia(identity, "https://files.test/missing");
   const nl = nf.at(-1)!;
