@@ -101,7 +101,8 @@
 //
 // How this host obtains the providers' keys is its own business (signer.ts:
 // children of its master secret); the instance knows them from its address
-// book (the genesis seeds them: `addressBook`, role = the provider's name).
+// book (the genesis seeds them: `addressBook`, transport `local`, address the
+// provider's name — no role, #126).
 
 import { randomBytes } from "node:crypto";
 import { ProtoWallet, type PrivateKey } from "@bsv/sdk";
@@ -123,7 +124,7 @@ export interface MailRecord {
 /** What the kernel hands over (the serve frame `emit`). */
 export interface Outgoing { message: MailRecord; body: Uint8Array; transport: string; address: string }
 
-/** The stock providers' names (and the roles the address book gives them). */
+/** The stock providers' names (each one's address on this host: `local`, <name>). */
 export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager", "certifier"] as const;
 /** The providers only the host skein's address book names (#90, #113): they act for it alone. */
 export const HOST_SKEIN_PROVIDERS: readonly ProviderName[] = ["manager", "certifier"];
@@ -220,9 +221,9 @@ export class Providers {
     return w;
   }
 
-  /** The address book entries a genesis seeds for this host's providers (role = name). */
-  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => !HOST_SKEIN_PROVIDERS.includes(n))): Array<{ key: Uint8Array; transport: "local"; address: string; role: string }> {
-    return names.map((n) => ({ key: Uint8Array.from(Buffer.from(this.key(n), "hex")), transport: "local" as const, address: n, role: n }));
+  /** The address book entries a genesis seeds for this host's providers: key, transport `local`, address the name (#126: no role). */
+  entries(names: readonly ProviderName[] = PROVIDERS.filter((n) => !HOST_SKEIN_PROVIDERS.includes(n))): Array<{ key: Uint8Array; transport: "local"; address: string }> {
+    return names.map((n) => ({ key: Uint8Array.from(Buffer.from(this.key(n), "hex")), transport: "local" as const, address: n }));
   }
 
   /** Stop the timers; nothing more is carried. */
@@ -365,7 +366,7 @@ export class Providers {
 
   // ---------------------------------------------------------------- fetch: the HTTP proxy
 
-  /** A message to the fetch provider (a module on an SDK before #126: fetch was a message to it, found by its role). */
+  /** A message to the fetch provider (a module on an SDK before #126: fetch was a message to it). */
   private async fetch(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): Promise<void> {
     if (box !== "fetch") return await this.answer(handle, "fetch", m, id, { error: `the fetch provider takes box "fetch", not ${box}` });
     await this.answer(handle, "fetch", m, id, await this.proxy(handle, b));

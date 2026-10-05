@@ -10,6 +10,7 @@
 // another commit. A pinned commit is fetched once into
 // <tmpdir>/skein-apps/<name>-<rev> and reused. Not part of anything that runs.
 
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,10 +45,16 @@ export const ONBOARD_APP: PinnedApp = {
   rev: process.env.SKEIN_ONBOARD_REV ?? "7202d9541a66dde5fcdf04a5242c0af29bf7a810", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
-/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered. */
+/**
+ * shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered.
+ * #126: its fetch is an intention (skein-sdk 0.7.0); skein-git's pinned commit predates it (it finds a
+ * `fetch` provider by role, and the address book has none), so the default is the default image's copy,
+ * rebuilt on 0.7.0 (images/default/apps/git), until skein-git follows. SKEIN_GIT_REV or SKEIN_GIT_DIR pick another.
+ */
 export const GIT_APP: PinnedApp = {
   name: "git", repo: "https://github.com/shruggr/skein-git",
-  rev: process.env.SKEIN_GIT_REV ?? "b571f42fe80fc348206bea65ac810f02a162c511", dir: process.env.SKEIN_GIT_DIR,
+  rev: process.env.SKEIN_GIT_REV ?? "b571f42fe80fc348206bea65ac810f02a162c511",
+  dir: process.env.SKEIN_GIT_DIR ?? (process.env.SKEIN_GIT_REV ? undefined : fileURLToPath(new URL("../images/default/apps/git", import.meta.url))),
 };
 
 /** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.1). */

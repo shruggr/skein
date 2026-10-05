@@ -97,7 +97,7 @@ kernel itself performs — no program is stepped:
 | `objects` | `{records: [{cid, bytes}], root?}` | each block stored under its CID (hash-checked); `root` → `main` if there is none |
 | `head` | `{name, tree}` | the head advanced to a record in the store (owner = the name's app) |
 | `dispatch` | `{op: "add" \| "remove", row}` | the row added (replacing the row with its key: transport, address, prefix, sender), or removed |
-| `peers` | `{op: "add", key, transport?, address? \| url?, role?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
+| `peers` | `{op: "add", key, transport?, address? \| url?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
 | `claim` | `{messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): **the owner is the message's sender** (#127; a body's `owner` is not read) — the sender's four admin rows added, and the explorer row with the sender's key (#121), the claim row removed, the head `claim` → `{owner: <the sender>, messagebox?, handle?, domain?}`, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned or the sender is not a key |
 
 Every genesis that names an owner seeds the owner's four admin rows
@@ -687,7 +687,7 @@ The head `peers` — who the instance can reach, and how:
 ```
 {kind: "peers", peers: [{key, peer: <cid>}]}                                   sorted by key
 {kind: "peer", key: bytes(33), transport: "mailbox" | "libp2p" | "local", address: text,
- role?: text, handle?: text, domain?: text, since: ms, source: "genesis" | "admin" | "claim"}
+ handle?: text, domain?: text, since: ms, source: "genesis" | "admin" | "claim"}
 ```
 
 | transport | address | how a message goes out |
@@ -700,24 +700,24 @@ An entry is a key, a transport and an address (#126). Nothing in skein
 finds a service by a role: the kernel finds no waker (a deadline is an
 intention), and a program that messages one of its host's services reads
 the entry by where it is reached (`sk.peerAt(a, "local", "cron")`) or is
-given the key. (`role` is still written by the reference host's genesis and
-taken by the `peers` operation, for modules built before skein-sdk 0.7.0
-that find a provider by it — #126's last step removes it.) Receiving needs none of this: a
+given the key. There is no `role` (a module built before skein-sdk 0.7.0
+that finds a provider by one finds none: rebuild it on 0.7.0). Receiving needs none of this: a
 sender is authenticated by its key (a BRC-104 session or the message's own
 signature) and admitted by a dispatch row, whether or not the instance can
 answer it.
 
 The address book is one of the kernel's four tables (#77). Who writes it:
 
-- **the genesis**, once: `addressBook: [{key, transport, address, role?,
+- **the genesis**, once: `addressBook: [{key, transport, address,
   handle?, domain?}]` (source `genesis`) — the host seeds its providers
-  (role = the provider's name; `libp2p` when it runs libp2p, `status` when
-  it has an Arcade) and the owner's mailbox;
+  (`local`, address the provider's name: `fetch`, `waker`, `cron`; `libp2p`
+  when it runs libp2p, `status` when it has an Arcade) and the owner's
+  mailbox (an older genesis's `role` is read and not kept);
 - **the kernel's `peers` operation** (the admin box `peers`, the owner's
   by every genesis, or a delegate's; source `admin`): `{op: "add", key,
-  transport?, address? | url?, role?, handle?, domain?}` | `{op: "remove",
+  transport?, address? | url?, handle?, domain?}` | `{op: "remove",
   key}` — `url` alone, or no `transport`, is a mailbox. No program runs.
-  `skein plan peers add <key> <address> [--transport t] [--role r]
+  `skein plan peers add <key> <address> [--transport t]
   [--handle h@d]` / `remove <key>`, sent by the owner's wallet (#124), and
   `skein-host peers <agent> list`; `scripts/host/up.sh` writes the owner,
   the inference peer and the other agents into every agent this way;
@@ -770,7 +770,7 @@ for a stream's frames), its body `{replyTo: <the message>, …}`; a failure is
 message, body}`): the front door checks the signature and the body, and the
 message routes by `replyTo` to the thread awaiting it.
 
-| role | box | body | answer body (beside `replyTo`) |
+| provider (`local` address) | box | body | answer body (beside `replyTo`) |
 |---|---|---|---|
 | `fetch` | `fetch` | the instance's signed request for a `fetch` intention (#126: its body the event's CID; above, "Intentions") | `{replyTo: <the event>, request, status, headers, body: bytes}` — the HTTP proxy; a URL of the host's own is answered in process, any other goes out when the host allows it (`SKEIN_HTTP=fetch`). `maxBytes` (#91): a response body over it is not carried in, and the answer is `{error}` (the git app bounds its pack this way). (A module built before skein-sdk 0.7.0 still emits `{method, url, …}` to it as a message; answered `{replyTo, status, headers, body}`) |
 | `waker` | `wake` | the instance's signed request for a `deadline` intention (#126) | `{replyTo: <the event>, request, at}`, at `at` (#69, below) |
@@ -802,7 +802,7 @@ other instance's book names them), and they act only on a message from the
 host skein's identity, sent from the host skein: any other is not acted on
 and not answered (a line in the host's log). A host skein made before #113
 has no `certifier` entry: the owner's `peers` message adds it (`skein plan
-peers add <certifier key> certifier --transport local --role certifier
+peers add <certifier key> certifier --transport local
 --origin <the host skein's origin>`, sent) (the key: what the
 host's manifest published as `metanet.trust.publicKey` before #113 — the
 master secret's child under `[2, "skein provider"]`, key ID `certifier`). A refusal is an answer: `{error}` for a handle that is not a
@@ -929,7 +929,7 @@ body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraI
   sender: <the provider's key>, program}` (the chain app's manifest writes
   `{"address": "status", …}`, resolved under its name, #128; a system tree writes
   `{"address": "chain/status", "sender": "$status", "program": "chain"}`, #78), and
-  the provider in the address book (role `status`), which the genesis seeds
+  the provider in the address book (at `local` `status`), which the genesis seeds
   when the host has one — how a program knows one speaks to it. The message
   steps the thread awaiting the transaction (input `message`), else the
   row's program (args `{message, body, box: "chain/status", sender}`). An
@@ -953,7 +953,7 @@ there is no setting, and the overlay holds no chain state. A submission is
 handed to the chain app (`ingest`) and admitted on the chain app's
 **first** admitting answer — `accepted` (a status provider's first status
 that is not a rejection) or `proven` (a validated proof) — and never on
-`rejected`. With no status provider subscribed (role `status`), no status
+`rejected`. With no status provider subscribed (a `status` row), no status
 ever arrives, so the chain app answers only at the proof and the overlay
 admits there. Admission on validation alone is not a mode. A submission
 admitted on `accepted` keeps listening (the overlay's watch of the same

@@ -37,10 +37,10 @@ test("skein plan peers: add / remove as the owner's messages to the `peers` box,
   assert.ok(out.includes(`peers add ${bob} → mailbox https://mail.example/bob (@bob@example.com)`), out.join("\n"));
   assert.equal(await send(p.dir), 1);
   const got = await until("bob in alpha's address book", async () => { const l = await list("alpha"); return l.length ? l : undefined; });
-  assert.deepEqual(got, [[bob, "mailbox", "https://mail.example/bob", "-", "bob@example.com", "admin"].join("\t")]);
+  assert.deepEqual(got, [[bob, "mailbox", "https://mail.example/bob", "bob@example.com", "admin"].join("\t")]);
   p = await plan("add", bob, "https://other.example/bob");
   await send(p.dir);
-  await until("the new URL", async () => (await list("alpha"))[0]?.includes("https://other.example/bob\t-\t-\tadmin") ? true : undefined);
+  await until("the new URL", async () => (await list("alpha"))[0]?.includes("https://other.example/bob\t-\tadmin") ? true : undefined);
   p = await plan("remove", bob);
   await send(p.dir);
   await until("bob removed", async () => (await list("alpha")).length === 0 ? true : undefined);

@@ -19,6 +19,8 @@ docs/BOOTSTRAP.md, "The default image".
   The explorer row (`/explore`) is the claim's: the kernel writes it with
   the owner's key (#121).
 - `apps/git/`: shruggr/skein-git v0.1.0's tree (the same git tree as that
-  tag's commit). Not wired: the management page installs it from here as the
+  tag's commit), but for #126: its fetch is the SDK's `fetch` intention
+  (skein-sdk 0.7.0; the address book has no `fetch` role to find), rebuilt
+  here until skein-git releases the same. Not wired: the management page installs it from here as the
   owner (objects for its module and records, head, dispatch, start), and
   every other app through it, by hash.

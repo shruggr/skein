@@ -161,8 +161,8 @@ export function planPeers(recipient: string, changes: PeerChange[]): AdminPlan {
       prompt.push(`peers remove ${c.key}`);
       continue;
     }
-    messages.push({ box: "peers", body: { op: "add", key: keyBytes(c.key), transport: c.transport, address: c.address, ...(c.role ? { role: c.role } : {}), ...(c.handle ? { handle: c.handle } : {}), ...(c.domain ? { domain: c.domain } : {}) } });
-    prompt.push(`peers add ${c.key} → ${c.transport} ${c.address}${c.role ? ` (role ${c.role})` : ""}${c.handle ? ` (@${c.handle}${c.domain ? `@${c.domain}` : ""})` : ""}`);
+    messages.push({ box: "peers", body: { op: "add", key: keyBytes(c.key), transport: c.transport, address: c.address, ...(c.handle ? { handle: c.handle } : {}), ...(c.domain ? { domain: c.domain } : {}) } });
+    prompt.push(`peers add ${c.key} → ${c.transport} ${c.address}${c.handle ? ` (@${c.handle}${c.domain ? `@${c.domain}` : ""})` : ""}`);
   }
   return { prompt, recipient, messages };
 }
@@ -218,8 +218,8 @@ export async function explorerView(read: ExplorerRead): Promise<InstanceView> {
   const book: AddressEntry[] = [];
   if (head("peers")) {
     for (const e of ((await record(head("peers")!)) as { peers?: Array<{ key?: unknown; peer: CID }> })?.peers ?? []) {
-      const p = await record(e.peer) as { key?: unknown; transport?: AddressEntry["transport"]; address?: string; role?: string; handle?: string; domain?: string; source?: string };
-      book.push({ key: hex(p.key ?? e.key), transport: p.transport ?? "mailbox", address: p.address ?? "", ...(p.role ? { role: p.role } : {}), ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
+      const p = await record(e.peer) as { key?: unknown; transport?: AddressEntry["transport"]; address?: string; handle?: string; domain?: string; source?: string };
+      book.push({ key: hex(p.key ?? e.key), transport: p.transport ?? "mailbox", address: p.address ?? "", ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
     }
   }
   const chain = await read(`/thread/${dispatchOrigin()}`) as { updates?: Array<{ record?: { op: "add" | "remove"; row: DispatchRow } }> } | undefined;

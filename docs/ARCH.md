@@ -163,9 +163,9 @@ the inference peer (`bin/skein-infer`), other instances on any host, and
 the providers.
 
 **The address book** says who an instance can reach and how: key →
-`{transport: mailbox | libp2p | local, address, handle?}` (#126: nothing
-finds a service by a role; `role` is still written for modules built
-before skein-sdk 0.7.0 until #126's last step). The genesis seeds it (the
+`{transport: mailbox | libp2p | local, address, handle?}` — a key, a
+transport and an address (#126: no roles; nothing finds a service by one).
+The genesis seeds it (the
 host's providers at `local` <name>, the owner's mailbox); after
 that it changes only through the kernel's `peers` operation, on a message
 signed by the owner (`skein plan peers`, sent by the owner's wallet) or by a key the owner added as a

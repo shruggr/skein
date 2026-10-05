@@ -43,13 +43,12 @@ export function onlyIgnore(dir: string, patterns: string[]): (rel: string) => bo
 /**
  * An address-book entry (#70): how to reach a key — its transport
  * (`mailbox`: a messagebox URL over BRC-103/104; `libp2p`: a peer ID or
- * `topic:<name>`; `local`: a host provider's name) and address, the provider
- * role it plays (`fetch`, `libp2p`, `waker`, `broadcast`), and optionally its
- * handle. The instance keeps them under the head `peers` (programs/resolve);
+ * `topic:<name>`; `local`: a host provider's name) and address, and
+ * optionally its handle (#126: no role). The instance keeps them under the head `peers` (programs/resolve);
  * `source` says who wrote one (`genesis`, `admin`: the `peers` box,
  * `resolve`: its own BRC-169 lookup, `claim`).
  */
-export interface AddressEntry { key: string; transport: "mailbox" | "libp2p" | "local"; address: string; role?: string; handle?: string; domain?: string; source?: string }
+export interface AddressEntry { key: string; transport: "mailbox" | "libp2p" | "local"; address: string; handle?: string; domain?: string; source?: string }
 
 const hexKey = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "";
 
@@ -61,8 +60,8 @@ export async function addressBook(store: Store | undefined): Promise<AddressEntr
   const t = await store.get(root) as unknown as { peers?: Array<{ key: unknown; peer: CID }> };
   const out: AddressEntry[] = [];
   for (const e of t.peers ?? []) {
-    const p = await store.get(e.peer) as unknown as { key: unknown; transport?: AddressEntry["transport"]; address?: string; role?: string | null; handle?: string | null; domain?: string | null; source?: string };
-    out.push({ key: hexKey(p.key ?? e.key), transport: p.transport ?? "mailbox", address: p.address ?? "", ...(p.role ? { role: p.role } : {}), ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
+    const p = await store.get(e.peer) as unknown as { key: unknown; transport?: AddressEntry["transport"]; address?: string; handle?: string | null; domain?: string | null; source?: string };
+    out.push({ key: hexKey(p.key ?? e.key), transport: p.transport ?? "mailbox", address: p.address ?? "", ...(p.handle ? { handle: p.handle } : {}), ...(p.domain ? { domain: p.domain } : {}), ...(p.source ? { source: p.source } : {}) });
   }
   return out;
 }

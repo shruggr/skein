@@ -263,9 +263,8 @@ against those reads in the kernel's match.)
     row's record and module must be in the store).
   - `peers` — `{op: "add", key, transport?, address? | url?, handle?,
     domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
-    An entry is a key, a transport and an address (#126: nothing finds a
-    service by a role; a `role` an older client sends is still stored, for
-    modules built before skein-sdk 0.7.0, until #126's last step).
+    An entry is a key, a transport and an address (#126: no roles; a `role`
+    an older client sends is not kept).
   - `claim` (#89, #127) — `{messagebox?, handle?, domain?}`, at an image's
     claim row (from anyone). **The owner is the message's sender** — the
     verified signer — never a key in the body (a body's `owner` is not

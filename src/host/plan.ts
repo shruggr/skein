@@ -124,6 +124,9 @@ export interface Plan {
   notes: string[];
 }
 
+/** The address book's entry for the host service `name` (`local`, <name>), if any. */
+const serviceOf = (view: InstanceView, name: string) => view.addressBook.find((x) => x.transport === "local" && x.address === name);
+
 /** A sender as the manifest writes it → what the kernel's row carries, and how to show it. */
 function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"]; label: string } {
   if (s === "*") return { sender: "*", label: "anyone" };
@@ -135,8 +138,9 @@ function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"
   }
   if (s === "$self") return { sender: keyBytes(view.identity), label: `the instance itself (${view.identity.slice(0, 10)}…)` };
   if (s.startsWith("$")) {
-    const e = view.addressBook.find((x) => x.role === s.slice(1));
-    if (!e) throw new Error(`sender ${s}: the instance's address book has no ${s.slice(1)} provider (an entry with role "${s.slice(1)}")`);
+    // Tooling (#126): `$<name>` names the key the instance's address book reaches on its host at `local` <name> (a host service: `$cron`, `$status`).
+    const e = serviceOf(view, s.slice(1));
+    if (!e) throw new Error(`sender ${s}: the instance's address book has no ${s.slice(1)} service on its host (an entry \`local\` ${s.slice(1)})`);
     return { sender: keyBytes(e.key), label: `${s} (${e.key.slice(0, 10)}…)` };
   }
   return { sender: keyBytes(s), label: `${s.slice(0, 10)}…` };
@@ -154,7 +158,7 @@ export function wiring(record: AppRecord, view: InstanceView, skipped: string[] 
     const { transport, address, prefix, sender, program, fn, optional, ...settings } = r;
     const cid = record.programs[program];
     if (!cid) throw new Error(`row ${rowKey(record.name, r)}: no program for role ${program}`);
-    if (optional === true && sender.startsWith("$") && sender !== "$owner" && sender !== "$self" && !view.addressBook.some((x) => x.role === sender.slice(1))) {
+    if (optional === true && sender.startsWith("$") && sender !== "$owner" && sender !== "$self" && !serviceOf(view, sender.slice(1))) {
       skipped.push(`${transport} ${rowAddress(record.name, r)} from ${sender}: no ${sender.slice(1)} provider in the address book (optional; left out)`);
       continue;
     }

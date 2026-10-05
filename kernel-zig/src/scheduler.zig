@@ -1204,7 +1204,7 @@ pub const Runtime = struct {
     ///   head      {name, tree | root}: the head advanced to the record (in the store); owner = its name's app
     ///   dispatch  {op: "add" | "remove", row}: the table changed (dispatch.zig; a program row's record
     ///             and module must be in the store)
-    ///   peers     {op: "add", key, transport?, address? | url?, role?, handle?, domain?} | {op: "remove", key}:
+    ///   peers     {op: "add", key, transport?, address? | url?, handle?, domain?} | {op: "remove", key}:
     ///             the address book (addressbook.zig write; source "admin")
     ///   claim     {messagebox?, handle?, domain?} (#89, #127): an image's one claim row. The
     ///             owner is the message's verified sender, never a key in the body (a body's
@@ -1293,10 +1293,10 @@ pub const Runtime = struct {
             return;
         }
         if (std.mem.eql(u8, op, "peers")) {
-            const what = Value.str(body.get("op")) orelse return refuse(a, "want {{op: add|remove, key, transport?, address? | url?, role?, handle?, domain?}}", .{});
+            const what = Value.str(body.get("op")) orelse return refuse(a, "want {{op: add|remove, key, transport?, address? | url?, handle?, domain?}}", .{});
             const key = keyOf(a, body.get("key")) orelse return refuse(a, "`key` is not an identity key", .{});
             if (std.mem.eql(u8, what, "remove")) {
-                try addressbook.write(a, rt.store, key, "", null, null, null, null, "admin", by);
+                try addressbook.write(a, rt.store, key, "", null, null, null, "admin", by);
                 rt.say("kernel peers: remove {s}", .{shortKey(key)});
                 return;
             }
@@ -1305,7 +1305,7 @@ pub const Runtime = struct {
             if (!logm.isTransport(transport)) return refuse(a, "transport is mailbox, libp2p or local", .{});
             const address = Value.str(body.get("address")) orelse Value.str(body.get("url")) orelse return refuse(a, "add wants an address (a mailbox's url, a peer ID or topic:<name>, a provider's name)", .{});
             if (address.len == 0) return refuse(a, "add wants an address", .{});
-            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("role")), Value.str(body.get("handle")), Value.str(body.get("domain")), "admin", by);
+            try addressbook.write(a, rt.store, key, transport, address, Value.str(body.get("handle")), Value.str(body.get("domain")), "admin", by);
             rt.say("kernel peers: add {s} by {s} {s}", .{ shortKey(key), transport, address });
             return;
         }
@@ -1360,7 +1360,7 @@ pub const Runtime = struct {
         };
         _ = try dispatch.apply(a, rt.store, "remove", row.value, d);
         _ = try heads.advanceHead(a, rt.store, CLAIM_HEAD, try rt.store.put(a, claimed.value()), by);
-        if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, null, handle, domain, "claim", by);
+        if (mb) |u| try addressbook.write(a, rt.store, owner, "mailbox", u, handle, domain, "claim", by);
         rt.say("kernel claim: owner {s}: admin rows objects, head, dispatch, peers, the explorer row; the claim row removed{s}", .{ shortKey(owner), if (mb != null) "; the owner's messagebox in the address book" else "" });
     }
 

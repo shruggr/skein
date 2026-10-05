@@ -44,7 +44,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   const host = await h.router.createInstance("host", h.ownerId, { host: true, claim: await signClaim(h.owner) });
   assert.equal(h.db.hostSkein()?.handle, "host");
   assert.equal(h.db.get("host")!.status, "enabled");
-  const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ role?: string }> }).addressBook ?? []).map((e) => e.role);
+  const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   assert.ok((await roles("host")).includes("manager"), "the host skein's address book names the instance manager");
 
   /** A message from `from` (its key) to the instance manager, carried as the kernel hands it over. */

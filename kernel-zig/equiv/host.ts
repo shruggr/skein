@@ -111,7 +111,7 @@ try {
   host = await runHost(db, { vars: { ...vars, SKEIN_OWNER: operatorId }, out, err: out });
   const router = host.router;
   const k = async (handle: string) => (await router.hydrate(handle)).kernel;
-  const genesisBook = async (handle: string) => (((await (await k(handle)).genesis()) as { addressBook?: Array<{ role?: string }> }).addressBook ?? []).map((e) => e.role);
+  const genesisBook = async (handle: string) => (((await (await k(handle)).genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   check((await genesisBook("host")).includes("manager"), "the host skein's address book names the instance manager");
   const kernelRows = async (handle: string) => ((await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>).filter((x) => x.program === "kernel");
   check((await kernelRows("host")).map((x) => `${x.address}<-${x.sender}`).join(",") === "claim<-*", "the host skein is a bare image: its one kernel row, the claim row from anyone");

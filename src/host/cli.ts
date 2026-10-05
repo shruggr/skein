@@ -146,7 +146,7 @@ const USAGE = `usage:
   skein-host run                                          the router on :8100 (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
-  skein-host peers <handle> list                          its address book, from its store: key, transport, address, role, handle, source
+  skein-host peers <handle> list                          its address book, from its store: key, transport, address, handle, source
   skein-host import-handles                               the mailbox instances in host.db the host skein's onboarding app has no record of (#113), each with
                                                           the owner's request that adopts it (onboard.adopt): \`1sat authfetch POST <origin>/onboard/call --body '…'\`
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
@@ -328,7 +328,7 @@ async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   if (row.kind === "mailbox") { env.err(`skein-host peers: ${handle} is a mailbox instance: it keeps mail, it sends nothing`); return 1; }
   const s = openRow(row, env);
   try {
-    for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.role ?? "-", e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
+    for (const e of await addressBook(s.blocks)) env.out([e.key, e.transport, e.address, e.handle ? `${e.handle}@${e.domain ?? ""}` : "-", e.source ?? "-"].join("\t"));
     return 0;
   } finally {
     await s.close?.();

@@ -53,7 +53,7 @@
 //             dispatch: [<row>], scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
 //             reads?: [{caller?: bytes, op}],
-//             addressBook?: [{key: bytes, transport, address, role?, handle?, domain?}]}
+//             addressBook?: [{key: bytes, transport, address, handle?, domain?}]}
 //            `dispatch` (#77, format 8): the seed of the dispatch table (dispatch.zig: the rows
 //            that route — boxes, HTTP paths, libp2p topics and protocols — and the admin rows
 //            whose program is the kernel), written as the chain's first updates when the
@@ -279,8 +279,9 @@ pub fn isTransport(t: []const u8) bool {
 }
 
 /// An address book entry as a genesis seeds it, or as the head `peers` holds
-/// it (#70): {key, transport, address, role?, handle?, domain?} (the peer
-/// record adds kind, since, source).
+/// it (#70): {key, transport, address, handle?, domain?} (the peer record adds
+/// kind, since, source). No role (#126); an older genesis's `role` (text) is
+/// read and not kept.
 pub fn isAddress(x: ?Value) bool {
     const e = x orelse return false;
     if (e != .map) return false;

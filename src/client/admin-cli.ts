@@ -5,7 +5,7 @@
 //   skein plan uninstall <app> <where> [--out dir]
 //   skein plan dispatch add|remove [--sender key] <box> <handler> <where> [--out dir]
 //   skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
-//   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] <where> [--out dir]
+//   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--out dir]
 //   skein plan peers remove <key> <where> [--out dir]
 //   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
 //   skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]
@@ -37,7 +37,7 @@ export const PLAN_USAGE = `usage:
   skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
                                                                                      an http row (#125: e.g. an app's handler at /); <handler>: a program
                                                                                      record CID, a genesis program, or <app>.<role> (the installed app's)
-  skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--role r] [--handle h@d] <where> [--out dir]
+  skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--out dir]
   skein plan peers remove <key> <where> [--out dir]                                  an address-book entry (#70)
   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]             a directory into main (objects, head)
   skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]             an image's claim (#127): the wallet that sends it owns the instance
@@ -151,9 +151,9 @@ export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
         return 0;
       }
       case "peers": {
-        const { values: v, positionals: [op, key, address, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, transport: { type: "string" }, role: { type: "string" }, handle: { type: "string" } } });
+        const { values: v, positionals: [op, key, address, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, transport: { type: "string" }, handle: { type: "string" } } });
         const shape = op === "remove" ? !!key && !address : op === "add" ? !!key && !!address : false;
-        if (more.length || !shape || ((v.transport ?? v.role ?? v.handle) !== undefined && op !== "add")) { env.err(PLAN_USAGE); return 2; }
+        if (more.length || !shape || ((v.transport ?? v.handle) !== undefined && op !== "add")) { env.err(PLAN_USAGE); return 2; }
         const transport = (v.transport ?? "mailbox") as "mailbox" | "libp2p" | "local";
         if (!["mailbox", "libp2p", "local"].includes(transport)) { env.err("skein plan peers: --transport is mailbox, libp2p or local"); return 2; }
         if (op === "add" && transport === "mailbox" && !/^https?:\/\/[^/]/.test(address!)) { env.err(`skein plan peers: ${address} is not an http(s) URL`); return 2; }
@@ -164,7 +164,7 @@ export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
           named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h };
           if (!named.handle || (at > 0 && !named.domain)) { env.err(`skein plan peers: --handle ${v.handle}: want handle@domain`); return 2; }
         }
-        const change: PeerChange = op === "add" ? { op: "add", key: key!, transport, address: address!, ...(v.role ? { role: v.role } : {}), ...named } : { op: "remove", key: key! };
+        const change: PeerChange = op === "add" ? { op: "add", key: key!, transport, address: address!, ...named } : { op: "remove", key: key! };
         const t = await targetOf(v, env);
         try { emit(planPeers(t.recipient, [change]), v.out, env); } finally { t.close(); }
         return 0;

@@ -68,9 +68,9 @@ test("router: the stock client by host name, our client by path prefix; the answ
   const k = (await h.router.hydrate("alpha")).kernel;
   const root = await k.call("head", "peers") as CID;
   const tab = await k.store.get(root) as unknown as { peers: Array<{ peer: CID }> };
-  const seeded = await Promise.all(tab.peers.map(async (p) => await k.store.get(p.peer) as unknown as { source: string; role?: string; transport: string }));
+  const seeded = await Promise.all(tab.peers.map(async (p) => await k.store.get(p.peer) as unknown as { source: string; address: string; transport: string }));
   assert.ok(seeded.every((p) => p.source === "genesis"), "no peer seeded from the host's rows");
-  assert.deepEqual(seeded.map((p) => p.role ?? p.transport).sort(), ["cron", "fetch", "mailbox", "waker"], "the providers (#69: the cron provider among them) and the owner's mailbox");
+  assert.deepEqual(seeded.map((p) => p.transport === "local" ? p.address : p.transport).sort(), ["cron", "fetch", "mailbox", "waker"], "the providers (#69: the cron provider among them) and the owner's mailbox");
 
   // Polls (#68: skein is a state process): each listMessages on david's mailbox is an entry — an access
   // log — and a read: the mailbox itself does not move.

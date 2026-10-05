@@ -251,22 +251,12 @@ fn holds(a: Allocator, c: []const u8) anyerror!bool {
     return true;
 }
 
-/// One HTTP request through the address book's `fetch` provider → the message's CID, awaited.
+/// One HTTP request as an intention (#126: sk.fetch's `fetch` event, sent by the runtime to its HTTP proxy) → its CID, awaited.
 fn fetch(a: Allocator, method: []const u8, url: []const u8, headers: []const [2][]const u8, body: ?[]const u8, max: usize) ![]const u8 {
     var h = cbor.MapBuilder.init(a);
     try h.put("git-protocol", cbor.string("version=2"));
     for (headers) |x| try h.put(x[0], cbor.string(x[1]));
-    var q = cbor.MapBuilder.init(a);
-    try q.put("method", cbor.string(method));
-    try q.put("url", cbor.string(url));
-    try q.put("headers", h.value());
-    if (body) |b| try q.put("body", .{ .bytes = b });
-    try q.put("timeoutMs", cbor.int(TIMEOUT_MS));
-    try q.put("maxBytes", cbor.int(max));
-    const provider = sk.provider(a, "fetch") catch return sk.report("no fetch provider in the address book: this host gives the instance no HTTP");
-    const id = try sk.emit(a, provider, "fetch", q.value(), null);
-    try sk.awaitRecord(id);
-    return id;
+    return sk.fetchWith(a, method, url, h.value(), body, .{ .timeout_ms = TIMEOUT_MS, .max_bytes = @intCast(max) });
 }
 
 fn keepStage(a: Allocator, stage: []const u8, url: []const u8, hash: []const u8, request: []const u8) !void {

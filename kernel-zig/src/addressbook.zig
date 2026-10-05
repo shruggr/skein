@@ -3,16 +3,18 @@
 //
 //   {kind: "peers", peers: [{key, peer: <cid>}]}            sorted by key
 //   peer  {kind: "peer", key: bytes(33), transport: "mailbox" | "libp2p" | "local", address,
-//          role?, handle?, domain?, since, source}
+//          handle?, domain?, since, source}
 //
 // `transport` and `address` say how a message to `key` goes out: `mailbox`, a
-// messagebox URL reached over BRC-103/104 by the instance's own sessions (the
-// mailbox transport's middleware, the messagebox program, delivers it
-// through the HTTP provider); `libp2p`, a peer ID or `topic:<name>` (the
-// host's libp2p node carries it); `local`, the name of a provider on this
-// host (handed to it directly). `role` is the provider role the entry plays
-// for the instance (`fetch`, `libp2p`, `waker`, `broadcast`): how a program
-// finds a provider (`deadline` finds the waker). One of the kernel's four
+// messagebox URL reached over BRC-103/104 (the mailbox transport's
+// middleware, the messagebox program, delivers it with the kernel's
+// `authfetch`, #126); `libp2p`, a peer ID or `topic:<name>` (the host's
+// libp2p node carries it); `local`, the name of a service on this host
+// (handed to it directly). An entry is a key, a transport and an address: no
+// role (#126). A program has no reason to know who the waker or the HTTP
+// proxy is (a `deadline` and a `fetch` are intentions the runtime answers);
+// a service's message in is admitted by a dispatch row naming its key, as
+// any sender's. One of the kernel's four
 // tables (#77): written by the genesis (`addressBook`: the host's providers,
 // the owner's mailbox; source "genesis") and by the kernel's `peers`
 // operation on an admin message from the owner or a key the owner added as a
@@ -32,7 +34,7 @@ pub const HEAD = "peers";
 /// identity, with no entry of its own, goes out as transport `local` to `self`.
 pub const SELF = "self";
 
-pub const Entry = struct { key: []const u8, transport: []const u8, address: []const u8, role: ?[]const u8 = null };
+pub const Entry = struct { key: []const u8, transport: []const u8, address: []const u8 };
 
 /// The peer records the address book `root` (the head's record) names, in key order.
 pub fn entries(a: std.mem.Allocator, s: Store, root: ?[]const u8) ![]Value {
@@ -51,7 +53,7 @@ pub fn entries(a: std.mem.Allocator, s: Store, root: ?[]const u8) ![]Value {
 
 fn entryOf(p: Value) ?Entry {
     if (!logm.isAddress(p)) return null;
-    return .{ .key = Value.bytesOf(p.get("key")).?, .transport = Value.str(p.get("transport")).?, .address = Value.str(p.get("address")).?, .role = Value.str(p.get("role")) };
+    return .{ .key = Value.bytesOf(p.get("key")).?, .transport = Value.str(p.get("transport")).?, .address = Value.str(p.get("address")).? };
 }
 
 /// How to reach `key`: its entry in the address book `root`, or null ("no route").
@@ -63,19 +65,10 @@ pub fn lookup(a: std.mem.Allocator, s: Store, root: ?[]const u8, key: []const u8
     return null;
 }
 
-/// The entry playing `role` (a provider's), or null.
-pub fn byRole(a: std.mem.Allocator, s: Store, root: ?[]const u8, role: []const u8) !?Entry {
-    for (try entries(a, s, root)) |p| {
-        const e = entryOf(p) orelse continue;
-        if (e.role) |r| if (std.mem.eql(u8, r, role)) return e;
-    }
-    return null;
-}
-
 /// Write (or replace) the peer record for `key` (#77: the kernel's `peers`
 /// operation); a null `address`
 /// removes it. The head `peers` moves under `by`.
-pub fn write(a: std.mem.Allocator, s: Store, key: []const u8, transport: []const u8, address: ?[]const u8, role: ?[]const u8, handle: ?[]const u8, domain: ?[]const u8, source: []const u8, by: heads.By) !void {
+pub fn write(a: std.mem.Allocator, s: Store, key: []const u8, transport: []const u8, address: ?[]const u8, handle: ?[]const u8, domain: ?[]const u8, source: []const u8, by: heads.By) !void {
     var list = std.array_list.Managed(Value).init(a);
     if (try s.headTree(a, HEAD)) |root| if (try s.get(a, root)) |r| if (r.get("peers")) |ps| if (ps == .array) for (ps.array) |x| {
         if (!std.mem.eql(u8, Value.bytesOf(x.get("key")) orelse "", key)) try list.append(x);
@@ -86,7 +79,6 @@ pub fn write(a: std.mem.Allocator, s: Store, key: []const u8, transport: []const
         try rec.put("key", .{ .bytes = key });
         try rec.put("transport", cbor.string(transport));
         try rec.put("address", cbor.string(u));
-        try rec.put("role", cbor.optStr(role));
         try rec.put("handle", cbor.optStr(handle));
         try rec.put("domain", cbor.optStr(domain));
         try rec.put("since", cbor.int(by.at));
@@ -109,7 +101,8 @@ pub fn write(a: std.mem.Allocator, s: Store, key: []const u8, transport: []const
 
 /// The genesis's seed (#70): each `addressBook` entry written as a peer
 /// record (source "genesis"), the head `peers` moved to the list. Nothing
-/// when the genesis names none.
+/// when the genesis names none. A `role` an older genesis names is not kept
+/// (#126: no roles).
 pub fn seed(a: std.mem.Allocator, s: Store, g: Value, by: heads.By) !void {
     const ab = g.get("addressBook") orelse return;
     if (ab != .array or ab.array.len == 0) return;
@@ -120,7 +113,7 @@ pub fn seed(a: std.mem.Allocator, s: Store, g: Value, by: heads.By) !void {
         try rec.put("key", e.get("key"));
         try rec.put("transport", e.get("transport"));
         try rec.put("address", e.get("address"));
-        for ([_][]const u8{ "role", "handle", "domain" }) |k| if (Value.str(e.get(k))) |v| try rec.put(k, cbor.string(v));
+        for ([_][]const u8{ "handle", "domain" }) |k| if (Value.str(e.get(k))) |v| try rec.put(k, cbor.string(v));
         try rec.put("since", cbor.int(by.at));
         try rec.put("source", cbor.string("genesis"));
         const key = Value.bytesOf(e.get("key")).?;

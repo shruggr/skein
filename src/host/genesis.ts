@@ -9,7 +9,7 @@
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
-//             addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
+//             addressBook?: [{key: bytes(33), transport, address, handle?, domain?}]}
 //   row      {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
 //             sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, filter?: "beef", …settings}
 //            (`dispatch`, #77: the seed of the kernel's dispatch table, docs/MESSAGES.md "The dispatch
@@ -17,8 +17,9 @@
 //            the boxes programs take (a subscription of old), the HTTP paths and libp2p topics and
 //            protocols the front door routes (a route of old). `scopes`: the heads a genesis-wired program
 //            may advance — STOCK_SCOPES, plus a tree's config `scopes`. No `subscriptions`, no `routes`.)
-//            (`addressBook`, #70: the address book's seed — the host's providers (role = their name: fetch,
-//            waker, cron, libp2p, status) and the owner's mailbox — written into the head `peers` at the genesis)
+//            (`addressBook`, #70: the address book's seed — the host's providers (transport `local`, address
+//            their name: fetch, waker, cron, libp2p, status; #126: no role) and the owner's mailbox — written
+//            into the head `peers` at the genesis)
 //            (no `jobs`, #69: a schedule is a program's message to the cron provider; a genesis naming
 //            them is refused)
 //            (`libp2p`, #51: the host's libp2p node runs for the instance, subscribes `topics` and serves
@@ -104,7 +105,7 @@ export interface Genesis2Config {
   resolveOrigin?: string;
   /**
    * The address book's seed (#70): the host's providers (their keys, `local`,
-   * role = name) and, when the host knows it, the owner's mailbox. Written
+   * address = name; #126: no role) and, when the host knows it, the owner's mailbox. Written
    * into the head `peers` when the genesis is processed.
    */
   addressBook?: AddressSeed[];
@@ -118,7 +119,7 @@ export interface Genesis2Config {
 }
 
 /** One address book entry a genesis seeds (#70): key → transport and address. */
-export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" | "local"; address: string; role?: string; handle?: string; domain?: string }
+export interface AddressSeed { key: Uint8Array; transport: "mailbox" | "libp2p" | "local"; address: string; handle?: string; domain?: string }
 
 /**
  * A box's row (a `mailbox` dispatch row) as a system tree wrote it before #77 (etc/subscriptions.json, the file keeping its old name),
@@ -564,7 +565,7 @@ export function codeSystem(c: Genesis2Config, programs: Record<string, CID>): Sy
 export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "handle" | "domain" | "addressBook">, s: System): Record<string, unknown> {
   return {
     kind: "genesis", identity: keyBytes(c.identity), handle: c.handle, domain: c.domain, ...(c.owner ? { owner: keyBytes(c.owner) } : {}),
-    ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.role ? { role: e.role } : {}), ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
+    ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
     programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}),
