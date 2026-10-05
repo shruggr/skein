@@ -77,7 +77,7 @@ ol.flow li{margin:4px 0}
 <div class="wrap">
 <header>
   <h1>Skein Architecture Map</h1>
-  <p>The host process, the instance's surface, the kernel's modules, and the path one request takes. Drawn from docs/ARCH.md, docs/VM.md, docs/MESSAGES.md and the source as of 2026-10-04 (main). File paths are in the shruggr/skein repo unless named otherwise.</p>
+  <p>The host process, the instance's surface, the kernel's modules, and the path one request takes. Drawn from docs/ARCH.md, docs/VM.md, docs/MESSAGES.md and the source as of 2026-10-05 (main ab461e9, after the audit builds #113, #114, #115, #118). File paths are in the shruggr/skein repo unless named otherwise.</p>
   <nav aria-label="Sections">
     <a href="#host">1 Host process</a>
     <a href="#surface">2 Instance surface</a>
@@ -118,9 +118,9 @@ ol.flow li{margin:4px 0}
 
       <!-- discovery -->
       <rect x="215" y="280" width="160" height="64" class="bx h"/>
-      <text x="295" y="300" class="t b" text-anchor="middle">discovery</text>
-      <text x="295" y="318" class="t m" text-anchor="middle">BRC-169 manifest</text>
-      <text x="295" y="334" class="t m" text-anchor="middle">resolve · certs</text>
+      <text x="295" y="300" class="t b" text-anchor="middle">router origin</text>
+      <text x="295" y="318" class="t m" text-anchor="middle">register · resolve · manifest</text>
+      <text x="295" y="334" class="t m" text-anchor="middle">mapped onto the host skein</text>
 
       <!-- instances -->
       <rect x="400" y="60" width="220" height="380" class="grp"/>
@@ -130,7 +130,7 @@ ol.flow li{margin:4px 0}
         <text x="510" y="114" class="t k" text-anchor="middle">host skein</text>
         <rect x="424" y="124" width="84" height="30" class="bx"/><text x="466" y="143" class="t" text-anchor="middle">kernel</text>
         <rect x="500" y="124" width="96" height="30" class="bx"/><text x="548" y="143" class="t" text-anchor="middle">runtime.db</text>
-        <text x="510" y="176" class="t m" text-anchor="middle">onboard app · manager row</text>
+        <text x="510" y="176" class="t m" text-anchor="middle">onboard: create · register · resolve</text>
       </g>
       <g>
         <rect x="412" y="204" width="196" height="92" class="bx k"/>
@@ -164,7 +164,8 @@ ol.flow li{margin:4px 0}
       <text x="702" y="140" class="t">cron</text><text x="765" y="140" class="t m">ticks</text>
       <text x="702" y="158" class="t">status</text><text x="765" y="158" class="t m">Arcade's word</text>
       <text x="702" y="176" class="t">manager</text><text x="765" y="176" class="t m">create · stop</text>
-      <text x="782" y="198" class="t m" text-anchor="middle">a key + local row each</text>
+      <text x="702" y="194" class="t">certifier</text><text x="765" y="194" class="t m">signs handle certs</text>
+      <text x="782" y="206" class="t m" text-anchor="middle" style="font-size:9.5px">manager + certifier: host skein only</text>
 
       <rect x="690" y="226" width="185" height="50" class="bx h"/>
       <text x="782" y="246" class="t b" text-anchor="middle">broadcaster</text>
@@ -174,7 +175,7 @@ ol.flow li{margin:4px 0}
       <text x="782" y="330" class="t m" text-anchor="middle">SSE consumer</text>
       <rect x="690" y="358" width="185" height="50" class="bx h"/>
       <text x="782" y="378" class="t b" text-anchor="middle">signer</text>
-      <text x="782" y="396" class="t m" text-anchor="middle">master.key → child keys</text>
+      <text x="782" y="396" class="t m" text-anchor="middle">this runtime: master.key → keys</text>
 
       <!-- instance <-> services -->
       <line x1="620" y1="118" x2="690" y2="118" class="ln k" marker-end="url(#a1k)"/>
@@ -218,18 +219,18 @@ ol.flow li{margin:4px 0}
       <text x="448" y="455" class="t m">boots from</text>
     </svg>
     </div>
-    <figcaption>The host process holds every socket and every store. Packages come in through the transports and are appended whole; what a step emits goes out to a provider or another instance; the signer signs; host.db is the side table the instance manager boots from.</figcaption>
+    <figcaption>The host process holds every socket and every store. Packages come in through the transports and are appended whole; what a step emits goes out to a provider or another instance; the signer signs; host.db is the side table the instance manager boots from. Since #113 the router origin only maps its register, resolve, search and manifest paths onto the host skein, where the onboarding app does the work.</figcaption>
     <div class="key"><span><i class="sw k"></i> instance (kernel + store)</span><span><i class="sw h"></i> host component</span><span><i class="sw o"></i> outside the host</span><span>dashed arrow: out-of-band or on demand</span></div>
   </figure>
   <table>
     <tr><th>Component</th><th>File</th><th>Does</th></tr>
-    <tr><td>HTTP router</td><td><code>src/host/router.ts</code></td><td>Picks the instance by origin or <code>/@handle</code>, appends the request as an entry, holds the socket until the thread rests, returns the answer. Serves discovery on its own origin.</td></tr>
+    <tr><td>HTTP router</td><td><code>src/host/router.ts</code></td><td>Picks the instance by origin or <code>/@handle</code>, appends the request as an entry, holds the socket until the thread rests, returns the answer. Its own origin's register, resolve, search, manifest and paymail paths are mapped onto the host skein's onboarding app (#113).</td></tr>
     <tr><td>libp2p node</td><td><code>src/host/p2p.ts</code></td><td>One node per instance that declares libp2p; topic messages and stream frames appended as requests; follows the dispatch table live.</td></tr>
-    <tr><td>Providers</td><td><code>src/host/providers.ts</code></td><td>fetch, waker, cron, libp2p, status, manager. Recipients of emit. Each answers with a signed message appended as a <code>local</code> request.</td></tr>
+    <tr><td>Providers</td><td><code>src/host/providers.ts</code></td><td>fetch, waker, cron, libp2p, status, manager, certifier. Recipients of emit. Each answers with a signed message appended as a <code>local</code> request. Manager and certifier act for the host skein only.</td></tr>
     <tr><td>Instance manager</td><td><code>src/host/instances.ts</code></td><td>Reads host.db's <code>instances</code> on start and boots each kernel; creates, starts, stops instances on messages from the host skein only.</td></tr>
     <tr><td>Broadcaster</td><td><code>src/host/arc.ts</code></td><td>One Arcade per host. Broadcast events queued durably; statuses back by SSE and webhook, delivered to every instance holding the transaction.</td></tr>
     <tr><td>Feeds</td><td><code>src/host/feeds.ts</code></td><td>SSE consumer with Last-Event-ID. Headers become events in box <code>chain</code> for instances whose table takes them.</td></tr>
-    <tr><td>Signer</td><td><code>src/host/signer.ts</code></td><td>One master secret; each instance's root key is a BRC-42 child keyed by handle. Answers the kernel's <code>wallet</code> frame.</td></tr>
+    <tr><td>Signer</td><td><code>src/host/signer.ts</code></td><td>The wallet interface outside the VM. In this runtime: one master secret, each instance's root key a BRC-42 child keyed by handle. Answers the kernel's <code>wallet</code> frame. Not every runtime has a master key (#117).</td></tr>
     <tr><td>Kernel process</td><td><code>src/host/kernel.ts</code></td><td><code>skein-kernel serve</code> per instance; length-prefixed dag-cbor frames on stdio; started on demand.</td></tr>
     <tr><td>Store</td><td><code>src/runtime/sqlite.ts</code></td><td>One runtime.db per instance. <code>blocks</code> and <code>entries</code> are the record; chains, updates, edges are indexes rebuilt from blocks.</td></tr>
     <tr><td>host.db</td><td><code>src/host/instances.ts</code></td><td>instances, fuel_ledger, stream_cursor, status_seen, broadcast_queue, cron_schedule, host_settings. Not derived from any log.</td></tr>
@@ -253,7 +254,7 @@ ol.flow li{margin:4px 0}
       <rect x="20" y="110" width="160" height="48" class="bx"/><text x="100" y="130" class="t" text-anchor="middle">libp2p</text><text x="100" y="148" class="t m" text-anchor="middle">topic msg · stream</text>
       <rect x="20" y="170" width="160" height="48" class="bx"/><text x="100" y="190" class="t" text-anchor="middle">local</text><text x="100" y="208" class="t m" text-anchor="middle">a provider's answer</text>
       <rect x="20" y="230" width="160" height="48" class="bx"/><text x="100" y="250" class="t" text-anchor="middle">event</text><text x="100" y="268" class="t m" text-anchor="middle">header · proof · tick</text>
-      <rect x="20" y="290" width="160" height="48" class="bx"/><text x="100" y="310" class="t" text-anchor="middle">mail</text><text x="100" y="328" class="t m" text-anchor="middle">browser host, direct</text>
+      <rect x="20" y="290" width="160" height="48" class="bx"/><text x="100" y="310" class="t" text-anchor="middle">mail</text><text x="100" y="328" class="t m" text-anchor="middle">only what a step routes</text>
 
       <rect x="240" y="50" width="120" height="288" class="bx e"/>
       <text x="300" y="72" class="t e" text-anchor="middle">the log</text>
@@ -274,8 +275,8 @@ ol.flow li{margin:4px 0}
       <rect x="440" y="50" width="280" height="288" class="grp k"/>
       <text x="580" y="72" class="t k" text-anchor="middle">kernel · the instance</text>
       <rect x="460" y="88" width="240" height="40" class="bx"/><text x="580" y="106" class="t" text-anchor="middle">scheduler</text><text x="580" y="120" class="t m" text-anchor="middle">one entry, one step at a time</text>
-      <rect x="460" y="140" width="240" height="40" class="bx"/><text x="580" y="158" class="t" text-anchor="middle">dispatch table</text><text x="580" y="172" class="t m" text-anchor="middle">(transport, address, sender)</text>
-      <rect x="460" y="192" width="112" height="60" class="bx"/><text x="516" y="212" class="t" text-anchor="middle">front door</text><text x="516" y="228" class="t m" text-anchor="middle">BRC-103/104</text><text x="516" y="242" class="t m" text-anchor="middle">sessions</text>
+      <rect x="460" y="140" width="240" height="40" class="bx"/><text x="580" y="158" class="t" text-anchor="middle">dispatch table</text><text x="580" y="172" class="t m" text-anchor="middle">matches every transport (#115)</text>
+      <rect x="460" y="192" width="112" height="60" class="bx"/><text x="516" y="212" class="t" text-anchor="middle">front door</text><text x="516" y="228" class="t m" text-anchor="middle">verifies 103/104</text><text x="516" y="242" class="t m" text-anchor="middle">matches nothing</text>
       <rect x="588" y="192" width="112" height="60" class="bx"/><text x="644" y="212" class="t" text-anchor="middle">app programs</text><text x="644" y="228" class="t m" text-anchor="middle">WASI steps</text><text x="644" y="242" class="t m" text-anchor="middle">threads</text>
       <rect x="460" y="264" width="240" height="60" class="bx"/><text x="580" y="282" class="t" text-anchor="middle">store</text><text x="580" y="298" class="t m" text-anchor="middle">objects · heads · dispatch · peers</text><text x="580" y="312" class="t m" text-anchor="middle">chains of updates, blocks by CID</text>
 
@@ -307,7 +308,7 @@ ol.flow li{margin:4px 0}
       <text x="536" y="394" class="t m" text-anchor="middle">the answer to an emit comes back as a new entry, signed by whoever answered</text>
     </svg>
     </div>
-    <figcaption>Everything a transport carries becomes an entry; the scheduler steps the front door on a request, the dispatch table picks the program, and the thread's resting state is the answer. A call reads current state without an entry. Emit leaves after the step commits and comes back as a fresh entry.</figcaption>
+    <figcaption>Everything a transport carries becomes an entry; the kernel matches the dispatch row first, the front door only verifies the session or signature, the row's program runs, and the thread's resting state is the answer. No host-asserted mail enters: a message is admitted only inside a signed request (#114). A call reads current state without an entry. Emit leaves after the step commits and comes back as a fresh entry.</figcaption>
     <div class="key"><span><i class="sw e"></i> the log</span><span><i class="sw k"></i> kernel</span><span><i class="sw h"></i> host-side</span></div>
   </figure>
   <table>
@@ -361,11 +362,11 @@ ol.flow li{margin:4px 0}
       <text x="250" y="290" class="t m" text-anchor="middle">consumes the log in order, one entry and one step at a time</text>
       <text x="250" y="306" class="t m" text-anchor="middle">routes by the dispatch table; a reply resumes its thread</text>
       <text x="250" y="322" class="t m" text-anchor="middle">time = max(last+1, stamp+fuel); random keyed per step</text>
-      <text x="250" y="338" class="t m" text-anchor="middle">out of fuel: the step ends errored, never retried</text>
+      <text x="250" y="338" class="t m" text-anchor="middle">write scope only from installed records (#114)</text>
       <rect x="472" y="252" width="130" height="96" class="bx"/>
       <text x="537" y="272" class="t b" text-anchor="middle">dispatch.zig</text>
       <text x="537" y="290" class="t m" text-anchor="middle">rows, first match</text>
-      <text x="537" y="306" class="t m" text-anchor="middle">forMail · forEvent</text>
+      <text x="537" y="306" class="t m" text-anchor="middle">mail · event · http · p2p</text>
       <text x="537" y="322" class="t m" text-anchor="middle">admin rows run</text>
       <text x="537" y="338" class="t m" text-anchor="middle">kernel operations</text>
       <rect x="614" y="252" width="130" height="96" class="bx"/>
@@ -391,7 +392,7 @@ ol.flow li{margin:4px 0}
 
       <rect x="40" y="476" width="430" height="50" class="bx h"/>
       <text x="255" y="496" class="t b" text-anchor="middle">ipc.zig · serve.zig</text>
-      <text x="255" y="514" class="t m" text-anchor="middle">frames to the host: admit, answer, call in · emit out</text>
+      <text x="255" y="514" class="t m" text-anchor="middle">admit, answer, call in · emit out · append = genesis only</text>
       <rect x="490" y="476" width="430" height="50" class="bx h"/>
       <text x="705" y="496" class="t b" text-anchor="middle">signer.zig</text>
       <text x="705" y="514" class="t m" text-anchor="middle">the wallet frame: public keys and signatures only</text>
@@ -410,14 +411,14 @@ ol.flow li{margin:4px 0}
   <table>
     <tr><th>Module</th><th>Role</th></tr>
     <tr><td><code>scheduler.zig</code></td><td>Consumes the log in order, one entry and one step at a time. Routes a message by <code>(sender, box)</code> through the dispatch table, an event by box, a reply to the thread awaiting it.</td></tr>
-    <tr><td><code>dispatch.zig</code></td><td>Folds the dispatch chain into rows; first match wins; a row with program <code>kernel</code> is an admin operation (objects, head, dispatch, peers, claim).</td></tr>
+    <tr><td><code>dispatch.zig</code></td><td>Folds the dispatch chain into rows; one matcher for mailbox, event, http (exact, then longest prefix) and libp2p rows; first match wins; a refused sender falls through to the next row that takes it; a row with program <code>kernel</code> is an admin operation (objects, head, dispatch, peers, claim).</td></tr>
     <tr><td><code>heads.zig</code></td><td>Named chains: origin <code>{kind: head, name}</code>, one update per move <code>{tree, thread, input, at}</code>. Write scope by name: an app advances only <code>&lt;app&gt;/…</code>.</td></tr>
     <tr><td><code>objects.zig</code> / <code>store.zig</code></td><td>Blocks by CID. Reads are global: holding a CID is the permission. Native backing is SQLite, browser is IndexedDB.</td></tr>
     <tr><td><code>log.zig</code></td><td>Entry shapes (format 8). Entries are unsigned; the sender signed its request, <code>prev</code> fixes order, <code>time</code> is the host's stamp.</td></tr>
     <tr><td><code>envelope.zig</code></td><td>Mail records and their ids; the unique map so a record is admitted once.</td></tr>
-    <tr><td><code>runner.zig</code> / <code>engine*.zig</code></td><td>One step of one program: fuel on, imports bound, writes collected and committed only when the step ends without error.</td></tr>
+    <tr><td><code>runner.zig</code> / <code>engine*.zig</code></td><td>One step of one program: fuel on, imports bound, writes collected and committed only when the step ends without error. A program advances <code>&lt;app&gt;/…</code> only if its record is installed (a dispatch row's program, listed in <code>&lt;app&gt;/app</code>, or a genesis program); any other record runs with no write scope.</td></tr>
     <tr><td><code>wasi.zig</code> / <code>vfs.zig</code> / <code>syscalls.zig</code></td><td>The WASI host inside the kernel. Pure syscalls are answered deterministically and never recorded.</td></tr>
-    <tr><td><code>signer.zig</code></td><td>The <code>wallet</code> import: the one recorded call. Replay serves the recorded answer.</td></tr>
+    <tr><td><code>signer.zig</code></td><td>The <code>wallet</code> import: the one recorded call (the record kind is still named <code>oracle</code>, a format value). Replay serves the recorded answer.</td></tr>
     <tr><td><code>replay.zig</code></td><td>Re-executes the log; recovery after a crash re-runs a step that was cut off.</td></tr>
     <tr><td><code>index.zig</code></td><td>One Merkle search tree per query, one state record holding every root.</td></tr>
     <tr><td><code>ipc.zig</code> / <code>serve.zig</code></td><td>The five frames over stdio to the host process.</td></tr>
@@ -459,13 +460,13 @@ ol.flow li{margin:4px 0}
       <text x="285" y="114" class="t m" text-anchor="middle">entry n: {request}</text>
       <text x="215" y="140" class="t m" text-anchor="middle">holds the socket</text>
       <line x1="355" y1="160" x2="495" y2="160" class="ln k" marker-end="url(#a4k)"/>
-      <text x="425" y="154" class="t m" text-anchor="middle">scheduler steps</text>
+      <text x="425" y="154" class="t m" text-anchor="middle">kernel matches the row, steps</text>
       <rect x="425" y="176" width="140" height="52" class="bx"/>
       <text x="495" y="194" class="t m" text-anchor="middle">verify the signature</text>
       <text x="495" y="208" class="t m" text-anchor="middle">session by yourNonce</text>
-      <text x="495" y="222" class="t m" text-anchor="middle">frontdoor/sessions</text>
+      <text x="495" y="222" class="t m" text-anchor="middle">matched row in hand</text>
       <line x1="495" y1="250" x2="635" y2="250" class="ln k" marker-end="url(#a4k)"/>
-      <text x="565" y="244" class="t m" text-anchor="middle">row (http, path, session) → launch</text>
+      <text x="565" y="244" class="t m" text-anchor="middle">the row's program → launch</text>
       <rect x="570" y="266" width="130" height="52" class="bx"/>
       <text x="635" y="284" class="t m" text-anchor="middle">get by CID</text>
       <text x="635" y="298" class="t m" text-anchor="middle">put · keep</text>
@@ -486,13 +487,13 @@ ol.flow li{margin:4px 0}
       <text x="355" y="490" class="t m" text-anchor="middle">the thread steps again</text>
     </svg>
     </div>
-    <figcaption>The socket is held across one entry and one thread. Nothing streams out of a step: the thread's resting state is the response. An emit leaves after commit and its answer is a new entry, which is why a waiting program is just a thread at rest and a restart re-executes it from the log.</figcaption>
+    <figcaption>The kernel matches, the front door verifies, the program runs. The socket is held across one entry and one thread. Nothing streams out of a step: the thread's resting state is the response. An emit leaves after commit and its answer is a new entry, which is why a waiting program is just a thread at rest and a restart re-executes it from the log.</figcaption>
   </figure>
   <ol class="flow">
     <li>The client signs the request on its BRC-104 session and sends it to the instance's origin.</li>
     <li>The router picks the instance by URL and appends the raw request as entry <em>n</em>. It holds the socket.</li>
-    <li>The scheduler steps the front door on the entry. It verifies the signature against the session record under <code>frontdoor/sessions</code>.</li>
-    <li>The dispatch table matches <code>(http, path, sender)</code>, first row wins, and the program is launched as the request's thread.</li>
+    <li>The kernel matches the dispatch table, <code>(http, path, sender)</code>, exact path then longest prefix, first row wins, and steps the front door with that row.</li>
+    <li>The front door verifies the signature against the session record under <code>frontdoor/sessions</code> and launches the row's program as the request's thread.</li>
     <li>The step reads any CID it holds, writes records, advances heads under its own name, and asks the signer to sign. The signing is the one recorded call.</li>
     <li>The step ends; its writes commit; its emits leave. The thread rests, and the resting state is the HTTP answer.</li>
     <li>A provider's answer arrives later as a <code>local</code> entry whose <code>replyTo</code> names the emitted record, and the scheduler steps the thread again.</li>
@@ -505,13 +506,15 @@ ol.flow li{margin:4px 0}
   <p>The state that is not derived from anything else, and what every other table is rebuilt from.</p>
   <table>
     <tr><th>State</th><th>Where</th><th>Derived from</th></tr>
-    <tr><td>master secret</td><td><code>$SKEIN_HOME/master.key</code></td><td>Nothing. Every instance key, provider key, libp2p key and the certifier key is a child of it.</td></tr>
+    <tr><td>master secret</td><td><code>$SKEIN_HOME/master.key</code></td><td>Nothing. In this runtime every instance key, provider key, libp2p key and the certifier key is a child of it. Another runtime may bind the signer differently (#117).</td></tr>
     <tr><td>instances rows</td><td><code>host.db</code></td><td>Nothing. Handle, domain, identity, owner, kind, store path, status. The instance manager boots from here.</td></tr>
     <tr><td>entries (the log)</td><td><code>runtime.db</code> per instance</td><td>Nothing. The only input. Replay re-executes every step from it.</td></tr>
     <tr><td>blocks</td><td><code>runtime.db</code></td><td>The kernel's writes while processing entries: every tree, chain update, head record, kept record. Reachable from each chain update.</td></tr>
     <tr><td>chains, updates, edges, messages</td><td><code>runtime.db</code></td><td>Indexes over blocks. Droppable and rebuilt.</td></tr>
     <tr><td>heads, dispatch, address book</td><td>chains in blocks</td><td>Current tips of named chains. A head is <code>{kind: head, name}</code> plus one update per move.</td></tr>
     <tr><td>sessions</td><td>head <code>frontdoor/sessions</code></td><td>Written by the front door's steps. Survive restarts.</td></tr>
+    <tr><td>registrations and handle certificates</td><td>host skein heads <code>onboard/instances/&lt;handle&gt;</code>, <code>onboard/handles/&lt;handle&gt;</code></td><td>Written by the onboarding app (#113): the manager's answer, and a chain of issuance records; the serial is the hash of the issuance record, so a reissue is a new serial.</td></tr>
+    <tr><td>handle profiles</td><td>host skein, the onboarding app's records</td><td>Posted signed to <code>/account/profile</code>; served by resolve and search. Moved from the mailbox instance in #113, David to review.</td></tr>
     <tr><td>app state</td><td>heads <code>&lt;app&gt;/…</code></td><td>Written only by that app's programs. The app record itself is <code>&lt;app&gt;/app</code>.</td></tr>
     <tr><td>host skein's view of children</td><td>head <code>onboard/instances/&lt;handle&gt;</code></td><td>The manager's answer at creation: <code>{handle, identity, url}</code>. Not the child's head.</td></tr>
     <tr><td>fuel, cron, broadcast queue, feed cursors</td><td><code>host.db</code></td><td>Host bookkeeping. Not derived, not replayed.</td></tr>
