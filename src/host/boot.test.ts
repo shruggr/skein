@@ -77,8 +77,15 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   assert.equal(g.owner, undefined, "no owner in it");
   assert.deepEqual(g.dispatch.filter((r: { program: unknown }) => r.program === "kernel"), [{ transport: "mailbox", address: "claim", sender: "*", program: "kernel", fn: "claim" }], "the one kernel row: the claim row, from anyone");
   assert.deepEqual(g.names, [], "no names");
-  assert.deepEqual(g.reads, [{ owner: true, op: "explore" }], "#92: the explorer is the owner's, whoever claims it (the front door reads the owner at the request)");
-  assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; sender: unknown; read?: string }) => r.transport === "http" && r.address === "/explore" && r.prefix === true && r.sender === "session" && r.read === "explore"), "#92: the explorer route, behind the read op");
+  assert.equal(g.reads, undefined, "#115: no reads table: a read permission is the row's sender");
+  assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; sender: unknown; read?: string }) => r.transport === "http" && r.address === "/explore" && r.prefix === true && r.sender === "owner" && r.read === undefined), "#92, #115: the explorer route is the owner's, whoever claims it (the kernel reads the owner at the request)");
+  // A tree that still writes etc/reads.json (the form before #115): folded into the rows that name the op.
+  const old = genesisRecord(c, resolveSystem(c, programs, [], s.config, root, [{ prefix: "/old", program: "frontdoor", fn: "explore", read: "explore" }], [{ owner: true, op: "explore" }, { caller: key(), op: "*" }], []));
+  const olds = (old.dispatch as Array<{ address: string; sender: unknown; read?: string }>).filter((r) => r.address === "/old");
+  assert.equal(olds.length, 2, "one row per read that allows the op");
+  assert.equal(olds[0]!.sender, "owner");
+  assert.ok(olds[1]!.sender instanceof Uint8Array);
+  assert.ok(olds.every((r) => r.read === undefined));
   assert.ok(g.dispatch.some((r: { transport: string; address: string; root?: string }) => r.transport === "http" && r.address === "/" && r.root === "www"), "the static app at /");
   assert.ok(g.dispatch.some((r: { transport: string; address: string; prefix?: boolean; root?: string }) => r.transport === "http" && r.address === "/site" && r.prefix === true && r.root === "www"), "#92: and the site's files under /site/");
   assert.throws(() => resolveReads({}, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);

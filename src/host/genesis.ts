@@ -8,11 +8,10 @@
 //             dispatch: [<row>], scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes(33)},
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
-//             reads?: [{caller?: bytes(33), op}],
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
 //             addressBook?: [{key: bytes(33), transport, address, role?, handle?, domain?}]}
 //   row      {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
-//             sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+//             sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 //            (`dispatch`, #77: the seed of the kernel's dispatch table, docs/MESSAGES.md "The dispatch
 //            table" — the admin rows (boxes objects, head, dispatch, peers → the kernel, from the owner),
 //            the boxes programs take (a subscription of old), the HTTP paths and libp2p topics and
@@ -24,7 +23,8 @@
 //            them is refused)
 //            (`libp2p`, #51: the host's libp2p node runs for the instance, subscribes `topics` and serves
 //            `protocols`; each message or frame is a front-door step routed by its `libp2p` row)
-//            (`feeds`: what the host holds for the instance, feeds.ts; `reads`: the front door's, #40;
+//            (`feeds`: what the host holds for the instance, feeds.ts; no `reads` since #115: a read
+//            permission is the row's sender — the reads a system names are folded into its rows, foldReads;
 //            `defaults.ownerMessagebox`: the owner's messagebox URL — the one peer a genesis names;
 //            `defaults.resolveOrigin`: where the instance's own domain is looked up (a dev host))
 //
@@ -36,7 +36,8 @@
 // (codeSystem: the kernel's own pinned programs and STOCK_DISPATCH). The
 // same `genesisRecord` writes both. A tree may still write
 // etc/subscriptions.json and etc/routes.json (the forms before #77): each
-// entry becomes a row (rowsOfSubscriptions, rowsOfRoutes).
+// entry becomes a row (rowsOfSubscriptions, rowsOfRoutes); and etc/reads.json
+// (the form before #115): folded into the rows that name a `read` op.
 
 import type { CID } from "multiformats/cid";
 import { parse as parseCid } from "../runtime/cid.ts";
@@ -85,7 +86,7 @@ export interface Genesis2Config {
   subscriptions?: Array<{ sender?: string; box: string; handler: CID }>;
   /** More seed rows of any transport (#77), after these: the row as a system writes it (handler names resolved against the programs). */
   dispatch?: DispatchSpec[];
-  /** The front door's routes (http and libp2p rows) and reads for code genesis (#40; default STOCK_HTTP, STOCK_READS). */
+  /** The front door's routes (http and libp2p rows) and reads for code genesis (#40; default STOCK_HTTP, STOCK_READS; the reads folded into the rows, #115). */
   routes?: RouteSpec[];
   reads?: ReadSpec[];
   /** Feeds the host holds for the instance (code genesis; a tree's config names its own). */
@@ -215,17 +216,21 @@ export const STOCK_SCOPES: Record<string, string[]> = {
  * A front-door route as a system wrote it before #77 (etc/routes.json, #40),
  * still read: an exact `path` or a `prefix`, the handler program (a bin/ name
  * or a CID) and its function; `auth: "none"` for an open route (sender `*`,
- * else `session`); `read` an op the reads table must allow the caller.
+ * else `session`); `read` an op the reads must allow the caller (folded
+ * into the row's sender at genesis, #115: foldReads).
  * `root` and `index` are the static handler's (#52), carried on the row. A
  * `libp2p:<topic>` or `libp2p:/<protocol>` path is a `libp2p` row.
  */
 export interface RouteSpec { path?: string; prefix?: string; program: string; fn: string; auth?: "none"; read?: string; root?: string; index?: string }
 /**
- * A read permission as a system writes it (etc/reads.json): a caller (hex or
- * `$owner`; absent: anyone) may call routes marked `read: op`. `owner: true`
- * (#92) is the instance's owner as the front door sees it at the read (the
- * genesis's, else the claim's): how an image, which names no owner, gives its
- * owner the explorer.
+ * A read permission as a system writes it (etc/reads.json, the form before
+ * #115, still read): a caller (hex or `$owner`; absent: anyone with a
+ * session) may call routes marked `read: op`. `owner: true` (#92) is the
+ * instance's owner as the kernel sees it at the request (the genesis's, else
+ * the claim's): how an image, which names no owner, gives its owner the
+ * explorer. Folded into the rows at genesis (foldReads): the row's sender
+ * becomes the caller (`owner: true` the sender "owner"); the genesis carries
+ * no `reads`.
  */
 export interface ReadSpec { caller?: string; owner?: true; op: string }
 
@@ -244,7 +249,7 @@ export const STOCK_HTTP: RouteSpec[] = [
   { prefix: "/explore", program: "frontdoor", fn: "explore", read: "explore" },
 ];
 
-/** The stock reads (#40): the owner may explore. */
+/** The stock reads (#40): the owner may explore (folded into the explorer's row: sender the owner's key). */
 export const STOCK_READS: ReadSpec[] = [{ caller: "$owner", op: "explore" }];
 
 /** A system's config (etc/config.json): every field optional; keys in hex or `$owner`/`$infer`. */
@@ -289,8 +294,6 @@ export interface System {
   /** The system tree (a git tree CID): `main` starts there. */
   tree?: CID;
   feeds?: FeedSpec[];
-  /** The front door's reads (#40). */
-  reads: Array<{ caller?: Uint8Array; owner?: true; op: string }>;
   /** libp2p (#51): what the host's libp2p node does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
 }
@@ -347,10 +350,11 @@ export class NoProvider extends Error {
   constructor(provider: string) { super(`no provider ${provider} on this host`); this.provider = provider; }
 }
 
-/** A row's sender resolved (`*` anyone, `event`, `session`, a key), or null when it names a provider this host has not (left out, with a warning). */
+/** A row's sender resolved (`*` anyone, `event`, `session`, `owner`, a key), or null when it names a provider this host has not (left out, with a warning). */
 function senderOf(sender: string | undefined, c: Genesis2Config): Sender | null {
   if (!sender || sender === "*") return "*";
   if (sender === "session") return "session";
+  if (sender === "owner") return "owner";
   if (sender === "event") return "event";
   try { return keyOf(sender, c); } catch (e) {
     if (!(e instanceof NoProvider)) throw e;
@@ -421,15 +425,45 @@ export function rowsOf(specs: DispatchSpec[], c: Genesis2Config, programs: Recor
   return out;
 }
 
+/** A read permission resolved for one instance (`$owner` to its key). */
+export type Read = { caller?: Uint8Array; owner?: true; op: string };
+
 /** Reads resolved for one instance (`$owner` to its key). */
-export function resolveReads(c: Pick<Genesis2Config, "owner" | "infer">, reads: ReadSpec[] = []): System["reads"] {
-  const rs: System["reads"] = [];
+export function resolveReads(c: Pick<Genesis2Config, "owner" | "infer">, reads: ReadSpec[] = []): Read[] {
+  const rs: Read[] = [];
   for (const r of reads) {
     if (!r || typeof r.op !== "string") throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (want {caller?, op} or {owner: true, op})`);
     if (r.owner !== undefined && (r.owner !== true || r.caller !== undefined)) throw new Error(`etc/reads.json: bad entry ${JSON.stringify(r)} (owner: true names no caller)`);
     rs.push({ ...(r.owner ? { owner: true as const } : r.caller && r.caller !== "*" ? { caller: keyOf(r.caller, c) } : {}), op: r.op });
   }
   return rs;
+}
+
+/**
+ * The reads folded into the rows (#115): an http row naming a `read` op (and
+ * a sender other than `*`, which no read ever limited) becomes one row per
+ * read that allows the op — its sender the read's caller, "owner" for
+ * `owner: true`, the row's own for a read with no caller — without the
+ * `read`. A row whose sender is a key keeps it only for a read with no
+ * caller, that caller, or `owner: true` when the key is the owner's. A row no
+ * read allows is left out (nobody could call it). The rest are unchanged.
+ */
+export function foldReads(rows: DispatchRow[], reads: Read[], owner?: string): DispatchRow[] {
+  const out: DispatchRow[] = [];
+  const push = (r: DispatchRow) => { if (!out.some((x) => rowKey(x) === rowKey(r))) out.push(r); };
+  for (const r of rows) {
+    if (r.transport !== "http" || typeof r.read !== "string" || r.sender === "*") { out.push(r); continue; }
+    const { read: op, ...row } = r;
+    for (const x of reads) {
+      if (x.op !== op && x.op !== "*") continue;
+      const sender = x.owner ? "owner" : x.caller ?? row.sender;
+      if (row.sender instanceof Uint8Array) {
+        const k = keyHex(row.sender);
+        if (x.owner ? k === owner : x.caller === undefined || keyHex(x.caller) === k) push(row as DispatchRow);
+      } else push({ ...row, sender } as DispatchRow);
+    }
+  }
+  return out;
 }
 
 /**
@@ -458,6 +492,8 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     if (admin.some((a) => rowKey(a) === rowKey(r))) { if (r.program !== "kernel") c.warn?.(`a dispatch row for the admin box ${r.address} is left out: the kernel's ${r.address} operation keeps it`); continue; }
     dispatch.push(r);
   }
+  // The reads are resolved only for rows that name a read op (an image's tree has none, and no `$owner`).
+  const rows = dispatch.some((r) => typeof r.read === "string") ? foldReads(dispatch, resolveReads(c, reads), c.owner) : dispatch;
   let names: System["names"] = c.owner ? [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }] : [];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });
   if (config.names) names = config.names.map((n) => ({ identityKey: keyOf(n.identityKey, c), handle: n.handle, domain: n.domain }));
@@ -465,11 +501,10 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
     ? Object.fromEntries(Object.entries(config.peers).map(([role, k]) => [role, keyOf(k, c)]))
     : c.infer ? { infer: keyBytes(c.infer) } : undefined;
   return {
-    programs, dispatch, scopes: { ...STOCK_SCOPES, ...c.scopes, ...config.scopes }, ...(peers ? { peers } : {}),
+    programs, dispatch: rows, scopes: { ...STOCK_SCOPES, ...c.scopes, ...config.scopes }, ...(peers ? { peers } : {}),
     defaults: mergeDefaults(c, { ...(config.owner?.messagebox ? { ownerMessagebox: config.owner.messagebox } : {}), ...config.defaults }),
     names, collect: config.collect ?? ["completions"], ...(tree ? { tree } : {}),
     ...(feedsIn(config.feeds ?? c.feeds)),
-    reads: resolveReads(c, reads),
     ...(p2p.libp2p ? { libp2p: p2p.libp2p } : {}),
   };
 }
@@ -519,7 +554,6 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.role ? { role: e.role } : {}), ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
     programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
-    ...(s.reads.length ? { reads: s.reads } : {}),
     ...(s.libp2p ? { libp2p: s.libp2p } : {}),
   };
 }

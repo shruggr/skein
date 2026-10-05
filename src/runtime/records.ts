@@ -126,7 +126,7 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
   if (typeof x.address !== "string" || x.address === "" || /[ \0]/.test(x.address)) return false;
   if (x.prefix !== undefined && x.prefix !== null && x.prefix !== false && !(x.prefix === true && t === "http")) return false;
   const s = x.sender;
-  if (!(s === "*" || (s === "session" && t === "http") || (s instanceof Uint8Array && s.length === 33))) return false;
+  if (!(s === "*" || ((s === "session" || s === "owner") && t === "http") || (s === "event" && t === "mailbox") || (s instanceof Uint8Array && s.length === 33 && (s[0] === 2 || s[0] === 3)))) return false;
   if (x.program === "kernel") return t === "mailbox" && typeof x.fn === "string" && KERNEL_OPS.includes(x.fn);
   return isCID(x.program) && (x.fn === undefined || x.fn === null || typeof x.fn === "string");
 }
