@@ -54,12 +54,9 @@ topics alike, first match wins, a row is the permission); the address book
 (key → transport and address; providers are `local` rows). Each has one
 admin operation, `objects`, `head`, `dispatch`, `peers`, which the kernel
 performs itself on a message at an admin row from the owner or a delegate.
-No program writes a kernel table. Where the matching happens: the kernel
-matches `mailbox` rows (boxes and events) itself (`dispatch.zig`); for
-`http` and `libp2p` it hands the table, and the genesis `reads`, to the
-front door, whose program matches the row (an exact path, then the longest
-prefix) and checks the sender and the read permission
-(`programs/frontdoor`). (`VM.md`, "The dispatch table, and the
+No program writes a kernel table. The kernel matches every transport's
+rows itself (#115, `dispatch.zig`); the front door verifies the claim the
+match was made on. (`VM.md`, "The dispatch table, and the
 kernel's four tables".)
 
 **Write scope by name, reads by CID.** No app writes another app's data,
