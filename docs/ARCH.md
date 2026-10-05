@@ -312,7 +312,10 @@ message is answered with a signed message:
   `{handle, stopped: true}`: published and started, or unpublished and
   stopped. Not the host skein itself.
 - A refusal is an answer `{error}`: a handle that is not a hostname label
-  or is taken, an owner that is not a key, another image, a refused claim.
+  or is taken or reserved (`id`, `host`, and the first label of the
+  router's own origin, which never routes to an instance), an owner that
+  is not a key, another image, a refused claim. Every row, however it is
+  made, has a hostname label for a handle.
 
 The **onboarding app** (shruggr/skein-onboard), installed in the host
 skein, is how a stranger gets a skein: `POST /onboard/call {fn:

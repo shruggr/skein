@@ -99,7 +99,7 @@ import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, imageSource, type BootSource, type Booted } from "./boot.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type RouteSpec } from "./genesis.ts";
-import type { HostDb, InstanceRow } from "./instances.ts";
+import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
 import { DEFAULT_LISTEN, libp2pConfig, P2PHost, type InboundAnswer, type InboundCall, type P2PHostConfig } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
@@ -192,8 +192,9 @@ export interface RouterResponse { status: number; headers: Record<string, string
 
 const json = (status: number, v: unknown): RouterResponse => ({ status, headers: { "content-type": "application/json" }, body: new TextEncoder().encode(JSON.stringify(v)) });
 const KEY = /^0[23][0-9a-f]{64}$/;
-/** A handle as an instance's hostname label (#90: what the instance manager creates). */
-export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+export { HANDLE };
+/** Handles no instance may take on this host (H3), besides the router origin's own first label (Router.reserved): `id` (the router's own in production) and `host` (the host skein's). */
+export const RESERVED_HANDLES = new Set(["id", "host"]);
 /** The registration signature (#113: the onboarding app checks it): [2, "skein register"], key ID the username, counterparty anyone, over `register <username>@<domain>`. */
 export const REGISTER_PROTOCOL: [2, string] = [2, "skein register"];
 /** A handle's domain as a manager's `create` takes it: a host name, lower case. */
@@ -399,6 +400,23 @@ export class Router {
 
   /** This host's own origin. */
   origin(): string { return (this.o.origin ?? "http://127.0.0.1:{port}").replace("{port}", String(this.port || this.o.port || 0)); }
+  /**
+   * The first label of the router's own origin, when its host name is a
+   * name (`id` for id.skein.nexus), else undefined: no instance may take it,
+   * so a request to the router's origin never reaches an instance (H3).
+   */
+  ownLabel(): string | undefined {
+    let h: string;
+    try { h = new URL(this.origin()).hostname.toLowerCase(); } catch { return undefined; } // an origin that is no URL names no label
+    if (!h.includes(".") || /^[0-9.]+$/.test(h) || h.startsWith("[")) return undefined;
+    return h.split(".")[0];
+  }
+
+  /** Whether `handle` is reserved on this host: `id`, `host` (RESERVED_HANDLES), or the router origin's own first label. */
+  reserved(handle: string): boolean {
+    return RESERVED_HANDLES.has(handle) || handle === this.ownLabel();
+  }
+
   /** An instance's origin: where its front door is, what BRC-169 publishes as its messagebox. */
   originOf(handle: string): string {
     return (this.o.instanceOrigin ?? "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", String(this.port || this.o.port || 0));
@@ -755,6 +773,7 @@ export class Router {
    */
   async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
+    if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
     if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
@@ -993,7 +1012,7 @@ export class Router {
     if (m) { const h = decodeURIComponent(m[1]!); return enabled(h) ? { handle: h, route: m[2] ?? "/" } : undefined; }
     const name = url.hostname.toLowerCase();
     const label = name.includes(".") ? name.split(".")[0]! : "";
-    if (label && enabled(label)) return { handle: label, route: url.pathname };
+    if (label && label !== this.ownLabel() && enabled(label)) return { handle: label, route: url.pathname };
     return undefined;
   }
 

@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS host_settings (
   value             TEXT NOT NULL
 ) WITHOUT ROWID;`;
 
+/**
+ * A handle: one hostname label (lower-case letters, digits and "-", at most
+ * 63, no "-" at either end), so `<handle>.<domain>` is the instance's origin.
+ * The one grammar for every row (H22): `add`, the instance manager's
+ * `create`, a mailbox instance.
+ */
+export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
 export type Status = "enabled" | "disabled";
 
 export type Kind = "agent" | "mailbox";
@@ -150,11 +158,12 @@ export class HostDb {
    * provisioning script can run again). A new row needs `store`.
    */
   add(handle: string, f: RowFields, now = new Date()): InstanceRow {
-    if (!/^[a-z0-9][a-z0-9._-]*$/.test(handle)) throw new Error(`bad handle ${JSON.stringify(handle)}`);
     const set = FIELDS.filter((k) => f[k] !== undefined);
     if (this.get(handle)) {
       if (set.length) this.db.prepare(`UPDATE instances SET ${set.map((k) => `${k} = ?`).join(", ")} WHERE handle = ?`).run(...set.map((k) => f[k]!), handle);
     } else {
+      // A new row's handle is a hostname label; a row an older file already has keeps its handle.
+      if (!HANDLE.test(handle)) throw new Error(`bad handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
       if (!f.store) throw new Error(`${handle}: a new instance needs a store`);
       const cols = ["handle", ...set, "created_at"];
       this.db.prepare(`INSERT INTO instances (${cols.join(", ")}) VALUES (${cols.map(() => "?").join(", ")})`).run(handle, ...set.map((k) => f[k]!), now.toISOString());

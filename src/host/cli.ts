@@ -216,7 +216,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
           // A mailbox instance (#40): the front door and the messagebox, keeping mail for --owner. #113: the instance
           // manager's own create (image `mailbox`), through a router of this command's own — the one creation path.
           if (!v.owner || !/^0[23][0-9a-f]{64}$/.test(v.owner)) { env.err("skein-host add --mailbox: --owner <identity key, hex>"); return 2; }
-          if ([v.boot, v.packet, v.image, v.identity, v.store, v.tree, v["wallet-url"]].some((x) => x !== undefined) || v.derive) { env.err("skein-host add --mailbox: only --owner and --domain"); return 2; }
+          if ([v.boot, v.packet, v.image, v.identity, v.store, v.tree].some((x) => x !== undefined) || v.derive) { env.err("skein-host add --mailbox: only --owner and --domain"); return 2; }
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
         } else if (v.owner) { env.err("skein-host add: --owner goes with --mailbox"); return 2; }
         if (!db.get(handle)) f.store ??= join(home, "instances", handle, "runtime.db");
