@@ -90,7 +90,8 @@
 // `run` is the router (#40: a reverse proxy — each
 // instance is an HTTP server, its front door, at http://<handle>.localhost:<port>
 // or /@<handle>) on SKEIN_ROUTER_PORT, a `skein-kernel serve` per instance
-// started on demand and stopped when idle, the providers (the waker, the cron
+// (every enabled row's started at start, any other on demand; stopped only
+// past SKEIN_IDLE_MS, which is unset by default), the providers (the waker, the cron
 // provider among them), the signer, the fuel ledger; plus the host page. It
 // reads (bin/skein-host fills it from $SKEIN_HOME):
 //   SKEIN_HOME            default ~/.skein; host.db and master.key live here
@@ -1066,7 +1067,7 @@ async function packCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
 /**
  * `skein-host run`: the router (router.ts) on SKEIN_ROUTER_PORT (default
  * 8100, the messagebox URL clients already use), every enabled row hydrated
- * once at start (then stopped when idle), and the host page and roster on
+ * once at start (stopped only past SKEIN_IDLE_MS), and the host page and roster on
  * SKEIN_HOST_PORT. A skein's explorer is its own (`/explore`, its owner's),
  * read by the management site (shruggr/skein-site, #92).
  */

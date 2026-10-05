@@ -54,7 +54,12 @@ topics alike, first match wins, a row is the permission); the address book
 (key → transport and address; providers are `local` rows). Each has one
 admin operation, `objects`, `head`, `dispatch`, `peers`, which the kernel
 performs itself on a message at an admin row from the owner or a delegate.
-No program writes a kernel table. (`VM.md`, "The dispatch table, and the
+No program writes a kernel table. Where the matching happens: the kernel
+matches `mailbox` rows (boxes and events) itself (`dispatch.zig`); for
+`http` and `libp2p` it hands the table, and the genesis `reads`, to the
+front door, whose program matches the row (an exact path, then the longest
+prefix) and checks the sender and the read permission
+(`programs/frontdoor`). (`VM.md`, "The dispatch table, and the
 kernel's four tables".)
 
 **Write scope by name, reads by CID.** No app writes another app's data,
@@ -88,8 +93,12 @@ Sleep and deadlines are messages to the waker provider.
 **Fuel** is on for every step and summed across everything in it; running
 out ends the step errored, deterministically, and it is never retried.
 
-The kernel has no disk, network, clock or process table. The "WASI host"
-that satisfies a module's imports is inside the kernel.
+The kernel has no disk, network or process table, and a step has no
+clock. A `call` (no entry, never replayed) is the exception: when the host
+passes no `now` it reads the process clock, and its random stream is
+seeded from the OS (`serve.zig`, `scheduler.zig`); the explorer's read
+answer is such a call, signed in a wallet call that is not recorded. The
+"WASI host" that satisfies a module's imports is inside the kernel.
 
 ## Apps
 
@@ -107,7 +116,7 @@ owner. `APPS.md` is the specification.
 | front door | `programs/frontdoor` | BRC-103/104 on every request, sessions under `frontdoor/sessions`, the HTTP and libp2p rows, signed answers |
 | messagebox | `programs/messagebox` | BRC-33 send/list/ack; delivery threads to other instances' messageboxes |
 | resolve | `programs/resolve` | BRC-169 handle lookup; keeps what it finds under `resolve/peers` and answers with the record's CID (never the address book) |
-| wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`) |
+| wallet | `programs/wallet` | coins, actions, drafts under `wallet/state`; reads `chain/state`; ingests by message to the chain app (`WALLET.md`). Not installable: a genesis-wired program the kernel pins, with no `etc/app.json`; `wallet` is a reserved app name |
 | chain | shruggr/skein-chain | the one writer of `chain/state`: headers, transactions, proofs, spends, broadcasts; ingest a BEEF; the only broadcaster |
 | overlay | shruggr/skein-overlay | BRC-22/24 over topic managers and lookup services; state under `<app>/…`; admits on the chain app's answer |
 | static | shruggr/skein-static | files from the `main` head's tree, at the http rows pointed at it |
@@ -178,7 +187,11 @@ function, no entry, no writes); out, **wallet** (signing requests) and
 never a message as the host's word: a message comes in inside the package
 that carried it, and the front door verifies it. The host's `append` frame
 writes only the genesis entry, as the log's first; every other entry is
-admitted.
+admitted. `skein-kernel serve` answers more than
+these (`kernel-zig/src/serve.zig`): reads (`get`, `has`, `tip`, `head`,
+`genesis`, `dispatch`, `boxes`, `byEnvelope`, `programs`), blocks at boot
+(`put`, `putblock`, `restore`), and process control (`start`, `running`,
+`idle`, `say`, `fatal`).
 
 The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 

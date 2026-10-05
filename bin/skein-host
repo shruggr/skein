@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # skein-host (src/host/cli.ts): the host's management database ($SKEIN_HOME/host.db)
-# and `run`, the supervisor: one bin/skein-runtime process per enabled row. For `run`
+# and `run`, the host: one `skein-kernel serve` process per enabled row. For `run`
 # (and `deploy`, `roster --deploy`, `peers`: owner and messagebox; `add --boot/--packet` and
 # `event`, which may write a genesis through a router of their own: owner and infer; `init`: the
 # operator, the host skein's owner) it fills

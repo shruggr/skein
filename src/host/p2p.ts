@@ -33,7 +33,8 @@
 //              a signed message to the instance, its package {message, body}; the
 //              front door checks and routes it, no route needed.
 //   changes    `declare` again with the instance's config as it now stands (the
-//              router does after a step moved the head `routes`): new topics are
+//              router does when the dispatch table changed: an install or an
+//              uninstall added or removed libp2p rows, #72/#77): new topics are
 //              subscribed and new protocols handled; gone ones unsubscribed and
 //              unhandled; no topic or protocol left: the node stops. No restart.
 //   outbound   the `libp2p` provider's work (#70, providers.ts): publish, dial,

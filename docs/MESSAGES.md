@@ -170,7 +170,7 @@ instance's signer (the kernel's `wallet`, a recorded call of the step).
   (`match`), verifies, and calls the row's handler, an in-VM call of
   `program`'s `fn` in its step; what that receives and returns is the
   program-facing contract below ("Route handlers").
-- **Static files** (#52, `programs/static`): the handler for a site. A row
+- **Static files** (#52, the app shruggr/skein-static): the handler for a site. A row
   `{transport: "http", address, prefix?, sender: "*", program: static, fn: "get",
   root?, index?}` answers `GET`/`HEAD` with the file at `<root>/<path>` in the
   `main` head's tree — `path` the route past the prefix, percent-decoded;
@@ -409,6 +409,13 @@ at}]}` — the unacknowledged messages in arrival order. An instance's own
 routed boxes keep no list: admission is the acknowledgement, the log is
 the queue. **A mailbox exists only where a row to the messagebox
 exists**: a message no row sends the messagebox is refused (`403`).
+
+Delivery out is the messagebox's delivery thread, which `emit`s (#70: no
+step has an http import). The messagebox program record's own `description`
+(kernel-zig/src/programs.zig, images/default/bin/messagebox.json) still says
+"`send` delivers over http (recorded)", from before #70: the description is
+part of the record and so of its CID, and is left until the messagebox is
+re-pinned for another reason.
 
 ## Mailbox instances
 

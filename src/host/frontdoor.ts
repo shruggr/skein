@@ -14,7 +14,7 @@
 // `call` of the front door's fn "read", signed there (not recorded).
 //
 // Sessions are state (#68): the front door keeps them as records (head
-// `sessions`); this side holds none.
+// `frontdoor/sessions`); this side holds none.
 
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";

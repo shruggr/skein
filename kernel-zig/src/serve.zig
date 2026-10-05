@@ -263,7 +263,7 @@ const Server = struct {
             }
             s.reply(a, id, m.value(), null, null);
         } else if (eq(u8, op, "head")) {
-            // A named head's record, read (the router reads the messagebox's `mailbox` head).
+            // A named head's record, read (the equiv drivers read heads with it; no host code calls it).
             const name = Value.str(v) orelse return error.BadRequest;
             s.reply(a, id, cbor.optCid(try s.store.headTree(a, name)) orelse .null, null, null);
         } else if (eq(u8, op, "genesis")) {

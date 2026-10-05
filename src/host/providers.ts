@@ -6,8 +6,8 @@
 //
 //   local    the provider named `address` on this host — handed over directly;
 //            `self` (#79): a message the instance sent itself (one of its apps to
-//            another: the wallet or an overlay to the chain app, resolve to the
-//            kernel's `peers` operation) — appended back into the same instance
+//            another: the wallet or an overlay to the chain app) — appended
+//            back into the same instance
 //            as a `local` request, as it is (signed by the instance)
 //   libp2p   the instance's libp2p node: `topic:<name>` publishes the
 //            package, a peer ID gets it as one frame on /skein/message/1.0.0;

@@ -53,6 +53,11 @@ const call_inputs = [_]cbor.Entry{
 
 const Handler = struct { name: []const u8, services: []const []const u8, description: []const u8, inputs: []const cbor.Entry = &handler_inputs };
 
+// A description is part of its record, and so of the CID every store pins.
+// The messagebox's "`send` delivers over http (recorded)" predates #70
+// (delivery is the delivery thread's `emit`; steps have no http import): it
+// is left as it is until the messagebox is re-pinned for another reason
+// (docs/MESSAGES.md, "The messagebox").
 const handlers = [_]Handler{
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
     .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that keeps the handle's record under its own head (`resolve/peers`, #87) and finishes with the record's CID; the messagebox's delivery reads it for a key the address book does not name. A `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The address book is written only by the kernel's `peers` operation, on an owner-signed message (#77, #87)." },

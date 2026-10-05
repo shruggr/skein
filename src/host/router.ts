@@ -2,7 +2,7 @@
 // front door (programs/frontdoor) — at an origin of its own, and the router
 // only picks the instance a request is for and forwards it. Routing comes
 // before authentication, because a BRC-104 handshake does not name its
-// recipient: the URL is the recipient. The router holds no auth state and no
+// recipient: the URL is the recipient. The router holds no sessions and no
 // mailbox: it keeps the hostname → instance map (host.db), the kernels it has
 // hydrated, the providers (the waker and the cron provider among them), the
 // feeds, the broadcaster, the fuel ledger.

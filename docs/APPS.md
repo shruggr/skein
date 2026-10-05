@@ -8,7 +8,7 @@ form before #77 gone; and by #83: the shell and the chat loop are apps,
 shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
 by #91: deploy by hash, the git app cloning in the VM, §3; and by #92: the
 management page, §3). Status of each
-part is marked **built** or **spec**. Authors of apps, topic managers,
+part is marked (Built, #…) or (Spec.) in the text, and in §7's table. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
 
@@ -287,11 +287,11 @@ sends the messages, signed by the wallet on a BRC-104 session.
   host serves the profile the onboarding app keeps, posted to
   `/account/profile` (docs/MESSAGES.md "Mailbox instances"); the mailbox
   instance's head is read no more, so the form has to post there.
-- **One grouped permission request** (#97, skein-site 0.5.0): the site's
-  `manifest.json`, served at `/manifest.json` of the skein's own origin, asks
-  a BRC-100 wallet once for the page's protocols, its basket and a spending
-  allowance, and declares the counterparty protocols (one prompt per new
-  skein or certifier).
+- **One grouped permission request** (#97, skein-site 0.5.0; 0.5.2 without
+  the spending allowance): the site's `manifest.json`, served at
+  `/manifest.json` of the skein's own origin, asks a BRC-100 wallet once for
+  the page's protocols and its basket, and declares the counterparty
+  protocols (one prompt per new skein or certifier).
 
 Who can install is whoever the kernel's admin rows admit to `objects`,
 `head` and `dispatch`: the owner, by every genesis that names one; a
@@ -668,21 +668,21 @@ bounded at 64 MiB).
 
 | part | status |
 |---|---|
-| heads with owners; `head`/`advance`/`get`; the write scope by name; the kernel's `objects`, `head`, `dispatch`, `peers` operations | built (#77) |
 | the write scope read only from installed program records (genesis programs, dispatch rows' programs, `<app>/app`'s `programs`); a record a program puts runs and writes no head | built, enforced (K1: kernel-zig/src/scheduler.zig `installedAs`; kernel-zig/equiv/install.ts, the forgery) |
 | no message admitted as the host's word: `admit` takes no `mail` entry; the browser host appends signed messages as `local` requests; `append` writes only the genesis entry | built, enforced (K2, K24: src/host/admission.test.ts) |
-| the dispatch table (routes, boxes, libp2p topics as rows); route handler contract; synchronous answer on thread completion | built (#68/#66, #77) |
+| heads with owners; `head`/`advance`/`get`; the write scope by name; the kernel's `objects`, `head`, `dispatch`, `peers` operations | built (#77) |
+| the dispatch table (routes, boxes, libp2p topics as rows); route handler contract; synchronous answer on thread completion | built (#68/#66, #77). The kernel matches `mailbox` rows itself (kernel-zig/src/dispatch.zig); for `http` and `libp2p` it hands the table, and the genesis `reads`, to the front door, whose program matches the row and checks the sender (programs/frontdoor). The `/<app>/` prefix of an app's http rows is checked by the install client (src/host/manifest.ts), not by the kernel's `dispatch` operation |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `<app>/ls_<service>`; the contract as a Zig module | built (#50, #79: skein-overlay 0.3.0) |
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
 | install client (manifest → objects + head + dispatch + start, approvals); `skein-host install <repo|dir>` / `uninstall`; `start`/`stop`, row senders | built (#72, #76, #77) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
-| the management page: the site in the default image; install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92: §3; shruggr/skein-site 0.5.0, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
+| the management page: the site in the default image; install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92: §3; shruggr/skein-site 0.5.2, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |
 | the overlay engine reads `config.overlay` from its app record `<app>/app`, at every step (the genesis `overlayTopics`/`overlayLookups`/`overlayGossip` only without one); a program finds its app from its program record's `app` | built (#72, #79: skein-overlay 0.3.0 `src/config.zig`) |
 | the chain under `chain/` (one chain module, shruggr/skein-chain: ingest, broadcast, answers on each state change); `optional` rows; no open box (`event`, `$self`, `$owner`) | built (#78, #79: §6a; skein-chain 0.2.0; skein-sdk 0.4.0 `chain`) |
-| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message; two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0; skein-shell and skein-chat 0.1.0 since #83) |
+| the wallet and each overlay under their own names, reading `chain/…`, ingesting by message (the wallet is a genesis-wired program the kernel pins, with scope `wallet/`, not an installable app: it has no `etc/app.json` and `wallet` is a reserved app name); two overlay apps on one instance; the sibling apps' manifests in the #77 shape | built (#79: programs/wallet, skein-overlay 0.3.0, skein-static 0.2.0; skein-shell and skein-chat 0.1.0 since #83) |
 | the shell and the chat loop as apps (shruggr/skein-shell, shruggr/skein-chat); a shell program declared in a manifest, its modules files of the tree; no shell in a genesis | built (#83: §6b) |
 | a multi-tenant overlay's `overlay.topics/1` / `overlay.lookups/1` | optional, not planned |
 | apps in their own repos; the SDK as a Zig package | built (#71, #75): shruggr/skein-sdk (a sibling repo, consumed by URL+hash, not a submodule; 0.4.0 since #78: the `chain` module split out of `wallet`), shruggr/skein-shell, shruggr/skein-chat, shruggr/skein-static, shruggr/skein-overlay (the engine and its demo topic/lookup, with `etc/app.json`; equiv/overlay.ts clones it) |
