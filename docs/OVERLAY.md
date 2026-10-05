@@ -29,3 +29,24 @@ pinned commits (or takes `$SKEIN_OVERLAY_DIR`, `$SKEIN_CHAIN_DIR`) and boots
 instances from trees carrying their `bin/*.wasm`;
 `kernel-zig/equiv/install-overlay.ts` installs both as apps, and two
 overlay apps on one instance.
+
+## How an overlay app activates a token topic live (#119)
+
+A topic per token (`tm_<txid>`) is not known at install, so it cannot be a
+row of its own. The app's manifest declares one libp2p **prefix row** —
+`{transport: "libp2p", address: "tm_", prefix: true, sender: "*",
+program: <role>, fn}` — which the owner approves at the install like any
+row. That row subscribes nothing by itself; it makes every `tm_…` topic the
+app's to route (the kernel's `forLibp2p`: an exact row first, then the
+longest prefix) and the app's to ask for.
+
+When the app learns of a token, its installed program emits
+`{event: "subscribe", topic: "tm_<txid>"}` (and `unsubscribe` when it is
+done with it). The kernel records the event on the step's update with the
+app's name; after the commit the host's libp2p node subscribes the topic
+for that app — only if the app's rows take it (another app's exact row for
+that topic, or its longer prefix, makes it the other app's: refused, a log
+line). A message gossiped on the topic is then validated and routed to the
+app's row like any topic message. After a host restart the node reads the
+subscriptions back from the log at hydrate; the app does nothing.
+docs/MESSAGES.md "libp2p (#51)", "Topics an app asks for".

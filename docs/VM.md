@@ -9,7 +9,7 @@ historical.)
 A skein instance is a deterministic virtual machine: its storage is a
 content-addressed graph, its programs execute inside it over an immutable
 filesystem, its only inputs are an ordered log of entries (packages as received), and
-its only outputs are messages and broadcast events. A host feeds it inputs and carries out its
+its only outputs are messages and events (a broadcast, or any name a host wires, #119). A host feeds it inputs and carries out its
 outputs; nothing the host does is part of the machine's state.
 
 ## The correction this version makes
@@ -389,7 +389,8 @@ answer is a signed message like any other.
 emit(message) → <cid>     preview1: skein.emit(msg, len, out, cap) → n (the CID, binary; n < 0: the error)
                           WIT:      emit: func(message: list<u8>) -> result<cid, string>
 message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
-          or an event (#65): {event: "broadcast", tx: <cid>, beef?: bytes}
+          or an event (#65, #119): {event: "broadcast", tx: <cid>, beef?: bytes}
+                                   {event: <any other name>, …fields}
 ```
 
 - `to` is the recipient's identity key — never a handle (resolve it first:
@@ -443,8 +444,35 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   thread still awaits (a host restart loses nothing a provider had); a host
   acts on a message once. Replay re-signs from the recorded signer answer
   and sends nothing.
+- **Events are open (#119).** `{event: <name>, …}` is addressed to no one
+  and signed by no one: the kernel puts a record, lists it on the update
+  (`emitted`, beside the messages) and hands it to the host after the
+  commit (transport `event`, address the name). The host acts on it by its
+  wiring for that name, or ignores it (a log line; the step is not told):
+  an event nobody wires costs a record in the log, nothing else.
+  - `broadcast` (#65): `{event: "broadcast", tx: <a held transaction's
+    CID>, beef?}` → the record `{kind: "broadcast", tx, beef?}` (unchanged
+    from #65: the transaction proves itself). The host's broadcaster posts
+    it to Arcade; the step awaits the transaction's CID, and at a start a
+    broadcast still awaited is handed over again.
+  - Any other name: `{event: <name>, …fields}` → the record `{kind: "event",
+    event: <name>, app?: <app>, …fields}` — the emit's other fields as they
+    are, and `app` set by the kernel: the `app` of the emitting program's
+    record (the thread's, or an in-VM callee's) **when that record is
+    installed** (#114's rule: a genesis program, a dispatch row's program,
+    or one listed in its app's record at `<app>/app`). An uninstalled
+    record's event — one a step put and launched or called — carries no
+    `app`, and a host scoping by app ignores it. An emit naming `kind` or
+    `app` itself is refused. Handed over once (the host recovers by reading
+    the log, not by a re-offer). Replay puts the same records.
+  - The events the reference host wires today: `broadcast` (Arcade),
+    `subscribe` / `unsubscribe` `{topic}` (its libp2p node, scoped to the
+    emitting app: docs/MESSAGES.md "libp2p (#51)").
 - **Errors** (the call's): `emit: want {to: <33-byte key>, box, body:
-  <dag-cbor bytes>, subject?: <cid>}` · `emit: the message is not dag-cbor`
+  <dag-cbor bytes>, subject?: <cid>}, {event: "broadcast", tx: <cid>, beef?:
+  bytes} or {event: <name>, …fields}` · ``emit: event <name>: a name is not
+  empty and has no space or NUL`` · ``emit: an event's `kind` and `app` are
+  the kernel's to set`` · `emit: the message is not dag-cbor`
   · ``emit: `to` is not an identity key (33 bytes): emit to a key, not a
   handle (resolve the handle first)`` · `emit: the box is empty or starts
   with ':' (reserved)` · `emit: the body is not dag-cbor` | `… not IPLD` |

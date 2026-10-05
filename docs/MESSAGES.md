@@ -59,7 +59,7 @@ the **address book**. The dispatch table is one chain of rows
  sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
 ```
 
-— a box, an HTTP path (prefix or exact), a libp2p topic or `/<protocol>`;
+— a box, an HTTP path (prefix or exact), a libp2p topic (prefix or exact, #119) or `/<protocol>`;
 who may send there (`event`, #79: events only — the host's wiring and a
 route's admits, never a message; `owner`, #115: the instance's owner's
 session); which program is stepped or called, or which of the
@@ -532,11 +532,32 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   the recorded signer answer and sends nothing. At a start the kernel hands
   over again every emitted message a waiting thread still awaits; a host
   acts on a message once.
-- **An event instead of a message** (#65): `emit({event: "broadcast", tx,
-  beef?})` — below, "Broadcast out, proofs and statuses in".
+- **An event instead of a message** (#65, #119): `emit({event: <name>,
+  …fields})`, addressed to no one, unsigned. The kernel lists the record on
+  the update (`emitted`) and hands it to the host after the commit
+  (transport `event`, address the name); the host acts on it by its wiring,
+  or ignores it with a log line (the step is not told). Any name is
+  accepted; the events the reference host wires:
+
+  | event | record | the host |
+  |---|---|---|
+  | `broadcast` (#65) | `{kind: "broadcast", tx, beef?}` | its broadcaster posts the transaction to Arcade — below, "Broadcast out, proofs and statuses in"; re-offered at a start while the thread awaits it |
+  | `subscribe` (#119) | `{kind: "event", event: "subscribe", app, topic}` | its libp2p node subscribes `topic` for `app`, when one of that app's libp2p rows takes it — "libp2p (#51)", below |
+  | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | the node drops `topic` from `app`'s asked set |
+  | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing: a log line |
+
+  A non-broadcast record is `{kind: "event", event, app?, …the emit's
+  fields}`: `app` is the kernel's, the `app` of the emitting program's record
+  when that record is installed (#114: a genesis program, a dispatch row's,
+  or one listed at `<app>/app`); an uninstalled record's event names no app,
+  and a host scoping by app (the libp2p node) ignores it. An emit naming
+  `kind` or `app` is refused. It is handed over once; a host that needs it
+  after a restart reads it from the log (the kernel keeps nothing else).
 - **Errors** (the call's; the step may catch them): `emit: want {to:
-  <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>} or {event:
-  "broadcast", tx: <cid>, beef?: bytes}` · `emit: the
+  <33-byte key>, box, body: <dag-cbor bytes>, subject?: <cid>}, {event:
+  "broadcast", tx: <cid>, beef?: bytes} or {event: <name>, …fields}` ·
+  ``emit: event <name>: a name is not empty and has no space or NUL`` ·
+  ``emit: an event's `kind` and `app` are the kernel's to set`` · `emit: the
   message is not dag-cbor` · ``emit: `to` is not an identity key (33
   bytes): emit to a key, not a handle (resolve the handle first)`` · `emit:
   the box is empty or starts with ':' (reserved)` · `emit: the body is not
@@ -767,8 +788,8 @@ record  {kind: "broadcast", tx: <cid>, beef?: bytes}                     (Zig: s
   step's `emitted` with the messages, recorded, never re-executed on replay,
   and goes out when the step ends without error — handed to the host
   (transport `event`) — and again at a start while the thread awaits the
-  transaction's CID. Errors: `emit: no event "<x>" (the one event is
-  "broadcast")` · `emit: a broadcast names its transaction: …` · `emit:
+  transaction's CID. (Any other event name is accepted since #119: "emit",
+  above.) Errors: `emit: a broadcast names its transaction: …` · `emit:
   <cid> is not a transaction in the store (put it first)` · ``emit: `beef` is
   bytes (an Atomic BEEF)``.
 - The step then `await`s the transaction's CID (with a `deadline` at its
@@ -1138,11 +1159,14 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
 ```
 
 - **Routing.** The kernel matches the dispatch table's `libp2p` rows (#115,
-  dispatch.zig `forLibp2p`: the first in table order at the topic or
-  protocol whose sender takes the peer's key, from `from`) and hands the
-  front door the row: `{transport: "libp2p",
-  address: <topic>, sender: "*", program, fn}` for a topic, `address:
-  "/<protocol>"` for a stream protocol (from `etc/dispatch.json`, or the
+  dispatch.zig `forLibp2p`) and hands the front door the row: a topic as an
+  http path is matched (#119) — rows whose address is the topic first, then
+  rows with `prefix: true`, the longest address the topic starts with
+  first; a `/<protocol>` exactly; within each, the first in table order
+  whose sender takes the peer's key (from `from`). `{transport: "libp2p",
+  address: <topic>, prefix?: true, sender: "*", program, fn}` for a topic
+  (one owner-approved `tm_` prefix row takes every `tm_<txid>` token
+  topic), `address: "/<protocol>"` for a stream protocol (no prefix) (from `etc/dispatch.json`, or the
   older `etc/routes.json`'s `libp2p:` paths; a protocol's handler named in
   `etc/config.json` `libp2p.protocols` becomes its row; or installed by an
   app, #72). No row: `ignore`. The handler gets `match`, the row that
@@ -1156,7 +1180,32 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   tip moved, it declares the config again: new topics subscribed and
   protocols handled, removed ones unsubscribed and unhandled, on the
   running node — started if the instance had none, stopped when nothing is
-  left. No restart.
+  left. No restart. A `prefix` row's address is not a topic: it is
+  subscribed to nothing by itself.
+- **Topics an app asks for** (#119). An app's installed program emits
+  `subscribe {topic}` / `unsubscribe {topic}` (an event: "Outbound: emit",
+  above); the kernel records `{kind: "event", event, app, topic}` on the
+  step's update and hands it to the host after the commit. The node keeps
+  an asked set per app (a subscribe adds, an unsubscribe removes) and
+  subscribes the asked topics that are **the app's own**: a topic is app
+  X's when the most specific libp2p rows taking it — the rows whose address
+  is the topic, else the `prefix` rows with the longest address the topic
+  starts with (forLibp2p's order, the sender aside) — include one whose
+  program record's `app` is X. So an app with a `tm_` prefix row may
+  subscribe any `tm_<txid>`, and another app's exact row for one topic
+  makes that topic the other app's. Any other subscribe is refused with a
+  log line, and nothing is subscribed; an event with no `app` (an
+  uninstalled program record's) is ignored; a `/<protocol>` is not
+  subscribed by event. The scope is applied against the rows as they stand
+  — at the event, and whenever the table changes — so an uninstall takes
+  the app's asked topics with its rows. A topic subscribed this way is
+  validated and routed like any other (the kernel's row, the front door).
+  **After a restart the host recovers by reading** (David, 2026-10-05):
+  at hydrate, beside reading the dispatch table, it folds the instance's
+  log — every `subscribe` / `unsubscribe` record the steps' updates list in
+  `emitted`, in log order (src/host/p2p.ts `askedTopics`, router.ts
+  `foldAsked`) — into the asked sets. The app does not emit again and the
+  kernel keeps nothing extra; another host may keep them otherwise.
 - **Verify in the step.** For a topic message the front door checks, from
   the request alone, that `from` is a secp256k1 peer ID (identity multihash of
   the key's protobuf) and that `signature` is its ECDSA signature (DER,
