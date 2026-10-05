@@ -53,6 +53,7 @@ const runner = @import("runner.zig");
 const wasi = @import("wasi.zig");
 const engine = @import("engine.zig");
 const doorm = @import("door.zig");
+const subsm = @import("subscriptions.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
 const Value = cbor.Value;
@@ -186,6 +187,10 @@ pub const Runtime = struct {
     /// Messages for the host to carry out (#70), handed over after the next
     /// commit (gpa-owned copies).
     outbox: std.array_list.Managed(Outgoing),
+    /// The apps' libp2p subscriptions (#119, subscriptions.zig): the fold of the log's subscribe /
+    /// unsubscribe events, kept in `life` — derived, never written; null until needed, and again
+    /// after a step that subscribed or unsubscribed (folded again from the store when next needed).
+    subs: ?[]subsm.Sub = null,
 
     pub fn init(gpa: std.mem.Allocator, s: Store, r: *runner.Runner, peers: Peers) !*Runtime {
         const rt = try gpa.create(Runtime);
@@ -896,8 +901,21 @@ pub const Runtime = struct {
             const name = Value.str(req.get("topic")) orelse Value.str(req.get("protocol")) orelse return .{};
             const who: dispatch.Who = .{ .key = peerKey(Value.bytesOf(req.get("from")) orelse ""), .owner = owner };
             if (dispatch.forLibp2p(rows, name, who)) |r| return .{ .row = r.value };
+            // #119: a topic no row is at is delivered by the app that subscribed it (the first standing subscription).
+            const topic = Value.str(req.get("topic")) orelse return .{};
+            if (dispatch.libp2pAt(rows, topic)) return .{};
+            const sub = subsm.forTopic(try rt.subscriptions(a), topic) orelse return .{};
+            return .{ .row = try subsm.rowValue(a, rt.store, sub) };
         }
         return .{};
+    }
+
+    /// The subscriptions as the log stands (#119): the kept fold, else folded now from the store.
+    pub fn subscriptions(rt: *Runtime, a: std.mem.Allocator) ![]const subsm.Sub {
+        if (rt.subs) |x| return x;
+        const folded = try subsm.fold(a, rt.store);
+        rt.subs = try subsm.dupe(rt.life.allocator(), folded);
+        return rt.subs.?;
     }
 
     /// The identity an HTTP request claims (its BRC-104 `x-bsv-auth-identity-key`), or null.
@@ -1556,6 +1574,8 @@ pub const Runtime = struct {
         progs: std.array_list.Managed(Running),
         /// The messages the step emitted (#70), in order: listed on its update, sent when it ends without error.
         emitted: std.array_list.Managed([]const u8),
+        /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
+        subscribed: bool = false,
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
         /// a wake-me to the waker (#70), emitted when the step ends.
         until: ?i64 = null,
@@ -1800,6 +1820,7 @@ pub const Runtime = struct {
         if (waiting) if (st.until) |t| try u.put("until", cbor.int(t));
         try u.put("calls", try cbor.cidArray(a, st.calls.items));
         if (!errored) try u.put("emitted", try cbor.cidArray(a, st.emitted.items));
+        if (!errored and st.subscribed) rt.subs = null;
         try u.put("launched", try cbor.cidArray(a, st.launched.items));
         try u.put("kept", try cbor.cidArray(a, st.kept.items));
         try u.put("heads", try cbor.cidArray(a, head_updates.items));
@@ -2083,11 +2104,29 @@ pub const Runtime = struct {
         const run_ = &st.progs.items[st.progs.items.len - 1];
         if (run_.install == null) run_.install = st.rt.installedAs(a, run_.cid, run_.record) catch return imp.failWith("store error");
         const app: ?[]const u8 = if (run_.install.? == .none) null else Value.str(run_.record.get("app"));
+        // #119: a subscription is checked as it is emitted (subscriptions.zig problem).
+        const kind: ?subsm.Kind = if (std.mem.eql(u8, name, "subscribe")) .subscribe else if (std.mem.eql(u8, name, "unsubscribe")) .unsubscribe else null;
+        if (kind) |k| {
+            const bad = st.rt.subscriptionProblem(st, k, m, app) catch return imp.failWith("emit: the subscriptions cannot be read (a store error)");
+            if (bad) |why| return imp.failWith(why);
+            st.subscribed = true;
+        }
         const rec = logm.eventRecord(a, m, name, app) catch |err| switch (err) {
             error.Reserved => return imp.failWith("emit: an event's `kind` and `app` are the kernel's to set"),
             error.OutOfMemory => return error.OutOfMemory,
         };
         return listEvent(st, imp, rec);
+    }
+
+    /// Why a subscribe / unsubscribe this step emits is refused, or null: against the subscriptions as
+    /// the log stands with this step's own earlier ones applied, and the app's record at `<app>/app`.
+    fn subscriptionProblem(rt: *Runtime, st: *StepState, kind: subsm.Kind, m: Value, app: ?[]const u8) !?[]u8 {
+        const a = st.a;
+        var now = std.array_list.Managed(subsm.Sub).init(a);
+        try now.appendSlice(try rt.subscriptions(a));
+        for (st.emitted.items) |c| if (rt.store.getOpt(a, c)) |rec| if (subsm.eventOf(rec)) |e| try subsm.apply(&now, e);
+        const ps = if (app) |x| try subsm.programsOf(a, rt.store, x) else null;
+        return subsm.problem(a, kind, m, app, ps, now.items);
     }
 
     /// Put an event record and list it on the update (once per step).
