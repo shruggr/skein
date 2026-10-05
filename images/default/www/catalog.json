@@ -11,7 +11,7 @@
       "description": "Static files from the main tree at /static/." },
     { "name": "chain", "version": "0.3.0", "url": "https://github.com/shruggr/skein-chain", "hash": "61b03c6bca1fee141a72be974eb211eeae06c0db",
       "description": "Chain state: headers, transactions, proofs; ingests BEEF and broadcasts." },
-    { "name": "overlay", "version": "0.3.0", "url": "https://github.com/shruggr/skein-overlay", "hash": "157cd1e6dfb0e166ecacdc4793d518a5c8230c94",
+    { "name": "overlay", "version": "0.4.0", "url": "https://github.com/shruggr/skein-overlay", "hash": "2073980541f652dd4ba8b2f4af4ad05072d01b91",
       "description": "The overlay engine: BRC-22 submit and BRC-24 lookup over topic managers. Needs the chain app." },
     { "name": "onboard", "version": "0.1.0", "url": "https://github.com/shruggr/skein-onboard", "hash": "e142f8ea203a5846ac2de9d4c319669c59463af9",
       "description": "Creates skeins for others through the host's instance manager. Only works in a host skein." }
