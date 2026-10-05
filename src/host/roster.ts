@@ -53,7 +53,7 @@ export async function rosterEntry(row: InstanceRow, blocks: TreeBlocks | undefin
   if (row.tree && blocks) {
     try {
       id = parseIdentity(new TextDecoder().decode(await readFile(blocks, CID.parse(row.tree), "IDENTITY.md")));
-    } catch { /* no IDENTITY.md, or the deploy has not been admitted yet */ }
+    } catch { /* no IDENTITY.md, or the deploy has not been admitted yet: the page shows the row without a name either way */ }
   }
   return { handle: row.handle, domain: row.domain, identity: row.identity ?? "", ...id, status: live ? "live" : "idle" };
 }

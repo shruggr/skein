@@ -130,11 +130,12 @@ export function arcadeBody(body: Uint8Array): { txid?: string; bytes: Uint8Array
   const bytes = [...body];
   let tx: Transaction | undefined;
   for (const parse of [() => Transaction.fromAtomicBEEF(bytes), () => Transaction.fromBEEF(bytes)]) {
-    try { tx = parse(); break; } catch { /* the next form */ }
+    try { tx = parse(); break; } catch { /* not this form: the next, then a raw transaction below */ }
   }
   if (!tx) {
-    try { return { txid: Transaction.fromBinary(bytes).id("hex"), bytes: body }; } catch { return { bytes: body }; }
+    try { return { txid: Transaction.fromBinary(bytes).id("hex"), bytes: body }; } catch { return { bytes: body }; } // no txid: enqueue says so and posts the raw transaction
   }
+  // toEF throws when an input's source transaction is not in the BEEF: then the raw transaction, which Arcade takes too.
   try { return { txid: tx.id("hex"), bytes: Uint8Array.from(tx.toEF()) }; } catch { return { txid: tx.id("hex"), bytes: Uint8Array.from(tx.toBinary()) }; }
 }
 
@@ -189,7 +190,7 @@ export class Broadcaster {
     this.stream = new SseStream(url.toString(), async (ev) => {
       if (ev.event === undefined || ev.event === "status" || ev.event === "message") {
         let v: unknown;
-        try { v = JSON.parse(ev.data); } catch { this.say("router", `arcade: an event that is not JSON: ignored`); v = undefined; }
+        try { v = JSON.parse(ev.data); } catch { this.say("router", `arcade: an event that is not JSON: ignored: ${ev.data.slice(0, 200)}`); v = undefined; }
         if (v !== undefined) await this.deliver(v, "stream");
       }
       if (ev.id !== undefined) this.o.db.setCursor(key, ev.id);
@@ -338,7 +339,7 @@ export class Broadcaster {
       // Taken (or a duplicate's current status) or refused: the row goes, and the answer is a status.
       this.o.db.unqueueBroadcast(row.txid);
       let v: Record<string, unknown> = {};
-      try { v = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { /* no JSON: below */ }
+      try { v = JSON.parse(new TextDecoder().decode(r.body)) as Record<string, unknown>; } catch { /* no JSON: the status is the HTTP code's (below), and the line above logged the answer */ }
       const reason = [v.reason, v.extraInfo, v.detail, v.title].find((x) => typeof x === "string" && x) as string | undefined;
       const status = r.status < 300
         ? { ...v, txid: row.txid, txStatus: typeof v.txStatus === "string" && v.txStatus ? v.txStatus : "RECEIVED" }
@@ -405,5 +406,5 @@ function summary(body: Uint8Array): string {
   try {
     const j = JSON.parse(new TextDecoder().decode(body.subarray(0, 4000))) as Record<string, unknown>;
     return String(j.txStatus ?? j.reason ?? j.title ?? j.extraInfo ?? "");
-  } catch { return ""; }
+  } catch { return ""; } // not JSON: the log line keeps the HTTP status alone
 }

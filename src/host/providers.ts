@@ -284,7 +284,7 @@ export class Providers {
     try {
       const v = await new ProtoWallet("anyone").verifySignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: hex(out.message.sender), data: [...dagCbor.encode(rest)], signature: [...signature] });
       return v.valid;
-    } catch { return false; }
+    } catch { return false; } // a signature that does not parse does not verify: the caller refuses the message and says so
   }
 
   /** A signed message from provider `name` to the instance that sent `to`, in `to`'s box: {replyTo, …answer}, appended. */

@@ -207,7 +207,7 @@ export class Cron {
       // The next tick first: the grid point after now (one tick however late this one is); an `at` one is done.
       if (s.every !== undefined) this.store.save({ ...s, next: due + (Math.floor((now - due) / s.every) + 1) * s.every });
       else this.store.drop(s.instance, s.name);
-      if (this.o.wake && !(await this.o.wake(s).catch(() => false))) {
+      if (this.o.wake && !(await this.o.wake(s).catch((e) => { this.say(s.instance, `cron: ${label(s)}: the instance could not be woken: ${(e as Error).message}`); return false; }))) {
         this.say(s.instance, `cron: ${label(s)} due: stopped, and nothing in it subscribes ${s.box}: not woken`);
         continue;
       }

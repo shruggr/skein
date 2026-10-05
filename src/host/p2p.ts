@@ -263,6 +263,7 @@ export class P2PHost {
   async declare(handle: string, config: P2PInstanceConfig | undefined): Promise<void> {
     if (this.stopped) return;
     const prev = this.starting.get(handle) ?? Promise.resolve();
+    // The previous declare's failure went to its own caller (it awaited it); this one runs regardless.
     const next = prev.catch(() => {}).then(async () => {
       if (this.stopped) return;
       if (!config) return this.drop(handle);
@@ -271,6 +272,7 @@ export class P2PHost {
       await this.start(handle, config);
     });
     this.starting.set(handle, next);
+    // Only clears the slot: the error reaches this call's caller through `await next` below.
     void next.catch(() => {}).finally(() => { if (this.starting.get(handle) === next) this.starting.delete(handle); });
     await next;
   }
@@ -297,7 +299,7 @@ export class P2PHost {
     n.config = { ...config, listen: was.listen };
     const list = (xs: string[]) => xs.join(", ") || "none";
     this.say(n.handle, `libp2p: topics ${list(config.topics)} (+${list(added)} −${list(removed)}); protocols ${list(config.protocols)} (+${list(addedP)} −${list(removedP)})`);
-    if (added.length) setTimeout(() => void this.discover(n).catch(() => {}), 200);
+    if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(n.handle, `libp2p: discovery: ${(e as Error).message}`)), 200);
   }
 
   private subscribe(n: Node, topic: string): void {
@@ -314,6 +316,7 @@ export class P2PHost {
     const h = this.o.host;
     const n: Node = { handle, node: undefined as never, config, streams: new Map(), seqnos: new Map() };
     const listen = [...(config.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
+    // An address that does not parse counts as private here; start() reports it when it is dialled or listened on.
     const privateDev = [...h.bootstrap, ...listen].every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
     const services: Record<string, unknown> = {
       identify: identify(),
@@ -349,7 +352,7 @@ export class P2PHost {
     n.node = node;
     if (this.stopped) { await node.stop(); return undefined; }
     this.nodes.set(handle, n);
-    if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch(() => {}); });
+    if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(handle, `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
     for (const topic of config.topics) this.subscribe(n, topic);
     for (const protocol of [...config.protocols, ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) await this.handleProtocol(n, protocol);
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
@@ -375,13 +378,13 @@ export class P2PHost {
     if (this.o.host.dht === "off" || !(node.services as Record<string, unknown>).dht) return;
     for (const topic of n.config.topics) {
       const cid = await topicCid(topic);
-      await node.contentRouting.provide(cid, { signal: AbortSignal.timeout(20_000) }).catch(() => {});
+      await node.contentRouting.provide(cid, { signal: AbortSignal.timeout(20_000) }).catch((e) => { if (!timedOut(e)) this.say(n.handle, `libp2p: provide ${topic}: ${(e as Error).message}`); });
       try {
         for await (const p of node.contentRouting.findProviders(cid, { signal: AbortSignal.timeout(20_000) })) {
           if (p.id.equals(node.peerId) || node.getConnections(p.id).length) continue;
-          await node.dial(p.multiaddrs.length ? p.multiaddrs : p.id).catch(() => {});
+          await node.dial(p.multiaddrs.length ? p.multiaddrs : p.id).catch((e) => this.say(n.handle, `libp2p: ${topic} provider ${p.id}: ${(e as Error).message}`));
         }
-      } catch { /* timed out: next round */ }
+      } catch (e) { if (!timedOut(e)) this.say(n.handle, `libp2p: find providers ${topic}: ${(e as Error).message}`); } // timed out: next round
     }
   }
 
@@ -412,12 +415,12 @@ export class P2PHost {
     try {
       for (;;) {
         let frame: Uint8Array;
-        try { frame = (await lp.read()).subarray(); } catch { break; } // the remote closed its side
+        try { frame = (await lp.read()).subarray(); } catch { break; } // the remote closed or reset its side: the stream is over either way, and nothing here is owed an answer
         const a = await this.o.inbound(n.handle, { transport: "libp2p", protocol, from: remote.toMultihash().bytes, body: frame });
         if (a.body) await lp.write(a.body);
         if (a.close || a.verdict === "reject") break;
       }
-      await stream.close().catch(() => {});
+      await stream.close().catch(() => {}); // a stream the remote already closed or reset cannot be closed again; every frame was answered
     } catch (e) {
       this.say(n.handle, `libp2p: ${protocol} from ${remote}: ${(e as Error).message}`);
       stream.abort(e as Error);
@@ -491,12 +494,12 @@ export class P2PHost {
     if (!n) return;
     this.nodes.delete(handle);
     clearInterval(n.timer);
-    try { await n.node.stop(); } catch { /* stopping anyway */ }
+    try { await n.node.stop(); } catch (e) { this.say(handle, `libp2p: stop: ${(e as Error).message}`); } // dropped either way
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
-    await Promise.all([...this.starting.values()].map((p) => p.catch(() => {})));
+    await Promise.all([...this.starting.values()].map((p) => p.catch(() => {}))); // each declare's failure went to its caller: this waits for them to settle
     await Promise.all([...this.nodes.keys()].map((h) => this.drop(h)));
   }
 }
@@ -505,5 +508,8 @@ export class P2PHost {
 function isPrivateAddr(ma: Multiaddr): boolean {
   const c = ma.getComponents().find((x) => x.name.startsWith("dns"));
   if (c?.value) return c.value === "localhost" || c.value.endsWith(".localhost");
-  try { return isPrivate(ma); } catch { return true; }
+  try { return isPrivate(ma); } catch { return true; } // an address isPrivate cannot classify (no IP component) counts as private, as a dev address
 }
+
+/** An AbortSignal.timeout's abort: the DHT's 20-second rounds end this way, and the next round tries again. */
+const timedOut = (e: unknown): boolean => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");

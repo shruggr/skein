@@ -288,6 +288,7 @@ export async function bootStore(o: { db: string; handle: string; domain: string;
 
 /** Blocks out of a store (a store file opened read-only, or anything with `bytes`). */
 export function storeObjects(s: { bytes(cid: CID): Promise<Uint8Array> }): Objects {
+  // A block the store does not have (or cannot read) is absent: the loader refuses what names it, with the CID.
   return { get: async (cid) => { try { return await s.bytes(cid); } catch { return undefined; } } };
 }
 

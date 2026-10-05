@@ -334,7 +334,7 @@ function routed(u: Obj): CID[] {
   const out = (u.result as Obj | undefined)?.stdout;
   if (!(out instanceof Uint8Array)) return [];
   let v: unknown;
-  try { v = decode(out); } catch { return []; }
+  try { v = decode(out); } catch { return []; } // stdout that is not dag-cbor admits nothing: a program's output is its own
   const admit = isObj(v) && Array.isArray(v.admit) ? v.admit : [];
   const got: CID[] = [];
   for (const x of admit) {
@@ -363,7 +363,7 @@ export function hasStatePointer(path: string): boolean {
  */
 export function openStoreFile(path: string, o: { readOnly?: boolean } = {}): SqliteStore {
   let fresh = true;
-  try { fresh = !hasStatePointer(path); } catch { /* no such file yet: sqlite.ts makes it */ }
+  try { fresh = !hasStatePointer(path); } catch { /* no such file yet: sqlite.ts makes it, and any other open failure throws there with its reason */ }
   if (fresh) return openStore(path, o);
   return indexStore(new DatabaseSync(path, { readOnly: o.readOnly ?? false }), o);
 }
@@ -486,7 +486,7 @@ export function indexStore(db: DatabaseSync, o: { readOnly?: boolean } = {}): In
         originEdges(block<Obj>(cid)).forEach((e, ord) => rows.push({ pos: ord, ...e }));
         const withKept = (u: Obj) => [...updateEdges(u), ...keptEdges((Array.isArray(u.kept) ? u.kept : []).map((k) => {
           const b = isCID(k) ? get(k) : undefined;
-          try { return b && decode(b); } catch { return undefined; }
+          try { return b && decode(b); } catch { return undefined; } // a kept block that is not dag-cbor has no edges
         }))];
         updatesOf(cid).forEach((u, i) => withKept(block<Obj>(u)).forEach((e, ord) => rows.push({ pos: (i + 1) * 1048576 + ord, ...e })));
         const first = new Map<string, (typeof rows)[number]>();

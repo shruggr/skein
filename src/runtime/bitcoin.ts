@@ -85,7 +85,7 @@ export function decodeBitcoin(cid: CID, b: Uint8Array): unknown {
   }
   if (b.length === 64) return [hashCid(BITCOIN_TX, b.subarray(0, 32)), hashCid(BITCOIN_TX, b.subarray(32, 64))];
   let tx: Tx;
-  try { tx = parseTx(b); } catch { return undefined; }
+  try { tx = parseTx(b); } catch { return undefined; } // not a transaction: no fields (the explorer shows the raw block)
   return {
     version: tx.version,
     vin: tx.inputs.map((x) => isCoinbase(x) ? { coinbase: x.script, sequence: x.sequence } : { txid: hashCid(BITCOIN_TX, x.prev), vout: x.vout, script: x.script, sequence: x.sequence }),
@@ -109,7 +109,7 @@ export function bitcoinLinks(cid: CID, b: Uint8Array): BitcoinLink[] {
   if (b.length === 64) return [0, 1].map((k) => ({ to: hashCid(BITCOIN_TX, b.subarray(32 * k, 32 * k + 32)), rel: "child", locator: k }));
   try {
     return parseTx(b).inputs.filter((x) => !isCoinbase(x)).map((x) => ({ to: hashCid(BITCOIN_TX, x.prev), rel: "spends", locator: x.vout }));
-  } catch { return []; }
+  } catch { return []; } // does not decode: no links, as the doc says
 }
 
 /** The edges a kept bitcoin block contributes (kernel-zig/src/bitcoin.zig `edgesOf`): a transaction's `spends` links; none for a header or a merkle node. */

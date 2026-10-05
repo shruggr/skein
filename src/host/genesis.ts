@@ -368,7 +368,7 @@ function programOf(h: string, programs: Record<string, CID>, what: string): CID 
   if (h === "kernel") return "kernel";
   const p = programs[h];
   if (p) return p;
-  try { return parseCid(h); } catch { return undefined; }
+  try { return parseCid(h); } catch { return undefined; } // neither a program's name nor a CID: the caller refuses the row and says so
 }
 
 const isBox = (b: unknown): b is string => typeof b === "string" && b.length > 0 && !/[\s\0]/.test(b);

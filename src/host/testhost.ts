@@ -57,7 +57,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
       const up = await store.get(u) as { result?: { stdout?: Uint8Array } };
       if (!up.result?.stdout?.length) continue;
       let a: { admit?: Array<{ mail?: Record<string, unknown> }> };
-      try { a = dagCbor.decode(up.result.stdout) as typeof a; } catch { continue; }
+      try { a = dagCbor.decode(up.result.stdout) as typeof a; } catch { continue; } // stdout that is not dag-cbor admitted nothing
       for (const x of a.admit ?? []) if (x.mail) out.push(x.mail);
     }
   }

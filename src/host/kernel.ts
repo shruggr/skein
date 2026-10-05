@@ -139,8 +139,10 @@ export class Kernel {
       else w.resolve(f.ok);
       return;
     }
-    const answer = (ok: unknown) => { try { this.write({ re: f.id, ok }); } catch { /* gone */ } };
-    const fail = (e: unknown) => { try { this.write({ re: f.id, error: (e as Error).message ?? String(e) }); } catch { /* gone */ } };
+    // A process that is gone is reported by its exit; any other write failure (a frame that does not encode) is logged.
+    const unwritten = (x: unknown) => { if (!this.gone) this.o.log?.(`the answer to the kernel's ${String(f.op)} frame not written: ${(x as Error).message ?? String(x)}`); };
+    const answer = (ok: unknown) => { try { this.write({ re: f.id, ok }); } catch (x) { unwritten(x); } };
+    const fail = (e: unknown) => { try { this.write({ re: f.id, error: (e as Error).message ?? String(e) }); } catch (x) { unwritten(x); } };
     this.busy++;
     this.last = Date.now();
     try {

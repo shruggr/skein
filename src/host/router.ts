@@ -274,7 +274,7 @@ function describeDelivery(req: HttpRequest): string {
   const b = req.body ?? new Uint8Array();
   let m: { messageBox?: unknown; recipient?: unknown } | undefined;
   try { m = (dagCbor.decode(b) as { message?: typeof m }).message; } catch {
-    try { m = (JSON.parse(new TextDecoder().decode(b)) as { message?: typeof m }).message; } catch { /* neither */ }
+    try { m = (JSON.parse(new TextDecoder().decode(b)) as { message?: typeof m }).message; } catch { /* neither: the line names no box; the delivery's result is logged beside it */ }
   }
   if (!m) return "";
   const to = m.recipient instanceof Uint8Array ? Buffer.from(m.recipient).toString("hex") : typeof m.recipient === "string" ? m.recipient : "";
@@ -284,7 +284,7 @@ function describeDelivery(req: HttpRequest): string {
 /** An error answer's description (JSON {description | error}), else its first 200 bytes. */
 function errorOf(body: Uint8Array): string {
   const t = new TextDecoder().decode(body.subarray(0, 2000));
-  try { const j = JSON.parse(t) as { description?: unknown; error?: unknown }; return String(j.description ?? j.error ?? t.slice(0, 200)); } catch { return t.slice(0, 200); }
+  try { const j = JSON.parse(t) as { description?: unknown; error?: unknown }; return String(j.description ?? j.error ?? t.slice(0, 200)); } catch { return t.slice(0, 200); } // not JSON: the text itself is the description
 }
 
 export class Router {
@@ -484,7 +484,7 @@ export class Router {
     // Clients waiting on a thread are answered 503 + Retry-After before the servers close (#66).
     this.stopNow();
     if (this.inflight.size) {
-      await Promise.all([...this.inflight].map((p) => p.catch(() => {})));
+      await Promise.all([...this.inflight].map((p) => p.catch(() => {}))); // each answers its own client (a 503 now): this only waits for them
       await new Promise((r) => setTimeout(r, 50)); // their 503s written before the sockets close
     }
     clearInterval(this.idleTimer);
@@ -497,7 +497,7 @@ export class Router {
     this.providers.stop();
     await Promise.all([this.cron.stop(), this.feeds.stop(), this.arc?.stop(), this.p2p?.stop()]);
     // A kernel still hydrating: its load finishes (or fails) first, then it is stopped with the rest.
-    await Promise.all([...this.loading.values()].map((p) => p.catch(() => {})));
+    await Promise.all([...this.loading.values()].map((p) => p.catch(() => {}))); // a failed load was reported to whoever asked for it
     await Promise.all([...this.loaded.values()].map((l) => l.kernel.stop()));
     this.loaded.clear();
     await Promise.all(closed);
@@ -560,7 +560,7 @@ export class Router {
     const l = await this.hydrate(handle);
     const source = `libp2p:${call.topic ?? call.protocol ?? "?"}`;
     let from = "";
-    try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: the front door rejects it */ }
+    try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: only this log line's name; the front door judges the record */ }
     const record = call.topic !== undefined
       ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
       : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
@@ -582,7 +582,7 @@ export class Router {
   async settled(): Promise<void> {
     for (let i = 0; i < 1000; i++) {
       await Promise.all([...this.queues.values()]);
-      await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {})));
+      await Promise.all([...this.loaded.values()].map((l) => l.kernel.idle().catch(() => {}))); // a kernel that exited is reported by its exit (hydrate's `exited`): this only waits
       await this.providers.idle(); // what the providers carry now (#70): its answers are entries
       await this.arc?.idle(); // the broadcaster's posts (#65): their answers are statuses to route
       await Promise.all([...this.syncing]); // the libp2p nodes following their dispatch tables (#72, #77)
@@ -594,6 +594,7 @@ export class Router {
   /** Run `f` after everything else queued for this instance (the waker's and the feeds' admissions are serial per instance). */
   serial<T>(handle: string, f: () => Promise<T>): Promise<T> {
     const prev = this.queues.get(handle) ?? Promise.resolve();
+    // f's failure goes to its caller through `next`; the queue only keeps the order.
     const next = prev.catch(() => {}).then(f);
     const tail = next.catch(() => {});
     this.queues.set(handle, tail);
@@ -643,7 +644,7 @@ export class Router {
       if (keyHex(g.identity) !== identity) throw new Error(`the signer (${short(identity)}) is not this instance's identity (${short(keyHex(g.identity))})`);
       await kernel.start();
       await kernel.running(identity);
-      void kernel.idle().catch(() => {}); // busy until what start resumed is done
+      void kernel.idle().catch(() => {}); // busy until what start resumed is done; a kernel that exits meanwhile is reported by its exit
       if (!row.identity) this.o.db.add(row.handle, { identity });
       if (row.kind !== "mailbox") { const w = noOwnerMessagebox(g); if (w) this.say(handle, w); }
       this.feeds.declare(handle, feedsOf(g as Record<string, unknown>));
@@ -908,7 +909,7 @@ export class Router {
    * headers feed follow the dispatch table (#72, #77, #102).
    */
   private settle(l: Loaded): void {
-    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch(() => {});
+    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }
@@ -924,7 +925,7 @@ export class Router {
    */
   private async syncDispatch(l: Loaded, first = false): Promise<void> {
     if ((!this.p2p && !this.o.headersFeed) || l.kernel.gone) return;
-    const d = await l.kernel.dispatch().catch(() => undefined);
+    const d = await l.kernel.dispatch().catch((e) => { this.say(l.row.handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; });
     if (d === undefined) return;
     const key = d.tip ? d.tip.toString() : "";
     if (!first && key === (l.dispatchTip ?? "")) return;
@@ -953,7 +954,7 @@ export class Router {
   private async refollowHeaders(handle: string): Promise<void> {
     if (!this.o.headersFeed) return;
     const l = this.loaded.get(handle);
-    const d = l && !l.kernel.gone ? await l.kernel.dispatch().catch(() => undefined) : undefined;
+    const d = l && !l.kernel.gone ? await l.kernel.dispatch().catch((e) => { this.say(handle, `the dispatch table not read: ${(e as Error).message}`); return undefined; }) : undefined;
     this.followHeaders(handle, d?.rows ?? []);
   }
 
@@ -1007,9 +1008,9 @@ export class Router {
   /** Whether a URL is this host's own (answered in process: no DNS, no socket). */
   isLocal(url: string): boolean {
     let u: URL;
-    try { u = new URL(url); } catch { return false; }
+    try { u = new URL(url); } catch { return false; } // a URL that does not parse is not this host's (the caller's fetch reports it)
     if (!this.port) return false;
-    const mine = (o: string) => { try { return new URL(o).host === u.host; } catch { return false; } };
+    const mine = (o: string) => { try { return new URL(o).host === u.host; } catch { return false; } }; // an origin setting that is no URL matches nothing
     if (mine(this.origin())) return true;
     const port = u.port || (u.protocol === "https:" ? "443" : "80");
     if (port !== String(this.port)) return false;

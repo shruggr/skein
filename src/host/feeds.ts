@@ -112,7 +112,7 @@ export function headersOf(data: string, drop?: (why: string) => void): Uint8Arra
   const direct = hex(t);
   if (direct) return [direct];
   let v: unknown;
-  try { v = JSON.parse(t); } catch { return []; }
+  try { v = JSON.parse(t); } catch { return []; } // neither hex nor JSON: no header; the caller logs an event with none
   const one = (x: unknown): Uint8Array | undefined => {
     if (typeof x === "string") return hex(x);
     const o = x as Record<string, unknown> | null;

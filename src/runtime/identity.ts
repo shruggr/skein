@@ -26,7 +26,7 @@ export function identityOf(wallet: KeyWallet, name: string): Promise<string> {
   let p = byName.get(name);
   if (!p) {
     p = wallet.getPublicKey({ protocolID: PROTOCOL, keyID: name, counterparty: "self" }).then((r) => r.publicKey);
-    p.catch(() => byName.delete(name)); // don't memoise a failure (wallet locked, permission not yet granted)
+    p.catch(() => byName.delete(name)); // don't memoise a failure (wallet locked, permission not yet granted); the caller awaiting `p` gets the error itself
     byName.set(name, p);
   }
   return p;

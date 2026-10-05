@@ -44,7 +44,7 @@ export class FakeArcade {
 
   /** The transaction Arcade received in a POST body: Extended Format, else raw. */
   static txOf(body: Uint8Array): Transaction {
-    try { return Transaction.fromEF([...body]); } catch { return Transaction.fromBinary([...body]); }
+    try { return Transaction.fromEF([...body]); } catch { return Transaction.fromBinary([...body]); } // not EF: raw, whose failure the caller answers 400
   }
 
   private async api(req: IncomingMessage, res: ServerResponse): Promise<void> {

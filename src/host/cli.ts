@@ -721,7 +721,7 @@ async function routerAt(vars: Env["vars"]): Promise<string | undefined> {
     const r = await fetch(`${base}/manifest.json`, { signal: AbortSignal.timeout(2000) });
     const m = await r.json() as { metanet?: unknown };
     return r.ok && m?.metanet ? base : undefined;
-  } catch { return undefined; }
+  } catch { return undefined; } // nothing answering there (or not a router): the command runs its own
 }
 
 /**
@@ -993,7 +993,7 @@ async function systemCmd(rest: string[], env: Env): Promise<number> {
 function isIndexBlock(cid: CID, bytes: Uint8Array): boolean {
   if (cid.code !== 0x71) return false;
   let v: unknown;
-  try { v = decodeCbor(bytes); } catch { return false; }
+  try { v = decodeCbor(bytes); } catch { return false; } // not dag-cbor: not an index block
   if (v && typeof v === "object" && !Array.isArray(v)) return (v as { kind?: unknown }).kind === "skein-state";
   if (!Array.isArray(v) || v.length !== 2 || !Array.isArray(v[1]) || (v[0] !== null && !CIDClass.asCID(v[0]))) return false;
   return v[1].length > 0 && v[1].every((e: unknown) => Array.isArray(e) && e.length === 3 && e[0] instanceof Uint8Array && (e[2] === null || !!CIDClass.asCID(e[2])));
