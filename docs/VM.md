@@ -171,7 +171,8 @@ checked against `kernel-zig/test/dispatch-cases.json`). A row:
 
 ```
 {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+ sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?,
+ filter?: "beef", …settings}
 ```
 
 A route, a subscription and a libp2p topic or protocol differ only in where
@@ -185,11 +186,16 @@ box (a feed's header, the broadcaster's proof, a route's admit), so a box
 that takes events need not be open; a key that identity (a message's
 sender, the BRC-104 session's, a libp2p peer's; the instance's own key
 admits its own programs' messages, below "emit"), `session` (http only)
-any identity with a session, `owner` (http only, #115) the instance's
-owner's session — the genesis's owner, else the claim's, so nobody before
-a claim. A row is the permission: who may read the explorer is the
+any identity with a session. **Every other sender is a key** (#121): the
+owner's rows name the owner's key — the genesis's, or, for an image, the
+key the claim brings (the claim writes the explorer row with it). #115's
+`owner` symbol (the instance's owner as the kernel sees it at the request)
+is gone: nothing writes it, and a row a log already holds with it is still
+read that way, so such a log replays. A row is the permission: who may read the explorer is the
 explorer row's sender (there is no reads table since #115). `program` is
-the handler, or the string `kernel`: an admin row, `fn` its operation. The
+the handler, or the string `kernel`: an admin row, `fn` its operation.
+`filter` (#121) names what the kernel's door runs on the package's content
+before the entry is written ("The door", below, "Requests"): `beef`. The
 rest is the handler's own (static's `root` and `index`, the install's
 `app`), carried to it as `match`. A row's key is (transport, address,
 prefix, sender): `add` replaces the row with that key in place, else
@@ -214,13 +220,17 @@ a reply routes before any row (docs/MESSAGES.md).
   its `mailbox` row (to review).
 
 For a request the kernel hands the front door the row it matched (step
-input `match`, or `refused`), never the table. The front door's part is
-verification: the BRC-103 handshake, and for a row whose sender is not `*`
+input `match`, or `refused`), never the table. Since #121 the sender is
+verified **at the door**, before the entry is written ("Requests", below):
 the BRC-104 session and signature of the identity the kernel matched on
-(the claimed key must be the session's); a topic message's GossipSub
-signature. Then it runs the row's handler. Matching on the claim and then
-verifying it is the same as verifying and then matching: the handler runs
-only when the claim held. (A genesis written before #115 carries the front
+for a row whose sender is not `*` (the claimed key must be the session's),
+a topic message's GossipSub signature, a carried message's signature — the
+transport's middleware's fn `verify`, called by the kernel. The front
+door's step then answers the handshake (a request like any other: its step
+writes the session) and runs the row's handler, trusting what the door
+recorded (`door.verified`). Matching on the claim and then verifying it is
+the same as verifying and then matching: the handler runs only when the
+claim held. (A genesis written before #115 carries the front
 door's `reads` and pins a front door that matched for itself; its request
 steps still get `dispatch` and `reads`, and a row's `read` op is checked
 against those reads in the kernel's match.)
@@ -254,7 +264,11 @@ against those reads in the kernel's match.)
     domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
   - `claim` (#89) — `{owner, messagebox?, handle?, domain?}`, at an image's
     claim row (from anyone): in one step the owner's four admin rows are
-    added, the claim row is removed, the head `claim` points at the body,
+    added, and (#121) the explorer row with the owner's key (`{http,
+    /explore, prefix, <owner>, <the genesis's front door>, explore}`; not
+    when the table holds a row for #115's `owner` symbol — an image written
+    before #121 — which reads the claim's key as before), the claim row is
+    removed, the head `claim` points at the body,
     and with a `messagebox` the owner's address-book entry is written
     (`source` "claim"). Refused when the genesis names an owner or the table
     has an admin row; a second claim finds no row. The instance's owner —
@@ -580,18 +594,105 @@ function over the current state and return a value. It writes nothing.
   the broadcaster's questions of an instance (#65). From a step, an in-VM
   call is how the front door calls a route handler.
 - **The write cache.** The blocks a step puts before its update commits —
-  the overlay's submit decodes the BEEF once into `bitcoin-tx` blocks and
-  merkle nodes with `putblock` and runs SPV and the topic managers over
-  them through `get` (#50, docs/OVERLAY.md) — are a cache in front of the
+  the records a handler builds and reads back through `get` (a submission
+  framed with off-chain values, which the door does not take as a BEEF,
+  is decoded by the overlay into `bitcoin-tx` blocks and merkle nodes
+  there, #50, docs/OVERLAY.md) — are a cache in front of the
   store, not a different kind of execution; a kernel call's puts are the
   same cache, dropped with the call. When a cache flushes, and what it may
   forget that nothing reaches, is the store's policy (retention).
 
+### The door: read-only, before anything is logged (#121)
+
+A request's entry is written only after the **door** has run, in the
+kernel's admission path (`scheduler.zig` `door`, `door.zig`), reading and
+writing nothing but blocks:
+
+1. **The row.** The kernel matches the package's dispatch row (#115).
+2. **The sender.** The transport's middleware verifies who the package is
+   from: a kernel call of its fn `verify` with the package (the genesis's
+   `middleware` per transport — the front door: BRC-104 for http on a row
+   that is not open, GossipSub's signature for a libp2p topic message, the
+   message signature for a `local` package). It answers `{ok: true,
+   verified?}` — `{caller, theirs, requestId}` for http, `{key}` for libp2p —
+   or `{refused: {status, code?, reason}}`. A handshake is a request like
+   any other: the door passes it and its step writes the session.
+3. **The filter.** The row's `filter` setting names what the door runs on
+   the package's content. For a `local` package (a signed message carried
+   in) the row is the message's own: its `mailbox` row on (sender, box),
+   none for a reply.
+4. **The outcome is logged either way.** The admission: the entry names the
+   package as the door hands it back and carries `door: {verified?,
+   filter?, beefs?: [<pointer record>], bodies?: [{of, is}]}`. Or a
+   refusal: `refused: {stage: "middleware" | "filter", reason, status,
+   code?}` beside the package as far as the door got — a stored entry, as
+   every refused request is, and **nothing runs** (no thread; a waiting
+   client gets the refusal at once: `status`, and `{status: "error", code,
+   description: reason}`; a libp2p message is `reject`, `ignore` when the
+   instance cannot judge it). Only then does the row's program run, as
+   the request's thread, trusting `door.verified` (an entry written before
+   the door has none, and its step verifies as before). A row with no
+   `filter` logs the package as received.
+
+A middleware with no fn `verify` (a front door pinned before #121) gets
+the package as received: no `door`, no filter, and its step verifies.
+
+**The door is lossless for anything a signature covers.** What a filter
+rewrites must be reconstructible to the exact bytes, so a reader of the log
+(replay, an auditor) can put them back and re-check the signature: the
+`beef` filter's encoder sits beside its decoder. A signed message's mail
+record is never rewritten (its CID is the message's id, and its signature
+covers its body's CID): the door puts the rewritten body beside it
+(`door.bodies`, `{of: <the body the record names>, is: <the body put>}`)
+and the kernel routes the message with that one; restored, it is the body
+the record names. Decryption of a body encrypted to the instance is **not**
+a door job: it stays a recorded signer call inside the step, so the
+ciphertext and its signature stay in the log.
+
+**The `beef` filter** — the one way a BEEF enters a skein, whatever the
+route (an overlay's `/submit`, a payment in a mailbox, a Metanet delivery,
+gossip, the chain app's own `ingest`). It walks the package's byte-string
+values (an http body, a libp2p message's body, a carried message's body
+fields: through maps and arrays) and takes those that start with a BEEF
+pattern (`beef.zig` `patterns`, a table: BEEF V1 `01 00 be ef`, V2 `02 00
+be ef`, Atomic BEEF `01 01 01 01` + txid, Outpoint BEEF `16 a7 be ef` +
+txid + vout, BRC-62/96/95/158). For each:
+
+- it decodes the BEEF; one that does not decode is a refusal;
+- it checks **every BUMP** against the headers in the chain app's state
+  (`chain/state`, read only: the header at the BUMP's height, its merkle
+  root): a BUMP that does not give that root, a height with no header, a
+  transaction marked with a BUMP that does not hold it — a refusal; no
+  `chain/state` (no chain app, or one that has seen no header) — a refusal,
+  saying so. A transaction no BUMP proves enters as unproven (SPV and status
+  are the chain app's);
+- it stores each transaction **once** as its `bitcoin-tx` block (CID =
+  txid), each BUMP as the raw block of its bytes and the merkle nodes it
+  reveals (a block the store holds is not written again);
+- it puts the **pointer record** where the bytes were, a link:
+
+```
+{kind: "beef", form: "beef" | "atomic" | "outpoint", version: 1 | 2,
+ subject: <bitcoin-tx CID>,             the Atomic/Outpoint BEEF's txid, else the last transaction
+ vout?: int,                            an Outpoint BEEF's output
+ txs: [<bitcoin-tx CID>, …],            every transaction in wire order (a V2 txid-only one too)
+ marks: [<bump index> | null | "txid"], per transaction: what the wire says beside it
+ bumps: [{height, path: <raw CID: the BUMP as received>,
+          block: <bitcoin-block CID: the header checked> | null, proves: [<tx index>]}]}
+```
+
+A refusal still stores what decoded (the entry names the pointer record:
+the bytes are reconstructible), but no merkle nodes. The encoder — the
+exact wire bytes from the record and its blocks — is `beef.zig` `encode`
+in the kernel, skein-sdk's `chain.record.beefOf` for programs (the chain
+app's `ingest`, the overlay's gossip), `src/runtime/beef.ts` on the
+host's side.
+
 ### Requests: the front door stepped on the package (#68, #66)
 
-Every package a transport carries in is an entry, as received:
-`{kind: "log", …, request: <record>, transport}` (docs/MESSAGES.md, "The
-log"). Processing it launches the transport's middleware — the genesis's
+Every package a transport carries in is an entry — since #121 as the door
+hands it back: `{kind: "log", …, request: <record>, transport, door? |
+refused?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
 `middleware[transport]`, else its front door for `http`, `libp2p` and
 `local` (#70: a provider's signed message, its signature checked;
 `scheduler.zig` `middlewareOf`) — as
@@ -679,7 +780,7 @@ state process: the log is every package that arrived, as received, and an
 entry is one of
 
 ```
-entry  {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}
+entry  {kind: "log", prev, n, time, genesis | request+transport (+ door | refused, #121) | mail | event+box}
 mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, json?,
         session?: {payload, signature, nonce, yourNonce} | nonce?, signature?}
 ```

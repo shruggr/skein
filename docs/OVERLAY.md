@@ -13,7 +13,23 @@ services' maps and its gossip state under its own name (`<app>/state`,
 `<app>/ls_<service>`, `<app>/gossip`). It holds no chain state: a
 submission goes to the chain app (shruggr/skein-chain, `requires:
 ["chain/1"]`) as an `ingest` message and is admitted on the chain app's
-first `accepted` or `proven` answer. Two overlay apps on one instance run
+first `accepted` or `proven` answer.
+
+**A submission's BEEF is decoded at the kernel's door** (#121, docs/VM.md
+"The door"). The submit rows — `/<app>/submit` and the libp2p `<topic>`,
+derived from `config.overlay` (src/host/manifest.ts `overlayWiring`) — name
+`filter: "beef"`: before the request's entry is written, the kernel stores
+each transaction once as its `bitcoin-tx` block and each BUMP as its bytes'
+raw block, checks every BUMP against `chain/state`, and puts the BEEF's
+pointer record where the bytes were. The submit handler gets the record's
+CID, reads it (skein-overlay ≥ its `beef-as-cid` commit, `decodeRecord`),
+and does not prove the BUMPs again; the submit event and the `ingest`
+message carry the CID; the gossip re-publishes the exact bytes received
+(skein-sdk `chain.record.beefOf`). A bad BUMP is a refusal entry, 400 to an
+HTTP client, `reject` on GossipSub; nothing runs. No BEEF bytes are logged
+— but for a body framed with off-chain values (`VarInt(len) ‖ BEEF ‖
+values`), which no BEEF pattern leads: the door passes it, and the overlay
+decodes and checks it in its call as before. Two overlay apps on one instance run
 over the one `chain/state` (docs/APPS.md §6). The topic and lookup
 contracts are Zig modules (`topic`, `lookup`, and the `sk` helpers) an app
 depends on by URL+hash. Next for the engine: skein-overlay#1 (submit walks

@@ -25,10 +25,21 @@ step is recorded. There is no in-memory execution path:
 - a request — an HTTP request, a GossipSub message, a stream frame — is one
   log entry (`request`), the package as the transport carried it: headers,
   signatures and all. The host verifies nothing;
-- the instance's middleware (the front door) is stepped on it, as the
-  request's own thread: it verifies, routes, and answers. A refusal (a bad
-  signature, no session, no route, a read rule) is that step's answer:
-  recorded, and nothing else changes;
+- **the door** (#121, docs/VM.md "The door") runs before the entry is
+  written, read-only: the kernel matches the dispatch row, the transport's
+  middleware verifies the sender (BRC-104, GossipSub's signature, the
+  message signature), and the row's `filter` runs on the package's content
+  (`beef`: every BEEF decoded, its transactions stored once as blocks, every
+  BUMP checked against `chain/state`, the bytes replaced by a pointer
+  record — **no BEEF bytes are logged**). The outcome is the entry either
+  way: the admission (`door`), or a refusal (`refused: {stage, reason,
+  status, code?}`), stored, which runs nothing. The door is lossless for
+  anything a signature covers: what it rewrites is reconstructible to the
+  exact bytes;
+- the instance's middleware (the front door) is stepped on an admitted
+  entry, as the request's own thread: it routes and answers (it verified at
+  the door). A refusal there (no session, no route, a read rule) is that
+  step's answer: recorded, and nothing else changes;
 - a read — a poll, a listing, a lookup — costs its entry and moves nothing,
   as a web server's access log records a GET; growth is a pruning question;
 - a handshake is a request like any other: its step writes the session as a
@@ -41,8 +52,8 @@ step is recorded. There is no in-memory execution path:
   entry; what comes back — a peer's reply, a provider's answer — is an
   entry like any other arrival;
 - the blocks a step puts before it commits are the **write cache** (the
-  decoded BEEF a submit judges, say): a cache in front of the store, not a
-  different kind of execution.
+  records a handler builds and reads back): a cache in front of the store,
+  not a different kind of execution.
 
 A reader with the log can check every message: the request that carried it
 is in the log as received, and the mail record carries the BRC-104 signed
@@ -56,13 +67,16 @@ the **address book**. The dispatch table is one chain of rows
 
 ```
 {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "event" | "session" | "owner" | bytes(33), program: <program record CID> | "kernel", fn?, …settings}
+ sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?,
+ filter?: "beef", …settings}
 ```
 
 — a box, an HTTP path (prefix or exact), a libp2p topic (prefix or exact, #119) or `/<protocol>`;
 who may send there (`event`, #79: events only — the host's wiring and a
-route's admits, never a message; `owner`, #115: the instance's owner's
-session); which program is stepped or called, or which of the
+route's admits, never a message; every other sender is a key, #121: the
+owner's rows name the owner's key, an image's the claim's — #115's `owner`
+symbol is gone, still read in a row a log already holds); what the door
+runs on the package before it is logged (`filter`, #121: `beef`); which program is stepped or called, or which of the
 kernel's own operations runs. A route and a subscription differ only in
 where the address comes from; the kernel matches every transport, first
 match wins (docs/VM.md, "The dispatch table", for the full rules). A program never writes the table: there is no
@@ -76,7 +90,7 @@ kernel itself performs — no program is stepped:
 | `head` | `{name, tree}` | the head advanced to a record in the store (owner = the name's app) |
 | `dispatch` | `{op: "add" \| "remove", row}` | the row added (replacing the row with its key: transport, address, prefix, sender), or removed |
 | `peers` | `{op: "add", key, transport?, address? \| url?, role?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
-| `claim` | `{owner, messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): the owner's four admin rows added, the claim row removed, the head `claim` → the body, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned |
+| `claim` | `{owner, messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): the owner's four admin rows added, and the explorer row with the owner's key (#121), the claim row removed, the head `claim` → the body, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned |
 
 Every genesis that names an owner seeds the owner's four admin rows
 (`sender` the owner, `program` `kernel`); an image (the default image,
@@ -117,14 +131,17 @@ http://<host>:<port>/@<handle>/…       the same instance, a dev form: the host
 
 **Auth is by key.** The kernel picks the request's row (#115: the
 dispatch table, on the identity the request claims in
-`x-bsv-auth-identity-key`) and hands the front door that row; the front
-door runs BRC-103/104 itself, in its step on the request: the handshake at
-`/.well-known/auth` and, for a row that is not open, the verification of
-the general message — its session holds the claimed identity and the
-signature verifies — against the instance's session table (below). The
-caller is the identity key the session proved; there is no account, no
-handle check, no envelope. Answers are signed on the session through the
-instance's signer (the kernel's `wallet`, a recorded call of the step).
+`x-bsv-auth-identity-key`) and hands the front door that row. The
+front door runs BRC-103/104: for a row that is not open, the verification
+of the general message — its session holds the claimed identity and the
+signature verifies, against the instance's session table (below) — at the
+door (#121: its fn `verify`, called by the kernel before the entry is
+written; a failure is a refusal entry, its status and `{status: "error",
+code, description}` the answer); the handshake at `/.well-known/auth` in
+its step on the request. The caller is the identity key the session proved
+(`door.verified` on the entry); there is no account, no handle check, no
+envelope. Answers are signed on the session through the instance's signer
+(the kernel's `wallet`, a recorded call of the step).
 
 - **Sessions are state** (#68). The BRC-103 session table is records the
   front door reads and writes; a handshake is a request like any other,
@@ -152,14 +169,18 @@ instance's signer (the kernel's `wallet`, a recorded call of the step).
     The records are prunable like any others; nothing prunes them yet.
 - **Routes are rows of the dispatch table** (#77, #115): the `http` rows
   `{transport: "http", address: <path>, prefix?: true, sender: "*" |
-  "session" | "owner" | <key>, program: <cid>, fn, …the handler's
+  "session" | <key>, program: <cid>, fn, filter?, …the handler's
   settings}`. The kernel matches them (dispatch.zig `forHttp`): exact
   addresses first, then prefixes, longest first; within each, the first row
   in table order whose sender takes the identity the request claims.
   `sender` `"*"` is an open route (no session is checked, the handler gets
   no caller: an overlay's submit and lookup); `"session"` any identity
-  with a BRC-104 session; `"owner"` the instance's owner's (the genesis's,
-  else the claim's); a key that identity's. A request no row takes is
+  with a BRC-104 session; a key that identity's (#121: the owner's rows
+  name the owner's key; #115's `"owner"`, the instance's owner as the
+  kernel sees it, is still read in a row a log already holds, and nothing
+  writes it). `filter: "beef"` (#121): the door decodes the body's BEEF
+  before the entry is written and the handler's `body` is the pointer
+  record's CID (an overlay's submit). A request no row takes is
   refused by the front door as the kernel says: no row at the path, 404;
   a row there needs a session and the request has none, 401 (the stock
   client shakes hands); none takes its identity, 403, signed on the
@@ -184,16 +205,16 @@ instance's signer (the kernel's `wallet`, a recorded call of the step).
   outside the root is served); 405 for another method (`Allow: GET, HEAD`).
   A read: its request's entry, and no head moves.
 - **Reads are rows** (#115). There is no reads table: who may call a
-  route is its row's sender. The explorer's row is the owner's (code
-  genesis names the key; the default image says `sender: "owner"`, #92:
-  the owner as the kernel sees it at the request — the genesis's, else the
-  key in the head `claim` — so nobody before a claim); others get 403,
-  signed — a refusal, recorded on the request's thread. Granting another
-  key the explorer is the owner adding a row with that sender through
-  `dispatch`. A system tree's `etc/reads.json` (`[{caller?: <key>, op}]`
-  or `[{owner: true, op}]`, the form before #115) is still read: at
-  genesis each read becomes the sender of the rows marked `read: op`
-  (src/host/genesis.ts `foldReads`), and the genesis carries no `reads`.
+  route is its row's sender. The explorer's row is the owner's key (#121:
+  code genesis names it; the default image has no explorer row, and the
+  claim writes it with the claimed owner's key — so nobody reads it before a
+  claim); others get 403, signed — a refusal, recorded on the request's
+  thread. Granting another key the explorer is the owner adding a row with
+  that sender through `dispatch`. A system tree's `etc/reads.json`
+  (`[{caller?: <key>, op}]` or `[{owner: true, op}]`, the form before #115)
+  is still read: at genesis each read becomes the sender of the rows marked
+  `read: op` (src/host/genesis.ts `foldReads`; `owner: true` the owner's key,
+  and no row in an image), and the genesis carries no `reads`.
 
 ### Route handlers: the program-facing contract (#68, #66)
 
@@ -211,9 +232,9 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
 { caller?:     bytes(33)       the identity the BRC-104 session proved (absent on an open route)
   method, path, route, query,  the request as received (path as the client signed it; route as the table saw it)
   headers:     {name: value}   names lower-cased, x-bsv-auth-* included
-  body:        bytes
+  body:        bytes | <cid>  as received; #121: on a row whose `filter` is `beef`, the BEEF's pointer record (docs/VM.md "The door")
   contentType: text            the media type alone
-  session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes
+  session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes (no payload when a filter replaced the body: reconstructible)
   match:       the dispatch row that matched, as the table holds it (`address`, `prefix: true` for a prefix row;
                a handler's own settings: static's root, index; the install's app). #79: no pre-#77 keys
   request:     <cid>           the request record: the package as received (its entry is `step.entry`)
@@ -318,7 +339,9 @@ sent, which is what the front door verifies.
 ## The log, format 8
 
 ```
-entry    {kind: "log", prev, n, time, genesis | request+transport | mail | event+box}
+entry    {kind: "log", prev, n, time, genesis | request+transport (+ door | refused, #121) | mail | event+box}
+door     {verified?, filter?, beefs?: [<pointer record>], bodies?: [{of, is}]}       the door's admission (docs/VM.md "The door")
+refused  {stage: "middleware" | "filter", reason, status, code?}                   a refusal at the door: stored, nothing runs
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
                  {kind: "p2p-frame", protocol, from: bytes, body: bytes}
@@ -330,11 +353,11 @@ mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
 
 Entries are unsigned (#9): the sender signed its request, `prev` fixes the
 order, `time` is the host's clock at admission (#10). A `request` names
-the package as received and its transport, whose middleware the kernel
+the package as received (#121: as the door hands it back — a BEEF replaced by its pointer record on a row whose `filter` is `beef`) and its transport, whose middleware the kernel
 steps on it (the genesis's front door for `http`, `libp2p` and `local`; a
 genesis may name others in `middleware: {<transport>: <program>}`). A
 `local` request is a provider's answer on this host (below, "Outbound"): the
-front door checks the message's signature against its sender and that its
+door (#121: the front door's fn `verify`) checks the message's signature against its sender and that its
 body is the one named, and admits it. No host admits a message directly
 (K2): `admit` refuses a `mail` entry, and every message arrives inside a
 request — the browser host's as `local` requests carrying a signed message.
@@ -1206,15 +1229,22 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   `emitted`, in log order (src/host/p2p.ts `askedTopics`, router.ts
   `foldAsked`) — into the asked sets. The app does not emit again and the
   kernel keeps nothing extra; another host may keep them otherwise.
-- **Verify in the step.** For a topic message the front door checks, from
-  the request alone, that `from` is a secp256k1 peer ID (identity multihash of
+- **Verify at the door** (#121). For a topic message the front door's fn
+  `verify` checks, from the request alone and before its entry is written,
+  that `from` is a secp256k1 peer ID (identity multihash of
   the key's protobuf) and that `signature` is its ECDSA signature (DER,
   sha2-256) over `"libp2p-pubsub:"` ‖ protobuf `{1: from, 2: body, 3: seqno,
-  4: topic}` — GossipSub's StrictSign. A bad one is `reject`, and no handler
-  runs. Then the handler (the route's program and fn, an in-VM call) gets the
+  4: topic}` — GossipSub's StrictSign. A bad one is a refusal entry (`reject`),
+  and nothing runs. Then the row's `filter` (an overlay's `<topic>` row:
+  `beef`, the body's BEEF decoded and replaced by its pointer record; a bad
+  BUMP is a refusal, `reject`; no chain state to check it by, `ignore`).
+  Then the handler (the route's program and fn, an in-VM call) gets the
   request plus `key` (the 33-byte key out of `from`) and `request` (the
   record's CID), and judges from state: `{verdict, admit?}`. A handler that
-  fails is `ignore` (cannot evaluate: no penalty for the forwarder).
+  fails is `ignore` (cannot evaluate: no penalty for the forwarder). The
+  record as logged re-verifies once its body is put back (docs/VM.md "The
+  door": lossless): a redelivery carries the original bytes, is decoded to
+  the same record, and is `seen`.
 - **What accept admits.** The message itself first, as an event:
 
   ```

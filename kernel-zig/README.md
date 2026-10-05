@@ -247,7 +247,11 @@ docs/BOOTSTRAP.md). The kernel adds only this:
   `claim` row is the kernel's `claim` operation (`scheduler.zig` claim):
   the owner's admin rows added, the claim row removed, the head `claim` at
   the body; the step input `owner` is then that key (`ownerOf`). No format
-  bump: a store that names its owner reads as before.
+  bump: a store that names its owner reads as before. Since #121 the claim
+  also writes the explorer row with the owner's key (every sender is a key:
+  the image carries no explorer row) — unless the table holds a row for
+  #115's `owner` symbol (an image written before #121), which is read as
+  before: the matcher's `owner` sender is the step's owner.
 - **`serve` frames**:
   - `has` answers whether any block is present, whatever its codec.
   - `putblock {cid, bytes}` stores a block minted elsewhere, hash-checked like
@@ -488,9 +492,11 @@ The host speaks to the kernel through `src/host/kernel.ts`: it asks `tip`,
 entry only, as the log's first; every other entry is admitted), `genesis`, `programs`
 (the pinned program records, for a new genesis), `head`, `boxes`,
 `dispatch` (#77: `{tip, rows}`, the dispatch table as it stands — the
-host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, body?}`: the one call in that writes — a
-request as received, #68, a feed's or a proof's event; never a `mail`
-entry, K2), `answer` (#66, below),
+host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, request?}`: the one call in that writes — a
+request as received, #68, its record beside the entry (#121: the kernel's
+door puts it, as it hands it back; a host may still put it first), a
+feed's or a proof's event; never a `mail` entry, K2; it answers the CID
+of the entry written, the admission or the refusal), `answer` (#66, below),
 `call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the host answers from the instance's
 ProtoWallet, the signer), and tells `emit` (#70: `{message, body,
@@ -511,6 +517,38 @@ are handled mid-step (an admit is processed when the running drain loops
 again), and answers to other requests are kept until asked for. A request
 appended mid-step is processed after that step. Since #67 a step never waits
 on the network: sending is an `emit`, and the answer an entry.
+
+### The door (issue #121)
+
+`admit` of a request runs the door before the entry is written
+(`scheduler.zig` `door`), read-only: the kernel matches the row (`matchOf`,
+#115); the transport's middleware verifies the sender — a kernel `call` of
+its fn `verify` with `{request: <the record>, transport, match?, refused?}`
+(the front door: BRC-104 for http on a row that is not open, GossipSub's
+signature for a topic message, the message signature for `local`; it
+answers `{ok, verified?}` or `{refused: {status, code?, reason}}`; a
+middleware with no fn `verify`, a front door pinned before #121, gets the
+package as received and no filter runs); then the row's `filter`
+(`door.zig`; for a `local` package, the row of the message it carries —
+`mailFilter`). The entry written is the admission, `door: {verified?,
+filter?, beefs?, bodies?}` and the package as the door hands it back, or a
+refusal, `refused: {stage: "middleware" | "filter", reason, status,
+code?}`, which runs nothing (`processRequest`); `answer` answers a refusal
+at once (`{state: "refused", refused}`). The front door's step trusts
+`door.verified` and verifies only an entry written before the door.
+
+The `beef` filter (`door.zig`, `beef.zig`): every byte string in the
+package that starts with a BEEF pattern (`beef.patterns`: V1 `0100beef`,
+V2 `0200beef`, Atomic `01010101`+txid, Outpoint `16a7beef`+txid+vout) is
+decoded; every BUMP checked against the headers in `chain/state` (read
+only; none: refused, "no chain state"); each transaction stored once as its
+`bitcoin-tx` block, each BUMP as the raw block of its bytes and its merkle
+nodes; the bytes replaced by a link to the pointer record
+`{kind: "beef", form, version, subject, vout?, txs, marks, bumps: [{height,
+path, block, proves}]}`. `beef.encode` (and skein-sdk's
+`chain.record.beefOf`, and `src/runtime/beef.ts`) give the exact bytes back;
+`door.restore` puts them back in a package. `replay` copies what the door
+put beside each entry (`replay.zig` `copyDoor`).
 
 ### Requests and `answer` (issues #68, #66)
 
@@ -668,7 +706,7 @@ natively), and `runner.zig` picks the component backend by target.
 | `skein_open(store)` | open the shim's store `store` and a runtime over it (an older-format store is refused) |
 | `skein_modules()` | `[{name, file, cid}]`: the pinned modules and files to install |
 | `skein_put_block(cid, bytes)`, `skein_get_block(cid)` | a block, checked against its CID on put |
-| `skein_admit({entry, body?})` | `admit`: the one call in that writes; admitted, not yet processed |
+| `skein_admit({entry, request?})` | `admit`: the one call in that writes (a request through the door, #121); admitted, not yet processed |
 | `skein_start()`, `skein_drain()` | `start`; the step loop over everything admitted (`kick`) |
 | `skein_state()` | `{state, log, cursor}` |
 | `skein_call({op, v})` | the other serve ops: `tip get put append programs head genesis boxes byEnvelope state`, and `call` (#40; the browser requires `now`) |
@@ -830,6 +868,7 @@ re-genesis when they move to this build).
 | `fuel.zig`, `fuel_test.zig` | `skein-kernel fuel` (fuel accounting as a query over the log); the fuel unit tests (issue #5) |
 | `component.zig`, `component_test.zig`, `test/components/` | WASI 0.2 components (issue #34): the standard worlds and `skein:kernel/skein` over the preview1 implementation; the unit tests' C program in three builds and the `fetch` component (`build.sh`) |
 | `addressbook.zig` | the address book (#70, #77): the head `peers`, lookup by key and by role, the genesis's seed, the kernel's `peers` operation (`write`) |
+| `beef.zig`, `door.zig`, `door_test.zig` | the door (#121): BEEF's pattern table, decoder and encoder, the BUMP's nodes and root; the row filters (`beef`) over a package, against `chain/state`'s headers; `restore` |
 | `signer.zig` | the signer's signature of an emitted message (#70): the BRC-100 `createSignature` frame, its answer |
 
 ## What is not the same, or not here

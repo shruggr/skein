@@ -17,7 +17,9 @@
 //
 //   sender "event" (#79): the row takes events only (a feed's header, a broadcaster's proof, a route's
 //   admit), never a message — the host's wiring into a box, not an open box. "owner" (#115, http):
-//   the instance's owner's session (the genesis's owner, else the claim's).
+//   the instance's owner's session (the genesis's owner, else the claim's) — #121: gone; nothing writes it, and a row a log
+//   already holds with it is still read so (every sender is a key: the claim writes the owner's explorer row).
+//   `filter?: "beef"` (#121): what the kernel's door runs on a package before its entry is written.
 //
 // The kernel writes the chain and matches by it (kernel-zig/src/dispatch.zig):
 // the genesis's `dispatch` as its first updates (no `thread`), then a change

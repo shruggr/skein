@@ -16,13 +16,15 @@
 //                                  proof, a route's admit — never a message); "session": an HTTP
 //                                  route that needs a BRC-103/104 session, any identity; "owner"
 //                                  (#115, http): the instance's owner's session (the genesis's
-//                                  owner, else the claim's — an image's explorer); a key: that
+//                                  owner, else the claim's) — #121: nothing writes it (every sender is a key; the claim writes the owner's explorer row), and a row a log holds with it is still read so; a key: that
 //                                  identity — a message's sender, the session's, a libp2p peer's
 //          program: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
 //                                  itself: an admin operation (`fn`: objects | head | dispatch | peers),
 //                                  or the claim (#89: an image's one row, from anyone)
 //          fn?: text,              http/libp2p: the handler's function; kernel: the operation
+//          filter?: "beef",        #121: what the kernel's door runs on the package before its entry is
+//                                  written (scheduler.zig door, door.zig): a setting like any other
 //          …}                      a handler's own settings, carried to it as `match` (static's
 //                                  `root`, `index`; the install's `app`; a `read` op, a genesis
 //                                  before #115's: checked against its `reads` in `takes`)

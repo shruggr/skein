@@ -465,9 +465,9 @@ writes under its program's name (`overlay/…`, the tree's `scopes`).
 pending at the chain app), `<app>/ls_<service>` (each lookup service's own
 maps), `<app>/gossip` (peers' admits). **The chain is the chain app's**
 (§6a): the overlay links no chain tracker and holds no headers, proofs or
-settlement. A submission is judged in the `/submit` call (SPV against
+settlement. A submission's BEEF is decoded at the kernel's door (#121: the submit rows name `filter: "beef"`; every BUMP checked against `chain/state` there, the handler given the pointer record's CID) and judged in the `/submit` call (SPV for the unproven against
 `chain/state`, read by CID; the topics on the transaction's CID), then the
-submission's thread sends the BEEF to the chain app (`{fn: "ingest", args:
+submission's thread sends the pointer record to the chain app (`{fn: "ingest", args:
 {beef}}` to the instance itself, box `chain`) and waits on its answers:
 **admitted on the first of `accepted` or `proven`** (#73), nothing on
 `rejected`. Proof validation is the chain app's answer. A submission
@@ -487,9 +487,9 @@ marked "(derived: config.overlay)" in the prompt:
 
 - the app's own box `<app>` from `event` (what its libp2p routes admit: a
   gossiped submission, a peer's admit) and from `$self` (its own watch);
-- the open http rows `/<app>/submit` and `/<app>/lookup` (the app's base
+- the open http rows `/<app>/submit` (`filter: "beef"`, #121) and `/<app>/lookup` (the app's base
   URL is what it advertises);
-- libp2p rows `<topic>` (raw submissions, fn `submit`), `<topic>-admit`
+- libp2p rows `<topic>` (raw submissions, fn `submit`, `filter: "beef"`), `<topic>-admit`
   (fn `peerAdmit`) and `<topic>-proof` (fn `peerProof`) per topic (#74).
 
 No `chain`, `status` or `submit` box (the chain app's, and the app's own
@@ -562,8 +562,8 @@ more: one program, two rows, one interface.
     "proof":  {"writes": false, "args": {"txid": "string"}, "answer": {"block": "cid", "height": "int", "depth": "int", "position": "int", "…": "…"}}}}],
   "dispatch": [
     {"address": "chain",  "sender": "event",   "program": "chain"},
-    {"address": "chain",  "sender": "$self",   "program": "chain"},
-    {"address": "chain",  "sender": "$owner",  "program": "chain"},
+    {"address": "chain",  "sender": "$self",   "program": "chain", "filter": "beef"},
+    {"address": "chain",  "sender": "$owner",  "program": "chain", "filter": "beef"},
     {"address": "status", "sender": "$status", "program": "chain", "optional": true}
   ]
 }
@@ -575,6 +575,16 @@ more: one program, two rows, one interface.
 - The `chain` rows from `$self` and `$owner` take the callers' `{fn,
   args}`: the instance's own apps (the wallet, the overlay apps, by the
   host's loopback) and the owner. A stranger's message routes nowhere.
+  They name `filter: "beef"` (#121): before a caller's message is logged,
+  the kernel's door decodes every BEEF in its body's fields — each
+  transaction stored once as its `bitcoin-tx` block, each BUMP as its bytes'
+  raw block, every BUMP checked against `chain/state` — and the body the
+  chain app is stepped with carries the BEEF's pointer record (the message
+  record itself untouched: its id is what the answers name). So `ingest`
+  takes `{beef: <the pointer record's CID>}` — what an overlay's submit
+  passes on, never the bytes — and reads the bytes back with skein-sdk's
+  `chain.record.beefOf`; bytes still work from a caller no door stands in
+  front of. A bad BUMP is a refusal entry: the message runs nothing.
 - The `status` row takes the status provider's messages; `optional`, so a
   host with no status provider installs it without (statuses are optional,
   #65).
