@@ -54,6 +54,7 @@ const wasi = @import("wasi.zig");
 const engine = @import("engine.zig");
 const doorm = @import("door.zig");
 const subsm = @import("subscriptions.zig");
+const authfetch = @import("authfetch.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
 const Value = cbor.Value;
@@ -113,7 +114,7 @@ pub const Witness = struct {
                 for (calls.array) |c| {
                     if (c != .cid) continue;
                     const av = s.getOpt(a, c.cid);
-                    if (!logm.isSignerCall(av)) continue;
+                    if (!logm.isSignerCall(av) and !logm.isAuthfetchCall(av)) continue;
                     const k = try key(a, Value.cidOf(av.?.get("thread")).?, Value.intOf(av.?.get("step")) orelse -1, Value.intOf(av.?.get("i")) orelse -1);
                     try w.map.put(k, av.?);
                 }
@@ -155,6 +156,10 @@ pub const Peers = struct {
     say: ?*const fn (ctx: *anyopaque, line: []const u8) void = null,
     /// The host's Io (native): a call's real randomness. The browser build has none.
     io: ?std.Io = null,
+    /// One HTTP exchange (#126): what `authfetch` hands the runtime — bytes only; the kernel
+    /// signs and verifies. Absent (replay; a host with no HTTP): authfetch is served from the
+    /// witness, or fails.
+    http: ?*const fn (ctx: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult = null,
 };
 
 /// A log entry the processing of which drives a step or a shell.
@@ -191,6 +196,8 @@ pub const Runtime = struct {
     /// unsubscribe events, kept in `life` — derived, never written; null until needed, and again
     /// after a step that subscribed or unsubscribed (folded again from the store when next needed).
     subs: ?[]subsm.Sub = null,
+    /// authfetch's BRC-103 sessions (#126), per server base URL, in memory only.
+    sessions: authfetch.Sessions,
 
     pub fn init(gpa: std.mem.Allocator, s: Store, r: *runner.Runner, peers: Peers) !*Runtime {
         const rt = try gpa.create(Runtime);
@@ -203,6 +210,7 @@ pub const Runtime = struct {
             .live = std.StringHashMap(void).init(gpa),
             .stepping = std.StringHashMap(void).init(gpa),
             .outbox = std.array_list.Managed(Outgoing).init(gpa),
+            .sessions = authfetch.Sessions.init(gpa),
         };
         rt.has_wallet = peers.wallet != null;
         return rt;
@@ -1848,6 +1856,7 @@ pub const Runtime = struct {
             .deadline = hDeadline,
             .call = hCall,
             .edges = hEdges,
+            .authfetch = hAuthfetch,
         };
         var rs = wasi.RunState{ .meter = meter };
         var svc = wasi.Services{ .ctx = &st, .state = &rs, .clock = stClock, .random = stRandom };
@@ -2324,6 +2333,91 @@ pub const Runtime = struct {
         return out;
     }
 
+    /// `authfetch` (#126, authfetch.zig): a BRC-104 request from this instance, a recorded call.
+    /// The record, at (thread, step, i) as a signer call's: {kind: "authfetch", thread, step, i,
+    /// request: bytes (the import's dag-cbor), answer?: bytes (dag-cbor {status, headers, body}),
+    /// error?: text, calls: [{request, result}] (every signer frame it made: the session's nonce,
+    /// the request's signature, the checks of the server's)}. Replay serves the answer (or the
+    /// failure) from the witness and asks no one; a differing request is a divergence. A request
+    /// that is not one fails here, recording nothing.
+    fn hAuthfetch(imp: *program.Imports, req: []const u8) program.Err![]const u8 {
+        const st = stepOf(imp);
+        const rt = st.rt;
+        const a = st.a;
+        const parsed = authfetch.parse(a, req) catch return error.OutOfMemory;
+        const r = switch (parsed) {
+            .ok => |x| x,
+            .bad => |why| return imp.failWith(why),
+        };
+        const i = st.calls.items.len;
+        const w: ?Value = if (rt.witness) |wi| (wi.find(a, st.origin, st.n, i) catch null) else null;
+        if (w) |x| {
+            if (!logm.isAuthfetchCall(x) or !std.mem.eql(u8, Value.bytesOf(x.get("request")) orelse "", req)) {
+                return imp.fatalWith(.diverged, try std.fmt.allocPrint(a, "{s} step {d} call {d}: the authfetch request differs from the recorded one", .{ short(a, st.origin), st.n, i }));
+            }
+            try st.calls.append(rt.store.put(a, x) catch return imp.failWith("store error"));
+            if (Value.bytesOf(x.get("answer"))) |ans| return ans;
+            return imp.failWith(Value.str(x.get("error")) orelse "authfetch: failed");
+        }
+        if (!rt.has_wallet or rt.peers.http == null) {
+            if (rt.witness != null or !rt.has_wallet) return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (authfetch): no wallet and no recorded answer", .{ short(a, st.origin), st.n, i }));
+            return imp.failWith("authfetch: this host carries no HTTP");
+        }
+        var ac = AuthCall{ .rt = rt, .calls = std.array_list.Managed(Value).init(a), .at = st.at };
+        const env = authfetch.Env{ .ctx = &ac, .identity = rt.identity(), .wallet = AuthCall.wallet, .http = AuthCall.http, .random = AuthCall.random };
+        const out = authfetch.run(a, env, &rt.sessions, r) catch |err| {
+            if (err == error.PeerGone) return imp.fatalWith(.no_witness, try std.fmt.allocPrint(a, "{s} step {d} call {d} (authfetch): the router is gone", .{ short(a, st.origin), st.n, i }));
+            if (err == error.OutOfMemory) return error.OutOfMemory;
+            return imp.failFmt("authfetch: {s}", .{@errorName(err)});
+        };
+        var rec = cbor.MapBuilder.init(a);
+        try rec.put("kind", cbor.string("authfetch"));
+        try rec.put("thread", cbor.cidv(st.origin));
+        try rec.put("step", cbor.int(st.n));
+        try rec.put("i", cbor.int(i));
+        try rec.put("request", .{ .bytes = req });
+        var answer: ?[]const u8 = null;
+        switch (out) {
+            .answer => |x| {
+                answer = cbor.encode(a, try authfetch.answerValue(a, x)) catch return error.OutOfMemory;
+                try rec.put("answer", .{ .bytes = answer.? });
+            },
+            .failed => |why| try rec.put("error", cbor.string(why)),
+        }
+        try rec.put("calls", .{ .array = ac.calls.items });
+        try st.calls.append(rt.store.put(a, rec.value()) catch return imp.failWith("store error"));
+        return answer orelse imp.failWith(out.failed);
+    }
+
+    /// authfetch's world for one call: the signer (each frame kept for the record), the
+    /// runtime's HTTP, real randomness (a nonce no one can guess; replay never asks for it).
+    const AuthCall = struct {
+        rt: *Runtime,
+        calls: std.array_list.Managed(Value),
+        at: i64,
+
+        fn of(ctx: *anyopaque) *AuthCall {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn wallet(ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]const u8 {
+            const c = of(ctx);
+            const res = try c.rt.peers.wallet.?(c.rt.peers.ctx, a, frame);
+            var m = cbor.MapBuilder.init(a);
+            try m.put("request", .{ .bytes = frame });
+            try m.put("result", .{ .bytes = res });
+            try c.calls.append(m.value());
+            return res;
+        }
+        fn http(ctx: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult {
+            const c = of(ctx);
+            return c.rt.peers.http.?(c.rt.peers.ctx, a, req);
+        }
+        fn random(ctx: *anyopaque, out: []u8) void {
+            const c = of(ctx);
+            realRandom(c.rt.peers.io, out, c.at);
+        }
+    };
+
     /// A signer call's answer, recorded (#67: the one call a step makes out
     /// mid-step): the witness's on replay (a differing request is a
     /// divergence), else the wallet's. The record: {kind: "oracle", thread,
@@ -2521,6 +2615,7 @@ pub const Runtime = struct {
         .deadline = cDeadline,
         .call = cCall,
         .edges = cEdges,
+        .authfetch = cAuthfetch,
     };
 
     fn callOf(imp: *program.Imports) *CallState {
@@ -2575,6 +2670,10 @@ pub const Runtime = struct {
     }
     fn cDeadline(imp: *program.Imports, _: i64) program.Err!void {
         return readOnly(imp, "deadline");
+    }
+    /// A kernel call talks to no one (#126): authfetch is a step's, recorded.
+    fn cAuthfetch(imp: *program.Imports, _: []const u8) program.Err![]const u8 {
+        return imp.failWith("authfetch: a kernel call talks to no one (authfetch from a step)");
     }
     /// The edges into a record (#42), as the index holds them (a call keeps nothing).
     fn cEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {

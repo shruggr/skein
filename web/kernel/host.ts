@@ -38,7 +38,7 @@
 
 import { KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, type HttpRequest, type HttpResponse, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
 import type { CID } from "multiformats/cid";
 // @ts-expect-error: plain JS module (kernel-zig/web/client.js)
 import { KernelWorker } from "../../kernel-zig/web/client.js";
@@ -163,11 +163,7 @@ export class BrowserHost {
       append: (_h, pkg) => this.appendLocal(pkg),
       identity: async () => this.identity ? keyBytes(this.identity) : undefined,
       sign: async (_h, data) => Uint8Array.from((await this.o.wallet.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] })).signature),
-      fetch: async (req) => {
-        const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: AbortSignal.timeout(req.timeoutMs ?? 30_000) });
-        this.events.push({ kind: "http", method: req.method, url: req.url, status: r.status });
-        return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
-      },
+      fetch: (req) => this.http(req),
       now: () => Date.now(),
       log: (_s, l) => this.log(l),
     });
@@ -259,8 +255,25 @@ export class BrowserHost {
     switch (op) {
       case "wallet":
         return dagCbor.encode(Uint8Array.from(await this.wire.transmitToWallet([...(arg as Uint8Array)])));
+      case "http": {
+        // #126: the kernel's authfetch — it signs and verifies; the page moves the bytes. No answer at all: {error}.
+        const q = arg as { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number };
+        try {
+          const r = await this.http({ method: q.method, url: q.url, headers: q.headers ?? {}, ...(q.body?.length ? { body: q.body } : {}), ...(q.timeoutMs !== undefined ? { timeoutMs: Number(q.timeoutMs) } : {}) });
+          return dagCbor.encode({ status: r.status, headers: r.headers, body: r.body });
+        } catch (e) {
+          return dagCbor.encode({ error: (e as Error).message });
+        }
+      }
     }
     throw new Error(`this host answers no ${op}`);
+  }
+
+  /** The page's HTTP: the HTTP proxy's network (#70) and authfetch's bytes (#126). */
+  private async http(req: HttpRequest): Promise<HttpResponse> {
+    const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: AbortSignal.timeout(req.timeoutMs ?? 30_000) });
+    this.events.push({ kind: "http", method: req.method, url: req.url, status: r.status });
+    return { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: new Uint8Array(await r.arrayBuffer()) };
   }
 
   // ---------------------------------------------------------------- what the kernel tells

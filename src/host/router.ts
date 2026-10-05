@@ -641,6 +641,7 @@ export class Router {
       db: row.store, handle: row.handle, domain: row.domain, wallet, command: this.o.kernel?.command, env: this.o.kernel?.env,
       log: (line) => this.say(handle, line),
       emit: (o) => this.providers.deliver(handle, o),
+      http: (req) => this.http(req, handle),
       exited: (code, signal) => {
         if (this.loaded.get(handle)?.kernel === kernel) this.loaded.delete(handle);
         if (code !== 0) this.say(handle, `kernel exited (${signal ?? `code ${code}`})`);

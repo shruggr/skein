@@ -38,6 +38,7 @@ const logm = @import("log.zig");
 const programsm = @import("programs.zig");
 const runner = @import("runner.zig");
 const scheduler = @import("scheduler.zig");
+const authfetch = @import("authfetch.zig");
 const storem = @import("store.zig");
 const engine_v8 = @import("engine_v8.zig");
 const WebStore = @import("web_store.zig").WebStore;
@@ -146,6 +147,7 @@ export fn skein_open(store: u32) i32 {
     rt = scheduler.Runtime.init(gpa, s.store(), r, .{
         .ctx = @ptrCast(s),
         .wallet = pWallet,
+        .http = pHttp,
         .emit = pEmit,
         .say = pSay,
     }) catch |err| return fail(@errorName(err));
@@ -169,6 +171,11 @@ fn request(a: std.mem.Allocator, op: []const u8, v: Value) !Value {
 fn pWallet(_: *anyopaque, a: std.mem.Allocator, fr: []const u8) anyerror![]u8 {
     const r = try request(a, "wallet", .{ .bytes = fr });
     return @constCast(Value.bytesOf(r) orelse return error.BadAnswer);
+}
+
+/// One HTTP exchange for authfetch (#126): the page moves the bytes (serve's `http`, the same shape).
+fn pHttp(_: *anyopaque, a: std.mem.Allocator, req: authfetch.HttpRequest) anyerror!authfetch.HttpResult {
+    return authfetch.httpResultOf(a, try request(a, "http", try authfetch.httpRequestValue(a, req)));
 }
 
 /// A message for the page to carry out (#70): serve's `emit` notice, the same shape.

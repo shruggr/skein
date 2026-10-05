@@ -425,6 +425,20 @@ pub fn isSignerCall(x: ?Value) bool {
     return Value.bytesOf(a.get("result")) != null;
 }
 
+/// An `authfetch` a step made (#126, the scheduler's hAuthfetch): {kind:
+/// "authfetch", thread, step, i, request: bytes, answer?: bytes, error?: text,
+/// calls: [{request, result}]}. Recorded at (thread, step, i) as a signer
+/// call is, and served by replay from the witness the same way.
+pub fn isAuthfetchCall(x: ?Value) bool {
+    const a = x orelse return false;
+    if (a != .map) return false;
+    if (!std.mem.eql(u8, Value.str(a.get("kind")) orelse return false, "authfetch")) return false;
+    if (Value.cidOf(a.get("thread")) == null) return false;
+    if (!Value.isNumber(a.get("step")) or !Value.isNumber(a.get("i"))) return false;
+    if (Value.bytesOf(a.get("request")) == null) return false;
+    return Value.bytesOf(a.get("answer")) != null or Value.str(a.get("error")) != null;
+}
+
 /// The genesis a log starts with (log.ts genesisOf).
 pub fn genesisOf(a: std.mem.Allocator, s: Store) !Value {
     const first = try s.logFrom(a, 0);

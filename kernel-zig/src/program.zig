@@ -15,9 +15,17 @@
 //                                  step's update (`emitted`) and sends it by the
 //                                  recipient's transport when the step ends without
 //                                  error. The answer is an entry (await the CID)
-//   deadline(until_ms) → 0         a step that ends waiting rests until then at most:
-//                                  a wake-me to the waker (#70), emitted and awaited
-//                                  when the step ends; its answer steps it (`woke`)
+//   deadline(until_ms) → 0         a step that ends waiting rests until then at most
+//                                  (#126): the kernel records a `deadline` event on the
+//                                  step, which the step awaits; the runtime's answer at
+//                                  that time steps it (`woke`)
+//   authfetch(req, len, out, cap) → n   (#126) a BRC-104 request from this instance:
+//                                  dag-cbor {url: <the server's base URL>, method?, path?,
+//                                  headers?, body?, timeoutMs?} → dag-cbor {status, headers,
+//                                  body}. The kernel holds the session (BRC-103), signs and
+//                                  verifies through the signer, and the runtime moves the
+//                                  bytes; the exchange is a recorded call (replay serves it).
+//                                  A failure: "transient: …" when no answer came
 //   call(prog, fn, arg, out, cap) → n   an in-VM call (#40): run a program as a function
 //                                  (input kind "call"), its stdout the result
 //   edges(to, len, rel, rel_len, out, cap) → n   (#42) the edges into `to` (a binary CID)
@@ -70,7 +78,14 @@ pub const Host = struct {
     call: *const fn (imp: *Imports, prog: []const u8, func: []const u8, arg: []const u8) Err![]const u8,
     /// The edges into `to` (#42): dag-cbor [{from, seq, rel, locator}] (edgesRead).
     edges: *const fn (imp: *Imports, to: []const u8, rel: ?[]const u8) Err![]const u8 = noEdges,
+    /// A BRC-104 request (#126, authfetch.zig): dag-cbor {url, method?, path?, headers?, body?,
+    /// timeoutMs?} → dag-cbor {status, headers, body}; a recorded call.
+    authfetch: *const fn (imp: *Imports, req: []const u8) Err![]const u8 = noAuthfetch,
 };
+
+fn noAuthfetch(imp: *Imports, _: []const u8) Err![]const u8 {
+    return imp.failWith("authfetch: this host carries no HTTP");
+}
 
 fn noEdges(imp: *Imports, _: []const u8, _: ?[]const u8) Err![]const u8 {
     return imp.failWith("edges: this host keeps no index");
@@ -216,6 +231,7 @@ pub const Imports = struct {
                 const rel: ?[]const u8 = if (a[3] > 0) try imp.strAt(p, a[2], a[3]) else null;
                 return imp.out(p, try h.edges(imp, to, rel), a[4], a[5]);
             },
+            .authfetch => return imp.out(p, try h.authfetch(imp, p.slice(a[0], a[1]) catch return error.OutOfMemory), a[2], a[3]),
             .take => {
                 if (@as(i64, @intCast(imp.held.len)) > a[1]) return imp.failWith("take: buffer too small");
                 p.set(a[0], imp.held) catch return imp.failWith("offset is out of bounds");
