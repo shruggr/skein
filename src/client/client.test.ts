@@ -114,7 +114,8 @@ test("bin/skein on a host (#40): run to the instance's front door, the result re
   assert.equal(client.lastSent("run")?.cid, sent.cid);
   assert.equal(sent.messageId, sent.cid, "a message's id is its record's CID");
 
-  const results = await until("the result", async () => { const r = await client.inbox(); return r.length ? r : undefined; });
+  // 3 minutes: the shell app's modules compile on their first run, which on a cold wasmtime cache (a CI runner) takes more than the default 30 s.
+  const results = await until("the result", async () => { const r = await client.inbox(); return r.length ? r : undefined; }, 180_000);
   assert.equal(results.length, 1);
   const r = results[0]!;
   assert.ok(r.verified && !r.error, r.error ?? "");
