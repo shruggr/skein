@@ -2,13 +2,15 @@
 //! The host appends every package a transport carries in as a `request`
 //! entry, as received, and verifies nothing; the kernel steps this program
 //! on it, as the request's own thread (#66: the thread a synchronous client
-//! waits on). Its first step verifies the package — BRC-103/104 for HTTP,
-//! the GossipSub signature for libp2p (libp2p.zig) — and routes it: the
-//! routes table names the handler, an in-VM call, part of this step. A
-//! failed verification is a recorded refusal: the step answers it and
-//! nothing else changes.
+//! waits on). The kernel has matched the package to a dispatch row (#115:
+//! the table matches every transport, dispatch.zig) on who it claims to be
+//! from; this program's first step verifies that claim — BRC-103/104 for
+//! HTTP, the GossipSub signature for libp2p (libp2p.zig) — and runs the
+//! row's handler, an in-VM call, part of this step. It never sees the
+//! table. A failed verification is a recorded refusal: the step answers it
+//! and nothing else changes.
 //!
-//! Stepped: input {kind: "step", args: {request: <record>, transport}, dispatch, reads, seen?, tip?, …}
+//! Stepped: input {kind: "step", args: {request: <record>, transport}, match? | refused?, seen?, tip?, …}
 //!   the request record (kernel-zig/src/log.zig):
 //!     http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
 //!     local   {kind: "message", message: <a signed mail record>, body: bytes}   (#70: a
@@ -17,23 +19,23 @@
 //!   Its stdout is its answer (the kernel routes `admit`; the host reads the
 //!   rest off the thread's last update once it has come to rest):
 //!     {status, headers: {name: value}, body: bytes, admit?: [entry]}     answered (signed on the session)
-//!     {read: {caller?, peer?, theirs?, requestId?}}                      answered by a read after it ends (below)
+//!     {read: {caller?, peer?, theirs?, requestId?, match}}               answered by a read after it ends (below)
 //!     {wait: {caller?, session?, peer?, theirs?, requestId?}, admit?}    waiting: the handler launched or awaits a thread
 //!   an entry is {mail: <record>, body: bytes} or {event: <record>, box}:
 //!   routed by the kernel after the step as the entries they once were.
 //!
-//! The routes are the kernel's dispatch table (#77: the `dispatch` rows in the
-//! input, as the kernel holds them — the genesis's seed and the admin's
-//! changes; docs/MESSAGES.md "The dispatch table"), this transport's rows:
-//!   {transport: "http", address: <path>, prefix?: true, sender: "*" | "session" | <key>, program, fn, read?, …}
-//!   exact paths first, then the longest prefix. `sender` "*" is an open
-//!   route (no session: an overlay's submit and lookup); "session" needs a
-//!   BRC-103/104 session, any identity; a key needs a session proving that
-//!   identity (another's is 403). `read` names an op the reads table must
-//!   allow the caller. The row is the handler's `match`.
-//! The reads table (the genesis's `reads`, from etc/reads.json):
-//!   [{caller?: <key>, op}] — no caller: anyone; [{owner: true, op}] (#92):
-//!   the instance's owner, the genesis's or else the claim's (input `owner`).
+//! The row (input `match`, #115) is the one the kernel's dispatch table
+//! matched (docs/MESSAGES.md "The dispatch table"): for http
+//!   {transport: "http", address: <path>, prefix?: true, sender: "*" | "session" | "owner" | <key>, program, fn, …}
+//!   exact paths first, then the longest prefix, the first whose sender
+//!   takes the identity the request claims (`x-bsv-auth-identity-key`).
+//!   `sender` "*" is an open route: no session is checked and the handler
+//!   gets no caller (an overlay's submit and lookup); any other needs the
+//!   BRC-103/104 session and signature verified here, for the identity the
+//!   kernel matched on. With no row the kernel says why (`refused`):
+//!   "path" 404; "session" 401 (the stock client shakes hands); "sender"
+//!   403, signed on the session once verified. The row is the handler's
+//!   `match`.
 //!
 //! The route handler contract (docs/MESSAGES.md, "Route handlers"): called
 //! with {caller?, method, path, route, query, headers, body, contentType,
@@ -50,7 +52,7 @@
 //! authorship verifies from the log alone.
 //!
 //! Called (a kernel call, #40 — reads only, nothing written):
-//!   fn "read"     {request: <cid>, read: {caller?, peer?, theirs?, requestId?}} → {status, headers, body}
+//!   fn "read"     {request: <cid>, read: {caller?, peer?, theirs?, requestId?, match}} → {status, headers, body}
 //!                 a route whose answer is a read of live state (the explorer: the
 //!                 log as it stands is not a function of the request's place in it,
 //!                 so no step may answer it): the host calls this once the request's
@@ -226,16 +228,18 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         resp = if (eql(u8, method, "POST")) try handshake(a, in, req) else try jsonError(a, 405, "ERR_METHOD", "POST the BRC-103 handshake here");
         return resp.value(a);
     }
-    const r = findRoute(in, route) orelse {
-        resp = try jsonError(a, 404, "ERR_NOT_FOUND", "no route for this path");
+    // #115: the kernel matched the row on the identity the request claims; this verifies the claim.
+    const r = in.get("match");
+    const refused = Value.str(in.get("refused")) orelse "path";
+    if (r == null and !eql(u8, refused, "sender")) {
+        resp = if (eql(u8, refused, "session")) mutualAuthFailed() else try jsonError(a, 404, "ERR_NOT_FOUND", "no route for this path");
         return resp.value(a);
-    };
-    const who = senderOf(r);
-    if (who == .open) return routed(a, in, r, rc, req, null);
+    }
+    if (r) |row| if (isOpen(row)) return routed(a, in, row, rc, req, null);
     // BRC-104: a general message.
     const headers = req.get("headers");
     const request_id = brc.headerOf(headers, "x-bsv-auth-request-id") orelse {
-        resp = .{ .status = 401, .body = "{\"status\":\"error\",\"code\":\"UNAUTHORIZED\",\"message\":\"Mutual-authentication failed!\"}" };
+        resp = mutualAuthFailed();
         return resp.value(a);
     };
     const v = verify(a, in, req, request_id) catch |err| {
@@ -247,27 +251,23 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         };
         return resp.value(a);
     };
-    // #77: a row for one identity takes that identity's session only.
-    if (who == .key and !eql(u8, Value.bytesOf(r.get("sender")).?, v.peer)) {
-        resp = try jsonError(a, 403, "ERR_FORBIDDEN", "this route is another identity's");
-        try sign(a, in, &resp, v);
-        return resp.value(a);
-    }
-    if (Value.str(r.get("read"))) |op| if (!mayRead(in, v.peer, op)) {
-        resp = try jsonError(a, 403, "ERR_FORBIDDEN", "this identity may not read here");
+    // The session's identity is the one the kernel matched on (verify checks the claimed key is the
+    // session's): no row there takes it (#77: a row for one identity takes that identity's session only).
+    const row = r orelse {
+        resp = try jsonError(a, 403, "ERR_FORBIDDEN", "no route here takes this identity");
         try sign(a, in, &resp, v);
         return resp.value(a);
     };
-    return routed(a, in, r, rc, req, v);
+    return routed(a, in, row, rc, req, v);
 }
 
-/// Who a row admits (#77): anyone (an open route), any session, or one identity's session.
-const Who = enum { open, session, key };
+fn mutualAuthFailed() Resp {
+    return .{ .status = 401, .body = "{\"status\":\"error\",\"code\":\"UNAUTHORIZED\",\"message\":\"Mutual-authentication failed!\"}" };
+}
 
-fn senderOf(r: Value) Who {
-    const s = r.get("sender") orelse return .session;
-    if (Value.str(s)) |t| return if (eql(u8, t, "*")) .open else .session;
-    return if (Value.bytesOf(s) != null) .key else .session;
+/// An open row (#77: sender "*"): no session is checked and the handler gets no caller.
+fn isOpen(r: Value) bool {
+    return eql(u8, Value.str(r.get("sender")) orelse "", "*");
 }
 
 /// A later step (#66): the thread the handler waited on has come to rest
@@ -275,7 +275,7 @@ fn senderOf(r: Value) Who {
 /// same request and what woke this thread.
 fn resumed(a: Allocator, in: Value, rc: []const u8, req: Value, tip: []const u8) !Value {
     const s = try saved(a, tip);
-    const r = findRoute(in, Value.str(req.get("route")) orelse "/") orelse return sk.report("the route is gone");
+    const r = in.get("match") orelse return sk.report("the route is gone");
     return routed(a, in, r, rc, req, verifiedOf(s));
 }
 
@@ -297,8 +297,11 @@ fn routed(a: Allocator, in: Value, r: Value, rc: []const u8, req: Value, v: ?Ver
         return m.value();
     };
     if (out.get("read")) |x| if (x == .bool and x.bool) {
+        // The read after the thread (fn "read") runs this row's handler: the kernel's match, kept with the session.
+        var rd = try verifiedValue(a, v);
+        rd = .{ .map = try std.mem.concat(a, cbor.Entry, &.{ rd.map, &.{.{ .key = "match", .value = r }} }) };
         var m = cbor.MapBuilder.init(a);
-        try m.put("read", try verifiedValue(a, v));
+        try m.put("read", rd);
         return m.value();
     };
     var resp = try respOf(a, out);
@@ -341,52 +344,6 @@ fn unauthorized(msg: []const u8) error{Unauthorized} {
     return error.Unauthorized;
 }
 
-// ---------------------------------------------------------------- the dispatch rows and the reads
-
-/// The `http` row for `route` (#77): an exact address first, then the longest prefix row.
-pub fn findRoute(in: Value, route: []const u8) ?Value {
-    const rs = in.get("dispatch") orelse return null;
-    if (rs != .array) return null;
-    for (rs.array) |r| {
-        if (!eql(u8, Value.str(r.get("transport")) orelse "", "http")) continue;
-        if (isPrefix(r)) continue;
-        if (Value.str(r.get("address"))) |p| if (eql(u8, p, route)) return r;
-    }
-    var best: ?Value = null;
-    var best_len: usize = 0;
-    for (rs.array) |r| {
-        if (!eql(u8, Value.str(r.get("transport")) orelse "", "http") or !isPrefix(r)) continue;
-        const p = Value.str(r.get("address")) orelse continue;
-        if (std.mem.startsWith(u8, route, p) and p.len >= best_len) {
-            best = r;
-            best_len = p.len;
-        }
-    }
-    return best;
-}
-
-fn isPrefix(r: Value) bool {
-    const p = r.get("prefix") orelse return false;
-    return p == .bool and p.bool;
-}
-
-fn mayRead(in: Value, caller: []const u8, op: []const u8) bool {
-    const rs = in.get("reads") orelse return false;
-    if (rs != .array) return false;
-    for (rs.array) |r| {
-        if (!eql(u8, Value.str(r.get("op")) orelse "", op) and !eql(u8, Value.str(r.get("op")) orelse "", "*")) continue;
-        // #92: {op, owner: true} — the instance's owner as the step sees it (the genesis's, else the
-        // claim's): an image's reads name no key at genesis, and nobody reads before the claim.
-        if (r.get("owner")) |o| if (o == .bool and o.bool) {
-            if (Value.bytesOf(in.get("owner"))) |k| if (eql(u8, k, caller)) return true;
-            continue;
-        };
-        const who = Value.bytesOf(r.get("caller")) orelse return true;
-        if (eql(u8, who, caller)) return true;
-    }
-    return false;
-}
-
 /// The route's handler, an in-VM call: the verified request, and — called
 /// again on a later step — what woke this thread (`resolved`, `event`,
 /// `reply`, `woke`). Its launches and awaits are this step's.
@@ -417,7 +374,7 @@ fn read(a: Allocator, in: Value, arg: Value) !Value {
     const rc = Value.cidOf(arg.get("request")) orelse return sk.report("read: no request");
     const s = arg.get("read") orelse return sk.report("read: no read");
     const req = try sk.get(a, rc);
-    const r = findRoute(in, Value.str(req.get("route")) orelse "/") orelse return sk.report("read: no route");
+    const r = s.get("match") orelse return sk.report("read: no route (the request's step keeps its matched row)");
     const v = verifiedOf(s);
     const out = invoke(a, in, r, rc, req, v) catch |err| {
         var resp = switch (err) {

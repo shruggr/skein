@@ -695,6 +695,52 @@ pub const Runtime = struct {
         return std.mem.eql(u8, rc, by);
     }
 
+    /// The dispatch row a request's step is handed (#115): `match`, the row
+    /// (its settings included), or for an http request no row takes,
+    /// `refused`: "path" (no row at the path: 404), "session" (a row there
+    /// needs a session and the request claims none: 401), "sender" (none
+    /// there takes the identity it claims: 403). Who it is from is what it
+    /// claims — `x-bsv-auth-identity-key`, a libp2p peer ID's key — and the
+    /// front door verifies that before it runs the handler.
+    fn putMatch(rt: *Runtime, a: std.mem.Allocator, input: *cbor.MapBuilder, o: Value) !void {
+        const args = o.get("args").?;
+        const transport = Value.str(args.get("transport")) orelse return;
+        const req = (try rt.store.get(a, Value.cidOf(args.get("request")).?)) orelse return;
+        const rows = (try dispatch.current(a, rt.store)) orelse &.{};
+        const owner = if (try rt.ownerOf(a)) |v| Value.bytesOf(v) else null;
+        if (std.mem.eql(u8, transport, "http")) {
+            const who: dispatch.Who = .{ .key = claimedKey(a, req.get("headers")), .owner = owner, .reads = rt.genesis.?.get("reads") };
+            switch (dispatch.forHttp(rows, Value.str(req.get("route")) orelse "/", who)) {
+                .row => |r| try input.put("match", r.value),
+                .refused => |why| try input.put("refused", cbor.string(why.text())),
+            }
+        } else if (std.mem.eql(u8, transport, "libp2p")) {
+            const name = Value.str(req.get("topic")) orelse Value.str(req.get("protocol")) orelse return;
+            const who: dispatch.Who = .{ .key = peerKey(Value.bytesOf(req.get("from")) orelse ""), .owner = owner };
+            if (dispatch.forLibp2p(rows, name, who)) |r| try input.put("match", r.value);
+        }
+    }
+
+    /// The identity an HTTP request claims (its BRC-104 `x-bsv-auth-identity-key`), or null.
+    fn claimedKey(a: std.mem.Allocator, headers: ?Value) ?[]const u8 {
+        const hs = headers orelse return null;
+        if (hs != .map) return null;
+        for (hs.map) |e| if (std.ascii.eqlIgnoreCase(e.key, "x-bsv-auth-identity-key")) {
+            const hex = Value.str(e.value) orelse return null;
+            if (hex.len != 66) return null;
+            const k = a.alloc(u8, 33) catch return null;
+            _ = std.fmt.hexToBytes(k, hex) catch return null;
+            return if (secp.isKey(k)) k else null;
+        };
+        return null;
+    }
+
+    /// The compressed secp256k1 key a libp2p peer ID carries (identity multihash over the key's protobuf), or null.
+    fn peerKey(id: []const u8) ?[]const u8 {
+        if (id.len != 39 or !std.mem.eql(u8, id[0..6], &[_]u8{ 0x00, 0x25, 0x08, 0x02, 0x12, 0x21 })) return null;
+        return if (secp.isKey(id[6..])) id[6..] else null;
+    }
+
     /// A request (#68): the package as a transport carried it in. Its
     /// transport's middleware is launched on it as a thread of its own — the
     /// request's thread, the one a synchronous client waits on (#66) — and its
@@ -1425,11 +1471,18 @@ pub const Runtime = struct {
         if (rt.step_extra) |x| try input.put(x.key, x.value);
         rt.step_extra = null;
         if (isRequestThread(o)) {
-            // The middleware (#68): the tables it routes by (#77: the dispatch rows, the reads), and — on
-            // the request's first step — whether the request record was admitted before as what it
-            // routes (a redelivered GossipSub message: the `unique` map holds its `p2p` record).
-            try input.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, rt.store)) orelse &.{}));
-            try input.put("reads", g.get("reads"));
+            // The middleware (#68): the row the kernel matched for the request (#115: the dispatch
+            // table matches every transport; the front door verifies who it is from and steps or
+            // calls the row's handler), and — on the request's first step — whether the request
+            // record was admitted before as what it routes (a redelivered GossipSub message: the
+            // `unique` map holds its `p2p` record).
+            try rt.putMatch(a, &input, o);
+            if (g.get("reads") != null) {
+                // A genesis written before #115 (it carries the front door's `reads`) pins a front
+                // door that matches for itself: it is handed the table and the reads as then.
+                try input.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, rt.store)) orelse &.{}));
+                try input.put("reads", g.get("reads"));
+            }
             if (std.mem.eql(u8, tip_cid, origin)) {
                 const rc = Value.cidOf(o.get("args").?.get("request")).?;
                 if (try rt.store.byUnique(a, rc)) |first| try input.put("seen", cbor.cidv(first));
@@ -1999,7 +2052,7 @@ pub const Runtime = struct {
         try m.put("peers", g.get("peers"));
         try m.put("defaults", g.get("defaults"));
         try m.put("names", g.get("names"));
-        try m.put("reads", g.get("reads"));
+        try m.put("reads", g.get("reads")); // a genesis before #115 carries them (its front door reads them)
         try m.put("dispatch", try dispatch.valueOf(a, (try dispatch.current(a, rt.store)) orelse &.{}));
         return m;
     }
