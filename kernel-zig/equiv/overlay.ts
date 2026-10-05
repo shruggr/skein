@@ -6,7 +6,7 @@
 // pinned commit or $SKEIN_OVERLAY_DIR) and the chain app (shruggr/skein-chain,
 // #78: bin/chain.wasm, or $SKEIN_CHAIN_DIR), its etc/dispatch.json the #77
 // rows: the chain app's box `chain` from `event` (the host's headers and
-// proofs), `$self` and `$owner`, its `status` from `$status`; the overlay's
+// proofs), `$self` and `$owner`, its `chain/status` from `$status`; the overlay's
 // own box `overlay` from `event` and `$self`; the overlay-express routes.
 //
 // Since #79 the overlay keeps only its own records (`overlay/state`:
@@ -60,9 +60,9 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "06a98d1df8bbc11838dc777b8953459afbd4b9c2";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "f71692b95bc6e88161789b5e5b2f5259a465d1c6";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "61b03c6bca1fee141a72be974eb211eeae06c0db";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "a4c91a4654ce8560ec7803c2254c7be1c55d5173";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));
@@ -105,7 +105,7 @@ const ROWS = [
   { address: "chain", sender: "event", program: "chain" },
   { address: "chain", sender: "$self", program: "chain", filter: "beef" },
   { address: "chain", sender: "$owner", program: "chain", filter: "beef" },
-  { address: "status", sender: "$status", program: "chain" },
+  { address: "chain/status", sender: "$status", program: "chain" },
   // The overlay (#79): its own box, from events (its libp2p route's admits) and from itself (its watches).
   { address: "overlay", sender: "event", program: "overlay" },
   { address: "overlay", sender: "$self", program: "overlay" },
@@ -755,7 +755,7 @@ try {
   const nSub = await fetch(`${noarcBase}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(nTok.toAtomicBEEF()) });
   await noarcRouter.settled();
   const ng = await (await kN()).genesis() as { dispatch?: Array<{ address: string }> };
-  report.noProviderPending = { status: nSub.status, state: (await settledIn(await kN(), [nTokId]))[0], live: await noarcLive(), statusRow: (ng.dispatch ?? []).some((r) => r.address === "status") };
+  report.noProviderPending = { status: nSub.status, state: (await settledIn(await kN(), [nTokId]))[0], live: await noarcLive(), statusRow: (ng.dispatch ?? []).some((r) => r.address === "chain/status") };
   const nFiller = "f7".repeat(32);
   const nH2 = mine(sha256d(nH1), sha256d(Buffer.concat([internal(nFiller), internal(nTokId)])), 1_790_010_600);
   const nPath = new MerklePath(2, [[{ offset: 0, hash: nFiller }, { offset: 1, hash: nTokId, txid: true }]]);

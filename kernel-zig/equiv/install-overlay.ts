@@ -29,8 +29,8 @@
 //     own heads (`<app>/state`, `<app>/ls_demo`); a submission to
 //     /overlay2/submit is admitted by overlay2 and not by overlay; both read
 //     the one `chain/state`;
-//   - register / deregister (skein-overlay 0.6.1, #119): overlay2's manifest
-//     copy adds a row admitting the owner to its box; the owner's
+//   - register / deregister (skein-overlay 0.7.0, #119, #128): the stock
+//     manifest's owner row is the box overlay2/overlay; the owner's
 //     register {topic: tm_reg, program: topic-demo} yields the three
 //     subscriptions (tm_reg → overlay.submit with filter beef, -admit → peerAdmit, -proof →
 //     peerProof) and overlay2/topics; the node subscribes them; a token
@@ -69,9 +69,9 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "06a98d1df8bbc11838dc777b8953459afbd4b9c2";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "f71692b95bc6e88161789b5e5b2f5259a465d1c6";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "61b03c6bca1fee141a72be974eb211eeae06c0db";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "a4c91a4654ce8560ec7803c2254c7be1c55d5173";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));
@@ -203,7 +203,7 @@ try {
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.6.1" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.6.1), with config.overlay; no alias head `overlay`");
+  check(app?.kind === "app" && app.version === "0.7.0" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.7.0), with config.overlay; no alias head `overlay`");
   check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "http /overlay/lookup", "mailbox overlay"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)), `the dispatch table has the derived rows: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const topics1 = ["tm_demo", "tm_demo-admit", "tm_demo-proof"];
   const s1 = await until("the node subscribes the installed topics", () => { const s = served(); return s && topics1.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
@@ -299,12 +299,11 @@ try {
   const mf2 = JSON.parse(readFileSync(join(dir2, "etc/app.json"), "utf8")) as { name: string; config: { overlay: Record<string, unknown> } };
   mf2.name = "overlay2";
   mf2.config.overlay = { topics: { tm_two: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: ["tm_two"] } }, gossip: { tm_two: true } };
-  // skein-overlay 0.6.1 (#119, #120): register / deregister come from whoever the app's rows admit to its box; the
-  // manifest admits event and $self only, so this copy adds the owner (the stock manifest has no such row).
-  (mf2 as unknown as { dispatch: Array<Record<string, unknown>> }).dispatch.push({ address: "overlay2", sender: "$owner", program: "overlay" });
+  // skein-overlay 0.7.0 (#128): the stock manifest's row {address: "overlay", sender: "$owner"} is the box
+  // overlay2/overlay here; register / deregister go there (the engine takes them in any box routed to it).
   writeFileSync(join(dir2, "etc/app.json"), JSON.stringify(mf2, null, 2));
   code = await cli("install", dir2, "--instance", "ov");
-  check(code === 0 && out.some((l) => l.includes("row       mailbox overlay2 from event → overlay")) && out.some((l) => l.includes("row       http /overlay2/submit from anyone → overlay.submit")), `two overlay apps on one instance: the same tree installed as overlay2 (its own box, its own routes, no row clash): exit ${code} ${err.join(" ")}`);
+  check(code === 0 && out.some((l) => l.includes("row       mailbox overlay2 from event → overlay")) && out.some((l) => l.includes("row       mailbox overlay2/overlay from $owner → overlay")) && out.some((l) => l.includes("row       http /overlay2/submit from anyone → overlay.submit")), `two overlay apps on one instance: the same tree installed as overlay2 (its own box, its own routes, no row clash): exit ${code} ${err.join(" ")}`);
   const t3 = token(2);
   await t3.sign();
   const sub2 = await fetch(`${rA.originOf("ov")}/overlay2/submit`, { method: "POST", headers: { "x-topics": "tm_two" }, body: new Uint8Array(t3.toBEEF()) });
@@ -325,9 +324,9 @@ try {
   const states = await Promise.all([t1, t2, t3].map((t) => status(t.id("hex"))));
   check(states.every((s) => s === "unproven"), `both overlays' submissions are in the one chain/state (the chain app's status: ${states.join(", ")})`);
 
-  // ------------------------------------------------ register / deregister (skein-overlay 0.6.1, #119): the owner registers tm_reg in overlay2
+  // ------------------------------------------------ register / deregister (skein-overlay 0.7.0, #119, #128): the owner registers tm_reg in overlay2, box overlay2/overlay
   const identity = (await rA.hydrate("ov")).identity;
-  const toBox = async (body: unknown) => { await new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@ov`).send(identity, "overlay2", body); await rA.settled(); };
+  const toBox = async (body: unknown) => { await new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@ov`).send(identity, "overlay2/overlay", body); await rA.settled(); };
   const folded = async () => { const s = openStoreFile(store, { readOnly: true }); try { return (await subscriptionsOf(s)).filter((x) => x.app === "overlay2").map((x) => `${x.topic} ${x.program}.${x.fn}${x.filter ? ` (filter ${x.filter})` : ""}`).sort().join("; "); } finally { s.close(); } };
   await toBox({ fn: "register", args: { topic: "tm_reg", program: "topic-demo" } });
   const subsReg = await folded();

@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.6.1).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.0).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -276,9 +276,9 @@ management page (`https://<handle>.skein.nexus/`: an app by repository URL
 and commit id), or from any machine with your wallet:
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --origin https://<handle>.skein.nexus --out chain
+bin/skein plan install https://github.com/shruggr/skein-chain#a4c91a4654ce8560ec7803c2254c7be1c55d5173 --origin https://<handle>.skein.nexus --out chain
 bin/skein send https://<handle>.skein.nexus chain
-bin/skein plan install https://github.com/shruggr/skein-overlay#06a98d1df8bbc11838dc777b8953459afbd4b9c2 --origin https://<handle>.skein.nexus --out overlay
+bin/skein plan install https://github.com/shruggr/skein-overlay#f71692b95bc6e88161789b5e5b2f5259a465d1c6 --origin https://<handle>.skein.nexus --out overlay
 bin/skein send https://<handle>.skein.nexus overlay
 ```
 

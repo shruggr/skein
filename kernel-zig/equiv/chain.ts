@@ -6,7 +6,7 @@
 // `$owner` and `$self`, not from anyone):
 //
 //   - the install asks for the rows `chain` from `event` (the host's events),
-//     from `$self` and from `$owner`, and `status` from $status (optional),
+//     from `$self` and from `$owner`, and `status` (box chain/status, #128) from $status (optional),
 //     and the head chain/app; chain/state is its writes; a stranger's call
 //     routes nowhere;
 //   - the host's chain feed (a `header` event in box chain) reaches it;
@@ -47,7 +47,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "61b03c6bca1fee141a72be974eb211eeae06c0db";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "a4c91a4654ce8560ec7803c2254c7be1c55d5173";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -121,12 +121,12 @@ try {
   const spec = process.env.SKEIN_CHAIN_DIR ?? `${CHAIN_REPO}#${CHAIN_REV}`;
   const code = await cli("install", spec, "--instance", "ch");
   check(code === 0, `skein plan install skein-chain: exit ${code} ${err.join(" ")}`);
-  check(["event", "$self", "$owner"].every((who) => out.some((l) => l.includes(`row       mailbox chain from ${who} → chain`))) && out.some((l) => /row {7}mailbox status from \$status .*→ chain/.test(l)) && !out.some((l) => l.includes("mailbox chain from anyone")), `the prompt shows its rows (#79: no open box): ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
+  check(["event", "$self", "$owner"].every((who) => out.some((l) => l.includes(`row       mailbox chain from ${who} → chain`))) && out.some((l) => /row {7}mailbox chain\/status from \$status .*→ chain/.test(l)) && !out.some((l) => l.includes("mailbox chain from anyone")), `the prompt shows its rows (#79: no open box): ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.3.0", "the head chain/app is the app record (0.3.0)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.3.1", "the head chain/app is the app record (0.3.1)");
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
   const senderOf = (r: Record<string, unknown>) => r.sender instanceof Uint8Array ? Buffer.from(r.sender).toString("hex") : String(r.sender);
-  check(rows.length === 4 && rows.every((r) => r.transport === "mailbox" && !("optional" in r)) && rows.map((r) => r.address).join(",") === "chain,chain,chain,status"
+  check(rows.length === 4 && rows.every((r) => r.transport === "mailbox" && !("optional" in r)) && rows.map((r) => r.address).join(",") === "chain,chain,chain,chain/status"
     && senderOf(rows[0]!) === "event" && senderOf(rows[1]!) === inst && senderOf(rows[2]!) === callerId,
   `its rows in the dispatch table (event; $self → the instance's key; $owner; optional not carried): ${rows.map((r) => `${r.transport} ${r.address} ${senderOf(r).slice(0, 10)}`).join(", ")}`);
 
@@ -248,7 +248,7 @@ try {
   check(JSON.stringify(conf.scopes?.chain) === '["chain/"]', `the stock scopes name chain/ for a genesis-wired chain program (${JSON.stringify(conf.scopes?.chain)})`);
   writeFileSync(join(sys, "etc/config.json"), JSON.stringify(conf));
   const rowsAt = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8")) as unknown[];
-  rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain", filter: "beef" }, { address: "chain", sender: "$owner", program: "chain", filter: "beef" }, { address: "status", sender: "$status", program: "chain" });
+  rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain", filter: "beef" }, { address: "chain", sender: "$owner", program: "chain", filter: "beef" }, { address: "chain/status", sender: "$status", program: "chain" });
   writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(rowsAt));
   const bootId = h.instance("boot");
   const src = await dirSource(sys);

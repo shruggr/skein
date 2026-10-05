@@ -30,7 +30,7 @@ export interface PinnedApp { name: string; repo: string; rev: string; dir?: stri
 /** shruggr/skein-shell: `run` and the shell (brush, coreutils, the toolset). */
 export const SHELL_APP: PinnedApp = {
   name: "shell", repo: "https://github.com/shruggr/skein-shell",
-  rev: process.env.SKEIN_SHELL_REV ?? "98e201a6283944fc396be19dcbf03a1e1aa493f1", dir: process.env.SKEIN_SHELL_DIR,
+  rev: process.env.SKEIN_SHELL_REV ?? "de5163fb496630246000ccea7eb4eadea5f12890", dir: process.env.SKEIN_SHELL_DIR,
 };
 /** shruggr/skein-chat: the chat loop (`chat`). */
 export const CHAT_APP: PinnedApp = {
