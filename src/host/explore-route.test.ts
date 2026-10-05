@@ -83,4 +83,9 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
   const last = (await get("/explore")).v;
   assert.deepEqual(Object.keys(last.heads as Obj).sort(), Object.keys(heads).sort(), "the heads are the same ones");
   for (const [k, v] of Object.entries(heads)) if (k !== "frontdoor/sessions") assert.deepEqual((last.heads as Obj)[k], v, `head ${k} unmoved`);
+
+  // The reads' fuel is charged to the identity the front door verified (H13): the owner's, never another's.
+  h.router.flushLedger();
+  const ledger = h.db.ledger("alpha");
+  assert.ok(ledger.length > 0 && ledger.every((r) => r.caller === h.ownerId && r.fuel > 0), `the ledger: ${JSON.stringify(ledger.map((r) => [r.caller.slice(0, 8), r.op]))}`);
 });

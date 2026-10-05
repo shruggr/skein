@@ -270,7 +270,9 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   disabled sentinel (docs/MESSAGES.md, "BRC-169 is discovery").
 - **The fuel ledger**: a request's fuel is on its thread's updates in the
   log; the host's own kernel calls (the explorer's reads) are charged in
-  host.db (`skein-host ledger`).
+  host.db (`skein-host ledger`), per instance and caller: the identity the
+  front door verified on the request's thread (its `read` answer names
+  it), not a header as the client sent it.
 - **The control socket** (`$SKEIN_HOME/host.sock`): `skein-host event`
   sends a cron tick by hand through the running host, `skein-host claim` an
   owner's claim into an image.

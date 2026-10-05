@@ -43,6 +43,12 @@ export interface FrontAnswer {
   thread?: CID;
   /** Fuel of the read call, when the answer was one (the steps' fuel is on their updates). */
   fuel?: number;
+  /**
+   * A read's caller (hex): the identity the front door verified on the
+   * request's thread (its answer's `read.caller`). Absent when the request
+   * named none or the answer was no read.
+   */
+  caller?: string;
 }
 
 /** How long a synchronous client waits on its request's thread by default (ms): SKEIN_ANSWER_WAIT_MS, else two minutes. */
@@ -95,13 +101,14 @@ export async function httpAnswer(k: Kernel, entry: CID, a: RequestAnswer): Promi
   const at = { entry, ...(a.thread ? { thread: a.thread } : {}) };
   if (a.state === "errored") return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: a.error }), ...at };
   if (a.state !== "finished") return unavailable(`not answered yet (its thread is ${a.state}): try again`, at);
-  const r = dagCbor.decode(a.answer) as { status?: number; headers?: Record<string, string>; body?: Uint8Array; read?: unknown };
+  const r = dagCbor.decode(a.answer) as { status?: number; headers?: Record<string, string>; body?: Uint8Array; read?: { caller?: unknown } };
   if (r.read !== undefined && r.status === undefined) {
+    const caller = r.read?.caller instanceof Uint8Array ? { caller: Buffer.from(r.read.caller).toString("hex") } : {};
     // A read of live state (the explorer): the front door answers it as a call, and signs it there.
     const c = await k.invoke("frontdoor", "read", dagCbor.encode({ request: await requestOf(k, entry), read: r.read }));
-    if (!c.ok) return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: c.error }), fuel: c.fuel, ...at };
+    if (!c.ok) return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: c.error }), fuel: c.fuel, ...caller, ...at };
     const x = dagCbor.decode(c.result) as { status: number; headers?: Record<string, string>; body?: Uint8Array };
-    return { status: x.status, headers: x.headers ?? {}, body: x.body ?? new Uint8Array(), fuel: c.fuel, ...at };
+    return { status: x.status, headers: x.headers ?? {}, body: x.body ?? new Uint8Array(), fuel: c.fuel, ...caller, ...at };
   }
   if (typeof r.status !== "number") return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: "the request's thread ended with no answer" }), ...at };
   return { status: r.status, headers: r.headers ?? {}, body: r.body ?? new Uint8Array(), ...at };

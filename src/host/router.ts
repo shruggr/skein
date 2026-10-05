@@ -1126,7 +1126,8 @@ export class Router {
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
     const a: FrontAnswer = await frontDoor(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
     this.settle(l);
-    if (a.fuel !== undefined) this.charge(handle, req.headers["x-bsv-auth-identity-key"] ?? "", `${route} (read)`, a.fuel);
+    // Charged to the identity the front door verified (H13), never to a header as the client sent it.
+    if (a.fuel !== undefined) this.charge(handle, a.caller ?? "", `${route} (read)`, a.fuel);
     return { status: a.status, headers: a.headers, body: a.body };
   }
 
