@@ -5,7 +5,7 @@
 # `event`, which may write a genesis through a router of their own: owner and infer; `init`: the
 # operator, the host skein's owner) it fills
 # the environment from what scripts/host/up.sh wrote under $SKEIN_HOME, unless already set:
-#   SKEIN_OWNER ← owner.identity   SKEIN_INFER ← infer.identity   SKEIN_MESSAGEBOX ← messagebox.url
+#   SKEIN_OWNER ← owner.identity   SKEIN_INFER ← infer.identity
 # Each instance's pinned wasm modules are installed into its store at start.
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
@@ -14,6 +14,5 @@ export SKEIN_HOME="$home"
 case "${1:-}" in run | deploy | roster | peers | add | event | init)
   [ -z "${SKEIN_OWNER:-}" ] && [ -f "$home/owner.identity" ] && export SKEIN_OWNER="$(cat "$home/owner.identity")"
   [ -z "${SKEIN_INFER:-}" ] && [ -f "$home/infer.identity" ] && export SKEIN_INFER="$(cat "$home/infer.identity")"
-  [ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"
 esac
 exec node --experimental-strip-types --no-warnings "$root/src/host/cli.ts" "$@"

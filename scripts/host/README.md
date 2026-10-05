@@ -575,3 +575,85 @@ bin/skein inbox --wait                               # until a result with reply
 node --experimental-strip-types --no-warnings --test src/client/client.test.ts src/client/chat.test.ts   # on a scratch host, real kernel
 bin/skein-host ledger david          # what the polls of david's mailbox cost
 ```
+
+## Environment: every `SKEIN_*` variable
+
+Every variable the code reads, one line each; the sections above say more
+where they use one. Unset means the default.
+
+**The host** (`skein-host`, `src/host/`):
+
+| variable | what |
+|---|---|
+| `SKEIN_HOME` | the host's directory (default `~/.skein`): host.db, master.key, instances/, host.env, the `.identity` files |
+| `SKEIN_MASTER_KEY` | the master secret (hex) every instance, provider and certifier key derives from |
+| `SKEIN_MASTER_KEY_FILE` | the master secret's file instead (default `$SKEIN_HOME/master.key`, made if absent) |
+| `SKEIN_ROUTER_PORT` | the HTTP transport's port (default 8100) |
+| `SKEIN_ROUTER_ORIGIN` | the router's public origin (default `http://127.0.0.1:{port}`): the manifest's resolve URL, the geneses' `resolveOrigin`, and the host's domain (its host name) for created instances, claims and new rows |
+| `SKEIN_INSTANCE_ORIGIN` | an instance's origin template (default `http://{handle}.localhost:{port}`) |
+| `SKEIN_HOST_PORT` | the host page and `/roster.json` (default 4600) |
+| `SKEIN_HOST_NAME`, `SKEIN_HOST_NOTE`, `SKEIN_HOST_ICON` | the manifest's `metanet.trust` name, note and icon URL (#104) |
+| `SKEIN_ORDFS_URL` | the ORDFS content route a profile's avatar URL is made under (default `https://api.1sat.app/content`; empty: none) |
+| `SKEIN_IDLE_MS` | stop a kernel this long after its last work (default 0: never) |
+| `SKEIN_ANSWER_WAIT_MS` | how long a client waits on its request's thread before 503 + Retry-After (default two minutes) |
+| `SKEIN_HTTP` | `fetch`: the HTTP proxy (the `fetch` provider) performs URLs that are not this host's; unset: refused |
+| `SKEIN_KERNEL_BIN` | the kernel binary (default `kernel-zig/zig-out/bin/skein-kernel`) |
+| `SKEIN_FUEL_PER_STEP` | a new genesis's `fuelPerStep` |
+| `SKEIN_OWNER`, `SKEIN_OWNER_HANDLE` | a new code genesis's owner key and its handle (default `david@localhost`); bin/skein-host fills the key from `owner.identity` |
+| `SKEIN_OWNER_MESSAGEBOX` | the owner's messagebox URL for new geneses (default: the owner's mailbox instance here) |
+| `SKEIN_INFER`, `SKEIN_INFER_HANDLE` | a new code genesis's inference peer key and handle (default `infer@localhost`); bin/skein-host fills the key from `infer.identity` |
+| `SKEIN_OWNER_WALLET`, `SKEIN_ORIGINATOR` | the owner's BRC-100 wallet (default `http://127.0.0.1:3322`) and origin (default `skein-client`) for `deploy`, `dispatch`, `peers`, `install` |
+| `SKEIN_HOST_URL` | where those commands find the running host (default `http://127.0.0.1:8100`) |
+| `SKEIN_ARC_URL`, `SKEIN_ARC_TOKEN`, `SKEIN_ARC_EVENTS_URL`, `SKEIN_ARC_CALLBACK_URL` | the host's Arcade ("The broadcaster" above); also read from `$SKEIN_HOME/host.env` |
+| `SKEIN_HEADERS_URL` | the host's headers feed (#102) |
+| `SKEIN_LIBP2P_LISTEN`, `_TLS_CERT`, `_TLS_KEY`, `_BOOTSTRAP`, `_DHT`, `_RELAYS`, `_MDNS` | the libp2p nodes ("libp2p" above) |
+| `SKEIN_LIBP2P_VERBOSE` | set: log every libp2p verdict, accepted ones too (default: only reject and ignore) |
+| `SKEIN_SHELL_APP`, `SKEIN_CHAT_APP`, `SKEIN_ONBOARD_APP` | up.sh: the shell, chat and onboarding apps it installs (repo URL with a tag) |
+
+**The kernel process** (`skein-kernel`, set by the host or by hand):
+
+| variable | what |
+|---|---|
+| `SKEIN_DB`, `SKEIN_HANDLE` | `serve`'s store file and `handle@domain` (the host sets both); `skein-dev`'s store (default `$SKEIN_HOME/runtime.db`) |
+| `SKEIN_WASM_DIR` | where the pinned modules are read from (default the repo's `wasm/`) |
+| `SKEIN_EXTRA_MODULES` | `file:file…`: modules that are not pinned, installed into the store too (tests) |
+| `SKEIN_REPLAY_MODULE` | `<cid>=<file>`: replay runs `<file>` wherever the log runs that module (another build of a program) |
+| `SKEIN_REPLAY_ECHO` | set: replay echoes the steps' log lines |
+| `SKEIN_FUEL_MODE` | `instrument`: count fuel by instrumenting the modules, as the browser build does |
+| `SKEIN_WASMTIME_CACHE` | `0`: no wasmtime compilation cache |
+| `SKEIN_SHELL_COMPONENTS` | `kernel shell`: run the tools found in that directory as components (#34) |
+| `SKEIN_COMPONENT_TRACE` | `1`: every component call on stderr (debugging) |
+
+**Clients** (`bin/skein`, `bin/skein-infer`, `web/`):
+
+| variable | what |
+|---|---|
+| `SKEIN_INSTANCE_IDENTITY`, `SKEIN_INSTANCE_HANDLE`, `SKEIN_INSTANCE_URL` | the client's instance: its key (default `$SKEIN_HOME/instance.identity`), `handle@domain`, its URL |
+| `SKEIN_MAILBOX_URL`, `SKEIN_MAILBOX_HANDLE` | the client's (or the inference peer's) mailbox instance; the handle when no URL is set (default `david`) |
+| `SKEIN_INFER_WALLET_URL` | the inference peer's wallet (default `http://127.0.0.1:3323`) |
+| `SKEIN_INFER_PEERS`, `SKEIN_INFER_PROVIDERS` | its address book and provider map files |
+| `SKEIN_INFER_CACHE`, `SKEIN_INFER_NODES` | its conversation graph on disk, and how many nodes it keeps in memory |
+| `SKEIN_POLL_MS` | its poll interval (default 1000) |
+| `SKEIN_WEB_PORT`, `SKEIN_WEB_HOST` | the web page's port (web.sh) and listen address (default 127.0.0.1) |
+| `SKEIN_YOURS_IDENTITY` | `web:build`: the owner key the page expects |
+
+**Tests and builds**:
+
+| variable | what |
+|---|---|
+| `SKEIN_SHELL_DIR`, `SKEIN_SHELL_REV`, `SKEIN_CHAT_DIR`, `SKEIN_CHAT_REV`, `SKEIN_ONBOARD_DIR`, `SKEIN_ONBOARD_REV`, `SKEIN_GIT_DIR`, `SKEIN_GIT_REV` | the apps the tests install: a checkout, or another commit than src/testapps.ts pins |
+| `SKEIN_CHAIN_DIR`, `SKEIN_CHAIN_REV`, `SKEIN_OVERLAY_DIR`, `SKEIN_OVERLAY_REV`, `SKEIN_STATIC_DIR`, `SKEIN_STATIC_REV` | the same for the equiv drivers' apps |
+| `SKEIN_KERNEL` | the equiv drivers' kernel binary (default `kernel-zig/zig-out/bin/skein-kernel`) |
+| `SKEIN_EQUIV_BROWSER` | `0`: skip the browser parts of equiv/run.sh |
+| `SKEIN_CHROMIUM`, `SKEIN_PLAYWRIGHT` | the Chromium and the Playwright package the browser parts use |
+| `SKEIN_BROWSER_MAX_MB` | the largest store the browser replay takes (default 256) |
+| `SKEIN_EQUIV_SHOW`, `SKEIN_EQUIV_KEEP`, `SKEIN_EQUIV_NO_COMPONENTS` | equiv/shell.ts: print the cases, keep the work dir, skip the component runs |
+| `SKEIN_WALLET_ABI`, `SKEIN_WALLET_COMPONENT`, `SKEIN_WALLET_REPORT` | equiv/wallet.ts: run the wallet as a component, which build, and where to write its report |
+| `SKEIN_FETCH_COMPONENT` | equiv/fetch.ts: the fetch component's build |
+| `SKEIN_WASI_ADAPTER` | the preview1 adapter for component builds (programs/*/build.zig, equiv/shell.ts) |
+| `SKEIN_P2P_KEEP` | p2p-router.test.ts: keep its stores |
+| `SKEIN_POLLS` | router.test.ts: how many polls the poll test makes (default 100) |
+| `SKEIN_TEST_MESSAGEBOX_HOST` | web/envelope.test.ts: the live messagebox it tries (default `http://127.0.0.1:8100`) |
+| `SKEIN_SDK_DIR` | scripts/sdk-local.sh: the sibling skein-sdk checkout |
+| `SKEIN_DIR` | images/default/www/build.mjs (the site's build): the skein checkout it builds against |
+| `SKEIN_NO_NODE` | host-go's tests: skip the comparison with Node |

@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # The inference peer (src/peers/infer.ts): its own wallet (127.0.0.1:3323,
 # origin skein-infer; scripts/host/wallets.sh), the messagebox, and the provider
-# map in $SKEIN_HOME/infer.json. Fills SKEIN_MESSAGEBOX from messagebox.url.
+# map in $SKEIN_HOME/infer.json.
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 home="${SKEIN_HOME:-$HOME/.skein}"
 export SKEIN_HOME="$home"
-[ -z "${SKEIN_MESSAGEBOX:-}" ] && [ -f "$home/messagebox.url" ] && export SKEIN_MESSAGEBOX="$(cat "$home/messagebox.url")"
 exec node --experimental-strip-types --no-warnings "$root/src/peers/infer-main.ts" "$@"
