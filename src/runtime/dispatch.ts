@@ -12,7 +12,7 @@
 // the row with that key in place, else appends; `remove` deletes it. First
 // match wins, in table order, for every transport (#115).
 //
-//   row  {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true (http; a libp2p topic, #119),
+//   row  {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true (http only; a libp2p row is exact, #119),
 //         sender: "*" | "event" | "session" | "owner" | bytes(33), program: <cid> | "kernel", fn?, …settings}
 //
 //   sender "event" (#79): the row takes events only (a feed's header, a broadcaster's proof, a route's
@@ -190,7 +190,7 @@ export const forEvent = (rows: DispatchRow[], box: string) => found(rows, first(
 /** Why no http row takes a request (dispatch.zig Refusal): no row at the path (404), a row needs a session and none is claimed (401), none takes the identity (403). */
 export type Refusal = "path" | "session" | "sender";
 
-/** Exact rows first, then prefix rows, longest first; within each, first in table order whose sender takes `w` (dispatch.zig exactThenPrefix). */
+/** An http path's match: exact rows first, then prefix rows, longest first; within each, first in table order whose sender takes `w` (dispatch.zig exactThenPrefix). */
 function exactThenPrefix(rows: DispatchRow[], transport: string, path: string, w: Who): { i: number; addressed: boolean } {
   const ex = first(rows, transport, { exact: path }, w);
   if (ex.i >= 0) return ex;
@@ -212,10 +212,8 @@ export function forHttp(rows: DispatchRow[], path: string, w: Who): { i: number;
 }
 
 /**
- * A libp2p package's row (dispatch.zig forLibp2p): a topic as an http path is
- * matched (#119: exact rows, then `prefix` rows, longest first — one `tm_` row
- * takes every `tm_<txid>`), a `/<protocol>` exactly; within each, the first
- * `libp2p` row whose sender takes the peer's key.
+ * A libp2p package's row (dispatch.zig forLibp2p): the first `libp2p` row at
+ * its topic or `/<protocol>` exactly whose sender takes the peer's key. A topic
+ * no row is at may be delivered by an app's subscription (#119, the kernel's).
  */
-export const forLibp2p = (rows: DispatchRow[], name: string, w: Who) =>
-  found(rows, name.startsWith("/") ? first(rows, "libp2p", { exact: name }, w).i : exactThenPrefix(rows, "libp2p", name, w).i);
+export const forLibp2p = (rows: DispatchRow[], name: string, w: Who) => found(rows, first(rows, "libp2p", { exact: name }, w).i);
