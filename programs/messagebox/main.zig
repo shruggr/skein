@@ -19,6 +19,9 @@
 //!                        a subscription to this program for its owner's (a
 //!                        mailbox exists only where one is subscribed)
 //!   listMessages         a read of the caller's mailbox: nothing is written
+//!                        (CBOR: each with `message`, its mail record as kept —
+//!                        a signed one is what the reader's own instance
+//!                        appends as a `local` request, K2)
 //!   acknowledgeMessage   one entry moving the reader's pointer (an `ack`
 //!                        event in `:ack`); the records stay in the log
 //! Stepped:
@@ -305,6 +308,9 @@ fn listMessages(a: Allocator, _: Value, arg: Value) !Resp {
             if (rb.cbor) {
                 try m.put("body", .{ .bytes = bytes });
                 try m.put("sender", .{ .bytes = sender });
+                // K2: the message itself, its record as kept (a signed one verifies on its own): a
+                // client that runs an instance appends it as a `local` request for its front door.
+                try m.put("message", rec);
             } else {
                 // {message: <the body as DAG-JSON>}, as text: the stock client unwraps `message`.
                 var w = cbor.MapBuilder.init(a);

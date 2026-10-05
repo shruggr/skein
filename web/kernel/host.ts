@@ -17,12 +17,17 @@
 //                               `local` request. The keys: children of a provider
 //                               master the page keeps (localStorage, per store);
 //                               the genesis seeds them in the address book.
-//   the call in       admit + drain, from: the page (a chat: a message from the
-//                     user admitted directly), a poll of this identity's
-//                     mailbox instance on the host (listMessages on a BRC-104
-//                     session; each message admitted, acknowledged once
-//                     durable), the providers' answers (the waker's among
-//                     them: a deadline's or a shell's sleep, #69).
+//   the call in       admit + drain, every message as a `local` request
+//                     ({kind: "message", message, body}) that the instance's
+//                     front door verifies (K2: the host admits no message as
+//                     its own word), from: the page (a chat, an install: a
+//                     message signed by the user's wallet), a poll of this
+//                     identity's mailbox instance on the host (listMessages on
+//                     a BRC-104 session: each signed message as the mailbox
+//                     keeps it, acknowledged once durable; an unsigned one —
+//                     a plain client's, proven only by its session with the
+//                     mailbox — is not admitted), the providers' answers (the
+//                     waker's among them: a deadline's or a shell's sleep, #69).
 //
 // The mailbox: registering this identity on the host creates its mailbox
 // instance (#40); the genesis names it as the owner's messagebox, so what the
@@ -33,13 +38,14 @@
 
 import { KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
-import { Providers, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
 import type { CID } from "multiformats/cid";
 // @ts-expect-error: plain JS module (kernel-zig/web/client.js)
 import { KernelWorker } from "../../kernel-zig/web/client.js";
 import { RawBox } from "../../src/client/raw.ts";
 import { admit2, keyBytes, writeGenesis } from "../../src/host/genesis.ts";
 import type { Kernel } from "../../src/host/kernel.ts";
+import { encode } from "../../src/runtime/cid.ts";
 import { DEFAULTS, stampMs } from "../../src/runtime/log.ts";
 import { NotFound, Rejected } from "../../src/runtime/store.ts";
 import { msStamp, type Stamp } from "../../src/runtime/syscalls.ts";
@@ -289,7 +295,7 @@ export class BrowserHost {
           this.events.push({ kind: "message", box, body: m.value, id: m.messageId });
           this.o.onMessage?.({ from: m.sender, box, body: m.value, id: m.messageId });
         } else {
-          const r = await this.admitMessage(m.sender, box, m.body);
+          const r = m.message?.signature ? await this.admitMessage(m.message, box, m.body) : "not admitted: unsigned (a client's message, proven only by its session with the mailbox; the front door verifies a signed message, K2)";
           this.log(`inbox ${box} from ${m.sender.slice(-8)}: ${r}`);
         }
         await this.box.ack([m.messageId]);
@@ -299,42 +305,52 @@ export class BrowserHost {
     return n;
   }
 
-  /** A message from `sender` to this identity, admitted as the host's word (the mailbox verified its session). Its id. */
-  private async admitMessage(sender: string, box: string, body: Uint8Array): Promise<string> {
-    const bodyCid = await this.kernel.store.put(dagCbor.decode(body));
-    const mail = await this.kernel.store.put({ kind: "mail", op: "put", sender: keyBytes(sender), recipient: keyBytes(this.identity), box, body: bodyCid });
-    return await this.serial(async () => {
-      try {
-        const e = await admit2(this.kernel as unknown as Kernel, { mail } as never, { body }, now());
-        this.events.push({ kind: "admitted", box, sender, message: mail.toString(), entry: e.toString() });
-        await this.kernel.drain();
-        return `admitted ${mail.toString().slice(-8)} as ${e.toString().slice(-8)}`;
-      } catch (e) {
-        if (e instanceof Rejected && e.reason === "duplicate-envelope") return "a duplicate";
-        return `rejected: ${(e as Error).message}`;
-      }
-    });
+  /**
+   * A signed message to this identity (K2), appended as the package that
+   * carries it — a `local` request {kind: "message", message, body} — for the
+   * instance's front door to verify (signature, body, recipient) and route.
+   * The page vouches for nothing. Its outcome.
+   */
+  private async admitMessage(message: Record<string, unknown>, box: string, body: Uint8Array): Promise<string> {
+    const sender = Array.from(message.sender as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
+    const id = encode(message).cid.toString();
+    try {
+      const e = await this.appendLocal({ kind: "message", message, body });
+      this.events.push({ kind: "admitted", box, sender, message: id, entry: e.toString() });
+      return `admitted ${id.slice(-8)} in ${e.toString().slice(-8)}`;
+    } catch (e) {
+      return `rejected: ${(e as Error).message}`;
+    }
+  }
+
+  /** A message from this identity, signed by its wallet as an emit is ([2, "metanet handles envelope"], key "send", counterparty anyone). */
+  private async signed(box: string, body: Uint8Array): Promise<Record<string, unknown>> {
+    const me = keyBytes(this.identity);
+    const unsigned = { kind: "mail", op: "put", sender: me, recipient: me, box, body: encode(dagCbor.decode(body)).cid, nonce: crypto.getRandomValues(new Uint8Array(16)) };
+    const { signature } = await this.o.wallet.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
+    return { ...unsigned, signature: Uint8Array.from(signature) };
   }
 
   // ---------------------------------------------------------------- the call in: the page
 
   /**
-   * A message from this identity — the instance's owner — in `box`, admitted
-   * directly: what an install client sends (#83: the kernel's `objects`,
-   * `head`, `dispatch` operations). The admission's outcome, as `chat`'s.
+   * A message from this identity — the instance's owner — in `box`, signed by
+   * its wallet and appended as a `local` request (K2): what an install client
+   * sends (#83: the kernel's `objects`, `head`, `dispatch` operations). The
+   * admission's outcome, as `chat`'s.
    */
   async send(box: string, body: Uint8Array): Promise<string> {
-    const r = await this.admitMessage(this.identity, box, body);
+    const r = await this.admitMessage(await this.signed(box, body), box, body);
     this.log(`${box}: ${r}`);
     if (!r.startsWith("admitted")) throw new Error(r);
     return r;
   }
 
-  /** The user's chat to the instance: a message from this identity, admitted directly (#16). Its id (what a reply names). */
+  /** The user's chat to the instance: a message from this identity, signed and appended as a `local` request (#16, K2). Its id (what a reply names). */
   async chat(text: string, replyTo?: CID): Promise<string> {
     const body = dagCbor.encode(replyTo ? { text, replyTo } : { text });
     void stampMs;
-    const r = await this.admitMessage(this.identity, "chat", body);
+    const r = await this.admitMessage(await this.signed("chat", body), "chat", body);
     this.log(`chat: ${r}`);
     if (!r.startsWith("admitted")) throw new Error(r);
     return r.split(" ")[1]!;

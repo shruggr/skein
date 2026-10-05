@@ -22,7 +22,7 @@ pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreihjdj7o75mnffyk362rzabszndywo4yoyjq4r7yvtmu3cv4ff3qhq" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreidnkfjixe64ik3usfgyb65gjhlbuvrjedovo7pipj5f6kqkikzdgq" },
+    .{ .name = "messagebox", .cid = "bafkreieiuxsale5wmudfymyuys4sldggvqo6foothuvmfscyeerfczjpli" },
     // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
     .{ .name = "frontdoor", .cid = "bafkreickxyn5kefdelapxhzb5ygwjuauiy6wlmzwcjf7tq5tnjb3ocyd34" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).

@@ -24,6 +24,8 @@ export interface Listed {
   body: Uint8Array;
   /** The body decoded. */
   value: unknown;
+  /** The message itself: its mail record as the messagebox keeps it (a signed one verifies on its own, K2). */
+  message?: Record<string, unknown>;
 }
 
 const hexOf = (b: Uint8Array): string => Buffer.from(b).toString("hex");
@@ -98,8 +100,8 @@ export class RawBox {
   async list(box: string): Promise<Listed[]> {
     const r = await this.post("/listMessages", { messageBox: box });
     if (r.status !== 200) throw new Error(`listMessages ${box}: HTTP ${r.status} ${String(r.v.description ?? "")}`);
-    return ((r.v.messages ?? []) as Array<{ messageId: string; sender: Uint8Array; body: Uint8Array }>).map((m) => ({
-      messageId: m.messageId, sender: hexOf(m.sender), body: m.body, value: dagCbor.decode(m.body),
+    return ((r.v.messages ?? []) as Array<{ messageId: string; sender: Uint8Array; body: Uint8Array; message?: Record<string, unknown> }>).map((m) => ({
+      messageId: m.messageId, sender: hexOf(m.sender), body: m.body, value: dagCbor.decode(m.body), ...(m.message ? { message: m.message } : {}),
     }));
   }
 

@@ -426,8 +426,9 @@ pub const Runtime = struct {
         invalid: []const u8, // a TypeError / Error: the provider's bug
     };
 
-    /// Admit a finished entry (Runtime.admit). A message entry names its
-    /// record, which the host put first; `body` is the message body's bytes.
+    /// Admit a finished entry (Runtime.admit): a request (its record put first) or an event.
+    /// No mail entry (K2): a message comes in inside the request that carries it. `body` is
+    /// unused (the frame's field from when a host admitted messages).
     pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, body: ?[]const u8) !AdmitResult {
         if (try rt.check(a, entry, body)) |r| return r;
         const res = try rt.store.logAppend(a, entry);
@@ -466,17 +467,12 @@ pub const Runtime = struct {
             if (!(try rt.store.has(ev))) return .{ .invalid = "admit: a plain entry's event record must be in the store (put it first)" };
             return null;
         }
-        const mc = Value.cidOf(entry.get("mail")) orelse return null;
-        const rec = rt.store.getOpt(a, mc);
-        if (!logm.isMail(rec)) return .{ .invalid = "admit: a message entry names its mail record, put first: {kind: \"mail\", op: \"put\", sender, recipient, box, body, json?, session?}" };
-        const bc = Value.cidOf(rec.?.get("body")).?;
-        if (body) |bb| {
-            const bv = cbor.decode(a, bb) catch return .{ .invalid = "admit: the body is not dag-cbor" };
-            const blk = try cbor.block(a, bv);
-            if (!std.mem.eql(u8, blk.bytes, bb)) return .{ .invalid = "admit: the body is not canonical dag-cbor" };
-            if (!std.mem.eql(u8, blk.cid, bc)) return .{ .invalid = "admit: the body is not the one the message names" };
-            try rt.store.putBlock(blk.cid, bb);
-        } else if (!(try rt.store.has(bc))) return .{ .invalid = "admit: a message entry needs its body" };
+        // K2: a message is never the host's word. It comes in as the package that carries it (a
+        // `local` request {kind: "message", message: <the signed mail record>, body}, or a client's
+        // request), and the front door verifies it; only what a step routes becomes a message
+        // (routeAdmits). A `mail` entry in a log written before this is still processed (replay).
+        _ = body;
+        if (entry.get("mail") != null) return .{ .invalid = "admit: a message is not admitted as a mail entry; append the signed package as a `local` request ({kind: \"message\", message, body}): the front door verifies it (docs/VM.md, \"Requests\")" };
         return null;
     }
 

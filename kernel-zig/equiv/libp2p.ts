@@ -8,8 +8,9 @@
 //     provider's answers are entries in the log, so the wasm kernel replays
 //     them as natively — same report, same dump, fuel included;
 //   - runs a live step that publishes (#70: an emit to the libp2p provider):
-//     alpha's store with one more message for its p2p-demo handler (admitted
-//     natively, not processed), then loaded into a Worker and drained. This
+//     alpha's store with one more message for its p2p-demo handler (the
+//     owner's signed message appended natively as a `local` request, K2, not
+//     processed), then loaded into a Worker and drained. This
 //     page answers no oracle, so the message cannot be signed: the step ends
 //     errored and nothing is handed to the tab (no `emit` notice).
 //
@@ -24,7 +25,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as dagCbor from "@ipld/dag-cbor";
-import { admit2 } from "../../src/host/genesis.ts";
+import { PrivateKey } from "@bsv/sdk";
+import { appendRequest } from "../../src/host/frontdoor.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL } from "../../src/host/providers.ts";
+import { ephemeralWallet } from "../../src/wallet.ts";
 import { Kernel } from "../../src/host/kernel.ts";
 import { encode } from "../../src/runtime/cid.ts";
 import { bundleOf, chromium, playwright, serveKernel, writeStore } from "./browser.ts";
@@ -63,9 +67,13 @@ try {
     const g = await k.genesis() as { identity: Uint8Array; dispatch: Array<{ transport: string; address: string; sender: Uint8Array | string }> };
     const owner = g.dispatch.find((r) => r.transport === "mailbox" && r.address === "p2p")!.sender as Uint8Array;
     const bodyBytes = dagCbor.encode({ op: "publish", topic: "skein-test/demo", text: "from a tab" });
-    const mail = { kind: "mail", op: "put", sender: owner, recipient: g.identity, box: "p2p", body: encode(dagCbor.decode(bodyBytes)).cid };
-    const mailCid = await k.store.put(mail as never);
-    await admit2(k, { mail: mailCid } as never, { body: bodyBytes });
+    // K2: the owner's message signed by the owner (src/host/p2p-router.test.ts's key) and appended as a
+    // `local` request, which the front door verifies when the tab drains (no oracle needed for that).
+    const ownerKey = new PrivateKey("2222", 16);
+    if (ownerKey.toPublicKey().toString() !== Buffer.from(owner).toString("hex")) throw new Error("the p2p row's sender is not p2p-router.test.ts's owner key");
+    const unsigned = { kind: "mail", op: "put", sender: owner, recipient: g.identity, box: "p2p", body: encode(dagCbor.decode(bodyBytes)).cid, nonce: new Uint8Array(16) };
+    const { signature } = await ephemeralWallet(ownerKey).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
+    await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
     await k.stop();
 
     const said: string[] = [];
