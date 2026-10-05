@@ -103,7 +103,7 @@ import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
 import { DEFAULT_LISTEN, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
-import { Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
 import * as Digest from "multiformats/hashes/digest";
@@ -379,6 +379,13 @@ export class Router {
     this.providers = new Providers({
       keyOf,
       append: (h, pkg) => this.appendLocal(h, pkg),
+      identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
+      sign: async (h, data) => {
+        const row = this.o.db.get(h);
+        if (!row) throw new Error(`no instance ${h}`);
+        const { signature } = await (await this.o.walletFor(row)).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] });
+        return Uint8Array.from(signature);
+      },
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),

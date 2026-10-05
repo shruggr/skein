@@ -99,6 +99,45 @@ pub fn eventRecord(a: std.mem.Allocator, emit: Value, name: []const u8, app: ?[]
     return rec.value();
 }
 
+/// A `deadline` event (#126): a thread's intention to rest until `at` (ms) at
+/// most, recorded by the kernel when a step ends waiting with a deadline (or a
+/// shell sleeps) — {kind: "event", event: "deadline", at, thread: <origin>,
+/// step: <n>, app?}. `thread` and `step` make it that wait's own record; the
+/// runtime answers it at `at` with a signed message naming it (`replyTo`) and
+/// carrying the instance's signed request for it (the scheduler's
+/// intentionAnswer), which steps the thread with `woke`.
+pub fn deadlineRecord(a: std.mem.Allocator, at: i64, thread: []const u8, step: i64, app: ?[]const u8) error{OutOfMemory}!Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("at", cbor.int(at));
+    try m.put("thread", cbor.cidv(thread));
+    try m.put("step", cbor.int(step));
+    return eventRecord(a, m.value(), "deadline", app) catch |err| switch (err) {
+        error.Reserved => unreachable,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+}
+
+test "deadlineRecord (#126): an event the wait owns — at, thread, step, the app when installed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const t1 = try cbor.cidOfValue(a, cbor.string("thread one"));
+    const t2 = try cbor.cidOfValue(a, cbor.string("thread two"));
+    const r = try deadlineRecord(a, 1_700_000_000_000, t1, 3, "demo");
+    try std.testing.expect(isEvent(r));
+    try std.testing.expectEqualStrings("deadline", Value.str(r.get("event")).?);
+    try std.testing.expectEqual(@as(i128, 1_700_000_000_000), Value.intOf(r.get("at")).?);
+    try std.testing.expectEqualSlices(u8, t1, Value.cidOf(r.get("thread")).?);
+    try std.testing.expectEqual(@as(i128, 3), Value.intOf(r.get("step")).?);
+    try std.testing.expectEqualStrings("demo", Value.str(r.get("app")).?);
+    // Two threads resting until the same time rest on two records; the same wait is the same record (replay).
+    const c1 = try cbor.cidOfValue(a, r);
+    try std.testing.expect(!std.mem.eql(u8, c1, try cbor.cidOfValue(a, try deadlineRecord(a, 1_700_000_000_000, t2, 3, "demo"))));
+    try std.testing.expect(!std.mem.eql(u8, c1, try cbor.cidOfValue(a, try deadlineRecord(a, 1_700_000_000_000, t1, 4, "demo"))));
+    try std.testing.expectEqualSlices(u8, c1, try cbor.cidOfValue(a, try deadlineRecord(a, 1_700_000_000_000, t1, 3, "demo")));
+    try std.testing.expect((try deadlineRecord(a, 5, t1, 1, null)).get("app") == null);
+}
+
 /// Whether a record is an emitted event of #119's kind ({kind: "event", event: <name>, …}).
 pub fn isEvent(m: Value) bool {
     if (m != .map) return false;

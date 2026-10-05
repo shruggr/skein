@@ -122,14 +122,32 @@ export const PROVIDERS = ["fetch", "waker", "cron", "libp2p", "status", "manager
 export const HOST_SKEIN_PROVIDERS: readonly ProviderName[] = ["manager", "certifier"];
 export type ProviderName = typeof PROVIDERS[number];
 
+/** The intentions a step records and the runtime answers (#126). */
+export type Intention = "fetch" | "deadline";
+const SERVICE: Record<Intention, { box: string; provider: ProviderName }> = { fetch: { box: "fetch", provider: "fetch" }, deadline: { box: "wake", provider: "waker" } };
+
 export type HttpRequest = { method: string; url: string; headers?: Record<string, string>; body?: Uint8Array; timeoutMs?: number; maxBytes?: number };
 export type HttpResponse = { status: number; headers: Record<string, string>; body: Uint8Array };
 
 export interface ProvidersOptions {
   /** A provider's key (the reference host: a child of its master secret). */
   keyOf(name: ProviderName): PrivateKey;
+  /** The instance `handle`'s identity key (33 bytes), or undefined when it is not known. */
+  identity(handle: string): Promise<Uint8Array | undefined>;
   /** Append a signed message (its package) into `handle` as a `local` request. */
   append(handle: string, pkg: { kind: "message"; message: MailRecord; body: Uint8Array }): Promise<unknown>;
+  /**
+   * Sign `data` with the instance `handle`'s own key, BRC-169's way ([2, "metanet handles
+   * envelope"], key "send", counterparty anyone) → the DER signature (#126: the request the
+   * runtime sends for an intention a step recorded is the instance's, signed by its wallet).
+   */
+  sign(handle: string, data: Uint8Array): Promise<Uint8Array>;
+  /**
+   * Where this host sends an intention (#126) — host wiring, not an instance setting nor an
+   * address-book role: the service by name (`fetch`: the HTTP proxy; `deadline`: the waker), on
+   * this host (`local`, the only transport wired so far). Default: this host's own providers.
+   */
+  route?: Partial<Record<Intention, { transport: "local"; address: ProviderName }>>;
   /** The HTTP proxy's network: one request, this host's own URLs in process. */
   fetch(req: HttpRequest, from: string): Promise<HttpResponse>;
   /** The broadcaster (#58, #65: the host's Arcade), when the host has one: a broadcast event's transaction and BEEF, queued. */
@@ -250,6 +268,14 @@ export class Providers {
       this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);
       return;
     }
+    if ((out.address === "deadline" || out.address === "fetch") && m.kind === "event" && m.event === out.address) {
+      const k = `${handle} ${encode(m).cid}`;
+      if (this.taken.has(k)) return; // handed over again (a kernel's start): kept already
+      this.taken.add(k);
+      const p = this.intention(handle, out.address, m).catch((e) => { this.taken.delete(k); this.say(handle, `provider: ${out.address}: ${(e as Error).message}`); });
+      this.track(p);
+      return;
+    }
     if ((out.address === "subscribe" || out.address === "unsubscribe") && m.kind === "event" && m.event === out.address) {
       if (!this.o.topicEvent) { this.say(handle, `${out.address}: this host has no libp2p node: ignored`); return; }
       this.o.topicEvent(handle, m);
@@ -332,36 +358,84 @@ export class Providers {
 
   // ---------------------------------------------------------------- fetch: the HTTP proxy
 
+  /** A message to the fetch provider (a module on an SDK before #126: fetch was a message to it, found by its role). */
   private async fetch(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): Promise<void> {
     if (box !== "fetch") return await this.answer(handle, "fetch", m, id, { error: `the fetch provider takes box "fetch", not ${box}` });
-    if (typeof b.method !== "string" || typeof b.url !== "string") return await this.answer(handle, "fetch", m, id, { error: "fetch wants {method, url, headers?, body?, timeoutMs?, maxBytes?}" });
-    const maxBytes = typeof b.maxBytes === "number" && b.maxBytes >= 0 ? b.maxBytes : undefined;
+    await this.answer(handle, "fetch", m, id, await this.proxy(handle, b));
+  }
+
+  /** The HTTP proxy (#70, #126): one request {method, url, headers?, body?, timeoutMs?, maxBytes?} → {status, headers, body} | {error}. */
+  private async proxy(handle: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (typeof b.method !== "string" || typeof b.url !== "string") return { error: "fetch wants {method, url, headers?, body?, timeoutMs?, maxBytes?}" };
+    const num = (x: unknown) => typeof x === "number" ? x : typeof x === "bigint" ? Number(x) : undefined;
+    const maxBytes = num(b.maxBytes) !== undefined && num(b.maxBytes)! >= 0 ? num(b.maxBytes) : undefined;
+    const timeoutMs = num(b.timeoutMs);
     const headers: Record<string, string> = {};
     if (b.headers && typeof b.headers === "object") for (const [k, v] of Object.entries(b.headers as Record<string, unknown>)) if (typeof v === "string") headers[k.toLowerCase()] = v;
     let r: HttpResponse;
     try {
-      r = await this.o.fetch({ method: b.method, url: b.url, headers, ...(b.body instanceof Uint8Array ? { body: b.body } : {}), ...(typeof b.timeoutMs === "number" ? { timeoutMs: b.timeoutMs } : {}), ...(maxBytes !== undefined ? { maxBytes } : {}) }, handle);
+      r = await this.o.fetch({ method: b.method, url: b.url, headers, ...(b.body instanceof Uint8Array ? { body: b.body } : {}), ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(maxBytes !== undefined ? { maxBytes } : {}) }, handle);
     } catch (e) {
-      return await this.answer(handle, "fetch", m, id, { error: (e as Error).message });
+      return { error: (e as Error).message };
     }
-    if (maxBytes !== undefined && r.body.length > maxBytes) return await this.answer(handle, "fetch", m, id, { error: tooLarge(maxBytes) });
-    await this.answer(handle, "fetch", m, id, { status: r.status, headers: r.headers, body: r.body });
+    if (maxBytes !== undefined && r.body.length > maxBytes) return { error: tooLarge(maxBytes) };
+    return { status: r.status, headers: r.headers, body: r.body };
   }
 
   // ---------------------------------------------------------------- the waker
 
-  private wake(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): void {
-    if (box !== "wake" || typeof b.at !== "number") { void this.answer(handle, "waker", m, id, { error: "the waker takes {at: ms} in box \"wake\"" }); return; }
-    const at = b.at;
+  /**
+   * An intention a step recorded (#126: a `deadline`, a `fetch` event), handed
+   * over once its step is committed: the request is the instance's, signed by
+   * its wallet — the mail record {kind: "mail", op: "put", sender: <the
+   * instance>, recipient: <the service's key>, box, body: <the event's CID>,
+   * nonce, signature} — sent where this host is wired (`route`: its own waker
+   * or HTTP proxy, `local`). The service's answer is a signed message from its
+   * key whose body names the event (`replyTo`) and carries that request
+   * (`request`), appended as a `local` request: the front door checks its
+   * signature, the kernel the request's (scheduler.zig intentionAnswer), and
+   * the thread awaiting the event steps — `woke` at a deadline, `reply` with a
+   * fetch's response ({status, headers, body} | {error}).
+   */
+  private async intention(handle: string, name: Intention, ev: Record<string, unknown>): Promise<void> {
+    const r = this.o.route?.[name] ?? { transport: "local" as const, address: SERVICE[name].provider };
+    if (r.transport !== "local") throw new Error(`no transport ${String(r.transport)} wired for ${name}`);
+    if (!PROVIDERS.includes(r.address)) throw new Error(`no provider ${r.address} on this host`);
+    const id = encode(ev).cid;
+    const identity = await this.o.identity(handle);
+    if (!identity) throw new Error("the instance's identity is not known");
+    const unsigned = {
+      kind: "mail" as const, op: "put" as const, sender: identity, recipient: Uint8Array.from(Buffer.from(this.key(r.address), "hex")), box: SERVICE[name].box, body: id, nonce: Uint8Array.from(randomBytes(16)),
+    };
+    const request: MailRecord = { ...unsigned, signature: await this.o.sign(handle, dagCbor.encode(unsigned)) };
+    const reply = (answer: Record<string, unknown>) => this.send(handle, r.address, identity, SERVICE[name].box, { replyTo: id, request, ...answer });
+    if (name === "deadline") {
+      const at = typeof ev.at === "number" ? ev.at : typeof ev.at === "bigint" ? Number(ev.at) : NaN;
+      if (!Number.isFinite(at)) throw new Error("a deadline with no `at`");
+      this.timer(handle, id, at, () => this.track(reply({ at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`))));
+      return;
+    }
+    await reply(await this.proxy(handle, ev));
+  }
+
+  /** Run `fire` at `at` (by the clock `now`), once per (handle, id). */
+  private timer(handle: string, id: CID, at: number, fire: () => void): void {
     const k = `${handle} ${id}`;
+    if (this.timers.has(k)) return;
     // A timer's longest wait is about 24.8 days; a later wake waits in steps.
-    const arm = () => this.timers.set(k, { at, handle, fire, timer: setTimeout(fire, Math.min(2 ** 31 - 1, Math.max(0, at - this.o.now()) + 1)) });
-    const fire = () => {
+    const arm = () => this.timers.set(k, { at, handle, fire: go, timer: setTimeout(go, Math.min(2 ** 31 - 1, Math.max(0, at - this.o.now()) + 1)) });
+    const go = () => {
       this.timers.delete(k);
       if (this.o.now() < at) { arm(); return; }
-      this.track(this.answer(handle, "waker", m, id, { at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`)));
+      fire();
     };
     arm();
+  }
+
+  /** A wake-me message (a kernel before #126: a deadline was a message to the waker), kept for such a log's waiting threads. */
+  private wake(handle: string, m: MailRecord, id: CID, box: string, b: Record<string, unknown>): void {
+    if (box !== "wake" || typeof b.at !== "number") { void this.answer(handle, "waker", m, id, { error: "the waker takes {at: ms} in box \"wake\"" }); return; }
+    this.timer(handle, id, b.at, () => this.track(this.answer(handle, "waker", m, id, { at: b.at }).catch((e) => this.say(handle, `waker: ${(e as Error).message}`))));
   }
 
   /**

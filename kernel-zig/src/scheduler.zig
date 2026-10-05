@@ -279,9 +279,9 @@ pub const Runtime = struct {
         rt.say("runtime {s} · log {d} processed{s}", .{ shortKey(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
-        // The messages a waiting thread still awaits an answer to go out again (#70): the host
-        // that had them may be gone (a restart), and a waker's timers with it. A provider that
-        // still has one ignores it (hosts dedupe by the message's CID); an answer is routed once.
+        // The messages and events a waiting thread still awaits an answer to go out again (#70,
+        // #126): the host that had them may be gone (a restart), and the waker's timers with it. A
+        // provider that still has one ignores it (hosts dedupe by the CID); an answer is routed once.
         if (rt.peers.emit != null) for (try rt.store.resting(a)) |t| rt.reoffer(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
         try rt.store.commit();
         rt.flushOutbox();
@@ -302,9 +302,14 @@ pub const Runtime = struct {
                 if (cidIn(tip.get("awaits"), Value.cidOf(m.get("tx")).?)) try rt.handOverEvent(a, c, m);
                 continue;
             }
-            // #119: any other event is handed over once, after its step's commit; a host that
-            // needs it again (a restart) reads it from the log.
-            if (isEvent(m)) continue;
+            // #126: an event the thread awaits (a `deadline`, a `fetch`) goes out again: the host
+            // that kept it may be gone (a restart), its timers with it; a host that still has it
+            // ignores it (hosts dedupe by the record's CID). #119: any other event is handed over
+            // once, after its step's commit; a host that needs it again reads it from the log.
+            if (isEvent(m)) {
+                if (cidIn(tip.get("awaits"), c)) try rt.handOverEvent(a, c, m);
+                continue;
+            }
             if (!cidIn(tip.get("awaits"), c)) continue;
             try rt.handOver(a, c, null);
         }
@@ -1053,8 +1058,10 @@ pub const Runtime = struct {
     }
 
     /// When a wake-me message this instance sent the waker asked to be woken
-    /// (#70: the `deadline` import's, or a program's own emit in box `wake`):
-    /// the `at` of its body, or null if the record is not one.
+    /// (a log before #126, #70: the `deadline` import's then, or a program's
+    /// own emit in box `wake`): the `at` of its body, or null if the record is
+    /// not one. Kept so such a log replays as it was written; since #126 a
+    /// deadline is an event (deadlineEvent) answered by an entry.
     fn wakeAt(rt: *Runtime, a: std.mem.Allocator, sent: []const u8) ?i128 {
         const m = rt.store.getOpt(a, sent) orelse return null;
         if (!logm.isMail(m) or !std.mem.eql(u8, Value.str(m.get("box")).?, "wake")) return null;
@@ -1085,6 +1092,7 @@ pub const Runtime = struct {
                     return;
                 },
                 .cid => |reply_to| {
+                    if (rt.store.getOpt(a, reply_to)) |rec| if (isIntention(rec)) return rt.intentionAnswer(a, what, ctx, mc, m, body, reply_to, rec, sender, at);
                     const t = try rt.awaiter(a, reply_to, sender);
                     if (t == null) {
                         rt.say("{s}: reply to {s}, which no thread awaits from this sender; recorded, nothing runs", .{ what, short(a, reply_to) });
@@ -1417,6 +1425,76 @@ pub const Runtime = struct {
         return if (r == .cid) .{ .cid = r.cid } else .not_cid;
     }
 
+    /// An intention a step records and awaits (#126): a `deadline` or a `fetch` event.
+    fn isIntention(rec: Value) bool {
+        if (!isEvent(rec)) return false;
+        const name = Value.str(rec.get("event")).?;
+        return std.mem.eql(u8, name, "deadline") or std.mem.eql(u8, name, "fetch");
+    }
+
+    /// The answer to an intention (#126): a signed message (the front door checked its signature)
+    /// whose body names the intention's event as `replyTo` and carries, as `request`, the
+    /// instance's own signed request for it to the answering key — the mail record {kind: "mail",
+    /// op: "put", sender: <this instance>, recipient: <the answering key>, box, body: <the
+    /// event's CID>, nonce?, signature}, signed BRC-169's way (the runtime's wrapper signs it with
+    /// the instance's key and sends it where the host is wired: the waker, the fetch proxy). The
+    /// request is the instance's word that it asked that key; the answer is that key's. Both are
+    /// in the log (the answer's body holds the request). The thread awaiting the event steps: a
+    /// `deadline` at its time with `woke` (a shell carries on past its sleep), a `fetch` with
+    /// `reply` ({message, body, box, sender, replyTo}: the answer's body {replyTo, request,
+    /// status, headers, body} | {replyTo, request, error}). Anything else is recorded and runs
+    /// nothing.
+    fn intentionAnswer(rt: *Runtime, a: std.mem.Allocator, what: []const u8, ctx: Ctx, mc: []const u8, m: Value, body: []const u8, ev: []const u8, rec: Value, sender: []const u8, at: i64) !void {
+        const bv = rt.store.getOpt(a, body) orelse return;
+        if (rt.requestProblem(a, bv.get("request"), ev, sender)) |why| {
+            rt.say("{s}: an answer to {s} {s} whose request {s}; recorded, nothing runs", .{ what, Value.str(rec.get("event")).?, short(a, ev), why });
+            return;
+        }
+        var t: ?[]const u8 = null;
+        for (try rt.store.awaiting(a, ev)) |x| {
+            const tip = rt.tipOf(a, x) catch null orelse continue;
+            if (stateIs(tip, "waiting") and cidIn(tip.get("awaits"), ev)) {
+                t = x;
+                break;
+            }
+        }
+        const th = t orelse {
+            rt.say("{s}: an answer to {s} {s}, which no thread awaits; recorded, nothing runs", .{ what, Value.str(rec.get("event")).?, short(a, ev) });
+            return;
+        };
+        if (std.mem.eql(u8, Value.str(rec.get("event")).?, "deadline")) {
+            const due = Value.intOf(rec.get("at")) orelse 0;
+            if (at < due) {
+                rt.say("{s}: a wake for {s} before its time; recorded, nothing runs", .{ what, short(a, th) });
+                return;
+            }
+            rt.say("{s}: wake → {s}", .{ what, short(a, th) });
+            return rt.wakeThread(a, th, ctx);
+        }
+        rt.say("{s}: {s} answered → {s}", .{ what, Value.str(rec.get("event")).?, short(a, th) });
+        var r = cbor.MapBuilder.init(a);
+        try r.put("message", cbor.cidv(mc));
+        try r.put("body", cbor.cidv(body));
+        try r.put("box", m.get("box"));
+        try r.put("sender", .{ .bytes = sender });
+        try r.put("replyTo", cbor.cidv(ev));
+        try rt.step(a, th, ctx, null, r.value());
+    }
+
+    /// Why an answer's `request` is not this instance's signed request for the event `ev` to
+    /// `answerer` (null: it is one).
+    fn requestProblem(rt: *Runtime, a: std.mem.Allocator, req: ?Value, ev: []const u8, answerer: []const u8) ?[]const u8 {
+        const r = req orelse return "is missing";
+        if (!logm.isMail(r)) return "is not a mail record";
+        if (!std.mem.eql(u8, Value.bytesOf(r.get("sender")).?, rt.identity())) return "is not this instance's";
+        if (!std.mem.eql(u8, Value.bytesOf(r.get("recipient")).?, answerer)) return "went to another key";
+        if (!std.mem.eql(u8, Value.cidOf(r.get("body")) orelse "", ev)) return "is for another record";
+        const sig = Value.bytesOf(r.get("signature")) orelse return "is not signed";
+        const pre = cbor.encode(a, cbor.without(a, r, "signature") catch return "cannot be read") catch return "cannot be read";
+        if (!secp.verifyAnyoneKey(rt.identity(), 2, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, pre, sig)) return "has a signature that does not verify";
+        return null;
+    }
+
     /// The thread whose tip awaits the message `sent` (a record this instance
     /// holds: what it sent `from`) — the reply is `from` the one it was sent to.
     fn awaiter(rt: *Runtime, a: std.mem.Allocator, sent: []const u8, from: []const u8) !?[]const u8 {
@@ -1474,7 +1552,7 @@ pub const Runtime = struct {
                 rt.say("{s} {s}: stepping (interrupted before its first step ended)", .{ short(a, origin), Value.str(p.?.get("name")).? });
                 try rt.run(a, origin);
             } else {
-                // A deadline is the waker's to keep (#70): its wake-me goes out again (reoffer), not a sleeper here.
+                // A deadline is the runtime's to keep (#126): its event goes out again (reoffer), not a sleeper here.
                 try rt.maybeStep(a, origin, tip.?);
             }
             return;
@@ -1591,10 +1669,8 @@ pub const Runtime = struct {
         /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
         subscribed: bool = false,
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
-        /// a wake-me to the waker (#70), emitted when the step ends.
+        /// a `deadline` event recorded when the step ends (#126), which the step awaits.
         until: ?i64 = null,
-        /// The waker the deadline goes to (the address book's `waker`), found when it was set.
-        waker: ?[]const u8 = null,
         /// For in-VM calls (#40): the step's host and services, and how deep the calls nest.
         host: ?*const program.Host = null,
         svc: ?*wasi.Services = null,
@@ -1796,27 +1872,15 @@ pub const Runtime = struct {
         const state: []const u8 = if (out.exit_code != 0) "errored" else if (st.launched.items.len > 0 or st.awaits.items.len > 0 or st.until != null) "waiting" else "finished";
         const errored = std.mem.eql(u8, state, "errored");
         if (!errored) if (st.until) |until| {
-            // #70: the deadline is a message to the waker — "wake me at `until`" — which this
-            // step awaits; the waker's answer steps it with `woke`.
-            var imp = program.Imports{ .host = &host, .alloc = a };
-            var body = cbor.MapBuilder.init(a);
-            try body.put("at", cbor.int(until));
-            const blk = try cbor.block(a, body.value());
-            const wm = emitMessage(&st, &imp, st.waker.?, "wake", blk, null) catch |err| switch (err) {
-                error.Fatal => {
-                    const f = imp.fatal orelse wasi.Fatal{ .message = "fatal" };
-                    last_error = f.message;
-                    return switch (f.kind) {
-                        .diverged => error.Diverged,
-                        .no_witness => error.NoWitness,
-                        .fuel => error.FuelExhausted,
-                        .plain => error.Failed,
-                    };
-                },
-                error.Failed => return rt.failf(a, "deadline: {s}", .{imp.last_error}),
-                else => return err,
-            };
-            try st.awaits.append(wm);
+            // #126: the deadline is an intention — the event {kind: "event", event: "deadline", at,
+            // thread, step, app?} on the step, which the step awaits. The runtime keeps it as it is
+            // wired (the host's waker: a timer) and answers it with an entry at `at`; that answer
+            // steps the thread with `woke`.
+            const c = try rt.deadlineEvent(a, origin, n, until, st.progs.items[0]);
+            var listed = false;
+            for (st.emitted.items) |x| listed = listed or std.mem.eql(u8, x, c);
+            if (!listed) try st.emitted.append(c);
+            try st.awaits.append(c);
         };
         for (st.children.items) |c| _ = try rt.store.chainOpen(a, c);
         var head_updates = std.array_list.Managed([]const u8).init(a);
@@ -2125,11 +2189,44 @@ pub const Runtime = struct {
             if (bad) |why| return imp.failWith(why);
             st.subscribed = true;
         }
-        const rec = logm.eventRecord(a, m, name, app) catch |err| switch (err) {
+        var fields = m;
+        if (std.mem.eql(u8, name, "fetch")) {
+            // #126: an intention — the step awaits it (sk.fetch), and the runtime answers it.
+            if (fetchProblem(m)) |why| return imp.failFmt("emit: fetch: {s}", .{why});
+            fields = try ownedBy(a, m, st.origin, st.n);
+        }
+        const rec = logm.eventRecord(a, fields, name, app) catch |err| switch (err) {
             error.Reserved => return imp.failWith("emit: an event's `kind` and `app` are the kernel's to set"),
             error.OutOfMemory => return error.OutOfMemory,
         };
         return listEvent(st, imp, rec);
+    }
+
+    /// Why a `fetch` intention (#126) is not one: {event: "fetch", method, url, headers?: {name:
+    /// text}, body?: bytes, timeoutMs?, maxBytes?}; `thread` and `step` are the kernel's.
+    fn fetchProblem(m: Value) ?[]const u8 {
+        const method = Value.str(m.get("method")) orelse return "want {method, url, headers?, body?, timeoutMs?, maxBytes?}";
+        if (method.len == 0) return "an empty method";
+        const url = Value.str(m.get("url")) orelse return "want {method, url, headers?, body?, timeoutMs?, maxBytes?}";
+        if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://")) return "the url is not http(s)";
+        if (m.get("headers")) |h| if (h != .null) {
+            if (h != .map) return "headers: want {name: text}";
+            for (h.map) |e| if (e.value != .string) return "headers: want {name: text}";
+        };
+        if (m.get("body")) |b| if (b != .null and b != .bytes) return "body: want bytes";
+        for ([_][]const u8{ "timeoutMs", "maxBytes" }) |k| if (m.get(k)) |x| if (x != .null and x != .int) return "timeoutMs and maxBytes are integers";
+        if (m.get("thread") != null or m.get("step") != null) return "`thread` and `step` are the kernel's to set";
+        return null;
+    }
+
+    /// An intention's fields with the thread and step that recorded it: its own record (two
+    /// threads asking the same are two intentions, two answers).
+    fn ownedBy(a: std.mem.Allocator, m: Value, origin: []const u8, n: i64) !Value {
+        var b = cbor.MapBuilder.init(a);
+        for (m.map) |e| try b.put(e.key, e.value);
+        try b.put("thread", cbor.cidv(origin));
+        try b.put("step", cbor.int(n));
+        return b.value();
     }
 
     /// Why a subscribe / unsubscribe this step emits is refused, or null: against the subscriptions as
@@ -2141,6 +2238,17 @@ pub const Runtime = struct {
         for (st.emitted.items) |c| if (rt.store.getOpt(a, c)) |rec| if (subsm.eventOf(rec)) |e| try subsm.apply(&now, e);
         const ps = if (app) |x| try subsm.programsOf(a, rt.store, x) else null;
         return subsm.problem(a, kind, m, app, ps, now.items);
+    }
+
+    /// A `deadline` event (#126): {kind: "event", event: "deadline", at: <ms>, thread: <origin>,
+    /// step: <n>, app?} — the thread's intention to rest until `at` at most, put. `thread` and
+    /// `step` make it this wait's own (two threads resting until the same time rest on two
+    /// records); `app` is the program's app when its record is installed (installedAs), as for any
+    /// event. The step (or the shell's waiting update) lists it and awaits it.
+    fn deadlineEvent(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, step_n: i64, until: i64, run_: Running) ![]const u8 {
+        const install = run_.install orelse try rt.installedAs(a, run_.cid, run_.record);
+        const app: ?[]const u8 = if (install == .none) null else Value.str(run_.record.get("app"));
+        return rt.store.put(a, try logm.deadlineRecord(a, until, origin, step_n, app));
     }
 
     /// Put an event record and list it on the update (once per step).
@@ -2202,13 +2310,7 @@ pub const Runtime = struct {
     fn hDeadline(imp: *program.Imports, until: i64) program.Err!void {
         const st = stepOf(imp);
         if (until <= st.at) return imp.failWith("deadline: not after the step's time");
-        // #70: sugar for a wake-me to the waker, emitted when the step ends waiting.
-        if (st.waker == null) {
-            const root = try hHead(imp, addressbook.HEAD);
-            const w = (addressbook.byRole(st.a, st.rt.store, root, "waker") catch return imp.failWith("deadline: the address book cannot be read")) orelse
-                return imp.failWith("deadline: no waker in the address book (an entry with role \"waker\")");
-            st.waker = w.key;
-        }
+        // #126: an intention, recorded when the step ends waiting (stepBody: the `deadline` event).
         st.until = if (st.until) |t| @min(t, until) else until;
     }
 
@@ -2536,11 +2638,9 @@ pub const Runtime = struct {
         state: []const u8 = "new",
         clock: syscalls.ThreadClock = .{},
         random: syscalls.Entropy = undefined,
-        /// Re-executing because of the waker's answer (#69): the sleep it reaches is woken by it.
+        /// Re-executing because of the answer to its sleep (#69, #126): the sleep it reaches is woken by it.
         wake: ?Ctx = null,
         diverged: ?[]const u8 = null,
-        /// A sleep that could not ask the waker (none in the address book): the shell errors with it.
-        sleep_error: ?[]const u8 = null,
         /// The fuel of the whole run (every instance of the shell and its
         /// children); a segment per step: from a `running` update to the
         /// `waiting`/`finished`/`errored` that ends it (issue #5).
@@ -2570,9 +2670,10 @@ pub const Runtime = struct {
         try rt.shellBody(&t);
     }
 
-    /// The waker's answer to a thread's wake-me came (#69): a program thread
-    /// steps with `woke`; a shell is re-executed from its origin and carries
-    /// on past its sleep under the answer's entry.
+    /// The answer to a thread's deadline came (#126; a log before it: the
+    /// waker's answer to a wake-me, #69): a program thread steps with `woke`;
+    /// a shell is re-executed from its origin and carries on past its sleep
+    /// under the answer's entry.
     fn wakeThread(rt: *Runtime, a: std.mem.Allocator, origin: []const u8, c: Ctx) !void {
         const p: ?Value = rt.programOf(a, try rt.getOrNotFound(a, origin)) catch null;
         if (p != null and hasWasm(p.?)) {
@@ -2637,10 +2738,6 @@ pub const Runtime = struct {
                         rt.say("{s} DIVERGED: {s}", .{ short(a, t.origin), d });
                         break :body;
                     }
-                    if (t.sleep_error) |m| {
-                        try rt.shellErrored(t, m, &ended);
-                        break :body;
-                    }
                     if (st.fatal) |f| if (f.kind == .fuel) {
                         var em = cbor.MapBuilder.init(a);
                         try em.put("kind", cbor.string("cant-do"));
@@ -2667,7 +2764,7 @@ pub const Runtime = struct {
             };
             ended = true;
         }
-        if (parked) return; // resting on its wake-me (#69): stays live until the waker answers
+        if (parked) return; // resting on its deadline (#69, #126): stays live until it is answered
         if (rt.live.fetchRemove(t.origin)) |kv| rt.gpa.free(kv.key);
         if (ended and !rt.stopped) rt.rested(a, t.origin) catch |err| rt.say("{s}: {s}", .{ short(a, t.origin), @errorName(err) });
     }
@@ -2756,12 +2853,12 @@ pub const Runtime = struct {
     }
 
     /// A sleep: at once if not after "now"; else rest `waiting` until it. The
-    /// wait is a message to the waker (#69, as a step's `deadline` is):
-    /// "wake me at `until`", signed through the signer (a recorded call),
-    /// listed on the waiting update (`emitted`) and awaited (`awaits`). The
-    /// waker's answer re-executes the shell from its origin, and it carries on
-    /// past the sleep under that answer's entry. Re-executing, the waiting
-    /// update is the one recorded (its wake-me with it).
+    /// wait is an intention (#126, as a step's `deadline` is): the `deadline`
+    /// event, listed on the waiting update (`emitted`) and awaited (`awaits`).
+    /// The runtime's answer at `until` re-executes the shell from its origin,
+    /// and it carries on past the sleep under that answer's entry.
+    /// Re-executing, the waiting update is the one recorded (its event with
+    /// it; a log before #126: its signed wake-me to the waker).
     fn shSleep(ctx: *anyopaque, clocks: []const wasi.Clock) wasi.Stop!void {
         const t: *ShellRun = @ptrCast(@alignCast(ctx));
         const rt = t.rt;
@@ -2775,7 +2872,7 @@ pub const Runtime = struct {
         const until: i64 = @intCast(@divFloor(deadline.? + 999_999, 1_000_000));
         var sent: ?[]const u8 = null;
         if (t.pos < t.history.len) {
-            // Re-executing: the waiting update is recorded, and its wake-me with it.
+            // Re-executing: the waiting update is recorded, and its event (or wake-me) with it.
             const u = (rt.store.get(t.a, t.history[t.pos]) catch null) orelse return shStop(t, error.NotFound);
             var kept: [3]cbor.Entry = undefined;
             var k: usize = 0;
@@ -2785,14 +2882,16 @@ pub const Runtime = struct {
             };
             rt.appendShellFull(t, "waiting", null, null, until, kept[0..k]) catch |err| return shStop(t, err);
         } else {
-            const wm = rt.shellWakeMe(t, until) catch |err| return shStop(t, err);
+            // #126: the sleep is an intention, the `deadline` event, listed and awaited.
+            const pc = Value.cidOf(t.o.get("program")) orelse return shStop(t, error.NotFound);
+            const prog = rt.store.getOpt(t.a, pc) orelse return shStop(t, error.NotFound);
+            const ev = rt.deadlineEvent(t.a, t.origin, @intCast(t.pos + 1), until, .{ .record = prog, .cid = pc }) catch |err| return shStop(t, err);
             const extra = [_]cbor.Entry{
-                .{ .key = "calls", .value = (cbor.cidArray(t.a, &.{wm.call}) catch return error.OutOfMemory).? },
-                .{ .key = "emitted", .value = (cbor.cidArray(t.a, &.{wm.message}) catch return error.OutOfMemory).? },
-                .{ .key = "awaits", .value = (cbor.cidArray(t.a, &.{wm.message}) catch return error.OutOfMemory).? },
+                .{ .key = "emitted", .value = (cbor.cidArray(t.a, &.{ev}) catch return error.OutOfMemory).? },
+                .{ .key = "awaits", .value = (cbor.cidArray(t.a, &.{ev}) catch return error.OutOfMemory).? },
             };
             rt.appendShellFull(t, "waiting", null, null, until, &extra) catch |err| return shStop(t, err);
-            sent = wm.message;
+            sent = ev;
         }
         // Re-executing: the chain may already record the wake.
         if (t.pos < t.history.len) {
@@ -2810,75 +2909,9 @@ pub const Runtime = struct {
             rt.appendShell(t, "running", null) catch |err| return shStop(t, err);
             return;
         }
-        // Resting on its wake-me: it goes to the waker once this is committed (a start hands it over again).
-        if (sent) |m| rt.handOver(t.a, m, null) catch |err| return shStop(t, err);
+        // Resting on its deadline: the event goes to the host once this is committed (a start hands it over again).
+        if (sent) |c| if (rt.store.getOpt(t.a, c)) |m| rt.handOverEvent(t.a, c, m) catch |err| return shStop(t, err);
         return error.Park;
-    }
-
-    /// A shell's wake-me (#69): {at: until} in box `wake` to the address
-    /// book's waker, signed as `emit` signs, the signer call recorded at
-    /// (thread, the waiting update's seq, 0) — replay serves it from the
-    /// witness. → the message's CID and the signer record's.
-    fn shellWakeMe(rt: *Runtime, t: *ShellRun, until: i64) !struct { message: []const u8, call: []const u8 } {
-        const a = t.a;
-        const root = try rt.store.headTree(a, addressbook.HEAD);
-        const waker = (try addressbook.byRole(a, rt.store, root, "waker")) orelse {
-            t.sleep_error = "sleep: no waker in the address book (an entry with role \"waker\")";
-            return error.NoWaker;
-        };
-        var body = cbor.MapBuilder.init(a);
-        try body.put("at", cbor.int(until));
-        const blk = try cbor.block(a, body.value());
-        const seq: i64 = @intCast(t.pos + 1);
-        var rec = cbor.MapBuilder.init(a);
-        try rec.put("kind", cbor.string("mail"));
-        try rec.put("op", cbor.string("put"));
-        try rec.put("sender", .{ .bytes = rt.identity() });
-        try rec.put("recipient", .{ .bytes = waker.key });
-        try rec.put("box", cbor.string("wake"));
-        try rec.put("body", cbor.cidv(blk.cid));
-        var h = std.crypto.hash.sha2.Sha256.init(.{});
-        h.update(t.origin);
-        var nb: [16]u8 = undefined;
-        std.mem.writeInt(i64, nb[0..8], seq, .big);
-        std.mem.writeInt(u64, nb[8..16], 0, .big);
-        h.update(&nb);
-        var d: [32]u8 = undefined;
-        h.final(&d);
-        try rec.put("nonce", .{ .bytes = try a.dupe(u8, d[0..16]) });
-        const frame = try signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, try cbor.encode(a, rec.value()));
-        var result: []const u8 = undefined;
-        const w: ?Value = if (rt.witness) |wi| try wi.find(a, t.origin, seq, 0) else null;
-        if (w) |x| {
-            if (!std.mem.eql(u8, Value.bytesOf(x.get("request")) orelse "", frame)) {
-                t.diverged = try std.fmt.allocPrint(a, "{s} update {d} (sleep): the oracle request differs from the recorded one", .{ short(a, t.origin), seq });
-                return error.Diverged;
-            }
-            result = Value.bytesOf(x.get("result")).?;
-        } else if (rt.has_wallet) {
-            result = rt.peers.wallet.?(rt.peers.ctx, a, frame) catch |err| {
-                t.sleep_error = try std.fmt.allocPrint(a, "sleep: the oracle: {s}", .{@errorName(err)});
-                return error.NoWaker;
-            };
-        } else {
-            t.diverged = try std.fmt.allocPrint(a, "{s} update {d} (sleep): no wallet and no recorded answer", .{ short(a, t.origin), seq });
-            return error.Diverged;
-        }
-        const sig = signer.signatureOf(result) orelse {
-            t.sleep_error = "sleep: the oracle did not sign the wake-me";
-            return error.NoWaker;
-        };
-        var rec_call = cbor.MapBuilder.init(a);
-        try rec_call.put("kind", cbor.string("oracle"));
-        try rec_call.put("thread", cbor.cidv(t.origin));
-        try rec_call.put("step", cbor.int(seq));
-        try rec_call.put("i", cbor.int(0));
-        try rec_call.put("request", .{ .bytes = frame });
-        try rec_call.put("result", .{ .bytes = result });
-        const call_cid = try rt.store.put(a, rec_call.value());
-        try rec.put("signature", .{ .bytes = sig });
-        try rt.store.putBlock(blk.cid, blk.bytes);
-        return .{ .message = try rt.store.put(a, rec.value()), .call = call_cid };
     }
 
     fn shStop(t: *ShellRun, err: anyerror) wasi.Stop {

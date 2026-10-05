@@ -161,6 +161,8 @@ export class BrowserHost {
     this.providers = new Providers({
       keyOf: (name: ProviderName) => master.derivePrivateKey([2, "skein provider"], name, "self"),
       append: (_h, pkg) => this.appendLocal(pkg),
+      identity: async () => this.identity ? keyBytes(this.identity) : undefined,
+      sign: async (_h, data) => Uint8Array.from((await this.o.wallet.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] })).signature),
       fetch: async (req) => {
         const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body as BodyInit | undefined, signal: AbortSignal.timeout(req.timeoutMs ?? 30_000) });
         this.events.push({ kind: "http", method: req.method, url: req.url, status: r.status });
