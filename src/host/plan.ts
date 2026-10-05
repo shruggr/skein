@@ -167,8 +167,15 @@ export function wiring(record: AppRecord, view: InstanceView, skipped: string[] 
 
 /** A row's key as the kernel's table knows it (the resolved row). */
 const keyOf = (r: DispatchRow) => kernelRowKey(r);
-/** A row as one line of the prompt: `<transport> <address>[*] from <who> → <role>[.<fn>]`. */
-const showRow = (r: RowOp) => `${r.row.transport} ${r.row.address}${r.row.prefix ? "*" : ""} from ${r.label} → ${r.role ?? String(r.row.program)}${r.row.fn ? `.${r.row.fn}` : ""}`;
+/** The fields of a row that are not its settings (its key, its program, `fn`; `optional` and `app` the install's). */
+const ROW_CORE = new Set(["transport", "address", "prefix", "sender", "program", "fn", "optional", "app"]);
+/** A row's settings as the prompt shows them (` (filter beef, read …)`), or "": every field the row carries to the kernel beyond its key, program and fn. */
+const showSettings = (r: object): string => {
+  const s = Object.entries(r).filter(([k, v]) => !ROW_CORE.has(k) && v !== undefined).map(([k, v]) => `${k} ${typeof v === "string" ? v : JSON.stringify(v)}`);
+  return s.length ? ` (${s.join(", ")})` : "";
+};
+/** A row as one line of the prompt: `<transport> <address>[*] from <who> → <role>[.<fn>][ (<settings>)]`. */
+const showRow = (r: RowOp) => `${r.row.transport} ${r.row.address}${r.row.prefix ? "*" : ""} from ${r.label} → ${r.role ?? String(r.row.program)}${r.row.fn ? `.${r.row.fn}` : ""}${showSettings(r.row)}`;
 
 /** The program records of the tree's programs, the modules to send, and the role → record map. */
 async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promise<{ programs: Record<string, CID>; records: Rec[] }> {
@@ -338,7 +345,7 @@ export function describe(p: Plan, record = p.record): string[] {
   const keyed = (r: Row) => rowKey(record.name, r);
   for (const r of record.dispatch) {
     const who = r.sender === "*" ? "anyone" : r.sender;
-    out.push(`  row       ${r.transport} ${rowAddress(record.name, r)}${r.prefix ? "*" : ""} from ${who} → ${r.program}${r.fn ? `.${r.fn}` : ""}${r.read ? ` (read ${String(r.read)})` : ""}${from(d.rows.includes(keyed(r)))}`);
+    out.push(`  row       ${r.transport} ${rowAddress(record.name, r)}${r.prefix ? "*" : ""} from ${who} → ${r.program}${r.fn ? `.${r.fn}` : ""}${showSettings(r)}${from(d.rows.includes(keyed(r)))}`);
   }
   if (record.start) out.push(`  start     ${JSON.stringify(record.start.body)} into ${p.app}`);
   if (record.stop) out.push(`  stop      ${JSON.stringify(record.stop.body)} (at uninstall)`);
