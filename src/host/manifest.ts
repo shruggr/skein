@@ -376,12 +376,14 @@ export function overlayWiring(app: string, ov: unknown, isRole: (role: string) =
   const http = (address: string, fn: string): Row => ({ transport: "http", address, sender: "*", program: OVERLAY_ROLE, fn });
   const p2p = (address: string, fn: string): Row => ({ transport: "libp2p", address, sender: "*", program: OVERLAY_ROLE, fn });
   const box = (sender: string): Row => ({ transport: "mailbox", address: app, sender, program: OVERLAY_ROLE });
+  // #121: a submission's BEEF is decoded at the kernel's door (the row's `filter`): the handler gets its pointer record.
+  const beef = (r: Row): Row => ({ ...r, filter: "beef" });
   return {
     topics,
     rows: [
       box("event"), box("$self"),
-      http("/submit", "submit"), http("/lookup", "lookup"),
-      ...topics.flatMap((t) => [p2p(t, "submit"), p2p(`${t}-admit`, "peerAdmit"), p2p(`${t}-proof`, "peerProof")]),
+      beef(http("/submit", "submit")), http("/lookup", "lookup"),
+      ...topics.flatMap((t) => [beef(p2p(t, "submit")), p2p(`${t}-admit`, "peerAdmit"), p2p(`${t}-proof`, "peerProof")]),
     ],
   };
 }
