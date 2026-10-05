@@ -49,7 +49,7 @@ test("remote delivery: an admin peer record; the run's result delivered over htt
   assert.equal(added[0]!.source, "admin");
 
   // A run: its result goes to the owner — over the wire, to host B.
-  const sent = await toAlpha.send(alpha, "run", { cmd: "echo remote" });
+  const sent = await toAlpha.send(alpha, "shell/run", { cmd: "echo remote" });
   const mine = new RawBox(a.owner, url);
   const results = await until("the result on host B", async () => { const r = await mine.list("results"); return r.length ? r : undefined; });
   const r = results[0]!.value as { exitCode: number; replyTo: CID; stdout: Uint8Array };

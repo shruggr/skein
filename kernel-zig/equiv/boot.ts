@@ -123,7 +123,7 @@ async function talk(r: Router, handles: string[], install?: string): Promise<voi
     check(a!.body.text === "I was booted from a system tree.", `${h}: a chat answered, the loop reading SOUL.md from main (the system tree) (${String(a!.body.text).slice(0, 80)})`);
     await box.ack([a!.id]);
     if (withShell.has(h)) {
-      await send("run", { cmd: "cat etc/config.json | head -c 1; ls bin | head -3; cat SOUL.md" });
+      await send("shell/run", { cmd: "cat etc/config.json | head -c 1; ls bin | head -3; cat SOUL.md" });
     const [x] = await until(`${h}'s run`, async () => { const y = await inbox("results"); return y.length ? y : undefined; });
     check(text(x!.body.stdout).includes("booted from a system tree") && text(x!.body.stdout).includes("frontdoor.cid"), `${h}: a run over main sees the system tree (${JSON.stringify(text(x!.body.stdout)).slice(0, 100)})`);
     await box.ack([x!.id]);

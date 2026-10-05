@@ -734,7 +734,7 @@ message routes by `replyTo` to the thread awaiting it.
 | | `dial` | `{peer, protocol}` | `{stream}`; then each frame read, in box `frame`: `{stream, body}`, and its end `{stream, closed: true, error?}` — all answering the dial |
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
-| `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `status` (#65, below) |
+| `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `chain/status` (#65, #128, below) |
 | `manager` | `create` | `{handle, owner: bytes(33), image?, domain?, claim?: {message, body: bytes}}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, `claim` (required: `owner`'s own signed claim, naming no recipient, #127) forwarded into it as its first entry and taken before its hostname is published, then started (#90, below); image `mailbox` (#113) — a mailbox instance for `owner`, published at once, the same owner and handle again the same answer ("Mailbox instances", above). `domain`: the handle's domain, recorded with the row (default `localhost`) |
 | | `start` | `{handle}` | `{handle, started: true, url}`: published and started |
 | | `stop` | `{handle}` | `{handle, stopped: true}`: unpublished and stopped |
@@ -793,8 +793,8 @@ global to it and has one writer, the chain module
 ([shruggr/skein-chain](https://github.com/shruggr/skein-chain), its
 contract that repo's docs/CHAIN.md), under `chain/state`. It takes the
 host's header feeds and the broadcaster's proofs (events in box `chain`),
-the status provider's messages (box `status`, its optional row from
-`$status`), and is the only thing that emits the broadcast event. Anything
+the status provider's messages (box `chain/status`, its optional row from
+`$status`; #128: a manifest's box is relative to the app, `"status"` → `chain/status`), and is the only thing that emits the broadcast event. Anything
 else that needs a transaction on the chain sends it a BEEF —
 `{fn: "ingest", args: {beef}}` in box `chain` — and is answered at its
 address. The wallet and the overlay apps are programs of the same
@@ -816,7 +816,7 @@ not separate wiring. Its rows (its manifest; or a system tree's
 {"address": "chain",  "sender": "event",   "program": "chain"}                     the host's events (feeds, the broadcaster's proofs)
 {"address": "chain",  "sender": "$self",   "program": "chain"}                     the instance's own apps (the wallet, the overlay apps)
 {"address": "chain",  "sender": "$owner",  "program": "chain"}                     the owner
-{"address": "status", "sender": "$status", "program": "chain", "optional": true}   the status provider (left out without one)
+{"address": "status", "sender": "$status", "program": "chain", "optional": true}   the status provider, box chain/status (left out without one)
 ```
 
 Neither the wallet nor an overlay app takes these events or broadcasts
@@ -874,19 +874,20 @@ reach an instance only as signed messages from a status provider it
 subscribes to:
 
 ```
-message  box "status", subject: <tx CID>, from the status provider's key (no replyTo)
+message  box "chain/status", subject: <tx CID>, from the status provider's key (no replyTo)
 body     {kind: "status", txid (hex), txStatus, blockHash?, blockHeight?, extraInfo?}
          txStatus: RECEIVED, SENT_TO_NETWORK, ACCEPTED_BY_NETWORK, SEEN_ON_NETWORK, SEEN_MULTIPLE_NODES,
                    MINED / IMMUTABLE (with no path), REJECTED, DOUBLE_SPEND_ATTEMPTED, INVALID, MALFORMED
 ```
 
-- **Taking statuses** is a row `{transport: "mailbox", address: "status",
-  sender: <the provider's key>, program}` (a system tree writes
-  `{"address": "status", "sender": "$status", "program": "chain"}`, #78), and
+- **Taking statuses** is a row `{transport: "mailbox", address: "chain/status",
+  sender: <the provider's key>, program}` (the chain app's manifest writes
+  `{"address": "status", …}`, resolved under its name, #128; a system tree writes
+  `{"address": "chain/status", "sender": "$status", "program": "chain"}`, #78), and
   the provider in the address book (role `status`), which the genesis seeds
   when the host has one — how a program knows one speaks to it. The message
   steps the thread awaiting the transaction (input `message`), else the
-  row's program (args `{message, body, box: "status", sender}`). An
+  row's program (args `{message, body, box: "chain/status", sender}`). An
   instance with no such row records the message and runs nothing.
 - The reference host's status provider is its broadcaster's identity (key ID
   `status`): every status Arcade reports but a proof — its answer to the

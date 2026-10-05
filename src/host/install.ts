@@ -14,7 +14,8 @@
 //                 prefix?, sender, program: <the role's program record>, fn?, …settings, app}} —
 //                 the sender "*" (anyone), "event" (events only), "session", "$owner" → the
 //                 owner's key, "$self" → the instance's own (#79: its other apps), "$<provider>"
-//                 → the key the instance's address book gives that role, a hex key itself; an
+//                 → the key the instance's address book gives that role, a hex key itself; a
+//                 box under the app's (#128: "" or `<app>` → `<app>`, "x" → `<app>/x`), an
 //                 http address under /<app>/, a libp2p topic or protocol as written.
 //   4. start      the manifest's `start.body`, into the app's box
 //

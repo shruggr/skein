@@ -55,9 +55,10 @@
 //              close {stream}          → {}
 //   status     takes no messages (#65): it speaks first. Each status of a transaction
 //              an instance holds (but a proof: that is an event, arc.ts) is a message
-//              from it in box `status`, `subject` the transaction's CID, body
-//              {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?};
-//              an instance admits it only if it subscribes to this key in `status`
+//              from it in box `chain/status` (the chain app's, #128), `subject` the
+//              transaction's CID, body {kind: "status", txid, txStatus, blockHash?,
+//              blockHeight?, extraInfo?}; an instance admits it only if it has a row from
+//              this key on `chain/status`
 //   manager    the instance manager (#89, #90): it creates, starts and stops this
 //              host's instances. It takes messages from the host skein only (the
 //              operator's instance, `skein-host init`): its entry is in the host
@@ -284,7 +285,7 @@ export class Providers {
         case "waker": return this.wake(handle, out.message, id, box, body);
         case "libp2p": return await this.p2p(handle, out.message, id, box, body);
         case "cron": return await this.cron(handle, out.message, id, box, body);
-        case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"status\")" });
+        case "status": return await this.answer(handle, "status", out.message, id, { error: "the status provider takes no messages: it sends statuses to the instances that subscribe to it (box \"chain/status\")" });
         case "manager": return await this.answer(handle, "manager", out.message, id, await this.o.manager!.request(box, body));
         case "certifier": {
           if (!this.o.certifier) return await this.answer(handle, "certifier", out.message, id, { error: "this host has no certifier" });

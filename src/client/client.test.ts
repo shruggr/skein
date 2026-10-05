@@ -111,7 +111,7 @@ test("bin/skein on a host (#40): run to the instance's front door, the result re
   };
   const client = new SkeinClient(cfg, h.owner);
   const sent = await client.run({ cmd: "echo a; echo b" });
-  assert.equal(client.lastSent("run")?.cid, sent.cid);
+  assert.equal(client.lastSent("shell/run")?.cid, sent.cid);
   assert.equal(sent.messageId, sent.cid, "a message's id is its record's CID");
 
   // 3 minutes: the shell app's modules compile on their first run, which on a cold wasmtime cache (a CI runner) takes more than the default 30 s.

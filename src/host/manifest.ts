@@ -20,8 +20,10 @@
 //   dispatch[]  the rows the app asks for (#77; the kernel's dispatch table, docs/MESSAGES.md):
 //               {transport?: "mailbox" (default) | "http" | "libp2p", address, prefix?: true,
 //                sender: "*" | "event" | "session" | "$owner" | "$self" | "$<provider>" | <key hex>, program: <role>,
-//                fn?, …settings}. A mailbox row's address is a box (the app's own name, or a
-//               protocol box); an http row's a path relative to /<name>/ (a leading "/" too:
+//                fn?, …settings}. A mailbox row's address is a box relative to the app (#128):
+//               "" or the app's name is the app's own box `<name>`, "x" the box `<name>/x` (an
+//               empty, "." or ".." segment, whitespace or a control character is refused: no box
+//               outside the app's); an http row's a path relative to /<name>/ (a leading "/" too:
 //               "/submit" → "/<name>/submit", "/" → "/<name>/"; a ".." or "." segment, an
 //               encoded dot or slash (%2e, %2f), a backslash, a NUL or a URL is refused: no row
 //               reaches outside the app's prefix), with `prefix: true` for a prefix and `fn`
@@ -104,7 +106,6 @@ const KEY = /^0[23][0-9a-f]{64}$/;
 const TYPES = ["string", "int", "ms", "bytes", "cid", "bool", "map", "any"];
 
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
-const isBox = (b: unknown): b is string => typeof b === "string" && b.length > 0 && !b.startsWith(":") && !/[\s\0]/.test(b);
 const isSender = (s: unknown): s is string => typeof s === "string" && (s === "*" || s === "event" || s === "session" || /^\$[a-z][a-z0-9_-]*$/.test(s) || KEY.test(s));
 
 /** Why `shape` is not a shape (APPS.md §2), or undefined. */
@@ -132,9 +133,26 @@ export function appPath(app: string, p: string): string {
   return `/${app}/${rest}`;
 }
 
-/** A row's address as served: an http path under /<app>/ (appPath); a box or a libp2p name as written. */
+/**
+ * A mailbox row's box as the kernel's table holds it (#128): relative to the app, as an http
+ * path is — "" or the app's own name is the app's box `<app>`; "x" is `<app>/x`. Throws on a
+ * box that is not one: an empty, "." or ".." segment (a leading, trailing or doubled "/"),
+ * whitespace or a control character, or more than 128 bytes resolved (the messagebox
+ * server's limit).
+ */
+export function appBox(app: string, b: string): string {
+  if (typeof b !== "string") throw new Error("not text");
+  if (b === "" || b === app) return app;
+  if (/[\s\0-\x1f\x7f]/.test(b)) throw new Error(`box ${JSON.stringify(b)}: whitespace or a control character`);
+  if (b.split("/").some((s) => s === "" || s === "." || s === "..")) throw new Error(`box ${JSON.stringify(b)}: an empty, "." or ".." segment (no box outside ${app}/)`);
+  const box = `${app}/${b}`;
+  if (new TextEncoder().encode(box).length > 128) throw new Error(`box ${JSON.stringify(box)}: more than 128 bytes`);
+  return box;
+}
+
+/** A row's address as served: an http path under /<app>/ (appPath); a box under the app's (appBox); a libp2p name as written. */
 export function rowAddress(app: string, r: { transport: string; address: string }): string {
-  return r.transport === "http" ? appPath(app, r.address) : r.address;
+  return r.transport === "http" ? appPath(app, r.address) : r.transport === "mailbox" ? appBox(app, r.address) : r.address;
 }
 
 /** A row's key as the kernel's table knows it: `<transport> <address as served>[*] <sender>`. */
@@ -147,9 +165,9 @@ function rowProblem(app: string, r: unknown, isRole: (role: unknown) => role is 
   if (!isMap(r)) return "not a map";
   const t = r.transport ?? "mailbox";
   if (t !== "mailbox" && t !== "http" && t !== "libp2p") return `transport ${JSON.stringify(t)} is not mailbox, http or libp2p`;
-  if (typeof r.address !== "string" || !r.address) return "address is not text";
+  if (typeof r.address !== "string" || (!r.address && t !== "mailbox")) return "address is not text";
   if (t === "mailbox") {
-    if (!isBox(r.address)) return `address ${JSON.stringify(r.address)} is not a box name`;
+    try { appBox(app, r.address); } catch (e) { return (e as Error).message; }
     if (r.prefix !== undefined) return "a mailbox row has no prefix";
   } else if (t === "http") {
     try { appPath(app, r.address); } catch (e) { return (e as Error).message; }
@@ -261,7 +279,7 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     if (!isMap(m[k]) || !isMap((m[k] as { body?: unknown }).body)) bad.push(`${k}: want {body: {…}}`);
   }
   if (m.start !== undefined || m.stop !== undefined) {
-    const own = rows.filter((r) => r.transport === "mailbox" && r.address === name);
+    const own = rows.filter((r) => r.transport === "mailbox" && rowAddress(app, r) === name);
     if (!own.length) bad.push(`start/stop go into the app's box: dispatch must have a mailbox row for ${name}`);
     else if (!own.some((r) => r.sender === "*" || r.sender === "$owner")) bad.push(`start/stop are the owner's: a row for box ${name} must admit "$owner" or "*"`);
   }

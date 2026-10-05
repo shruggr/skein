@@ -13,7 +13,7 @@
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
 //   start message schedules a heartbeat with the cron provider, whose tick
-//   reaches it in `app-demo-tick` (admitted from $cron only: a stranger's is
+//   reaches it in `app-demo/tick` (admitted from $cron only: a stranger's is
 //   not); a {fn, args} message from a caller in box `app-demo` is answered in
 //   the caller's mailbox (result, bad-args, read-only for a `writes: false`
 //   function that writes, unknown-fn); its `peers` message to the kernel, sent
@@ -108,20 +108,20 @@ try {
 
   // ------------------------------------------------ app-demo: start, ticks, calls
   code = await cli("install", demoDir, "--instance", "inst");
-  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo-tick from $cron → demo")), `skein plan install app-demo: exit ${code} ${err.join(" ")}`);
+  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo/tick from $cron → demo")), `skein plan install app-demo: exit ${code} ${err.join(" ")}`);
   const state = async () => {
     const rec = await record("app-demo/app");
     return rec?.state ? await (await k()).store.get(rec.state as CID) as { count: number; ticks: number } : undefined;
   };
   const ticked = await until("the first tick", async () => { await h.router.settled(); const s = await state(); return s && s.ticks >= 1 ? s : undefined; }, 20_000).catch(() => undefined);
-  check(!!ticked, `the start message scheduled a heartbeat with the cron provider, and its tick reached app-demo-tick from $cron (ticks ${ticked?.ticks})`);
-  check(h.lines.some((l) => /cron: beat \(app-demo-tick every 3600000 ms\) scheduled/.test(l)), "the cron provider took the schedule (beat, every hour)");
+  check(!!ticked, `the start message scheduled a heartbeat with the cron provider, and its tick reached app-demo/tick from $cron (ticks ${ticked?.ticks})`);
+  check(h.lines.some((l) => /cron: beat \(app-demo\/tick every 3600000 ms\) scheduled/.test(l)), "the cron provider took the schedule (beat, every hour)");
 
-  // A stranger's "tick" is not admitted (only $cron's row takes app-demo-tick).
+  // A stranger's "tick" is not admitted (only $cron's row takes app-demo/tick).
   const strangerKey = PrivateKey.fromRandom();
-  const refused = await new RawBox(ephemeralWallet(strangerKey), `${h.base}/@inst`).send(inst, "app-demo-tick", { kind: "cron", name: "fake", due: 0 }).then(() => "sent", (e: Error) => e.message);
+  const refused = await new RawBox(ephemeralWallet(strangerKey), `${h.base}/@inst`).send(inst, "app-demo/tick", { kind: "cron", name: "fake", due: 0 }).then(() => "sent", (e: Error) => e.message);
   await h.router.settled();
-  check(/403 ERR_NOT_SUBSCRIBED/.test(refused) && (await state())?.ticks === ticked?.ticks, `a stranger's message into app-demo-tick is refused, and runs nothing (${refused})`);
+  check(/403 ERR_NOT_SUBSCRIBED/.test(refused) && (await state())?.ticks === ticked?.ticks, `a stranger's message into app-demo/tick is refused, and runs nothing (${refused})`);
 
   // Calls by message: answered in the caller's mailbox.
   const callerBox = new RawBox(caller, `${h.base}/@inst`);

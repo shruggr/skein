@@ -191,11 +191,11 @@ inside the VM; the host holds the connection until the request's thread
 comes to rest, and the answer is signed on the session.
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-shell#v0.1.0 --origin http://martha.localhost:8100 --out shell && bin/skein send http://martha.localhost:8100 shell   # the shell app: box run
+bin/skein plan install https://github.com/shruggr/skein-shell#v0.1.0 --origin http://martha.localhost:8100 --out shell && bin/skein send http://martha.localhost:8100 shell   # the shell app: box shell/run
 bin/skein plan install https://github.com/shruggr/skein-chat#v0.1.0 --origin http://martha.localhost:8100 --out chat && bin/skein send http://martha.localhost:8100 chat      # the chat app: box chat
 bin/skein whoami
 bin/skein import ~/some/dir                      # tree objects into the kernel's objects operation; prints the tree CID
-bin/skein run --tree <cid> -- 'ls | head -3'     # box run (the shell app: the shell over a tree)
+bin/skein run --tree <cid> -- 'ls | head -3'     # box shell/run (the shell app: the shell over a tree)
 bin/skein inbox --wait                           # the answer, from your mailbox instance
 bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs the inference peer, bin/skein-infer)
 ```
@@ -266,7 +266,7 @@ description left out:
   "requires": [],
   "dispatch": [
     { "address": "app-demo", "sender": "*", "program": "demo" },
-    { "address": "app-demo-tick", "sender": "$cron", "program": "demo" },
+    { "address": "tick", "sender": "$cron", "program": "demo" },
     { "transport": "http", "address": "/call", "sender": "session", "program": "demo", "fn": "call" }
   ],
   "start": { "body": { "kind": "app-demo-start" } },

@@ -13,7 +13,7 @@ import { chunk } from "../src/client/bundle.ts";
 import { asConversation, chatBody, conversationFrom, parseReply, type Conversation } from "../src/client/conversation.ts";
 import { hashFiles, importOrder, type PickedFile } from "./tree.ts";
 
-export const BOX = { objects: "objects", run: "run", results: "results", chat: "chat" } as const;
+export const BOX = { objects: "objects", run: "shell/run", results: "results", chat: "chat" } as const;
 /** `run` results, then `chat`: the instance's replies (`replyTo` set), and chats from others. */
 export const INBOX = [BOX.results, BOX.chat] as const;
 

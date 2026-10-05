@@ -132,9 +132,9 @@ test("run and import reach the instance; a tampered reply shows its error", asyn
   assert.equal(recs.at(-1)!.cid.toString(), imp.root.toString());
 
   const r = await page.run({ tree: imp.root.toString(), cmd: "ls", cwd: "d" });
-  const rb = dagCbor.decode((await open(inst, box.boxes.get("run")![0]!.body as Envelope)).body) as Record<string, unknown>;
+  const rb = dagCbor.decode((await open(inst, box.boxes.get("shell/run")![0]!.body as Envelope)).body) as Record<string, unknown>;
   assert.deepEqual([rb.cmd, String(rb.tree), rb.cwd], ["ls", imp.root.toString(), "d"]);
-  assert.equal(page.lastSent("run")?.cid, r.cid);
+  assert.equal(page.lastSent("shell/run")?.cid, r.cid);
 
   // Tampered: the signature no longer covers `created`.
   const env = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode({ replyTo: CID.parse(r.cid), exitCode: 0 }) });

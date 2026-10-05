@@ -19,7 +19,7 @@ import type { ClientConfig } from "./config.ts";
 import { RawBox } from "./raw.ts";
 import { chatBody, conversationFrom, loadConversation, parseReply, saveConversation, type Conversation } from "./conversation.ts";
 
-export const BOX = { objects: "objects", run: "run", head: "head", dispatch: "dispatch", results: "results", chat: "chat" } as const;
+export const BOX = { objects: "objects", run: "shell/run", head: "head", dispatch: "dispatch", results: "results", chat: "chat" } as const;
 
 /** The boxes David reads, in this order: `run` results, then `chat` (the instance's replies, and chats from others). */
 export const INBOX = [BOX.results, BOX.chat] as const;

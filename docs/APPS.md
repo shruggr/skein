@@ -114,7 +114,7 @@ src/host/install.ts.)
 | `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
-| `dispatch[]` | **the rows it asks for** (#77): each `{transport?, address, prefix?, sender, program, fn?, …settings}` in the kernel's row shape (docs/VM.md "The dispatch table"). `transport` defaults to `mailbox`: the address is a box — the app's own name (its public face, §4), or another app's box it is wired into. An `http` row's address is a path **relative to `/<name>/`** (a leading `/` too: `"/submit"` is `/amm/submit`, `"/"` is `/amm/`; `prefix: true` for a prefix; `fn` the handler's function; the rest the handler's own settings, carried to it as `match`). A `libp2p` row's address is a pubsub topic or `/<protocol>`, exact — global, not namespaced; sender `*` (a topic the app takes at run time is not a row: its program emits a subscription, `subscribe {topic, program, fn}`, #119, docs/MESSAGES.md "libp2p (#51)"). `sender` says who the row admits: `"*"` anyone, `"event"` (mailbox only, #79) events and never a message (the host's wiring, a route's admits: a box that takes events need not be open), `"session"` (http only) any BRC-103/104 session, `"$owner"` the owner, `"$self"` (#79) the instance's own identity — its other programs, by the host's loopback (docs/VM.md "emit"), `"$cron"`/`"$status"`/`"$<provider>"` the key the instance's address book gives that role, or an identity key in hex. The install resolves each and sends it to the kernel's `dispatch` operation with `app: <name>` (§3). The same key (transport, address, prefix, sender) twice is refused. `optional: true` (only on a row from a `$<provider>`, #78): the install leaves the row out, with a note in the prompt, when the instance's address book has no such provider — as a genesis leaves out a row from a provider its host has not; it never reaches the kernel |
+| `dispatch[]` | **the rows it asks for** (#77): each `{transport?, address, prefix?, sender, program, fn?, …settings}` in the kernel's row shape (docs/VM.md "The dispatch table"). `transport` defaults to `mailbox`: the address is a box **relative to the app** (#128), as an http path is — `""` or the app's own name is the app's box `<name>` (its public face, §4), any other address `x` the box `<name>/x` (`"run"` in the shell app is the box `shell/run`; `"status"` in the chain app is `chain/status`); an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes resolved: no row names a box outside the app's. An `http` row's address is a path **relative to `/<name>/`** (a leading `/` too: `"/submit"` is `/amm/submit`, `"/"` is `/amm/`; `prefix: true` for a prefix; `fn` the handler's function; the rest the handler's own settings, carried to it as `match`). A `libp2p` row's address is a pubsub topic or `/<protocol>`, exact — global, not namespaced; sender `*` (a topic the app takes at run time is not a row: its program emits a subscription, `subscribe {topic, program, fn}`, #119, docs/MESSAGES.md "libp2p (#51)"). `sender` says who the row admits: `"*"` anyone, `"event"` (mailbox only, #79) events and never a message (the host's wiring, a route's admits: a box that takes events need not be open), `"session"` (http only) any BRC-103/104 session, `"$owner"` the owner, `"$self"` (#79) the instance's own identity — its other programs, by the host's loopback (docs/VM.md "emit"), `"$cron"`/`"$status"`/`"$<provider>"` the key the instance's address book gives that role, or an identity key in hex. The install resolves each and sends it to the kernel's `dispatch` operation with `app: <name>` (§3). The same key (transport, address, prefix, sender) twice is refused. `optional: true` (only on a row from a `$<provider>`, #78): the install leaves the row out, with a note in the prompt, when the instance's address book has no such provider — as a genesis leaves out a row from a provider its host has not; it never reaches the kernel |
 | `start` | optional: a message the owner sends into the app's box as the **last install message**, after the rows, so a program whose first act is to schedule something (a heartbeat tick from `$cron`) actually runs; nothing else starts an app. Sending it again is the restart after a reconfiguration (a new manifest + head advance): an install over an installed version sends it again. It needs a row admitting the owner to the app's box (`"$owner"` or `"*"`). (#76, built) |
 | `stop` | optional: a message the owner sends into the app's box at uninstall, before its rows are removed, so the app can cancel what it scheduled. (#76, built) |
 
@@ -356,7 +356,8 @@ stand; then a `dispatch` remove for every row the table holds with `app:
 
 ## 4. Calling an app: one box, the function in the body
 
-One box per app, named after it. The body names the function, dotted
+One box per app for its calls, named after it (its other boxes, `<app>/x`, are
+its own wiring, §2). The body names the function, dotted
 `<interface-name>.<function>` (the interface without its `/<major>`), with
 its arguments:
 
@@ -536,7 +537,7 @@ marked "(derived: config.overlay)" in the prompt:
 - libp2p rows `<topic>` (raw submissions, fn `submit`, `filter: "beef"`), `<topic>-admit`
   (fn `peerAdmit`) and `<topic>-proof` (fn `peerProof`) per topic (#74).
 
-No `chain`, `status` or `submit` box (the chain app's, and the app's own
+No `chain`, `chain/status` or `submit` box (the chain app's, and the app's own
 box), no grants. An explicit row in the manifest with the same key
 overrides the derived one. The host's libp2p node subscribes the derived
 topics once their rows are in the table, and unsubscribes them when they
@@ -629,7 +630,8 @@ more: one program, two rows, one interface.
   passes on, never the bytes — and reads the bytes back with skein-sdk's
   `chain.record.beefOf`; bytes still work from a caller no door stands in
   front of. A bad BUMP is a refusal entry: the message runs nothing.
-- The `status` row takes the status provider's messages; `optional`, so a
+- The `status` row (the box `chain/status`, #128: relative to the app, §2)
+  takes the status provider's messages; `optional`, so a
   host with no status provider installs it without (statuses are optional,
   #65).
 - Its only head is `chain/state` (the name rule; the app record is
@@ -659,8 +661,8 @@ agent's skein needs the chat loop and no shell, a developer's the shell and
 no chat loop, an overlay's neither.
 
 **The shell app** ([shruggr/skein-shell](https://github.com/shruggr/skein-shell),
-name `shell`, heads `shell/…`) is the whole userland: `run` (the box `run`
-from `$owner`: a command over a tree, the answer in the sender's `results`)
+name `shell`, heads `shell/…`) is the whole userland: `run` (the box `shell/run`,
+written `"run"` in its manifest, from `$owner`: a command over a tree, the answer in the sender's `results`)
 and the shell itself — brush, uutils coreutils, the toolset (find, xargs,
 diff, cmp, jq, which, grep, tree, awk, sed, git, qjs as `node`, python as
 `python3`) and python's standard library, all files of its tree. Interface

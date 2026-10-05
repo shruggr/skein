@@ -181,18 +181,18 @@ const mailboxes: string[] = [];
     "cat nope",
     "printf 'b\\na\\n' | sort | tr a-z A-Z; seq 3 | awk '{s+=$1} END {print s}'",
   ];
-  for (const cmd of cmds) { h.later(1); await h.send(i, "run", { cmd, tree: root }); }
+  for (const cmd of cmds) { h.later(1); await h.send(i, "shell/run", { cmd, tree: root }); }
   h.later(1);
-  await h.send(i, "run", { cmd: "pwd; ls", tree: root, cwd: "/src", env: { FOO: "bar" } });
+  await h.send(i, "shell/run", { cmd: "pwd; ls", tree: root, cwd: "/src", env: { FOO: "bar" } });
   h.later(1);
-  await h.send(i, "run", { cmd: "echo from main; ls" }); // no tree: main's
+  await h.send(i, "shell/run", { cmd: "echo from main; ls" }); // no tree: main's
   // Sleeps: one wake, then two in a row.
   h.later(1);
-  await h.send(i, "run", { cmd: "t0=$(date +%s%N); echo $RANDOM; sleep 2; t1=$(date +%s%N); echo $(( t1 - t0 >= 2000000000 )); echo $RANDOM; echo x > made.txt; ls", tree: root });
+  await h.send(i, "shell/run", { cmd: "t0=$(date +%s%N); echo $RANDOM; sleep 2; t1=$(date +%s%N); echo $(( t1 - t0 >= 2000000000 )); echo $RANDOM; echo x > made.txt; ls", tree: root });
   await h.tick(1); // not due
   await h.tick(5);
   h.later(1);
-  await h.send(i, "run", { cmd: "sleep 1; echo one; sleep 1; echo two", tree: root });
+  await h.send(i, "shell/run", { cmd: "sleep 1; echo one; sleep 1; echo two", tree: root });
   await h.tick(3);
   await h.tick(3);
   // Scripts: qjs/node and python in a thread (issue #25), on the same instance (#83: one shell app install for both).
@@ -207,10 +207,10 @@ const mailboxes: string[] = [];
     "python3 t.py x; ./t.py y; cat ls.json; python -c 'import datetime; print(datetime.datetime.now().year)'",
     "qjs -e 'console.log(scriptArgs, Date.now() > 1.7e12)'; python3 -c 'open(\"/opt/skein/python/lib/python314.zip\", \"ab\")' 2>&1 | tail -1",
   ];
-  for (const cmd of scmds) { h.later(1); await h.send(i, "run", { cmd, tree: sroot }); }
+  for (const cmd of scmds) { h.later(1); await h.send(i, "shell/run", { cmd, tree: sroot }); }
   // A sleep inside a runtime: python's time.sleep and a qjs timer rest the thread until the waker wakes it.
   h.later(1);
-  await h.send(i, "run", { cmd: "python3 -c 'import time; t = time.time(); time.sleep(2); print(time.time() - t >= 2)'; node -e 'const t = Date.now(); setTimeout(() => console.log(\"later\", Date.now() - t >= 1000), 1000)'", tree: sroot });
+  await h.send(i, "shell/run", { cmd: "python3 -c 'import time; t = time.time(); time.sleep(2); print(time.time() - t >= 2)'; node -e 'const t = Date.now(); setTimeout(() => console.log(\"later\", Date.now() - t >= 1000), 1000)'", tree: sroot });
   await h.tick(3);
   await h.tick(3);
   await fs.rm(sdir, { recursive: true, force: true });
@@ -245,7 +245,7 @@ const mailboxes: string[] = [];
   await h.send(i, "dispatch", { op: "bogus", row });
   await h.send(i, "head", { name: "work", tree: root });
   await h.send(i, "head", { name: "bad name", tree: root });
-  await h.send(i, "run", { cmd: "echo x > y; ls" }).catch(() => {}); // no shell app here (#83): no row takes `run`; refused, nothing written
+  await h.send(i, "shell/run", { cmd: "echo x > y; ls" }).catch(() => {}); // no shell app here (#83): no row takes `shell/run`; refused, nothing written
   await fs.rm(dir, { recursive: true, force: true });
   await h.done();
   made.push("gen-subs");
@@ -368,9 +368,9 @@ const mailboxes: string[] = [];
   const { root, bundles } = await bundlesOf(dir);
   for (const b of bundles) await h.send(i, "objects", b);
   h.later(1);
-  await h.send(i, "run", { cmd: "ls", tree: root });
+  await h.send(i, "shell/run", { cmd: "ls", tree: root });
   h.later(1);
-  await h.send(i, "run", { cmd: "echo start; while :; do :; done", tree: root });
+  await h.send(i, "shell/run", { cmd: "echo start; while :; do :; done", tree: root });
   await fs.rm(dir, { recursive: true, force: true });
   await h.done();
   made.push("gen-fuel");

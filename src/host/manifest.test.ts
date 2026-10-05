@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appPath, checkManifest, ManifestError, missingInterfaces, overlayWiring, rowKey, shapeProblem } from "./manifest.ts";
+import { appBox, appPath, checkManifest, ManifestError, missingInterfaces, overlayWiring, rowKey, shapeProblem } from "./manifest.ts";
 
 const files = new Set(["bin/demo.wasm", "bin/engine.cid", "etc/app.json"]);
 const has = (p: string) => files.has(p);
@@ -29,7 +29,7 @@ const keys = (m: unknown) => checkManifest(m, has).manifest.dispatch.map((r) => 
 
 test("a good manifest: its rows normalised (transport mailbox by default)", () => {
   const c = checkManifest(base(), has);
-  assert.deepEqual(keys(base()), ["mailbox demo *", "mailbox demo $cron", "mailbox admin $owner", "http /demo/call session"]);
+  assert.deepEqual(keys(base()), ["mailbox demo *", "mailbox demo $cron", "mailbox demo/admin $owner", "http /demo/call session"]);
   assert.deepEqual(c.manifest.dispatch[0], { transport: "mailbox", address: "demo", sender: "*", program: "demo" });
   assert.deepEqual(c.sources.demo, { kind: "wasm", path: "bin/demo.wasm", name: "demo" });
 });
@@ -53,7 +53,7 @@ test("rows: the senders, the transports, the keys", () => {
   assert.match(problems({ ...base(), dispatch: [{ transport: "http", address: "/x", sender: "event", program: "demo", fn: "f" }] }).join("\n"), /"event" is for mailbox rows/);
   assert.match(row({ sender: "anyone" }), /sender "anyone"/);
   assert.match(row({ sender: "session" }), /"session" is for http rows/);
-  assert.match(row({ address: ":ack" }), /is not a box name/);
+  assert.match(row({ address: "a b" }), /whitespace or a control character/);
   assert.match(row({ transport: "local" }), /transport "local"/);
   assert.match(row({ program: "nobody" }), /program "nobody" is not a role/);
   assert.match(row({ app: "x" }), /app is set by the install/);
@@ -85,6 +85,25 @@ test("shapes", () => {
   assert.equal(shapeProblem({ a: "int", "b?": ["string"], c: { d: "cid" }, e: "map", f: "any", g: "ms", h: "bytes", i: "bool" }, "args"), undefined);
   assert.match(shapeProblem(["int", "string"], "args")!, /one element shape/);
   assert.match(shapeProblem(3, "args")!, /a shape is a type name/);
+});
+
+test("mailbox boxes are relative to the app (#128): \"\" or its name is its own box, \"x\" is <app>/x; escapes are refused", () => {
+  assert.equal(appBox("demo", ""), "demo");
+  assert.equal(appBox("demo", "demo"), "demo");
+  assert.equal(appBox("demo", "run"), "demo/run");
+  assert.equal(appBox("demo", "a/b"), "demo/a/b");
+  assert.equal(appBox("demo", "demo/x"), "demo/demo/x", "written relative: the app's name is not stripped");
+  assert.equal(appBox("demo", ":ack"), "demo/:ack");
+  const box = (address: string) => problems({ ...base(), dispatch: [{ address, sender: "*", program: "demo" }] }).join("\n");
+  for (const ok of ["", "demo", "run", "a/b", "amm-p2p"]) assert.equal(box(ok), "", ok);
+  for (const bad of ["/run", "run/", "a//b", "..", "../chain", "a/./b", "./x"]) assert.match(box(bad), /an empty, "\." or "\.\." segment/, bad);
+  for (const bad of ["a b", " run", "run\n", "a\tb", "x\u0000", "x\u007f"]) assert.match(box(bad), /whitespace or a control character/, JSON.stringify(bad));
+  assert.match(box("x".repeat(124)), /more than 128 bytes/);
+  assert.equal(box("x".repeat(123)), "");
+  assert.deepEqual(keys({ ...base(), dispatch: [{ address: "", sender: "*", program: "demo" }, { address: "status", sender: "$status", program: "demo" }] }), ["mailbox demo *", "mailbox demo/status $status"]);
+  assert.match(problems({ ...base(), dispatch: [{ address: "", sender: "*", program: "demo" }, { address: "demo", sender: "*", program: "demo" }] }).join("\n"), /mailbox demo \* twice/, "\"\" and the app's name are one box");
+  assert.equal(problems({ ...base(), dispatch: [{ address: "", sender: "$owner", program: "demo" }], start: { body: {} } }).join("\n"), "", "start goes into the own box, written \"\"");
+  assert.match(problems({ ...base(), dispatch: [{ address: "run", sender: "$owner", program: "demo" }], start: { body: {} } }).join("\n"), /dispatch must have a mailbox row for demo/, "demo/run is not the app's box");
 });
 
 test("name, version, provides, start/stop", () => {
@@ -247,6 +266,7 @@ test("optional rows (#78): only from a $<provider>; kept in the manifest as writ
   const m = { ...base(), dispatch: [...base().dispatch, { address: "status", sender: "$status", program: "demo", optional: true }] };
   const c = checkManifest(m, has);
   assert.deepEqual(c.manifest.dispatch.at(-1), { transport: "mailbox", address: "status", sender: "$status", program: "demo", optional: true });
+  assert.equal(rowKey("demo", c.manifest.dispatch.at(-1)!), "mailbox demo/status $status", "the box resolved under the app's (#128)");
   assert.ok(problems({ ...base(), dispatch: [{ address: "demo", sender: "*", program: "demo", optional: true }] }).some((p) => /optional is for a row from a \$<provider>/.test(p)));
   assert.ok(problems({ ...base(), dispatch: [{ address: "demo", sender: "$owner", program: "demo", optional: true }] }).some((p) => /optional is for a row from a \$<provider>/.test(p)));
   assert.ok(problems({ ...base(), dispatch: [{ address: "demo", sender: "$self", program: "demo", optional: true }] }).some((p) => /optional is for a row from a \$<provider>/.test(p)));

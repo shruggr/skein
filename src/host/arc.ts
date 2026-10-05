@@ -34,9 +34,9 @@
 //       height; specific wiring (this session), never an open box
 //   anything else (RECEIVED, SEEN_ON_NETWORK, REJECTED, DOUBLE_SPEND_ATTEMPTED, …)
 //       a **status message** from the host's status provider (providers.ts `status`): a signed
-//       message, box `status`, `subject` the transaction's CID, body {kind: "status", txid,
-//       txStatus, blockHash?, blockHeight?, extraInfo?} — admitted by an instance only if it
-//       subscribes to that provider ({sender: <its key>, box: "status"}). Optional: an instance
+//       message, box `chain/status` (the chain app's, #128), `subject` the transaction's CID, body
+//       {kind: "status", txid, txStatus, blockHash?, blockHeight?, extraInfo?} — admitted by an
+//       instance only if it has a row from that provider ({sender: <its key>, box: "chain/status"}). Optional: an instance
 //       without the subscription learns acceptance from the proof, rejection from a competing
 //       proof or abandonment (docs/WALLET.md).
 //
@@ -100,7 +100,7 @@ export interface BroadcasterOptions {
   db: HostDb;
   /** Admit a proof event into `handle`'s box (Router.admitEvent): unsigned, self-validating. */
   admit(handle: string, box: string, event: Record<string, unknown>): Promise<unknown>;
-  /** Send `handle` a status message from the host's status provider (providers.ts `status`): box `status`, `subject` the transaction's CID. */
+  /** Send `handle` a status message from the host's status provider (providers.ts `status`): box `chain/status` (#128), `subject` the transaction's CID. */
   status(handle: string, body: Record<string, unknown>, subject: ReturnType<typeof txCid>): Promise<unknown>;
   /** The instances a transaction may be in: every enabled row, and those whose kernel runs now. */
   instances(): { all: string[]; running: string[] };

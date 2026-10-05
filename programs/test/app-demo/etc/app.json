@@ -44,7 +44,7 @@
       "program": "demo"
     },
     {
-      "address": "app-demo-tick",
+      "address": "tick",
       "sender": "$cron",
       "program": "demo"
     },

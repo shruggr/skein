@@ -355,7 +355,7 @@ export class Router {
         status: async (h, body, subject) => {
           const id = this.o.db.get(h)?.identity;
           if (!id) throw new Error("its identity is not known yet");
-          await this.providers.send(h, "status", keyBytes(id), "status", body, subject);
+          await this.providers.send(h, "status", keyBytes(id), "chain/status", body, subject);
         },
         now: () => stampMs(this.now()),
         instances: () => ({ all: this.o.db.list("enabled").map((r) => r.handle), running: [...this.loaded].filter(([, l]) => !l.kernel.gone).map(([h]) => h) }),

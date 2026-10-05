@@ -16,14 +16,14 @@
 //! call. Other messages, by box and body:
 //!
 //!   app-demo       {kind: "app-demo-start"}   (the install's start) asks the cron
-//!                  provider for a tick every hour into `app-demo-tick`, named
+//!                  provider for a tick every hour into `app-demo/tick`, named
 //!                  "beat"; rests on its answer; finishes "scheduled beat next <ms>"
 //!   app-demo       {kind: "app-demo-stop"}    (the uninstall's stop) stops "beat";
 //!                  finishes "stopped beat <true|false>"
 //!   app-demo       {kind: "app-demo-peers", key, url} (#87) emits the kernel's
 //!                  `peers` operation as the instance itself — refused: no row
 //!                  admits a program to a kernel table; finishes "sent peers"
-//!   app-demo-tick  a tick from the cron provider (admitted from `$cron` only):
+//!   app-demo/tick  a tick from the cron provider (admitted from `$cron` only):
 //!                  ticks += 1; finishes "tick <ticks>"
 //!   app-demo       {kind: "app-demo-forge", how, head, app?, name?} (K1): the
 //!                  forgery the kernel refuses. With how "call" or "launch" it
@@ -59,7 +59,7 @@ const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
 const NAME = "app-demo";
-const TICK_BOX = "app-demo-tick";
+const TICK_BOX = "app-demo/tick"; // the manifest writes "tick" (#128: a box is relative to the app)
 
 const fns = [_]app.Function{
     .{ .name = "demo.counter.get", .run = get },

@@ -37,7 +37,7 @@ test("router: the stock client by host name, our client by path prefix; the answ
 
   // The stock client, by host name (one BRC-104 session per origin: the instance's).
   const mb = new MessageBoxClient({ host: h.origin("alpha"), walletClient: h.owner });
-  await mb.sendMessage({ recipient: alpha, messageBox: "run", body: { cmd: "echo hello; echo from $PWD" }, skipEncryption: true }, h.origin("alpha"));
+  await mb.sendMessage({ recipient: alpha, messageBox: "shell/run", body: { cmd: "echo hello; echo from $PWD" }, skipEncryption: true }, h.origin("alpha"));
 
   // The run's result is delivered by alpha itself, over http, to the owner's mailbox instance — in process.
   const dav = new MessageBoxClient({ host: h.origin("david"), walletClient: h.owner });

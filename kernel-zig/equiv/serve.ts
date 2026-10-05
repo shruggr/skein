@@ -98,7 +98,7 @@ try {
   const { root, bundles } = await bundlesOf(dir);
   await install("zigtest", [SHELL_APP, CHAT_APP]);
   for (const b of bundles) await sendTo(zig, "zigtest", "objects", b);
-  await sendTo(zig, "zigtest", "run", { cmd: "cat README; ls; echo $RANDOM", tree: root });
+  await sendTo(zig, "zigtest", "shell/run", { cmd: "cat README; ls; echo $RANDOM", tree: root });
   const [r1] = await results(1);
   check(text(r1!.body.stdout).startsWith("hello\nREADME\nsrc\n"), "a run answered through the router");
   await box.ack([r1!.id]);
@@ -118,7 +118,7 @@ try {
   await box.ack([a!.id]);
 
   // A sleep longer than the idle timeout: stopped mid-sleep, hydrated by the waker, re-executed, woken.
-  await sendTo(zig, "zigtest", "run", { cmd: "sleep 3; echo woke", tree: root });
+  await sendTo(zig, "zigtest", "shell/run", { cmd: "sleep 3; echo woke", tree: root });
   await until("stopped mid-sleep", async () => !router.loaded.has("zigtest") && router.nextWake("zigtest") !== undefined ? true : undefined, 15_000);
   check(lines.some((l) => /^\[zigtest\] \S+ shell running → waiting \(until \d+\)$/.test(l)), "the sleep: the shell rests waiting, its wake-me with the waker (#69)");
   check(true, "the kernel is stopped while its thread sleeps; the waker keeps the wake-me");
@@ -128,7 +128,7 @@ try {
   await box.ack([r2!.id]);
 
   // The router itself restarts mid-sleep: the next router hydrates at start and learns the deadline.
-  await sendTo(zig, "zigtest", "run", { cmd: "sleep 2; echo again", tree: root });
+  await sendTo(zig, "zigtest", "shell/run", { cmd: "sleep 2; echo again", tree: root });
   await sleep(500);
   await router.stop();
   router = make();
@@ -151,7 +151,7 @@ try {
   const ft = db.get("fueltest")!.identity!;
   await install("fueltest", [SHELL_APP]); // the install's steps fit the limit (#83); the spinning shell does not
   for (const b of bundles) await sendTo(ft, "fueltest", "objects", b);
-  await sendTo(ft, "fueltest", "run", { cmd: "echo start; while :; do :; done", tree: root });
+  await sendTo(ft, "fueltest", "shell/run", { cmd: "echo start; while :; do :; done", tree: root });
   const [s] = await results(1, "results", 60_000);
   check(JSON.stringify(s!.body).includes("fuel exhausted"), `a spinning shell runs out of fuel and run-handler says so (${JSON.stringify(s!.body).slice(0, 160)})`);
   await box.ack([s!.id]);
@@ -167,7 +167,7 @@ try {
     "qjs -e 'const t0 = Date.now(); let n = 0; while (Date.now() - t0 < 50) n++; console.log(\"qjs\", Date.now() - t0, n > 100)'",
     "python3 -c 'import time\nt0 = time.monotonic()\nwhile time.monotonic() - t0 < 0.05: pass\nprint(\"python\", round((time.monotonic() - t0) * 1000))'",
   ].join("; ");
-  await sendTo(ct, "clocktest", "run", { cmd: clockCmd, tree: root });
+  await sendTo(ct, "clocktest", "shell/run", { cmd: clockCmd, tree: root });
   const [w] = await results(1, "results", 60_000);
   waited = { exitCode: w!.body.exitCode as number, stdout: w!.body.stdout ? text(w!.body.stdout) : undefined };
   await box.ack([w!.id]);
