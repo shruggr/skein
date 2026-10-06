@@ -1,7 +1,8 @@
 // The page's code path, as the browser runs it: web/core.ts bundled by
 // esbuild with the page's options (node:crypto, node:fs/path and Buffer
-// shimmed), then driven with ProtoWallets. The instance side uses the node
-// modules (src/envelope.ts), so this also checks the two agree.
+// shimmed), then driven with ProtoWallets over a messagebox in memory. A
+// message is a plain BRC-33 message on the sender's session (#126 step 4: no
+// envelope, nothing signed or sealed inside): the box records who sent it.
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
@@ -11,12 +12,11 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { AuthFetch, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
-import { MessageBoxClient } from "@bsv/message-box-client";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { open, seal, verify, type Envelope } from "../src/envelope.ts";
-import { envelopeCid as nodeEnvelopeCid } from "../src/envelope.ts";
 import { decodeBundle } from "../src/client/bundle.ts";
+import { RawBox } from "../src/client/raw.ts";
+import { encode } from "../src/runtime/cid.ts";
 import { blobCid } from "../src/runtime/tree.ts";
 import { browserOptions, WEB } from "./build.ts";
 import type * as Core from "./core.ts";
@@ -33,25 +33,26 @@ before(async () => {
 const wallet = (): WalletInterface => new ProtoWallet(PrivateKey.fromRandom()) as unknown as WalletInterface;
 const idk = async (w: WalletInterface) => (await w.getPublicKey({ identityKey: true })).publicKey;
 
-/** A messagebox in memory: what sendMessage delivers, listMessagesLite returns to the recipient. */
+/** A messagebox in memory: the sender is the wallet whose session it is; a message's id is its record's CID. */
 function fakeBox() {
-  const boxes = new Map<string, { messageId: string; sender: string; body: unknown; recipient: string }[]>();
+  const boxes = new Map<string, { messageId: string; sender: string; body: Uint8Array; recipient: string }[]>();
   let n = 0;
-  const forWallet = (w: WalletInterface) => ({
-    async sendMessage(m: { recipient: string; messageBox: string; body: unknown; skipEncryption?: boolean }) {
-      assert.equal(m.skipEncryption, true);
-      const messageId = `m${++n}`;
-      const list = boxes.get(m.messageBox) ?? [];
-      list.push({ messageId, sender: await idk(w), recipient: m.recipient, body: JSON.parse(JSON.stringify(m.body)) });
-      boxes.set(m.messageBox, list);
-      return { status: "success", messageId };
+  const forWallet = (w: WalletInterface): Core.Box => ({
+    async send(recipient: string, box: string, body: unknown) {
+      const bytes = body instanceof Uint8Array ? body : dagCbor.encode(body);
+      const sender = await idk(w);
+      const id = encode({ sender, recipient, box, body: bytes, n: ++n }).cid;
+      const list = boxes.get(box) ?? [];
+      list.push({ messageId: id.toString(), sender, recipient, body: bytes });
+      boxes.set(box, list);
+      return { id };
     },
-    async listMessagesLite({ messageBox }: { messageBox: string }) {
+    async list(box: string) {
       const me = await idk(w);
-      return (boxes.get(messageBox) ?? []).filter((m) => m.recipient === me);
+      return (boxes.get(box) ?? []).filter((m) => m.recipient === me).map((m) => ({ messageId: m.messageId, sender: m.sender, body: m.body, value: dagCbor.decode(m.body) }));
     },
-    async acknowledgeMessage({ messageIds }: { messageIds: string[] }) {
-      for (const [k, v] of boxes) boxes.set(k, v.filter((m) => !messageIds.includes(m.messageId)));
+    async ack(ids: string[]) {
+      for (const [k, v] of boxes) boxes.set(k, v.filter((m) => !ids.includes(m.messageId)));
     },
   });
   return { boxes, forWallet };
@@ -64,84 +65,79 @@ async function setup() {
     instance: { identityKey: await idk(inst), handle: "skein", domain: "localhost" },
     messageboxUrl: "http://unused/messagebox", hostUrl: "http://unused",
   };
-  const page = new core.WebSkein(cfg, david, core.memoryStore(), box.forWallet(david) as unknown as MessageBoxClient);
+  const page = new core.WebSkein(cfg, david, core.memoryStore(), box.forWallet(david));
   return { david, inst, box, page, instBox: box.forWallet(inst) };
 }
 
-/** The instance's `chat` reply to david, sealed with the node envelope code. */
-async function reply(inst: WalletInterface, david: WalletInterface, instBox: ReturnType<ReturnType<typeof fakeBox>["forWallet"]>, body: Record<string, unknown>) {
-  const env = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode(body) });
-  await instBox.sendMessage({ recipient: await idk(david), messageBox: "chat", body: env, skipEncryption: true });
-  return (await nodeEnvelopeCid(env)).toString();
+/** The instance's `chat` reply to david: its id. */
+async function reply(david: WalletInterface, from: Core.Box, body: Record<string, unknown>, box = "chat") {
+  return (await from.send(await idk(david), box, body)).id.toString();
 }
 
-test("chat → chat reply → chat: the bundled page seals, the instance opens, replyTo chains", async () => {
+const bodyOf = (m: { body: Uint8Array }) => dagCbor.decode(m.body) as Record<string, unknown>;
+
+test("chat → chat reply → chat: the bundled page sends plain messages, replyTo chains", async () => {
   const { david, inst, box, page, instBox } = await setup();
   const tcid = blobCid(new Uint8Array([1])).toString();
 
   const s1 = await page.chat({ text: "hello", tree: tcid });
   const [m1] = box.boxes.get("chat")!;
-  const env1 = m1!.body as Envelope;
-  assert.ok(verify(env1), "node verify() accepts the page's envelope");
-  assert.equal((await nodeEnvelopeCid(env1)).toString(), s1.cid, "page and CLI compute the same envelope CID");
-  assert.equal(env1.sender.identityKey, await idk(david));
-  const b1 = dagCbor.decode((await open(inst, env1)).body) as Record<string, unknown>;
+  assert.equal(m1!.messageId, s1.cid, "the page keeps the message's id");
+  assert.equal(m1!.sender, await idk(david), "the box records the session's identity");
+  const b1 = bodyOf(m1!);
   assert.equal(b1.text, "hello");
   assert.equal(String(b1.tree), tcid);
   assert.equal(b1.replyTo, undefined, "a first chat has no replyTo");
-  await instBox.acknowledgeMessage({ messageIds: [m1!.messageId] });
+  await instBox.ack([m1!.messageId]);
 
   const thread = CID.parse(s1.cid); // any CID will do for the thread
-  const replyCid = await reply(inst, david, instBox, { text: "hi", page: "# Title\n\n- a\n- b", tree: CID.parse(tcid), thread, replyTo: CID.parse(s1.cid) });
+  const replyCid = await reply(david, instBox, { text: "hi", page: "# Title\n\n- a\n- b", tree: CID.parse(tcid), thread, replyTo: CID.parse(s1.cid) });
   const got = await page.inbox();
   assert.equal(got.length, 1);
-  assert.ok(got[0]!.verified, got[0]!.error ?? "unverified");
   assert.equal(got[0]!.error, undefined);
   assert.equal(got[0]!.cid, replyCid);
+  assert.equal(got[0]!.sender, await idk(inst));
   assert.equal(got[0]!.body!.text, "hi");
   assert.deepEqual(page.conversation()?.reply, replyCid);
   assert.deepEqual(await page.inbox(), [], "acknowledged");
 
   // A chat that is not a reply (a new conversation), or a reply from anyone but the instance, is shown, not continued.
   const other = wallet();
-  await reply(inst, david, instBox, { text: "new topic" }); // no replyTo
-  await reply(other, david, box.forWallet(other), { text: "not the instance", replyTo: CID.parse(s1.cid) });
+  await reply(david, instBox, { text: "new topic" }); // no replyTo
+  await reply(david, box.forWallet(other), { text: "not the instance", replyTo: CID.parse(s1.cid) });
   const shown = await page.inbox();
   assert.deepEqual(shown.map((r) => [r.body?.text, r.error]), [["new topic", undefined], ["not the instance", undefined]]);
   assert.deepEqual(page.conversation()?.reply, replyCid);
 
   // The next chat replies to that reply and inherits its tree.
   await page.chat({ text: "more" });
-  const b2 = dagCbor.decode((await open(inst, box.boxes.get("chat")!.at(-1)!.body as Envelope)).body) as Record<string, unknown>;
+  const b2 = bodyOf(box.boxes.get("chat")!.at(-1)!);
   assert.equal(String(b2.replyTo), replyCid);
   assert.equal(String(b2.tree), tcid);
   // --new: neither.
   await page.chat({ text: "fresh", fresh: true });
-  const b3 = dagCbor.decode((await open(inst, box.boxes.get("chat")!.at(-1)!.body as Envelope)).body) as Record<string, unknown>;
+  const b3 = bodyOf(box.boxes.get("chat")!.at(-1)!);
   assert.equal(b3.replyTo, undefined);
   assert.equal(b3.tree, undefined);
 });
 
-test("run and import reach the instance; a tampered reply shows its error", async () => {
-  const { david, inst, box, page, instBox } = await setup();
+test("run and import reach the instance; a body that is not a record shows its error", async () => {
+  const { david, box, page, instBox } = await setup();
   const imp = await page.importFiles([{ path: "a.txt", bytes: new TextEncoder().encode("A\n") }, { path: "d/b.txt", bytes: new TextEncoder().encode("B\n") }]);
   const objs = box.boxes.get("objects")!;
   assert.equal(objs.length, 1);
-  const recs = decodeBundle((await open(inst, objs[0]!.body as Envelope)).body);
+  const recs = decodeBundle(objs[0]!.body);
   assert.equal(recs.length, 4); // 2 blobs, tree d, the root tree
   assert.equal(recs.at(-1)!.cid.toString(), imp.root.toString());
 
   const r = await page.run({ tree: imp.root.toString(), cmd: "ls", cwd: "d" });
-  const rb = dagCbor.decode((await open(inst, box.boxes.get("shell/run")![0]!.body as Envelope)).body) as Record<string, unknown>;
+  const rb = bodyOf(box.boxes.get("shell/run")![0]!);
   assert.deepEqual([rb.cmd, String(rb.tree), rb.cwd], ["ls", imp.root.toString(), "d"]);
   assert.equal(page.lastSent("shell/run")?.cid, r.cid);
 
-  // Tampered: the signature no longer covers `created`.
-  const env = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode({ replyTo: CID.parse(r.cid), exitCode: 0 }) });
-  await instBox.sendMessage({ recipient: await idk(david), messageBox: "results", body: { ...env, created: "2001-01-01T00:00:00.000Z" }, skipEncryption: true });
+  await instBox.send(await idk(david), "results", dagCbor.encode("just text"));
   const [bad] = await page.inbox();
-  assert.equal(bad!.verified, false);
-  assert.match(bad!.error!, /does not verify/);
+  assert.match(bad!.error!, /not a record/);
 });
 
 test("the shimmed bundle and node agree on sha256/sha1 and random bytes", async () => {
@@ -181,19 +177,16 @@ test("live: the bundled page registers, chats and reads a chat reply through the
   assert.equal(ir.status, 200);
 
   const sent = await page.chat({ text: "live hello" });
-  const mb = new MessageBoxClient({ host: cfg.messageboxUrl, walletClient: inst });
-  const got = await mb.listMessagesLite({ messageBox: "chat", host: cfg.messageboxUrl });
+  const mb = new RawBox(inst, cfg.messageboxUrl);
+  const got = await mb.list("chat");
   assert.equal(got.length, 1);
-  const env = got[0]!.body as unknown as Envelope;
-  assert.equal((await nodeEnvelopeCid(env)).toString(), sent.cid);
-  assert.equal((dagCbor.decode((await open(inst, env)).body) as { text: string }).text, "live hello");
-  await mb.acknowledgeMessage({ messageIds: [got[0]!.messageId], host: cfg.messageboxUrl });
+  assert.equal(got[0]!.messageId, sent.cid);
+  assert.equal((got[0]!.value as { text: string }).text, "live hello");
+  await mb.ack([got[0]!.messageId]);
 
-  const answer = await seal(inst, { recipient: { identityKey: await idk(david), handle: "david", domain: "localhost" }, body: dagCbor.encode({ text: "live hi", thread: CID.parse(sent.cid), replyTo: CID.parse(sent.cid) }) });
-  await mb.sendMessage({ recipient: await idk(david), messageBox: "chat", body: answer as unknown as Record<string, unknown>, skipEncryption: true }, cfg.messageboxUrl);
+  const answer = await mb.send(await idk(david), "chat", { text: "live hi", thread: CID.parse(sent.cid), replyTo: CID.parse(sent.cid) });
   const rs = await page.inbox();
   assert.equal(rs.length, 1);
-  assert.ok(rs[0]!.verified, rs[0]!.error ?? "unverified");
   assert.equal(rs[0]!.body!.text, "live hi");
-  assert.equal(page.conversation()?.reply, (await nodeEnvelopeCid(answer)).toString());
+  assert.equal(page.conversation()?.reply, answer.id.toString());
 });

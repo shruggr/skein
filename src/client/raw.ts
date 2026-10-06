@@ -25,7 +25,7 @@ export interface Listed {
   body: Uint8Array;
   /** The body decoded. */
   value: unknown;
-  /** The message itself: its mail record as the messagebox keeps it (a signed one verifies on its own, K2). */
+  /** The message itself: its mail record as the messagebox keeps it. */
   message?: Record<string, unknown>;
 }
 
@@ -34,8 +34,9 @@ const hexOf = (b: Uint8Array): string => Buffer.from(b).toString("hex");
 /**
  * A claim (#127), signed by `wallet` and naming no recipient: a message in
  * box `claim`, its body {messagebox?, handle?, domain?} (the owner's mailbox
- * entry, if any), signed as an emit is ([2, "metanet handles envelope"], key
- * "send", counterparty anyone). Signed before the instance it claims exists;
+ * entry, if any), signed by its sender ([2, "metanet handles envelope"], key
+ * "send", counterparty anyone) — the one message a client signs itself (#126
+ * step 4: no session of the instance's carries it). Signed before the instance it claims exists;
  * the host forwards it into that instance as its first entry, and the kernel
  * takes the owner from the signer. {message, body: its dag-cbor bytes}.
  */
@@ -107,22 +108,12 @@ export class RawBox {
 
   /**
    * A message to `recipient` (hex) in `box`: `body` a record (encoded here) or its dag-cbor bytes. Its id.
-   * `sign`: signed as an emit is (BRC-169's way: [2, "metanet handles envelope"], key "send", counterparty
-   * anyone, over the mail record without `signature`), so the record verifies on its own wherever it is
-   * carried next — a browser host appends it for its front door (K2), and admits no unsigned message.
+   * The BRC-33 message alone (#126 step 4): the session proves who sends it, and nothing in it is signed.
    */
-  async send(recipient: string, box: string, body: unknown, o: { sign?: boolean } = {}): Promise<{ id: CID }> {
+  async send(recipient: string, box: string, body: unknown): Promise<{ id: CID }> {
     const bytes = body instanceof Uint8Array ? body : dagCbor.encode(body);
     const to = Uint8Array.from(Buffer.from(recipient, "hex"));
-    let signed: Record<string, unknown> = {};
-    if (o.sign) {
-      const me = (await this.wallet.getPublicKey({ identityKey: true }, this.originator)).publicKey;
-      const nonce = globalThis.crypto.getRandomValues(new Uint8Array(16));
-      const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(me, "hex")), recipient: to, box, body: encode(dagCbor.decode(bytes)).cid, nonce };
-      const { signature } = await this.wallet.createSignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone", data: [...dagCbor.encode(unsigned)] }, this.originator);
-      signed = { signature: Uint8Array.from(signature), nonce };
-    }
-    const r = await this.post("/sendMessage", { message: { recipient: to, messageBox: box, body: bytes, ...signed } });
+    const r = await this.post("/sendMessage", { message: { recipient: to, messageBox: box, body: bytes } });
     if (r.status !== 200) throw new Error(`sendMessage ${box}: HTTP ${r.status} ${String(r.v.code ?? "")} ${String(r.v.description ?? "")}`.trim());
     return { id: CID.parse(String(r.v.id ?? r.v.messageId)) };
   }

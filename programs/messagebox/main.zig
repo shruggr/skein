@@ -9,19 +9,19 @@
 //!                        session's identity), recipient, box, body: <cid>,
 //!                        json?, session: {payload, signature, nonce,
 //!                        yourNonce}} and its body — or, for a BRC-231 message
-//!                        that carries `signature` (and `subject?`), another
-//!                        instance's signed message (#70), kept as the record
-//!                        its sender signed (checked: message.zig), so both
-//!                        sides know it by one CID. Nothing is written if it is
+//!                        that carries `nonce` (and `subject?`), another
+//!                        instance's emit (#70) delivered on its own session,
+//!                        kept as the record it emitted ({…, subject?, nonce},
+//!                        no session: #126 step 4), so both sides know it by
+//!                        one CID. A message carrying a `signature` is refused
+//!                        (the session is the proof). Nothing is written if it is
 //!                        refused. Accepted when a subscription takes it —
 //!                        (sender, box) for this instance's own boxes, or a
 //!                        reply to a message this instance sent that sender;
 //!                        a subscription to this program for its owner's (a
 //!                        mailbox exists only where one is subscribed)
 //!   listMessages         a read of the caller's mailbox: nothing is written
-//!                        (CBOR: each with `message`, its mail record as kept —
-//!                        a signed one is what the reader's own instance
-//!                        appends as a `local` request, K2)
+//!                        (CBOR: each with `message`, its mail record as kept)
 //!   acknowledgeMessage   one entry moving the reader's pointer (an `ack`
 //!                        event in `:ack`); the records stay in the log
 //! Stepped:
@@ -42,7 +42,6 @@ const cid = cbor.cidm;
 const sk = @import("sk");
 const dagjson = @import("dagjson");
 const deliver = @import("deliver.zig");
-const message = @import("message");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -221,14 +220,14 @@ fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
     try rec.put("recipient", .{ .bytes = recipient });
     try rec.put("box", cbor.string(box));
     try rec.put("body", cbor.cidv(blk.cid));
-    if (rb.cbor and Value.bytesOf(m.get("signature")) != null) {
-        // #70: a signed message (another instance's emit, delivered on its own session): kept as
-        // the record its sender signed, so both sides know it by the same CID. The session proves
-        // who sent it; the signature, checked here, makes the record verify on its own.
-        if (m.get("subject")) |s| if (s != .null) try rec.put("subject", s);
-        if (m.get("nonce")) |s| if (s != .null) try rec.put("nonce", s);
-        try rec.put("signature", m.get("signature"));
-        if (try message.problem(a, rec.value(), blk.bytes)) |why| return failure(a, true, 400, "ERR_INVALID_SIGNATURE", why);
+    if (m.get("signature")) |x| if (x != .null) return failure(a, rb.cbor, 400, "ERR_SIGNED_MESSAGE", "A message carries no signature: the session proves who sends it.");
+    if (rb.cbor and Value.bytesOf(m.get("nonce")) != null) {
+        // #70, #126 step 4: another instance's emit, delivered on its own session — kept as the
+        // record it emitted ({…, subject?, nonce}: the emit's own nonce, no session), so both
+        // sides know the message by one CID. The session proves who sent it (`sender` is the
+        // caller); the request entry it came in holds that proof.
+        if (m.get("subject")) |s| if (s != .null) try rec.put("subject", cbor.cidv(Value.cidOf(s) orelse return failure(a, true, 400, "ERR_INVALID_SUBJECT", "The subject is not a CID.")));
+        try rec.put("nonce", m.get("nonce"));
     } else {
         if (json) try rec.put("json", .{ .bool = true });
         try rec.put("session", arg.get("session"));
@@ -308,8 +307,7 @@ fn listMessages(a: Allocator, _: Value, arg: Value) !Resp {
             if (rb.cbor) {
                 try m.put("body", .{ .bytes = bytes });
                 try m.put("sender", .{ .bytes = sender });
-                // K2: the message itself, its record as kept (a signed one verifies on its own): a
-                // client that runs an instance appends it as a `local` request for its front door.
+                // The message itself, its record as kept (its id is that record's CID).
                 try m.put("message", rec);
             } else {
                 // {message: <the body as DAG-JSON>}, as text: the stock client unwraps `message`.

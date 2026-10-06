@@ -349,6 +349,29 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
         try m.put("fuel", cbor.int(res.fuel));
         return reply(a, m.value(), null, null);
     }
+    if (eq(u8, op, "answer")) {
+        // #66, #126 step 4: the answer of the thread a request entry launched, as it stands after
+        // the drain (serve's `answer` without the wait: nothing runs between calls) — the page's
+        // own requests to its instance, on its BRC-104 session. <entry> → {state: "refused",
+        // refused} | {state: "pending"} | {thread, state, answer?: bytes, error?}.
+        const entry = Value.cidOf(v) orelse return error.BadRequest;
+        var m = cbor.MapBuilder.init(a);
+        if (try s.get(a, entry)) |e| if (e.get("refused")) |x| {
+            try m.put("state", cbor.string("refused"));
+            try m.put("refused", x);
+            return reply(a, m.value(), null, null);
+        };
+        const t = (try r.requestThread(a, entry)) orelse {
+            try m.put("state", cbor.string("pending"));
+            return reply(a, m.value(), null, null);
+        };
+        const res = try r.answerOf(a, t);
+        try m.put("thread", cbor.cidv(t));
+        try m.put("state", cbor.string(res.state));
+        if (eq(u8, res.state, "finished")) try m.put("answer", .{ .bytes = res.stdout });
+        if (eq(u8, res.state, "errored")) try m.put("error", cbor.string(res.err));
+        return reply(a, m.value(), null, null);
+    }
     if (eq(u8, op, "idle")) return reply(a, .null, null, null); // nothing runs between calls
     if (eq(u8, op, "state")) {
         var m = cbor.MapBuilder.init(a);

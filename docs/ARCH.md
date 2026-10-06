@@ -35,7 +35,8 @@ Inside:
   matched there, first match wins (#115);
 - **programs**: stepped by the scheduler, with imports for the virtual
   filesystem, reads by CID, heads, threads (`launch`, `await`, `deadline`,
-  `call`), the signer (`wallet`), `emit` (a signed message, or an event:
+  `call`), the signer (`wallet`), `emit` (a message — unsigned, its transport
+  proves its sender, #126 step 4 — or an event:
   an intention the runtime answers, a broadcast, a subscription, a beacon)
   and `authfetch` (#126: the kernel's BRC-104 client, a recorded call — the
   one direct HTTP path);
@@ -77,9 +78,11 @@ calls hand back CIDs, not data.
 answered inside, deterministically, and never recorded. The one recorded
 call is the signer (`wallet`): its request and answer are written on the
 step, and replay serves them from there. Everything that leaves is `emit`:
-a signed message to a key in the address book, or a broadcast event, sent
-by the host after the step commits. The answer is a new entry, signed by
-whoever answered. A program waiting on an answer is a thread at rest; the
+a message to a key in the address book, or a broadcast event, sent
+by the host after the step commits. A skein receives mail only where it
+verifies the sender itself — a BRC-104 session to its own front door, or
+libp2p — so a message carries no signature of its sender (#126 step 4). The
+answer is a new entry, proven by whoever carried it. A program waiting on an answer is a thread at rest; the
 scheduler steps it again when the answer arrives, and a restart re-executes
 it from the log.
 
@@ -91,8 +94,10 @@ thread's CIDs; nothing may use them for secrets, which the signer makes.
 Sleep and deadlines are intentions (#126): the kernel records a
 `deadline` event the host's waker keeps, and its signed answer is an entry.
 **The signature boundary is absolute**: every request out is signed by the
-instance's key and recorded (an emit's signature, the host's signed request
-for an intention, authfetch's), and every answer in is signed.
+instance's key and recorded (authfetch's BRC-104 request — a message's
+delivery to a peer's front door is one —, the host's signed request for an
+intention), and every answer in is signed (the BRC-104 session's, a
+provider's own).
 
 **Fuel** is on for every step and summed across everything in it; running
 out ends the step errored, deterministically, and it is never retried.
@@ -378,11 +383,13 @@ numbers as wasmtime's), the store in IndexedDB, preview1 modules only
 wallet's: `wallet` goes to the page's BRC-100 wallet, `emit` to the page's
 own providers (fetch, waker: the intentions, signed by the page's wallet as
 the instance), `http` (authfetch's bytes) to the page's fetch. In: the
-page's chat, a poll of the page identity's mailbox instance, and the
-waker's timers — each message a
-`local` request carrying a signed message (the page's own signed by its
-wallet, a polled one as the mailbox kept it), verified by the front door;
-the page admits no unsigned message. Nothing runs while the
+page's own messages (a chat, an install) on the page wallet's BRC-104
+session with its instance — `http` requests its front door verifies, as any
+client's (#126 step 4) — and the providers' signed answers (`local`
+requests), the waker's timers among them. The page reads the page
+identity's mailbox instance with its wallet and shows what is there; it
+admits none of it into the instance (the mailbox is the user's: to have the
+instance act on one, the user sends it a message of their own). Nothing runs while the
 tab is closed. Logs cross between browser and native in both directions.
 
 ## Genesis

@@ -16,7 +16,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { PrivateKey, ProtoWallet } from "@bsv/sdk";
+import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
@@ -24,7 +24,7 @@ import { signClaim } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import { KERNEL_BIN } from "./kernel.ts";
-import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, type MailRecord } from "./providers.ts";
+import type { MailRecord } from "./providers.ts";
 import { testHost } from "./testhost.ts";
 
 const skip = !existsSync(KERNEL_BIN) && "kernel-zig not built";
@@ -51,9 +51,8 @@ test("the instance manager: create (the owner's claim forwarded before published
   const send = async (from: string, box: string, body: Record<string, unknown>) => {
     const key = h.keyOf(from);
     const bytes = dagCbor.encode(body);
-    const unsigned = { kind: "mail" as const, op: "put" as const, sender: Uint8Array.from(Buffer.from(key.toPublicKey().toString(), "hex")), recipient: Uint8Array.from(Buffer.from(manager, "hex")), box, body: encode(dagCbor.decode(bytes)).cid, nonce: Uint8Array.from(randomBytes(16)) };
-    const { signature } = await new ProtoWallet(key).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
-    const message: MailRecord = { ...unsigned, signature: Uint8Array.from(signature) };
+    // #126 step 4: an emit is unsigned; the host carries what its own kernel hands it.
+    const message: MailRecord = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(key.toPublicKey().toString(), "hex")), recipient: Uint8Array.from(Buffer.from(manager, "hex")), box, body: encode(dagCbor.decode(bytes)).cid, nonce: Uint8Array.from(randomBytes(16)) };
     const n = answers.length;
     h.router.providers.deliver(from, { message, body: bytes, transport: "local", address: "manager" });
     await h.router.providers.idle();

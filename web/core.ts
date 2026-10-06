@@ -1,14 +1,15 @@
 // The browser client: what src/client/client.ts does, over any WalletInterface
 // (in the page, the one @1sat/connect returns) and without node:fs. State the
 // CLI keeps in ~/.skein/client lives in a `Store` (localStorage in the page).
-// The envelope, bundle and conversation code is the CLI's own, imported.
+// The bundle and conversation code is the CLI's own, imported. A message is a
+// plain BRC-33 message on the wallet's BRC-104 session with the messagebox
+// (src/client/raw.ts RawBox): the session proves who sends it, and nothing in
+// it is signed or sealed (#126 step 4; before it, a BRC-169 envelope).
 
 import { AuthFetch, type WalletInterface } from "@bsv/sdk";
-import { MessageBoxClient } from "@bsv/message-box-client";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { sha256 } from "multiformats/hashes/sha2";
-import { open, seal, signedPart, verify, type Envelope, type Signed } from "../src/envelope.ts";
+import { RawBox, type Listed } from "../src/client/raw.ts";
 import { chunk } from "../src/client/bundle.ts";
 import { asConversation, chatBody, conversationFrom, parseReply, type Conversation } from "../src/client/conversation.ts";
 import { hashFiles, importOrder, type PickedFile } from "./tree.ts";
@@ -42,15 +43,18 @@ export interface Result {
   messageId: string;
   cid?: string;
   sender: string;
+  /** The sender is the one the messagebox names: proven by the sender's session with it (#126 step 4); nothing in the message is signed. */
   verified: boolean;
   created?: string;
   body?: Record<string, unknown>;
   error?: string;
 }
 
-/** The message's id: CIDv1 dag-cbor, sha2-256 of the dag-cbor encoded signed part, without `content` (client.ts envelopeCid). */
-export async function envelopeCid(env: Envelope | Signed): Promise<CID> {
-  return CID.createV1(dagCbor.code, await sha256.digest(dagCbor.encode(signedPart(env))));
+/** What the page needs of a messagebox: RawBox's send, list and ack (a fake in tests). */
+export interface Box {
+  send(recipient: string, box: string, body: unknown): Promise<{ id: CID }>;
+  list(box: string): Promise<Listed[]>;
+  ack(ids: string[]): Promise<void>;
 }
 
 const CONVERSATION = "skein.conversation";
@@ -59,14 +63,14 @@ const SENT = "skein.sent";
 export class WebSkein {
   readonly cfg: WebConfig;
   readonly wallet: WalletInterface;
-  readonly mb: MessageBoxClient;
+  readonly mb: Box;
   readonly store: Store;
 
-  constructor(cfg: WebConfig, wallet: WalletInterface, store: Store = memoryStore(), mb?: MessageBoxClient) {
+  constructor(cfg: WebConfig, wallet: WalletInterface, store: Store = memoryStore(), mb?: Box) {
     this.cfg = cfg;
     this.wallet = wallet;
     this.store = store;
-    this.mb = mb ?? new MessageBoxClient({ host: cfg.messageboxUrl, walletClient: wallet });
+    this.mb = mb ?? new RawBox(wallet, cfg.messageboxUrl);
   }
 
   async identityKey(): Promise<string> {
@@ -87,19 +91,15 @@ export class WebSkein {
     return this.sendBytes(box, dagCbor.encode(body), note);
   }
 
+  /** The body (dag-cbor) to the instance in `box`: a plain message on the session. Its id is the message's (what a reply names). */
   async sendBytes(box: string, body: Uint8Array, note: Partial<Sent> = {}): Promise<Sent> {
-    const env = await seal(this.wallet, { recipient: this.cfg.instance, body });
-    const cid = (await envelopeCid(env)).toString();
-    const r = await this.mb.sendMessage(
-      { recipient: this.cfg.instance.identityKey, messageBox: box, body: env as unknown as Record<string, unknown>, skipEncryption: true },
-      this.cfg.messageboxUrl,
-    );
-    const sent: Sent = { cid, box, messageId: r.messageId, at: new Date().toISOString(), ...note };
+    const { id } = await this.mb.send(this.cfg.instance.identityKey, box, body);
+    const sent: Sent = { cid: id.toString(), box, messageId: id.toString(), at: new Date().toISOString(), ...note };
     this.store.set(`${SENT}.${box}`, JSON.stringify(sent));
     return sent;
   }
 
-  /** Hash, bundle (≤1 MiB, blobs first, root tree last), seal and send each bundle to `objects`. */
+  /** Hash, bundle (≤1 MiB, blobs first, root tree last) and send each bundle to `objects`. */
   async importFiles(files: PickedFile[], onBundle?: (i: number, n: number, bytes: number) => void): Promise<{ root: CID; records: number; bundles: Sent[] }> {
     const { root, records } = await hashFiles(files);
     const bundles = [...chunk(importOrder(root, records))];
@@ -139,15 +139,13 @@ export class WebSkein {
     try { return JSON.parse(this.store.get(`${SENT}.${box}`) ?? "null") ?? undefined; } catch { return undefined; }
   }
 
-  /** Read (and by default acknowledge) `results` then `chat`; the newest verified `chat` reply from the instance becomes the conversation. */
+  /** Read (and by default acknowledge) `results` then `chat`; the newest `chat` reply from the instance becomes the conversation. */
   async inbox(opts: { ack?: boolean } = {}): Promise<Result[]> {
     const out: Result[] = [];
     for (const box of INBOX) {
-      const msgs = await this.mb.listMessagesLite({ messageBox: box, host: this.cfg.messageboxUrl });
-      for (const m of msgs) out.push(await this.readOne(box, m.messageId, m.sender, m.body));
-      if ((opts.ack ?? true) && msgs.length) {
-        await this.mb.acknowledgeMessage({ messageIds: msgs.map((m) => m.messageId), host: this.cfg.messageboxUrl });
-      }
+      const msgs = await this.mb.list(box);
+      for (const m of msgs) out.push(this.readOne(box, m));
+      if ((opts.ack ?? true) && msgs.length) await this.mb.ack(msgs.map((m) => m.messageId));
     }
     let newest: Conversation | undefined = this.conversation();
     for (const r of out) {
@@ -163,20 +161,11 @@ export class WebSkein {
     return out;
   }
 
-  async readOne(box: string, messageId: string, sender: string, raw: unknown): Promise<Result> {
-    const r: Result = { box, messageId, sender, verified: false };
-    try {
-      const env = (typeof raw === "string" ? JSON.parse(raw) : raw) as Envelope;
-      r.created = env.created;
-      r.cid = (await envelopeCid(env)).toString();
-      r.verified = verify(env);
-      if (!r.verified) throw new Error("envelope signature does not verify");
-      if (env.sender.identityKey !== sender) throw new Error(`envelope sender ${env.sender.identityKey} is not the messagebox sender ${sender}`);
-      const { body } = await open(this.wallet, env);
-      r.body = dagCbor.decode(body) as Record<string, unknown>;
-    } catch (e) {
-      r.error = (e as Error).message;
-    }
+  /** One listed message: its body as sent (dag-cbor), its id the messagebox's (the record's CID). */
+  readOne(box: string, m: Listed): Result {
+    const r: Result = { box, messageId: m.messageId, cid: m.messageId, sender: m.sender, verified: true };
+    if (m.value && typeof m.value === "object" && !(m.value instanceof Uint8Array)) r.body = m.value as Record<string, unknown>;
+    else r.error = "the body is not a record";
     return r;
   }
 }

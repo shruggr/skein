@@ -1,6 +1,7 @@
 // The host's providers (#70): recipients with identities of their own, which
-// carry an instance's messages out. A step emits a signed message (the
-// kernel's `emit`); once its step is committed the kernel hands it here (the
+// carry an instance's messages out. A step emits a message (the kernel's
+// `emit`; unsigned since #126 step 4: the host carries what its own kernel
+// hands it); once its step is committed the kernel hands it here (the
 // serve frame `emit`: {message, body, transport, address}) and this module
 // delivers it by the address book's transport:
 //
@@ -8,7 +9,8 @@
 //            `self` (#79): a message the instance sent itself (one of its apps to
 //            another: the wallet or an overlay to the chain app) — appended
 //            back into the same instance
-//            as a `local` request, as it is (signed by the instance)
+//            as a `local` request, as it is (unsigned: the front door finds the
+//            record in the instance's store, its own emit)
 //   libp2p   the instance's libp2p node: `topic:<name>` publishes the
 //            package, a peer ID gets it as one frame on /skein/message/1.0.0;
 //            the libp2p provider answers {replyTo, seqno, recipients} | {replyTo, sent: true}
@@ -26,14 +28,15 @@
 // it itself, with the kernel's authfetch, #126.)
 //
 // Every answer is a signed message from the provider to the instance — the
-// same record an `emit` makes, {kind: "mail", op: "put", sender, recipient,
-// box, body, signature}, signed under [2, "metanet handles envelope"], key
+// record an `emit` makes, {kind: "mail", op: "put", sender, recipient, box,
+// body, nonce}, with its `signature` (#126 step 4: a `local` package has no
+// session of the instance's to prove its sender), signed under [2, "metanet handles envelope"], key
 // "send", counterparty anyone, its body {replyTo: <the message>, …} — appended
 // as a `local` request ({kind: "message", message, body}): the instance's
 // front door checks it and routes it by `replyTo` to the thread awaiting
 // that message. The host verifies nothing of what it carries in; a provider
-// does check that a message it is asked to act on is signed by its sender
-// and is for it.
+// checks that a message it is asked to act on is for it (the instance's
+// message comes from the instance's own kernel: no signature, #126 step 4).
 //
 // The stock providers (box → body → answer body; every answer has `replyTo`,
 // and a failure is {replyTo, error}):
@@ -110,15 +113,15 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 
-/** The signing every message gets (BRC-169 §7.2, on skein's mail record). */
+/** The signing a provider's answer and an intention's request get (BRC-169 §7.2, on skein's mail record); an emit is unsigned (#126 step 4). */
 export const MESSAGE_PROTOCOL: [2, string] = [2, "metanet handles envelope"];
 export const MESSAGE_KEY_ID = "send";
 /** The stream protocol a signed message travels on to a libp2p recipient. */
 export const MESSAGE_STREAM = "/skein/message/1.0.0";
 
-/** A signed message as the kernel keeps it. */
+/** A message as the kernel keeps it: an emit's unsigned, a provider's answer and an intention's request signed. */
 export interface MailRecord {
-  kind: "mail"; op: "put"; sender: Uint8Array; recipient: Uint8Array; box: string; body: CID; subject?: CID; nonce?: Uint8Array; signature: Uint8Array;
+  kind: "mail"; op: "put"; sender: Uint8Array; recipient: Uint8Array; box: string; body: CID; subject?: CID; nonce?: Uint8Array; signature?: Uint8Array;
   [k: string]: unknown;
 }
 /** What the kernel hands over (the serve frame `emit`). */
@@ -142,7 +145,7 @@ export interface ProvidersOptions {
   keyOf(name: ProviderName): PrivateKey;
   /** The instance `handle`'s identity key (33 bytes), or undefined when it is not known. */
   identity(handle: string): Promise<Uint8Array | undefined>;
-  /** Append a signed message (its package) into `handle` as a `local` request. */
+  /** Append a message (its package: a provider's signed answer, or the loopback's own emit) into `handle` as a `local` request. */
   append(handle: string, pkg: { kind: "message"; message: MailRecord; body: Uint8Array }): Promise<unknown>;
   /**
    * Sign `data` with the instance `handle`'s own key, BRC-169's way ([2, "metanet handles
@@ -304,7 +307,6 @@ export class Providers {
     const name = out.address as ProviderName;
     if (!PROVIDERS.includes(name)) throw new Error(`no provider ${out.address} on this host`);
     if (hex(out.message.recipient) !== this.key(name)) throw new Error(`the message is not for the ${name} provider`);
-    if (!(await this.signed(out))) throw new Error("the message's signature does not verify: not acted on");
     if (HOST_SKEIN_PROVIDERS.includes(name)) {
       // #90, #113: the host skein's alone — any other sender's message is not acted on, and not answered.
       const host = this.o.manager?.from();
@@ -329,15 +331,6 @@ export class Providers {
     } catch (e) {
       await this.answer(handle, name, out.message, id, { error: (e as Error).message });
     }
-  }
-
-  /** The sender's signature over the record (BRC-169's way): anyone checks it with the sender's key. */
-  private async signed(out: Outgoing): Promise<boolean> {
-    const { signature, ...rest } = out.message;
-    try {
-      const v = await new ProtoWallet("anyone").verifySignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: hex(out.message.sender), data: [...dagCbor.encode(rest)], signature: [...signature] });
-      return v.valid;
-    } catch { return false; } // a signature that does not parse does not verify: the caller refuses the message and says so
   }
 
   /** A signed message from provider `name` to the instance that sent `to`, in `to`'s box: {replyTo, …answer}, appended. */

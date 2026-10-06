@@ -5,8 +5,14 @@ How messages enter and leave a skein instance, as built at log format 8.
 network; messages are state.** Skein is a state process: every package a
 transport carries in is appended as received and the front door is stepped
 on it; sessions are state; a synchronous client waits on the thread. There
-is **one way out**: a step `emit`s a signed message to a key the address
-book names, or an event, and ends waiting, and the answer is an entry.
+is **one way out**: a step `emit`s a message to a key the address book
+names, or an event, and ends waiting, and the answer is an entry. **A skein
+receives mail only where it verifies the sender itself** (#126 step 4): a
+BRC-104 session to its own front door (`/sendMessage`, which another
+instance reaches with `authfetch`), or libp2p — the delivery session is the
+sender's proof, and a mail record carries no signature of its sender.
+Anything inside a body that must mean something on its own signs itself (a
+claim, a payment). A remote messagebox is a wallet's, never a skein's.
 **Intentions** (#126) are events the runtime answers as it is wired — a
 `deadline`, a `fetch` (the host signs the request with the instance's key
 to its waker or its HTTP proxy, whose signed answer comes back); a program
@@ -35,8 +41,8 @@ step is recorded. There is no in-memory execution path:
   signatures and all. The host verifies nothing;
 - **the door** (#121, docs/VM.md "The door") runs before the entry is
   written, read-only: the kernel matches the dispatch row, the transport's
-  middleware verifies the sender (BRC-104, GossipSub's signature, the
-  message signature), and the row's `filter` runs on the package's content
+  middleware verifies the sender (BRC-104, GossipSub's signature, a
+  provider's or a claim's own signature), and the row's `filter` runs on the package's content
   (`beef`: every BEEF decoded, its transactions stored once as blocks, every
   BUMP checked against `chain/state`, the bytes replaced by a pointer
   record — **no BEEF bytes are logged**). The outcome is the entry either
@@ -108,10 +114,11 @@ claim's sender owns it; `skein plan claim`), or signed before the instance
 existed and forwarded by the host's instance manager as its first entry
 (`create`, #90), before the instance is published. A claim is the one
 message that may name **no recipient**: the mail record without
-`recipient`, box `claim`, signed as every message is (`[2, "metanet
-handles envelope"]`, key `send`, counterparty anyone — the sender's key
-alone checks it; SDK `message.zig` ≥ 0.6.1, the front door, the kernel's
-`isMail`). Any other message naming none is not admitted. Delegating administration is the owner adding a row
+`recipient`, box `claim`, and one of the few a sender signs itself (#126
+step 4: no session of the instance's carries a claim forwarded into it) —
+`[2, "metanet handles envelope"]`, key `send`, counterparty anyone, the
+sender's key alone checks it; SDK `message.zig` ≥ 0.6.1, the front door, the
+kernel's `isMail`. #127 is its own mechanism, untouched by #126 step 4. Any other message naming none is not admitted. Delegating administration is the owner adding a row
 with the same operation and another sender. A refused operation (a bad
 body, a record not in the store) is a log line and nothing written. The
 client commands: `skein plan install|uninstall|dispatch|peers|deploy`
@@ -362,7 +369,7 @@ refused  {stage: "middleware" | "filter", reason, status, code?}                
 request  http:   {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
          libp2p: {kind: "p2p", topic, from: bytes, seqno: bytes(8), signature: bytes, body: bytes}
                  {kind: "p2p-frame", protocol, from: bytes, body: bytes}
-         local:  {kind: "message", message: <a signed mail record>, body: bytes}
+         local:  {kind: "message", message: <a mail record>, body: bytes}       signed, or the loopback (below)
 mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, subject?: <cid>,
           json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce}
           | nonce?: bytes(16), signature?: bytes}
@@ -373,21 +380,35 @@ order, `time` is the host's clock at admission (#10). A `request` names
 the package as received (#121: as the door hands it back — a BEEF replaced by its pointer record on a row whose `filter` is `beef`) and its transport, whose middleware the kernel
 steps on it (the genesis's front door for `http`, `libp2p` and `local`; a
 genesis may name others in `middleware: {<transport>: <program>}`). A
-`local` request is a provider's answer on this host (below, "Outbound"): the
-door (#121: the front door's fn `verify`) checks the message's signature against its sender and that its
-body is the one named, and admits it. No host admits a message directly
-(K2): `admit` refuses a `mail` entry, and every message arrives inside a
-request — the browser host's as `local` requests carrying a signed message.
-A mail entry is only in a log written before that. A
+`local` request is what the host carries in itself (below, "Outbound"): a
+provider's answer or a forwarded claim — the door (#121: the front door's fn
+`verify`) checks the message's signature against its sender and that its
+body is the one named — or the loopback (#79), this instance's own emit to
+itself, unsigned, which the door admits because the record is in the
+instance's store (the kernel put it when the step emitted it). No host
+admits a message directly (K2): `admit` refuses a `mail` entry, and every
+message arrives inside a request — the browser page's own messages as
+`http` requests on its session with its instance (#126 step 4). A mail entry
+is only in a log written before that. A
 store in an older format is refused for running (`kernel-zig/src/log.zig`
 has the shapes).
 
-- **A message is its mail record.** A client's message: `sender` is the
-  session's identity, `session` the BRC-104 signed request (the payload that
-  carried the body, its signature and nonces), `json` set when the client
-  sent JSON (so the answer to it goes back as JSON). An emitted message (an
-  instance's or a provider's, #70) carries its own `signature` and `nonce`
-  instead, and keeps it whatever carried it. `body` is the dag-cbor record
+- **A message is its mail record.** Its sender is proven by the transport
+  that carried it (#126 step 4), never by a signature inside the record. A
+  client's message: `sender` is the session's identity, `session` the
+  BRC-104 signed request (the payload that carried the body, its signature
+  and nonces), `json` set when the client sent JSON (so the answer to it goes
+  back as JSON). An instance's emitted message (#70) is the record the
+  instance emitted — `nonce` (the emit's own: two threads asking the same
+  thing are two messages) and `subject?`, no `session` — kept the same by
+  the recipient, whose front door took it on the sender's BRC-104 session
+  (`sender` the session's identity) or over libp2p (`sender` the peer's key):
+  the request entry it was admitted from holds the proof, and both sides know
+  the message by one CID. `signature` is on the records no session of the
+  instance's carries: a provider's answer (#70), a claim (#127), the
+  instance's request an intention's answer carries (#126) — and on every
+  emitted message in a log written before #126 step 4 (read, never written:
+  replay serves that signer call from the log). `body` is the dag-cbor record
   beside it. A box a client
   names never starts with `:` (reserved for the host's own boxes).
 - **A message's id is the CID of its mail record.** Sender and recipient
@@ -431,7 +452,11 @@ bytes); the answer is in the form asked.
 
 - **sendMessage** → one message to admit (`admit`): the mail record
   (`sender` the caller) and its body, which the kernel routes after the
-  front door's step. Accepted when something takes it: for this instance's
+  front door's step — the client's form (`session`, `json?`), or, for a
+  BRC-231 message that names `nonce` (and `subject?`), another instance's
+  emit delivered on its own session, kept as the record it emitted (#126
+  step 4). A message carrying a `signature` is refused (400): the session is
+  the proof. Accepted when something takes it: for this instance's
   own boxes, a dispatch row on `(sender, box)` — the kernel's own, or a
   program's — or a reply to a message this instance sent that sender; for
   the identity it keeps a mailbox for (its owner), a row whose program is
@@ -459,6 +484,15 @@ part of the record and so of its CID, and is left until the messagebox is
 re-pinned for another reason.
 
 ## Mailbox instances
+
+A mailbox instance is a **wallet's** messagebox, never a skein's (#126 step
+4): a skein receives mail only at its own front door (or over libp2p), where
+it verifies the sender itself; a messagebox someone else keeps can only hand
+on what was sent to it, which the receiving skein could not verify. There is
+no mailbox pull path into a skein: the browser page reads its identity's
+mailbox with its wallet and shows what is there, and if the user wants their
+instance to act on something, the user sends the instance a message of
+their own, on their own session with it.
 
 An identity outside the host — David's wallet, the inference peer, a browser
 tab — gets its mail kept by a **mailbox instance**: an instance with only the
@@ -543,7 +577,7 @@ owner's key and the instance's origin.
 ## Outbound: emit, the address book and the providers
 
 (#70, #67.) This is the program-facing contract for everything that leaves
-an instance. A step never talks to the network: it **emits a signed
+an instance. A step never talks to the network: it **emits a
 message** to an identity key the address book names, ends `waiting` on it,
 and the answer — a peer's reply, a provider's answer — is an entry that
 steps the thread again. **External communication is a thread.**
@@ -556,21 +590,27 @@ emit(message) → <cid>    preview1: skein.emit(msg, len, out, cap) → n   (the
                          Zig:      sk.emit(a, to, box, body: Value, subject: ?cid) → cid; sk.send(a, to, box, body)
 message  dag-cbor {to: bytes(33), box: text, body: bytes (the body record's canonical dag-cbor), subject?: <cid>}
 record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, subject?: <cid>,
-          nonce: bytes(16), signature: bytes}
+          nonce: bytes(16)}
 ```
 
 - The kernel builds the record (`sender` the instance, `recipient` = `to`),
-  signs it through the signer — DER ECDSA by the sender's BRC-42 child for
-  `[2, "metanet handles envelope"]`, key ID `send`, counterparty anyone,
-  over the dag-cbor of the record without `signature` (BRC-169 §7.2/§7.3's
-  signing on skein's record; anyone verifies it with the sender's key) —
   puts it and the body, and returns its CID: the message's id, what an
   answer's `replyTo` names. `nonce` is the first 16 bytes of sha256(thread ‖
   step ‖ the emit's place in the step): two threads asking the same thing
-  send two messages.
+  send two messages. **Unsigned** (#126 step 4): no signer call; the
+  transport that carries it proves its sender — the instance's own BRC-104
+  session with the recipient's front door (its delivery thread's
+  `authfetch`), libp2p (the peer), or, for a provider on its host, the host
+  itself, which carries what its own kernel hands it. The recipient keeps
+  the same record. A log written before signed every emit (`[2, "metanet
+  handles envelope"]`, key `send`, counterparty anyone, over the record
+  without `signature`; a recorded signer call at that place in the step):
+  replay serves that call when the log holds it for that very record, and
+  the record is the signed one it was (scheduler.zig `oldEnvelope`) — read,
+  never written.
 - It goes out **when the step ends without error** (an errored step sends
-  nothing), listed on the step's update as `emitted`. Replay re-signs from
-  the recorded signer answer and sends nothing. At a start the kernel hands
+  nothing), listed on the step's update as `emitted`. Replay sends
+  nothing. At a start the kernel hands
   over again every emitted message a waiting thread still awaits; a host
   acts on a message once.
 - **An event instead of a message** (#65, #119): `emit({event: <name>,
@@ -626,7 +666,8 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   is not a CID`` · ``emit: no route to <hex>: not in the address book, and
   the genesis has no messagebox program to deliver it`` · `emit: <hex> is
   reached by mailbox, and the genesis has no messagebox program to deliver
-  it` · `emit: the signer did not sign the message` · in a kernel call,
+  it` · `emit: the signer did not sign the message` (replaying a log before #126
+  step 4 only) · in a kernel call,
   `emit: a kernel call sends nothing (emit from a step)`.
 
 ### Awaiting the answer
@@ -665,8 +706,9 @@ step's commit (transport `event`, address the name; again at a start while
 a thread awaits it). The host's wrapper — it holds the instance's signer —
 signs a request for it with the instance's key: the mail record `{kind:
 "mail", op: "put", sender: <the instance>, recipient: <the service's key>,
-box, body: <the event's CID>, nonce, signature}` (BRC-169's signing, as an
-emit's), and sends it where the host is wired (`Providers.route`: the
+box, body: <the event's CID>, nonce, signature}` (BRC-169's signing: the one
+message the instance's key signs, since no session of the instance's carries
+the answer back), and sends it where the host is wired (`Providers.route`: the
 reference host's own waker, box `wake`, and HTTP proxy, box `fetch`, both
 `local`; which service and which transport is host wiring — not an
 instance setting, not an address-book entry the program reads). The
@@ -702,8 +744,8 @@ intention), and a program that messages one of its host's services reads
 the entry by where it is reached (`sk.peerAt(a, "local", "cron")`) or is
 given the key. There is no `role` (a module built before skein-sdk 0.7.0
 that finds a provider by one finds none: rebuild it on 0.7.0). Receiving needs none of this: a
-sender is authenticated by its key (a BRC-104 session or the message's own
-signature) and admitted by a dispatch row, whether or not the instance can
+sender is authenticated by the transport (a BRC-104 session to the front
+door, or libp2p; a host provider's answer by its own signature) and admitted by a dispatch row, whether or not the instance can
 answer it.
 
 The address book is one of the kernel's four tables (#77). Who writes it:
@@ -763,8 +805,11 @@ message out and answers. The reference host runs seven
 the host skein's only; their
 keys are the host's business (children of its master secret), the instance
 knows them from its address book. Every answer is a signed message from
-the provider to the instance — the same record an `emit` makes, signed the
-same way, `subject` echoed, a fresh `nonce` — in the box asked (`frame`
+the provider to the instance — the record an `emit` makes with its
+`signature` (BRC-169's way: a `local` package has no session of the
+instance's to prove its sender; an instance's message to a provider is
+unsigned, the host carrying what its own kernel hands it, #126 step 4),
+`subject` echoed, a fresh `nonce` — in the box asked (`frame`
 for a stream's frames), its body `{replyTo: <the message>, …}`; a failure is
 `{replyTo, error}`. It arrives as a `local` request (`{kind: "message",
 message, body}`): the front door checks the signature and the body, and the
@@ -1021,9 +1066,10 @@ which POSTs it with the kernel's **`authfetch`** (#126,
 
 ```
 step 1   authfetch(<url>, {POST /sendMessage, content-type application/cbor, BRC-231 CBOR {message:
-         {recipient, messageBox, body, signature, subject?, nonce}} — the signed message itself});
+         {recipient, messageBox, body, subject?, nonce}} — the BRC-33 message, and the emit's own
+         subject and nonce; no signature});
          200 → finished {delivered: <cid>, url, attempt} (the recipient keeps the same record under
-         the same CID)
+         the same CID; another CID in the answer fails the delivery)
 ```
 
 - **The session** is the kernel's (docs/VM.md "authfetch"): per server base
@@ -1033,12 +1079,11 @@ step 1   authfetch(<url>, {POST /sendMessage, content-type application/cbor, BRC
   the identity that answered the handshake — the recipient's own, or a
   mailbox instance's for a mailbox kept for someone. Sending never tells
   the peer who we are beyond the session (no claim, no registration, #40).
-- **The message is still signed** (its `signature`, BRC-169's): #126 asks
-  for the BRC-104 request alone to be the signature, but a mailbox kept for
-  someone (the browser page's mailbox instance, #16) forwards the record to
-  its owner's instance, which must verify it by the sender's key alone; the
-  BRC-104 signature is verifiable only by the server it was made for. Kept
-  until that is decided (#126, "calls").
+- **The session is the proof** (#126 step 4): the recipient's front door
+  verifies the BRC-104 request and keeps the record with `sender` the
+  session's identity; nothing in the message is signed. A mailbox instance
+  keeping mail for a wallet keeps it for that wallet to read; it is never
+  forwarded into a skein ("Mailbox instances", above).
 - **Failure.** `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
   `defaults.sendRetryMs` later (default 30 000; a `deadline`) up to
   `defaults.sendAttempts` attempts in all (default 3); anything else, or
@@ -1199,8 +1244,8 @@ hints: no certificate comes with them.
 "1.0", handle: "<handle>@<domain>", pubkey}` from the same records (without
 a domain, the handle domain); 404 `{error: "not found"}`.
 
-An emitted message is signed the way BRC-169 signs an envelope (above), so
-a BRC-169 peer can check it.
+An emitted message carries no BRC-169 envelope signature (#126 step 4): a
+BRC-169 peer knows its sender by the BRC-104 session it came on.
 
 ## Calls
 
@@ -1365,18 +1410,23 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   the request's thread comes to rest.
 - **Fuel** is each request thread's, on its updates.
 
-- **Signed messages** (#70). A frame on `/skein/message/1.0.0` (which every
+- **Messages** (#70). A frame on `/skein/message/1.0.0` (which every
   node serves) and a message on a topic no route takes are read as a package
-  `{message, body}`: a signed mail record for this instance and its body.
-  The front door checks the signature as for a `local` request and admits
-  it; one for another identity is `ignore`, and a frame that is not a
-  package is `reject` (on a topic, `ignore`).
+  `{message, body}`: a mail record for this instance and its body. Its
+  sender must be the key the transport proved (#126 step 4: the stream's
+  Noise peer, the GossipSub publisher — `from`); the record carries no
+  signature. The front door checks the record and its body and admits it;
+  one from another sender is `reject`, one for another identity `ignore`,
+  and a frame that is not a package is `reject` (on a topic, `ignore`). The
+  reference host's peer key is not the instance's identity (a child of the
+  master secret, `libp2p:<handle>`), so an instance's own emit over libp2p
+  names a sender its peer ID does not carry, and is refused.
 
 Outbound is the `libp2p` provider (above, "The providers"): a step emits
 `publish`, `dial`, `send` or `close` to it and awaits the answer; a dialed
 stream's frames come back as messages in box `frame`. A message to an
-address book entry with `transport: "libp2p"` is carried as a signed
-package. Messagebox delivery stays HTTP.
+address book entry with `transport: "libp2p"` is carried as a package
+`{message, body}` (unsigned). Messagebox delivery stays HTTP.
 
 ## Fuel
 
@@ -1614,10 +1664,14 @@ BRC-104 session, none of that carries weight: the session proves the sender,
 TLS (or localhost) keeps the wire private, and the recipient is the host. The
 mail record keeps the signed request, so the proof outlives the session and
 verifies from the log with the instance's key alone. Replay needs the log
-and nothing else. (#70 brought back one part of it: an emitted message is
-signed itself, BRC-169's way, because it may travel by a provider or over
-libp2p, with no session to prove its sender. Still no encryption and no
-shared relay.)
+and nothing else. (#70 brought back one part of it — an emitted message
+signed itself, BRC-169's way — and #126 step 4 took it out again: a skein
+receives mail only where it verifies the sender itself, a BRC-104 session
+to its own front door or libp2p, and a messagebox someone else keeps is a
+wallet's, read by that wallet. What still signs itself is what no session of
+the recipient's carries: a claim, a host provider's answer, and anything
+inside a body that must mean something on its own. Still no encryption and
+no shared relay.)
 
 ## Bodies
 

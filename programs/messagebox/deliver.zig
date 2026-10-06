@@ -4,14 +4,16 @@
 //! address book does not name, whose record the resolve program kept
 //! (`resolve/peers`, #87) — is delivered by the instance itself: the kernel
 //! launches this program as the message's **delivery thread** (args
-//! {message: <the signed mail record>, transport: "mailbox"}), and the
+//! {message: <the mail record>, transport: "mailbox"}), and the
 //! thread POSTs it to <url>/sendMessage with `authfetch` (#126: the kernel's
 //! BRC-103/104 client — the session, the request's signature and the
 //! answer's check are the kernel's, through the signer, and the exchange is a
 //! recorded call on the step). The body is BRC-231 CBOR: {message:
-//! {recipient, messageBox, body, signature, subject?, nonce?}} — the signed
-//! message itself, so the recipient keeps it under the same CID. 200 and that
-//! CID → finished {delivered: <cid>, url, attempt}.
+//! {recipient, messageBox, body, subject?, nonce}} — the BRC-33 message, its
+//! sender the session's identity (#126 step 4: the session is the proof; no
+//! signature), and the emit's `subject` and `nonce`, so the recipient keeps the
+//! record this instance emitted, under the same CID. 200 and that CID →
+//! finished {delivered: <cid>, url, attempt}.
 //!
 //! Failure: `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
 //! at `defaults.sendRetryMs` (default 30 000) — a deadline (#126: an
@@ -79,14 +81,13 @@ const Ctx = struct {
     at: i128,
     attempt: i64,
 
-    /// One attempt: the signed message POSTed to <url>/sendMessage over the kernel's BRC-104 session.
+    /// One attempt: the message POSTed to <url>/sendMessage over the kernel's BRC-104 session.
     fn send(c: *Ctx) !void {
         const a = c.a;
         var m = cbor.MapBuilder.init(a);
         try m.put("recipient", .{ .bytes = c.to });
         try m.put("messageBox", cbor.string(Value.str(c.msg.get("box")) orelse ""));
         try m.put("body", .{ .bytes = c.body });
-        try m.put("signature", c.msg.get("signature"));
         try m.put("subject", c.msg.get("subject"));
         try m.put("nonce", c.msg.get("nonce"));
         var outer = cbor.MapBuilder.init(a);

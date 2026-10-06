@@ -59,7 +59,7 @@ else
   echo "== browser (issue #35): the corpus replayed by the wasm kernel in headless Chrome, into IndexedDB"
   (cd "$kz" && mise exec -- zig build web)
   "${node[@]}" "$kz/equiv/browser.ts" "${gen[@]}" || status=1
-  echo "== browser live (issue #35): an instance in Chrome chats an agent on a scratch router; the reply admitted; its store replayed natively"
+  echo "== browser live (issue #35): an instance in Chrome, chatted on the page's own session with it (#126 step 4), delivers its inference request itself; the answer shown from the page identity's mailbox, nothing admitted; its store replayed natively"
   "${node[@]}" "$kz/equiv/browser-live.ts" || status=1
 fi
 

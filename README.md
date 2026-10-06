@@ -386,8 +386,9 @@ is no "router"; the dispatch table routes); the **kernel** is the machine,
 the four tables and the signer import; **admin operations** are kernel
 operations, not programs; every other thing is an **app** under its own
 name; a **box** is a mailbox address in the dispatch table; **emit** is the
-one way out (a signed message to a key in the address book, or a broadcast
-event).
+one way out (a message to a key in the address book — unsigned: a skein
+receives mail only on a BRC-104 session to its own front door or over
+libp2p, #126 step 4 — or an event).
 
 ## Contributing
 

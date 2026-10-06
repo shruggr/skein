@@ -225,8 +225,9 @@ input `match`, or `refused`), never the table. Since #121 the sender is
 verified **at the door**, before the entry is written ("Requests", below):
 the BRC-104 session and signature of the identity the kernel matched on
 for a row whose sender is not `*` (the claimed key must be the session's),
-a topic message's GossipSub signature, a carried message's signature — the
-transport's middleware's fn `verify`, called by the kernel. The front
+a topic message's GossipSub signature, a `local` message's own signature (a
+provider's answer, a forwarded claim) or, for the loopback, its record in
+the store — the transport's middleware's fn `verify`, called by the kernel. The front
 door's step then answers the handshake (a request like any other: its step
 writes the session) and runs the row's handler, trusting what the door
 recorded (`door.verified`). Matching on the claim and then verifying it is
@@ -283,9 +284,10 @@ against those reads in the kernel's match.)
     claim first owns it — `skein plan claim`, then `skein send`); or a claim
     the owner signed **before the instance existed**, naming no recipient —
     the one message that may name none (the mail record without
-    `recipient`, signed as every message is: BRC-169's `[2, "metanet
-    handles envelope"]`, key `send`, counterparty anyone, so the sender's
-    key alone checks it) — which the host's instance manager forwards into
+    `recipient`, signed by its sender — one of the few messages that sign
+    themselves (#126 step 4: no session of the instance's carries it) —
+    BRC-169's `[2, "metanet handles envelope"]`, key `send`, counterparty
+    anyone, so the sender's key alone checks it) — which the host's instance manager forwards into
     a new instance as its first entry, a `local` request (`create`, #90,
     MESSAGES.md). The host signs nothing for the owner.
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
@@ -331,7 +333,8 @@ these imports:
 - the record store, read-only, by CID (`get`): global, holding a CID is the permission;
 - the connected wallet's BRC-100 operations (sign, verify, encrypt, decrypt,
   derive): the signer, answered synchronously and recorded;
-- **`emit`** (#70): a signed message to a recipient the address book names,
+- **`emit`** (#70): a message to a recipient the address book names (unsigned:
+  its transport proves its sender, #126 step 4),
   or an event — an intention the runtime answers (#126: a `deadline`, a
   `fetch`) or one it acts on (a broadcast, a subscription, a beacon) — the
   way out (below, "emit");
@@ -413,7 +416,7 @@ status as 1, because `wasi:cli/exit` is ok/err.
 
 A step never asks the world anything mid-step but the signer and, through
 the kernel, a BRC-104 server (`authfetch`, #126 — both recorded calls).
-**External communication is a thread**: the step emits a signed message or
+**External communication is a thread**: the step emits a message or
 records an intention, ends `waiting` on what it expects, and the answer
 arrives as an entry that steps the thread again. There is no plain `http`
 import, no `libp2p` import and no `wasi:http` (format 6 removed them, and
@@ -449,7 +452,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   (the wallet or an overlay app sending the chain app an `ingest`; never a
   kernel admin box, which no row opens to the instance's key). It goes out by
   the host's loopback (transport `local`, address `self`), comes back as a
-  `local` request signed by the instance, and routes like any message: a
+  `local` request as it is (unsigned, #126 step 4: the front door admits it
+  as the instance's own emit, its record in the store), and routes like any message: a
   dispatch row from the instance's own key (a manifest's `$self`) admits
   it; the answer, from the instance to the instance, steps the thread
   awaiting it by `replyTo`. (An answer — a body naming `replyTo` — to the
@@ -460,23 +464,27 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   `box` is not empty and does not start with `:`. `body` is the canonical
   dag-cbor of the body record. `subject` names what the message is about
   (a transaction's CID); a provider's answer carries it back.
-- The kernel builds the **message record**, signs it through the signer
-  (a recorded call, an `oracle` record — the kind keeps the signer's old name — as a program's own `wallet` calls
-  are), puts it and the body, lists its CID on the step's update
-  (`emitted`) and returns the CID — the message's id, what a reply's
-  `replyTo` names:
+- The kernel builds the **message record**, puts it and the body, lists
+  its CID on the step's update (`emitted`) and returns the CID — the
+  message's id, what a reply's `replyTo` names:
 
   ```
   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>,
-   subject?: <cid>, nonce: bytes(16), signature: bytes}
+   subject?: <cid>, nonce: bytes(16)}
   ```
 
-  `signature` is BRC-169's signing (§7.2/§7.3) on skein's record: DER
-  ECDSA by the sender's BRC-42 child for `[2, "metanet handles envelope"]`,
-  key ID `send`, counterparty anyone, over sha256 of the dag-cbor of the
-  record without `signature` — anyone checks it with the sender's key.
   `nonce` is sha256(thread ‖ step ‖ the emit's place in it)'s first 16
-  bytes: two threads asking the same thing send two messages.
+  bytes: two threads asking the same thing send two messages. **No
+  signature** (#126 step 4): a skein receives mail only where it verifies
+  the sender itself — the recipient's front door on the sender's BRC-104
+  session (the delivery thread's `authfetch`), or libp2p — and keeps the
+  same record, so both know the message by one CID. A log written before
+  #126 step 4 signed every emit through the signer (a recorded `oracle`
+  call: BRC-169's `[2, "metanet handles envelope"]`, key `send`,
+  counterparty anyone, over the record without `signature`); replay serves
+  that call when the log holds it at that place in the step for that very
+  record, and puts the signed record it was (scheduler.zig `oldEnvelope`) —
+  read, never written.
 - It goes out **when the step ends without error** (an errored step's
   emits are dropped), by the recipient's transport (docs/MESSAGES.md, "The
   address book"): a `mailbox` recipient's by the instance's own delivery
@@ -485,8 +493,7 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   recipient's or the instance's own (the loopback, `local` to `self`)
   handed to the host once the step is committed (the serve frame `emit`). At a start the kernel hands over again what a waiting
   thread still awaits (a host restart loses nothing a provider had); a host
-  acts on a message once. Replay re-signs from the recorded signer answer
-  and sends nothing.
+  acts on a message once. Replay sends nothing.
 - **Events are open (#119).** `{event: <name>, …}` is addressed to no one
   and signed by no one: the kernel puts a record, lists it on the update
   (`emitted`, beside the messages) and hands it to the host after the
@@ -558,7 +565,7 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
   no route to <hex>: not in the address book, and the genesis has no
   messagebox program to deliver it`` · `emit: <hex> is reached by mailbox, and the
   genesis has no messagebox program to deliver it` · `emit: the signer did
-  not sign the message` · `emit: fetch: <why>` (a fetch that is
+  not sign the message` (replaying a log before #126 step 4) · `emit: fetch: <why>` (a fetch that is
   not one) · a refused beacon (`emit: beacon: every <n> ms: from 1000 ms to
   a day`, `emit: beacon: \`body\` is the bytes published at each beat`, `emit:
   <beacon|unbeacon>: the emitting program is not installed …`) · in a kernel
@@ -739,7 +746,7 @@ writing nothing but blocks:
    or `{refused: {status, code?, reason}}`. A handshake is a request like
    any other: the door passes it and its step writes the session.
 3. **The filter.** The row's `filter` setting names what the door runs on
-   the package's content. For a `local` package (a signed message carried
+   the package's content. For a `local` package (a message the host carried
    in) the row is the message's own: its `mailbox` row on (sender, box),
    none for a reply.
 4. **The outcome is logged either way.** The admission: the entry names the
@@ -761,9 +768,9 @@ the package as received: no `door`, no filter, and its step verifies.
 **The door is lossless for anything a signature covers.** What a filter
 rewrites must be reconstructible to the exact bytes, so a reader of the log
 (replay, an auditor) can put them back and re-check the signature: the
-`beef` filter's encoder sits beside its decoder. A signed message's mail
-record is never rewritten (its CID is the message's id, and its signature
-covers its body's CID): the door puts the rewritten body beside it
+`beef` filter's encoder sits beside its decoder. A carried message's mail
+record is never rewritten (its CID is the message's id, and a signature, if
+it has one, covers its body's CID): the door puts the rewritten body beside it
 (`door.bodies`, `{of: <the body the record names>, is: <the body put>}`)
 and the kernel routes the message with that one; restored, it is the body
 the record names. Decryption of a body encrypted to the instance is **not**
@@ -815,7 +822,8 @@ Every package a transport carries in is an entry — since #121 as the door
 hands it back: `{kind: "log", …, request: <record>, transport, door? |
 refused?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
 `middleware[transport]`, else its front door for `http`, `libp2p` and
-`local` (#70: a provider's signed message, its signature checked;
+`local` (#70: a provider's signed answer or a forwarded claim, its
+signature checked; the loopback, this instance's own emit, its record in the store;
 `scheduler.zig` `middlewareOf`) — as
 the **request's thread**: origin `{kind: "thread", program: <middleware>,
 args: {request, transport}, launchedBy: <the request record>, input: <the
@@ -911,15 +919,18 @@ mail   {kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?, 
   GossipSub message, a stream frame), which the front door is stepped on
   ("Requests", above; the record shapes in docs/MESSAGES.md).
 - **`mail`** is a message that arrived at the front door: its sender is
-  proven by the BRC-104 session it came on (`session` keeps the signed
-  request, so the log verifies with keys alone) or, for a message another
-  instance or a provider emitted, by its own `signature` (#70, "emit"
-  above); its body is a record of its own. Every host's messages arrive in
-  requests, and the front door's step routes them: `admit` refuses a `mail`
-  entry (K2) — a message is never the host's word. A signed message comes
-  in as a `local` request `{kind: "message", message, body}`, its signature
-  checked by the front door (the browser host's own messages, signed by its
-  wallet, and the ones it polls from its mailbox instance). A `mail` entry
+  proven by the transport it came on (#126 step 4) — the BRC-104 session
+  (`session` keeps a client's signed request, so the log verifies with keys
+  alone; another instance's emit is kept as it emitted it, its proof the
+  request entry it came in), libp2p (the peer) — or, for a host provider's
+  answer and a forwarded claim, by its own `signature` (#70, #127); its body
+  is a record of its own. Every host's messages arrive in requests, and the
+  front door's step routes them: `admit` refuses a `mail` entry (K2) — a
+  message is never the host's word. A provider's answer comes in as a
+  `local` request `{kind: "message", message, body}`, its signature checked
+  by the front door; the browser page's own messages come as `http`
+  requests on its session with its instance (#126 step 4: it admits nothing
+  from its mailbox instance, which is the user's). A `mail` entry
   in a log written before that still processes on replay. The mail
   record's CID is the message's id — what the sender computes too, and what
   a reply's `replyTo` names; the same record is admitted once (the `unique`

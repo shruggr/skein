@@ -27,21 +27,30 @@
 //                      message is routed as (box `libp2p:<topic>`)
 //                      {kind: "p2p-frame", protocol, from: bytes, body: bytes}
 //                      one frame of an inbound stream (unsigned: the stream is Noise's)
-//              local   {kind: "message", message: <a signed mail record>, body: bytes}
-//                      a signed message a host provider (or anyone the host hands one
-//                      from) carried in with its body (#70): the front door checks the
-//                      signature and routes it
+//              local   {kind: "message", message: <a mail record>, body: bytes}
+//                      a message the host carried in with its body (#70): a provider's
+//                      answer or a forwarded claim, signed (the front door checks the
+//                      signature), or the host's loopback (#79) — this instance's own
+//                      emit to itself, unsigned (the front door finds it in the store)
 //   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, subject?: <cid>,
 //             (#127: a claim, box `claim`, may name no recipient — signed before the instance it
 //             claims existed and forwarded into it by the host)
 //             json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce} | nonce?: bytes, signature?: bytes}
 //            a message (#40, #70): its CID is the message's id — what a
-//            reply's `replyTo` names. Its sender is proven one of two ways:
-//            `session`, the BRC-104 signed request it came in (a BRC-33
-//            client's), or `signature`, the sender's own signature over the
-//            record without it (an emitted message, #70: BRC-169's signing —
-//            [2, "metanet handles envelope"], key "send", counterparty
-//            anyone — so anyone can check it with the sender's key). Routed to
+//            reply's `replyTo` names. Its sender is proven by the transport
+//            that carried it (#126 step 4): `session`, the BRC-104 signed
+//            request it came in (a BRC-33 client's); an emitted message
+//            (`nonce`: the emit's own, no session) delivered on the sender's
+//            BRC-104 session to this instance's front door or over libp2p —
+//            the request entry it was admitted from holds the proof, and the
+//            record is the one the sender emitted, so both know it by one CID.
+//            `signature` (BRC-169's signing — [2, "metanet handles envelope"],
+//            key "send", counterparty anyone; the SDK's message.zig) is on the
+//            records no session of this instance's carries: a claim (#127), a
+//            host provider's answer and the instance's request an intention's
+//            answer carries (#126); and on every emitted message in a log
+//            written before #126 step 4, read (replay serves that signing from
+//            the witness: scheduler.zig oldEnvelope), never written. Routed to
 //            the thread awaiting the message its body's `replyTo` names, else
 //            by subscription on (sender, box). Since #68 a message arrives
 //            inside a request and the middleware's step routes it; a host may
@@ -260,10 +269,12 @@ pub fn isRequest(transport: []const u8, x: ?Value) bool {
         return false;
     }
     if (std.mem.eql(u8, transport, "local")) {
-        // #70: a signed message and its body, as a provider carried it in.
+        // #70: a signed message and its body, as a provider carried it in — or (#79, #126 step 4)
+        // the loopback, the instance's own unsigned emit to itself (the front door checks it is).
         if (!std.mem.eql(u8, kind, "message")) return false;
         const m = r.get("message") orelse return false;
-        if (!isMail(m) or Value.bytesOf(m.get("signature")) == null) return false;
+        if (!isMail(m)) return false;
+        if (Value.bytesOf(m.get("signature")) == null and !std.mem.eql(u8, Value.bytesOf(m.get("sender")).?, Value.bytesOf(m.get("recipient")) orelse "")) return false;
         return Value.bytesOf(r.get("body")) != null;
     }
     return false;
@@ -324,12 +335,13 @@ pub fn isMail(x: ?Value) bool {
 /// A signed message's preimage (#70): the dag-cbor of its mail record without
 /// `signature` — what the sender signed, BRC-169's way ([2, "metanet handles
 /// envelope"], key "send", counterparty anyone; message.zig in the SDK (lib/)
-/// checks it).
+/// checks it): a claim, a provider's answer, an emit in a log before #126 step 4.
 pub fn signedPart(a: std.mem.Allocator, m: Value) ![]u8 {
     return cbor.encode(a, try cbor.without(a, m, "signature"));
 }
 
-/// The BRC-43 protocol and key an emitted message is signed under (#70): BRC-169 §7.2's.
+/// The BRC-43 protocol and key a signed message is signed under (#70: BRC-169 §7.2's) — a claim, a
+/// provider's answer, an intention's request; an emit before #126 step 4 (read on replay, never written).
 pub const MESSAGE_PROTOCOL = "metanet handles envelope";
 pub const MESSAGE_KEY_ID = "send";
 /// The one box a message may name no recipient in (#127: a claim, forwarded; the SDK's message.CLAIM_BOX).

@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     inferHandle: { handle: ih!, domain: id ?? "localhost" },
     pollMs: Number(q.get("pollMs") ?? 1000),
     log: (l) => line(l),
-    onMessage: (m) => say("instance", String((m.body as { text?: unknown }).text ?? JSON.stringify(m.body)), "in"),
+    onMessage: (m) => say(m.from === host.identity ? "instance" : m.from.slice(0, 10), String((m.body as { text?: unknown }).text ?? JSON.stringify(m.body)), "in"),
   });
   (window as unknown as { skein: BrowserHost }).skein = host;
   await host.start();

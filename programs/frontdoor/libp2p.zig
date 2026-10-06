@@ -49,11 +49,13 @@
 //! `match`: the routes-table entry that matched (#72: an installed route's
 //! `program` and `app`).
 //!
-//! A signed message (#70) over libp2p needs no route: a frame on
+//! A message (#70) over libp2p needs no route: a frame on
 //! MESSAGE_PROTOCOL (/skein/message/1.0.0), or a topic message no route
-//! takes, whose body is {message: <signed mail record>, body: bytes}, is
-//! checked and admitted as the message it is (main.zig signedMessage) — a
-//! message for another identity is `ignore`.
+//! takes, whose body is {message: <mail record>, body: bytes}, is checked and
+//! admitted as the message it is (main.zig carriedMessage) — its sender must be
+//! the peer the transport proved (#126 step 4: the stream's Noise peer, the
+//! GossipSub publisher; the record carries no signature); a message for
+//! another identity is `ignore`.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -66,8 +68,8 @@ const Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 const SIGN_PREFIX = "libp2p-pubsub:";
 
-/// The stream protocol a signed message travels on to a libp2p recipient (#70):
-/// one frame, dag-cbor {message: <the signed mail record>, body: bytes}.
+/// The stream protocol a message travels on to a libp2p recipient (#70):
+/// one frame, dag-cbor {message: <the mail record>, body: bytes}.
 pub const MESSAGE_PROTOCOL = "/skein/message/1.0.0";
 
 /// A step of a libp2p request's thread: the first verifies and routes, a later one calls a waiting frame's handler again.
@@ -93,7 +95,7 @@ pub fn stepped(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
         }
         const pkg = cbor.decode(a, body) catch return verdict(a, if (topic != null) "ignore" else "reject", try std.fmt.allocPrint(a, "no route for {s}", .{source}));
         const m = pkg.get("message") orelse return verdict(a, if (topic != null) "ignore" else "reject", "not a message {message, body}");
-        return main.signedMessage(a, in, m, Value.bytesOf(pkg.get("body")) orelse "", false);
+        return main.carriedMessage(a, in, m, Value.bytesOf(pkg.get("body")) orelse "", false, key);
     };
     const again = Value.cidOf(in.get("tip")) != null;
     if (again) _ = try main.saved(a, Value.cidOf(in.get("tip")).?);

@@ -44,8 +44,8 @@
 // entry; a read moves nothing.
 //
 // What the instances send out goes through the host's providers (#70,
-// providers.ts): each kernel hands over the signed messages its steps
-// emitted to a `local` provider or a libp2p recipient, and the provider's
+// providers.ts): each kernel hands over the messages its steps emitted
+// (unsigned, #126 step 4) to a `local` provider or a libp2p recipient, and the provider's
 // answer comes back as a signed message, a `local` request entry. The HTTP
 // proxy (`fetch`) answers a URL of this host's own in process (the same
 // path, no socket) and sends any other out; the waker keeps the instances'
@@ -543,9 +543,11 @@ export class Router {
   }
 
   /**
-   * A signed message for an instance (#70): a provider's answer, appended as
-   * received — a `local` request entry, {kind: "message", message, body}; the
-   * front door checks its signature and routes it. Nobody waits on it.
+   * A message for an instance (#70): a provider's signed answer, a forwarded
+   * claim, or the loopback's own emit, appended as received — a `local`
+   * request entry, {kind: "message", message, body}; the front door checks it
+   * (the signature, or for the loopback the record in the store) and routes
+   * it. Nobody waits on it.
    */
   async appendLocal(handle: string, pkg: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {

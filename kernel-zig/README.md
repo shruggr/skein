@@ -23,8 +23,8 @@ owner; a message at its claim row writes its sender's admin rows and
 removes the row, #127); a program advances only heads in its write scope (an
 app's `<app>/…`; a genesis-wired program's genesis `scopes`); every package
 a transport carries in is an entry and the front door is stepped on it; a
-step's way out is `emit` (a signed message to a key the address book
-names, or an event: an intention the runtime answers, a broadcast, a
+step's way out is `emit` (a message to a key the address book
+names — unsigned, its transport proves its sender, #126 step 4 — or an event: an intention the runtime answers, a broadcast, a
 subscription, a beacon) and `authfetch` (#126: the kernel's BRC-104 client,
 a recorded call), and the answer is an entry; a deadline or a shell's sleep
 is a `deadline` event the host's waker keeps (#126). The host
@@ -201,14 +201,17 @@ What this kernel adds for the wallet in the VM (`programs/wallet` over the SDK's
 - **`await` on a record**: besides a message the step emitted, a step may
   await any record in the store — the subject of a plain entry to come.
 - **`emit(msg, len, out, cap)`** (#70, #67): a dag-cbor `{to: bytes(33),
-  box, body: bytes, subject?: <cid>}` → the CID of the signed message record
+  box, body: bytes, subject?: <cid>}` → the CID of the message record
   `{kind: "mail", op: "put", sender, recipient, box, body: <cid>, subject?,
-  nonce: bytes(16), signature}` (`scheduler.zig` hEmit/emitMessage). `to`
-  must be in the address book (`addressbook.zig`, the head `peers`); the
-  signature is BRC-169's (`[2, "metanet handles envelope"]`, key `send`,
-  counterparty anyone, over the record without `signature`), made through
-  the signer as a recorded call (`signer.zig`); `nonce` is sha256(thread ‖
-  step ‖ index)[0..16]. The update lists it in `emitted`; it goes out only
+  nonce: bytes(16)}` (`scheduler.zig` hEmit/emitMessage). `to`
+  must be in the address book (`addressbook.zig`, the head `peers`); no
+  signature (#126 step 4: the recipient's front door verifies the sender's
+  BRC-104 session, or libp2p's peer; the recipient keeps the same record).
+  A log written before signed every emit through the signer (BRC-169's `[2,
+  "metanet handles envelope"]`, key `send`, counterparty anyone, over the
+  record without `signature`; a recorded call, `signer.zig`): replay serves
+  that call when the log holds it for that very record (`oldEnvelope`) —
+  read, never written. `nonce` is sha256(thread ‖ step ‖ index)[0..16]. The update lists it in `emitted`; it goes out only
   if the step did not error: a `mailbox` recipient's by a delivery thread
   the kernel launches (the messagebox program, args `{message, transport:
   "mailbox"}`), a `local` or `libp2p` recipient's handed to the host after
@@ -357,7 +360,7 @@ A component has no network import: there is no `wasi:http` and no
 `http` and `libp2p` imports). It reaches the world as a preview1 program
 does: `skein:kernel/skein.emit(message) -> result<cid, string>` (the
 component host's `sk_emit`, over `program.Host.emit`, the scheduler's
-`hEmit`) — a signed message to a provider or a peer — and awaits the
+`hEmit`) — a message to a provider or a peer — and awaits the
 answer, which steps it again. `test/components/fetch.wasm`
 (`../programs/test/fetch`) is the fixture: it emits `{method: "GET", url}` in box
 `fetch` to the address book's `fetch` provider, ends awaiting, and writes
@@ -660,7 +663,8 @@ machine, four tables and the signer.
 - **The loopback** (#79, `routeTo`): `emit` to the instance's own identity
   needs no address book entry; the message goes to the host as transport
   `local`, address `self`, and the host appends it back as a `local`
-  request (src/host/providers.ts). A key the address book does not name
+  request (src/host/providers.ts), unsigned: the front door admits it as
+  the instance's own emit, its record in the store (#126 step 4). A key the address book does not name
   routes to the `mailbox` middleware when the genesis has one (#87): the
   messagebox's delivery thread reads the resolve program's record of it
   (`resolve/peers`) or fails "no route".
@@ -794,14 +798,14 @@ wallet in the tab over a test key, @1sat/wallet-browser's `createWebWallet`,
 as the 1sat-sdk test-app boots one); `emit` → the page's own providers (#70: `fetch`, `waker`, keys from
 a page-local master), by which the instance's own programs deliver its
 messages (the messagebox's delivery threads, a BRC-104 client through the
-`fetch` provider) and resolve handles (the resolve program). The call in: the page's chat (a message from the user,
-signed by the wallet and appended as a `local` request — K2: `admit` takes
-no mail entry, the front door verifies every message), a poll of this identity's mailbox
-instance on the host (registered by the page; `listMessages` on a BRC-104
-session, each signed message appended the same way, as the mailbox kept it,
-and acknowledged once durable; an unsigned one is not admitted; what the
-instance sends its owner lands there too and is shown), and a timer for
-wakes. An intermittent host: nothing runs while the tab is closed; inbound
+`fetch` provider) and resolve handles (the resolve program). The call in: the page's own messages (a chat, an install: the user's, on
+the page wallet's BRC-104 session with its instance — `http` requests to its
+front door, `frontFetch`, #126 step 4; K2: `admit` takes no mail entry), the
+providers' signed answers (`local` requests), and a timer for wakes. The
+page polls this identity's mailbox instance on the host (registered by the
+page; `listMessages` on a BRC-104 session) and shows every message there —
+what the instance sends its owner, a peer's mail to the user — and admits
+none into the instance: the mailbox is the user's (#126 step 4). An intermittent host: nothing runs while the tab is closed; inbound
 waits in the mailbox instance, wakes fire late at the next open.
 
 **Proof** (`equiv/run.sh`; `SKEIN_EQUIV_BROWSER=0` skips the Chrome parts):
@@ -814,12 +818,15 @@ native replay — 12/12 identical (entries, updates with fuel, state CID; about
 above `SKEIN_BROWSER_MAX_MB` (256) a tab crashes holding the bundle, the blocks
 and the kernel's memory at once, so the shell in the browser build is no
 longer replayed (native and instrumented replays still cover them). `equiv/browser-live.ts` runs the page against a
-host on a scratch port with an agent on the native kernel and a scripted
-inference peer (on its own mailbox instance): the page registers its
-identity's mailbox instance; its instance asks inference through its delivery thread and the page's `fetch` provider, resolves
-`@agent@localhost` (its resolve program), delivers a chat to the agent's front
-door, the reply is polled from the page identity's mailbox and admitted, and the thread answers the page; the store the browser wrote then
-replays natively to the same state with no DIVERGED.
+host on a scratch port with a scripted inference peer (on its own mailbox
+instance): the page registers its identity's mailbox instance; the chat app
+is installed and the page chats, both on the page wallet's session with its
+instance; its instance asks inference through its delivery thread (the
+kernel's authfetch, the page moving the bytes); the peer's answer lands in
+the page identity's mailbox and the page shows it, admitting nothing into
+the instance (#126 step 4: the mailbox is the user's; the agent half of
+this equiv, a reply admitted from the mailbox, went with it); the store the
+browser wrote then replays natively to the same state with no DIVERGED.
 
 **Not yet:** components in the browser (the shim would need jco-style glue);
 the JSPI path (not needed: re-execution on wake); a store too big to hold in
@@ -843,7 +850,7 @@ meter; it is deleted, #55). `equiv/run.sh` runs all of it (it builds first):
 | `wasm_fuel_test.zig` (#35) | fuel by instrumentation against wasmtime's on a probe module (bulk operators, grows that fail, branches to the function's label, call_indirect, a trap, a start function): the same reading at every host call and at the end, and the same exhaustion for every limit; every pinned program instruments to a valid module | ok |
 | instrumented fuel (#35) | the corpus replayed natively with `SKEIN_FUEL_MODE=instrument` (every module metered by its own counter) | 15/15 identical reports |
 | `equiv/browser.ts` (#35) | the corpus replayed by the wasm kernel in headless Chrome into IndexedDB, read back, against the native replay: report and dump; a store above `SKEIN_BROWSER_MAX_MB` skipped with a note (#83: the 3 with the shell app) | 12/12 identical, 3 skipped |
-| `equiv/browser-live.ts` (#35) | an instance in Chrome, the chat app installed into it by the install client's plan sent through the page as its owner (#83), chats an agent (the chat app by the owner's messages) on a scratch host; the reply admitted; its store replayed natively | all ok |
+| `equiv/browser-live.ts` (#35, #126 step 4) | an instance in Chrome, the chat app installed into it by the install client's plan sent by the page as its owner on its session with its instance (#83), chatted the same way; its inference request delivered by its own delivery thread; the answer shown from the page identity's mailbox, nothing admitted; its store replayed natively | all ok |
 | older-format refusal | a store in sqlite.ts's tables with a host-signed genesis (`equiv/old-store.ts`: format 1, no fuel) opened for running (`skein-kernel shell`) | refused, with the message |
 | `equiv/overlay.ts` (#36, #40, #79) | overlay nodes booted from system trees carrying skein-overlay's and skein-chain's modules and their #77 rows: @bsv/sdk's `TopicBroadcaster` and `LookupResolver` at the host-name origin; a submission ingested at the chain app and admitted on its first `accepted`/`proven` answer; GossipSub the same state; lookups, dupes, refusals, listings; a spend rejected at the chain app unwound by the overlay's watch; proofs as IPLD nodes; the busy gate; no Arcade (admitted at the proof); the three-host gossip (#74); all replayed | all ok; reproduced exactly |
 | `equiv/emit-events.ts` (#119) | two apps (app-demo's module as `evt-a`, no libp2p row, and `evt-b`, an exact row `demo_mine`) installed on a router with libp2p; refused as emitted: a subscribe with no program, a program not the app's, no fn, a `/protocol`, an unsubscribe of nothing the app has; evt-a emits `subscribe {topic: demo_abc, program: "demo", fn: "topic"}`: the update lists it with `app: "evt-a"`, the node subscribes it, a message published from a second router is delivered by the subscription to evt-a's fn (its head `evt-a/seen` moves); evt-b's subscribe of the same topic is its own (the next message is still evt-a's); evt-a unsubscribes: the next is evt-b's; evt-b unsubscribes: the node leaves it, a second unsubscribe refused; a row wins (evt-a's subscription to demo_mine: the message is evt-b's, by its row); an event nobody wires is a record and a log line; the fold read from the log; a new router on the same host subscribes the same topics and its kernel delivers by the subscription; replayed | all ok; reproduced exactly |

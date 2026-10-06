@@ -18,8 +18,8 @@
 // the owner installed it, installedAs), and everything else is an
 // admin message from the owner or a delegate, taken by the kernel itself.
 //
-// Outbound there is one primitive, `emit` (#70, #67): a step signs a message
-// to a recipient its address book names (addressbook.zig), the update lists
+// Outbound there is one primitive, `emit` (#70, #67): a step puts a message
+// (unsigned, #126 step 4: its transport proves its sender) to a recipient its address book names (addressbook.zig), the update lists
 // it (`emitted`), and when the step has ended without error the message goes
 // out by the recipient's transport — a `local` provider or the host's libp2p
 // node (handed to the host, Peers.emit, once the state is committed), or a
@@ -134,7 +134,7 @@ pub const Witness = struct {
 
 /// What the host carries out (#70): a message whose recipient's transport is
 /// `local` (a provider on the host: `address` its name) or `libp2p` (a peer
-/// ID, or `topic:<name>`) — `message` the signed mail record's dag-cbor (its
+/// ID, or `topic:<name>`) — `message` the mail record's dag-cbor (its
 /// CID is the message's id), `body` its body's — or (#65) an event, transport
 /// `event`, `address` its name (`broadcast`, or any other, #119): `message`
 /// the event record's dag-cbor, `body` a broadcast's transaction bytes (empty
@@ -358,8 +358,9 @@ pub const Runtime = struct {
     /// message to the instance's own identity (#79: one app of the instance
     /// asking another — the wallet or an overlay asking the chain app) goes by
     /// the host's loopback: transport `local`, address `self` — the host
-    /// appends it back into this instance as a `local` request, signed by the
-    /// instance, routed like any message (a dispatch row from the instance's
+    /// appends it back into this instance as a `local` request, as it is
+    /// (unsigned: the front door admits it as this instance's own emit, the
+    /// record in its store), routed like any message (a dispatch row from the instance's
     /// own key; none admits it to an admin box, #87). One exception: an answer
     /// (`is_reply`: its body names `replyTo`) to the instance's own key goes
     /// where the address book says that key is reached, when it says so — an
@@ -2148,8 +2149,8 @@ pub const Runtime = struct {
     /// The `emit` import (#70): dag-cbor {to: bytes(33), box, body: bytes (a
     /// dag-cbor record, canonical), subject?: <cid>} → the message's CID. The
     /// recipient must have a route (routeTo: the address book as this step
-    /// leaves it, else the mailbox transport's delivery thread); the message is signed through the signer (a recorded call), put, and
-    /// listed on the update; it goes out when the step ends without error.
+    /// leaves it, else the mailbox transport's delivery thread); the message is put (unsigned,
+    /// #126 step 4: emitMessage) and listed on the update; it goes out when the step ends without error.
     fn hEmit(imp: *program.Imports, msg: []const u8) program.Err![]const u8 {
         const st = stepOf(imp);
         const a = st.a;
@@ -2297,9 +2298,11 @@ pub const Runtime = struct {
         return st.rt.routeTo(st.a, root, key, false) catch imp.failWith("emit: the address book cannot be read");
     }
 
-    /// Sign, put and list one message from this instance (#70): {kind: "mail",
-    /// op: "put", sender, recipient, box, body, subject?, signature}, signed
-    /// BRC-169's way over the record without `signature`.
+    /// Put and list one message from this instance (#70): {kind: "mail", op:
+    /// "put", sender, recipient, box, body, subject?, nonce}. Unsigned (#126,
+    /// step 4): who sent it is the transport's to prove — a BRC-104 session to
+    /// the recipient's front door, libp2p — and the recipient keeps the same
+    /// record, so both sides know the message by one CID.
     fn emitMessage(st: *StepState, imp: *program.Imports, to: []const u8, box: []const u8, blk: cbor.Block, subject: ?[]const u8) program.Err![]const u8 {
         const a = st.a;
         var rec = cbor.MapBuilder.init(a);
@@ -2321,16 +2324,34 @@ pub const Runtime = struct {
         var d: [32]u8 = undefined;
         h.final(&d);
         try rec.put("nonce", .{ .bytes = try a.dupe(u8, d[0..16]) });
-        const pre = cbor.encode(a, rec.value()) catch return error.OutOfMemory;
-        const frame = signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, pre) catch return error.OutOfMemory;
-        const res = try signerCall(st, imp, frame);
-        const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the signer did not sign the message");
-        try rec.put("signature", .{ .bytes = sig });
+        // #126 step 4: no signature — the transport that carries the message proves its sender (the
+        // recipient's BRC-104 session, libp2p). A log written before signed every emit through the
+        // signer (a recorded call at this place in the step): replay serves that call when the
+        // witness holds it for this very record, and the record is the signed one it was.
+        if (try oldEnvelope(st, rec.value())) |frame| {
+            const res = try signerCall(st, imp, frame);
+            const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the signer did not sign the message");
+            try rec.put("signature", .{ .bytes = sig });
+        }
         st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
         const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
         try st.emitted.append(c);
         return c;
     }
+    /// Replaying a log written before #126 step 4, whose emits were signed (BRC-169's way, [2,
+    /// "metanet handles envelope"], key "send", counterparty anyone, over the record without
+    /// `signature`): the signer frame of that signature when the witness holds it at this place in
+    /// the step for this very record — read, never written; null otherwise (a new log, a live step).
+    fn oldEnvelope(st: *StepState, unsigned: Value) program.Err!?[]const u8 {
+        const wi = st.rt.witness orelse return null;
+        const a = st.a;
+        const w = (wi.find(a, st.origin, st.n, st.calls.items.len) catch return null) orelse return null;
+        if (!logm.isSignerCall(w)) return null;
+        const pre = cbor.encode(a, unsigned) catch return error.OutOfMemory;
+        const frame = signer.createSignatureFrame(a, logm.MESSAGE_PROTOCOL, logm.MESSAGE_KEY_ID, .anyone, pre) catch return error.OutOfMemory;
+        return if (std.mem.eql(u8, Value.bytesOf(w.get("request")) orelse "", frame)) frame else null;
+    }
+
     /// The edges into a record (#42): the index, plus the links of the bitcoin blocks this step kept so far.
     fn hEdges(imp: *program.Imports, to: []const u8, rel: ?[]const u8) program.Err![]const u8 {
         const st = stepOf(imp);

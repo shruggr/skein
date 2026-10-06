@@ -13,9 +13,9 @@
 //! Stepped: input {kind: "step", args: {request: <record>, transport}, match? | refused?, seen?, tip?, …}
 //!   the request record (kernel-zig/src/log.zig):
 //!     http    {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
-//!     local   {kind: "message", message: <a signed mail record>, body: bytes}   (#70: a
-//!             provider's answer, or any signed message the host hands in: the
-//!             signature checked, and admitted — signedMessage)
+//!     local   {kind: "message", message: <a mail record>, body: bytes}   (#70: a
+//!             provider's answer or a forwarded claim, its signature checked; the
+//!             loopback, this instance's own emit to itself — carriedMessage)
 //!   Its stdout is its answer (the kernel routes `admit`; the host reads the
 //!   rest off the thread's last update once it has come to rest):
 //!     {status, headers: {name: value}, body: bytes, admit?: [entry]}     answered (signed on the session)
@@ -125,7 +125,7 @@ fn run(a: Allocator) !void {
 /// matched, or why none. Who the package is from is checked here: BRC-104
 /// for http (a row that is not open: the session and the signature of the
 /// identity the kernel matched on), GossipSub's signature for a libp2p topic
-/// message, the message's signature for a `local` package. The answer is the
+/// message, a `local` package's signature (or, the loopback, its record in the store). The answer is the
 /// door's outcome: {ok: true, verified?: {caller, theirs, requestId} | {key}}
 /// — written on the entry (`door.verified`), so the step does not verify
 /// again — or {refused: {status, code?, reason}}: the entry is a refusal and
@@ -136,7 +136,7 @@ fn doorVerify(a: Allocator, in: Value, arg: Value) !Value {
     const transport = Value.str(arg.get("transport")) orelse "";
     if (eql(u8, transport, "libp2p")) return p2p.verify(a, req);
     if (eql(u8, transport, "local")) {
-        if (try message.problem(a, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "")) |bad| return doorRefused(a, 400, null, bad);
+        if (try localProblem(a, in, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "")) |bad| return doorRefused(a, 400, null, bad);
         return doorOk(a, null);
     }
     if (!eql(u8, transport, "http")) return doorRefused(a, 400, null, "the front door takes http, libp2p and local");
@@ -202,21 +202,25 @@ fn stepped(a: Allocator, in: Value) !Value {
     const transport = Value.str(args.get("transport")) orelse "";
     const req = try sk.get(a, rc);
     if (eql(u8, transport, "libp2p")) return p2p.stepped(a, in, rc, req);
-    if (eql(u8, transport, "local")) return signedMessage(a, in, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "", in.get("door") != null);
+    if (eql(u8, transport, "local")) return carriedMessage(a, in, req.get("message") orelse .null, Value.bytesOf(req.get("body")) orelse "", in.get("door") != null, null);
     if (!eql(u8, transport, "http")) return sk.report("the front door takes http, libp2p and local");
     if (Value.cidOf(in.get("tip"))) |tip| return resumed(a, in, rc, req, tip);
     return http(a, in, rc, req);
 }
 
-/// A signed message carried in whole (#70): a provider's (transport
-/// `local`: {kind: "message", message, body}) or one over libp2p (a frame on
-/// /skein/message/1.0.0, a topic message nothing else routes). Its signature,
-/// its body and its recipient (this instance; #127: none, for a forwarded claim) checked here, it is admitted as
-/// the message it is — routed by the kernel after the step by its `replyTo`,
-/// else by subscription on (sender, box), once (the `unique` map). The answer:
+/// A message carried in whole (#70): the host's (transport `local`: {kind:
+/// "message", message, body} — a provider's answer or a forwarded claim,
+/// signed; the loopback, this instance's own emit to itself) or one over
+/// libp2p (a frame on /skein/message/1.0.0, a topic message nothing else
+/// routes: `peer` the key the transport proved, which must be its sender —
+/// #126 step 4: the transport is the sender's proof, the record carries no
+/// signature). Its proof, its body and its recipient (this instance; #127:
+/// none, for a forwarded claim) checked here, it is admitted as the message it
+/// is — routed by the kernel after the step by its `replyTo`, else by
+/// subscription on (sender, box), once (the `unique` map). The answer:
 /// {verdict: "accept", admit: [{mail, body}]} | {verdict: "reject" | "ignore", reason}.
-/// `checked`: the door checked the signature before the entry was written (#121).
-pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8, checked: bool) !Value {
+/// `checked`: the door checked a `local` message before the entry was written (#121).
+pub fn carriedMessage(a: Allocator, in: Value, m: Value, body: []const u8, checked: bool, peer: ?[]const u8) !Value {
     const V = struct {
         fn no(al: Allocator, v: []const u8, reason: []const u8) !Value {
             var r = cbor.MapBuilder.init(al);
@@ -225,7 +229,10 @@ pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8, checke
             return r.value();
         }
     };
-    if (!checked) if (try message.problem(a, m, body)) |bad| return V.no(a, "reject", bad);
+    if (peer) |k| {
+        if (try message.shapeProblem(a, m, body)) |bad| return V.no(a, "reject", bad);
+        if (!eql(u8, Value.bytesOf(m.get("sender")).?, k)) return V.no(a, "reject", "the sender is not the peer that sent it");
+    } else if (!checked) if (try localProblem(a, in, m, body)) |bad| return V.no(a, "reject", bad);
     const me = selfIdentity(in) orelse return V.no(a, "ignore", "no identity");
     // #127: a claim may name no recipient (signed before this instance existed, forwarded into it: message.zig).
     if (Value.bytesOf(m.get("recipient"))) |to| if (!eql(u8, to, me)) return V.no(a, "ignore", "the message is for another identity");
@@ -236,6 +243,19 @@ pub fn signedMessage(a: Allocator, in: Value, m: Value, body: []const u8, checke
     try r.put("verdict", cbor.string("accept"));
     try r.put("admit", .{ .array = try a.dupe(Value, &.{entry.value()}) });
     return r.value();
+}
+
+/// Why a message the host carried in (`local`) does not hold (null: it does). Signed (#70): a
+/// host provider's answer, a forwarded claim (#127) — its signature by its sender (the SDK's
+/// message.problem). Unsigned (#126 step 4): only the loopback (#79) — this instance's own emit to
+/// itself, which the kernel put when the step emitting it ran, so the record is in the store.
+fn localProblem(a: Allocator, in: Value, m: Value, body: []const u8) !?[]const u8 {
+    if (m == .map and m.get("signature") != null) return message.problem(a, m, body);
+    if (try message.shapeProblem(a, m, body)) |bad| return bad;
+    const me = selfIdentity(in) orelse return "no identity";
+    if (!eql(u8, Value.bytesOf(m.get("sender")).?, me) or !eql(u8, Value.bytesOf(m.get("recipient")) orelse "", me)) return "not signed (only this instance's own message to itself comes in unsigned)";
+    if (try sk.getOpt(a, try cbor.cidOfValue(a, m)) == null) return "not signed, and not a message this instance emitted";
+    return null;
 }
 
 /// What this thread's last step saved (`wait`), from its tip's stdout.

@@ -70,4 +70,12 @@ test("admit: no mail entry from the host (K2); the signed message as a `local` r
   await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
   await k.idle();
   assert.ok(((await k.call("head", "notes/x")) as CID | null)?.equals(tree), "the owner's signed message moved the head");
+  // #126 step 4: unsigned, from anyone but the instance itself to itself, is not a `local` package.
+  await assert.rejects(appendRequest(k, "local", { kind: "message", message: unsigned, body: bodyBytes }), /admit: a request record in its transport's shape/);
+  // The loopback's shape (the instance to itself), unsigned, but no record the instance emitted: the door refuses it.
+  const self = { ...unsigned, sender: keyBytes(identity) };
+  const e = await appendRequest(k, "local", { kind: "message", message: self, body: bodyBytes });
+  await k.idle();
+  const refused = (await k.store.get(e) as unknown as { refused?: { reason?: string } }).refused;
+  assert.match(String(refused?.reason), /not a message this instance emitted/, "an unsigned loopback is admitted only as the instance's own emit");
 });

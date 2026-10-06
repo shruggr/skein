@@ -127,8 +127,8 @@ two ways:
 - **A hosted registration** (the onboarding app's `onboard.create`): the
   registrant's wallet signs the claim **before the instance exists** — a
   message in box `claim` that names no recipient (the one message that may
-  name none; signed as every message is, counterparty anyone, so the
-  sender's key alone checks it) — and sends it in the request. The
+  name none; one of the few a sender signs itself, #126 step 4 — counterparty
+  anyone, so the sender's key alone checks it) — and sends it in the request. The
   instance manager's `create` (#90) adds the row disabled, boots it from
   the image, **forwards that signed message** as a `local` request — the
   instance's first entry after its genesis — and waits for the kernel to

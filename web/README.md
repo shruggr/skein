@@ -1,18 +1,22 @@
 # The browser client (`web/`)
 
 > Historical: this page client is from the envelope era (before #40) and
-> is not maintained; `scripts/host/web.sh` is a leftover. The browser
+> is not maintained (#126 step 4 took the envelope out of it: its messages
+> are plain BRC-33 messages on its session); `scripts/host/web.sh` is a leftover. The browser
 > host, the kernel in a tab, is `web/kernel/` (docs/ARCH.md, "The browser
 > host"; kernel-zig/README.md, "The browser build").
 
 The CLI client (`bin/skein`, src/client) as one page, signing with David's own
 wallet — the Yours browser extension — instead of the dev owner wallet-api.
-Same boxes, same envelopes, same bodies (src/client/README.md, docs/MESSAGES.md).
+Same boxes, same bodies (src/client/README.md, docs/MESSAGES.md); a message
+is a plain BRC-33 message on the wallet's BRC-104 session with the messagebox
+(src/client/raw.ts): the session proves who sends it, and nothing in it is
+signed or sealed (#126 step 4).
 
 ```
 scripts/host/web.sh --bg        # build web/dist, serve http://localhost:4400 (log ~/.skein/logs/web.log)
 npm run web:build               # just the bundle + web/dist/config.json
-npm run web:test                # tree hashing, bundling, envelope round trips (the live one needs the messagebox)
+npm run web:test                # tree hashing, bundling, message round trips (the live one needs the messagebox)
 ```
 
 **Origin: `http://localhost:4400`.** Always open exactly this (not 127.0.0.1,
@@ -43,11 +47,10 @@ is up to Yours (untested here — approve and note what it actually shows):
 | when | call | protocol / key |
 |---|---|---|
 | Connect | `getPublicKey({identityKey})`, `waitForAuthentication` | identity key retrieval; the connection itself |
-| every send (seal) | `encrypt` | `[2, "message encryption"]`, keyID random, counterparty = the instance |
-| every send (seal) | `createSignature` | `[2, "metanet handles envelope"]`, keyID `1`, counterparty `anyone` |
-| every reply read (open) | `decrypt` | `[2, "message encryption"]`, counterparty = the instance |
-| Register, and every messagebox call (BRC-104 via AuthFetch) | `createHmac`/`verifyHmac`, `createSignature`/`verifySignature` | `[2, "server hmac"]` counterparty self; `[2, "auth message signature"]` counterparty = the host |
-| every send | `createHmac` | `[1, "messagebox"]` (the message id) |
+| Register, and every messagebox call — every send, every read (BRC-104 via AuthFetch) | `createHmac`/`verifyHmac`, `createSignature`/`verifySignature` | `[2, "server hmac"]` counterparty self; `[2, "auth message signature"]` counterparty = the host |
+
+Nothing else: a message is not sealed, signed or encrypted (#126 step 4: the
+BRC-104 session is the sender's proof).
 
 The same set `scripts/host/grants.sh` grants the dev owner wallet (origin
 `skein-client`). Approving them "for this site" / "always" avoids a prompt per
@@ -67,10 +70,9 @@ message; the inbox polls every 2 s, so a denied permission stops polling (tick
    registered` are both fine; `409 … taken` means pick another name.
 4. Optional: **Choose Files** → pick a directory → **Import**. The root CID
    lands in the chat and run tree fields.
-5. Type in **Chat**, **Send** (approve encrypt + signature). The reply (a `chat`
+5. Type in **Chat**, **Send**. The reply (a `chat`
    with `replyTo` = your chat) arrives in
-   **Inbox** within a couple of seconds of the instance answering (approve
-   decrypt). The next chat replies to it (`replyTo` = that reply, tree defaults to
+   **Inbox** within a couple of seconds of the instance answering. The next chat replies to it (`replyTo` = that reply, tree defaults to
    its tree); tick **new conversation** to start over.
 6. **Run**: a tree CID and a command; the result shows in the inbox.
 
@@ -93,9 +95,8 @@ Yours key as the instance's owner (a new genesis with
   in the CLI; empty directories vanish in both.
 - State lives in localStorage (conversation, last sent chat/run, the last 100
   inbox messages) instead of `~/.skein/client`.
-- The shared modules (src/envelope.ts, src/runtime/identity.ts,
-  src/client/{bundle,conversation}.ts) are bundled unchanged; node-only imports
+- The shared modules (src/client/{raw,bundle,conversation}.ts) are bundled unchanged; node-only imports
   are mapped to `web/shims` (node:crypto → @bsv/sdk hashes + getRandomValues,
   node:fs/path → stubs never reached, `Buffer` → the `buffer` package with
   node's Uint8Array-accepting `equals`/`compare`). `web/envelope.test.ts` runs
-  the bundled code against the node code.
+  the bundled code over a messagebox in memory.

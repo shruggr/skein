@@ -440,9 +440,11 @@ result.
 
 ## 5. Security model, in one place
 
-- **Only signed messages change anything.** Every package is appended and
-  verified inside (docs/MESSAGES.md): a message routes only where the
-  dispatch table says its sender may go.
+- **Only authenticated messages change anything.** Every package is
+  appended and its sender verified inside (docs/MESSAGES.md): a BRC-104
+  session to the front door, libp2p, or a host provider's or a claim's own
+  signature (#126 step 4: a message carries no signature of its sender); a
+  message routes only where the dispatch table says its sender may go.
 - **The admin operations are the kernel's.** `objects`, `head`, `dispatch`
   and `peers` are kernel operations on admin messages from the owner (every
   genesis) or a delegate (a row the owner added) — no program, elevated or
@@ -731,7 +733,7 @@ bounded at 64 MiB).
 | part | status |
 |---|---|
 | the write scope read only from installed program records (genesis programs, dispatch rows' programs, `<app>/app`'s `programs`); a record a program puts runs and writes no head | built, enforced (K1: kernel-zig/src/scheduler.zig `installedAs`; kernel-zig/equiv/install.ts, the forgery) |
-| no message admitted as the host's word: `admit` takes no `mail` entry; the browser host appends signed messages as `local` requests; `append` writes only the genesis entry | built, enforced (K2, K24: src/host/admission.test.ts) |
+| no message admitted as the host's word: `admit` takes no `mail` entry; the browser page sends its own messages on its session with its instance (#126 step 4: `http` requests) and admits nothing from its mailbox instance; `append` writes only the genesis entry | built, enforced (K2, K24: src/host/admission.test.ts) |
 | heads with owners; `head`/`advance`/`get`; the write scope by name; the kernel's `objects`, `head`, `dispatch`, `peers` operations | built (#77) |
 | the dispatch table (routes, boxes, libp2p topics as rows); route handler contract; synchronous answer on thread completion | built (#68/#66, #77; #115: the kernel matches every transport, kernel-zig/src/dispatch.zig, and the front door verifies). The `/<app>/` prefix of an app's http rows is checked by the install client (src/host/manifest.ts), not by the kernel's `dispatch` operation |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `<app>/ls_<service>`; the contract as a Zig module | built (#50, #79: skein-overlay 0.3.0) |

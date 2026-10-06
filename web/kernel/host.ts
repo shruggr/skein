@@ -9,31 +9,35 @@
 //                               BRC-100 wire (WalletWireProcessor)
 //   what it carries   emit    → the page is the host's providers (#70,
 //                               src/host/providers.ts): the HTTP proxy `fetch`
-//                               (the page's fetch: the instance's own programs
-//                               deliver its messages — the messagebox program, a
-//                               BRC-104 client — and resolve handles through it)
-//                               and the `waker` (setTimeout). Each answers with a
-//                               signed message from its own key, admitted as a
-//                               `local` request. The keys: children of a provider
-//                               master the page keeps (localStorage, per store);
-//                               the genesis seeds them in the address book.
-//   the call in       admit + drain, every message as a `local` request
-//                     ({kind: "message", message, body}) that the instance's
-//                     front door verifies (K2: the host admits no message as
-//                     its own word), from: the page (a chat, an install: a
-//                     message signed by the user's wallet), a poll of this
-//                     identity's mailbox instance on the host (listMessages on
-//                     a BRC-104 session: each signed message as the mailbox
-//                     keeps it, acknowledged once durable; an unsigned one —
-//                     a plain client's, proven only by its session with the
-//                     mailbox — is not admitted), the providers' answers (the
-//                     waker's among them: a deadline's or a shell's sleep, #69).
+//                               and the `waker` (setTimeout), and the bytes of
+//                               the kernel's `authfetch` (the instance delivers
+//                               its messages itself — the messagebox program's
+//                               delivery thread, a BRC-104 client — and resolves
+//                               handles through the proxy). Each provider answers
+//                               with a signed message from its own key, admitted
+//                               as a `local` request. The keys: children of a
+//                               provider master the page keeps (localStorage, per
+//                               store); the genesis seeds them in the address book.
+//   the call in       admit + drain: the page's own messages (a chat, an
+//                     install) as the user, on the page wallet's BRC-104
+//                     session with its instance — `http` request entries to
+//                     the instance's front door (`/sendMessage`), which
+//                     verifies them as it does any client's (frontFetch, #126
+//                     step 4: the session is the sender's proof; nothing is
+//                     signed inside a message) — and the providers' answers
+//                     (`local` requests: the waker's among them, a deadline's
+//                     or a shell's sleep, #69).
 //
 // The mailbox: registering this identity on the host creates its mailbox
-// instance (#40); the genesis names it as the owner's messagebox, so what the
-// instance sends its owner (this identity) lands there too — the page shows
-// those (sender = this identity) and admits the rest. An intermittent host
-// (#16): nothing runs while the tab is closed; inbound waits in the mailbox
+// instance (#40) — the user's, read with the user's wallet, never the
+// instance's inbox (#126 step 4: a skein receives mail only where it
+// verifies the sender itself, and the page's instance has no front door
+// anyone else reaches). The genesis names it as the owner's messagebox, so
+// what the instance sends its owner (this identity) lands there; the page
+// polls it and shows every message (from the instance, from peers), and
+// admits none into the instance: if the user wants the instance to act on
+// one, the user sends it a message of their own. An intermittent host
+// (#16): nothing runs while the tab is closed; mail waits in the mailbox
 // instance and wakes fire late, at the next open.
 
 import { KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
@@ -46,7 +50,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { admit2, keyBytes, writeGenesis } from "../../src/host/genesis.ts";
 import type { Kernel } from "../../src/host/kernel.ts";
 import { encode } from "../../src/runtime/cid.ts";
-import { DEFAULTS, stampMs } from "../../src/runtime/log.ts";
+import { DEFAULTS } from "../../src/runtime/log.ts";
 import { NotFound, Rejected } from "../../src/runtime/store.ts";
 import { msStamp, type Stamp } from "../../src/runtime/syscalls.ts";
 
@@ -73,7 +77,7 @@ export interface HostOptions {
   wasmBase?: string;
   pollMs?: number;
   log?(line: string): void;
-  /** A message the instance sent to this identity: the page shows it. */
+  /** A message in this identity's mailbox (the instance's to its owner, a peer's to the user): the page shows it. */
   onMessage?(m: { from: string; box: string; body: unknown; id: string }): void;
 }
 
@@ -131,6 +135,10 @@ export class WebKernel {
     return WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply) as CID;
   }
   async drain(): Promise<void> { await this.kw.call("drain"); }
+  /** The answer of the thread a request entry launched, as it stands after the drain (#66: kernel-zig/src/web.zig `answer`). */
+  async answer(entry: CID): Promise<{ state: string; thread?: CID; answer?: Uint8Array; error?: string; refused?: { status?: number; code?: string; reason?: string } }> {
+    return await this.call("answer", entry) as { state: string; thread?: CID; answer?: Uint8Array; error?: string };
+  }
   async start(): Promise<void> { WebKernel.unwrap(dagCbor.decode(await this.kw.call("start")) as Reply); }
   async idle(): Promise<void> {}
   async genesis(): Promise<unknown> { return await this.call("genesis"); }
@@ -143,6 +151,8 @@ export class BrowserHost {
   kernel!: WebKernel;
   identity = "";
   private box!: RawBox;
+  /** The page's client of its own instance: a BRC-104 session over frontFetch. */
+  private own!: RawBox;
   /** This identity's mailbox instance on the host. */
   mailbox = "";
   private queue: Promise<unknown> = Promise.resolve();
@@ -208,6 +218,7 @@ export class BrowserHost {
       this.log(`genesis ${e}`);
     }
     await this.serial(async () => { await this.kernel.start(); await this.kernel.drain(); });
+    this.own = new RawBox(this.o.wallet, this.ownUrl, { fetch: this.frontFetch });
     void this.pollLoop();
   }
 
@@ -304,22 +315,19 @@ export class BrowserHost {
 
   /**
    * listMessages in every box the subscriptions route (and COLLECT) on this
-   * identity's mailbox instance: what the instance sent its owner (this
-   * identity) is shown; the rest admitted as messages (durable), processed,
-   * acknowledged.
+   * identity's mailbox instance: each message — the instance's to its owner,
+   * a peer's to the user — shown (`onMessage`, an event `message`) and
+   * acknowledged. None is admitted into the instance (#126 step 4): the
+   * mailbox is the user's, and the user's own message is how the instance
+   * hears of one.
    */
   async poll(): Promise<number> {
     let n = 0;
     const boxes = [...new Set([...(await this.kernel.boxes()), ...COLLECT])];
     for (const box of boxes) {
       for (const m of await this.box.list(box)) {
-        if (m.sender === this.identity) {
-          this.events.push({ kind: "message", box, body: m.value, id: m.messageId });
-          this.o.onMessage?.({ from: m.sender, box, body: m.value, id: m.messageId });
-        } else {
-          const r = m.message?.signature ? await this.admitMessage(m.message, box, m.body) : "not admitted: unsigned (a client's message, proven only by its session with the mailbox; the front door verifies a signed message, K2)";
-          this.log(`inbox ${box} from ${m.sender.slice(-8)}: ${r}`);
-        }
+        this.events.push({ kind: "message", box, sender: m.sender, body: m.value, id: m.messageId });
+        this.o.onMessage?.({ from: m.sender, box, body: m.value, id: m.messageId });
         await this.box.ack([m.messageId]);
         n++;
       }
@@ -327,54 +335,57 @@ export class BrowserHost {
     return n;
   }
 
-  /**
-   * A signed message to this identity (K2), appended as the package that
-   * carries it — a `local` request {kind: "message", message, body} — for the
-   * instance's front door to verify (signature, body, recipient) and route.
-   * The page vouches for nothing. Its outcome.
-   */
-  private async admitMessage(message: Record<string, unknown>, box: string, body: Uint8Array): Promise<string> {
-    const sender = Array.from(message.sender as Uint8Array, (b) => b.toString(16).padStart(2, "0")).join("");
-    const id = encode(message).cid.toString();
-    try {
-      const e = await this.appendLocal({ kind: "message", message, body });
-      this.events.push({ kind: "admitted", box, sender, message: id, entry: e.toString() });
-      return `admitted ${id.slice(-8)} in ${e.toString().slice(-8)}`;
-    } catch (e) {
-      return `rejected: ${(e as Error).message}`;
-    }
-  }
-
-  /** A message from this identity, signed by its wallet as an emit is ([2, "metanet handles envelope"], key "send", counterparty anyone). */
-  private async signed(box: string, body: Uint8Array): Promise<Record<string, unknown>> {
-    const me = keyBytes(this.identity);
-    const unsigned = { kind: "mail", op: "put", sender: me, recipient: me, box, body: encode(dagCbor.decode(body)).cid, nonce: crypto.getRandomValues(new Uint8Array(16)) };
-    const { signature } = await this.o.wallet.createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
-    return { ...unsigned, signature: Uint8Array.from(signature) };
-  }
-
   // ---------------------------------------------------------------- the call in: the page
 
+  /** The instance's origin as the page addresses it: nothing goes to the network (frontFetch carries every request in). */
+  private get ownUrl(): string { return `http://${this.o.handle}.instance.invalid`; }
+
   /**
-   * A message from this identity — the instance's owner — in `box`, signed by
-   * its wallet and appended as a `local` request (K2): what an install client
-   * sends (#83: the kernel's `objects`, `head`, `dispatch` operations). The
-   * admission's outcome, as `chat`'s.
+   * The page's requests to its own instance (#126 step 4): a fetch over the
+   * instance's front door, no socket — each request appended as an `http`
+   * request entry ({kind: "http", method, path, route, query, headers,
+   * body}), processed, and answered with what its thread answered (signed on
+   * the session inside, through the page wallet: the instance's signer). The
+   * page is a client of its instance like any other, on its wallet's BRC-104
+   * session; what it sends is a plain BRC-33 message.
+   */
+  private readonly frontFetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+    const req = input instanceof Request ? input : new Request(url, init);
+    const body = new Uint8Array(await req.arrayBuffer());
+    const headers: Record<string, string> = {};
+    req.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+    const record = { kind: "http", method: req.method, path: url.pathname, route: url.pathname, query: url.search, headers, body };
+    const a = await this.serial(async () => {
+      const e = await admit2(this.kernel as unknown as Kernel, { request: encode(record).cid, transport: "http" } as never, { request: record }, now());
+      await this.kernel.drain();
+      return await this.kernel.answer(e);
+    });
+    const json = (status: number, code: string, description: string) => new Response(JSON.stringify({ status: "error", code, description }), { status, headers: { "content-type": "application/json" } });
+    if (a.state === "refused") return json(a.refused?.status ?? 400, a.refused?.code ?? "ERR_REFUSED", a.refused?.reason ?? "refused");
+    if (a.state === "errored") return json(500, "ERR_FRONT_DOOR", a.error ?? "errored");
+    if (a.state !== "finished" || !a.answer) return json(503, "ERR_UNAVAILABLE", `not answered (its thread is ${a.state})`);
+    const r = dagCbor.decode(a.answer) as { status?: number; headers?: Record<string, string>; body?: Uint8Array };
+    if (typeof r.status !== "number") return json(500, "ERR_FRONT_DOOR", "the request's thread ended with no answer the page serves");
+    return new Response(r.body?.length ? r.body as BodyInit : null, { status: r.status, headers: r.headers ?? {} });
+  }) as typeof fetch;
+
+  /**
+   * A message from this identity — the instance's owner — in `box`, on the
+   * page wallet's session with its instance (#126 step 4): what an install
+   * client sends (#83: the kernel's `objects`, `head`, `dispatch`
+   * operations). "sent <id>" (the message's id: what a reply names).
    */
   async send(box: string, body: Uint8Array): Promise<string> {
-    const r = await this.admitMessage(await this.signed(box, body), box, body);
-    this.log(`${box}: ${r}`);
-    if (!r.startsWith("admitted")) throw new Error(r);
-    return r;
+    const { id } = await this.own.send(this.identity, box, body);
+    this.events.push({ kind: "sent", box, message: id.toString() });
+    this.log(`${box}: sent ${id.toString().slice(-8)}`);
+    return `sent ${id}`;
   }
 
-  /** The user's chat to the instance: a message from this identity, signed and appended as a `local` request (#16, K2). Its id (what a reply names). */
+  /** The user's chat to the instance (#16): a message from this identity on its session. Its id (what a reply names). */
   async chat(text: string, replyTo?: CID): Promise<string> {
-    const body = dagCbor.encode(replyTo ? { text, replyTo } : { text });
-    void stampMs;
-    const r = await this.admitMessage(await this.signed("chat", body), "chat", body);
-    this.log(`chat: ${r}`);
-    if (!r.startsWith("admitted")) throw new Error(r);
+    const r = await this.send("chat", dagCbor.encode(replyTo ? { text, replyTo } : { text }));
     return r.split(" ")[1]!;
   }
 }
