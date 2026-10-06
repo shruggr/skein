@@ -9,6 +9,7 @@
 //   skein plan peers remove <key> <where> [--out dir]
 //   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
 //   skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]
+//   skein plan host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--out dir]
 //   skein send <origin> <dir>
 //
 // <where> is how the plan reads the instance: `--origin <url>` (its explorer,
@@ -27,7 +28,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { CID } from "multiformats/cid";
-import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planClaim, planDeploy, planDispatch, planFiles, planInstallApp, planPeers, planUninstallApp, writePlan, type AdminPlan, type PeerChange } from "./admin.ts";
+import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planClaim, planDeploy, planDispatch, planFiles, planHost, planInstallApp, planPeers, planUninstallApp, writePlan, type AdminPlan, type HostTerms, type PeerChange } from "./admin.ts";
 import type { InstanceView } from "../host/plan.ts";
 
 export const PLAN_USAGE = `usage:
@@ -41,6 +42,9 @@ export const PLAN_USAGE = `usage:
   skein plan peers remove <key> <where> [--out dir]                                  an address-book entry (#70)
   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]             a directory into main (objects, head)
   skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]             an image's claim (#127): the wallet that sends it owns the instance
+  skein plan host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--out dir]
+                                                                                     the host row (#130): the host and its rates, granted (--from: the terms
+                                                                                     the host publishes at /.well-known/skein-host)
   skein send <origin> <dir>                                                          the files, in order, to <origin>/sendMessage by the wallet
 <where>: --origin <url> (the explorer, read by the wallet: \`1sat authfetch GET\`; the owner's) | --store <runtime.db> (read only)
          | --recipient <key> (dispatch, peers, deploy, claim: no reads)
@@ -182,6 +186,27 @@ export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
         }
         const t = await targetOf(v, env);
         try { emit(planClaim(t.recipient, { messagebox: v.messagebox, ...named }), v.out, env); } finally { t.close(); }
+        return 0;
+      }
+      case "host": {
+        const { values: v, positionals: [op, key, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, x: { type: "string" }, rates: { type: "string" }, from: { type: "string" } } });
+        if (more.length || (op !== "add" && op !== "remove") || (!key && v.from === undefined) || (key && v.from !== undefined)) { env.err(PLAN_USAGE); return 2; }
+        let terms: HostTerms;
+        if (v.from !== undefined) {
+          const r = await fetch(new URL("/.well-known/skein-host", v.from));
+          const b = (await r.json() as { billing?: HostTerms }).billing;
+          if (!r.ok || !b) throw new Error(`${v.from}: no billing terms at /.well-known/skein-host`);
+          terms = { key: b.key, x: b.x, rates: b.rates };
+        } else {
+          let rates: Record<string, number> | undefined;
+          if (v.rates !== undefined) {
+            try { rates = JSON.parse(v.rates) as Record<string, number>; } catch { rates = undefined; }
+            if (!rates || typeof rates !== "object" || Array.isArray(rates)) { env.err("skein plan host --rates: a JSON object {fuel, storage, served, fetch, authfetch, publish}"); return 2; }
+          }
+          terms = { key: key!, x: Number(v.x ?? (op === "remove" ? 1 : NaN)), ...(rates ? { rates } : {}) };
+        }
+        const t = await targetOf(v, env);
+        try { emit(planHost(t.recipient, op, terms), v.out, env); } finally { t.close(); }
         return 0;
       }
       case "deploy": {

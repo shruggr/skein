@@ -148,6 +148,29 @@ export function planClaim(recipient: string, o: { messagebox?: string; handle?: 
   return { prompt: [`claim ${recipient}: its owner becomes the key that sends this${o.messagebox ? ` · messagebox ${o.messagebox}` : ""}${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, messages: [{ box: "claim", body }] };
 }
 
+/** The host's terms as it publishes them (/.well-known/skein-host `billing`, #130). */
+export interface HostTerms { key: string; x: number; rates?: Record<string, number> }
+
+/**
+ * The host row (#130): the owner's grant of a host and its rates — one `dispatch` message adding (or
+ * removing) the kernel row {mailbox, billing, sender: <the host's key>, kernel, tick, x, rates}. The
+ * first such row is the host's; the kernel bills by it, the host ticks it. Removing it ends billing.
+ */
+export function planHost(recipient: string, op: "add" | "remove", t: HostTerms): AdminPlan {
+  if (!isKey(t.key)) throw new Error(`${t.key}: not the host's key (hex)`);
+  if (op === "add" && (!Number.isSafeInteger(t.x) || t.x < 1)) throw new Error("x: the sats the skein prepays at a time (a whole number ≥ 1)");
+  const rates = Object.fromEntries(Object.entries(t.rates ?? {}).map(([k, v]) => {
+    if (!Number.isSafeInteger(v) || v < 0) throw new Error(`rates.${k}: a whole number of sats`);
+    return [k, v];
+  }));
+  const row = { transport: "mailbox", address: "billing", sender: keyBytes(t.key), program: "kernel", fn: "tick", ...(op === "add" ? { x: t.x, ...(Object.keys(rates).length ? { rates } : {}) } : {}) };
+  const shown = Object.entries(rates).map(([k, v]) => `${k} ${v}`).join(", ");
+  return {
+    prompt: [op === "add" ? `host ${t.key}: bills this skein — x ${t.x} sats a block${shown ? `, rates ${shown}` : ""} (#130: the skein pays it from its own wallet, ahead)` : `host ${t.key}: removed (nothing is billed)`],
+    recipient, messages: [{ box: "dispatch", body: { op, row } }],
+  };
+}
+
 export type PeerChange = ({ op: "add" } & AddressEntry) | { op: "remove"; key: string };
 
 /** Address-book changes (#40, #70): one message to `peers` each. */

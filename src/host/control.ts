@@ -7,6 +7,7 @@
 // The protocol is one JSON line each way, and it carries one request:
 //
 //   {"op": "event", "handle": h, "box": b, "event": {…}}   → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
+//   {"op": "reclaim", "handle": h}                       → {"ok": true, "entry": ""} | {"ok": false, "error": "…"}
 //
 // `event` is `skein-host event` (cli.ts): the router sends it as a message
 // from its cron provider, a tick due now (Router.cronEvent, #69). (#127: no
@@ -18,12 +19,14 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 
 export const CONTROL_SOCKET = "host.sock";
 
-export type ControlRequest = { op: "event"; handle: string; box: string; event: Record<string, unknown> };
+export type ControlRequest = { op: "event"; handle: string; box: string; event: Record<string, unknown> } | { op: "reclaim"; handle: string };
 export type ControlAnswer = { ok: true; entry: string } | { ok: false; error: string };
 
 /** What the socket's owner does with a request (the router: cronEvent). */
 export interface ControlHandler {
   event(handle: string, box: string, event: Record<string, unknown>): Promise<string>;
+  /** #130: `skein-host reclaim --yes` (Router.reclaim); absent: refused. */
+  reclaim?(handle: string): Promise<void>;
 }
 
 const MAX_LINE = 1 << 20;
@@ -33,7 +36,11 @@ function requestOf(line: string): ControlRequest {
   let r: unknown;
   try { r = JSON.parse(line); } catch { throw new Error("not JSON"); }
   const o = r as Record<string, unknown> | null;
-  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event}");
+  if (o && typeof o === "object" && o.op === "reclaim") {
+    if (typeof o.handle !== "string" || !o.handle) throw new Error("a reclaim names its instance (handle)");
+    return o as unknown as ControlRequest;
+  }
+  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event} or {op: \"reclaim\", handle}");
   if (typeof o.handle !== "string" || !o.handle || typeof o.box !== "string" || !o.box) throw new Error("an event names its instance (handle) and its box");
   if (!o.event || typeof o.event !== "object" || Array.isArray(o.event)) throw new Error("the event is a JSON object");
   return o as unknown as ControlRequest;
@@ -76,6 +83,11 @@ function serveOne(s: Socket, h: ControlHandler): void {
     if (nl < 0) { if (buf.length > MAX_LINE) reply({ ok: false, error: "request too long" }); return; }
     let req: ControlRequest;
     try { req = requestOf(buf.slice(0, nl)); } catch (e) { reply({ ok: false, error: (e as Error).message }); return; }
+    if (req.op === "reclaim") {
+      if (!h.reclaim) { reply({ ok: false, error: "this router reclaims nothing" }); return; }
+      h.reclaim(req.handle).then(() => reply({ ok: true, entry: "" }), (e: Error) => reply({ ok: false, error: e.message }));
+      return;
+    }
     h.event(req.handle, req.box, req.event).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
   });
 }

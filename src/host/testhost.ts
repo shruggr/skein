@@ -65,7 +65,7 @@ export async function messagesIn(store: Store): Promise<Array<Record<string, unk
 }
 
 /** A host with instances (mailbox instances among them), each instance's key its own (the signer's stand-in). */
-export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string } = {}) {
+export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs?: number; http?: Router["o"]["http"]; infer?: string; ownerMessagebox?: string; ownerKey?: PrivateKey; genesis?: Router["o"]["genesis"]; now?: Router["o"]["now"]; arc?: Router["o"]["arc"]; arcRetry?: Router["o"]["arcRetry"]; headersFeed?: string; billing?: Router["o"]["billing"] } = {}) {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-router-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
   const db = new HostDb(join(home, "host.db"));
@@ -82,6 +82,8 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     ...(o.arc ? { arc: o.arc } : {}), ...(o.arcRetry ? { arcRetry: o.arcRetry } : {}),
     // The host's headers feed (#102).
     ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
+    // #130: what the host bills (billing.ts); none: it bills no one.
+    ...(o.billing ? { billing: o.billing } : {}),
     // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
     discovery: fakeDiscovery(db, () => router),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.

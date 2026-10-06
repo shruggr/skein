@@ -133,7 +133,7 @@ export function isDispatchRow(x: unknown): x is DispatchRow {
 }
 
 /** What a kernel row may name (its `fn`): the admin operations, and the claim (#89: an image's one row; the owner's admin rows written, the row removed). */
-export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers", "claim"];
+export const KERNEL_OPS: readonly string[] = ["objects", "head", "dispatch", "peers", "claim", "tick"];
 
 // ---------------------------------------------------------------- genesis
 

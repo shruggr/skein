@@ -29,6 +29,10 @@
 //                                         config.onboard.domain), for a page an instance serves (the management
 //                                         site) to find the manifest and register
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
+//   POST /fund/<handle>                   #130: a payment for an instance (its body an Atomic BEEF, the header
+//                                         x-skein-outputs BRC-100's internalizeAction outputs, JSON), handed in
+//                                         on its funding row (/wallet/fund) — even asleep: the one thing the gate
+//                                         lets through (billing.ts)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
 // (a durable queue in host.db, retries, one Arcade session) and routes what
@@ -87,7 +91,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
-import { KeyDeriver, PrivateKey, ProtoWallet, type WalletInterface } from "@bsv/sdk";
+import { KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
@@ -111,6 +115,7 @@ import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
+import { allocation, BILLING_HEAD, closedBy, DESCRIPTION_HEADER, FUND_PREFIX, FUND_ROUTE, mismatch, OUTPUTS_HEADER, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -182,6 +187,8 @@ export interface RouterOptions {
   discovery?(req: RouterRequest, url: URL): Promise<RouterResponse | undefined>;
   /** How often the libp2p host redials bootstrap peers and runs topic rendezvous (ms); default 30 000. */
   libp2pDiscoveryMs?: number;
+  /** #130: what this host bills (billing.ts; `skein-host run`: billingConfig over the environment). Absent: it bills no one. */
+  billing?: BillingConfig;
 }
 
 interface Loaded {
@@ -336,6 +343,15 @@ export class Router {
 
   /** The default image (#89), with its chain part (#132): what createInstance boots a new skein from. */
   readonly image: ImageChain;
+  /** #130: each billed instance as last read (its host row's terms, the kernel's billing state), and what this host metered since its last tick. */
+  private views = new Map<string, BillingView>();
+  private periods = new Map<string, Period>();
+  /** Instances a tick is on its way to; and those sent their first (billing starts with it) since this router started: the timer sends it again. */
+  private ticking = new Set<string>();
+  private firstTicks = new Set<string>();
+  private tickTimer?: ReturnType<typeof setInterval>;
+  /** The host's provider keys (its billing key among them, #130). */
+  private readonly providerKey: (name: ProviderName) => PrivateKey;
 
   constructor(o: RouterOptions) {
     this.o = o;
@@ -387,6 +403,7 @@ export class Router {
     // Without a host's own provider keys: a router's own, fresh (a test's).
     const own = o.providerKeyFor ? undefined : new KeyDeriver(PrivateKey.fromRandom());
     const keyOf = o.providerKeyFor ?? ((n: ProviderName) => own!.derivePrivateKey([2, "skein provider"], n, "self"));
+    this.providerKey = keyOf;
     // The certifier key is the certifier provider's (signer.ts certifierKey: providerKey("certifier")).
     this.certifier = new ProtoWallet(keyOf("certifier"));
     const p2p = this.p2p;
@@ -406,6 +423,8 @@ export class Router {
       },
       // #113: the certifier signs for the host skein alone (the onboarding app records each issue).
       certifier: (box, body) => certify(this.certifier, box, body),
+      // #130: a payment is this host's: kept and broadcast.
+      ...(o.billing ? { payment: (h: string, rec: Record<string, unknown>) => this.payment(h, rec) } : {}),
       ...(p2p ? {
         p2p: {
           publish: (h: string, topic: string, body: Uint8Array) => p2p.publish(h, topic, body),
@@ -421,6 +440,7 @@ export class Router {
     const idle = o.idleMs ?? 0;
     if (idle > 0) this.idleTimer = setInterval(() => void this.reap(idle), Math.max(50, Math.min(idle / 4, 10_000)));
     this.ledgerTimer = setInterval(() => this.flushLedger(), o.ledgerMs ?? 5000);
+    if (o.billing) this.tickTimer = setInterval(() => void this.tickAll(), o.billing.tickMs);
   }
 
   private say(source: string, line: string): void { this.o.log?.(source, line); }
@@ -495,6 +515,7 @@ export class Router {
     if (this.stopped) throw new Error("the router is stopping");
     const server = await listenControl(path, {
       event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString(),
+      reclaim: (h) => this.reclaim(h),
     });
     this.control = { server, path };
     this.say("router", `control socket at ${path}`);
@@ -510,6 +531,7 @@ export class Router {
     }
     clearInterval(this.idleTimer);
     clearInterval(this.ledgerTimer);
+    clearInterval(this.tickTimer);
     this.flushLedger();
     const closed = this.servers.map((s) => new Promise<void>((r) => { s.close(() => r()); s.closeAllConnections(); }));
     this.servers = [];
@@ -547,6 +569,8 @@ export class Router {
   async admitEvent(handle: string, box: string, event: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
       const l = await this.hydrate(handle);
+      const closed = this.closed(handle);
+      if (closed) throw new Error(`not forwarded (#130): ${closed}`);
       const cid = await l.kernel.store.put(event as never);
       const e = await admit2(l.kernel, { box, event: cid } as never, {}, this.now());
       this.settle(l);
@@ -564,6 +588,9 @@ export class Router {
   async appendLocal(handle: string, pkg: Record<string, unknown>): Promise<CID> {
     return await this.serial(handle, async () => {
       const l = await this.hydrate(handle);
+      // #130: the gate lets through the instance's own messages to itself (the loopback), nothing else.
+      const closed = this.closed(handle);
+      if (closed && !isLoopback(pkg, l.identity)) throw new Error(`not forwarded (#130): ${closed}`);
       const e = await appendRequest(l.kernel, "local", pkg, this.now());
       this.settle(l);
       return e;
@@ -589,6 +616,8 @@ export class Router {
    */
   async p2pInbound(handle: string, call: InboundCall): Promise<InboundAnswer> {
     const l = await this.hydrate(handle);
+    const closed = this.closed(handle);
+    if (closed) return { verdict: "ignore", reason: `not forwarded (#130): ${closed}` };
     const source = `libp2p:${call.topic ?? call.protocol ?? "?"}`;
     let from = "";
     try { from = peerIdFromMultihash(Digest.decode(call.from)).toString(); } catch { /* not a peer ID: only this log line's name; the front door judges the record */ }
@@ -699,6 +728,7 @@ export class Router {
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
+    await this.syncBilling(l).catch((e) => this.say(handle, `billing: not read: ${(e as Error).message}`));
     this.say("router", `hydrated ${handle} (${short(identity)})`);
     return l;
   }
@@ -939,7 +969,7 @@ export class Router {
    * headers feed follow the dispatch table (#72, #77, #102).
    */
   private settle(l: Loaded): void {
-    const p = l.kernel.idle().then(() => this.syncDispatch(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
+    const p = l.kernel.idle().then(() => this.syncDispatch(l)).then(() => this.syncBilling(l)).catch((e) => this.say(l.row.handle, `the dispatch table not followed: ${(e as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
   }
@@ -1113,6 +1143,166 @@ export class Router {
     try { this.o.db.charge(rows); } catch (e) { this.say("router", `ledger: ${(e as Error).message}`); }
   }
 
+  // ---------------------------------------------------------------- billing (#130, billing.ts)
+
+  /** Why this host forwards nothing to `handle` but a payment (undefined: it forwards as usual). */
+  closed(handle: string): string | undefined {
+    return closedBy(this.views.get(handle), `${this.origin()}${FUND_PREFIX}${handle}`);
+  }
+
+  /** A billed instance as this host last read it (#130). */
+  billingView(handle: string): BillingView | undefined { return this.views.get(handle); }
+
+  /** A line of this host's log for `handle`'s period (#130): a request it served, a read call it made. */
+  private meter(handle: string, line: { at: number; op: string; caller?: string; fuel: number; bytes: number }): void {
+    if (!this.o.billing || !this.views.get(handle)?.terms) return;
+    let p = this.periods.get(handle);
+    if (!p) this.periods.set(handle, (p = new Period(line.at)));
+    p.add(line);
+  }
+
+  /**
+   * Read the instance's billing (#130): its host row's terms (the dispatch table) and its kernel's
+   * billing state (the head `billing`), checked against what this host supports. A skein with a host
+   * row this host has not ticked yet is ticked now; one whose unreported amounts would take its tally
+   * to its allocation, early. When it went asleep (and woke) goes to host.db (the grace).
+   */
+  private async syncBilling(l: Loaded): Promise<void> {
+    const cfg = this.o.billing;
+    if (!cfg || l.kernel.gone) return;
+    const handle = l.row.handle;
+    const rows = (await l.kernel.dispatch()).rows;
+    const terms = termsOf(rows);
+    if (!terms) {
+      if (this.views.has(handle)) { this.views.delete(handle); this.o.db.forgetBilling(handle); this.say(handle, "billing: no host row: not billed"); }
+      return;
+    }
+    const root = await l.kernel.call("head", BILLING_HEAD) as CID | null;
+    const state = root ? stateOf(await l.kernel.store.get(root)) : undefined;
+    const why = mismatch(cfg, this.providers.key("billing"), terms);
+    const was = this.views.get(handle);
+    const view: BillingView = { terms, ...(state ? { state } : {}), ...(why ? { mismatch: why } : {}) };
+    this.views.set(handle, view);
+    const mine = state && state.host === terms.host ? state : undefined;
+    this.o.db.setBilling(handle, { host: terms.host, ...(mine ? { tally: mine.tally, allocation: allocation(mine) } : {}), asleep: !!mine?.asleep, ...(why ? { mismatch: why } : {}) }, stampMs(this.now()));
+    const fundAt = `${this.origin()}${FUND_PREFIX}${handle}`;
+    const closed = closedBy(view, fundAt);
+    if (closed !== closedBy(was, fundAt)) this.say(handle, closed ? `billing: closed — ${closed}` : "billing: open");
+    if (why || mine?.asleep) return;
+    if (mine) this.firstTicks.delete(handle);
+    else if (this.firstTicks.has(handle)) return; // sent: the timer sends it again
+    else this.firstTicks.add(handle);
+    const p = this.periods.get(handle);
+    const owed = p ? priceHost(terms.rates, p.fuel, p.served) : 0n;
+    if (!mine || (p && !p.empty && mine.tally + owed >= allocation(mine))) void this.billingTick(handle).catch((e) => this.say(handle, `billing: tick: ${(e as Error).message}`));
+  }
+
+  /** Tick every billed instance this router holds (the timer, every tickMs). */
+  private async tickAll(): Promise<void> {
+    for (const [handle, l] of this.loaded) {
+      if (l.kernel.gone || !this.views.get(handle)?.terms) continue;
+      await this.billingTick(handle).catch((e) => this.say(handle, `billing: tick: ${(e as Error).message}`));
+    }
+  }
+
+  /**
+   * The host's tick to `handle` (#130 decided 4): signed by its billing key, in the host row's box —
+   * {kind: "tick", at, allowance, fuel, served, log} — the period since its last tick closed, its log
+   * record kept (host.db billing_ticks: `log` is that record's CID). Not to an instance the gate
+   * holds (asleep, other terms), nor twice at once. The tick's entry, or undefined.
+   */
+  async billingTick(handle: string): Promise<CID | undefined> {
+    const cfg = this.o.billing;
+    const v = this.views.get(handle);
+    if (!cfg || !v?.terms || this.closed(handle) || this.ticking.has(handle)) return undefined;
+    const l = this.loaded.get(handle);
+    if (!l || l.kernel.gone) return undefined;
+    this.ticking.add(handle);
+    try {
+      const at = stampMs(this.now());
+      const p = this.periods.get(handle) ?? new Period(at);
+      this.periods.set(handle, new Period(at));
+      const log = periodRecord(l.identity, p, at);
+      this.o.db.billingTick(handle, at, log.cid.toString(), log.bytes);
+      return await this.providers.send(handle, "billing", keyBytes(l.identity), v.terms.address, tickBody(at, cfg, p, log.cid)) as CID;
+    } finally {
+      this.ticking.delete(handle);
+    }
+  }
+
+  /**
+   * A `payment` event from `handle` (#130 decided 6: its pay step's, the kernel lets no other step
+   * emit one): this host is the payee. Its wiring: the payment kept (host.db billing_payments, with
+   * whether its output pays the key the BRC-29 remittance derives from this host's billing key) and
+   * broadcast (its Arcade, once).
+   */
+  private payment(handle: string, rec: Record<string, unknown>): void {
+    const p = (async () => {
+      const beef = rec.tx instanceof Uint8Array ? rec.tx : undefined;
+      const amount = typeof rec.amount === "number" ? rec.amount : undefined;
+      const vout = typeof rec.outputIndex === "number" ? rec.outputIndex : undefined;
+      const rem = rec.remittance as { derivationPrefix?: string; derivationSuffix?: string; senderIdentityKey?: string } | undefined;
+      if (!beef || amount === undefined || vout === undefined || !rem) { this.say(handle, "billing: a payment event without its transaction, amount or remittance: ignored"); return; }
+      const tx = Transaction.fromAtomicBEEF([...beef]);
+      let ours = false;
+      try {
+        const key = new KeyDeriver(this.providerKey("billing")).derivePrivateKey([2, "3241645161d8"], `${rem.derivationPrefix} ${rem.derivationSuffix}`, String(rem.senderIdentityKey));
+        const out = tx.outputs[vout];
+        ours = !!out && out.satoshis === amount && out.lockingScript.toHex() === new P2PKH().lock(key.toPublicKey().toHash()).toHex();
+      } catch { /* a remittance that derives nothing: kept, not ours */ }
+      const checkpoint = CID.asCID(rec.checkpoint)?.toString();
+      const txid = tx.id("hex");
+      const fresh = this.o.db.billingPayment({ instance: handle, txid, amount, at: stampMs(this.now()), beef, remittance: rem, ours, ...(checkpoint ? { checkpoint } : {}) });
+      if (fresh && this.arc) this.arc.enqueue(handle, Uint8Array.from(tx.toBinary()), beef);
+      this.say(handle, `billing: payment ${txid.slice(0, 8)}… ${amount} sats${ours ? "" : " (its output does not pay this host's derived key)"}${checkpoint ? `, checkpoint ${checkpoint.slice(-8)}` : ""}`);
+    })().catch((e) => this.say(handle, `billing: payment: ${(e as Error).message}`));
+    this.syncing.add(p);
+    void p.finally(() => this.syncing.delete(p));
+  }
+
+  /**
+   * A payment for `handle` delivered to this host (#130 decided 7: POST /fund/<handle>): handed in
+   * on the instance's funding row (FUND_ROUTE: open, the door's `beef` filter validates it, the
+   * wallet internalizes it) — past the gate, which lets nothing else through while it is asleep —
+   * and the instance's answer returned.
+   */
+  private async fund(handle: string, req: RouterRequest): Promise<RouterResponse> {
+    const row = this.o.db.get(handle);
+    if (!HANDLE.test(handle) || row?.status !== "enabled") return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no instance ${handle} here` });
+    const outputs = req.headers[OUTPUTS_HEADER];
+    if (!outputs) return json(400, { status: "error", code: "ERR_FUNDING", description: `${OUTPUTS_HEADER}: the payment's outputs, BRC-100 internalizeAction's (JSON), with the Atomic BEEF as the body` });
+    let l: Loaded;
+    try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
+    const headers: Record<string, string> = { "content-type": "application/octet-stream", [OUTPUTS_HEADER]: outputs, ...(req.headers[DESCRIPTION_HEADER] ? { [DESCRIPTION_HEADER]: req.headers[DESCRIPTION_HEADER] } : {}) };
+    const a = await frontDoor(l.kernel, { method: "POST", path: FUND_ROUTE, route: FUND_ROUTE, query: "", headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
+    this.settle(l);
+    this.say(handle, `billing: a payment handed in: ${a.status}`);
+    return { status: a.status, headers: a.headers, body: a.body };
+  }
+
+  /**
+   * Reclaim an instance (#130 decided 9; `skein-host reclaim`): its kernel stopped, its row and its
+   * billing removed, its store deleted. The host's call to make, after the grace; nothing here makes
+   * it on its own. Not the host skein.
+   */
+  async reclaim(handle: string): Promise<void> {
+    const row = this.o.db.get(handle);
+    if (!row) throw new Error(`no instance ${handle}`);
+    if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein`);
+    this.o.db.setStatus(handle, "disabled");
+    await this.refollowHeaders(handle);
+    const l = this.loaded.get(handle);
+    if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
+    await this.p2p?.declare(handle, undefined).catch(() => {});
+    this.cron.forget(handle);
+    this.views.delete(handle);
+    this.periods.delete(handle);
+    this.o.db.forgetBilling(handle);
+    this.o.db.remove(handle);
+    await removeStore(row.store);
+    this.say("router", `${handle}: reclaimed (its store ${row.store} deleted)`);
+  }
+
   // ---------------------------------------------------------------- HTTP
 
   /** Whether a URL is this host's own (answered in process: no DNS, no socket). */
@@ -1170,7 +1360,10 @@ export class Router {
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
-      return json(200, { origin: this.origin(), domain: await this.handleDomain() });
+      // #130: the terms this host bills by — what an owner grants as the host row (`skein plan host`).
+      const b = this.o.billing;
+      const billing = b ? { key: this.providers.key("billing"), x: b.x, rates: b.rates, allowance: b.allowance, tickMs: b.tickMs, graceMs: b.graceMs, fund: `${this.origin()}${FUND_PREFIX}{handle}` } : undefined;
+      return json(200, { origin: this.origin(), domain: await this.handleDomain(), ...(billing ? { billing } : {}) });
     }
     const t = this.target(url);
     if (t) return await this.held(this.forward(t.handle, t.route, url, req));
@@ -1185,6 +1378,7 @@ export class Router {
       return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no host skein (skein-host init): no BRC-169 here" });
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
+    if (req.method === "POST" && path.startsWith(FUND_PREFIX)) return await this.held(this.fund(decodeURIComponent(path.slice(FUND_PREFIX.length)), req));
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
@@ -1235,10 +1429,15 @@ export class Router {
     if (this.stopped) return unavailable("the host is shutting down");
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
+    // #130: asleep, or terms this host does not serve: nothing is forwarded (a payment comes in at /fund/<handle>).
+    const closed = this.closed(handle);
+    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
     const a: FrontAnswer = await frontDoor(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
     this.settle(l);
     // Charged to the identity the front door verified (H13), never to a header as the client sent it.
     if (a.fuel !== undefined) this.charge(handle, a.caller ?? "", `${route} (read)`, a.fuel);
+    // #130: what never reaches the log — the read call's fuel, the bytes served — for its next tick.
+    this.meter(handle, { at: stampMs(this.now()), op: `${req.method} ${route}`, ...(a.caller ? { caller: a.caller } : {}), fuel: a.fuel ?? 0, bytes: a.body.length });
     return { status: a.status, headers: a.headers, body: a.body };
   }
 
@@ -1316,4 +1515,19 @@ function claimProblem(c: SignedClaim, owner: string): void {
   if (!(m.sender instanceof Uint8Array) || Buffer.from(m.sender).toString("hex") !== owner) throw new Error("claim: its sender is not the owner");
   if (m.recipient !== undefined) throw new Error("claim: it names a recipient (a claim is signed before the instance exists: it names none)");
   if (!(m.signature instanceof Uint8Array)) throw new Error("claim: not signed");
+}
+
+/** #130: a package that is the instance's own message to itself (the loopback: unsigned, sender and recipient its identity). */
+function isLoopback(pkg: Record<string, unknown>, identity: string): boolean {
+  const m = pkg.message as { sender?: unknown; recipient?: unknown; signature?: unknown } | undefined;
+  const hex = (k: unknown) => k instanceof Uint8Array ? Buffer.from(k).toString("hex") : "";
+  return !!m && m.signature === undefined && hex(m.sender) === identity && hex(m.recipient) === identity;
+}
+
+/** #130: a reclaimed instance's store: the file, its -wal and -shm, and its directory when that empties. */
+async function removeStore(store: string): Promise<void> {
+  const fs = await import("node:fs/promises");
+  const { dirname } = await import("node:path");
+  for (const f of [store, `${store}-wal`, `${store}-shm`]) await fs.rm(f, { force: true });
+  await fs.rmdir(dirname(store)).catch(() => {}); // not empty, or not its own: left
 }

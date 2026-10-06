@@ -83,7 +83,7 @@ test("skein-host event over the control socket while the router runs; a router o
   // The router's refusal comes back as the command's error.
   assert.deepEqual(await controlRequest(sock, { op: "event", handle: "nope", box: "tick", event: {} }), { ok: false, error: "no enabled instance nope" });
   // #127: no claim through the socket — the owner of an instance is the claim's sender, the owner's wallet.
-  assert.deepEqual(await controlRequest(sock, { op: "claim", handle: "evt", owner: "02" + "ab".repeat(32) } as never), { ok: false, error: "want {op: \"event\", handle, box, event}" });
+  assert.deepEqual(await controlRequest(sock, { op: "claim", handle: "evt", owner: "02" + "ab".repeat(32) } as never), { ok: false, error: "want {op: \"event\", handle, box, event} or {op: \"reclaim\", handle}" });
 
   // Closed: the socket is gone, and `event` goes through a router of its own.
   await host.stop();

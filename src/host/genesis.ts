@@ -155,8 +155,8 @@ export interface DispatchSpec { transport?: Transport; address: string; prefix?:
  */
 export const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
 export const ADMIN_ROWS: DispatchSpec[] = ADMIN_OPS.map((op): DispatchSpec => ({ address: op, sender: "$owner", program: "kernel", fn: op }));
-/** What a kernel row may name: the admin operations, and the claim (#89). */
-export const KERNEL_OPS = [...ADMIN_OPS, "claim"] as const;
+/** What a kernel row may name: the admin operations, the claim (#89), and the host's tick (#130: the host row, billing.ts). */
+export const KERNEL_OPS = [...ADMIN_OPS, "claim", "tick"] as const;
 
 /**
  * The claim row (#89): an image's one wildcard row to the kernel. A message

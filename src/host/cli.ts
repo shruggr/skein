@@ -98,6 +98,11 @@
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
 //                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
 //                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
+//   SKEIN_BILLING         `off`: this host bills no one (#130, billing.ts); else it bills a skein whose host row names its
+//                         key, by SKEIN_BILLING_X (sats a skein prepays at a time), SKEIN_BILLING_RATES (JSON {fuel,
+//                         storage, served, fetch, authfetch, publish}: whole sats), SKEIN_BILLING_ALLOWANCE (the free
+//                         allowance per skein, sats), SKEIN_BILLING_TICK_MS, SKEIN_BILLING_GRACE_MS — small dev defaults
+//                         (billing.ts DEV_BILLING); published at /.well-known/skein-host
 //   SKEIN_HEADERS_URL     the host's headers feed (#102, feeds.ts): an SSE stream of block headers (hex, or chaintracks'
 //                         JSON: Arcade's http://127.0.0.1:8083/chaintracks/v2/tip/stream) that every enabled instance
 //                         whose dispatch table takes events in box `chain` (the chain app's row) is subscribed to;
@@ -125,6 +130,7 @@ import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { addressBook } from "./deploy.ts";
 import { hostDomain, Router, type RouterOptions } from "./router.ts";
+import { billingConfig, DEV_BILLING, NSAT } from "./billing.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
 
@@ -145,6 +151,10 @@ const USAGE = `usage:
   skein-host identity <handle> [--peer]                   an instance's identity key; --peer: its libp2p peer ID (#51)
   skein-host mailboxes                                    the mailbox instances: handle, owner, front-door key, status, store
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
+  skein-host billing [handle]                             #130: each billed instance as the router last read it (tally, allocation, asleep since,
+                                                          terms not served), its ticks' log records and its payments
+  skein-host reclaim [--grace ms] [--yes]                 #130: the instances asleep past the grace (SKEIN_BILLING_GRACE_MS); --yes reclaims them:
+                                                          disabled, row and store removed (through the running router)
   skein-host enable|disable|remove <handle>
   skein-host run                                          the router on :8100 (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
   skein-host roster                                       the front end's roster JSON
@@ -237,6 +247,10 @@ export async function main(argv: string[], env: Env): Promise<number> {
       case "ledger":
         for (const l of db.ledger(rest[0])) env.out([l.instance, l.caller || "-", l.op, String(l.calls), String(l.fuel), l.updated_at].join("\t"));
         return 0;
+      case "billing":
+        return billingCmd(db, rest, env);
+      case "reclaim":
+        return await reclaimCmd(db, rest, env);
       case "list": {
         const door = frontDoorKeys(env.vars, home);
         const peer = peerIds(env.vars, home);
@@ -590,8 +604,57 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     libp2p: hostP2PConfig(v, home),
     headersFeed: v.SKEIN_HEADERS_URL || undefined,
     arc: hostArcConfig(v, home),
+    billing: billingConfig(v),
     log: (source, line) => env.out(`[${source}] ${line}`),
   };
+}
+
+/** `skein-host billing [handle]` (#130): what host.db holds of billing — the instances, their ticks, their payments. */
+function billingCmd(db: HostDb, rest: string[], env: Env): number {
+  const [handle] = rest;
+  const sats = (n: string | null) => n === null ? "-" : `${(BigInt(n) / NSAT).toString()}.${(BigInt(n) % NSAT).toString().padStart(9, "0")}`;
+  for (const b of db.billings()) {
+    if (handle && b.instance !== handle) continue;
+    env.out([b.instance, `host ${b.host?.slice(0, 8) ?? "-"}`, `tally ${sats(b.tally)}`, `allocation ${sats(b.allocation)}`, b.asleep_since !== null ? `asleep since ${new Date(b.asleep_since).toISOString()}` : "awake", b.mismatch ? `not served: ${b.mismatch}` : "", b.updated_at].filter(Boolean).join("\t"));
+    if (!handle) continue;
+    for (const t of db.billingTicks(b.instance)) env.out(`  tick ${new Date(t.at).toISOString()} log ${t.log}`);
+    for (const p of db.billingPayments(b.instance)) env.out(`  payment ${p.txid} ${p.amount} sats ${new Date(p.at).toISOString()}${p.ours ? "" : " (not to this host's key)"}${p.checkpoint ? ` checkpoint ${p.checkpoint}` : ""}`);
+  }
+  return 0;
+}
+
+/**
+ * `skein-host reclaim [--grace ms] [--yes]` (#130 decided 9): the instances asleep longer than the
+ * grace (host.db: since when the router saw it asleep), listed; with --yes each is reclaimed —
+ * through the running router's control socket when one runs (it holds their kernels), else here.
+ * The host's call to make: nothing reclaims on its own.
+ */
+async function reclaimCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { grace: { type: "string" }, yes: { type: "boolean" } } });
+  if (positionals.length) { env.err(USAGE); return 2; }
+  const grace = v.grace !== undefined ? Number(v.grace) : (billingConfig(env.vars) ?? DEV_BILLING).graceMs;
+  if (!Number.isFinite(grace) || grace < 0) { env.err("skein-host reclaim --grace: ms"); return 2; }
+  const due = db.reclaimable(Date.now(), grace).filter((r) => r.instance !== db.hostSkein()?.handle);
+  for (const r of due) env.out(`${r.instance}\tasleep since ${new Date(r.asleep_since).toISOString()}`);
+  if (!v.yes) { env.out(`${due.length} past the grace (${grace} ms)${due.length ? "; --yes reclaims them" : ""}`); return 0; }
+  const sock = join(homeOf(env.vars), CONTROL_SOCKET);
+  let failed = 0;
+  for (const r of due) {
+    try {
+      const answer = await controlRequest(sock, { op: "reclaim", handle: r.instance });
+      if (answer && !answer.ok) throw new Error(answer.error);
+      if (!answer) {
+        if (await routerAt(env.vars)) throw new Error("a router serves this host with no control socket here: it holds the store; reclaim through it");
+        const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
+        try { await router.reclaim(r.instance); } finally { await router.close(); }
+      }
+      env.out(`${r.instance}: reclaimed`);
+    } catch (e) {
+      failed++;
+      env.err(`skein-host reclaim ${r.instance}: ${(e as Error).message}`);
+    }
+  }
+  return failed ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- bootstrap (#4)

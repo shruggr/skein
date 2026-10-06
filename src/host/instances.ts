@@ -16,7 +16,10 @@
 // provider's one (#69, cron.ts): the schedules the instances asked for.
 // And the host's own settings (#90): which row is the host skein — the
 // operator's instance (`skein-host init`), whose identity alone reaches the
-// instance manager.
+// instance manager. And billing's (#130, billing.ts): each billed instance as
+// the host last read it (asleep since when: the grace), the periods it ticked
+// (each period's log record, which its tick commits to), and the payments its
+// wallet made (the `payment` events).
 
 import { DatabaseSync } from "node:sqlite";
 
@@ -90,7 +93,38 @@ CREATE TABLE IF NOT EXISTS host_settings (
 CREATE TABLE IF NOT EXISTS image_blocks (
   cid               TEXT PRIMARY KEY,                 -- the object's CID (git-raw, sha1)
   bytes             BLOB NOT NULL                     -- the git object ("blob <n>\\0…", "tree <n>\\0…")
-);`;
+);
+-- Billing (#130, billing.ts): a billed instance as the host last read its kernel's billing state; asleep_since
+-- (ms) is the host's clock when it went asleep (the grace counts from it), NULL when awake.
+CREATE TABLE IF NOT EXISTS billing (
+  instance          TEXT PRIMARY KEY,
+  host              TEXT,                             -- the host row's key (hex)
+  tally             TEXT,                             -- nanosats (decimal)
+  allocation        TEXT,                             -- nanosats (decimal)
+  asleep_since      INTEGER,
+  mismatch          TEXT,                             -- why this host does not serve its terms, if so
+  updated_at        TEXT NOT NULL
+) WITHOUT ROWID;
+-- The periods ticked (#130): the host's log record for each (dag-cbor), the CID its tick commits to.
+CREATE TABLE IF NOT EXISTS billing_ticks (
+  instance          TEXT NOT NULL,
+  at                INTEGER NOT NULL,                 -- the tick's time (ms)
+  log               TEXT NOT NULL,                    -- the period record's CID
+  record            BLOB NOT NULL,
+  PRIMARY KEY (instance, at)
+) WITHOUT ROWID;
+-- The payments (#130): each \`payment\` event an instance's wallet emitted to this host.
+CREATE TABLE IF NOT EXISTS billing_payments (
+  instance          TEXT NOT NULL,
+  txid              TEXT NOT NULL,
+  amount            INTEGER NOT NULL,                 -- sats
+  at                INTEGER NOT NULL,                 -- ms, when the host took it
+  beef              BLOB NOT NULL,                    -- the Atomic BEEF
+  remittance        TEXT NOT NULL,                    -- JSON {derivationPrefix, derivationSuffix, senderIdentityKey}
+  ours              INTEGER NOT NULL,                 -- 1: its output pays the key the remittance derives from this host's
+  checkpoint        TEXT,                             -- the state record CID its other output commits
+  PRIMARY KEY (instance, txid)
+) WITHOUT ROWID;`;
 
 /**
  * A handle: one hostname label (lower-case letters, digits and "-", at most
@@ -348,6 +382,52 @@ export class HostDb {
       this.db.exec("ROLLBACK");
       throw e;
     }
+  }
+
+  /** A billed instance as last read (#130); asleep: when it went asleep (ms) is kept from the first time seen. */
+  setBilling(instance: string, b: { host?: string; tally?: bigint; allocation?: bigint; asleep: boolean; mismatch?: string }, now: number, at = new Date()): void {
+    const had = this.billing(instance);
+    const since = b.asleep ? (had?.asleep_since ?? now) : null;
+    this.db.prepare("INSERT INTO billing (instance, host, tally, allocation, asleep_since, mismatch, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (instance) DO UPDATE SET host = excluded.host, tally = excluded.tally, allocation = excluded.allocation, asleep_since = excluded.asleep_since, mismatch = excluded.mismatch, updated_at = excluded.updated_at")
+      .run(instance, b.host ?? null, b.tally?.toString() ?? null, b.allocation?.toString() ?? null, since, b.mismatch ?? null, at.toISOString());
+  }
+
+  billing(instance: string): { instance: string; host: string | null; tally: string | null; allocation: string | null; asleep_since: number | null; mismatch: string | null; updated_at: string } | undefined {
+    const r = this.db.prepare("SELECT * FROM billing WHERE instance = ?").get(instance);
+    return r ? { ...r } as never : undefined;
+  }
+
+  billings(): Array<{ instance: string; host: string | null; tally: string | null; allocation: string | null; asleep_since: number | null; mismatch: string | null; updated_at: string }> {
+    return this.db.prepare("SELECT * FROM billing ORDER BY instance").all().map((r) => ({ ...r }) as never);
+  }
+
+  /** The instances asleep since before `now - graceMs` (#130: the host may reclaim them). */
+  reclaimable(now: number, graceMs: number): Array<{ instance: string; asleep_since: number }> {
+    return this.db.prepare("SELECT instance, asleep_since FROM billing WHERE asleep_since IS NOT NULL AND asleep_since <= ? ORDER BY asleep_since").all(now - graceMs).map((r) => ({ ...r }) as never);
+  }
+
+  forgetBilling(instance: string): void {
+    this.db.prepare("DELETE FROM billing WHERE instance = ?").run(instance);
+  }
+
+  /** A period ticked (#130): its log record and CID. */
+  billingTick(instance: string, at: number, log: string, record: Uint8Array): void {
+    this.db.prepare("INSERT OR REPLACE INTO billing_ticks (instance, at, log, record) VALUES (?, ?, ?, ?)").run(instance, at, log, record);
+  }
+
+  billingTicks(instance: string): Array<{ at: number; log: string; record: Uint8Array }> {
+    return this.db.prepare("SELECT at, log, record FROM billing_ticks WHERE instance = ? ORDER BY at").all(instance).map((r) => { const x = r as { at: number; log: string; record: Uint8Array }; return { at: Number(x.at), log: x.log, record: new Uint8Array(x.record) }; });
+  }
+
+  /** A payment taken (#130); false if it was already. */
+  billingPayment(p: { instance: string; txid: string; amount: number; at: number; beef: Uint8Array; remittance: unknown; ours: boolean; checkpoint?: string }): boolean {
+    return Number(this.db.prepare("INSERT OR IGNORE INTO billing_payments (instance, txid, amount, at, beef, remittance, ours, checkpoint) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(p.instance, p.txid, p.amount, p.at, p.beef, JSON.stringify(p.remittance), p.ours ? 1 : 0, p.checkpoint ?? null).changes) > 0;
+  }
+
+  billingPayments(instance?: string): Array<{ instance: string; txid: string; amount: number; at: number; ours: boolean; checkpoint: string | null; remittance: string }> {
+    const q = instance ? this.db.prepare("SELECT instance, txid, amount, at, ours, checkpoint, remittance FROM billing_payments WHERE instance = ? ORDER BY at").all(instance) : this.db.prepare("SELECT instance, txid, amount, at, ours, checkpoint, remittance FROM billing_payments ORDER BY instance, at").all();
+    return q.map((r) => { const x = r as { instance: string; txid: string; amount: number; at: number; ours: number; checkpoint: string | null; remittance: string }; return { ...x, amount: Number(x.amount), at: Number(x.at), ours: x.ours === 1 }; });
   }
 
   /** The host skein (#90): the operator's instance (`skein-host init`), the one row whose identity reaches the instance manager. */
