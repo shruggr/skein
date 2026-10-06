@@ -125,6 +125,9 @@ echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, 
 echo "== the image carries the header chain (#132): a fake chaintracks' history (N regtest headers) and tip stream (M more), all before any skein exists; the host builds the default image's chain part from genesis at start and grows it per header; a skein created from the image holds chain/headers and chain/tip; its owner installs the chain app (shruggr/skein-chain at image-chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR); the next header is the first it takes, and its chain state holds all N + M + 1 from genesis (no feed replay); add --image default boots from the same image; replayed"
 "${node[@]}" "$kz/equiv/image-chain.ts" || status=1
 
+echo "== billing (#130): two skeins from the default image (its wallet and funding row) on a host that bills, with the chain app (wallet.ts's pinned commit, or \$SKEIN_CHAIN_DIR) over a fake header feed and a fake Arcade; alice's owner grants the host (skein plan host: the host row, the host's published terms), the host ticks at once (billing starts on its allowance); a funding delivered to the host (POST /fund/alice) internalized by her wallet; usage consumes the allocation and the kernel's pay step pays X — a payment event the host keeps and broadcasts, its output the host's BRC-29 key, its other output OP_RETURN the state record's CID — then all she has, then nothing: asleep, 402, no tick, her owner held too, reclaimable past the grace; a second funding through the host wakes her; a tick charges storage and the host's amounts, its period's log record kept; an owner's head message for billing and a stranger's tick refused; bob (no host row) untouched; an app's payment event refused; replayed"
+"${node[@]}" "$kz/equiv/billing.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 
