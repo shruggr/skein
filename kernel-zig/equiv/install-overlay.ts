@@ -71,7 +71,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "a57018824d14326ef7eb983b4a826ebaff1283e8";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "28765fc7129e6e7a1c4d5cdf083b63d51bc978ca";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -80,16 +80,6 @@ const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
 
-/** #135: a copy of the overlay app with its listing and documentation rows as reads[] (the entries the overlay repo is to declare). */
-function withReads(dir: string, to: string): string {
-  cpSync(dir, to, { recursive: true, filter: (p) => !/\/(\.git|zig-out|\.zig-cache|zig-pkg)$/.test(p) });
-  const mf = JSON.parse(readFileSync(join(to, "etc/app.json"), "utf8")) as { dispatch: Array<Record<string, unknown>>; reads?: Array<Record<string, unknown>> };
-  const isRead = (r: Record<string, unknown>) => r.transport === "http" && ["/listTopicManagers", "/listLookupServiceProviders", "/getDocumentationForTopicManager", "/getDocumentationForLookupServiceProvider"].includes(String(r.address));
-  mf.reads = [...(mf.reads ?? []), ...mf.dispatch.filter(isRead).map(({ transport: _t, sender: _s, ...r }) => r)];
-  mf.dispatch = mf.dispatch.filter((r) => !isRead(r));
-  writeFileSync(join(to, "etc/app.json"), JSON.stringify(mf, null, 2));
-  return to;
-}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(what: string, f: () => Promise<T | undefined> | T | undefined, ms = 30_000): Promise<T> {
   for (const end = Date.now() + ms; ;) {
@@ -236,9 +226,8 @@ try {
   };
   const served = () => rA.p2p?.served("ov");
   const subscribers = (r: Router, h: string, topic: string) => ((r.p2p?.node(h)?.services as { pubsub: { getSubscribers(t: string): unknown[] } } | undefined)?.pubsub.getSubscribers(topic).length ?? 0);
-  // #135: the overlay's listings and documentation are reads — its manifest's http rows for them moved to reads[]
-  // here, as the overlay stream's next release declares them (a copy: the checkout is left as it is).
-  const overlayDir = withReads(checkout(process.env.SKEIN_OVERLAY_DIR, OVERLAY_REPO, OVERLAY_REV, join(home, "overlay")), join(home, "overlay-reads"));
+  // #135: the overlay's listings and documentation are reads — its manifest (0.8.0) declares them in reads[], no rows.
+  const overlayDir = checkout(process.env.SKEIN_OVERLAY_DIR, OVERLAY_REPO, OVERLAY_REV, join(home, "overlay"));
   const chainDir = checkout(process.env.SKEIN_CHAIN_DIR, CHAIN_REPO, CHAIN_REV, join(home, "chain"));
 
   // ------------------------------------------------ requires chain/1: refused without the chain app
@@ -259,7 +248,7 @@ try {
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.7.8" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.7.8), with config.overlay; no alias head `overlay`");
+  check(app?.kind === "app" && app.version === "0.8.0" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.8.0), with config.overlay; no alias head `overlay`");
   check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "mailbox overlay", "mailbox overlay/submit"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)) && !rowsT.some((r) => r.transport === "http" && r.address !== "/overlay/submit"), `the dispatch table has the derived rows, and no http row but /submit: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const readsT = (((await record("reads"))?.reads ?? []) as Array<{ address: string; fn: string; app?: string }>).filter((r) => r.app === "overlay").map((r) => `${r.address} ${r.fn}`).sort();
   check(JSON.stringify(readsT) === JSON.stringify(["/overlay/getDocumentationForLookupServiceProvider lookupDocumentation", "/overlay/getDocumentationForTopicManager topicDocumentation", "/overlay/listLookupServiceProviders listLookupServiceProviders", "/overlay/listTopicManagers listTopicManagers", "/overlay/lookup lookup"]), `#135: the reads head has the overlay's reads — the derived /lookup and the manifest's four: ${readsT.join(", ")}`);

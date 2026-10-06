@@ -145,7 +145,7 @@ approves (§3): the install prompt is the rows and reads read aloud. A manifest 
 for a row the owner did not approve is refused at install.
 
 **The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
-(#79): skein-overlay 0.7.8, skein-shell 0.1.1, skein-chat 0.1.0 and
+(#79): skein-overlay 0.8.0, skein-shell 0.1.1, skein-chat 0.1.0 and
 skein-site 0.7.3 are in this shape (skein-static, archived by #125, was). There are no grants: an app writes only `<name>/…`.
 
 **The app record** — the root of `<name>/app`, written by the install
@@ -562,7 +562,7 @@ marked "(derived: config.overlay)" in the prompt:
   (fn `peerAdmit`) and `<topic>-proof` (fn `peerProof`) per topic (#74).
 
 No `chain`, `chain/status` or `submit` box (the chain app's, and the app's own
-box), no grants. The engine's three boxes (skein-overlay 0.7.7, #128; 0.7.8 current):
+box), no grants. The engine's three boxes (skein-overlay 0.7.7, #128; 0.8.0 current):
 `<app>/submit` takes submissions, by message and by POST `/<app>/submit`,
 from anyone (`filter: "beef"`; the manifest's own row, address `"submit"`);
 `<app>/register` takes register / deregister from the owner (the manifest's

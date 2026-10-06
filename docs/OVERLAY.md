@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.8).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.8.0).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -221,9 +221,9 @@ paths are reads the manifest declares itself, `reads[]`:
 ]
 ```
 
-(skein-overlay 0.7.8 still names them as http rows; the overlay stream's
-next release moves them — until then they are message routes, and an
-unsigned GET is a 401. The walkthrough below predates #135.) The chain app's
+(skein-overlay 0.8.0 declares them so; through 0.7.8 they were http rows,
+message routes, and an unsigned GET a 401. The walkthrough below predates
+#135.) The chain app's
 four rows are its manifest's own; its `$status` row is left out on a host
 with no status provider. The prompt does not show a row's `filter`.
 

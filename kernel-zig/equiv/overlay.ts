@@ -74,7 +74,7 @@ import { READS_HEAD, readsRecord } from "../../src/host/plan.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "a57018824d14326ef7eb983b4a826ebaff1283e8";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "28765fc7129e6e7a1c4d5cdf083b63d51bc978ca";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
