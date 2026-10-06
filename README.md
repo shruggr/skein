@@ -284,7 +284,7 @@ description left out:
   depend on skein-sdk by tag:
 
   ```
-  zig fetch --save=skein_sdk https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.7.0.tar.gz
+  zig fetch --save=skein_sdk https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.7.2.tar.gz
   ```
 
   and dispatch `{fn, args}` with the SDK's `app.serve`
