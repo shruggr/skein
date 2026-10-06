@@ -131,7 +131,7 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.equal(refusedSigned.status, 400, "the filter refused the BEEF (no chain state to check it against)");
   assert.match(await refusedSigned.text(), /no chain state/, "the refusal's reason, in the body AuthFetch verified");
   assert.ok(signed(answers.at(-1)!) && !answers.at(-1)!.thread, "a door refusal (no thread) of a signed request: answered signed on its session");
-  const refusedRecord = await k.store.get((await k.store.get(answers.at(-1)!.entry!) as { request: CID }).request) as { body: unknown };
+  const refusedRecord = await k.store.get((await k.store.get(answers.at(-1)!.entry!) as { request: CID }).request) as unknown as { body: unknown };
   assert.ok(!(refusedRecord.body instanceof Uint8Array), "the record the refusal entry names has its BEEF replaced (the host signed over the bytes as received)");
   answers.length = 0;
   const refusedPlain = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
