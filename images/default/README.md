@@ -18,7 +18,8 @@ docs/BOOTSTRAP.md, "The default image".
 - `etc/dispatch.json`: the claim row and the messagebox's box and http rows.
   The explorer row (`/explore`) is the claim's: the kernel writes it with
   the owner's key (#121).
-- `apps/git/`: shruggr/skein-git v0.1.1's tree (the same git tree as that
-  tag's commit; its fetch is the SDK's `fetch` intention, #126). Not wired: the management page installs it from here as the
+- `apps/git/`: shruggr/skein-git v0.1.2's tree (the same git tree as that
+  tag's commit; its fetch is the SDK's `fetch` intention, #126; its manifest
+  check is skein's checkManifest, rule for rule: an overlay may list no topics). Not wired: the management page installs it from here as the
   owner (objects for its module and records, head, dispatch, start), and
   every other app through it, by hash.

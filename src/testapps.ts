@@ -44,10 +44,10 @@ export const ONBOARD_APP: PinnedApp = {
   rev: process.env.SKEIN_ONBOARD_REV ?? "454954aac0541e1d4f16b902e586d0c10124a9e8", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
-/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1). */
+/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1); 0.1.2: the manifest checked by every rule of src/host/manifest.ts (an overlay may list no topics, #120; boxes relative to the app, #128). */
 export const GIT_APP: PinnedApp = {
   name: "git", repo: "https://github.com/shruggr/skein-git",
-  rev: process.env.SKEIN_GIT_REV ?? "66d77ccf68782e95d74a4c88dfd65b800b98c358", dir: process.env.SKEIN_GIT_DIR,
+  rev: process.env.SKEIN_GIT_REV ?? "39a8b95a558af756e43d77a104b2a9a902c5b0a7", dir: process.env.SKEIN_GIT_DIR,
 };
 
 /** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.2: bundles on a skein with no address-book roles, #126). */

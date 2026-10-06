@@ -24,12 +24,17 @@
 //      is not admitted; the same clone again, once the app is installed,
 //      answers the same tree and the record with the app's state carried
 //      over (as the client rebuilds it);
-//   4. the instance's store replays to itself exactly.
+//   4. an overlay app with no topics (#120: it registers them at runtime, as
+//      skein-amm does) and mailbox rows relative to the app (#128: "", the
+//      box "register", the box "submit" with filter beef): cloned, its record
+//      rebuilt by the client (the same CID), installed — its rows and the
+//      derived ones, the boxes resolved under its name;
+//   5. the instance's store replays to itself exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/git-clone.ts
 
 import { spawn, spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -76,6 +81,30 @@ const checkoutA = await readApp(repo); // the CLI's host-side path, over the sam
 git("rm", "-q", "etc/app.json");
 git("commit", "-qm", "no manifest");
 const hashB = git("rev-parse", "HEAD");
+
+// An overlay app with no topics (#120) and relative boxes (#128): app-demo's module as its engine.
+const ovRepo = join(repos, "ov-dyn");
+mkdirSync(join(ovRepo, "etc"), { recursive: true });
+cpSync(join(demoDir, "bin"), join(ovRepo, "bin"), { recursive: true });
+writeFileSync(join(ovRepo, "etc/app.json"), JSON.stringify({
+  kind: "app", name: "ov-dyn", version: "0.1.0",
+  programs: { overlay: "bin/app-demo.wasm" },
+  config: { overlay: { lookups: { ls_dyn: { program: "overlay" } } } },
+  dispatch: [
+    { address: "register", sender: "$owner", program: "overlay" },
+    { address: "submit", sender: "*", program: "overlay", filter: "beef" },
+    { address: "", sender: "event", program: "overlay" },
+  ],
+}, null, 2));
+const ovGit = (...args: string[]) => {
+  const r = spawnSync("git", args, { cwd: ovRepo, env: gitEnv, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+};
+ovGit("init", "-q", "-b", "main");
+ovGit("add", "-A");
+ovGit("commit", "-qm", "ov-dyn");
+const hashOv = ovGit("rev-parse", "HEAD");
 
 /** `git http-backend` as a CGI under node:http. Under /liar/ the server swaps the wanted commit for B's: a pack of another commit. */
 function backend(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string): void {
@@ -221,6 +250,24 @@ try {
     `the same clone again: the same tree, and the record with the installed app's state carried over, as the client rebuilds it (${JSON.stringify(again.result ?? again.error)})`);
   const stranger = await new RawBox(ephemeralWallet(PrivateKey.fromRandom()), `${h.base}/@inst`).send(inst, "git", { fn: "git.clone", args: { url: repoUrl, hash: hashA } }).then(() => "sent", (x: Error) => x.message);
   check(/403/.test(stranger), `a stranger's clone is not admitted: only the owner's row opens box git (${stranger})`);
+
+  // ------------------------------------------------ 4. an overlay with no topics, boxes relative to the app
+  const ov = await clone(repoUrl.replace(/app-demo$/, "ov-dyn"), hashOv);
+  check(!ov.error && !!ov.result?.app, `git.clone of an overlay manifest with no topics (#120): answered (${JSON.stringify(ov.error ?? ov.result)})`);
+  if (ov.result?.tree && ov.result.app) {
+    const ovPlan = await planInstall(await readStoredApp(view, ov.result.tree), await instanceView(view), { modules: wasmDirObjects(join(here, "../../wasm")) });
+    check(ovPlan.recordCid.equals(ov.result.app), `planInstall rebuilds its record: the same CID (${ovPlan.recordCid} = ${ov.result.app})`);
+    const ovRec = await kk.store.get(ov.result.app) as { dispatch?: Array<{ transport: string; address: string; sender: string; filter?: string }> };
+    const keys = (ovRec.dispatch ?? []).map((r) => `${r.transport} ${r.address} ${r.sender}${r.filter ? ` ${r.filter}` : ""}`).join(", ");
+    check(keys === "mailbox register $owner, mailbox submit * beef, mailbox  event, mailbox ov-dyn $self, http /submit * beef, http /lookup *",
+      `its rows as written, then the derived ones the manifest has not (the box "" from event is the app's box): ${keys}`);
+    const sentOv = await sendInstall(ovPlan, (box, body) => owner.send(inst, box, dagCbor.decode(body)));
+    await h.router.settled();
+    check(sentOv.messages === 1 + 6, `the install: head and six dispatch rows (${sentOv.messages} messages)`);
+    const table = (await instanceView(view)).dispatch.filter((r) => (r as { app?: string }).app === "ov-dyn").map((r) => `${r.transport} ${r.address}`).sort().join(", ");
+    check(table === "http /ov-dyn/lookup, http /ov-dyn/submit, mailbox ov-dyn, mailbox ov-dyn, mailbox ov-dyn/register, mailbox ov-dyn/submit",
+      `the kernel's table holds them under the app's name: ${table}`);
+  }
 } catch (err) {
   check(false, `threw: ${(err as Error).stack}`);
 } finally {
