@@ -4,8 +4,9 @@
 // The stock AuthFetch shakes hands with the instance — the handshake is a
 // request like any other, and its session is a record (head `frontdoor/sessions`) —
 // its signed requests verify inside the VM and the answers verify at the
-// client. A refusal (401, 404) is recorded and changes nothing else. A poll
-// costs an entry. Sessions survive a new kernel process; an expired one is a
+// client. A refusal (401, 404) of a signed request is recorded and changes
+// nothing else; an unsigned request is no entry (#135: the second door is
+// for reads; a row is a message route). A poll costs an entry. Sessions survive a new kernel process; an expired one is a
 // 401 and the stock client shakes hands again by itself.
 
 import { test } from "node:test";
@@ -19,7 +20,7 @@ import type { CID } from "multiformats/cid";
 import { msStamp } from "../runtime/syscalls.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { rawCid } from "./boot.ts";
-import { frontDoorFetch, type FrontAnswer } from "./frontdoor.ts";
+import { frontDoorFetch, routeOf, type FrontAnswer } from "./frontdoor.ts";
 import { writeGenesis } from "./genesis.ts";
 import { Kernel, KERNEL_BIN } from "./kernel.ts";
 
@@ -89,16 +90,17 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.deepEqual([req.kind, req.method, req.route], ["http", "POST", "/whoami"], "the request as received");
   assert.ok(req.headers["x-bsv-auth-signature"], "its BRC-104 headers too: the host verified nothing");
 
-  // Unsigned: a plain 401 on an authenticated route, recorded (an entry, a finished thread) and nothing else.
+  // #135, two doors: an unsigned request never reaches the kernel's door — a 401 at a message route
+  // (any row, an open one `*` included: sign it), a 404 at nothing; answered by the host, no entry.
   answers.length = 0;
   const n1 = await entries();
   assert.equal((await door("http://alpha.test/whoami", { method: "POST" })).status, 401);
-  assert.equal((await door("http://alpha.test/open", { method: "POST" })).status, 200, "an open route answers without auth");
+  assert.equal((await door("http://alpha.test/open", { method: "POST" })).status, 401, "an open row (`*`) is a message route too: an unsigned request is 401");
   assert.equal((await door("http://alpha.test/nowhere", { method: "POST" })).status, 404);
   await k.idle();
-  assert.equal(await entries(), n1 + 3, "each refusal is an entry");
+  assert.equal(await entries(), n1, "an unsigned request is no entry");
   assert.equal((await sessions())!.toString(), s1.toString(), "a refusal moves nothing");
-  assert.ok(answers.every((a) => a.thread), "each answered by its own thread (the refusal recorded on it)");
+  assert.ok(answers.every((a) => !a.thread && !a.entry), "answered by the host: no entry, no thread");
 
   // 2026-10-07: a signed request is verified and answered signed on its session whatever the row's
   // sender — an open row (`*`) included; the row's sender is who may reach it, not how the wire is answered.
@@ -117,9 +119,8 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.ok(signed(answers.at(-1)!), "a signed request no row is at: its 404 signed");
   answers.length = 0;
   const plainGet = await door("http://alpha.test/open", { method: "GET" });
-  assert.equal(plainGet.status, 200);
-  assert.notEqual(Buffer.from(await plainGet.arrayBuffer()).toString("hex"), client, "an unsigned request on an open row: the handler gets no caller");
-  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "an unsigned request on an open row: answered plain");
+  assert.equal(plainGet.status, 401, "#135: an unsigned GET of an open row: 401 (a read is a read, declared as one; a row is a message route)");
+  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "answered plain");
 
   // #135: a door refusal (no thread ran) of a signed request is answered signed on its session too:
   // the host asks the front door (fn "refusal") with the request as received. A BEEF the filter
@@ -135,8 +136,8 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.ok(!(refusedRecord.body instanceof Uint8Array), "the record the refusal entry names has its BEEF replaced (the host signed over the bytes as received)");
   answers.length = 0;
   const refusedPlain = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
-  assert.equal(refusedPlain.status, 400);
-  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "the same refusal of an unsigned request: plain");
+  assert.equal(refusedPlain.status, 401, "#135: the same request unsigned never reaches the door's filter: 401, plain");
+  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")) && !answers.at(-1)!.entry, "answered by the host, plain, no entry");
   // 403: a stranger's signed request to a row for another key: verified, its 403 signed.
   const stranger = new AuthFetch(ephemeralWallet(PrivateKey.fromRandom()), undefined, undefined, undefined, {}, door);
   answers.length = 0;
@@ -171,4 +172,21 @@ test("front door: every request is an entry and a thread; the handshake writes t
   const root2 = await k.store.get((await sessions())!) as unknown as { buckets: CID[] };
   const held2 = (await Promise.all(root2.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: unknown[] }).sessions))).flat();
   assert.equal(held2.length, 1, "the handshake dropped the expired session");
+});
+
+test("two doors (#135): a path goes to a read or a row as the table matches — exact first, then the longest prefix", () => {
+  const read = (address: string, prefix?: true) => ({ address, ...(prefix ? { prefix } : {}), program: "p" as never, fn: "get" });
+  const row = (address: string, prefix?: true) => ({ transport: "http" as const, address, ...(prefix ? { prefix } : {}), sender: "*" as const, program: "p" as never, fn: "f" });
+  const reads = [read("/", true), read("/site/", true), read("/onboard/resolve"), read("/amm/", true)];
+  const rows = [row("/sendMessage"), row("/amm/call"), row("/explore", true), { ...row("/x"), transport: "mailbox" as const }];
+  const to = (p: string) => { const r = routeOf(reads, rows as never, p); return !r ? "none" : "read" in r ? `read ${r.read.address}` : `row ${r.row.address}`; };
+  assert.equal(to("/sendMessage"), "row /sendMessage", "an exact row over the root read");
+  assert.equal(to("/amm/call"), "row /amm/call", "an exact row over a prefix read");
+  assert.equal(to("/amm/index.html"), "read /amm/");
+  assert.equal(to("/explore/log"), "row /explore", "a longer prefix row over the root read");
+  assert.equal(to("/onboard/resolve"), "read /onboard/resolve");
+  assert.equal(to("/site/app.js"), "read /site/");
+  assert.equal(to("/anything"), "read /");
+  assert.equal(routeOf([], rows as never, "/x"), undefined, "a mailbox row is no http path");
+  assert.equal(routeOf([], rows as never, "/nowhere"), undefined);
 });

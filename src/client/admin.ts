@@ -34,7 +34,8 @@ import { dispatchBody, handlerCid, hashDir, recordBundles, senderKey } from "./c
 import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
 import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
-import { describe, planInstall, planUninstall, sendInstall, sendUninstall, type AppTree, type InstanceView } from "../host/plan.ts";
+import { describe, planInstall, planOwnerRead, planUninstall, sendInstall, sendUninstall, type AppTree, type InstanceView, type ReadEntry } from "../host/plan.ts";
+import { chunk } from "./bundle.ts";
 import type { Objects } from "../host/boot.ts";
 
 /** One admin message: the box and the body (a record value: what the kernel's operation takes). */
@@ -136,6 +137,26 @@ export function planDispatch(recipient: string, a: { op: "add" | "remove"; sende
     prompt: [`dispatch ${a.op} http ${a.box}${h.prefix ? "*" : ""} from ${a.sender ?? "anyone"} → ${a.handler}.${h.fn} (${String(program)})${shown ? ` (${shown})` : ""}`],
     recipient, messages: [{ box: "dispatch", body: { op: a.op, row } }],
   };
+}
+
+/**
+ * The owner's own read (#135): one path served by a `call` of a program's function, for anyone,
+ * signed or not — added to (removed from) the reads head: `objects` (the reads record) and `head
+ * reads`. E.g. the site at the root: `skein plan reads add --prefix --fn get --settings
+ * '{"root":"www"}' / site.site --origin <url>`. The handler as for a dispatch row (a program record
+ * CID, a genesis program, or <app>.<role>, resolved by the caller into `programs`).
+ */
+export async function planReads(view: InstanceView, a: { op: "add" | "remove"; path: string; handler: string; http: HttpRowArgs }, programs: Record<string, CID> = {}): Promise<AdminPlan> {
+  if (!a.path.startsWith("/") || /[\\\0?#]/.test(a.path) || a.path.split("/").some((x) => x === "." || x === "..")) throw new Error(`read ${JSON.stringify(a.path)}: a path (from /, no ".", "..", query or fragment)`);
+  if (!a.http.fn) throw new Error("a read names its function (--fn)");
+  const settings = a.http.settings ?? {};
+  const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
+  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the read's own, not a setting`);
+  const read: ReadEntry = { ...settings, address: a.path, ...(a.http.prefix ? { prefix: true as const } : {}), program: handlerCid(a.handler, programs), fn: a.http.fn };
+  const p = await planOwnerRead(view, a.op, read);
+  const messages: AdminMessage[] = [...chunk(p.records)].map((b) => ({ box: "objects", body: dagCbor.decode(b) }));
+  messages.push({ box: "head", body: { name: p.head.name, tree: p.head.tree } });
+  return { prompt: p.prompt, recipient: view.identity, messages };
 }
 
 /**

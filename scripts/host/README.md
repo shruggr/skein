@@ -57,7 +57,7 @@ So `up.sh` goes:
    again. The shell app's first install is the slow step: its modules are
    ~50 MB of messages.
 7. **The onboarding app** (#90, #113) into the host skein, as the owner, from
-   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.3.3`; first the owner's claim of the host skein, #127), with
+   `SKEIN_ONBOARD_APP` (default `shruggr/skein-onboard#v0.3.4`; first the owner's claim of the host skein, #127), with
    `--config '{"onboard": {"domain": <SKEIN_HANDLE_DOMAIN, default
    localhost>, "origin": <the router's origin>}}'`: any wallet with a
    session then creates a skein of its own with `POST
@@ -414,6 +414,7 @@ bin/skein plan install <repo-url#commit | dir> <where> [--config json] [--out di
 bin/skein plan uninstall <app> <where> [--out dir]
 bin/skein plan dispatch add|remove [--sender <key>] <box> <handler> <where> [--out dir]
 bin/skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender <key>|session] <path> <handler> <where> [--out dir]
+bin/skein plan reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--out dir]   # #135: the owner's own read (a call, anyone)
 bin/skein plan peers add <key> <address> [--transport …] [--role r] [--handle h@d] <where> [--out dir]
 bin/skein plan peers remove <key> <where> [--out dir]
 bin/skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
@@ -481,7 +482,7 @@ within one segment; a pattern naming a directory takes all of it;
 
 ```
 bin/skein plan install https://github.com/shruggr/skein-site#<commit> --origin http://martha.localhost:8100 --out plan
-bin/skein plan dispatch add --http --prefix --fn get --settings '{"root":"www"}' / site.site --origin http://martha.localhost:8100 --out root   # the owner's own row: the site at /
+bin/skein plan reads add --prefix --fn get --settings '{"root":"www"}' / site.site --origin http://martha.localhost:8100 --out root   # the owner's own read (#135): the site at /
 bin/skein send http://martha.localhost:8100 plan
 bin/skein plan dispatch add --sender <key> register resolve --store ~/.skein/instances/martha/runtime.db --out plan
 bin/skein plan deploy ~/Work/prompts/.agents/martha --store ~/.skein/instances/martha/runtime.db --out plan

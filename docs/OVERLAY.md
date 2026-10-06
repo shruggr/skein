@@ -196,14 +196,34 @@ true}`). The install derives these rows from it (src/host/manifest.ts
 |---|---|---|
 | mailbox `overlay` | `event` (what its libp2p rows admit) | |
 | mailbox `overlay` | `$self` (its own watch) | |
-| http `/overlay/submit` | anyone | `submit`, `filter: "beef"` |
-| http `/overlay/lookup` | anyone | `lookup` |
+| http `/overlay/submit` | any key (signed, #135) | `submit`, `filter: "beef"` |
+| read `/overlay/lookup` (#135) | anyone, by a call | `lookup` |
 | libp2p `tm_demo` | anyone | `submit`, `filter: "beef"` |
 | libp2p `tm_demo-admit` | anyone | `peerAdmit` |
 | libp2p `tm_demo-proof` | anyone | `peerProof` |
 
-The operator writes only the listing and documentation rows in
-`etc/app.json` (the four http rows above the derived ones). The chain app's
+**Two doors (#135).** `/overlay/lookup` is a **read**, derived into the
+manifest's `reads[]`: the host serves it by a call over the current state —
+anyone, signed or not, any method (BRC-24's POST), no entry. `/submit` is a
+**message route**: a signed request (BRC-104); the stock TopicBroadcaster's
+plain POST is a 401 now, and the stock AuthFetch does not carry `X-Topics`
+(it signs only content-type, authorization and `x-bsv-*`) — a signed HTTP
+submission names its topics beside the signed headers, or a submission goes
+by message into the box `overlay/submit`. The listing and documentation
+paths are reads the manifest declares itself, `reads[]`:
+
+```json
+"reads": [
+  {"address": "/listTopicManagers", "program": "overlay", "fn": "listTopicManagers"},
+  {"address": "/listLookupServiceProviders", "program": "overlay", "fn": "listLookupServiceProviders"},
+  {"address": "/getDocumentationForTopicManager", "program": "overlay", "fn": "topicDocumentation"},
+  {"address": "/getDocumentationForLookupServiceProvider", "program": "overlay", "fn": "lookupDocumentation"}
+]
+```
+
+(skein-overlay 0.7.8 still names them as http rows; the overlay stream's
+next release moves them — until then they are message routes, and an
+unsigned GET is a 401. The walkthrough below predates #135.) The chain app's
 four rows are its manifest's own; its `$status` row is left out on a host
 with no status provider. The prompt does not show a row's `filter`.
 

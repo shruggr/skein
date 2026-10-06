@@ -2,9 +2,13 @@
 
 How messages enter and leave a skein instance, as built at log format 8.
 **The instance is an HTTP server; BRC-169 is discovery; BRC-103/104 is the
-network; messages are state.** Skein is a state process: every package a
+network; messages are state.** Skein is a state process: every message a
 transport carries in is appended as received and the front door is stepped
-on it; sessions are state; a synchronous client waits on the thread. There
+on it; sessions are state; a synchronous client waits on the thread. **Two
+doors** (#135): the kernel's door admits messages only — a key, a
+signature, a row — and a read is a `call` the host serves over the current
+state, nothing admitted, nothing logged ("The front door: two doors",
+below). There
 is **one way out**: a step `emit`s a message to a key the address book
 names, or an event, and ends waiting, and the answer is an entry. **A skein
 receives mail only where it verifies the sender itself** (#126 step 4): a
@@ -132,13 +136,69 @@ through the client's own wallet. An app's own writes are heads under its name,
 ## The instance as an HTTP server
 
 Each instance is an HTTP server at an origin of its own. Its **front door**
-(`programs/frontdoor`, Zig) is the program that answers: the host appends
-the raw request as a `request` entry and the kernel steps the front door on
-it; the host holds the client's connection until that thread has come to
-rest and returns its answer as the HTTP response (#66, "A synchronous
-client waits on the thread", below). The host's HTTP transport (`src/host/router.ts`)
-picks the instance by URL and appends; it holds no mail and no sessions,
-and verifies nothing.
+(`programs/frontdoor`, Zig) is the program that answers. The host's HTTP
+transport (`src/host/router.ts`) picks the instance by URL and sends the
+request to one of two doors (below): a message is appended as a `request`
+entry and the kernel steps the front door on it — the host holds the
+client's connection until that thread has come to rest and returns its
+answer as the HTTP response (#66, "A synchronous client waits on the
+thread", below); a read is a kernel `call`. The host holds no mail and no
+sessions, and verifies nothing.
+
+### The front door: two doors (#135)
+
+Decided 2026-10-07 (David): "The security boundary is absolute." Every
+entry in the log came from a key.
+
+1. **The kernel's door admits messages only.** A message is a key, a
+   signature, a row. There is no unsigned path into it: an `http` row of
+   the dispatch table is a **message route**, and a request reaches it
+   signed (BRC-104: `x-bsv-auth-*` headers) — verified at the door and
+   answered signed on its session, whatever the row's sender (`*` means
+   any key, never no key).
+2. **Reads are `call`s.** A path the instance's **reads** name is served by
+   the host as a kernel `call` of a program's function over the current
+   state — the front door's fn `read` with the request as received and the
+   read as the handler's `match`. Nothing is admitted, nothing is logged;
+   the fuel is the host's to meter (billing's read-call fuel). Any HTTP
+   method (a BRC-24 lookup is a POST and is a read); signed or not — a
+   signed one is verified and answered signed on its session (its caller
+   the handler's `caller`), an unsigned one answered plain. A read is
+   read-only by definition: a function that writes fails inside the call.
+3. **The host routes HTTP onto the two** (`src/host/frontdoor.ts`
+   `serveHttp`). The reads and the `http` rows are matched together as the
+   table matches its rows — exact paths first, then the longest prefix;
+   **a read and a row never share a path** (address and prefix: the install
+   refuses the clash, and so does `skein plan reads`). A read wins → the
+   call. A row wins, or nothing matches: a signed request goes through the
+   kernel's door (an entry; a path no row takes is the door's signed 404);
+   an unsigned one is answered by the host with no entry — **401** when a
+   row is at the path (a message route: sign it; the stock client shakes
+   hands), else **404**. The handshake (`/.well-known/auth`) is the
+   door's, signed or not.
+
+**Where reads come from.** The head `reads` (src/host/plan.ts
+`READS_HEAD`): its root `{kind: "reads", reads: [{address: <the path as
+served>, prefix?: true, program: <program record>, fn, app?, …settings}]}`.
+An app's manifest declares its reads (`reads[]`, docs/APPS.md §2; the
+overlay's `/lookup` is derived from `config.overlay`); the install writes
+them into the head beside the others' (the kernel's `objects` and `head`
+operations, as the owner) — an upgrade replaces them, an uninstall takes
+them out. The owner adds reads of its own (`skein plan reads add|remove
+[--prefix] --fn f [--settings json] <path> <handler>`; no `app`, so an
+app's upgrade or uninstall leaves them): the site at `/` is one. State, so
+replay-derived, as the dispatch table is; the host reads the head when its
+root moves.
+
+| path (examples) | door |
+|---|---|
+| `/site/*`, the owner's `/`, `/onboard/resolve`, `/onboard/search`, `/onboard/manifest.json`, `/onboard/bsvalias/id/*`, `/<overlay>/lookup`, `/<overlay>/listTopicManagers` … | a read: a call, anyone |
+| `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/<overlay>/submit`, `/amm/call`, `/wallet/fund`, `/explore*` | a message route: signed |
+
+A plain write — the stock TopicBroadcaster's POST `/submit`, an unsigned
+profile — gets 401 and shakes hands. The host's funding hand-in to
+`/wallet/fund` is a message too: the host signs it over a BRC-104 session
+with its billing key (docs/WALLET.md, Billing).
 
 ```
 request {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
@@ -146,7 +206,9 @@ entry   {kind: "log", prev, n, time, request: <that record>, transport: "http"}
 ```
 
 `path` is what the client sent (what BRC-104 signs), `route` what the
-dispatch table sees (the host strips `/@<handle>`), header names lower-cased.
+dispatch table and the reads see (the host strips `/@<handle>`), header
+names lower-cased. A read is the same record, handed to the call and kept
+nowhere.
 
 ```
 http://<handle>.localhost:<port>/…     the instance's origin (the Host header)
@@ -198,8 +260,8 @@ envelope. Answers are signed on the session through the instance's signer
   addresses first, then prefixes, longest first; within each, the first row
   in table order whose sender takes the identity the request claims.
   `sender` says only which keys may reach the route, never how the wire
-  is answered: `"*"` any key with a session, or none (an open route: an
-  overlay's submit and lookup); `"session"` any identity with a BRC-104
+  is answered: `"*"` any key (#135: signed — an unsigned request never
+  reaches a row; the host answers it 401); `"session"` any identity with a BRC-104
   session; a key that identity's (#121, #126: the owner's
   rows name the owner's key; there is no `"owner"` sender symbol). `filter: "beef"` (#121): the door decodes the body's BEEF
   before the entry is written and the handler's `body` is the pointer
@@ -210,8 +272,9 @@ envelope. Answers are signed on the session through the instance's signer
   its session and signature and signs its answer on that session whatever
   the row's sender, `*` included (the handler gets its `caller`); a bad
   signature or an unknown or expired session is a plain 401, as on any
-  row. A request without those headers reaches only an open row, answered
-  plain with no caller. A request no row takes is refused by the front
+  row. A request without those headers reaches no row (#135: the host
+  answers it 401, no entry; before #135 an open row took it, plain). A
+  signed request no row takes is refused by the front
   door as the kernel says: no row at the path, 404 (verified and signed
   when the request is signed); a row there needs a session and the request
   has none, 401 (the stock client shakes hands); none takes its identity,
@@ -231,8 +294,8 @@ envelope. Answers are signed on the session through the instance's signer
 - **Files** (#52; #125: skein-sdk's `files` module, the static app
   archived): any handler serves a site with `files.serve(a, req, tree,
   files.rowOptions(req))` over the tree it picks (shruggr/skein-site: its
-  own app record's `tree`). A row `{transport: "http", address, prefix?,
-  sender: "*", program: <the handler>, fn: "get", root?, index?}` answers
+  own app record's `tree`). A read (#135) `{address, prefix?, program:
+  <the handler>, fn: "get", root?, index?}` answers
   `GET`/`HEAD` with the file at `<root>/<path>` in that tree — `path` the route past the prefix, percent-decoded;
   `root` default the tree's top; a path ending in `/` (or an exact route on
   a directory) its `index`, default `index.html`; a directory without the
@@ -242,9 +305,11 @@ envelope. Answers are signed on the session through the instance's signer
   sha1), and `If-None-Match` naming it is a 304. 404 for a missing file, a
   non-file (link, submodule), a `..` segment, a NUL or a bad escape (nothing
   outside the root is served); 405 for another method (`Allow: GET, HEAD`).
-  A read: its request's entry, and no head moves.
-- **Reads are rows** (#115). There is no reads table: who may call a
-  route is its row's sender. The explorer's row is the owner's key (#121:
+  A read: no entry (#135: a call), and no head moves.
+- **The explorer is a message route** (#115; the explorer's `read` op is
+  not `reads[]`): who may call it is its row's sender, and its answer is a
+  read of live state made after the request's thread (fn `read` with the
+  entry's request). The explorer's row is the owner's key (#121:
   code genesis names it; the default image has no explorer row, and the
   claim writes it with the claimed owner's key — so nobody reads it before a
   claim); others get 403, signed — a refusal, recorded on the request's
@@ -1523,7 +1588,7 @@ scripts/host/README.md "Billing" the host's):
 | the host row | the owner → the skein, box `dispatch` (`skein plan host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
 | a tick | the host's billing key → the skein, the host row's box, a signed `local` message | `{kind: "tick", at, allowance, fuel, served, log?: <cid of the host's period record>}` |
 | a payment | the skein's pay step → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
-| a funding | anyone → the host, `POST /fund/<handle>`; the host → the skein, an `http` request on `/wallet/fund` (open, the `beef` filter) | the body an Atomic BEEF; `x-skein-outputs`: BRC-100 internalizeAction outputs (JSON); `x-skein-description?` → `{txid, status, outputs}` |
+| a funding | anyone → the host, `POST /fund/<handle>`; the host → the skein, a signed `http` request on `/wallet/fund` (#135: sender `session`, over a BRC-104 session with the host's billing key; the `beef` filter) | the body an Atomic BEEF; `x-skein-outputs`: BRC-100 internalizeAction outputs (JSON); `x-skein-description?` (the host hands them in as `x-bsv-skein-outputs` / `x-bsv-skein-description`, signed) → `{txid, status, outputs}` |
 
 The payment's transaction has two outputs before any change: the host's
 (P2PKH to the BRC-29 key `[2, "3241645161d8"]`, key ID `"<prefix>

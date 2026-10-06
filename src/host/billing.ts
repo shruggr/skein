@@ -21,7 +21,7 @@
 //             the terms not this host's: nothing is forwarded to the instance — a request is 402,
 //             a libp2p message ignored, a provider's answer, a feed's event dropped — but a payment
 //             for it (POST /fund/<handle> on the host's origin, handed in on the funding row,
-//             FUND_ROUTE) and its own messages to itself (the loopback: its wallet's ingest at the
+//             FUND_ROUTE, a message: signed with the host's billing key over a BRC-104 session, #135) and its own messages to itself (the loopback: its wallet's ingest at the
 //             chain app). No tick is sent; the tally is frozen in the kernel.
 //   grace     when it went asleep is in host.db; past the grace the host may reclaim it
 //             (`skein-host reclaim`): disabled, its row and store removed. Nothing does it on its own.
@@ -42,9 +42,16 @@ export const BILLING_BOX = "billing";
 export const FUND_ROUTE = "/wallet/fund";
 /** The host's funding endpoint: POST <the host's origin>/fund/<handle>. */
 export const FUND_PREFIX = "/fund/";
-/** The header carrying BRC-100 internalizeAction outputs (JSON) with a funding. */
+/** The header carrying BRC-100 internalizeAction outputs (JSON) with a funding: the public one, at POST /fund/<handle>. */
 export const OUTPUTS_HEADER = "x-skein-outputs";
 export const DESCRIPTION_HEADER = "x-skein-description";
+/**
+ * #135: the same headers as the host hands a funding in, on its BRC-104 session (signed with its
+ * billing key) to the funding row — x-bsv-*, so the session's signature covers them (the SDK's
+ * AuthFetch signs those); the wallet's `fund` reads these.
+ */
+export const SIGNED_OUTPUTS_HEADER = "x-bsv-skein-outputs";
+export const SIGNED_DESCRIPTION_HEADER = "x-bsv-skein-description";
 export const NSAT = 1_000_000_000n;
 
 export const RATE_NAMES = ["fuel", "storage", "served", "fetch", "authfetch", "publish"] as const;

@@ -37,8 +37,9 @@
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //   POST /fund/<handle>                   #130: a payment for an instance (its body an Atomic BEEF, the header
 //                                         x-skein-outputs BRC-100's internalizeAction outputs, JSON), handed in
-//                                         on its funding row (/wallet/fund) — even asleep: the one thing the gate
-//                                         lets through (billing.ts)
+//                                         on its funding row (/wallet/fund; #135: a message, signed by the host's
+//                                         billing key over a session, the outputs as x-bsv-skein-outputs) — even
+//                                         asleep: the one thing the gate lets through (billing.ts)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
 // (a durable queue in host.db, retries, one Arcade session) and routes what
@@ -46,12 +47,15 @@
 // `has` of its CID, cached): a proof as an unsigned event in box `chain`,
 // any other status as a signed message from the status provider.
 //
-// A request for an instance (#68, #66) is appended as received — one
-// `request` entry, verified by nothing here — and the client's connection
-// held until the thread the kernel steps the front door on comes to rest;
-// its answer, signed on the session inside, is the response (frontdoor.ts).
-// Past `answerWaitMs`, or at shutdown, 503 + Retry-After. Every request is an
-// entry; a read moves nothing.
+// A request for an instance goes to one of its two doors (#135, frontdoor.ts
+// serveHttp): a read — a path the instance's reads head names — is served by
+// a `call` (no entry; its fuel metered); a signed request for a message route
+// (#68, #66) is appended as received — one `request` entry, verified by
+// nothing here — and the client's connection held until the thread the kernel
+// steps the front door on comes to rest; its answer, signed on the session
+// inside, is the response. Past `answerWaitMs`, or at shutdown, 503 +
+// Retry-After. An unsigned request for a message route is 401, for nothing
+// 404, answered without an entry.
 //
 // What the instances send out goes through the host's providers (#70,
 // providers.ts): each kernel hands over the messages its steps emitted
@@ -97,10 +101,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
-import { KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
+import { AuthFetch, KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
+import { ephemeralWallet } from "../wallet.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
@@ -112,7 +117,7 @@ import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { historyOf, ImageChain } from "./image-chain.ts";
-import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
+import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
@@ -122,7 +127,7 @@ import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
-import { allocation, BILLING_HEAD, closedBy, DESCRIPTION_HEADER, FUND_PREFIX, FUND_ROUTE, mismatch, OUTPUTS_HEADER, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
+import { allocation, BILLING_HEAD, closedBy, DESCRIPTION_HEADER, FUND_PREFIX, FUND_ROUTE, mismatch, OUTPUTS_HEADER, Period, SIGNED_DESCRIPTION_HEADER, SIGNED_OUTPUTS_HEADER, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -1324,7 +1329,9 @@ export class Router {
 
   /**
    * A payment for `handle` delivered to this host (#130 decided 7: POST /fund/<handle>): handed in
-   * on the instance's funding row (FUND_ROUTE: open, the door's `beef` filter validates it, the
+   * on the instance's funding row (FUND_ROUTE: a message route, sender `session` — #135: the host
+   * sends it over a BRC-104 session of its own, signed with its billing key, the outputs and the
+   * description in the signed x-bsv-skein-* headers; the door's `beef` filter validates it, the
    * wallet internalizes it) — past the gate, which lets nothing else through while it is asleep —
    * and the instance's answer returned.
    */
@@ -1335,11 +1342,28 @@ export class Router {
     if (!outputs) return json(400, { status: "error", code: "ERR_FUNDING", description: `${OUTPUTS_HEADER}: the payment's outputs, BRC-100 internalizeAction's (JSON), with the Atomic BEEF as the body` });
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    const headers: Record<string, string> = { "content-type": "application/octet-stream", [OUTPUTS_HEADER]: outputs, ...(req.headers[DESCRIPTION_HEADER] ? { [DESCRIPTION_HEADER]: req.headers[DESCRIPTION_HEADER] } : {}) };
-    const a = await frontDoor(l.kernel, { method: "POST", path: FUND_ROUTE, route: FUND_ROUTE, query: "", headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
+    const headers: Record<string, string> = { "content-type": "application/octet-stream", [SIGNED_OUTPUTS_HEADER]: outputs, ...(req.headers[DESCRIPTION_HEADER] ? { [SIGNED_DESCRIPTION_HEADER]: req.headers[DESCRIPTION_HEADER] } : {}) };
+    // #135: a message — signed. A session of the host's own (its billing key) with the instance's front door, in process: each request to it straight to the door.
+    const door = (async (input: string | URL | Request, init: RequestInit = {}) => {
+      const r = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(r.url);
+      const a = await frontDoor(l.kernel, { method: r.method, path: url.pathname, route: url.pathname, query: url.search, headers: headerMap(r.headers), body: new Uint8Array(await r.arrayBuffer()) }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
+      return new Response(a.body.length ? Buffer.from(a.body) : null, { status: a.status, headers: a.headers });
+    }) as typeof fetch;
+    const af = new AuthFetch(ephemeralWallet(this.providerKey("billing")), undefined, undefined, undefined, {}, door);
+    let r: Response;
+    try {
+      r = await af.fetch(`http://${handle}.fund.invalid${FUND_ROUTE}`, { method: "POST", headers, body: Buffer.from(req.body) });
+    } catch (e) {
+      this.settle(l);
+      this.say(handle, `billing: a payment not handed in: ${(e as Error).message}`);
+      return json(502, { status: "error", code: "ERR_FUNDING", description: `the instance's answer did not verify: ${(e as Error).message}` });
+    }
     this.settle(l);
-    this.say(handle, `billing: a payment handed in: ${a.status}`);
-    return { status: a.status, headers: a.headers, body: a.body };
+    this.say(handle, `billing: a payment handed in: ${r.status}`);
+    const out: Record<string, string> = {};
+    r.headers.forEach((v, k) => { if (!k.startsWith("x-bsv-auth-")) out[k] = v; });
+    return { status: r.status, headers: out, body: new Uint8Array(await r.arrayBuffer()) };
   }
 
   /**
@@ -1499,7 +1523,8 @@ export class Router {
     // #130: asleep, or terms this host does not serve: nothing is forwarded (a payment comes in at /fund/<handle>).
     const closed = this.closed(handle);
     if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
-    const a: FrontAnswer = await frontDoor(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
+    // #135: two doors — a read by a call, a signed request through the door (serveHttp).
+    const a: FrontAnswer = await serveHttp(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
     this.settle(l);
     // Charged to the identity the front door verified (H13), never to a header as the client sent it.
     if (a.fuel !== undefined) this.charge(handle, a.caller ?? "", `${route} (read)`, a.fuel);

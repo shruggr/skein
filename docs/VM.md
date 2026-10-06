@@ -719,11 +719,19 @@ function over the current state and return a value. It writes nothing.
   record claims. A step sees its own head moves: a
   head a callee advanced reads back as moved in the rest of the step. Calls
   nest to depth 8; an answer is at most 64 MiB.
-- **What calls are for** (#68). Not requests: every request is an entry
-  and the front door is stepped on it ("Requests", below). A kernel call is
-  for host-side reads that are genuinely not requests — the answer of a
-  route that is a read of live state (the explorer: the front door's fn
-  `read`, made by the host after the request's thread ended), and later
+- **What calls are for** (#68, #135). Not messages: every message is an
+  entry and the front door is stepped on it ("Requests", below). A kernel
+  call is a **read** — the second door (#135; docs/MESSAGES.md "The front
+  door: two doors"): an HTTP request at a path the instance's reads name
+  (the head `reads`, written by app installs from their `reads[]` and by
+  the owner) is served by a call of the front door's fn `read` with the
+  request as received and the read as `match`; the front door verifies it
+  when it is signed, calls the read's function (an in-VM call: the callee
+  reads only, so a function that writes fails inside it) and signs the
+  answer on the session. No entry, nothing logged; the fuel goes to the
+  host's meter. A call also answers a route that is a read of live state
+  after its request's thread (the explorer: fn `read` with the entry's
+  request), a door refusal of a signed request (fn `refusal`), and later
   the broadcaster's questions of an instance (#65). From a step, an in-VM
   call is how the front door calls a route handler.
 - **The write cache.** The blocks a step puts before its update commits —
@@ -823,7 +831,9 @@ host's side.
 
 ### Requests: the front door stepped on the package (#68, #66)
 
-Every package a transport carries in is an entry — since #121 as the door
+Every message a transport carries in is an entry (#135: an HTTP request is
+a message when it is signed — a read is a call, above, and an unsigned
+request at a message route is the host's 401, no entry) — since #121 as the door
 hands it back: `{kind: "log", …, request: <record>, transport, door? |
 refused?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
 `middleware[transport]`, else its front door for `http`, `libp2p` and
@@ -1022,9 +1032,12 @@ entry it processes it runs the pay step again: one that pays wakes it
 (`lastTick` moves to that entry's time, so the time asleep is not charged).
 
 **Funding** (decided 7) is the wallet's: the default image's row
-`{http, /wallet/fund, *, wallet, fund, filter: "beef"}` takes an Atomic BEEF
-(the door's `beef` filter validates it: no signature) with BRC-100
-internalizeAction's outputs in the header `x-skein-outputs`; the wallet's fn
+`{http, /wallet/fund, session, wallet, fund, filter: "beef"}` (#135: a
+message route — the host hands a payment in over a BRC-104 session signed
+with its billing key) takes an Atomic BEEF (the door's `beef` filter
+validates it) with BRC-100 internalizeAction's outputs in the header
+`x-bsv-skein-outputs` (signed with the request; the host translates the
+public `x-skein-outputs` of POST `/fund/<handle>`); the wallet's fn
 `fund` internalizes it and ingests it at the chain app. A funding whose
 transaction the chain app has not taken yet cannot be spent in a BEEF: the
 pay step then pays with the coins the chain state holds, or nothing yet, and
@@ -1130,7 +1143,10 @@ Routing is a **row in the dispatch table**, not a permission check made at
 delivery time: `(transport, address, sender) → program` ("The dispatch
 table" under "The filesystem" above, beside "Heads"). Delivery is a pure
 function of the message and the rows as of that point in the log. No match →
-recorded, nothing runs.
+recorded, nothing runs. A read (#135) is not routed by the table: the host
+matches an HTTP path against the reads head and the table's http rows
+together (exact, then the longest prefix; a read and a row never share a
+path) and serves a read by a call, before anything is logged.
 
 ## Host
 

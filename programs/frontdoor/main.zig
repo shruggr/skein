@@ -58,6 +58,11 @@
 //!
 //! Called (a kernel call, #40 — reads only, nothing written):
 //!   fn "read"     {request: <cid>, read: {caller?, peer?, theirs?, requestId?, match}} → {status, headers, body}
+//!                 or (#135, the second door) {request: <the request record itself, as received>, match: <the read>}
+//!                 → {status, headers, body, caller?}: a read the host serves with no entry — the read's
+//!                 function called over the state as it stands (a write fails inside it); a signed
+//!                 request verified (as of `now`) and its answer signed on its session (`caller` the
+//!                 verified identity, for the host's meter), an unsigned one answered plain.
 //!                 a route whose answer is a read of live state (the explorer: the
 //!                 log as it stands is not a function of the request's place in it,
 //!                 so no step may answer it): the host calls this once the request's
@@ -495,7 +500,7 @@ fn unauthorized(msg: []const u8) error{Unauthorized} {
 /// The route's handler, an in-VM call: the verified request, and — called
 /// again on a later step — what woke this thread (`resolved`, `event`,
 /// `reply`, `woke`). Its launches and awaits are this step's.
-fn invoke(a: Allocator, in: Value, r: Value, rc: []const u8, req: Value, v: ?Verified) !Value {
+fn invoke(a: Allocator, in: Value, r: Value, rc: ?[]const u8, req: Value, v: ?Verified) !Value {
     const prog = Value.cidOf(r.get("program")) orelse return error.NoProgram;
     const func = Value.str(r.get("fn")) orelse return error.NoProgram;
     var h = cbor.MapBuilder.init(a);
@@ -507,7 +512,7 @@ fn invoke(a: Allocator, in: Value, r: Value, rc: []const u8, req: Value, v: ?Ver
     if (v) |x| try h.put("session", x.proof);
     // #52: the dispatch row that matched (a handler's own settings: static's root, index; the install's app).
     try h.put("match", r);
-    try h.put("request", cbor.cidv(rc));
+    if (rc) |c| try h.put("request", cbor.cidv(c)); // a read (#135) has no entry: no request record
     for ([_][]const u8{ "resolved", "event", "reply", "woke" }) |k| try h.put(k, in.get(k));
     return sk.callValue(a, prog, func, h.value());
 }
@@ -519,6 +524,7 @@ fn invoke(a: Allocator, in: Value, r: Value, rc: []const u8, req: Value, v: ?Ver
 /// ended; this call runs the handler over the state as it stands and signs
 /// the answer on the session. Nothing is written.
 fn read(a: Allocator, in: Value, arg: Value) !Value {
+    if (arg.get("request")) |x| if (x == .map) return served(a, in, x, arg.get("match") orelse return sk.report("read: no match (the read)"));
     const rc = Value.cidOf(arg.get("request")) orelse return sk.report("read: no request");
     const s = arg.get("read") orelse return sk.report("read: no read");
     const req = try sk.get(a, rc);
@@ -537,6 +543,38 @@ fn read(a: Allocator, in: Value, arg: Value) !Value {
     resp.admit = null; // a read writes nothing
     if (v) |x| try sign(a, in, &resp, x);
     return resp.value(a);
+}
+
+/// A read the host serves (#135: the second door): the request as received (no entry), the read
+/// ({address, prefix?, program, fn, app?, …settings}) as the handler's `match`. A signed request is
+/// verified (as of `now`) and answered signed on its session, its caller the handler's — a session
+/// that does not verify gets the plain 401 the stock client shakes hands again on; an unsigned one is
+/// answered plain, no caller. The handler runs as a call: a write fails inside it. Nothing is written.
+fn served(a: Allocator, in: Value, req: Value, r: Value) !Value {
+    var v: ?Verified = null;
+    if (signedRequest(req)) {
+        var no = mutualAuthFailed();
+        const request_id = brc.headerOf(req.get("headers"), "x-bsv-auth-request-id") orelse return no.value(a);
+        v = verify(a, in, req, request_id) catch |err| switch (err) {
+            error.Malformed, error.Unauthorized => return no.value(a),
+            else => return err,
+        };
+    }
+    const out = invoke(a, in, r, null, req, v) catch |err| {
+        var resp = switch (err) {
+            error.ImportFailed => try jsonError(a, 500, "ERR_INTERNAL", sk.lastError()),
+            error.NoProgram => try jsonError(a, 500, "ERR_ROUTE", "the read names no program or fn"),
+            else => return err,
+        };
+        if (v) |x| try sign(a, in, &resp, x);
+        return resp.value(a);
+    };
+    var resp = try respOf(a, out);
+    resp.admit = null; // a read writes nothing
+    if (v) |x| try sign(a, in, &resp, x);
+    const val = try resp.value(a);
+    const x = v orelse return val;
+    return .{ .map = try std.mem.concat(a, cbor.Entry, &.{ val.map, &.{.{ .key = "caller", .value = .{ .bytes = x.peer } }} }) };
 }
 
 // ---------------------------------------------------------------- a refusal at the door (fn "refusal")

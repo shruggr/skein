@@ -100,6 +100,10 @@ src/host/install.ts.)
     {"transport": "libp2p", "address": "amm-proofs",        "sender": "*",       "program": "p2p",       "fn": "proof"},
     {"transport": "libp2p", "address": "/amm-validator/1/swap", "sender": "*",   "program": "validator", "fn": "swap"}
   ],
+  "reads": [
+    {"address": "/",     "prefix": true, "program": "p2p", "fn": "serve", "root": "www", "index": "index.html"},
+    {"address": "/quote",                "program": "validator", "fn": "quote"}
+  ],
   "start": {"body": {"kind": "amm-p2p-start"}},
   "stop":  {"body": {"kind": "amm-p2p-stop"}},
   "description": "An AMM: its own overlay (one topic manager, one lookup service), a validator, and a market UI."
@@ -115,10 +119,11 @@ src/host/install.ts.)
 | `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
 | `dispatch[]` | **the rows it asks for** (#77): each `{transport?, address, prefix?, sender, program, fn?, …settings}` in the kernel's row shape (docs/VM.md "The dispatch table"). `transport` defaults to `mailbox`: the address is a box **relative to the app** (#128), as an http path is — `""` or the app's own name is the app's box `<name>` (its public face, §4), any other address `x` the box `<name>/x` (`"run"` in the shell app is the box `shell/run`; `"status"` in the chain app is `chain/status`); an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes resolved: no row names a box outside the app's. An `http` row's address is a path **relative to `/<name>/`** (a leading `/` too: `"/submit"` is `/amm/submit`, `"/"` is `/amm/`; `prefix: true` for a prefix; `fn` the handler's function; the rest the handler's own settings, carried to it as `match`). A `libp2p` row's address is a pubsub topic or `/<protocol>`, exact — global, not namespaced; sender `*` (a topic the app takes at run time is not a row: its program emits a subscription, `subscribe {topic, program, fn}`, #119, docs/MESSAGES.md "libp2p (#51)"). `sender` says who the row admits: `"*"` anyone, `"event"` (mailbox only, #79) events and never a message (the host's wiring, a route's admits: a box that takes events need not be open), `"session"` (http only) any BRC-103/104 session (over http the sender is only who may reach the row: a signed request is verified and answered signed on every row, `"*"` included; docs/MESSAGES.md "The instance as an HTTP server"), `"$owner"` the owner (tooling, #126: the sender of the instance's `dispatch` admin row — the kernel has no built-in owner), `"$self"` (#79) the instance's own identity — its other programs, by the host's loopback (docs/VM.md "emit"), `"$cron"`/`"$status"`/`"$<provider>"` the key the instance's address book reaches at `local` <provider> (tooling, #126: no roles), or an identity key in hex. The install resolves each and sends it to the kernel's `dispatch` operation with `app: <name>` (§3). The same key (transport, address, prefix, sender) twice is refused. `optional: true` (only on a row from a `$<provider>`, #78): the install leaves the row out, with a note in the prompt, when the instance's address book has no such provider — as a genesis leaves out a row from a provider its host has not; it never reaches the kernel |
+| `reads[]` | **its reads** (#135, the second door; docs/MESSAGES.md "The front door: two doors"): each `{address, prefix?, program, fn, …settings}` — the shape of an http row **without a sender** (and with no `transport`): `address` a path relative to `/<name>/` under the same rules as an http row's (`prefix: true` for a prefix; the rest the function's own settings, carried to it as `match`), `program` a role, `fn` its function. The host serves a request at that path by a `call` of that function over the current state — the http-shaped request (the route handler contract, docs/MESSAGES.md "Route handlers"), any method, signed or not (a signed one answered signed on its session) — with no entry and nothing logged; a function that writes fails inside the call. What a page serves, what a lookup answers, what resolves: the view/pure functions. Everything that stays an http row in `dispatch[]` is a message route and takes a signed request. **A read and an http row never share a path** (address and prefix): refused here, and at install against the instance's rows and the other reads. The install writes them into the instance's reads head (§3); an overlay's `/lookup` is derived into `reads` from `config.overlay` (§6) |
 | `start` | optional: a message the owner sends into the app's box as the **last install message**, after the rows, so a program whose first act is to schedule something (a heartbeat tick from `$cron`) actually runs; nothing else starts an app. Sending it again is the restart after a reconfiguration (a new manifest + head advance): an install over an installed version sends it again. It needs a row admitting the owner to the app's box (`"$owner"` or `"*"`). (#76, built) |
 | `stop` | optional: a message the owner sends into the app's box at uninstall, before its rows are removed, so the app can cancel what it scheduled. (#76, built) |
 
-**http rows are namespaced under `/<app>/`, enforced.** Every path an app
+**http rows and reads are namespaced under `/<app>/`, enforced.** Every path an app
 asks for lives under its own prefix: the AMM's rows are `/amm/submit`,
 `/amm/lookup`, `/amm/…`; the manifest's address is relative to that prefix
 and the install refuses anything else — a `.` or `..` segment, an encoded
@@ -135,8 +140,8 @@ boundary programs (the messagebox rows, the BRC-103 well-known path), which
 are not apps. libp2p topic names are global by nature and are not
 namespaced. Boxes follow the same rule: an app's box is its name.
 
-**The app declares; it never installs.** Every row is a request the owner
-approves (§3): the install prompt is the rows read aloud. A manifest asking
+**The app declares; it never installs.** Every row and read is a request the owner
+approves (§3): the install prompt is the rows and reads read aloud. A manifest asking
 for a row the owner did not approve is refused at install.
 
 **The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
@@ -151,6 +156,7 @@ skein-site 0.7.3 are in this shape (skein-static, archived by #125, was). There 
  programs: {<role>: <program record CID>},       the manifest's paths resolved
  config?, provides, requires,
  dispatch: [<row as the manifest wrote it: relative addresses, roles>],   with what config.overlay derives (§6)
+ reads: [<read as the manifest wrote it: relative addresses, roles>],     #135; with the derived /lookup (§6)
  start?, stop?, description?,
  tree: <the app's git tree CID>,                  etc/app.json as shipped, bin/, www/, …
  state?: <the app's own state record>}            the handler's (§1); kept across installs
@@ -190,7 +196,10 @@ authfetch POST <origin>/sendMessage --body @"$f" || break; done`
    `provides`). The name is free (no `<name>/app` head, or one whose root is
    this app's earlier record). No row takes a key the genesis's rows or
    another app's have. Every `$<provider>` sender is in the instance's
-   address book at `local` <name> (tooling, #126: no roles). Then the prompt: the head, each row (`row <transport> <address> from <who> → <role>.<fn>`),
+   address book at `local` <name> (tooling, #126: no roles). No read
+   shares a path with an http row (the genesis's, another app's, this
+   app's) or another app's or the owner's read (#135). Then the prompt: the head, each row (`row <transport> <address> from <who> → <role>.<fn>`),
+   each read (`read <address>[*] → <role>.<fn> (anyone, by a call: nothing logged)`),
    `start`/`stop`, `requires`/`provides`, what an overlay publishes (for
    information), and the messages to be sent. Nothing is sent unless the
    owner sends it: the page's "Approve and send", or `skein send` /
@@ -207,7 +216,14 @@ authfetch POST <origin>/sendMessage --body @"$f" || break; done`
    an app never becomes `main`.
 2. **`head`** — `{name: "<app>/app", tree: <the app record's CID>}`. The
    head's root is the app record, which links the tree; its owner is the
-   app.
+   app. When the app's reads change the instance's reads (#135), a second
+   `head`: `{name: "reads", tree: <the reads record>}` — the record
+   `{kind: "reads", reads: [{address: <the path as served>, prefix?, program:
+   <the role's program record>, fn, app: "<name>", …settings}]}` with the
+   other apps' and the owner's reads kept (sent in step 1's `objects`). An
+   upgrade replaces the app's reads; an uninstall takes them out the same
+   way (after its rows are removed). The owner's own reads (no `app`) are
+   `skein plan reads add|remove` (the site at `/`).
 3. **`dispatch`** — one per row: `{op: "add", row: {transport, address,
    prefix?, sender, program: <the role's program record>, fn?, …settings,
    app: "<name>"}}`, the sender resolved (`"*"`, `"event"`, `"session"`, the
@@ -261,26 +277,26 @@ instance, and there are two ways:
   `hash`, sha256 repositories.
 
 **The management page** (built, #92; an app since #125). The management
-site is an app, shruggr/skein-site (name `site`): one route handler serving
+site is an app, shruggr/skein-site (name `site`): one function serving
 its own tree's `www` (the head `site/app`'s record, its `tree`, through
-skein-sdk's `files`) on one row, `/site/*`; the page is the installer
+skein-sdk's `files`) as one read (#135), `/site/*`; the page is the installer
 (there is no installer program). The default image has no site and serves
 nothing at `/`: the host's own skein carries the site, installed by the
 host's owner, and a user manages their skeins from there, the page talking
-to each one directly. **The root is the owner's**: an app's rows are under
-its name, and the owner may send one more row of their own to the site's
-handler, `{transport: "http", address: "/", prefix: true, sender: "*",
-program: <the site's program record>, fn: "get", root: "www"}` — `skein
-plan dispatch add --http --prefix --fn get --settings '{"root":"www"}' /
-site.site <where>` (a handler `<app>.<role>` is that installed app's
-program) — to serve the page at `/` (and its `manifest.json`, the wallet's
-grouped request, at the origin's `/manifest.json`). A manifest has no field
-for it: the install shows the app's own rows only, and the site's README
-says how. The row carries no `app`, so the site's upgrade or uninstall
-leaves it (`skein plan dispatch remove` with the same arguments removes it);
-as a prefix at `/` it takes every path no exact row or longer prefix takes. Connected to the owner's wallet, it reads the
-skein through its explorer (`/explore`, the owner's read, docs/MESSAGES.md),
-which gives it what the plan needs: the heads, the genesis, the claim, the
+to each one directly. **The root is the owner's**: an app's paths are under
+its name, and the owner may add a read of their own to the site's
+function, `{address: "/", prefix: true, program: <the site's program
+record>, fn: "get", root: "www"}` in the reads head — `skein plan reads add
+--prefix --fn get --settings '{"root":"www"}' / site.site <where>` (a
+handler `<app>.<role>` is that installed app's program) — to serve the page
+at `/` (and its `manifest.json`, the wallet's grouped request, at the
+origin's `/manifest.json`). A manifest has no field for it: the install
+shows the app's own reads only, and the site's README says how. The read
+carries no `app`, so the site's upgrade or uninstall leaves it (`skein plan
+reads remove` with the same arguments takes it out); as a prefix at `/` it
+takes every path no exact row or read, or longer prefix, takes. Connected to the owner's wallet, it reads the
+skein through its explorer (`/explore`, the owner's message route, docs/MESSAGES.md),
+which gives it what the plan needs: the heads (the reads head among them), the genesis, the claim, the
 address book, the dispatch table (the chain `{kind: "dispatch"}`) and any
 record by CID. It plans with the same code as `skein plan`
 (src/host/plan.ts, bundled into the site) and shows the plan as the prompt;
@@ -321,7 +337,7 @@ loop are three ways to the same messages: none of it is the host's (#124).
   instance's head is read no more, so the form has to post there.
 - **One grouped permission request** (#97, skein-site 0.5.0; 0.5.2 without
   the spending allowance): the site's `manifest.json`, served at
-  `/manifest.json` of the skein's own origin by the owner's root row (#125), asks a BRC-100 wallet once for
+  `/manifest.json` of the skein's own origin by the owner's root read (#125, #135), asks a BRC-100 wallet once for
   the page's protocols and its basket, and declares the counterparty
   protocols (one prompt per new skein or certifier).
 
@@ -537,8 +553,11 @@ marked "(derived: config.overlay)" in the prompt:
 
 - the app's own box `<app>` from `event` (what its libp2p routes admit: a
   gossiped submission, a peer's admit) and from `$self` (its own watch);
-- the open http rows `/<app>/submit` (`filter: "beef"`, #121) and `/<app>/lookup` (the app's base
-  URL is what it advertises);
+- the http row `/<app>/submit` (`filter: "beef"`, #121; a message route: a
+  signed request, #135) and the **read** `/<app>/lookup` (#135: BRC-24's
+  POST, served by a call — anyone, signed or not, nothing logged; derived
+  into `reads`, "(derived: config.overlay)" too). The app's base URL is
+  what it advertises;
 - libp2p rows `<topic>` (raw submissions, fn `submit`, `filter: "beef"`), `<topic>-admit`
   (fn `peerAdmit`) and `<topic>-proof` (fn `peerProof`) per topic (#74).
 
@@ -548,7 +567,16 @@ box), no grants. The engine's three boxes (skein-overlay 0.7.7, #128; 0.7.8 curr
 from anyone (`filter: "beef"`; the manifest's own row, address `"submit"`);
 `<app>/register` takes register / deregister from the owner (the manifest's
 row, address `"register"`); `<app>` takes only the derived rows above, events and `$self`. An explicit row in the manifest with the same key
-overrides the derived one. The host's libp2p node subscribes the derived
+overrides the derived one, as an explicit read at `/lookup` overrides the
+derived read. The listings and the documentation (`/listTopicManagers`,
+`/listLookupServiceProviders`, `/getDocumentationForTopicManager`,
+`/getDocumentationForLookupServiceProvider`) are reads the manifest
+declares itself (`reads[]`, #135). The stock TopicBroadcaster's plain POST
+`/submit` is a 401 (#135): a submission is a signed request — the stock
+AuthFetch does not carry BRC-22's `X-Topics` header (it signs only
+content-type, authorization and `x-bsv-*`), so a signed HTTP submission
+names its topics beside the signed headers, or goes by message into
+`<app>/submit`. The host's libp2p node subscribes the derived
 topics once their rows are in the table, and unsubscribes them when they
 are removed. What the app **publishes** (`<topic>`, `<topic>-admit`,
 `<topic>-proof`; on by default, `config.overlay.gossip` per topic to turn

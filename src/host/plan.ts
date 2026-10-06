@@ -17,7 +17,7 @@ import type { Store } from "../runtime/store.ts";
 // Types only (erased): boot.ts and deploy.ts are node code.
 import type { Objects } from "./boot.ts";
 import type { AddressEntry } from "./deploy.ts";
-import { checkManifest, missingInterfaces, rowAddress, rowKey, type Checked, type Derived, type Provide, type Row, type ShellSource } from "./manifest.ts";
+import { appPath, checkManifest, missingInterfaces, pathKey, rowAddress, rowKey, type Checked, type Derived, type Provide, type ReadIn, type Row, type ShellSource } from "./manifest.ts";
 
 const textOf = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -94,6 +94,68 @@ export async function appRecordIn(view: Pick<InstanceView, "store" | "heads">, n
   return r && r.kind === "app" ? { cid: root, record: r } : undefined;
 }
 
+// ---------------------------------------------------------------- the reads (#135: the second door)
+
+/**
+ * The head the instance's reads are under (#135): its root a record {kind: "reads", reads:
+ * [<read>]}, each read {address: <the path as served>, prefix?: true, program: <program record
+ * CID>, fn, app?: <the app that asked for it; absent: the owner's own>, …settings}. Written by the
+ * owner (the kernel's `objects` and `head` operations, as an install writes `<app>/app`): an install
+ * puts its app's reads in (an upgrade replaces them, an uninstall takes them out); `skein plan reads`
+ * adds or removes the owner's own (the site at `/`). The host reads it to serve reads by `call`
+ * (frontdoor.ts serveHttp). State, so replay-derived as the dispatch table is.
+ */
+export const READS_HEAD = "reads";
+
+/** One read as the reads head holds it (resolved: the path as served, the program a CID). */
+export interface ReadEntry { address: string; prefix?: true; program: CID; fn: string; app?: string; [setting: string]: unknown }
+export interface ReadsRecord { kind: "reads"; reads: ReadEntry[] }
+
+/** A read's key: its path as served, `*` for a prefix (an http row with the same address and prefix shares it). */
+export const readEntryKey = (r: { address: string; prefix?: boolean }): string => pathKey(r.address, r.prefix);
+
+/** The reads the view's head `reads` holds ([] when none). */
+export async function readsIn(view: Pick<InstanceView, "store" | "heads">): Promise<ReadEntry[]> {
+  const root = view.heads.find((h) => h.name === READS_HEAD)?.root;
+  if (!root) return [];
+  const r = await view.store.get(root).catch(() => undefined) as Partial<ReadsRecord> | undefined;
+  return r?.kind === "reads" && Array.isArray(r.reads) ? r.reads : [];
+}
+
+/** The reads an app record asks for, resolved (the path as served under /<app>/, the role's program record, `app`). */
+export function readsOf(record: AppRecord): ReadEntry[] {
+  return (record.reads ?? []).map((r: ReadIn) => {
+    const { address, prefix, program, fn, ...settings } = r;
+    const cid = record.programs[program];
+    if (!cid) throw new Error(`read ${appPath(record.name, address)}: no program for role ${program}`);
+    return { ...settings, address: appPath(record.name, address), ...(prefix ? { prefix: true as const } : {}), program: cid, fn, app: record.name };
+  });
+}
+
+/** The reads record for `reads`, encoded. */
+export function readsRecord(reads: ReadEntry[]): { cid: CID; bytes: Uint8Array } {
+  const b = encode({ kind: "reads", reads } as never);
+  return { cid: b.cid, bytes: b.bytes };
+}
+
+/**
+ * Why `reads` cannot stand beside the dispatch table `rows` (#135: a read and an http row never share a
+ * path) and the other reads `others`: the first clash, as a line, or undefined.
+ */
+export function readClash(reads: ReadEntry[], rows: DispatchRow[], others: ReadEntry[]): string | undefined {
+  for (const r of reads) {
+    const k = readEntryKey(r);
+    const o = others.find((x) => readEntryKey(x) === k);
+    if (o) return `read ${k}: ${o.app ? `app ${o.app}` : "the owner"} has it`;
+    const row = rows.find((x) => x.transport === "http" && pathKey(x.address, x.prefix) === k);
+    if (row) return `read ${k}: an http row is at that path (${(row as { app?: string }).app ? `app ${String((row as { app?: string }).app)}` : "the genesis or the owner"}'s): a path is a read or a message route, not both`;
+  }
+  return undefined;
+}
+
+/** A read as one line of the prompt: `<address>[*] → <role or program>.<fn>[ (<settings>)]`. */
+const showRead = (r: { address: string; prefix?: boolean; fn: string; program: unknown }, role?: string) => `${r.address}${r.prefix ? "*" : ""} → ${role ?? String(r.program)}.${r.fn}${showSettings(r)}`;
+
 /** The app record (a head's root): the manifest as installed. */
 export type AppRecord = Omit<Checked["manifest"], "programs"> & { programs: Record<string, CID>; tree: CID; state?: CID };
 
@@ -121,6 +183,8 @@ export interface Plan {
   publishes: string[];
   /** What `config.overlay` added (APPS.md §6). */
   derived: Derived;
+  /** #135: the app's reads as the reads head will hold them. */
+  reads: ReadEntry[];
   notes: string[];
 }
 
@@ -301,6 +365,21 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
     const keep = new Set(want.map((r) => keyOf(r.row)));
     for (const r of view.dispatch) if ((r as { app?: string }).app === m.name && !keep.has(keyOf(r))) rows.push({ op: "remove", row: r as DispatchRow & { app: string }, label: senderText(r.sender) });
   }
+  // #135: the app's reads, in the reads head beside the others' — never at an http row's path.
+  const reads = readsOf(record);
+  const current = await readsIn(view);
+  const others = current.filter((r) => r.app !== m.name);
+  const tableAfter = [...view.dispatch.filter((r) => (r as { app?: string }).app !== m.name), ...want.map((r) => r.row)];
+  const clash = readClash(reads, tableAfter, others);
+  if (clash) throw new Error(clash);
+  for (const r of want) {
+    const o = r.row.transport === "http" ? others.find((x) => readEntryKey(x) === pathKey(r.row.address, r.row.prefix)) : undefined;
+    if (o) throw new Error(`row http ${pathKey(r.row.address, r.row.prefix)}: ${o.app ? `app ${o.app}` : "the owner"} has a read at that path: a path is a read or a message route, not both`);
+  }
+  const nextReads = [...others, ...reads];
+  const readsRec = readsRecord(nextReads);
+  const readsRoot = view.heads.find((h) => h.name === READS_HEAD)?.root;
+  const readsMove = readsRoot ? !readsRoot.equals(readsRec.cid) : reads.length > 0;
   // Only what changes: a row the instance has as asked is not sent again.
   const have = new Map(view.dispatch.map((r) => [keyOf(r), r]));
   const sendRows = rows.filter((r) => {
@@ -314,19 +393,19 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   const trees = t.records.filter((r) => textOf(r.bytes.subarray(0, 5)) === "tree ");
   const blobs = t.records.filter((r) => textOf(r.bytes.subarray(0, 5)) !== "tree ");
   // blobs, then trees (children before parents: the root last), modules and program records, the app record.
-  const ordered = [...blobs, ...trees.filter((r) => !r.cid.equals(t.root)), ...t.records.filter((r) => r.cid.equals(t.root)), ...progRecords, { cid: app.cid, bytes: app.bytes }];
+  const ordered = [...blobs, ...trees.filter((r) => !r.cid.equals(t.root)), ...t.records.filter((r) => r.cid.equals(t.root)), ...progRecords, { cid: app.cid, bytes: app.bytes }, ...(readsMove ? [readsRec] : [])];
   for (const r of ordered) {
     const k = r.cid.toString();
     if (seen.has(k)) continue;
     seen.add(k);
     if (!(await view.store.has(r.cid))) all.push(r);
   }
-  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }];
+  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }, ...(readsMove ? [{ name: READS_HEAD, tree: readsRec.cid }] : [])];
   const publishes = gossipOf(m.config);
   return {
     app: m.name, version: m.version, record, recordCid: app.cid, records: all, heads,
     rows: sendRows, ...(m.start ? { start: m.start.body } : {}),
-    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, publishes, derived: t.checked.derived, notes,
+    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, publishes, derived: t.checked.derived, reads, notes,
   };
 }
 
@@ -345,12 +424,13 @@ export function describe(p: Plan, record = p.record): string[] {
   out.push(`${p.upgrade ? "upgrade" : "install"} ${p.app} ${p.version}${p.upgrade ? ` (installed: ${p.upgrade})` : ""}${record.description ? ` — ${record.description}` : ""}`);
   const d = p.derived ?? { rows: [] };
   const from = (yes: boolean) => (yes ? " (derived: config.overlay)" : "");
-  for (const h of p.heads) out.push(`  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})`);
+  for (const h of p.heads) out.push(h.name === READS_HEAD ? `  head      ${h.name} → the instance's reads with this app's (${h.tree})` : `  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})`);
   const keyed = (r: Row) => rowKey(record.name, r);
   for (const r of record.dispatch) {
     const who = r.sender === "*" ? "anyone" : r.sender;
     out.push(`  row       ${r.transport} ${rowAddress(record.name, r)}${r.prefix ? "*" : ""} from ${who} → ${r.program}${r.fn ? `.${r.fn}` : ""}${showSettings(r)}${from(d.rows.includes(keyed(r)))}`);
   }
+  for (const r of record.reads ?? []) out.push(`  read      ${showRead({ ...r, address: appPath(record.name, r.address) }, r.program)} (anyone, by a call: nothing logged)${from(!!d.reads?.includes(`${appPath(record.name, r.address)}${r.prefix ? "*" : ""}`))}`);
   if (record.start) out.push(`  start     ${JSON.stringify(record.start.body)} into ${p.app}`);
   if (record.stop) out.push(`  stop      ${JSON.stringify(record.stop.body)} (at uninstall)`);
   if (p.requires.length) out.push(`  requires  ${p.requires.join(", ")}`);
@@ -380,15 +460,18 @@ const rowBody = (r: RowOp) => ({ op: r.op, row: r.row });
 
 // ---------------------------------------------------------------- uninstall
 
-export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[] }
+export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[]; /** #135: the reads head without the app's, when it had any. */ reads?: { cid: CID; bytes: Uint8Array; removed: ReadEntry[] } }
 
-/** What uninstalling `name` sends: `stop`, then its rows removed (every row the table holds with `app: name`). The heads are left. */
+/** What uninstalling `name` sends: `stop`, then its rows removed (every row the table holds with `app: name`), then its reads (#135). The app's heads are left. */
 export async function planUninstall(name: string, view: InstanceView): Promise<UninstallPlan> {
   const a = await appRecordIn(view, name);
   if (!a) throw new Error(`${name}: no app installed under that head`);
+  const current = await readsIn(view);
+  const removed = current.filter((r) => r.app === name);
   return {
     app: name, record: a.record, ...(a.record.stop ? { stop: a.record.stop.body } : {}),
     rows: view.dispatch.filter((r) => (r as { app?: string }).app === name).map((r) => ({ op: "remove" as const, row: r as DispatchRow & { app: string }, label: senderText(r.sender) })),
+    ...(removed.length ? { reads: { ...readsRecord(current.filter((r) => r.app !== name)), removed } } : {}),
   };
 }
 
@@ -397,5 +480,36 @@ export async function sendUninstall(p: UninstallPlan, send: (box: string, body: 
   const go = async (box: string, body: Uint8Array) => { await send(box, body); n++; };
   if (p.stop) await go(p.app, dagCbor.encode(p.stop));
   for (const r of p.rows) await go("dispatch", dagCbor.encode(rowBody(r)));
+  if (p.reads) {
+    for (const b of chunk([{ cid: p.reads.cid, bytes: p.reads.bytes }])) await go("objects", b);
+    await go("head", dagCbor.encode({ name: READS_HEAD, tree: p.reads.cid }));
+  }
   return { messages: n };
+}
+
+// ---------------------------------------------------------------- the owner's own reads (#135)
+
+/**
+ * The owner's own read (#135; `skein plan reads`): added to (or removed from) the reads head —
+ * `objects` (the new reads record) and `head reads`. No `app`: an app's upgrade or uninstall leaves
+ * it. The site at the instance's root is one: {address: "/", prefix: true, program: <the site's
+ * program>, fn: "get", root: "www"}. Refused at an http row's path or another read's.
+ */
+export async function planOwnerRead(view: InstanceView, op: "add" | "remove", read: ReadEntry): Promise<{ prompt: string[]; records: Rec[]; head: HeadOp }> {
+  const current = await readsIn(view);
+  const k = readEntryKey(read);
+  const mine = (r: ReadEntry) => !r.app && readEntryKey(r) === k;
+  let next: ReadEntry[];
+  if (op === "add") {
+    const clash = readClash([read], view.dispatch, current.filter((r) => !mine(r)));
+    if (clash) throw new Error(clash);
+    const { app: _app, ...own } = read;
+    void _app;
+    next = [...current.filter((r) => !mine(r)), own as ReadEntry];
+  } else {
+    if (!current.some(mine)) throw new Error(`read ${k}: the owner has no read there`);
+    next = current.filter((r) => !mine(r));
+  }
+  const rec = readsRecord(next);
+  return { prompt: [`reads ${op} ${showRead(read)} (the owner's: anyone, by a call — nothing logged)`, `  messages  objects ×1 · head ${READS_HEAD}`], records: [rec], head: { name: READS_HEAD, tree: rec.cid } };
 }

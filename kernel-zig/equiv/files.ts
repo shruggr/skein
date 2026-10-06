@@ -2,21 +2,22 @@
 // module, the static app gone) end to end, through the management site's
 // handler: shruggr/skein-site (src/testapps.ts SITE_APP, or $SKEIN_SITE_DIR)
 // with test files added to its tree, installed as the owner's messages (#124)
-// into an instance on a router. The app's one row is `/site/*` (its `/`,
-// namespaced by the install); the owner adds two rows of its own to the same
-// handler (`skein plan dispatch --http`'s body): `/favicon.ico` exact (a file
-// root) and `/` exact (a directory root: its index). The handler serves the
-// app's own tree (the head site/app's record, its `tree`), under the row's
-// root (`www`).
+// into an instance on a router. The app's one read (#135, `reads[]`) is
+// `/site/*` (its `/`, namespaced by the install); the owner adds two reads of
+// its own to the same function (`skein plan reads add`: the reads head):
+// `/favicon.ico` exact (a file root) and `/` exact (a directory root: its
+// index). The function serves the app's own tree (the head site/app's
+// record, its `tree`), under the read's root (`www`), by a call.
 //
 // Through the router, at the instance's own origin: the index for the prefix
 // and for a directory, nested files with their content types, a directory
 // without its `/` redirected, 404 for a missing file, a file outside the
 // root, a prefix that ends mid-segment (and `/site` itself: the app's row is
 // `/site/`) and every `..` form, 405 for a POST, HEAD with no body, and the
-// ETag (the blob's CID) answered 304 on If-None-Match. Every request is one
-// entry, recorded (#68), and none moves a head; the store replays to itself
-// exactly.
+// ETag (the blob's CID) answered 304 on If-None-Match. A read is no entry
+// (#135: the second door — served by a call, nothing logged, signed or
+// not: a signed one answered signed on its session), and none moves a head;
+// the store replays to itself exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/files.ts
 
@@ -29,8 +30,9 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
-import { planDispatch } from "../../src/client/admin.ts";
-import { appCheckout, installApp, sendPlan, SITE_APP } from "../../src/testapps.ts";
+import { AuthFetch } from "@bsv/sdk";
+import { planReads } from "../../src/client/admin.ts";
+import { appCheckout, installApp, sendPlan, SITE_APP, viewOf } from "../../src/testapps.ts";
 import { testHost } from "../../src/host/testhost.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -68,7 +70,6 @@ const blobCid = (s: string) => {
 
 const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) });
-const inst = h.instance("site");
 const ih = { home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() };
 
 type Got = { status: number; type: string; etag: string; location: string; allow: string; body: string };
@@ -101,11 +102,18 @@ try {
   await installApp(ih, "site", app);
   const k = (await h.router.hydrate("site")).kernel;
   const rec = await k.store.get(await k.call("head", "site/app") as CID) as { programs: { site: CID } };
-  // The owner's own rows to the same handler (#125; `skein plan dispatch add --http … site.site`).
+  // The owner's own reads of the same function (#125, #135; `skein plan reads add … site.site`): the reads head.
   const programs = { "site.site": rec.programs.site };
   for (const [address, prefix, root] of [["/favicon.ico", false, "www/favicon.ico"], ["/", false, "www"]] as const) {
-    await sendPlan(ih, "site", planDispatch(inst, { op: "add", box: address, handler: "site.site", http: { prefix, fn: "get", settings: { root } } }, programs));
+    const view = await viewOf(ih, "site");
+    try { await sendPlan(ih, "site", await planReads(view, { op: "add", path: address, handler: "site.site", http: { prefix, fn: "get", settings: { root } } }, programs)); } finally { view.close(); }
   }
+  const view = await viewOf(ih, "site");
+  try {
+    let clash = "";
+    try { await planReads(view, { op: "add", path: "/sendMessage", handler: "site.site", http: { fn: "get" } }, programs); } catch (e) { clash = (e as Error).message; }
+    check(/an http row is at that path/.test(clash), `the owner's read at a row's path (/sendMessage) refused: ${clash}`);
+  } finally { view.close(); }
   await get("/site/");
   await h.router.settled();
   const n0 = await h.entries("site"), r0 = requests, h0 = await heads();
@@ -159,7 +167,15 @@ try {
 
   await h.router.settled();
   const n1 = await h.entries("site"), h1 = await heads();
-  check(n1 - n0 === requests - r0 && h1.join() === h0.join(), `each request one entry (${requests - r0} requests, ${n1 - n0} entries), and no head moved (main, sessions, site/app: ${h1.join(", ")})`);
+  check(n1 === n0 && requests - r0 > 20 && h1.join() === h0.join(), `#135: a read is no entry (${requests - r0} requests, ${n1 - n0} entries), and no head moved (main, sessions, site/app: ${h1.join(", ")})`);
+
+  // A signed read: served by the same call, verified and answered signed on the client's session (AuthFetch checks it); still no entry for the read.
+  const af = new AuthFetch(h.owner, undefined, undefined, undefined, {}, (input, init) => fetch(input, init));
+  const signed = await af.fetch(`${h.router.originOf("site")}/site/js/app.js`, { method: "GET" });
+  check(signed.status === 200 && await signed.text() === files["www/js/app.js"], `a signed GET of a read: 200, the file, its answer verified by AuthFetch (${signed.status})`);
+  await h.router.settled();
+  const n2 = await h.entries("site");
+  check(n2 - n1 === 1, `the signed read: no entry but the session's handshake (${n2 - n1})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

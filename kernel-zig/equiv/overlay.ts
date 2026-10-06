@@ -68,6 +68,9 @@ import { Router } from "../../src/host/router.ts";
 import { RawBox } from "../../src/client/raw.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
+import { chunk } from "../../src/client/bundle.ts";
+import { signedSubmitter } from "../../src/testapps.ts";
+import { READS_HEAD, readsRecord } from "../../src/host/plan.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
@@ -83,6 +86,25 @@ const report: Record<string, unknown> = {};
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+
+// #135, two doors: POST /submit is a message route — a signed request, X-Topics beside the signed headers
+// (src/testapps.ts signedSubmitter); the stock TopicBroadcaster's plain POST is a 401 now.
+const submitFetch = signedSubmitter(ephemeralWallet(key("8888")));
+
+// #135: the overlay's lookup, listings and documentation are reads — served by a call, anyone, signed or not, no
+// entry. A system tree's genesis holds no reads head: the owner writes it (objects + head reads), as `skein plan
+// reads add` does, the overlay's program the genesis's.
+const OVERLAY_READS: Array<[string, string]> = [["/lookup", "lookup"], ["/listTopicManagers", "listTopicManagers"], ["/listLookupServiceProviders", "listLookupServiceProviders"], ["/getDocumentationForTopicManager", "topicDocumentation"], ["/getDocumentationForLookupServiceProvider", "lookupDocumentation"]];
+async function addReads(r: Router, h: string): Promise<void> {
+  const l = await r.hydrate(h);
+  const g = await l.kernel.genesis() as { programs: Record<string, CID> };
+  const rec = readsRecord(OVERLAY_READS.map(([address, fn]) => ({ address, program: g.programs.overlay!, fn })));
+  const box = new RawBox(ephemeralWallet(key("2222")), r.originOf(h));
+  for (const b of chunk([{ cid: rec.cid, bytes: rec.bytes }])) await box.send(l.identity, "objects", b);
+  await box.send(l.identity, "head", { name: READS_HEAD, tree: rec.cid });
+  await r.settled();
+  if (String(await l.kernel.call("head", READS_HEAD)) !== String(rec.cid)) throw new Error(`${h}: the reads head not written`);
+}
 
 function clone(repo: string, rev: string, dir: string): string {
   for (const args of [["clone", "-q", repo, dir], ["-C", dir, "checkout", "-q", rev]]) {
@@ -126,11 +148,10 @@ const ROWS = [
   // skein-overlay 0.7.6 (#112, #128): a submission is a message into the box overlay/submit, from anyone (the BEEF through the door's filter).
   { address: "overlay/submit", sender: "*", program: "overlay", filter: "beef" },
   { transport: "http", address: "/sendMessage", sender: "session", program: "messagebox", fn: "sendMessage" },
-  // The overlay-express wire contract: open routes, as overlay-express is.
+  // The overlay-express wire contract: /submit a message route (#135: signed); the lookup, listings and documentation
+  // are reads (addReads, the reads head).
   // #121: the submit rows name the door's beef filter: the handler gets the BEEF's pointer record, never its bytes.
-  { ...http("/submit", "submit"), filter: "beef" }, http("/lookup", "lookup"),
-  http("/listTopicManagers", "listTopicManagers"), http("/listLookupServiceProviders", "listLookupServiceProviders"),
-  http("/getDocumentationForTopicManager", "topicDocumentation"), http("/getDocumentationForLookupServiceProvider", "lookupDocumentation"),
+  { ...http("/submit", "submit"), filter: "beef" },
   // #57: the same submit fn on a GossipSub topic.
   { transport: "libp2p", address: "tm_demo", sender: "*", program: "overlay", fn: "submit", filter: "beef" },
 ];
@@ -316,6 +337,7 @@ try {
   await router.bootRow("gossip", { kind: "tree", root: src.root, objects: src.objects });
   const src2 = await dirSource(sys2);
   await router.bootRow("gate", { kind: "tree", root: src2.root, objects: src2.objects });
+  for (const x of ["overlay", "gossip", "gate"]) await addReads(router, x);
   const base = router.originOf("overlay");
   const kO = async () => (await router.hydrate("overlay")).kernel;
   // skein-overlay 0.7.3 (#112): a submission by message, {fn: "submit", args: {beef, topics}} into box `overlay/submit`, from a
@@ -375,7 +397,7 @@ try {
   // The stock broadcaster, its facilitator pointed at the router.
   const steaks: unknown[] = [];
   const sentBeefs: Uint8Array[] = [];
-  const facilitator = { send: async (_url: string, tagged: Parameters<HTTPSOverlayBroadcastFacilitator["send"]>[1]) => { sentBeefs.push(Uint8Array.from(tagged.beef)); const s = await new HTTPSOverlayBroadcastFacilitator(fetch, true).send(base, tagged); steaks.push(s); return s; } };
+  const facilitator = { send: async (_url: string, tagged: Parameters<HTTPSOverlayBroadcastFacilitator["send"]>[1]) => { sentBeefs.push(Uint8Array.from(tagged.beef)); const s = await new HTTPSOverlayBroadcastFacilitator(submitFetch as typeof fetch, true).send(base, tagged); steaks.push(s); return s; } };
   const broadcaster = new TopicBroadcaster(["tm_demo"], { networkPreset: "local", facilitator });
   const b1 = await broadcaster.broadcast(t1);
   // skein-overlay 0.7.3 (#112): POST /submit answers its delivery, {id}, not a STEAK (the stock broadcaster reads that
@@ -536,7 +558,7 @@ try {
   };
   await router.settled();
   const held0 = heldBlocks();
-  const dupeHttp = await new HTTPSOverlayBroadcastFacilitator(fetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo", "tm_other"] }) as { id?: unknown };
+  const dupeHttp = await new HTTPSOverlayBroadcastFacilitator(submitFetch as typeof fetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo", "tm_other"] }) as { id?: unknown };
   await router.settled();
   {
     const k = await kO();
@@ -554,8 +576,16 @@ try {
   const logLen = async () => { const k = await kO(); return (await k.store.get((await k.tip())!) as unknown as { n: number }).n + 1; };
   const fwd = router as unknown as { forward(handle: string, ...rest: unknown[]): Promise<unknown> };
   const forward0 = fwd.forward.bind(router);
-  let requests = 0;
-  fwd.forward = async (handle, ...rest) => { if (handle === "overlay") requests++; return await forward0(handle, ...rest); };
+  let requests = 0, toDoor = 0;
+  // #135: what reaches the door — a signed request, or the handshake — is an entry; a read (a call) is none.
+  fwd.forward = async (handle, ...rest) => {
+    if (handle === "overlay") {
+      requests++;
+      const [route, , req] = rest as [string, URL, { headers: Record<string, string> }];
+      if (route === "/.well-known/auth" || Object.keys(req.headers).some((k) => k.startsWith("x-bsv-auth-"))) toDoor++;
+    }
+    return await forward0(handle, ...rest);
+  };
   const stateOf = async () => { const k = await kO(); return [String(await k.call("head", "overlay/state")), String(await k.call("head", "overlay/ls_demo")), String(await k.call("head", "chain/state"))]; };
   const before = await logLen();
   const state0 = await stateOf();
@@ -582,7 +612,7 @@ try {
     bad.set(Buffer.from("cc".repeat(32), "hex"), at);
     const len0 = await logLen();
     const st0 = await stateOf();
-    const res = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: bad });
+    const res = await submitFetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: bad });
     const answer = await res.json() as { code?: string; description?: string };
     await router.settled();
     const k = await kO();
@@ -598,7 +628,7 @@ try {
   report.lsHead = (await (await kO()).call("head", "overlay/ls_demo")) != null;
 
   // T2 spends the token into a new one (X-Topics as a JSON array, Atomic BEEF): the old one is retained.
-  const r2 = await fetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": JSON.stringify(["tm_demo"]) }, body: new Uint8Array(t2.toAtomicBEEF()) });
+  const r2 = await submitFetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": JSON.stringify(["tm_demo"]) }, body: new Uint8Array(t2.toAtomicBEEF()) });
   report.submit2Delivered = [r2.status, typeof ((await r2.json()) as { id?: unknown }).id];
   report.submit2 = await until("T2 admitted", async () => { await router.settled(); return await steakOf(db, t2.id("hex")); });
   report.lookup2 = (await look({ topic: "tm_demo" })).map((o) => [name(o.txid), o.outputIndex, o.verifies]);
@@ -630,12 +660,15 @@ try {
   const doc = await fetch(`${base}/getDocumentationForTopicManager?manager=tm_demo`);
   report.doc = [doc.headers.get("content-type"), (await doc.text()).split("\n")[0]];
   await look({ topic: "tm_demo" });
-  await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
+  await submitFetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
+  // #135: the same submission plain (the stock TopicBroadcaster's): a message route, 401, no entry.
+  const plainSubmit = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
+  report.plainSubmit = plainSubmit.status;
   await router.settled();
   // #65, #79: `local` requests are entries too, not forwarded: the status provider's messages and the loopback (the
   // overlay's ingest and watch messages, the chain app's answers).
   const local = (await entriesSince("overlay", before)).filter((e) => e.transport === "local").length;
-  report.readsWrite = [before, (await logLen()) - local, requests, eq(await stateOf(), state1), local];
+  report.readsWrite = [before, (await logLen()) - local, requests, eq(await stateOf(), state1), local, toDoor];
   fwd.forward = forward0;
 
   // Merkle proofs as IPLD nodes (#29): three tokens mined in one block (4: a coinbase, u1, u2, u3), each proven by
@@ -649,7 +682,7 @@ try {
     sats -= 100;
     u.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: sats });
     await u.sign();
-    const s = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(u.toAtomicBEEF()) });
+    const s = await submitFetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(u.toAtomicBEEF()) });
     if (s.status !== 200) throw new Error(`submit u${i + 1}: ${s.status} ${await s.text()}`);
     us.push(u);
     from = u; vout = 1;
@@ -831,6 +864,7 @@ try {
   // admitted. The proof, fed directly: the chain app proves it and answers `proven`: admitted at the proof.
   await noarcRouter.listen(0);
   await noarcRouter.bootRow("noarc", { kind: "tree", root: src.root, objects: src.objects });
+  await addReads(noarcRouter, "noarc");
   const noarcBase = noarcRouter.originOf("noarc");
   const kN = async () => (await noarcRouter.hydrate("noarc")).kernel;
   const bob = key("5555");
@@ -931,6 +965,7 @@ try {
     await gr(h).listen(0);
     const s = h === "gc" ? srcC : srcAB;
     await gr(h).bootRow(h, { kind: "tree", root: s.root, objects: s.objects });
+    await addReads(gr(h), h);
   }
   const subscribers = (h: GH, topic: string) => ((gr(h).p2p?.node(h)?.services as { pubsub: { getSubscribers(t: string): unknown[] } } | undefined)?.pubsub.getSubscribers(topic).length ?? 0);
   for (const h of G) await gr(h).hydrate(h);
@@ -1008,7 +1043,7 @@ try {
 
   // (1) A submission over HTTP to A: admitted on its chain app's `accepted` (Arcade's RECEIVED) → A publishes the
   // BEEF as received on `tm_demo` and its verdict on `tm_demo-admit`.
-  const sub = await fetch(`${gr("ga").originOf("ga")}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(gTok.toBEEF()) });
+  const sub = await submitFetch(`${gr("ga").originOf("ga")}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(gTok.toBEEF()) });
   report.g74submit = [sub.status, typeof ((await sub.json()) as { id?: unknown }).id, await until("A admits", async () => { await gr("ga").settled(); return await steakOf(gDb.ga, gTokId); }).catch(() => undefined)];
   // B gets the raw submission by gossip, judges it, hands it to its chain app and waits: no status provider, so
   // nothing is admitted before the proof.
@@ -1155,8 +1190,9 @@ check(Array.isArray(report.badBeef) && report.badBeef[0] === "rejected" && repor
 check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Example tokens: outputs starting <\"tm_demo\"> OP_DROP with at least 1 satoshi." } }) && (report.lookups as Record<string, unknown>)?.ls_demo !== undefined, `the listings, from the programs' own metadata (skein-overlay#2) (${JSON.stringify([report.topics, report.lookups])})`);
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
 {
-  const [b, a, n, still, local] = (report.readsWrite ?? []) as [number, number, number, boolean, number];
-  check(n > 10 && a === b + n && local >= 2 && still === true, `every forwarded request is an entry (${n} requests: ${b} → ${a}, besides ${local} \`local\` ones: the status provider's and the loopback's); the reads moved nothing (${still})`);
+  const [b, a, n, still, local, door] = (report.readsWrite ?? []) as [number, number, number, boolean, number, number];
+  check(n > 10 && n - door >= 5 && a === b + door && local >= 2 && still === true, `#135: every request to the door (signed, or the handshake) is an entry, a read none (${n} requests, ${door} to the door: ${b} → ${a}, besides ${local} \`local\` ones: the status provider's and the loopback's); the reads moved nothing (${still})`);
+  check(report.plainSubmit === 401, `#135: a plain POST /submit (the stock TopicBroadcaster's) is a message route unsigned: 401 (${String(report.plainSubmit)})`);
 }
 check(eq(report.awaitingU, { state: [[false, true, false], [false, true, false], [false, true, false]], posts: [1, 1, 1] }), `#57, #79: three unproven tokens, each posted once by the chain app and admitted on its accepted, each unproven with its broadcast registered (${JSON.stringify(report.awaitingU)})`);
 check(eq(report.settledBySse, [[true, false, false], [true, false, false], [true, false, false]]), `#65: Arcade's SEEN_ON_NETWORK then MINED (proof events with merkle paths) over its SSE stream, to the chain app: proven, nothing registered (${JSON.stringify(report.settledBySse)})`);

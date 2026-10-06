@@ -37,6 +37,12 @@
 //               refused. `optional: true` (a row from a `$<provider>` only, #78): left out by the
 //               install when the instance's address book has no such provider (a note in the
 //               prompt), as a genesis leaves out a row from a provider its host has not.
+//   reads[]     the app's reads (#135: the second door): {address, prefix?: true, program: <role>,
+//               fn, …settings} — an http path under /<name>/ as a row's (the same rules), no sender:
+//               the host serves a request at that path by a `call` of the role's program at `fn` over
+//               the current state (the http-shaped request, the settings as `match`), signed or
+//               unsigned, any method; no entry, nothing logged. A read and an http row never share a
+//               path (address and prefix): refused here, and at install against what the instance has.
 //   provides[]  {interface: "<name>/<major>", functions: {<fn>: {writes: bool, args?, answer?}}}
 //               — `writes` required; `args`/`answer` shapes: a type name (string, int,
 //               ms, bytes, cid, bool, map, any), [shape], or {key[?]: shape}
@@ -45,8 +51,8 @@
 //   config      a map (the programs read it from the head's root record)
 //   config.overlay   an overlay app (APPS.md §6): {topics?: {<topic>: <role>}, lookups?: {<service>:
 //               <role> | {program: <role>, topics?: [<topic>]}}, gossip?: {<topic>: bool}}; the engine
-//               is the role `overlay`. Its wiring is derived (overlayWiring) and added to the rows the
-//               manifest names itself — an explicit row with the same key wins. `topics` may be absent
+//               is the role `overlay`. Its wiring is derived (overlayWiring) and added to the rows and
+//               reads the manifest names itself (`/lookup` a read, #135) — an explicit row or read with the same key wins. `topics` may be absent
 //               or empty: a dynamic overlay (Mandala, an AMM) registers its topics by a call at runtime
 //               and the engine adds and drops their rows itself; a manifest may still pre-configure
 //               topics (OpNS: one global topic). No prefix declarations (#120): any other field is refused.
@@ -55,6 +61,8 @@
 //   dispatch rows, and writes only heads under its own name.
 
 export interface RowIn { transport?: "mailbox" | "http" | "libp2p"; address: string; prefix?: boolean; sender: string; program: string; fn?: string; optional?: true; [setting: string]: unknown }
+/** A read as the manifest writes it (#135): an http path under /<app>/, its program a role, its fn; the rest its settings. */
+export interface ReadIn { address: string; prefix?: true; program: string; fn: string; [setting: string]: unknown }
 export interface FunctionDecl { writes: boolean; args?: unknown; answer?: unknown }
 export interface Provide { interface: string; functions: Record<string, FunctionDecl> }
 
@@ -67,6 +75,7 @@ export interface Manifest {
   provides?: Provide[];
   requires?: string[];
   dispatch?: RowIn[];
+  reads?: ReadIn[];
   start?: { body: Record<string, unknown> };
   stop?: { body: Record<string, unknown> };
   description?: string;
@@ -85,7 +94,7 @@ export type Row = RowIn & { transport: "mailbox" | "http" | "libp2p" };
 
 /** A manifest checked: the fields as installed. */
 export interface Checked {
-  manifest: Omit<Manifest, "dispatch"> & { dispatch: Row[]; provides: Provide[]; requires: string[] };
+  manifest: Omit<Manifest, "dispatch" | "reads"> & { dispatch: Row[]; reads: ReadIn[]; provides: Provide[]; requires: string[] };
   sources: Record<string, ProgramSource>;
   /** What `config.overlay` added (APPS.md §6): row keys (rowKey). */
   derived: Derived;
@@ -96,7 +105,7 @@ export class ManifestError extends Error {
   constructor(problems: string[]) { super(`etc/app.json:\n  ${problems.join("\n  ")}`); this.problems = problems; }
 }
 
-export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "claim", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "messagebox", "resolve", "billing", "tick"];
+export const RESERVED_NAMES = ["objects", "head", "dispatch", "peers", "claim", "subscribe", "routes", "main", "sessions", "wallet", "kernel", "frontdoor", "messagebox", "resolve", "billing", "tick", "reads"];
 /** The fields of the form before #77, refused (#79). */
 const LEGACY_FIELDS = ["handler", "boxes", "routes", "heads"];
 const NAME = /^[a-z0-9][a-z0-9._-]*$/;
@@ -190,6 +199,30 @@ function rowProblem(app: string, r: unknown, isRole: (role: unknown) => role is 
   return undefined;
 }
 
+/** A read's key (#135): its path as served, `*` for a prefix — the key an http row's address and prefix make too (pathKey). */
+export function readKey(app: string, r: { address: string; prefix?: boolean }): string {
+  return `${appPath(app, r.address)}${r.prefix ? "*" : ""}`;
+}
+
+/** An http path's key, as served (an http row's or a read's): `<path>[*]`. Reads and rows never share one (#135). */
+export const pathKey = (address: string, prefix?: boolean): string => `${address}${prefix ? "*" : ""}`;
+
+/** The fields a read does not have (#135): a read has no sender and no transport — it is no message. */
+const NOT_READ_FIELDS = ["sender", "transport", "app", "optional"];
+
+/** Why a read is not one (checked against the roles and the app's name), or undefined. */
+function readProblem(app: string, r: unknown, isRole: (role: unknown) => role is string): string | undefined {
+  if (!isMap(r)) return "not a map";
+  if (typeof r.address !== "string" || !r.address) return "address is not text (a path under the app's)";
+  try { appPath(app, r.address); } catch (e) { return (e as Error).message; }
+  if (r.prefix !== undefined && r.prefix !== true) return "prefix is true or absent";
+  if (!isRole(r.program)) return `program ${JSON.stringify(r.program)} is not a role in programs`;
+  if (typeof r.fn !== "string" || !r.fn) return "fn is not text (a read names its function)";
+  const extra = NOT_READ_FIELDS.filter((k) => r[k] !== undefined);
+  if (extra.length) return `${extra.join(", ")}: not a read's (a read has no sender: anyone reads, signed or not; ${extra.includes("app") ? "app is set by the install" : "no transport: it is http"})`;
+  return undefined;
+}
+
 /** Check and normalise a manifest. `has(path)`: whether the tree has a file at the path. */
 export function checkManifest(json: unknown, has: (path: string) => boolean): Checked {
   const bad: string[] = [];
@@ -240,6 +273,20 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     addRow({ ...row, transport: row.transport ?? "mailbox" }, `dispatch[${i}]`);
   }
 
+  // reads (#135)
+  const reads: ReadIn[] = [];
+  const addRead = (r: ReadIn, at: string) => {
+    const k = readKey(app, r);
+    if (reads.some((x) => readKey(app, x) === k)) { bad.push(`${at}: read ${k} twice`); return; }
+    reads.push(r);
+  };
+  if (m.reads !== undefined && !Array.isArray(m.reads)) bad.push("reads: not a list");
+  for (const [i, r] of (Array.isArray(m.reads) ? m.reads : []).entries()) {
+    const why = readProblem(app, r, isRole);
+    if (why) { bad.push(`reads[${i}]: ${why}`); continue; }
+    addRead(r as ReadIn, `reads[${i}]`);
+  }
+
   // provides, requires
   const provides: Provide[] = [];
   if (m.provides !== undefined && !Array.isArray(m.provides)) bad.push("provides: not a list");
@@ -262,7 +309,7 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   }
 
   // config.overlay: the overlay app's wiring, derived (APPS.md §6), under what the manifest names itself.
-  const derived: Derived = { rows: [] };
+  const derived: Required<Derived> = { rows: [], reads: [] };
   const ov = isMap(m.config) ? m.config.overlay : undefined;
   if (ov !== undefined) {
     const w = overlayWiring(app, ov, (r) => isRole(r));
@@ -270,7 +317,15 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
     else {
       const have = new Set(rows.map((r) => rowKey(app, r)));
       for (const r of w.rows) if (!have.has(rowKey(app, r))) { rows.push(r); derived.rows.push(rowKey(app, r)); }
+      const haveR = new Set(reads.map((r) => readKey(app, r)));
+      for (const r of w.reads) if (!haveR.has(readKey(app, r))) { reads.push(r); derived.reads.push(readKey(app, r)); }
     }
+  }
+
+  // #135: a read and an http row never share a path (address and prefix).
+  for (const r of reads) {
+    const k = readKey(app, r);
+    if (rows.some((x) => x.transport === "http" && pathKey(appPath(app, x.address), x.prefix) === k)) bad.push(`reads: ${k} is an http row's path too (a path is a read or a message route, not both)`);
   }
 
   // start, stop
@@ -285,9 +340,9 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   }
 
   if (bad.length) throw new ManifestError(bad);
-  const { dispatch: _d, ...rest } = m as Manifest;
-  void _d;
-  const out = { ...rest, dispatch: rows, provides, requires };
+  const { dispatch: _d, reads: _r, ...rest } = m as Manifest;
+  void _d; void _r;
+  const out = { ...rest, dispatch: rows, reads, provides, requires };
   return { manifest: out, sources, derived };
 }
 
@@ -352,11 +407,11 @@ export function shellSource(p: Record<string, unknown>, has: (path: string) => b
 /** The role of an overlay app's engine (its `config.overlay` is the engine's). */
 export const OVERLAY_ROLE = "overlay";
 
-/** What the install derived from `config.overlay` (row keys), for the prompt. */
-export interface Derived { rows: string[] }
+/** What the install derived from `config.overlay` (row keys, read keys), for the prompt. */
+export interface Derived { rows: string[]; reads?: string[] }
 
 /** An overlay app's wiring. */
-export interface OverlayWiring { rows: Row[]; topics: string[] }
+export interface OverlayWiring { rows: Row[]; reads: ReadIn[]; topics: string[] }
 
 const TOPIC = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 /** The fields of `config.overlay` (`status` is refused with its own reason). */
@@ -365,8 +420,8 @@ const OVERLAY_FIELDS = ["topics", "lookups", "gossip"];
 /**
  * The wiring `config.overlay` asks for (APPS.md §6, #79), or its problems. For
  * each topic: the libp2p rows `<topic>` → submit, `<topic>-admit` →
- * peerAdmit, `<topic>-proof` → peerProof; the open http rows `/submit`,
- * `/lookup`; and the app's own box `<app>` twice: from `event` (what its
+ * peerAdmit, `<topic>-proof` → peerProof; the http row `/submit` (a message: signed,
+ * #135) and the read `/lookup` (BRC-24's POST, served by a call); and the app's own box `<app>` twice: from `event` (what its
  * libp2p routes admit — a gossiped submission, a peer's admit) and from
  * `$self` (its own watch of a submission the chain app has accepted, sent by
  * the host's loopback). All to the role `overlay`, the engine. No `chain` or
@@ -402,15 +457,17 @@ export function overlayWiring(app: string, ov: unknown, isRole: (role: string) =
   if (ov.gossip !== undefined && (!isMap(ov.gossip) || Object.entries(ov.gossip).some(([t, on]) => typeof on !== "boolean" || !topics.includes(t)))) bad.push("gossip: want {<topic the overlay serves>: true | false}");
   if (bad.length) return bad;
   const http = (address: string, fn: string): Row => ({ transport: "http", address, sender: "*", program: OVERLAY_ROLE, fn });
+  const read = (address: string, fn: string): ReadIn => ({ address, program: OVERLAY_ROLE, fn });
   const p2p = (address: string, fn: string): Row => ({ transport: "libp2p", address, sender: "*", program: OVERLAY_ROLE, fn });
   const box = (sender: string): Row => ({ transport: "mailbox", address: app, sender, program: OVERLAY_ROLE });
   // #121: a submission's BEEF is decoded at the kernel's door (the row's `filter`): the handler gets its pointer record.
   const beef = (r: Row): Row => ({ ...r, filter: "beef" });
   return {
     topics,
+    reads: [read("/lookup", "lookup")],
     rows: [
       box("event"), box("$self"),
-      beef(http("/submit", "submit")), http("/lookup", "lookup"),
+      beef(http("/submit", "submit")),
       ...topics.flatMap((t) => [beef(p2p(t, "submit")), p2p(`${t}-admit`, "peerAdmit"), p2p(`${t}-proof`, "peerProof")]),
     ],
   };

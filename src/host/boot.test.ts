@@ -99,7 +99,7 @@ test("an image (#89): the default image resolves into a genesis with no owner, n
   assert.ok(!http.some((a) => a === "/" || a === "/site" || a === "/manifest.json"), `#125: no site and no static in the image: nothing at /, /site or /manifest.json (${http.join(", ")})`);
   assert.ok(http.every((a) => /^\/(messagebox\/)?(sendMessage|listMessages|acknowledgeMessage)$/.test(a) || a === "/wallet/fund"), "the image's http rows are the messagebox's and (#130) the wallet's funding row");
   const fund = (g.dispatch as Array<{ address: string; sender: unknown; program: CID; fn?: string; filter?: string }>).find((r) => r.address === "/wallet/fund")!;
-  assert.deepEqual([fund.sender, fund.program.toString(), fund.fn, fund.filter], ["*", programs.wallet!.toString(), "fund", "beef"], "#130: the funding row — open, the wallet's fund, the door's beef filter");
+  assert.deepEqual([fund.sender, fund.program.toString(), fund.fn, fund.filter], ["session", programs.wallet!.toString(), "fund", "beef"], "#130, #135: the funding row — a message route (the host's signed session), the wallet's fund, the door's beef filter");
   assert.throws(() => resolveReads({}, [{ owner: true, caller: "$owner", op: "explore" }] as never), /owner: true names no caller/);
   // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
   for (const n of ["frontdoor", "messagebox", "wallet"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);

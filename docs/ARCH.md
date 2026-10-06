@@ -41,14 +41,17 @@ Inside:
   a liveness)
   and `authfetch` (#126: the kernel's BRC-104 client, a recorded call — the
   one direct HTTP path);
-- **requests**: every package a transport carries in is an entry, and the
+- **requests**: every message a transport carries in is an entry (#135:
+  the kernel's door admits messages only — a key, a signature, a row), and the
   instance's front door (a program) is stepped on it as the request's own
   thread, handed the row the kernel matched; the front door verifies who
   the package is from (BRC-103/104, GossipSub's signature) and runs the
   row's handler (`VM.md`, "Requests");
 - **calls**: a program function run over current state with no entry and no
-  writes, for host-side reads that are not requests (the explorer's;
-  `VM.md`, "Calls");
+  writes — the second door (#135): the reads an instance's apps declare
+  (`reads[]`, the head `reads`) and the owner adds are served by a call,
+  anyone, signed or not, nothing logged; and host-side reads that are not
+  requests (the explorer's; `VM.md`, "Calls");
 - the **virtual filesystem**: trees from the store, seen through WASI. The
   shell and its tools run over it. It is the only filesystem there is.
 
@@ -227,11 +230,15 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 - **The HTTP transport.** Each instance has its own origin,
   `http://<handle>.localhost:<port>` or `/@<handle>` on the host's origin.
   The host picks the instance by the URL (a handshake does not name its
-  recipient), appends the request as a `request` entry, and holds the
+  recipient) and the door by the path (#135, `frontdoor.ts` `serveHttp`;
+  docs/MESSAGES.md "The front door: two doors"): a read is a `call` of the
+  front door's fn `read` (no entry, its fuel metered); a signed request for
+  a message route is appended as a `request` entry and the host holds the
   connection until the thread comes to rest; past `answerWaitMs` (two
-  minutes) or at shutdown, 503 + Retry-After. Sessions are the front door's
-  records under `frontdoor/sessions`, so they survive a restart. Every
-  request is an entry; a read moves nothing.
+  minutes) or at shutdown, 503 + Retry-After; an unsigned request for a
+  message route is 401, for nothing 404, no entry. Sessions are the front
+  door's records under `frontdoor/sessions`, so they survive a restart.
+  Every message is an entry; a read is none and moves nothing.
 - **The libp2p node** (`src/host/p2p.ts`): one js-libp2p node per instance
   whose genesis config declares `libp2p` or whose installed apps added
   libp2p rows; it follows the dispatch table live as apps install and
@@ -323,7 +330,7 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   host has no wallet: the certificate's revocation outpoint is BRC-52's
   disabled sentinel (docs/MESSAGES.md, "BRC-169 is discovery").
 - **The fuel ledger**: a request's fuel is on its thread's updates in the
-  log; the host's own kernel calls (the explorer's reads) are charged in
+  log; the host's own kernel calls (the reads, #135, and the explorer's) are charged in
   host.db (`skein-host ledger`), per instance and caller: the identity the
   front door verified on the request's thread (its `read` answer names
   it), not a header as the client sent it.

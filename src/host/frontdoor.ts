@@ -15,6 +15,20 @@
 //
 // Sessions are state (#68): the front door keeps them as records (head
 // `frontdoor/sessions`); this side holds none.
+//
+// Two doors (#135; docs/MESSAGES.md "The front door"). The kernel's door
+// admits messages only; a read is a `call`. An HTTP request goes to one of
+// them by its path (serveHttp): the instance's reads (the head `reads`,
+// plan.ts READS_HEAD) and its http rows are matched together, exact paths
+// first, then the longest prefix — a read and a row never share a path.
+// A read wins: the front door's fn "read" runs the read's function over the
+// current state (a call: no entry, nothing logged; the fuel reported for
+// the host's meter), the request as received, signed or not, any method —
+// a signed one verified and answered signed on its session. A row wins, or
+// nothing matches: a signed request goes through the door (appended, its
+// thread waited on: frontDoor); an unsigned one is answered here, 401 when
+// a row is at the path (a message route: sign it), else 404 — never an
+// entry. The handshake (/.well-known/auth) is the door's.
 
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
@@ -24,6 +38,8 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import { admit2 } from "./genesis.ts";
 import type { Kernel, Refusal, RequestAnswer } from "./kernel.ts";
+import { READS_HEAD, type ReadEntry } from "./plan.ts";
+import type { DispatchRow } from "../runtime/dispatch.ts";
 
 /** A raw request as the host appends it: `path` as the client signed it, `route` what the routes table sees. */
 export interface FrontRequest {
@@ -150,14 +166,89 @@ async function requestOf(k: Kernel, entry: CID): Promise<CID> {
   return e.request;
 }
 
-/** A fetch over one instance's front door, no socket: for a client in a test, or a URL of the host's own. */
+// ---------------------------------------------------------------- two doors (#135)
+
+/** The BRC-104 handshake's path: the door's own, signed or not. */
+export const HANDSHAKE_PATH = "/.well-known/auth";
+
+/** Whether a request carries BRC-104 headers (x-bsv-auth-*): a signed request. */
+export const isSigned = (headers: Record<string, string>): boolean => Object.keys(headers).some((h) => h.toLowerCase().startsWith("x-bsv-auth-"));
+
+/** The reads head as last read, per kernel: its root and its reads. */
+const readsSeen = new WeakMap<Kernel, { root: string; reads: ReadEntry[] }>();
+
+/** The instance's reads (#135): the reads head's record, read again only when its root moved. */
+export async function currentReads(k: Kernel): Promise<ReadEntry[]> {
+  const root = await k.call("head", READS_HEAD) as CID | null;
+  if (!root) return [];
+  const seen = readsSeen.get(k);
+  if (seen?.root === root.toString()) return seen.reads;
+  const r = await k.store.get(root).catch(() => undefined) as { kind?: string; reads?: ReadEntry[] } | undefined;
+  const reads = r?.kind === "reads" && Array.isArray(r.reads) ? r.reads : [];
+  readsSeen.set(k, { root: root.toString(), reads });
+  return reads;
+}
+
+/**
+ * Where an http path goes (#135): a read or an http row, matched together as the dispatch table
+ * matches its rows — exact paths first, then the longest prefix (a read and a row never share a path;
+ * were one to, the read wins). Undefined: neither.
+ */
+export function routeOf(reads: ReadEntry[], rows: DispatchRow[], path: string): { read: ReadEntry } | { row: DispatchRow } | undefined {
+  const http = rows.filter((r) => r.transport === "http");
+  const exactRead = reads.find((r) => !r.prefix && r.address === path);
+  if (exactRead) return { read: exactRead };
+  const exactRow = http.find((r) => r.prefix !== true && r.address === path);
+  if (exactRow) return { row: exactRow };
+  let best: { read: ReadEntry } | { row: DispatchRow } | undefined, len = -1;
+  for (const r of reads) if (r.prefix && path.startsWith(r.address) && r.address.length > len) { best = { read: r }; len = r.address.length; }
+  for (const r of http) if (r.prefix === true && path.startsWith(r.address) && r.address.length > len) { best = { row: r }; len = r.address.length; }
+  return best;
+}
+
+/**
+ * A read served (#135): the front door's fn "read" with the request as received and the read as its
+ * `match` — the read's function called over the current state; a signed request verified and its
+ * answer signed on its session. Nothing is appended.
+ */
+export async function serveRead(k: Kernel, req: FrontRequest, read: ReadEntry, o: { now?: Stamp } = {}): Promise<FrontAnswer> {
+  const c = await k.invoke("frontdoor", "read", dagCbor.encode({ request: httpRecord(req), match: read }), { now: stampMs(o.now ?? clockNow()) });
+  if (!c.ok) return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_READ", description: c.error }), fuel: c.fuel };
+  const x = dagCbor.decode(c.result) as { status: number; headers?: Record<string, string>; body?: Uint8Array; caller?: Uint8Array };
+  return { status: x.status, headers: x.headers ?? {}, body: x.body ?? new Uint8Array(), fuel: c.fuel, ...(x.caller instanceof Uint8Array ? { caller: Buffer.from(x.caller).toString("hex") } : {}) };
+}
+
+/**
+ * One HTTP request through the two doors (#135): a read served by a call (serveRead); a signed
+ * request for a row, or for nothing, through the door (frontDoor); an unsigned one for a row 401,
+ * for nothing 404 — answered here, nothing appended. The handshake goes to the door.
+ */
+export async function serveHttp(k: Kernel, req: FrontRequest, o: { now?: Stamp; waitMs?: number; stop?: Promise<unknown> } = {}): Promise<FrontAnswer> {
+  const route = req.route ?? req.path;
+  const signed = isSigned(req.headers);
+  if (route !== HANDSHAKE_PATH) {
+    const reads = await currentReads(k);
+    const rows = reads.length || !signed ? (await k.dispatch()).rows : [];
+    const to = routeOf(reads, rows, route);
+    if (to && "read" in to) return await serveRead(k, req, to.read, o);
+    if (!signed) {
+      return to
+        ? { status: 401, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_UNAUTHORIZED", description: `${route}: a message route — the request is signed (BRC-104: shake hands at ${HANDSHAKE_PATH})` }) }
+        : { status: 404, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_NOT_FOUND", description: `nothing at ${route} (no read, no message route)` }) };
+    }
+  }
+  return await frontDoor(k, req, o);
+}
+
+
+/** A fetch over one instance's two doors (serveHttp), no socket: for a client in a test, or a URL of the host's own. */
 export function frontDoorFetch(k: Kernel, o: { now?: () => Stamp; route?: (path: string) => string; onAnswer?: (a: FrontAnswer) => void; waitMs?: number } = {}): typeof fetch {
   return (async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
     const req = input instanceof Request ? input : new Request(url, init);
     const body = new Uint8Array(await req.arrayBuffer());
     const fr: FrontRequest = { method: req.method, path: url.pathname, route: o.route ? o.route(url.pathname) : url.pathname, query: url.search, headers: headerMap(req.headers), body };
-    const a = await frontDoor(k, fr, { now: o.now?.(), waitMs: o.waitMs });
+    const a = await serveHttp(k, fr, { now: o.now?.(), waitMs: o.waitMs });
     o.onAnswer?.(a);
     return new Response(a.body.length ? Buffer.from(a.body) : null, { status: a.status, headers: a.headers });
   }) as typeof fetch;

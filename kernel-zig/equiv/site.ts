@@ -9,10 +9,10 @@
 //   git app's tree under apps/git); you install the onboarding app and the
 //   management site (shruggr/skein-site, an app: its page at /site/) into it
 //   as the owner's messages (`skein plan install`, #124), and send the site's
-//   optional root row (`skein plan dispatch --http … / site.site`).
+//   optional root read (`skein plan reads add … / site.site`, #135).
 //
 //   The wallet's grouped request (#97): GET /manifest.json at the host skein's
-//   own origin is the site's manifest.json, by that root row (the protocols,
+//   own origin is the site's manifest.json, by that root read (the protocols,
 //   the basket and the spend the page uses; the counterparty protocols); the
 //   router's origin still answers its own (metanet.trust, metanet.handles).
 //
@@ -264,15 +264,15 @@ try {
   r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
   await router.settled();
   check(r.code === 0, `the onboarding app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
-  // #125: the management site, an app the host's owner installs, and its optional root row (the owner's own).
+  // #125: the management site, an app the host's owner installs, and its optional root read (the owner's own).
   r = await cli(["install", appCheckout(SITE_APP), "--instance", "host"], { wallet: ephemeralWallet(youKey), id: you });
   await router.settled();
   check(r.code === 0, `the site app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
   const rootPlan = join(home, "root-row");
   const pe: string[] = [];
-  const pc = await planMain(["dispatch", "add", "--http", "--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", db.get("host")!.store, "--out", rootPlan], { vars: {}, out, err: (l) => { pe.push(l); out(l); } });
+  const pc = await planMain(["reads", "add", "--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", db.get("host")!.store, "--out", rootPlan], { vars: {}, out, err: (l) => { pe.push(l); out(l); } });
   const rootSent = pc === 0 ? await sendDir({ port, owner: ephemeralWallet(youKey), settled: () => router.settled() }, "host", rootPlan) : 0;
-  check(pc === 0 && rootSent === 1, `the owner's root row for the site (skein plan dispatch add --http … / site.site), sent: ${pc} ${pe.join(" ")}`);
+  check(pc === 0 && rootSent === 2, `the owner's root read for the site (#135: skein plan reads add … / site.site — objects, head reads), sent: ${pc} ${rootSent} ${pe.join(" ")}`);
 
   // ------------------------------------------------ the wallet's grouped request (#97): /manifest.json at the host skein's own origin
   // (host.localhost:<port>, the origin a wallet takes the page's originator from); the router's origin keeps its own.
@@ -484,7 +484,9 @@ try {
     const text = (s: string) => { const b = enc.encode(s); return [0x60 + b.length, ...b]; };
     const record = Uint8Array.from([0xa3, ...text("name"), ...text("You Yourself"), ...text("avatar"), 0x58, 36, ...avatarBytes, ...text("domain"), ...text("localhost")]);
     const { signature } = await w.createSignature({ protocolID: [1, "metanet handles profile"], keyID: "1", counterparty: "anyone", data: Array.from(record) });
-    const r = await fetch(`${origin}/account/profile`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ handle: "you", record: btoa(String.fromCharCode(...record)), signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    // #135: a write, so a signed request — over the wallet's session (the page's RawBox, as its Profile form sends it).
+    const { RawBox } = await import(new URL("lib.js", location.href).href) as { RawBox: new (w: unknown, u: string) => { af: { fetch: typeof fetch } } };
+    const r = await new RawBox(w, origin).af.fetch(`${origin}/account/profile`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ handle: "you", record: btoa(String.fromCharCode(...record)), signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
     return { status: r.status, text: await r.text() };
   }, [base, Array.from(outpointToBytes(avatar.replace(".", "_"))!)] as const);
   check(posted.status === 200, `your profile, signed by the wallet in the tab, posted to the host (/account/profile → the host skein's app): ${posted.status} ${posted.text.slice(0, 120)}`);

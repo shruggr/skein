@@ -339,7 +339,7 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 |---|---|---|
 | shruggr/skein-shell | the shell app (#83): `run` (a command over a tree, row `run` from the owner: the box `shell/run`, #128) and the shell itself — brush, coreutils, the toolset, python's stdlib, each a file of its tree, declared as a shell program in its manifest (docs/APPS.md §6b) | `skein plan install https://github.com/shruggr/skein-shell#<commit> --origin <url>`, sent (below). A genesis has no shell: an instance runs commands only once this is installed |
 | shruggr/skein-chat | the chat app (#83): the turn loop, rows `chat` from the owner and from anyone; its `bash` calls run the shell app's shell when the instance has the shell app | `skein plan install https://github.com/shruggr/skein-chat#<commit> --origin <url>`, sent |
-| shruggr/skein-site | the management site (#92; an app since #125): one route handler serving its own tree's `www` (skein-sdk `files`) | `skein plan install https://github.com/shruggr/skein-site#<commit> --origin <url>`, sent: its row under `/site/`; then, if the owner wants the page at `/`, the owner's own row: `skein plan dispatch add --http --prefix --fn get --settings '{"root":"www"}' / site.site --origin <url>`, sent (docs/APPS.md §3, "The management page") |
+| shruggr/skein-site | the management site (#92; an app since #125): one route handler serving its own tree's `www` (skein-sdk `files`) | `skein plan install https://github.com/shruggr/skein-site#<commit> --origin <url>`, sent: its read under `/site/`; then, if the owner wants the page at `/`, the owner's own read (#135): `skein plan reads add --prefix --fn get --settings '{"root":"www"}' / site.site --origin <url>`, sent (docs/APPS.md §3, "The management page") |
 | shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein plan install https://github.com/shruggr/skein-chain#<commit> --origin <url>`, sent: rows `chain` from `event`, `$self` and `$owner`, `status` (the box `chain/status`, #128) from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (there written `chain/status`: a genesis row is as written) (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
 | shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein plan install https://github.com/shruggr/skein-overlay#<commit> --origin <url>`, sent (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 | shruggr/skein-git | the git app (#91): `git.clone {url, hash}` from the owner, box `git` — one commit fetched through the fetch provider, checked against the hash, kept in the store, its app record built and answered (deploy by hash, below) | `skein plan install https://github.com/shruggr/skein-git#<commit> --origin <url>`, sent |
@@ -400,8 +400,10 @@ There are three ways to install an app.
 
   One at a time, the same messages: `skein plan deploy <dir>` (objects and
   `head main`), `skein plan dispatch add [--sender <key>] <box> <handler>`
-  (a mailbox row), `skein plan dispatch add --http [--prefix] --fn <fn>
-  [--settings <json>] <path> <handler>` (#125: an http row of the owner's,
+  (a mailbox row), `skein plan reads add [--prefix] --fn <fn> [--settings
+  <json>] <path> <handler>` (#135: a read of the owner's — the site at `/`),
+  `skein plan dispatch add --http [--prefix] --fn <fn>
+  [--settings <json>] <path> <handler>` (#125: an http row of the owner's, a message route,
   the handler a program record CID, a genesis program or `<app>.<role>`, an
   installed app's; an app's own http and libp2p rows come through
   `install`), `skein plan peers …`.
@@ -540,7 +542,7 @@ boot is written, and the process exits 0.
   address escapes, the senders, the form before #77 refused, shapes,
   `requires`); `kernel-zig/equiv/install.ts`
   (in `run.sh`): the owner's messages (`skein plan install`, sent to
-  `/sendMessage`) for shruggr/skein-site (and the owner's root row to its
+  `/sendMessage`) for shruggr/skein-site (and the owner's root read to its
   handler, which its uninstall leaves) and
   programs/test/app-demo into a running instance, driven, uninstalled,
   replayed. `kernel-zig/equiv/files.ts` (in `run.sh`): skein-sdk's `files`
@@ -601,7 +603,7 @@ boot is written, and the process exits 0.
   commit's pack, a bad URL, no repository and no manifest refused; replayed.
 - `kernel-zig/equiv/site.ts` (in `run.sh`, #92): the management site in
   headless Chrome on a host skein (#125: installed there as an app, with the
-  owner's root row) — create from the page, the locator in the
+  owner's root read) — create from the page, the locator in the
   wallet's basket, the new skein managed from the host's page, the git app installed from the image's `apps/git`,
   app-demo deployed by hash from the page, the explorer, the host skein's
   children; replayed.

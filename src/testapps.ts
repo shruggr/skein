@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WalletInterface } from "@bsv/sdk";
+import { AuthFetch, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { join as joinPath } from "node:path";
 import { deliver, planFiles, planInstallApp, planUninstallApp, messageJson, type AdminPlan } from "./client/admin.ts";
@@ -194,4 +194,44 @@ export async function putShellProgram(store: Pick<Store, "put" | "putBlock" | "h
   const { record, blocks } = shellProgram(t.read, "shell", src, t.checked.manifest.name);
   for (const b of blocks) if (!(await store.has(b.cid))) await store.putBlock(b.cid, b.bytes);
   return await store.put(record as never);
+}
+
+/**
+ * #135: a BRC-22 submission as a signed request — POST <base>/submit is a message route. The stock AuthFetch
+ * carries only content-type, authorization and x-bsv-* headers, so X-Topics rides beside the signed ones (added
+ * on the wire by the transport, not covered by the signature). One session per origin. An answer that is not
+ * signed (a 503 at the router's bound) comes back as its status. A fetch for the SDK's
+ * HTTPSOverlayBroadcastFacilitator too.
+ */
+export function signedSubmitter(wallet: WalletInterface): (url: string, init?: { method?: string; headers?: Record<string, string>; body?: unknown }) => Promise<Response> {
+  const sessions = new Map<string, { af: AuthFetch; topics?: string }>();
+  return async (url, init = {}) => {
+    const u = new URL(url);
+    // The dev form /@<handle>/…: the session is that instance's, its handshake under the prefix (as RawBox's).
+    const prefix = /^\/@[^/]+/.exec(u.pathname)?.[0] ?? "";
+    let s = sessions.get(u.origin + prefix);
+    if (!s) {
+      const slot: { af?: AuthFetch; topics?: string } = {};
+      const wire = ((input: string | URL | Request, i?: RequestInit) => {
+        const w = new URL(input instanceof Request ? input.url : String(input));
+        if (prefix && w.pathname === "/.well-known/auth") w.pathname = `${prefix}/.well-known/auth`;
+        const h = new Headers(i?.headers);
+        if (slot.topics !== undefined && w.pathname.endsWith("/submit")) h.set("x-topics", slot.topics);
+        return fetch(w, { ...i, headers: h });
+      }) as typeof fetch;
+      slot.af = new AuthFetch(wallet, undefined, undefined, undefined, {}, wire);
+      s = slot as { af: AuthFetch; topics?: string };
+      sessions.set(u.origin + prefix, s);
+    }
+    const hs = Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+    s.topics = hs["x-topics"];
+    const body = init.body instanceof Uint8Array ? init.body : Uint8Array.from(init.body as number[]);
+    try {
+      return await s.af.fetch(url, { method: init.method ?? "POST", headers: { "content-type": hs["content-type"] ?? "application/octet-stream" }, body: Buffer.from(body) });
+    } catch (e) {
+      const m = /Received HTTP (\d+)/.exec((e as Error).message);
+      if (m) return new Response(JSON.stringify({ status: "error" }), { status: Number(m[1]), headers: { "content-type": "application/json" } });
+      throw e;
+    }
+  };
 }

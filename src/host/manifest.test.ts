@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appBox, appPath, checkManifest, ManifestError, missingInterfaces, overlayWiring, rowKey, shapeProblem } from "./manifest.ts";
+import { appBox, appPath, checkManifest, ManifestError, missingInterfaces, overlayWiring, readKey, rowKey, shapeProblem } from "./manifest.ts";
 
 const files = new Set(["bin/demo.wasm", "bin/engine.cid", "etc/app.json"]);
 const has = (p: string) => files.has(p);
@@ -199,19 +199,22 @@ const overlayProblems = (m: unknown, files = overlayFiles): string[] => {
   return [];
 };
 
-test("config.overlay derives the wiring: three libp2p rows per topic, /submit and /lookup open, the app's box from events and from itself (#79)", () => {
+test("config.overlay derives the wiring: three libp2p rows per topic, the row /submit and the read /lookup (#135), the app's box from events and from itself (#79)", () => {
   const c = checkManifest(overlayApp(demoOverlay), (p) => overlayFiles.has(p));
   const m = c.manifest;
   assert.deepEqual(m.dispatch.map((r) => `${rowKey("overlay", r)}→${r.program}${r.fn ? `.${r.fn}` : ""}`), [
     "http /overlay/listTopicManagers *→overlay.listTopicManagers",
     // Events (its libp2p routes' admits) into its own box; its own watch messages, by the loopback.
     "mailbox overlay event→overlay", "mailbox overlay $self→overlay",
-    "http /overlay/submit *→overlay.submit", "http /overlay/lookup *→overlay.lookup",
+    "http /overlay/submit *→overlay.submit",
     "libp2p tm_demo *→overlay.submit", "libp2p tm_demo-admit *→overlay.peerAdmit", "libp2p tm_demo-proof *→overlay.peerProof",
   ]);
   assert.deepEqual(c.derived, {
-    rows: ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *", "http /overlay/lookup *", "libp2p tm_demo *", "libp2p tm_demo-admit *", "libp2p tm_demo-proof *"],
+    rows: ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *", "libp2p tm_demo *", "libp2p tm_demo-admit *", "libp2p tm_demo-proof *"],
+    reads: ["/overlay/lookup"],
   });
+  // #135: BRC-24's lookup is a read (a POST served by a call), not a row.
+  assert.deepEqual(m.reads, [{ address: "/lookup", program: "overlay", fn: "lookup" }]);
   // Another name, the same tree: its box is its own name — two overlay apps do not clash (#79).
   const two = checkManifest({ ...overlayApp(demoOverlay), name: "amm" }, (p) => overlayFiles.has(p));
   assert.deepEqual(two.manifest.dispatch.filter((r) => r.transport === "mailbox").map((r) => rowKey("amm", r)), ["mailbox amm event", "mailbox amm $self"]);
@@ -242,16 +245,43 @@ test("config.overlay: its problems", () => {
 });
 
 test("config.overlay with no topics (#120): accepted; the box, /submit and /lookup derived, no per-topic rows", () => {
-  const rows = ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *", "http /overlay/lookup *"];
+  const rows = ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *"];
   for (const ov of [{}, { topics: {} }, { lookups: { ls_demo: "lookup-demo" } }, { topics: {}, lookups: { ls_demo: { program: "lookup-demo" } } }]) {
     const c = checkManifest(overlayApp(ov), (p) => overlayFiles.has(p));
-    assert.deepEqual(c.derived, { rows }, JSON.stringify(ov));
+    assert.deepEqual(c.derived, { rows, reads: ["/overlay/lookup"] }, JSON.stringify(ov));
     assert.ok(!c.manifest.dispatch.some((r) => r.transport === "libp2p"), "no per-topic rows");
   }
   const w = overlayWiring("mandala", {}, (r) => r === "overlay");
   assert.ok(!Array.isArray(w));
   assert.deepEqual(w.topics, []);
-  assert.deepEqual(w.rows.map((r) => rowKey("mandala", r)), ["mailbox mandala event", "mailbox mandala $self", "http /mandala/submit *", "http /mandala/lookup *"]);
+  assert.deepEqual(w.rows.map((r) => rowKey("mandala", r)), ["mailbox mandala event", "mailbox mandala $self", "http /mandala/submit *"]);
+  assert.deepEqual(w.reads.map((r) => readKey("mandala", r)), ["/mandala/lookup"]);
+});
+
+test("reads[] (#135): a path under the app's, a role, a fn, settings carried; no sender; never an http row's path", () => {
+  const files = new Set(["bin/site.wasm"]);
+  const app = (more: Record<string, unknown>) => ({ kind: "app", name: "site", version: "1.0.0", programs: { site: "bin/site.wasm" }, ...more });
+  const ok = checkManifest(app({ reads: [{ address: "/", prefix: true, program: "site", fn: "get", root: "www" }, { address: "status", program: "site", fn: "status" }] }), (p) => files.has(p));
+  assert.deepEqual(ok.manifest.reads, [{ address: "/", prefix: true, program: "site", fn: "get", root: "www" }, { address: "status", program: "site", fn: "status" }]);
+  assert.deepEqual(ok.manifest.reads.map((r) => readKey("site", r)), ["/site/*", "/site/status"]);
+  assert.deepEqual(ok.manifest.dispatch, [], "an app with reads only takes no messages");
+  const bad = (reads: unknown, more: Record<string, unknown> = {}) => { try { checkManifest(app({ reads, ...more }), (p) => files.has(p)); return ""; } catch (e) { return (e as ManifestError).problems.join("\n"); } };
+  assert.match(bad([{ address: "/x", program: "site", fn: "get", sender: "*" }]), /reads\[0\]: sender: not a read's/);
+  assert.match(bad([{ address: "/x", program: "site", fn: "get", transport: "http" }]), /reads\[0\]: transport: not a read's/);
+  assert.match(bad([{ address: "/x", program: "site", fn: "get", app: "other" }]), /app is set by the install/);
+  assert.match(bad([{ address: "/x", program: "nobody", fn: "get" }]), /program "nobody" is not a role/);
+  assert.match(bad([{ address: "/x", program: "site" }]), /fn is not text/);
+  assert.match(bad([{ address: "/../x", program: "site", fn: "get" }]), /a "\." or "\.\." segment/);
+  assert.match(bad([{ address: "/x", prefix: false, program: "site", fn: "get" }]), /prefix is true or absent/);
+  assert.match(bad([{ address: "/x", program: "site", fn: "a" }, { address: "x", program: "site", fn: "b" }]), /read \/site\/x twice/);
+  assert.match(bad("x"), /reads: not a list/);
+  // A read and an http row never share a path; the same path as a prefix and exactly is two paths.
+  assert.match(bad([{ address: "/x", program: "site", fn: "get" }], { dispatch: [{ transport: "http", address: "/x", sender: "session", program: "site", fn: "post" }] }), /reads: \/site\/x is an http row's path too/);
+  assert.equal(bad([{ address: "/x", prefix: true, program: "site", fn: "get" }], { dispatch: [{ transport: "http", address: "/x", sender: "session", program: "site", fn: "post" }] }), "");
+  // config.overlay's derived /lookup: a read the manifest names itself wins.
+  const ov = checkManifest(overlayApp({}, { reads: [{ address: "/lookup", program: "lookup-demo", fn: "mine" }] }), (p) => overlayFiles.has(p));
+  assert.deepEqual(ov.manifest.reads, [{ address: "/lookup", program: "lookup-demo", fn: "mine" }]);
+  assert.deepEqual(ov.derived.reads, []);
 });
 
 test("config.overlay: no prefix declarations (#120): prefixes refused, in the overlay and in a lookup service", () => {

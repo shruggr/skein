@@ -52,11 +52,13 @@
 //!                                     outputIndex, amount, to, remittance, checkpoint} — the host's to
 //!                                     take — and ingest it at the chain app as any other. Nothing to
 //!                                     pay: no event (the kernel puts the instance to sleep).
-//!   call fn "fund"                    the route handler of the funding row (`/wallet/fund`, open, the
-//!                                     door's `beef` filter): the body an Atomic BEEF (the door's
-//!                                     pointer record), the header `x-skein-outputs` BRC-100's
-//!                                     internalizeAction outputs (JSON), `x-skein-description`
-//!                                     optional: internalized (SPV against the chain state), ingested
+//!   call fn "fund"                    the route handler of the funding row (`/wallet/fund`, sender
+//!                                     session — #135: the host hands a payment in over a BRC-104
+//!                                     session signed with its billing key — the door's `beef`
+//!                                     filter): the body an Atomic BEEF (the door's pointer record),
+//!                                     the header `x-bsv-skein-outputs` BRC-100's internalizeAction
+//!                                     outputs (JSON), `x-bsv-skein-description` optional (x-bsv-*:
+//!                                     headers the SDK's AuthFetch signs): internalized (SPV against the chain state), ingested
 //!                                     at the chain app (not awaited), answered {txid, status, outputs}.
 //!
 //! Recorded calls: the signer over the `wallet` import (getPublicKey,
@@ -1027,7 +1029,7 @@ fn headerOf(headers: ?Value, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// BRC-100 internalizeAction outputs as JSON (the header `x-skein-outputs`).
+/// BRC-100 internalizeAction outputs as JSON (the header `x-bsv-skein-outputs`).
 fn specsOf(a: std.mem.Allocator, text: []const u8) ![]w.wallet.InternalizeOutput {
     const j = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return error.BadOutputs;
     if (j != .array or j.array.items.len == 0) return error.BadOutputs;
@@ -1087,8 +1089,9 @@ fn fund(a: std.mem.Allocator, s: Store, in: Value, func: []const u8) ![]const u8
     if (!eql(u8, func, "fund")) return error.UnknownFn;
     const req = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
     const headers = req.get("headers");
-    const specs = try specsOf(a, headerOf(headers, "x-skein-outputs") orelse return error.NoOutputs);
-    const description = headerOf(headers, "x-skein-description") orelse "funding";
+    // #135: x-bsv-* headers, so the session's signature covers them (the SDK's AuthFetch signs those).
+    const specs = try specsOf(a, headerOf(headers, "x-bsv-skein-outputs") orelse return error.NoOutputs);
+    const description = headerOf(headers, "x-bsv-skein-description") orelse "funding";
     const beef = switch (req.get("body") orelse return error.NoBeef) {
         // The door's `beef` filter put the pointer record where the bytes were.
         .cid => |c| try chainlib.record.beefOf(a, s, c),

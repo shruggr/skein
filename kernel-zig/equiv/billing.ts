@@ -151,7 +151,7 @@ try {
   aliceDb = h.db.get("alice")!.store;
   bobDb = h.db.get("bob")!.store;
   const g = await (await h.router.hydrate("alice")).kernel.genesis() as { programs: Record<string, CID>; dispatch: Array<{ address: string; fn?: string; filter?: string }> };
-  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund" && r.fn === "fund" && r.filter === "beef") };
+  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund" && r.fn === "fund" && r.filter === "beef" && (r as { sender?: unknown }).sender === "session") };
 
   // The chain app in both (the door's `beef` filter and the wallet's SPV read its headers).
   const chainDir = process.env.SKEIN_CHAIN_DIR ?? (() => {
@@ -179,11 +179,13 @@ try {
   // No host row yet: nothing billed.
   report.beforeTerms = { billing: (await billingOf("alice")) === undefined, open: h.router.closed("alice") === undefined };
 
-  // The owner funds alice through the host, before granting it: the funding row takes it as any time.
+  // The owner funds alice through the host, before granting it: the funding row takes it as any time (#135: the host hands it in signed, with its billing key).
   const f1 = await funding(alice, 0, 700, "one");
   // Until her chain app has taken header 101 (the door checks the BUMP against it: before, a refusal).
   const r1 = await until("the funding taken", async () => { const r = await fundAtHost("alice", f1); return r.status === 200 ? r : (await sleep(250), undefined); }, 60_000);
   report.funded = [r1.status, JSON.parse(r1.text).txid === f1.txid];
+  // #135: the funding row is a message route — the same funding sent to it directly, unsigned, is 401 (only the host's signed hand-in reaches it).
+  report.fundDirect = (await fetch(`${h.base}/@alice/wallet/fund`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-bsv-skein-outputs": f1.outputs }, body: Buffer.from(f1.beef) })).status;
 
   // The owner grants the host (#130 decided 1): the host row, with the terms the host publishes.
   await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", planHost(alice, "add", { key: hostTerms.billing!.key, x: BILLING.x, rates: BILLING.rates }));
@@ -300,8 +302,9 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(report.published === true, "the host publishes its terms at /.well-known/skein-host (its billing key, X, the rates)");
-check(eq(report.image, { wallet: true, fundRow: true }), `the default image carries the wallet and the funding row /wallet/fund (open, the beef filter) (${JSON.stringify(report.image)})`);
+check(eq(report.image, { wallet: true, fundRow: true }), `the default image carries the wallet and the funding row /wallet/fund (#135: sender session — the host hands a payment in signed with its billing key; the beef filter) (${JSON.stringify(report.image)})`);
 check(eq(report.beforeTerms, { billing: true, open: true }), "no host row: no billing state, the host forwards as usual");
+check(report.fundDirect === 401, `#135: the funding row directly, unsigned: 401 (a message route; the host's hand-in is signed) (${String(report.fundDirect)})`);
 check(eq(report.funded, [200, true]), `a funding delivered to the host (POST /fund/alice) is handed in on the funding row and internalized (${JSON.stringify(report.funded)})`);
 const st = (report.started ?? {}) as Record<string, unknown>;
 check(st.host === true && st.allowance === BILLING.allowance && st.ticks === 1 && st.bytes === true, `the owner's host row: the host ticks at once, billing starts — the host's key, its allowance the allocation, the store measured (${JSON.stringify(st)})`);

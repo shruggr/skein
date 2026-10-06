@@ -5,6 +5,7 @@
 //   skein plan uninstall <app> <where> [--out dir]
 //   skein plan dispatch add|remove [--sender key] <box> <handler> <where> [--out dir]
 //   skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
+//   skein plan reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--out dir]
 //   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--out dir]
 //   skein plan peers remove <key> <where> [--out dir]
 //   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
@@ -28,7 +29,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { CID } from "multiformats/cid";
-import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planClaim, planDeploy, planDispatch, planFiles, planHost, planInstallApp, planPeers, planUninstallApp, writePlan, type AdminPlan, type HostTerms, type PeerChange } from "./admin.ts";
+import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planClaim, planDeploy, planDispatch, planFiles, planHost, planInstallApp, planPeers, planReads, planUninstallApp, writePlan, type AdminPlan, type HostTerms, type PeerChange } from "./admin.ts";
 import type { InstanceView } from "../host/plan.ts";
 
 export const PLAN_USAGE = `usage:
@@ -38,6 +39,9 @@ export const PLAN_USAGE = `usage:
   skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
                                                                                      an http row (#125: e.g. an app's handler at /); <handler>: a program
                                                                                      record CID, a genesis program, or <app>.<role> (the installed app's)
+  skein plan reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--out dir]
+                                                                                     the owner's own read (#135: e.g. the site at /): served by a call,
+                                                                                     anyone, signed or not; the reads head (needs --origin or --store)
   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--out dir]
   skein plan peers remove <key> <where> [--out dir]                                  an address-book entry (#70)
   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]             a directory into main (objects, head)
@@ -70,6 +74,22 @@ async function viewOf(v: { origin?: string; store?: string }, env: AdminEnv): Pr
     try { return { view: await instanceView(s), close: () => s.close() }; } catch (e) { s.close(); throw e; }
   }
   throw new Error("where is the instance: --origin <url> or --store <runtime.db>");
+}
+
+/** The programs a handler may name (#125): the genesis's by name, and `<app>.<role>` — the installed app's (its app record's `programs`). */
+async function handlerPrograms(view: InstanceView | undefined, handler: string): Promise<Record<string, CID>> {
+  const programs = { ...(view?.programs as Record<string, CID> | undefined) };
+  const role = /^([a-z0-9][a-z0-9-]*)\.([A-Za-z0-9_-]+)$/.exec(handler);
+  if (role && !programs[handler]) {
+    if (!view) throw new Error(`handler ${handler}: an app's program needs the instance's view (--origin or --store), not --recipient`);
+    const { appRecordIn } = await import("../host/plan.ts");
+    const app = await appRecordIn(view, role[1]!);
+    if (!app) throw new Error(`handler ${handler}: no app ${role[1]} installed (no head ${role[1]}/app)`);
+    const cid = app.record.programs[role[2]!];
+    if (!cid) throw new Error(`handler ${handler}: app ${role[1]} has no program ${role[2]} (${Object.keys(app.record.programs).join(", ")})`);
+    programs[handler] = cid;
+  }
+  return programs;
 }
 
 /** The view, or with --recipient alone the key only. */
@@ -138,20 +158,24 @@ export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
         }
         const t = await targetOf(v, env);
         try {
-          const programs = { ...(t.view?.programs as Record<string, CID> | undefined) };
-          // <app>.<role>: the installed app's program (its app record's `programs`).
-          const role = /^([a-z0-9][a-z0-9-]*)\.([A-Za-z0-9_-]+)$/.exec(handler);
-          if (role && !programs[handler]) {
-            if (!t.view) throw new Error(`handler ${handler}: an app's program needs the instance's view (--origin or --store), not --recipient`);
-            const { appRecordIn } = await import("../host/plan.ts");
-            const app = await appRecordIn(t.view, role[1]!);
-            if (!app) throw new Error(`handler ${handler}: no app ${role[1]} installed (no head ${role[1]}/app)`);
-            const cid = app.record.programs[role[2]!];
-            if (!cid) throw new Error(`handler ${handler}: app ${role[1]} has no program ${role[2]} (${Object.keys(app.record.programs).join(", ")})`);
-            programs[handler] = cid;
-          }
+          const programs = await handlerPrograms(t.view, handler);
           emit(planDispatch(t.recipient, { op, sender: v.sender, box: box!, handler, ...(v.http ? { http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } } : {}) }, programs), v.out, env);
         } finally { t.close(); }
+        return 0;
+      }
+      case "reads": {
+        const { values: v, positionals: [op, path, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
+        if (!handler || more.length || (op !== "add" && op !== "remove") || v.recipient !== undefined) { env.err(PLAN_USAGE); return 2; }
+        let settings: Record<string, unknown> | undefined;
+        if (v.settings !== undefined) {
+          try { settings = JSON.parse(v.settings) as Record<string, unknown>; } catch { settings = undefined; }
+          if (!settings || typeof settings !== "object" || Array.isArray(settings)) { env.err("skein plan reads --settings: a JSON object (the function's own settings, e.g. {\"root\":\"www\"})"); return 2; }
+        }
+        const { view, close } = await viewOf(v, env);
+        try {
+          const programs = await handlerPrograms(view, handler);
+          emit(await planReads(view, { op, path: path!, handler, http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } }, programs), v.out, env);
+        } finally { close(); }
         return 0;
       }
       case "peers": {

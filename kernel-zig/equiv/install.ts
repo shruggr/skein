@@ -6,10 +6,11 @@
 //   skein-site (shruggr/skein-site at the commit src/testapps.ts pins, cloned
 //   by the install itself; or $SKEIN_SITE_DIR; 0.7.3, #125): the head
 //   `site/app` is the app record (the manifest as installed, linking the
-//   tree; no alias head), its one row is served under /site/ (the files of
-//   its own tree's www) out of the kernel's dispatch table; the owner's own
-//   row puts the same handler at `/` (`skein plan dispatch --http`), which an
-//   uninstall leaves; uninstalled, its rows are gone.
+//   tree; no alias head), its one read (#135, `reads[]`) is served under
+//   /site/ (the files of its own tree's www) by a call, out of the reads head
+//   — no dispatch row, no entry; the owner's own read puts the same function
+//   at `/` (`skein plan reads add`), which an uninstall leaves; a read at a
+//   row's path refused; uninstalled, its reads are gone.
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
 //   start message schedules a heartbeat with the cron provider, whose tick
@@ -91,20 +92,23 @@ try {
   // ------------------------------------------------ skein-site, from its repo (#125)
   const siteSpec = SITE_APP.dir ?? `${SITE_APP.repo}#${SITE_APP.rev}`;
   let code = await cli("install", siteSpec, "--instance", "inst", "--dry-run");
-  check(code === 0 && out.some((l) => l.includes("row       http /site/* from anyone → site.get (root www)")), `the prompt shows the site's row under /site/ (${code}: ${out.filter((l) => l.includes("row ")).join(" | ")})`);
+  check(code === 0 && out.some((l) => l.includes("read      /site/* → site.get (root www) (anyone, by a call: nothing logged)")) && !out.some((l) => l.startsWith("  row ")), `the prompt shows the site's read under /site/, and no row (${code}: ${out.filter((l) => /^ {2}(row|read) /.test(l)).join(" | ")})`);
   check((await record("site/app")) === undefined, "a dry run sends nothing");
   code = await cli("install", siteSpec, "--instance", "inst");
   check(code === 0, `skein plan install skein-site, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
   const st = await record("site/app");
-  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.7.6" && (await record("site")) === undefined, `the head site/app is the app record (0.7.6), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
+  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.7.7" && (await record("site")) === undefined, `the head site/app is the app record (0.7.7), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
   const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
-  check((await appRows("site")).join(",") === "http /site/*", `the dispatch table has the site's row: ${(await appRows("site")).join(", ")}`);
+  const appReads = async (app?: string) => (((await record("reads"))?.reads ?? []) as Array<Record<string, unknown>>).filter((x) => x.app === app).map((x) => `${x.address}${x.prefix ? "*" : ""} ${String(x.fn)}`);
+  check((await appRows("site")).length === 0 && (await appReads("site")).join(",") === "/site/* get", `#135: the site's read in the reads head, no dispatch row: ${(await appReads("site")).join(", ")} · rows ${(await appRows("site")).join(", ")}`);
+  const n0 = await h.entries("inst");
   let r = await get("/site/");
   check(r.status === 200 && r.body.includes('src="app.js"'), `GET /site/: its own tree's www/index.html (${r.status})`);
   r = await get("/site/app.js");
   check(r.status === 200 && r.body.includes("skein-locators"), `GET /site/app.js: the page's script (${r.status})`);
   r = await get("/");
   check(r.status === 404, `GET / : nothing at the root until the owner says so (${r.status})`);
+  check(await h.entries("inst") === n0, `#135: a read is no entry, nor is an unsigned 404 (${(await h.entries("inst")) - n0})`);
 
   // ------------------------------------------------ app-demo: start, ticks, calls
   code = await cli("install", demoDir, "--instance", "inst");
@@ -225,8 +229,8 @@ try {
   c = await call({ fn: "demo.counter.get" });
   check(c.status === 404, `after uninstall, /app-demo/call is no route: ${c.status}`);
   check((await record("app-demo/app"))?.kind === "app", "the head app-demo/app is left");
-  // The owner's own row (#125): the same handler at `/` — `skein plan dispatch --http`, sent as the owner.
-  const rootArgs = ["--http", "--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", h.db.get("inst")!.store];
+  // The owner's own read (#125, #135): the same function at `/` — `skein plan reads add`, sent as the owner.
+  const rootArgs = ["--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", h.db.get("inst")!.store];
   const rootPlan = join(work, "root-row");
   const plan = async (...args: string[]) => {
     out.length = 0; err.length = 0;
@@ -235,29 +239,31 @@ try {
     return c;
   };
   const sendRoot = () => sendDir({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "inst", rootPlan);
-  code = await plan("dispatch", "add", ...rootArgs, "--out", rootPlan);
-  check(code === 0 && out.some((l) => /^dispatch add http \/\* from anyone → site\.site\.get \(.+\) \(root www\)$/.test(l)), `skein plan dispatch add --http … / site.site: the owner's row, planned (${code}: ${[...out, ...err].join(" | ")})`);
+  code = await plan("reads", "add", ...rootArgs, "--out", rootPlan);
+  check(code === 0 && out.some((l) => /^reads add \/\* → .+\.get \(root www\) \(the owner's/.test(l)), `skein plan reads add --prefix … / site.site: the owner's read, planned (${code}: ${[...out, ...err].join(" | ")})`);
+  code = await plan("reads", "add", "--fn", "get", "/sendMessage", "site.site", "--store", h.db.get("inst")!.store, "--out", join(work, "clash"));
+  check(code !== 0 && err.some((l) => /an http row is at that path/.test(l)), `a read at a row's path (/sendMessage) refused at the plan (${code}: ${err.join(" | ")})`);
   await sendRoot();
   r = await get("/");
-  check(r.status === 200 && r.body.includes('src="app.js"'), `GET / : the site, by the owner's row (${r.status})`);
+  check(r.status === 200 && r.body.includes('src="app.js"'), `GET / : the site, by the owner's read (${r.status})`);
   r = await get("/app.js");
   check(r.status === 200 && r.body.includes("skein-locators"), `GET /app.js: its files at the root too (${r.status})`);
   r = await get("/manifest.json");
   check(r.status === 200 && r.body.includes("groupPermissions"), `GET /manifest.json: the page's grouped request, at the origin (${r.status})`);
   c = await call({ fn: "demo.counter.get" });
-  check(c.status === 405, `a path no other row takes is the root row's (a catch-all prefix): POST /app-demo/call, app-demo gone, is the site handler's 405 (${c.status})`);
-  const ownerRow = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).find((x) => x.transport === "http" && x.address === "/");
-  check(!!ownerRow && ownerRow.app === undefined && ownerRow.prefix === true && ownerRow.root === "www", "the root row is the owner's (no app)");
+  check(c.status === 405, `a path no row or other read takes is the root read's (a catch-all prefix): POST /app-demo/call, app-demo gone, is the site function's 405, signed (${c.status})`);
+  const ownerRead = (((await record("reads"))?.reads ?? []) as Array<Record<string, unknown>>).find((x) => x.address === "/");
+  check(!!ownerRead && ownerRead.app === undefined && ownerRead.prefix === true && ownerRead.root === "www", "the root read is the owner's (no app)");
   code = await cli("uninstall", "site", "--instance", "inst");
   r = await get("/site/");
-  check(code === 0 && r.status === 404, `skein plan uninstall site: its row is gone (${code}, GET /site/ ${r.status})`);
-  check((await appRows("site")).length === 0 && (await appRows("app-demo")).length === 0, "no app rows left in the dispatch table");
+  check(code === 0 && r.status === 404 && !r.body.includes('src="app.js"'), `skein plan uninstall site: its read is gone — /site/ falls to the root read, which has no www/site/ (${code}, GET /site/ ${r.status})`);
+  check((await appReads("site")).length === 0 && (await appRows("app-demo")).length === 0, "no app reads or rows left");
   r = await get("/");
-  check(r.status === 200, `the owner's root row is the owner's: the uninstall leaves it (GET / ${r.status})`);
-  code = await plan("dispatch", "remove", ...rootArgs, "--out", rootPlan);
+  check(r.status === 200, `the owner's root read is the owner's: the uninstall leaves it (GET / ${r.status})`);
+  code = await plan("reads", "remove", ...rootArgs, "--out", rootPlan);
   await sendRoot();
   r = await get("/");
-  check(code === 0 && r.status === 404, `skein plan dispatch remove with the same arguments: the root row is gone (${code}, GET / ${r.status})`);
+  check(code === 0 && r.status === 404, `skein plan reads remove with the same arguments: the root read is gone (${code}, GET / ${r.status})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

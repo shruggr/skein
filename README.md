@@ -131,7 +131,7 @@ conversation (docs/ARCH.md, "The host skein").
 bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, for you to claim
 bin/skein-host run                                                                       # the host on :8100; the host skein at http://host.localhost:8100
 bin/skein plan claim --recipient <its identity> --out claim && bin/skein send http://host.localhost:8100 claim   # claim it first: your wallet's message, you own it
-bin/skein plan install https://github.com/shruggr/skein-onboard#v0.3.3 --origin http://host.localhost:8100 \
+bin/skein plan install https://github.com/shruggr/skein-onboard#v0.3.4 --origin http://host.localhost:8100 \
   --config '{"onboard": {"domain": "<the handle domain>"}}' --out plan                   # the onboarding app: the messages, read by your wallet
 bin/skein send http://host.localhost:8100 plan                                            # sent by your wallet (1sat authfetch), as you (the owner)
 ```

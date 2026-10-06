@@ -7,5 +7,5 @@
   { "transport": "http", "address": "/messagebox/sendMessage", "sender": "session", "program": "messagebox", "fn": "sendMessage" },
   { "transport": "http", "address": "/messagebox/listMessages", "sender": "session", "program": "messagebox", "fn": "listMessages" },
   { "transport": "http", "address": "/messagebox/acknowledgeMessage", "sender": "session", "program": "messagebox", "fn": "acknowledgeMessage" },
-  { "transport": "http", "address": "/wallet/fund", "sender": "*", "program": "wallet", "fn": "fund", "filter": "beef" }
+  { "transport": "http", "address": "/wallet/fund", "sender": "session", "program": "wallet", "fn": "fund", "filter": "beef" }
 ]

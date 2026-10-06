@@ -154,7 +154,10 @@ test("handles: the host skein serves BRC-169 (#113) — the manifest (the certif
   const avatar = `${"ab".repeat(32)}_1`;
   const bytes = Uint8Array.from(encodeProfile({ domain: "localhost", name: "Dave D", avatar: outpointToBytes(avatar)! }));
   const sign = async (key: PrivateKey, b: Uint8Array) => Utils.toHex((await new ProtoWallet(key).createSignature({ protocolID: PROFILE_PROTOCOL, keyID: "1", counterparty: "anyone", data: Array.from(b) })).signature);
-  const post = async (body: Record<string, unknown>) => await fetch(`${h.base}/account/profile`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  // A write (it keeps the record): a signed request over a session (#135); a plain POST is 401.
+  const poster = new AuthFetch(ephemeralWallet(daveKey));
+  const post = async (body: Record<string, unknown>) => await poster.fetch(`${h.base}/account/profile`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert.equal((await fetch(`${h.base}/account/profile`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 401, "#135: the profile is a message route: unsigned, 401");
   const ok = await post({ handle: "dave", record: Utils.toBase64(Array.from(bytes)), signature: await sign(daveKey, bytes) });
   assert.equal(ok.status, 200, await ok.clone().text());
 
