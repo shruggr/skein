@@ -75,7 +75,7 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
   const owner = ephemeralWallet(ownerKey), ownerId = ownerKey.toPublicKey().toString();
   const lines: string[] = [];
   const providerMaster = PrivateKey.fromRandom();
-  const router = new Router({
+  const make = (billing: Router["o"]["billing"]): Router => new Router({
     db, walletFor: (row) => ephemeralWallet(keyOf(row.handle)), owner: ownerId, infer: o.infer, home,
     idleMs: o.idleMs ?? 0, http: o.http, ownerMessagebox: o.ownerMessagebox, genesis: o.genesis, now: o.now, ledgerMs: 60_000, kernel: { env: { SKEIN_HOME: home } },
     // A broadcaster (#58, #65): its Arcade, and so a `status` provider.
@@ -83,18 +83,34 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     // The host's headers feed (#102).
     ...(o.headersFeed ? { headersFeed: o.headersFeed } : {}),
     // #130: what the host bills (billing.ts); none: it bills no one.
-    ...(o.billing ? { billing: o.billing } : {}),
+    ...(billing ? { billing } : {}),
     // #113: with no host skein, discovery over host.db (a fixture); hostSkein() makes the real server.
-    discovery: fakeDiscovery(db, () => router),
+    discovery: fakeDiscovery(db, (): Router => router),
     // The host's providers (#70) under keys of its own, as `skein-host run` derives them.
     providerKeyFor: (name) => new Signer(providerMaster).providerKey(name),
     log: (s, l) => { lines.push(`[${s}] ${l}`); if (process.env.VERBOSE) console.log(`[${s}] ${l}`); },
   });
+  let router: Router = make(o.billing);
   t.after(async () => { await router.stop(); db.close(); });
   await router.listen(0);
-  const base = `http://127.0.0.1:${router.port}`;
+  let base = `http://127.0.0.1:${router.port}`;
   const h = {
-    home, db, router, base, owner, ownerKey, ownerId, lines, keyOf,
+    home, db, owner, ownerKey, ownerId, lines, keyOf,
+    get router() { return router; },
+    get base() { return base; },
+    /**
+     * The same host started again with other pricing (#130: `billing`, undefined for none) — the
+     * router stopped (its kernels with it) and a new one over the same host.db, home and provider
+     * keys, on the same port, started.
+     */
+    async restart(billing: Router["o"]["billing"]) {
+      const port = router.port;
+      await router.stop();
+      router = make(billing);
+      await router.listen(port);
+      base = `http://127.0.0.1:${router.port}`;
+      await router.start();
+    },
     /**
      * An instance's row (host.db kind `agent`: not a mailbox instance), its
      * genesis at first hydration (the owner's mailbox must exist first to be

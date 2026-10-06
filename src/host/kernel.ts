@@ -4,7 +4,8 @@
 //
 //   the router asks      tip · get · put · has · putblock · restore · append · genesis · boxes · byEnvelope ·
 //                        admit (the one call in that writes: a request as received, #68, a feed's or a
-//                        proof's event) · answer (#66: wait on the thread a request entry launched; its answer once it
+//                        proof's event; answered with the entry and, #130, the fuel of the door's
+//                        `verify` call, the host's to attest) · answer (#66: wait on the thread a request entry launched; its answer once it
 //                        comes to rest, or its state at the wait's bound) · call (#40: a program's function
 //                        over the state, no entry, no writes: host-side reads only) · idle · start · running
 //   the kernel asks      wallet (a BRC-100 wire frame → its answer: the signer, #67) · http (#126: one
@@ -62,6 +63,14 @@ export interface KernelOptions {
   log?(line: string): void;
   /** The process exited (code or signal). */
   exited?(code: number | null, signal: string | null): void;
+  /**
+   * #130: what rides on the next admission — the host's attestation of its external cost
+   * (billing.ts), when it has some — and, once the kernel answered, whether the entry went in
+   * (`done(true)`: the period is reported; `done(false)`: it is owed again).
+   */
+  attest?(): Promise<{ value: Record<string, unknown>; done(ok: boolean): void } | undefined>;
+  /** #130: an entry admitted, and the fuel of the door's `verify` call on it (the host's external cost). */
+  admitted?(entry: CID, doorFuel: number): void;
   /** Environment for the process, added to this one's. */
   env?: Record<string, string | undefined>;
   command?: string;
@@ -71,7 +80,7 @@ export class Kernel {
   readonly o: KernelOptions;
   readonly proc: ChildProcess;
   private nextId = 1;
-  private waiting = new Map<number, { resolve(v: unknown): void; reject(e: Error): void }>();
+  private waiting = new Map<number, { resolve(v: unknown): void; reject(e: Error): void; whole?: boolean }>();
   private buf = Buffer.alloc(0);
   private wire?: WalletWireProcessor;
   private done: Promise<void>;
@@ -116,12 +125,12 @@ export class Kernel {
     this.proc.stdin!.write(Buffer.concat([h, body]));
   }
 
-  call(op: string, v?: unknown): Promise<unknown> {
+  call(op: string, v?: unknown, whole = false): Promise<unknown> {
     const id = this.nextId++;
     this.busy++;
     this.last = Date.now();
     return new Promise<unknown>((resolve, reject) => {
-      this.waiting.set(id, { resolve, reject });
+      this.waiting.set(id, { resolve, reject, whole });
       try { this.write({ id, op, v }); } catch (e) { this.waiting.delete(id); reject(e as Error); }
     }).finally(() => { this.busy--; this.last = Date.now(); });
   }
@@ -144,7 +153,7 @@ export class Kernel {
       this.waiting.delete(f.re);
       if (typeof f.rejected === "string") w.reject(new Rejected(f.rejected as Rejected["reason"], String(f.error)));
       else if (typeof f.error === "string") w.reject(new Error(f.error));
-      else w.resolve(f.ok);
+      else w.resolve(w.whole ? f : f.ok);
       return;
     }
     // A process that is gone is reported by its exit; any other write failure (a frame that does not encode) is logged.
@@ -207,9 +216,23 @@ export class Kernel {
   /** The dispatch table as it stands (#77): its chain's tip (the change key; null before the genesis is processed) and its rows. */
   async dispatch(): Promise<{ tip: CID | null; rows: DispatchRow[] }> { return await this.call("dispatch") as { tip: CID | null; rows: DispatchRow[] }; }
   async genesis(): Promise<Record<string, unknown>> { return await this.call("genesis") as Record<string, unknown>; }
-  /** Admit an entry; a request entry's record beside it (#121: the kernel puts it, after the door), else put first. */
+  /**
+   * Admit an entry; a request entry's record beside it (#121: the kernel puts it, after the door), else
+   * put first. #130: the host's attestation rides on it when it has one (`attest`), and the door's
+   * `verify` fuel the kernel answers with goes to `admitted`.
+   */
   async admit(entry: Entry | Record<string, unknown>, records: { body?: Uint8Array; request?: Record<string, unknown> } = {}): Promise<CID> {
-    return await this.call("admit", { entry, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}) }) as CID;
+    const a = await this.o.attest?.();
+    let f: { ok: CID; fuel?: number | bigint };
+    try {
+      f = await this.call("admit", { entry: a ? { ...entry, attest: a.value } : entry, ...(records.body ? { body: records.body } : {}), ...(records.request ? { request: records.request } : {}) }, true) as typeof f;
+    } catch (e) {
+      a?.done(false);
+      throw e;
+    }
+    a?.done(true);
+    this.o.admitted?.(f.ok, Number(f.fuel ?? 0));
+    return f.ok;
   }
   /**
    * The kernel's `call` (#40): a program's function (by CID, or a genesis

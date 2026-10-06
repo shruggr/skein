@@ -153,8 +153,9 @@ export interface HostTerms { key: string; x: number; rates?: Record<string, numb
 
 /**
  * The host row (#130): the owner's grant of a host and its rates — one `dispatch` message adding (or
- * removing) the kernel row {mailbox, billing, sender: <the host's key>, kernel, tick, x, rates}. The
- * first such row is the host's; the kernel bills by it, the host ticks it. Removing it ends billing.
+ * removing) the kernel row {mailbox, billing, sender: <the host's key>, kernel, billing, x, rates}. The
+ * first such row is the host's; the kernel bills by it, the host's wake comes in on it. On a host that
+ * bills, removing it ends its service there (#130: no host row is a terms mismatch).
  */
 export function planHost(recipient: string, op: "add" | "remove", t: HostTerms): AdminPlan {
   if (!isKey(t.key)) throw new Error(`${t.key}: not the host's key (hex)`);
@@ -163,10 +164,10 @@ export function planHost(recipient: string, op: "add" | "remove", t: HostTerms):
     if (!Number.isSafeInteger(v) || v < 0) throw new Error(`rates.${k}: a whole number of sats`);
     return [k, v];
   }));
-  const row = { transport: "mailbox", address: "billing", sender: keyBytes(t.key), program: "kernel", fn: "tick", ...(op === "add" ? { x: t.x, ...(Object.keys(rates).length ? { rates } : {}) } : {}) };
+  const row = { transport: "mailbox", address: "billing", sender: keyBytes(t.key), program: "kernel", fn: "billing", ...(op === "add" ? { x: t.x, ...(Object.keys(rates).length ? { rates } : {}) } : {}) };
   const shown = Object.entries(rates).map(([k, v]) => `${k} ${v}`).join(", ");
   return {
-    prompt: [op === "add" ? `host ${t.key}: bills this skein — x ${t.x} sats a block${shown ? `, rates ${shown}` : ""} (#130: the skein pays it from its own wallet, ahead)` : `host ${t.key}: removed (nothing is billed)`],
+    prompt: [op === "add" ? `host ${t.key}: bills this skein — x ${t.x} sats a block${shown ? `, rates ${shown}` : ""} (#130: the skein pays it from its own wallet, ahead)` : `host ${t.key}: removed (nothing is billed; a host that bills serves no skein without its row)`],
     recipient, messages: [{ box: "dispatch", body: { op, row } }],
   };
 }

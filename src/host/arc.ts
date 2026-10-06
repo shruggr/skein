@@ -49,6 +49,11 @@
 // since the router started; a later status asks again only the running
 // instances not yet known.
 //
+// The host's own billing (#130, billing.ts) hears every status too
+// (`observe`, before any routing or deduplication): a payment it took is
+// accepted or rejected by what Arcade says of it; a funding it broadcasts
+// is handed in only once Arcade answers (`broadcastAndWait`).
+//
 // Arcade itself may later sign its statuses (a signed-message callback beside
 // webhook and SSE): it would then be the status provider an instance
 // subscribes to, and nothing on the instance's side changes.
@@ -73,6 +78,9 @@ export interface ArcConfig {
 
 /** The webhook's path on the router. */
 export const ARC_ROUTE = "/arc";
+
+/** Arcade's statuses that are a rejection (terminal); any other is the transaction taken (#130: "at least accepted"). */
+export const REJECTIONS: ReadonlySet<string> = new Set(["REJECTED", "DOUBLE_SPEND_ATTEMPTED"]);
 
 /** The host's Arcade from SKEIN_ARC_URL, SKEIN_ARC_TOKEN, SKEIN_ARC_EVENTS_URL, SKEIN_ARC_CALLBACK_URL (the environment, else $SKEIN_HOME/host.env); none without a URL. */
 export function hostArcConfig(vars: Record<string, string | undefined>, home?: string): ArcConfig | undefined {
@@ -120,6 +128,8 @@ export interface BroadcasterOptions {
   maxKnown?: number;
   /** The clock (ms): the queue's. */
   now?(): number;
+  /** #130: every status Arcade gives (a post's answer, the stream's, a webhook's), heard before it is routed or deduplicated. */
+  observe?(txid: string, txStatus: string): void;
 }
 
 const enc = (v: unknown) => new TextEncoder().encode(JSON.stringify(v));
@@ -163,6 +173,8 @@ export class Broadcaster {
   private known = new Map<string, { handles: Set<string>; swept: boolean }>();
   /** Statuses being routed now (txid + key): a webhook and the stream delivering the same one route it once. */
   private inflight = new Map<string, Promise<number>>();
+  /** #130: who waits for Arcade's first word on a transaction (broadcastAndWait), by txid. */
+  private waiters = new Map<string, Array<(ev: Record<string, unknown>) => void>>();
   private stream?: SseStream;
   private timer?: ReturnType<typeof setTimeout>;
   private pumping?: Promise<void>;
@@ -244,6 +256,21 @@ export class Broadcaster {
     const ev = statusOf(v);
     if (typeof ev === "string") { this.say("router", `arcade ${via}: not a status (${ev}): ignored`); return 0; }
     const txid = ev.txid as string;
+    // #130: the host's billing hears it, and whoever waits on this transaction — an acceptance before
+    // it is routed (the gate it opens lets the status in), a rejection after (the gate it closes does
+    // not keep it out).
+    const rejected = REJECTIONS.has(String(ev.txStatus));
+    const hear = () => {
+      try { this.o.observe?.(txid, String(ev.txStatus)); } catch (e) { this.say("router", `arcade: billing on ${txid.slice(0, 8)}: ${(e as Error).message}`); }
+      const ws = this.waiters.get(txid);
+      if (ws) { this.waiters.delete(txid); for (const w of ws) w(ev); }
+    };
+    if (!rejected) hear();
+    try { return await this.route(ev, txid, via, askers); } finally { if (rejected) hear(); }
+  }
+
+  /** deliver's routing: to every instance holding the transaction, once (askers: again). */
+  private async route(ev: Record<string, unknown>, txid: string, via: "stream" | "webhook" | "post", askers: string[]): Promise<number> {
     const key = `${String(ev.txStatus)} ${String(ev.blockHash ?? "")}`;
     const proof = proofOf(ev);
     const send = async (hs: string[]): Promise<number> => {
@@ -298,6 +325,32 @@ export class Broadcaster {
     this.o.db.queueBroadcast(raw, bytes, handle, this.now());
     this.kick();
     return raw;
+  }
+
+  /**
+   * #130: a transaction the host broadcasts for `handle` (a funding), and Arcade's first word on it
+   * — its answer to the post, or a status — or undefined when none came within `timeoutMs`.
+   */
+  async broadcastAndWait(handle: string, tx: Uint8Array, beef: Uint8Array | undefined, timeoutMs: number): Promise<{ txid: string; txStatus: string; extraInfo?: string } | undefined> {
+    let raw: string;
+    try { raw = Transaction.fromBinary([...tx]).id("hex"); } catch { return undefined; }
+    let mine: ((ev: Record<string, unknown>) => void) | undefined;
+    const heard = new Promise<Record<string, unknown>>((resolve) => {
+      mine = resolve;
+      const ws = this.waiters.get(raw) ?? [];
+      ws.push(resolve);
+      this.waiters.set(raw, ws);
+    });
+    const unwait = () => {
+      const ws = this.waiters.get(raw)?.filter((w) => w !== mine);
+      if (ws?.length) this.waiters.set(raw, ws); else this.waiters.delete(raw);
+    };
+    if (!this.enqueue(handle, tx, beef)) { unwait(); return undefined; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ev = await Promise.race([heard, new Promise<undefined>((r) => { timer = setTimeout(() => r(undefined), timeoutMs); })]);
+    clearTimeout(timer);
+    if (!ev) { unwait(); return undefined; }
+    return { txid: raw, txStatus: String(ev.txStatus), ...(typeof ev.extraInfo === "string" ? { extraInfo: ev.extraInfo } : {}) };
   }
 
   /** Post what is due now, then wait for the next. */
