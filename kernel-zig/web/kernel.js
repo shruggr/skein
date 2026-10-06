@@ -52,13 +52,14 @@ export class MemoryStore {
     return this.blocks.get(k);
   }
   hasBlock(cid) { return this.getBlock(cid) !== undefined; }
+  /** 1: stored (created); 0: held already; -1: refused (read only). #130: the kernel's putBlock is created-or-not. */
   putBlock(cid, bytes) {
-    if (this.readOnly) return false;
+    if (this.readOnly) return -1;
     const k = key(cid);
-    if (this.hasBlock(cid)) return true;
+    if (this.hasBlock(cid)) return 0;
     if (this.tx) this.tx.blocks.set(k, bytes);
     else this.apply({ blocks: new Map([[k, bytes]]), pointers: new Map() });
-    return true;
+    return 1;
   }
   getPointer(name) { return this.tx?.pointers.has(name) ? this.tx.pointers.get(name) : this.pointers.get(name); }
   setPointer(name, cid) {
@@ -139,7 +140,7 @@ export class Kernel {
         get(id, c, n) { const b = store(id).getBlock(k.bytesAt(c, n)); if (b === undefined) return -1; return k.hold(b); },
         take(p) { k.bytesAt(p, k.held.length).set(k.held); },
         has(id, c, n) { return store(id).hasBlock(k.bytesAt(c, n)) ? 1 : 0; },
-        put(id, c, cn, b, bn) { return store(id).putBlock(k.bytesAt(c, cn).slice(), k.bytesAt(b, bn).slice()) ? 0 : -1; },
+        put(id, c, cn, b, bn) { return store(id).putBlock(k.bytesAt(c, cn).slice(), k.bytesAt(b, bn).slice()); },
         begin(id) { store(id).begin(); },
         commit(id) { return store(id).commit() ? 0 : -1; },
         rollback(id) { store(id).rollback(); },

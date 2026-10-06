@@ -102,9 +102,6 @@ const wallet_calls = [_]u8{ 8, 11, 12, 13, 14, 15, 16 };
 pub const Witness = struct {
     arena: std.heap.ArenaAllocator,
     map: std.StringHashMap(Value),
-    /// #130: what the source's kernel measured its store at at each tick (the tick's entry → bytes),
-    /// read from its billing head's records: a measurement is an input, served on replay.
-    measured: std.StringHashMap(u64),
 
     fn key(a: std.mem.Allocator, thread: []const u8, step: i128, i: i128) ![]u8 {
         return std.fmt.allocPrint(a, "{x} {d} {d}", .{ thread, step, i });
@@ -113,7 +110,7 @@ pub const Witness = struct {
     /// Every signer record the source's thread chains list (scheduler.ts witnessFrom).
     pub fn from(gpa: std.mem.Allocator, s: Store) !*Witness {
         const w = try gpa.create(Witness);
-        w.* = .{ .arena = std.heap.ArenaAllocator.init(gpa), .map = std.StringHashMap(Value).init(gpa), .measured = std.StringHashMap(u64).init(gpa) };
+        w.* = .{ .arena = std.heap.ArenaAllocator.init(gpa), .map = std.StringHashMap(Value).init(gpa) };
         const a = w.arena.allocator();
         for (try s.threads(a)) |t| {
             for ((try s.chainUpdates(a, t)) orelse &.{}) |u| {
@@ -129,19 +126,7 @@ pub const Witness = struct {
                 }
             }
         }
-        // #130: the billing head's records name the tick each measured at.
-        if (try s.chainUpdates(a, try heads.headOrigin(a, billing.HEAD))) |ups| for (ups) |u| {
-            const uv = (try s.get(a, u)) orelse continue;
-            const rec = s.getOpt(a, Value.cidOf(uv.get("tree")) orelse continue) orelse continue;
-            const st = billing.State.of(rec) orelse continue;
-            const k = try std.fmt.allocPrint(a, "{x}", .{st.tick});
-            if (!w.measured.contains(k)) try w.measured.put(k, st.bytes);
-        };
         return w;
-    }
-
-    fn measuredAt(w: *Witness, a: std.mem.Allocator, entry: []const u8) ?u64 {
-        return w.measured.get(std.fmt.allocPrint(a, "{x}", .{entry}) catch return null);
     }
 
     fn find(w: *Witness, a: std.mem.Allocator, thread: []const u8, step: i64, i: usize) !?Value {
@@ -217,9 +202,12 @@ pub const Runtime = struct {
     /// unsubscribe events, kept in `life` — derived, never written; null until needed, and again
     /// after a step that subscribed or unsubscribed (folded again from the store when next needed).
     subs: ?[]subsm.Sub = null,
-    /// #130: what the entry being processed used — its steps' fuel and the billable events — for
-    /// the meter (billingAfter); reset as each entry starts.
+    /// #130: what was used since the meter last took it — every step's fuel (a step resumed at a
+    /// restart's too) and the billable events — taken after each entry (billingAfter).
     usage: billing.Usage = .{},
+    /// #130: the fuel of the door's `verify` call for the last admission (the host's external
+    /// cost, on its attestation: serve.zig hands it back with the entry).
+    door_fuel: u64 = 0,
     /// authfetch's BRC-103 sessions (#126), per server base URL, in memory only.
     sessions: authfetch.Sessions,
 
@@ -310,7 +298,11 @@ pub const Runtime = struct {
         if (rt.cursor > 0 and (try rt.store.chainTip(a, try dispatch.origin(a))) == null) return error.PredatesDispatch;
         rt.say("runtime {s} · log {d} processed{s}", .{ shortKey(rt.identity()), rt.cursor, if (rt.has_wallet) "" else " · no wallet (replay)" });
         rt.started = true;
+        // #130: a step resumed here is metered like any (its fuel waits in `usage` for the next
+        // entry's meter), and on a billed skein what it stores is counted.
+        _ = rt.store.setCounting(try rt.billingOn(a));
         for (try rt.store.resting(a)) |t| rt.resume_(a, t) catch |err| rt.say("runtime: {s}", .{@errorName(err)});
+        _ = rt.store.setCounting(false);
         // The messages and events a waiting thread still awaits an answer to go out again (#70,
         // #126): the host that had them may be gone (a restart), and the waker's timers with it. A
         // provider that still has one ignores it (hosts dedupe by the CID); an answer is routed once.
@@ -489,7 +481,12 @@ pub const Runtime = struct {
     /// bytes are never stored); without it the record the entry names is
     /// read from the store.
     pub fn admit(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: ?Value) !AdmitResult {
+        rt.door_fuel = 0;
         if (try rt.check(a, entry, record)) |r| return r;
+        // #130: an admission is not the log's processing (it may come mid-step): what it puts is
+        // counted when the entry is processed (keepEntry), not now.
+        const was = rt.store.setCounting(false);
+        defer _ = rt.store.setCounting(was);
         var e = entry;
         if (Value.cidOf(entry.get("request"))) |rc| {
             const rec = record orelse (try rt.store.get(a, rc)).?;
@@ -519,6 +516,8 @@ pub const Runtime = struct {
     fn check(rt: *Runtime, a: std.mem.Allocator, entry: Value, record: ?Value) !?AdmitResult {
         if (!logm.isLogEntry(entry) or entry.get("genesis") != null) return .{ .invalid = "admit: want a request, mail or event entry (format 7: a wake is the waker's message, #69)" };
         if (entry.get("door") != null or entry.get("refused") != null) return .{ .invalid = "admit: `door` and `refused` are the kernel's to write (#121: the door's outcome)" };
+        // #130: the host's attestation rides on any entry it appends; its form here, whose it is when processed.
+        if (entry.get("attest")) |x| if (billing.attestationOf(x) == null) return .{ .invalid = "admit: attest: the host's attestation is {fuel, served, log: <cid>, signature: bytes} (#130)" };
         try rt.loadGenesis();
         if (rt.genesis == null) return .{ .invalid = "admit: no genesis" };
         if (Value.cidOf(entry.get("request"))) |rc| {
@@ -575,6 +574,7 @@ pub const Runtime = struct {
         try arg.put("match", m.row);
         try arg.put("refused", cbor.optStr(m.refused));
         const r = try rt.call(a, mw, "verify", try cbor.encode(a, arg.value()), null, at);
+        rt.door_fuel = r.fuel; // #130: the host's external cost (its attestation), handed back with the entry
         if (!r.ok) {
             if (std.mem.indexOf(u8, r.err, "unknown fn") != null) return withRequest(a, entry, try rt.store.put(a, record), null, null);
             return refusedEntry(a, entry, try rt.store.put(a, record), "middleware", try std.fmt.allocPrint(a, "the middleware failed: {s}", .{r.err}), 500, null);
@@ -641,7 +641,7 @@ pub const Runtime = struct {
             for (x.beefs, bs) |c, *v| v.* = cbor.cidv(c);
             try d.put("beefs", .{ .array = bs });
             const blk = try cbor.block(a, x.value);
-            try rt.store.putBlock(blk.cid, blk.bytes);
+            _ = try rt.store.putBlock(blk.cid, blk.bytes);
             var r = cbor.MapBuilder.init(a);
             for (record.map) |e| try r.put(e.key, e.value);
             try r.put("body", .{ .bytes = blk.bytes });
@@ -727,9 +727,14 @@ pub const Runtime = struct {
                 const a = arena.allocator();
                 const e = try rt.getOrNotFound(a, cid);
                 last_error = "";
-                rt.usage = .{};
+                // #130: a billed skein's processing counts what the kernel stores (the entry's own
+                // records first: what its admission put); the meter, and the pay step when the
+                // allocation is consumed, after it (no host row: nothing).
+                const counting = try rt.billingOn(a);
+                _ = rt.store.setCounting(counting);
+                defer _ = rt.store.setCounting(false);
+                if (counting) try rt.keepEntry(a, cid, e);
                 try rt.process(a, cid, e);
-                // #130: the meter, and the pay step when the allocation is consumed (no host row: nothing).
                 try rt.billingAfter(a, .{ .cid = cid, .e = e });
                 rt.cursor = @intCast((Value.intOf(e.get("n")) orelse rt.cursor) + 1);
                 try rt.store.cursorSet(rt.cursor);
@@ -1079,7 +1084,7 @@ pub const Runtime = struct {
                         rt.say("#{d}: a routed message's body is not the canonical one it names; dropped", .{n});
                         continue;
                     }
-                    try rt.store.putBlock(blk.cid, bb);
+                    _ = try rt.store.putBlock(blk.cid, bb);
                 } else if (!(try rt.store.has(bc))) {
                     rt.say("#{d}: a routed message has no body; dropped", .{n});
                     continue;
@@ -1259,7 +1264,7 @@ pub const Runtime = struct {
         const done = if (std.mem.eql(u8, op, "claim"))
             rt.claim(a, row, Value.bytesOf(m.get("sender")).?, body, by)
         else if (std.mem.eql(u8, op, billing.OP))
-            rt.tick(a, row, Value.bytesOf(m.get("sender")).?, body, by)
+            rt.hostWake(a, Value.bytesOf(m.get("sender")).?, body, by)
         else
             rt.kernelOpBody(a, op, body, by);
         done catch |err| switch (err) {
@@ -1291,7 +1296,9 @@ pub const Runtime = struct {
             if (body.get("root")) |x| if (x != .null) {
                 root = Value.cidOf(x) orelse return refuse(a, "root: not a CID", .{});
             };
-            for (records.array) |r| try rt.store.putBlock(Value.cidOf(r.get("cid")).?, Value.bytesOf(r.get("bytes")).?);
+            for (records.array) |r| {
+                _ = try rt.store.putBlock(Value.cidOf(r.get("cid")).?, Value.bytesOf(r.get("bytes")).?);
+            }
             rt.say("kernel objects: {d} record{s} stored", .{ records.array.len, if (records.array.len == 1) "" else "s" });
             if (root) |t| if ((try rt.store.headTree(a, "main")) == null) {
                 if (!(try rt.store.has(t))) return refuse(a, "root {s} is not in the store", .{fmtCid(a, t)});
@@ -1430,49 +1437,61 @@ pub const Runtime = struct {
         _ = try heads.advanceHead(a, rt.store, billing.HEAD, try rt.store.put(a, try st.value(a)), by);
     }
 
-    /// The store's size at a tick: measured (the backend's pages in use) — an input, so a replay
-    /// is served the source's measurement for that tick (the witness), as a signer's answer is.
-    fn measure(rt: *Runtime, a: std.mem.Allocator, entry: []const u8) !u64 {
-        if (rt.witness) |w| if (w.measuredAt(a, entry)) |b| return b;
-        return rt.store.size();
+    /// Whether the skein is billed now: a host row, and a billing state that host started. While it
+    /// is, the store counts what the kernel stores (index.zig `kept`): the scheduler turns counting
+    /// on for an entry's processing, a resumed step and the pay step, and off for what is not the
+    /// log's processing (an admission, the host's puts, a call).
+    fn billingOn(rt: *Runtime, a: std.mem.Allocator) !bool {
+        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return false) orelse return false;
+        const st = (try rt.billingState(a)) orelse return false;
+        return std.mem.eql(u8, st.host, terms.host);
     }
 
-    /// The host's tick (#130 decided 4): a message from the host's key — the host row's sender —
-    /// signed (the door checked it), at the host row: {kind: "tick", at, allowance, fuel, served,
-    /// log?}. The first from this host starts the billing state (its allowance the allocation,
-    /// its time the last tick); after that each charges storage — the store's bytes, measured now,
-    /// for the time since the last tick — and the host's amounts (its read calls' fuel, the bytes
-    /// it served) at the row's rates, and advances the last tick. Refused: another key than the
-    /// host row's, a body that is no tick, a time before the last tick's, an asleep instance (the
-    /// tally is frozen until a payment comes). Validated whole, then written under the entry.
-    fn tick(rt: *Runtime, a: std.mem.Allocator, row: dispatch.Row, sender: []const u8, body: Value, by: heads.By) !void {
-        _ = row;
-        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse &.{}) orelse return refuse(a, "no host row (a kernel `tick` row with x)", .{});
-        if (!std.mem.eql(u8, terms.host, sender)) return refuse(a, "the host is the first tick row's key ({s}), not this sender", .{shortKey(terms.host)});
-        const t = switch (billing.tickOf(body)) {
+    /// Keep what an entry's admission put (#130: storage counted): the entry, the record it names,
+    /// and what the door put beside it — the BEEF pointer records and the bodies it hands back.
+    /// While counting (a billed skein); each block once.
+    fn keepEntry(rt: *Runtime, a: std.mem.Allocator, cid: []const u8, e: Value) !void {
+        try rt.store.keep(a, cid);
+        for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| if (Value.cidOf(e.get(k))) |x| try rt.store.keep(a, x);
+        const d = e.get("door") orelse return;
+        if (d != .map) return;
+        if (d.get("beefs")) |bs| if (bs == .array) for (bs.array) |b| if (Value.cidOf(b)) |x| try rt.store.keep(a, x);
+        if (d.get("bodies")) |bs| if (bs == .array) for (bs.array) |p| if (Value.cidOf(p.get("is"))) |x| try rt.store.keep(a, x);
+    }
+
+    /// The host's wake (#130, the walk of the build: no periodic tick): a message from the host's
+    /// key — the host row's sender — signed (the door checked it), at the host row: {kind: "wake",
+    /// allowance, received}. The first from this host starts the billing state: its allowance the
+    /// free allocation, this entry's time the last charge, the bytes kept so far (another host's
+    /// state) carried over; counting starts. Every one sets `paid` to what the host says it
+    /// received (taken from this skein, not seen rejected): between wakes the kernel counts what
+    /// its own pay steps paid, so it does not pay again while the host waits on its broadcast; at a
+    /// wake the host's word replaces that — a payment the host never got (rejected) no longer
+    /// counts, one an app made does. billingAfter then evaluates, as after every entry. Refused:
+    /// another key than the host row's, a body that is no wake.
+    fn hostWake(rt: *Runtime, a: std.mem.Allocator, sender: []const u8, body: Value, by: heads.By) !void {
+        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse &.{}) orelse return refuse(a, "no host row (a kernel `billing` row with x)", .{});
+        if (!std.mem.eql(u8, terms.host, sender)) return refuse(a, "the host is the first billing row's key ({s}), not this sender", .{shortKey(terms.host)});
+        const w = switch (billing.wakeOf(body)) {
             .ok => |x| x,
             .bad => |why| return refuse(a, "{s}", .{why}),
         };
         const prev = try rt.billingState(a);
-        const fresh = prev == null or !std.mem.eql(u8, prev.?.host, sender);
-        var st: billing.State = undefined;
-        if (fresh) {
-            st = .{ .host = sender, .allowance = t.allowance, .last_tick = t.at, .tick = by.input, .bytes = 0 };
-        } else {
-            st = prev.?;
-            if (st.asleep) return refuse(a, "asleep: the tally is frozen until a payment comes", .{});
-            if (t.at < st.last_tick) return refuse(a, "its time {d} is before the last tick's {d}", .{ t.at, st.last_tick });
+        if (prev != null and std.mem.eql(u8, prev.?.host, sender)) {
+            var st = prev.?;
+            if (st.paid == w.received) {
+                rt.say("kernel billing: the host's wake ({s})", .{shortKey(sender)});
+                return;
+            }
+            rt.say("kernel billing: the host's wake ({s}): it received {d} sats; this skein's pay steps counted {d}", .{ shortKey(sender), w.received, st.paid });
+            st.paid = w.received;
+            try rt.writeBilling(a, st, by);
+            return;
         }
-        const bytes = try rt.measure(a, by.input);
-        const storage = if (fresh) 0 else billing.priceStorage(terms.rates, bytes, t.at - st.last_tick);
-        const host = billing.priceHost(terms.rates, t.fuel, t.served);
-        st.tally += storage + host;
-        if (!fresh) st.ticks += 1;
-        st.last_tick = t.at;
-        st.tick = by.input;
-        st.bytes = bytes;
+        const st = billing.State{ .host = sender, .allowance = w.allowance, .paid = w.received, .last_charge = by.at, .bytes = if (prev) |p| p.bytes else 0 };
         try rt.writeBilling(a, st, by);
-        rt.say("kernel tick: host {s}{s} · {d} bytes held · storage {d} + host {d} nsat · tally {d} of {d} nsat", .{ shortKey(sender), if (fresh) " (billing starts)" else "", bytes, storage, host, st.tally, st.allocation() });
+        _ = rt.store.setCounting(true);
+        rt.say("kernel billing: host {s}: billing starts · allowance {d} sats · {d} bytes kept", .{ shortKey(sender), w.allowance, st.bytes });
     }
 
     /// Whether a message out by `e` in `box` is a libp2p publish (a billable event).
@@ -1487,60 +1506,66 @@ pub const Runtime = struct {
         return if (ps == .map) Value.cidOf(ps.get("wallet")) else null;
     }
 
-    /// Why a step may not emit a `payment` (null: it may): only the kernel's pay step — the genesis's
-    /// wallet program on a thread the kernel launched under the entry it processes (launchedBy is
-    /// that entry: no program can launch one, for a launched thread is launched by a thread), its
-    /// first step, as the thread's own program (not a callee), once.
-    fn payProblem(rt: *Runtime, st: *StepState) ?[]const u8 {
-        const no = "only the kernel's pay step emits it (#130: the wallet program the kernel launches when the allocation is consumed)";
-        if (st.progs.items.len != 1 or st.n != 1) return no;
-        const o = rt.store.getOpt(st.a, st.origin) orelse return no;
-        const args = o.get("args") orelse return no;
-        if (args != .map or args.get("pay") == null) return no;
-        const by = Value.cidOf(o.get("launchedBy")) orelse return no;
-        if (!std.mem.eql(u8, by, Value.cidOf(o.get("input")) orelse return no)) return no;
-        if (!logm.isLogEntry(rt.store.getOpt(st.a, by) orelse return no)) return no;
-        if (!std.mem.eql(u8, Value.cidOf(o.get("program")) orelse return no, rt.walletProgram() orelse return no)) return no;
-        for (st.emitted.items) |c| if (rt.store.getOpt(st.a, c)) |r| if (isEvent(r) and std.mem.eql(u8, Value.str(r.get("event")).?, billing.PAYMENT)) return "one payment per pay step";
-        return null;
-    }
-
-    /// The meter and the prepayment (#130), after each entry is processed, when the instance has a
-    /// host row and that host has ticked (the billing state is its): what the entry used — its
-    /// steps' fuel and its billable events (rt.usage) — at the row's rates, onto the tally. While
-    /// the tally has reached the allocation, the kernel starts its pay step (payStep): the wallet
-    /// pays the next block — X, or all it has if less — and the payment extends the allocation;
-    /// nothing to pay: asleep. Asleep (decided 8), nothing is metered (the tally freezes) and each
-    /// entry processed — only a payment reaches it — is followed by a pay step: one that pays
-    /// wakes it (the time asleep is not charged). Written under the entry, once. A function of
-    /// the log (fuel and the rest are deterministic), so a replay writes the same.
+    /// The meter and the prepayment (#130), after every entry is processed, when the instance has a
+    /// host row and that host has started its billing state:
+    ///
+    ///   - what was used since the last evaluation — every step's fuel (a step resumed at a restart
+    ///     included) and the billable events (rt.usage) — at the row's rates;
+    ///   - the entry's attestation, when it carries one signed by the host row's key for this skein:
+    ///     the host's calls' fuel and the bytes it served (an attestation that does not verify is
+    ///     not taken, and said);
+    ///   - storage: the bytes kept (`bytes`) for the time since `lastCharge` (this entry's time),
+    ///     then this entry's newly kept bytes added;
+    ///
+    /// onto the tally. While the tally has reached the allocation, the kernel starts its pay step
+    /// (payStep): the wallet pays the next block — X, or all it has if less — and the payment
+    /// extends the allocation; nothing to pay: asleep. Asleep (decided 8), its own usage and
+    /// storage are not metered (the tally freezes; the time asleep is not charged) but an
+    /// attestation is (the host's cost before), and each entry processed is followed by a pay step:
+    /// one that pays wakes it. Written under the entry, once, when anything changed. A function of
+    /// the log (fuel, the attestation and the kept bytes are), so a replay writes the same.
     fn billingAfter(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx) !void {
         const used = rt.usage;
         rt.usage = .{};
+        const kept = rt.store.takeKept();
         if (rt.stopped or ctx.e.get("genesis") != null) return;
-        // No billing state: never ticked, nothing to meter (one head lookup: an instance that is not billed pays no more).
-        var st = (try rt.billingState(a)) orelse return;
         const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return) orelse return;
-        // Another host's state (the owner moved hosts): the new host's first tick starts its own.
+        var st = (try rt.billingState(a)) orelse return;
+        // Another host's state (the owner moved hosts): the new host's first wake starts its own.
         if (!std.mem.eql(u8, st.host, terms.host)) return;
         const at = logm.stampOf(ctx.e.get("time")).?.ms();
         var dirty = false;
+        if (billing.attestationOf(ctx.e.get("attest"))) |t| {
+            if (try billing.attestedBy(a, st.host, rt.identity(), t)) {
+                const owed = billing.priceHost(terms.rates, t.fuel, t.served);
+                st.tally += owed;
+                dirty = true;
+                rt.say("billing: the host attests {d} fuel, {d} bytes served: {d} nsat", .{ t.fuel, t.served, owed });
+            } else rt.say("billing: an attestation not signed by the host row's key for this skein: not taken", .{});
+        }
         var i: usize = 0;
         if (st.asleep) {
+            st.bytes +|= kept;
             const paid = try rt.payStep(a, ctx, terms, i);
             i += 1;
             rt.usage = .{};
-            if (paid == 0) return;
+            st.bytes +|= rt.store.takeKept();
+            if (paid == 0) {
+                if (dirty or kept > 0) try rt.writeBilling(a, st, .{ .thread = null, .input = ctx.cid, .at = at });
+                return;
+            }
             st.asleep = false;
             st.paid += paid;
             st.payments += 1;
-            st.last_tick = @max(st.last_tick, at);
+            st.last_charge = @max(st.last_charge, at);
             dirty = true;
             rt.say("billing: awake: paid {d} sats; allocation {d} nsat", .{ paid, st.allocation() });
         } else {
-            const cost = billing.priceUsage(terms.rates, used);
-            if (cost > 0) {
+            const cost = billing.priceUsage(terms.rates, used) + billing.priceStorage(terms.rates, st.bytes, at - st.last_charge);
+            if (cost > 0 or kept > 0 or dirty) {
                 st.tally += cost;
+                st.last_charge = @max(st.last_charge, at);
+                st.bytes +|= kept;
                 dirty = true;
             }
         }
@@ -1548,6 +1573,7 @@ pub const Runtime = struct {
             const paid = try rt.payStep(a, ctx, terms, i);
             st.tally += billing.priceUsage(terms.rates, rt.usage);
             rt.usage = .{};
+            st.bytes +|= rt.store.takeKept();
             dirty = true;
             if (paid == 0) {
                 st.asleep = true;
@@ -1569,6 +1595,11 @@ pub const Runtime = struct {
     /// every machine that consumed the log). The wallet pays the host X, or all it has if less, in
     /// one transaction whose other output commits that CID, and emits it as the event `payment`
     /// (paymentOf). The sats paid, or 0: nothing paid (no wallet, an empty one, a step that failed).
+    /// The kernel credits only what its own pay steps paid, checked against the transaction (the
+    /// allocation it fires on): a payment an app makes, or a pay step an app launches (#130: any
+    /// app may; nothing refuses it), reaches the host as any `payment` event does and counts at the
+    /// host's gate if the host receives it, but does not move this allocation — so no app can put
+    /// the kernel's own trigger off.
     fn payStep(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, terms: billing.Terms, i: usize) !u64 {
         const wallet = rt.walletProgram() orelse {
             rt.say("billing: the genesis has no wallet program: nothing pays", .{});
@@ -2259,7 +2290,7 @@ pub const Runtime = struct {
     fn hPutBlock(imp: *program.Imports, c: []const u8, bytes: []const u8) program.Err!void {
         const st = stepOf(imp);
         if (!cidm.hashMatches(c, bytes)) return imp.failFmt("putblock: bytes do not hash to {s}", .{fmtCid(st.a, c)});
-        st.rt.store.putBlock(c, bytes) catch return imp.failWith("store error");
+        _ = st.rt.store.putBlock(c, bytes) catch return imp.failWith("store error");
     }
     fn hKeep(imp: *program.Imports, c: []const u8) program.Err!void {
         const st = stepOf(imp);
@@ -2485,10 +2516,6 @@ pub const Runtime = struct {
             if (fetchProblem(m)) |why| return imp.failFmt("emit: fetch: {s}", .{why});
             fields = try ownedBy(a, m, st.origin, st.n);
         }
-        // #130: a payment is the kernel's pay step's alone — the wallet program the kernel launched
-        // on its own (no program can launch one: a launched thread is launched by a thread), as the
-        // thread's own program (not a callee). Anything else naming it is refused.
-        if (std.mem.eql(u8, name, billing.PAYMENT)) if (st.rt.payProblem(st)) |why| return imp.failFmt("emit: payment: {s}", .{why});
         const rec = logm.eventRecord(a, fields, name, app) catch |err| switch (err) {
             error.Reserved => return imp.failWith("emit: an event's `kind` and `app` are the kernel's to set"),
             error.OutOfMemory => return error.OutOfMemory,
@@ -2598,7 +2625,7 @@ pub const Runtime = struct {
             const sig = signer.signatureOf(res) orelse return imp.failWith("emit: the signer did not sign the message");
             try rec.put("signature", .{ .bytes = sig });
         }
-        st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
+        _ = st.rt.store.putBlock(blk.cid, blk.bytes) catch return imp.failWith("store error");
         const c = st.rt.store.put(a, rec.value()) catch return imp.failWith("store error");
         try st.emitted.append(c);
         return c;

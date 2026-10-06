@@ -23,7 +23,7 @@ const Sink = struct {
     s: Store,
     fn put(ctx: *anyopaque, c: []const u8, b: []const u8) anyerror!void {
         const k: *Sink = @ptrCast(@alignCast(ctx));
-        try k.s.putBlock(c, b);
+        _ = try k.s.putBlock(c, b);
     }
     fn get(ctx: *anyopaque, a: std.mem.Allocator, c: []const u8) anyerror!?[]u8 {
         const k: *Sink = @ptrCast(@alignCast(ctx));
@@ -34,7 +34,7 @@ const Sink = struct {
 /// A chain state holding one header at `height` (the chain app's record shape).
 fn chainState(a: std.mem.Allocator, s: Store, height: u32, header: []const u8) !void {
     const hc = try cidm.ofBitcoin(a, cidm.BITCOIN_BLOCK, header);
-    try s.putBlock(hc, header);
+    _ = try s.putBlock(hc, header);
     var sink = Sink{ .s = s };
     var f = mst.Forest.init(a, .{ .ctx = &sink, .get = Sink.get });
     var key: [4]u8 = undefined;

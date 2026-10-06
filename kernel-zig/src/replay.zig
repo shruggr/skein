@@ -56,7 +56,7 @@ pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: *SqliteStore, say: ?*cons
             std.debug.print("wasm/{s} does not match the pinned {s}\n", .{ file, m.cid });
             return error.ModuleMismatch;
         }
-        try s.putBlock(c, bytes);
+        _ = try s.putBlock(c, bytes);
         if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ m.name, m.cid }));
     }
     // SKEIN_EXTRA_MODULES=<file>:<file>…: modules that are not pinned, installed
@@ -68,7 +68,7 @@ pub fn install(gpa: std.mem.Allocator, io: std.Io, ss: *SqliteStore, say: ?*cons
             const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30));
             const c = try cidm.ofRaw(a, bytes);
             if (try s.has(c)) continue;
-            try s.putBlock(c, bytes);
+            _ = try s.putBlock(c, bytes);
             if (say) |f| f(try std.fmt.allocPrint(a, "installed {s} {s}", .{ path, try cidm.format(a, c) }));
         }
     }
@@ -81,7 +81,7 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
     const g = try logm.genesisOf(a, src);
     for (g.get("programs").?.map) |p| {
         const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
-        try dst.putBlock(p.value.cid, b);
+        _ = try dst.putBlock(p.value.cid, b);
     }
     // Programs the genesis's dispatch rows name that are not among its programs (the wallet, #29; a
     // route handler the middleware's steps call, #68): replay needs them as the source holds them.
@@ -89,7 +89,7 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         const h = Value.cidOf(r.get("program")) orelse continue;
         if (try dst.has(h)) continue;
         const b = (try src.bytes(a, h)) orelse continue;
-        try dst.putBlock(h, b);
+        _ = try dst.putBlock(h, b);
     };
     // The system tree the genesis booted from (issue #4): pre-filled, not carried by any entry.
     if (Value.cidOf(g.get("tree"))) |t| try copyTree(a, src, dst, t);
@@ -101,11 +101,13 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         }
         for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
-            try dst.putBlock(x, b);
+            _ = try dst.putBlock(x, b);
         };
         // A message's body (#40), beside its record.
         if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
-            if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
+            if (try src.bytes(a, bc)) |b| {
+                _ = try dst.putBlock(bc, b);
+            }
         };
         // #121: what the door put for a request, beside it.
         if (Value.cidOf(e.get("request"))) |rc| if (src.getOpt(a, rc)) |req| try copyDoor(a, src, dst, req);
@@ -128,7 +130,9 @@ fn copyDoor(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import(
     if (std.mem.eql(u8, Value.str(req.get("kind")) orelse "", "message")) if (Value.bytesOf(req.get("body"))) |bb| {
         const body = cbor.decode(a, bb) catch return;
         const bc = try cbor.cidOfValue(a, body);
-        if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
+        if (try src.bytes(a, bc)) |b| {
+            _ = try dst.putBlock(bc, b);
+        }
         try copyLinked(a, src, dst, body);
     };
 }
@@ -138,19 +142,23 @@ fn copyLinked(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @impor
         .cid => |c| {
             const rec = src.getOpt(a, c) orelse return;
             if (!beefm.isRecord(rec)) return;
-            try dst.putBlock(c, (try src.bytes(a, c)).?);
+            _ = try dst.putBlock(c, (try src.bytes(a, c)).?);
             if (rec.get("txs")) |ts| if (ts == .array) for (ts.array) |t| if (Value.cidOf(t)) |tc| {
-                if (try src.bytes(a, tc)) |b| try dst.putBlock(tc, b);
+                if (try src.bytes(a, tc)) |b| {
+                    _ = try dst.putBlock(tc, b);
+                }
             };
             if (rec.get("bumps")) |bs| if (bs == .array) for (bs.array) |b| {
                 const pc = Value.cidOf(b.get("path")) orelse continue;
                 const pb = (try src.bytes(a, pc)) orelse continue;
-                try dst.putBlock(pc, pb);
+                _ = try dst.putBlock(pc, pb);
                 if (Value.cidOf(b.get("block")) == null) continue;
                 const rev = beefm.reveal(a, beefm.bumpOf(a, pb) catch continue) catch continue;
                 for (rev.nodes) |n| {
                     const nc = try beefm.txCid(a, n.hash);
-                    if (try src.bytes(a, nc)) |x| try dst.putBlock(nc, x);
+                    if (try src.bytes(a, nc)) |x| {
+                        _ = try dst.putBlock(nc, x);
+                    }
                 }
             };
         },
@@ -164,11 +172,15 @@ fn copyLinked(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @impor
 fn copyTree(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, t: []const u8) !void {
     if (try dst.has(t)) return;
     const b = (try src.bytes(a, t)) orelse return error.NotFound;
-    try dst.putBlock(t, b);
+    _ = try dst.putBlock(t, b);
     for (try tree.parseTree(a, b)) |e| switch (e.mode) {
         .dir => try copyTree(a, src, dst, e.cid),
-        .module => if (try src.bytes(a, e.cid)) |x| try dst.putBlock(e.cid, x),
-        else => if (!(try dst.has(e.cid))) try dst.putBlock(e.cid, (try src.bytes(a, e.cid)) orelse return error.NotFound),
+        .module => if (try src.bytes(a, e.cid)) |x| {
+            _ = try dst.putBlock(e.cid, x);
+        },
+        else => if (!(try dst.has(e.cid))) {
+            _ = try dst.putBlock(e.cid, (try src.bytes(a, e.cid)) orelse return error.NotFound);
+        },
     };
 }
 
@@ -182,7 +194,9 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, source: []const u8, out: []const
     const a = arena.allocator();
 
     try install(gpa, io, dst, null);
-    for (try src.blocksOfCodec(a, cidm.RAW)) |b| try dst.store().putBlock(b[0], b[1]);
+    for (try src.blocksOfCodec(a, cidm.RAW)) |b| {
+        _ = try dst.store().putBlock(b[0], b[1]);
+    }
     try copyLog(a, src, dst);
 
     const r = try runner.Runner.init(gpa);

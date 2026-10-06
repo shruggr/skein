@@ -378,7 +378,9 @@ pub const Vfs = struct {
 
     fn put(v: *Vfs, cid: []const u8, object: []const u8) !void {
         const s = v.store orelse return;
-        if (!try s.has(cid)) try s.putBlock(cid, object);
+        if (!try s.has(cid)) {
+            _ = try s.putBlock(cid, object);
+        }
     }
 
     fn hashDir(v: *Vfs, d: *Node) anyerror![]const u8 {

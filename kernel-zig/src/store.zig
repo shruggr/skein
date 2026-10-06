@@ -35,7 +35,8 @@ pub const Edge = struct { from: []u8, seq: i64, ord: i64, rel: []u8, locator: ?V
 pub const VTable = struct {
     bytes: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8,
     has: *const fn (ctx: *anyopaque, cid: []const u8) anyerror!bool,
-    putBlock: *const fn (ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!void,
+    /// Store a block under its CID; true when the store created it (false: it held it already).
+    putBlock: *const fn (ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!bool,
     chainOpen: *const fn (ctx: *anyopaque, a: std.mem.Allocator, origin: Value) anyerror![]u8,
     chainAppend: *const fn (ctx: *anyopaque, a: std.mem.Allocator, origin: []const u8, body: Value) anyerror![]u8,
     /// null: no such chain (NotFound).
@@ -69,8 +70,15 @@ pub const VTable = struct {
     /// unique keys left out) — its CID (null: none yet); nothing written. A function of the log up
     /// to there: the same on every machine that consumed it (index.zig).
     processedState: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
-    /// #130: the bytes the store holds, as its backend measures them (0: it cannot say).
-    size: *const fn (ctx: *anyopaque) anyerror!u64,
+    /// #130: storage, counted (index.zig `kept`). While counting is on (the scheduler's: billing
+    /// active, an entry's processing), a block the store creates — or holds already but the kernel
+    /// has not kept yet (an admission's, a pre-fill's, a replay's copy) — is kept, its bytes added
+    /// to what `takeKept` returns. setCounting → the setting before.
+    setCounting: *const fn (ctx: *anyopaque, on: bool) bool,
+    /// #130: keep a block the store holds (an entry's own records, put at its admission), as a put would.
+    keep: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!void,
+    /// #130: the bytes kept since the last take (a block once: the `kept` map remembers it).
+    takeKept: *const fn (ctx: *anyopaque) u64,
 };
 
 pub const Store = struct {
@@ -92,12 +100,13 @@ pub const Store = struct {
     pub fn has(s: Store, cid: []const u8) !bool {
         return s.vt.has(s.ctx, cid);
     }
-    pub fn putBlock(s: Store, cid: []const u8, b: []const u8) !void {
+    /// True when the store created the block (false: it held it already).
+    pub fn putBlock(s: Store, cid: []const u8, b: []const u8) !bool {
         return s.vt.putBlock(s.ctx, cid, b);
     }
     pub fn put(s: Store, a: std.mem.Allocator, v: Value) ![]u8 {
         const blk = try cbor.block(a, v);
-        try s.putBlock(blk.cid, blk.bytes);
+        _ = try s.putBlock(blk.cid, blk.bytes);
         return blk.cid;
     }
     pub fn chainOpen(s: Store, a: std.mem.Allocator, origin: Value) ![]u8 {
@@ -167,7 +176,13 @@ pub const Store = struct {
     pub fn processedState(s: Store, a: std.mem.Allocator) !?[]u8 {
         return s.vt.processedState(s.ctx, a);
     }
-    pub fn size(s: Store) !u64 {
-        return s.vt.size(s.ctx);
+    pub fn setCounting(s: Store, on: bool) bool {
+        return s.vt.setCounting(s.ctx, on);
+    }
+    pub fn keep(s: Store, a: std.mem.Allocator, cid: []const u8) !void {
+        return s.vt.keep(s.ctx, a, cid);
+    }
+    pub fn takeKept(s: Store) u64 {
+        return s.vt.takeKept(s.ctx);
     }
 };

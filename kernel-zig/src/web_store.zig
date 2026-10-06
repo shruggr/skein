@@ -15,7 +15,7 @@ const shim = struct {
     extern "skein_store" fn get(store: u32, cid: [*]const u8, cid_len: usize) i32;
     extern "skein_store" fn take(ptr: [*]u8) void;
     extern "skein_store" fn has(store: u32, cid: [*]const u8, cid_len: usize) i32;
-    /// 0 stored; < 0 refused (a read-only store).
+    /// 1 stored (created), 0 held already; < 0 refused (a read-only store).
     extern "skein_store" fn put(store: u32, cid: [*]const u8, cid_len: usize, bytes: [*]const u8, len: usize) i32;
     extern "skein_store" fn begin(store: u32) void;
     extern "skein_store" fn commit(store: u32) i32;
@@ -86,9 +86,11 @@ pub const WebStore = struct {
         return shim.has(self(ctx).id, cid.ptr, cid.len) != 0;
     }
 
-    fn putFn(ctx: *anyopaque, cid: []const u8, b: []const u8) anyerror!void {
+    fn putFn(ctx: *anyopaque, cid: []const u8, b: []const u8) anyerror!bool {
         if (self(ctx).read_only) return error.ReadOnly;
-        if (shim.put(self(ctx).id, cid.ptr, cid.len, b.ptr, b.len) < 0) return error.Store;
+        const r = shim.put(self(ctx).id, cid.ptr, cid.len, b.ptr, b.len);
+        if (r < 0) return error.Store;
+        return r > 0;
     }
 
     fn beginFn(ctx: *anyopaque) anyerror!void {

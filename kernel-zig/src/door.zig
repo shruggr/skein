@@ -162,7 +162,7 @@ const Walk = struct {
 
     fn once(w: *Walk, c: []const u8, b: []const u8) !void {
         if (try w.s.has(c)) return;
-        try w.s.putBlock(c, b);
+        _ = try w.s.putBlock(c, b);
     }
 };
 

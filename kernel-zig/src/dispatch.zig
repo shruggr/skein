@@ -22,9 +22,9 @@
 //          program: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
 //                                  itself: an admin operation (`fn`: objects | head | dispatch | peers),
-//                                  the claim (#89: an image's one row, from anyone), or the host's
-//                                  tick (#130: the host row — sender the host's key, `x` and `rates`
-//                                  its settings, billing.zig)
+//                                  the claim (#89: an image's one row, from anyone), or billing
+//                                  (#130: the host row — sender the host's key, `x` and `rates` its
+//                                  settings; the host's wake comes in on it, billing.zig)
 //          fn?: text,              http/libp2p: the handler's function; kernel: the operation
 //          filter?: "beef",        #121: what the kernel's door runs on the package before its entry is
 //                                  written (scheduler.zig door, door.zig): a setting like any other
@@ -59,8 +59,8 @@ pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
 /// What a kernel row may name (#89): the admin operations, the claim —
 /// an image's wildcard row, taken once: the claimed owner's admin rows
 /// written and the claim row removed (scheduler.zig kernelOp) — and (#130)
-/// the host's tick: the host row, the owner's grant of a host and its rates
-/// (billing.zig).
+/// billing: the host row, the owner's grant of a host and its rates, which
+/// the host's wake comes in on (billing.zig).
 pub const kernel_ops = admin_ops ++ [_][]const u8{ "claim", billing.OP };
 
 pub const Sender = union(enum) { any, event, session, key: []const u8 };
@@ -150,8 +150,8 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     const prog = v.get("program") orelse return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
     if (Value.str(prog)) |s| {
         if (!std.mem.eql(u8, s, "kernel")) return try std.fmt.allocPrint(a, "program {s}: want a program record's CID, or \"kernel\"", .{try json.quoted(a, s)});
-        const op = Value.str(v.get("fn")) orelse return try a.dupe(u8, "fn: a kernel row names its operation (objects, head, dispatch, peers, claim or tick)");
-        if (!isKernelOp(op)) return try std.fmt.allocPrint(a, "fn {s}: a kernel row's operation is objects, head, dispatch, peers, claim or tick", .{try json.quoted(a, op)});
+        const op = Value.str(v.get("fn")) orelse return try a.dupe(u8, "fn: a kernel row names its operation (objects, head, dispatch, peers, claim or billing)");
+        if (!isKernelOp(op)) return try std.fmt.allocPrint(a, "fn {s}: a kernel row's operation is objects, head, dispatch, peers, claim or billing", .{try json.quoted(a, op)});
         if (!std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "a kernel row is a mailbox row (an admin box)");
         // #130: the host row — its sender the host's key, its settings X and the rates.
         if (std.mem.eql(u8, op, billing.OP)) if (try billing.rowProblem(a, v)) |bad| return bad;

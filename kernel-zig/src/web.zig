@@ -218,7 +218,7 @@ export fn skein_put_block(c: [*]const u8, cn: usize, b: [*]const u8, bn: usize) 
     const cid = c[0..cn];
     const bytes = b[0..bn];
     if (!cidm.isValid(cid) or !cidm.hashMatches(cid, bytes)) return fail("the bytes do not match the CID");
-    s.store().putBlock(cid, bytes) catch |err| return fail(@errorName(err));
+    _ = s.store().putBlock(cid, bytes) catch |err| return fail(@errorName(err));
     return 0;
 }
 
@@ -399,25 +399,27 @@ fn copyLog(a: std.mem.Allocator, src: storem.Store, dst: storem.Store) !void {
     const g = try logm.genesisOf(a, src);
     for (g.get("programs").?.map) |p| {
         const b = (try src.bytes(a, p.value.cid)) orelse return error.NotFound;
-        try dst.putBlock(p.value.cid, b);
+        _ = try dst.putBlock(p.value.cid, b);
     }
     // Programs the genesis's dispatch rows name that are not among its programs (replay.zig copyLog, #77).
     if (g.get("dispatch")) |rs| if (rs == .array) for (rs.array) |r| {
         const h = Value.cidOf(r.get("program")) orelse continue;
         if (try dst.has(h)) continue;
         const b = (try src.bytes(a, h)) orelse continue;
-        try dst.putBlock(h, b);
+        _ = try dst.putBlock(h, b);
     };
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) return error.BadSignature;
         for ([_][]const u8{ "genesis", "mail", "event", "request" }) |k| if (Value.cidOf(e.get(k))) |x| {
             const b = (try src.bytes(a, x)) orelse return error.NotFound;
-            try dst.putBlock(x, b);
+            _ = try dst.putBlock(x, b);
         };
         // A message's body (#40), beside its record.
         if (Value.cidOf(e.get("mail"))) |mc| if (src.getOpt(a, mc)) |m| if (Value.cidOf(m.get("body"))) |bc| {
-            if (try src.bytes(a, bc)) |b| try dst.putBlock(bc, b);
+            if (try src.bytes(a, bc)) |b| {
+                _ = try dst.putBlock(bc, b);
+            }
         };
         switch (try dst.logAppend(a, e)) {
             .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,

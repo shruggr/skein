@@ -161,6 +161,15 @@ const Server = struct {
         ipc.write(io, s.to_peer, a, m.value()) catch |err| std.log.err("peer write: {s}", .{@errorName(err)});
     }
 
+    /// An `ok` answer with the fuel a call in it used (#130: the admission's door `verify`).
+    fn replyFuel(s: *Server, a: std.mem.Allocator, id: i64, ok: Value, fuel: u64) void {
+        var m = cbor.MapBuilder.init(a);
+        m.put("re", cbor.int(id)) catch return;
+        m.put("ok", ok) catch return;
+        m.put("fuel", cbor.int(fuel)) catch return;
+        ipc.write(io, s.to_peer, a, m.value()) catch |e| std.log.err("peer write: {s}", .{@errorName(e)});
+    }
+
     fn reply(s: *Server, a: std.mem.Allocator, id: i64, ok: ?Value, err: ?[]const u8, rejected: ?[]const u8) void {
         var m = cbor.MapBuilder.init(a);
         m.put("re", cbor.int(id)) catch return;
@@ -215,6 +224,10 @@ const Server = struct {
 
     fn handleOp(s: *Server, a: std.mem.Allocator, op: []const u8, id: i64, v: Value) !void {
         const eq = std.mem.eql;
+        // #130: what the peer puts or asks is never the log's processing (a frame may come mid-step):
+        // nothing it stores is counted as the kernel's storage (the drain sets counting per entry).
+        const was = s.store.setCounting(false);
+        defer _ = s.store.setCounting(was);
         if (eq(u8, op, "say")) {
             say(Value.str(v) orelse "");
         } else if (eq(u8, op, "fatal")) {
@@ -236,7 +249,7 @@ const Server = struct {
             const c = Value.cidOf(v.get("cid")) orelse return error.BadRequest;
             const b = Value.bytesOf(v.get("bytes")) orelse return error.BadRequest;
             if (!cidm.hashMatches(c, b)) return s.reply(a, id, null, try std.fmt.allocPrint(a, "putblock: bytes do not hash to {s}", .{try cidm.format(a, c)}), null);
-            try s.store.putBlock(c, b);
+            _ = try s.store.putBlock(c, b);
             s.reply(a, id, cbor.cidv(c), null, null);
         } else if (eq(u8, op, "restore")) {
             // A checkpoint (issue #4): its blocks already put, the state record becomes this store's state.
@@ -288,7 +301,8 @@ const Server = struct {
             const entry = v.get("entry") orelse return error.BadRequest;
             const res = try s.rt.admit(a, entry, v.get("request"));
             switch (res) {
-                .ok => |c| s.reply(a, id, cbor.cidv(c), null, null),
+                // #130: with the fuel of the door's `verify` call, the host's to attest.
+                .ok => |c| s.replyFuel(a, id, cbor.cidv(c), s.rt.door_fuel),
                 .rejected => |r| s.reply(a, id, null, r.message, r.reason.text()),
                 .invalid => |m| s.reply(a, id, null, m, null),
             }

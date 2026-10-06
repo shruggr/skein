@@ -203,21 +203,7 @@ pub const SqliteStore = struct {
         .rollback = rollbackFn,
         .pointer = pointerFn,
         .setPointer = setPointerFn,
-        .size = sizeFn,
     };
-
-    /// #130: the bytes the file holds — its pages in use (page_count − freelist_count) × page_size.
-    fn sizeFn(ctx: *anyopaque) anyerror!u64 {
-        const s = self(ctx);
-        var v: [3]i64 = undefined;
-        for ([_][]const u8{ "PRAGMA page_count", "PRAGMA freelist_count", "PRAGMA page_size" }, &v) |q, *x| {
-            const st = try s.db.prepare(q);
-            x.* = if (try st.step()) st.int(0) else 0;
-            st.done();
-        }
-        const pages = @max(0, v[0] - v[1]);
-        return @intCast(pages * v[2]);
-    }
 
     fn self(ctx: *anyopaque) *SqliteStore {
         return @ptrCast(@alignCast(ctx));
@@ -239,9 +225,12 @@ pub const SqliteStore = struct {
         return r;
     }
 
-    fn putFn(ctx: *anyopaque, cid: []const u8, b: []const u8) anyerror!void {
-        if (self(ctx).read_only) return error.ReadOnly;
-        try (try self(ctx).db.prepare("INSERT OR IGNORE INTO blocks (cid, bytes) VALUES (?, ?)")).run(&.{ .{ .blob = cid }, .{ .blob = b } });
+    /// INSERT OR IGNORE: created when a row went in (#130: putBlock's created-or-not).
+    fn putFn(ctx: *anyopaque, cid: []const u8, b: []const u8) anyerror!bool {
+        const s = self(ctx);
+        if (s.read_only) return error.ReadOnly;
+        try (try s.db.prepare("INSERT OR IGNORE INTO blocks (cid, bytes) VALUES (?, ?)")).run(&.{ .{ .blob = cid }, .{ .blob = b } });
+        return s.db.changes() > 0;
     }
 
     fn beginFn(ctx: *anyopaque) anyerror!void {

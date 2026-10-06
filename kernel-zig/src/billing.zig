@@ -1,21 +1,25 @@
 // Billing (#130): a hosted skein meters itself and prepays its host from its
-// own wallet. The kernel's part, and only the kernel's: no program writes any
-// of it, and none can start, stop or alter a payment.
+// own wallet. The kernel's part: the meter, the state, and the pay step it
+// fires whenever the allocation is consumed (no program can stop it; any app
+// may also pay the host, scheduler.zig).
 //
 // The terms are the owner's (#130 decided 1): the **host row**, a kernel row
 // the owner writes with an ordinary `dispatch` admin message —
 //
 //   {transport: "mailbox", address: <a box, "billing" by convention>, sender: <the host's key>,
-//    program: "kernel", fn: "tick", x: <sats>, rates?: {fuel, storage, served, fetch, authfetch, publish}}
+//    program: "kernel", fn: "billing", x: <sats>, rates?: {fuel, storage, served, fetch, authfetch, publish}}
 //
 // — the first such row in table order is the host's; with none, nothing is
 // billed and nothing here runs. `x` is the block the instance prepays at a
 // time; the rates (integers, a missing one is 0, free):
 //
 //   fuel       sats per 10^9 fuel: every step's (a request's thread, a handler, a shell
-//              segment, the pay step itself), and the host's read calls (on its tick)
-//   storage    sats per 10^6 bytes held for a day, charged at each tick for the time since the last
-//   served     sats per 10^6 bytes the host served for the instance (on its tick)
+//              segment, the pay step itself, a step resumed at a restart), and the host's
+//              read and door calls (on its attestation)
+//   storage    sats per 10^6 bytes held for a day: the bytes the kernel stored (index.zig
+//              `kept`, counted as blocks are created), charged on every entry for the time
+//              since the last charge
+//   served     sats per 10^6 bytes the host served for the instance (on its attestation)
 //   fetch      sats per `fetch` intention a step recorded (#126)
 //   authfetch  sats per authfetch exchange (#126: one recorded call each)
 //   publish    sats per libp2p publish: a message to the libp2p provider in box `publish`, or
@@ -23,16 +27,37 @@
 //
 // Other events (`deadline`, `subscribe`, `beacon`, …) are not metered.
 //
+// The host calls in two ways, neither periodic (#130, the walk of the build):
+//
+//   the wake         a message from the host's key at the host row: {kind: "wake", allowance:
+//                    <sats>, received: <sats>}. The first from this host starts the billing state
+//                    (its allowance, the host's free allowance for this skein); a later one is a
+//                    call-in like any other — the host sends it when it has computed that what is
+//                    outstanding reaches the allocation, so the kernel evaluates its billing then,
+//                    or when a payment it took was rejected. `received` is what the host has taken
+//                    from this skein and not seen rejected: the kernel's `paid` becomes it, so a
+//                    payment the host did not get is no longer counted (the pay step fires again)
+//                    and one an app made is (no second payment for the same block).
+//   the attestation  on any entry the host appends, when it has external cost not yet reported:
+//                    the entry's `attest: {fuel, served, log: <cid>, signature}` — its read and
+//                    door calls' fuel and the bytes it served since its last attestation, and the
+//                    CID of its log record for that period — signed by the host's key ([2, "skein
+//                    billing"], key "attestation", counterparty anyone) over the dag-cbor of
+//                    {kind: "attestation", instance: <this skein's identity>, fuel, served, log}.
+//
 // The state is a head of its own, `billing`, written by the kernel alone (an
 // owner's `head` message and every program's `advance` are refused it):
 //
 //   {kind: "billing", host: bytes(33), allowance: <sats>, paid: <sats>, tally: <nanosats>,
-//    lastTick: <ms, the host's>, ticks, tick: <the entry of the last tick>, bytes: <the store's
-//    size measured at it>, payments, asleep: bool}
+//    lastCharge: <ms, the entry time storage was last charged to>, bytes: <bytes kept>,
+//    payments, asleep: bool}
 //
-// Allocation = (allowance + paid) sats; consumed = the tally. The host's first
-// tick starts the state (its `allowance`, the host's free allowance for this
-// skein); a tick from another key (the owner moved hosts) starts a new one.
+// Allocation = (allowance + paid) sats; consumed = the tally. The kernel
+// evaluates after every entry (scheduler.zig billingAfter): its steps' fuel and
+// billable events, the entry's attestation, and storage — `bytes` held × the
+// time since `lastCharge` — onto the tally; then, while the tally has reached
+// the allocation, the pay step. A wake from another key (the owner moved hosts)
+// starts a new state (the bytes kept carry over).
 // Amounts are nanosatoshis inside (the tally), satoshis on the wire.
 const std = @import("std");
 const cbor = @import("cbor");
@@ -42,14 +67,18 @@ const Value = cbor.Value;
 
 /// The kernel's head (bare name: its owner is `billing`, a reserved app name).
 pub const HEAD = "billing";
-/// The host row's kernel operation: the host's tick.
-pub const OP = "tick";
-/// The event the pay step emits (the wallet's, when the kernel launched it).
+/// The host row's kernel operation: the host's call-in (its wake).
+pub const OP = "billing";
+/// The event the pay step emits (the wallet's; any app may emit one too).
 pub const PAYMENT = "payment";
 /// Nanosatoshis per satoshi: the tally's unit.
 pub const NSAT: i128 = 1_000_000_000;
 /// How many payments one entry may make (each pays the next block; the rest at the next entry).
 pub const MAX_PAYS: usize = 16;
+/// The attestation's signature: BRC-43 [2, "skein billing"], key "attestation", counterparty anyone.
+pub const ATTEST_LEVEL: u8 = 2;
+pub const ATTEST_PROTOCOL = "skein billing";
+pub const ATTEST_KEY_ID = "attestation";
 
 pub const Rates = struct {
     fuel: u64 = 0,
@@ -62,7 +91,7 @@ pub const Rates = struct {
 
 pub const rate_names = [_][]const u8{ "fuel", "storage", "served", "fetch", "authfetch", "publish" };
 
-/// The host row's terms: the host's key, X, the rates, and the box its ticks come in.
+/// The host row's terms: the host's key, X, the rates, and the box its wakes come in.
 pub const Terms = struct { host: []const u8, x: u64, rates: Rates, address: []const u8 };
 
 fn uint(v: ?Value) ?u64 {
@@ -71,7 +100,7 @@ fn uint(v: ?Value) ?u64 {
     return @intCast(i);
 }
 
-/// Why a row whose `fn` is `tick` is not a host row (null: it is one): its sender
+/// Why a row whose `fn` is `billing` is not a host row (null: it is one): its sender
 /// is the host's key, `x` a whole number of sats ≥ 1, `rates` (if any) a map of
 /// whole numbers ≥ 0 by the names above.
 pub fn rowProblem(a: std.mem.Allocator, v: Value) !?[]u8 {
@@ -92,13 +121,13 @@ pub fn rowProblem(a: std.mem.Allocator, v: Value) !?[]u8 {
     return null;
 }
 
-/// Whether a row is a host row (a kernel row whose operation is `tick`).
+/// Whether a row is a host row (a kernel row whose operation is `billing`).
 pub fn isHostRow(r: dispatch.Row) bool {
     const op = r.op orelse return false;
     return r.program == null and std.mem.eql(u8, op, OP);
 }
 
-/// The terms of the host row: the first kernel `tick` row in table order whose
+/// The terms of the host row: the first kernel `billing` row in table order whose
 /// settings hold (a malformed one a log holds counts as none). Null: no host
 /// row — nothing is billed.
 pub fn termsOf(rows: []const dispatch.Row) ?Terms {
@@ -117,7 +146,7 @@ pub fn termsOf(rows: []const dispatch.Row) ?Terms {
     return null;
 }
 
-/// What the entry being processed used (#130 decided 2): its steps' fuel and the billable events.
+/// What was used since the last evaluation (#130 decided 2): steps' fuel and the billable events.
 pub const Usage = struct {
     fuel: u64 = 0,
     fetch: u64 = 0,
@@ -146,8 +175,8 @@ pub fn priceStorage(r: Rates, bytes: u64, ms: i64) i128 {
     return @divFloor(@as(i128, bytes) * ms * r.storage, 86_400);
 }
 
-/// What the host reports on its tick (nanosats): its read calls' fuel at the fuel rate, and the
-/// bytes it served at `served` sats per 10^6 bytes (= 1 000 nanosats per byte).
+/// What the host attests (nanosats): its calls' fuel at the fuel rate, and the bytes it served at
+/// `served` sats per 10^6 bytes (= 1 000 nanosats per byte).
 pub fn priceHost(r: Rates, fuel: u64, served: u64) i128 {
     return @as(i128, fuel) * r.fuel + @as(i128, served) * r.served * 1_000;
 }
@@ -158,10 +187,10 @@ pub const State = struct {
     allowance: u64,
     paid: u64 = 0,
     tally: i128 = 0,
-    last_tick: i64,
-    ticks: u64 = 1,
-    tick: []const u8,
-    bytes: u64,
+    /// The entry time (ms) storage was last charged to.
+    last_charge: i64,
+    /// The bytes the kernel has kept (stored, counted) since billing started.
+    bytes: u64 = 0,
     payments: u64 = 0,
     asleep: bool = false,
 
@@ -177,9 +206,7 @@ pub const State = struct {
         try m.put("allowance", cbor.int(s.allowance));
         try m.put("paid", cbor.int(s.paid));
         try m.put("tally", cbor.int(s.tally));
-        try m.put("lastTick", cbor.int(s.last_tick));
-        try m.put("ticks", cbor.int(s.ticks));
-        try m.put("tick", cbor.cidv(s.tick));
+        try m.put("lastCharge", cbor.int(s.last_charge));
         try m.put("bytes", cbor.int(s.bytes));
         try m.put("payments", cbor.int(s.payments));
         try m.put("asleep", .{ .bool = s.asleep });
@@ -189,7 +216,7 @@ pub const State = struct {
     pub fn of(v: Value) ?State {
         if (v != .map or !std.mem.eql(u8, Value.str(v.get("kind")) orelse "", "billing")) return null;
         const tally = Value.intOf(v.get("tally")) orelse return null;
-        const last = Value.intOf(v.get("lastTick")) orelse return null;
+        const last = Value.intOf(v.get("lastCharge")) orelse return null;
         const asleep = v.get("asleep") orelse return null;
         if (asleep != .bool) return null;
         return .{
@@ -197,9 +224,7 @@ pub const State = struct {
             .allowance = uint(v.get("allowance")) orelse return null,
             .paid = uint(v.get("paid")) orelse return null,
             .tally = tally,
-            .last_tick = std.math.cast(i64, last) orelse return null,
-            .ticks = uint(v.get("ticks")) orelse return null,
-            .tick = Value.cidOf(v.get("tick")) orelse return null,
+            .last_charge = std.math.cast(i64, last) orelse return null,
             .bytes = uint(v.get("bytes")) orelse return null,
             .payments = uint(v.get("payments")) orelse return null,
             .asleep = asleep.bool,
@@ -207,29 +232,52 @@ pub const State = struct {
     }
 };
 
-/// A tick's body (#130 decided 4), signed by the host (the message's signature, checked at the door):
-/// {kind: "tick", at: <the host's time, ms>, allowance: <sats>, fuel: <its read calls' fuel since its
-/// last tick>, served: <bytes served since>, log: <the CID of its log for the period>}.
-pub const Tick = struct { at: i64, allowance: u64, fuel: u64, served: u64, log: ?[]const u8 };
+/// The host's wake (its call-in at the host row, signed as every message is): {kind: "wake",
+/// allowance: <sats>, received: <sats>}. The allowance is taken when the wake starts the state
+/// (the first from this host), and only then; `received` at every wake.
+pub const Wake = struct { allowance: u64, received: u64 };
+pub const WakeParse = union(enum) { ok: Wake, bad: []const u8 };
 
-pub const TickParse = union(enum) { ok: Tick, bad: []const u8 };
-
-pub fn tickOf(body: Value) TickParse {
-    const want = "a tick is {kind: \"tick\", at: ms, allowance: sats, fuel, served, log?: <cid>}";
-    if (body != .map or !std.mem.eql(u8, Value.str(body.get("kind")) orelse "", "tick")) return .{ .bad = want };
-    const at = Value.intOf(body.get("at")) orelse return .{ .bad = want };
-    if (at < 0 or at > std.math.maxInt(i64)) return .{ .bad = "at: the host's time (ms)" };
-    var log: ?[]const u8 = null;
-    if (body.get("log")) |l| if (l != .null) {
-        log = Value.cidOf(l) orelse return .{ .bad = "log: the CID of the host's log for the period" };
-    };
+pub fn wakeOf(body: Value) WakeParse {
+    const want = "a host's wake is {kind: \"wake\", allowance: sats, received: sats}";
+    if (body != .map or !std.mem.eql(u8, Value.str(body.get("kind")) orelse "", "wake")) return .{ .bad = want };
     return .{ .ok = .{
-        .at = @intCast(at),
         .allowance = uint(body.get("allowance")) orelse return .{ .bad = "allowance: a whole number of sats" },
-        .fuel = uint(body.get("fuel")) orelse return .{ .bad = "fuel: a whole number" },
-        .served = uint(body.get("served")) orelse return .{ .bad = "served: a whole number of bytes" },
-        .log = log,
+        .received = uint(body.get("received")) orelse return .{ .bad = "received: a whole number of sats (what the host has taken from this skein and not seen rejected)" },
     } };
+}
+
+/// The host's attestation on an entry (`attest`): its external cost since its last one.
+pub const Attestation = struct { fuel: u64, served: u64, log: []const u8, signature: []const u8 };
+
+/// An entry's `attest` in its form (null: not one): {fuel, served, log: <cid>, signature: bytes}.
+pub fn attestationOf(v: ?Value) ?Attestation {
+    const x = v orelse return null;
+    if (x != .map) return null;
+    return .{
+        .fuel = uint(x.get("fuel")) orelse return null,
+        .served = uint(x.get("served")) orelse return null,
+        .log = Value.cidOf(x.get("log")) orelse return null,
+        .signature = Value.bytesOf(x.get("signature")) orelse return null,
+    };
+}
+
+/// What the attestation's signature covers: the dag-cbor of {kind: "attestation", instance, fuel,
+/// served, log} — the skein it is for, so it is good for that skein only.
+pub fn attestationPreimage(a: std.mem.Allocator, instance: []const u8, t: Attestation) ![]u8 {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("attestation"));
+    try m.put("instance", .{ .bytes = instance });
+    try m.put("fuel", cbor.int(t.fuel));
+    try m.put("served", cbor.int(t.served));
+    try m.put("log", cbor.cidv(t.log));
+    return cbor.encode(a, m.value());
+}
+
+/// Whether the host `host` signed this attestation for `instance`.
+pub fn attestedBy(a: std.mem.Allocator, host: []const u8, instance: []const u8, t: Attestation) !bool {
+    const pre = try attestationPreimage(a, instance, t);
+    return secp.verifyAnyoneKey(host, ATTEST_LEVEL, ATTEST_PROTOCOL, ATTEST_KEY_ID, pre, t.signature);
 }
 
 /// The checkpoint a payment carries (#130 decided, "Checkpoint"): `OP_FALSE OP_RETURN <the state
@@ -253,12 +301,16 @@ test "billing: prices in nanosats — fuel, events, storage by the day, the host
     try std.testing.expectEqual(NSAT, priceStorage(r, 1_000_000, 86_400_000));
     try std.testing.expectEqual(@as(i128, 0), priceStorage(r, 1_000_000, -5));
     try std.testing.expectEqual(@as(i128, 0), priceStorage(.{}, 1_000_000, 86_400_000));
+    // Charged entry by entry or at once: the same, to the nanosat the rounding drops at each.
+    var parts: i128 = 0;
+    for (0..10) |_| parts += priceStorage(r, 1_000_000, 8_640_000);
+    try std.testing.expectEqual(priceStorage(r, 1_000_000, 86_400_000), parts);
     // 10^6 bytes served at 3 sats per MB: three sats; 10^9 read fuel at 2: two sats.
     try std.testing.expectEqual(3 * NSAT, priceHost(r, 0, 1_000_000));
     try std.testing.expectEqual(2 * NSAT, priceHost(r, 1_000_000_000, 0));
 }
 
-test "billing: the host row — the first tick row's terms; its settings checked" {
+test "billing: the host row — the first billing row's terms; its settings checked" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -310,37 +362,82 @@ test "billing: the host row — the first tick row's terms; its settings checked
     try std.testing.expect(termsOf(&.{}) == null);
 }
 
-test "billing: the state record round-trips; allocation = allowance + paid; a tick's body" {
+test "billing: the state record round-trips; allocation = allowance + paid; a wake's body" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const k1 = [_]u8{2} ++ [_]u8{1} ** 32;
     const e = try cbor.cidOfValue(a, cbor.string("an entry"));
-    const s = State{ .host = &k1, .allowance = 100, .paid = 50, .tally = 149 * NSAT + 7, .last_tick = 1_700_000_000_000, .tick = e, .bytes = 4096, .payments = 1 };
+    const s = State{ .host = &k1, .allowance = 100, .paid = 50, .tally = 149 * NSAT + 7, .last_charge = 1_700_000_000_000, .bytes = 4096, .payments = 1 };
     const back = State.of(try cbor.decode(a, try cbor.encode(a, try s.value(a)))).?;
     try std.testing.expectEqualSlices(u8, &k1, back.host);
     try std.testing.expectEqual(s.tally, back.tally);
+    try std.testing.expectEqual(s.last_charge, back.last_charge);
+    try std.testing.expectEqual(@as(u64, 4096), back.bytes);
     try std.testing.expectEqual(@as(i128, 150) * NSAT, back.allocation());
     try std.testing.expect(back.tally < back.allocation());
     try std.testing.expect(!back.asleep);
 
-    var t = cbor.MapBuilder.init(a);
-    try t.put("kind", cbor.string("tick"));
-    try t.put("at", cbor.int(5));
-    try t.put("allowance", cbor.int(10));
-    try t.put("fuel", cbor.int(0));
-    try t.put("served", cbor.int(12));
-    try t.put("log", cbor.cidv(e));
-    const ok = tickOf(t.value());
-    try std.testing.expect(ok == .ok);
-    try std.testing.expectEqual(@as(u64, 12), ok.ok.served);
-    try std.testing.expect(tickOf(cbor.string("tick")) == .bad);
+    var w = cbor.MapBuilder.init(a);
+    try w.put("kind", cbor.string("wake"));
+    try w.put("allowance", cbor.int(10));
+    try w.put("received", cbor.int(300));
+    try std.testing.expectEqual(@as(u64, 10), wakeOf(w.value()).ok.allowance);
+    try std.testing.expectEqual(@as(u64, 300), wakeOf(w.value()).ok.received);
+    try std.testing.expect(wakeOf(cbor.string("wake")) == .bad);
+    var tick = cbor.MapBuilder.init(a);
+    try tick.put("kind", cbor.string("tick"));
+    try tick.put("allowance", cbor.int(10));
+    try std.testing.expect(wakeOf(tick.value()) == .bad);
     var no = cbor.MapBuilder.init(a);
-    try no.put("kind", cbor.string("tick"));
-    try no.put("at", cbor.int(5));
-    try std.testing.expect(tickOf(no.value()) == .bad);
+    try no.put("kind", cbor.string("wake"));
+    try no.put("allowance", cbor.int(10));
+    try std.testing.expect(wakeOf(no.value()) == .bad);
     // The checkpoint: OP_FALSE OP_RETURN <the CID>.
     const sc = try checkpointScript(a, e);
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x6a, @intCast(e.len) }, sc[0..3]);
     try std.testing.expectEqualSlices(u8, e, sc[3..]);
+}
+
+test "billing: the host's attestation — its form, signed by the host for this skein only (a fixture @bsv/sdk signed)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // ProtoWallet(0x11…11).createSignature([2, "skein billing"], "attestation", anyone) over
+    // dag-cbor {kind: "attestation", instance: <0x22…22's public key>, fuel: 5, served: 7, log}.
+    var host: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&host, "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa");
+    var inst: [33]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&inst, "02466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27");
+    var log: [36]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&log, "017112205d4fb1da1bcac84abd10fec47c73513adeb4f44e21ab8ae4809f04bf127a8b85");
+    var sig: [70]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&sig, "30440220128e144088e24ea88340155e1d56128a8c6a891ea76c2c18338bfdfe2876339602207631f125ee36cc7818a83d190583f22cd0018443f70f7e8764948bb1e951841d");
+    var pre: [121]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&pre, "a5636c6f67d82a582500017112205d4fb1da1bcac84abd10fec47c73513adeb4f44e21ab8ae4809f04bf127a8b85646675656c05646b696e646b6174746573746174696f6e667365727665640768696e7374616e6365582102466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27");
+
+    var m = cbor.MapBuilder.init(a);
+    try m.put("fuel", cbor.int(5));
+    try m.put("served", cbor.int(7));
+    try m.put("log", cbor.cidv(&log));
+    try m.put("signature", .{ .bytes = &sig });
+    const t = attestationOf(m.value()).?;
+    try std.testing.expectEqualSlices(u8, &pre, try attestationPreimage(a, &inst, t));
+    try std.testing.expect(try attestedBy(a, &host, &inst, t));
+    // Another skein, another amount, another key: not the host's attestation.
+    var other = inst;
+    other[5] ^= 1;
+    try std.testing.expect(!(try attestedBy(a, &host, &other, t)));
+    var more = t;
+    more.served = 8;
+    try std.testing.expect(!(try attestedBy(a, &host, &inst, more)));
+    try std.testing.expect(!(try attestedBy(a, &inst, &inst, t)));
+    // The form: every field, `log` a CID.
+    try std.testing.expect(attestationOf(cbor.string("x")) == null);
+    try std.testing.expect(attestationOf(null) == null);
+    var nolog = cbor.MapBuilder.init(a);
+    try nolog.put("fuel", cbor.int(5));
+    try nolog.put("served", cbor.int(7));
+    try nolog.put("signature", .{ .bytes = &sig });
+    try std.testing.expect(attestationOf(nolog.value()) == null);
 }

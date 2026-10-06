@@ -35,11 +35,12 @@ const Mem = struct {
     fn has(ctx: *anyopaque, cid: []const u8) anyerror!bool {
         return self(ctx).blocks.contains(cid);
     }
-    fn put(ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!void {
+    fn put(ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!bool {
         const m = self(ctx);
-        if (m.blocks.contains(cid)) return;
+        if (m.blocks.contains(cid)) return false;
         m.puts += 1;
         try m.blocks.put(try m.gpa.dupe(u8, cid), try m.gpa.dupe(u8, bytes));
+        return true;
     }
     fn nop(_: *anyopaque) anyerror!void {}
     fn nop2(_: *anyopaque) void {}
@@ -123,7 +124,7 @@ test "index: maps follow chains; commits write new nodes only; import = incremen
     var mem2 = Mem.init(gpa);
     defer mem2.deinit();
     var it = mem.blocks.iterator();
-    while (it.next()) |e| try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
+    while (it.next()) |e| _ = try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
     const ix2 = try index.Index.init(gpa, mem2.backend(), false);
     defer ix2.deinit();
     for ([_][]const u8{ t3, t1, t2 }) |t| {
@@ -167,9 +168,9 @@ test "index: a kept record's refs are edges with the record's own rel (#37)" {
     try rec.put("kind", cbor.string("wallet-result"));
     try rec.put("refs", .{ .array = try a.dupe(Value, &.{ ref1.value(), ref2.value() }) });
     const kept = try cbor.block(a, rec.value());
-    try Mem.put(&mem, kept.cid, kept.bytes);
+    _ = try Mem.put(&mem, kept.cid, kept.bytes);
     const plain = try cbor.block(a, cbor.string("no refs here"));
-    try Mem.put(&mem, plain.cid, plain.bytes);
+    _ = try Mem.put(&mem, plain.cid, plain.bytes);
     var u = cbor.MapBuilder.init(a);
     try u.put("state", cbor.string("finished"));
     try u.put("at", cbor.int(11));
@@ -199,7 +200,7 @@ test "index: a kept record's refs are edges with the record's own rel (#37)" {
     var mem2 = Mem.init(gpa);
     defer mem2.deinit();
     var it = mem.blocks.iterator();
-    while (it.next()) |e| try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
+    while (it.next()) |e| _ = try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
     const ix2 = try index.Index.init(gpa, mem2.backend(), false);
     defer ix2.deinit();
     const ups = (try s.chainUpdates(a, t)).?;
@@ -230,8 +231,8 @@ test "index: a kept bitcoin transaction's inputs are edges from the block (#42);
     const tx = try hexBytes(a, "0100000001c997a5e56e104102fa209c6a852dd90660a20b2d9c352423edce25857fcd3704000000004847304402204e45e16932b8af514961a1d3a1a25fdf3f4f7732e9d624c6c61548ab5fb8cd410220181522ec8eca07de4860a4acdd12909d831cc56cbbac4622082221a8768d1d0901ffffffff0200ca9a3b00000000434104ae1a62fe09c5f51b13905f07f06b99a2f7159b2225f374cd378d71302fa28414e7aab37397f554a7df5f142c21c1b7303b8a0626f1baded5c72a704f7e6cd84cac00286bee0000000043410411db93e1dcdb8a016b49840f8c53bc1eb68a382e97b1482ecad7b148a6909a5cb2e0eaddfb84ccf9744464f82e160bfa9b8b64f9d4c03f999b8643f656b412a3ac00000000");
     const hc = try cidm.ofBitcoin(a, cidm.BITCOIN_BLOCK, header);
     const tc = try cidm.ofBitcoin(a, cidm.BITCOIN_TX, tx);
-    try s.putBlock(hc, header);
-    try s.putBlock(tc, tx);
+    _ = try s.putBlock(hc, header);
+    _ = try s.putBlock(tc, tx);
     // A block put but not kept indexes nothing.
     try std.testing.expectEqual(@as(usize, 0), (try ix.all(a, .edges)).len);
 
@@ -266,7 +267,7 @@ test "index: a kept bitcoin transaction's inputs are edges from the block (#42);
     var mem2 = Mem.init(gpa);
     defer mem2.deinit();
     var it = mem.blocks.iterator();
-    while (it.next()) |e| try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
+    while (it.next()) |e| _ = try Mem.put(&mem2, e.key_ptr.*, e.value_ptr.*);
     const ix2 = try index.Index.init(gpa, mem2.backend(), false);
     defer ix2.deinit();
     for ([_][]const u8{ t1, t2 }) |t| {
@@ -308,11 +309,11 @@ test "index: a libp2p `p2p` event record is admitted once (#42/#51): a redeliver
     try ev.put("topic", cbor.string("t"));
     try ev.put("body", .{ .bytes = "hello" });
     const p2p = try cbor.block(a, ev.value());
-    try s.putBlock(p2p.cid, p2p.bytes);
+    _ = try s.putBlock(p2p.cid, p2p.bytes);
     var hv = cbor.MapBuilder.init(a);
     try hv.put("kind", cbor.string("header"));
     const hdr = try cbor.block(a, hv.value());
-    try s.putBlock(hdr.cid, hdr.bytes);
+    _ = try s.putBlock(hdr.cid, hdr.bytes);
 
     var prev: Value = .null;
     var n: i64 = 0;
@@ -327,4 +328,76 @@ test "index: a libp2p `p2p` event record is admitted once (#42/#51): a redeliver
     try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
     try std.testing.expect((try appendEvent(a, s, &prev, &n, hdr.cid, "chain")) == .ok);
     try std.testing.expectEqual(@as(usize, 3), (try ix.all(a, .log)).len);
+}
+
+test "index: storage counted (#130) — putBlock says created; while counting, a block is kept once, whatever filled the store before; a store that never counts keeps the state record it had" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const x = try cbor.block(a, cbor.string("a record an admission put first"));
+    const y = try cbor.block(a, cbor.string("a record the kernel stores"));
+    const z = try cbor.block(a, cbor.string("put while not counting"));
+
+    // A: x pre-filled (an admission, a replay's copy: not counting), then the kernel stores x and y.
+    var ma = Mem.init(gpa);
+    defer ma.deinit();
+    const ia = try index.Index.init(gpa, ma.backend(), false);
+    defer ia.deinit();
+    const sa = ia.store();
+    try std.testing.expect(try sa.putBlock(x.cid, x.bytes));
+    try std.testing.expect(!(try sa.putBlock(x.cid, x.bytes)));
+    try std.testing.expectEqual(@as(u64, 0), sa.takeKept());
+    try std.testing.expect(!sa.setCounting(true));
+    try std.testing.expect(!(try sa.putBlock(x.cid, x.bytes)));
+    try std.testing.expect(try sa.putBlock(y.cid, y.bytes));
+    try std.testing.expect(!(try sa.putBlock(y.cid, y.bytes)));
+    try sa.keep(a, x.cid); // once
+    try std.testing.expectEqual(@as(u64, x.bytes.len + y.bytes.len), sa.takeKept());
+    try std.testing.expectEqual(@as(u64, 0), sa.takeKept());
+
+    // B: nothing pre-filled; the kernel stores x (created now) and y: the same count, the same map.
+    var mb = Mem.init(gpa);
+    defer mb.deinit();
+    const ib = try index.Index.init(gpa, mb.backend(), false);
+    defer ib.deinit();
+    const sb = ib.store();
+    _ = sb.setCounting(true);
+    try std.testing.expect(try sb.putBlock(y.cid, y.bytes));
+    try std.testing.expect(try sb.putBlock(x.cid, x.bytes));
+    try std.testing.expectEqual(@as(u64, x.bytes.len + y.bytes.len), sb.takeKept());
+    try std.testing.expectEqualSlices(u8, try ia.stateCid(a), try ib.stateCid(a));
+
+    // Not counting: stored, not kept.
+    try std.testing.expect(sa.setCounting(false));
+    try std.testing.expect(try sa.putBlock(z.cid, z.bytes));
+    try std.testing.expectEqual(@as(u64, 0), sa.takeKept());
+    try std.testing.expectEqual(@as(usize, 2), (try ia.keptAll(a)).len);
+
+    // Committed and opened again: what was kept stays kept.
+    try sa.cursorSet(1);
+    const ia2 = try index.Index.init(gpa, ma.backend(), false);
+    defer ia2.deinit();
+    try std.testing.expect(try ia2.load());
+    const sa2 = ia2.store();
+    _ = sa2.setCounting(true);
+    _ = try sa2.putBlock(x.cid, x.bytes);
+    try sa2.keep(a, y.cid);
+    try std.testing.expectEqual(@as(u64, 0), sa2.takeKept());
+    try sa2.keep(a, z.cid);
+    try std.testing.expectEqual(@as(u64, z.bytes.len), sa2.takeKept());
+
+    // A store that never counted: its state record has no `kept` (the record a skein never billed always had).
+    var mc = Mem.init(gpa);
+    defer mc.deinit();
+    const ic = try index.Index.init(gpa, mc.backend(), false);
+    defer ic.deinit();
+    const sc = ic.store();
+    _ = try sc.putBlock(y.cid, y.bytes);
+    try sc.cursorSet(1);
+    const rec = try cbor.decode(a, (try Mem.get(&mc, a, mc.ptr.?)).?);
+    try std.testing.expect(rec.get("kept") == null);
+    try sa.cursorSet(2);
+    const reca = try cbor.decode(a, (try Mem.get(&ma, a, ma.ptr.?)).?);
+    try std.testing.expect(Value.cidOf(reca.get("kept")) != null);
 }

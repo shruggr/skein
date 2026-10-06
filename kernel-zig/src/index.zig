@@ -37,6 +37,21 @@
 //                                                              (locator = vout); headers and merkle nodes: none)
 //   heads     name                       → tree CID            (named heads)
 //
+// and one more, outside `index` and only once there is one (#130, billing):
+//
+//   kept      CID                        → bytes (its length)  (the blocks the kernel has stored while
+//                                                              counting: storage, counted, not measured)
+//
+// The state record names it as `kept: <root>` beside `index`, absent while it
+// is empty — so a skein never billed has the state record it always had.
+// While counting is on (the scheduler turns it on while it processes an entry
+// of a billed skein), a block the store creates is kept and its bytes are
+// added (`takeKept`); a block the store held already is kept, and added, only
+// if the kernel had not kept it yet: what an admission put (the door, the log
+// append), what a pre-fill or a replay's copy put, counts the first time the
+// kernel itself stores it. So the count is a function of the log's processing,
+// not of what else filled the store, and a replay comes to the same.
+//
 // Every map is a function of the chains and the log (the derivation is
 // sqlite.ts's, key for key), and the trees are canonical, so the state
 // record is a function of the log: two runtimes that consumed the same log
@@ -65,14 +80,13 @@ pub const Backend = struct {
     pub const VT = struct {
         get: *const fn (ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!?[]u8,
         has: *const fn (ctx: *anyopaque, cid: []const u8) anyerror!bool,
-        put: *const fn (ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!void,
+        /// Store a block under its CID; true when it was created (false: held already).
+        put: *const fn (ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!bool,
         begin: *const fn (ctx: *anyopaque) anyerror!void,
         commit: *const fn (ctx: *anyopaque) anyerror!void,
         rollback: *const fn (ctx: *anyopaque) void,
         pointer: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror!?[]u8,
         setPointer: *const fn (ctx: *anyopaque, name: []const u8, cid: []const u8) anyerror!void,
-        /// #130: the bytes the backend holds (a file's pages in use); absent: it cannot say (0).
-        size: ?*const fn (ctx: *anyopaque) anyerror!u64 = null,
     };
 };
 
@@ -120,6 +134,8 @@ pub const Root = struct {
 
 pub const State = struct {
     roots: [map_count]Root = [_]Root{.{}} ** map_count,
+    /// #130: the `kept` map's root (none until the kernel keeps a block).
+    kept: Root = .{},
     tip: Root = .{},
     cursor: i64 = 0,
     format: i64 = FORMAT,
@@ -140,6 +156,9 @@ pub const Index = struct {
     loaded_format: i64 = 0,
     commits: usize = 0,
     states: usize = 0,
+    /// #130: whether a put is counted (the scheduler's setting), and the bytes kept since the last take.
+    counting: bool = false,
+    kept_bytes: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, backend: Backend, read_only: bool) !*Index {
         const ix = try gpa.create(Index);
@@ -186,6 +205,7 @@ pub const Index = struct {
         if (!std.mem.eql(u8, Value.str(v.get("kind")) orelse "", STATE_KIND)) return error.BadState;
         var s = State{};
         s.tip = Root.of(Value.cidOf(v.get("log")));
+        s.kept = Root.of(Value.cidOf(v.get("kept")));
         s.cursor = @intCast(Value.intOf(v.get("cursor")) orelse 0);
         s.format = @intCast(Value.intOf(v.get("format")) orelse 0);
         const idx = v.get("index") orelse return error.BadState;
@@ -214,6 +234,8 @@ pub const Index = struct {
         try m.put("cursor", cbor.int(s.cursor));
         try m.put("heads", link(s.roots[@intFromEnum(Map.heads)].get()));
         try m.put("index", idx.value());
+        // #130: only once there is one (a skein never billed: the record it always had).
+        if (s.kept.get()) |k| try m.put("kept", .{ .cid = k });
         return m.value();
     }
 
@@ -228,10 +250,10 @@ pub const Index = struct {
 
     fn sinkPut(ctx: *anyopaque, cid: []const u8, bytes: []const u8) anyerror!void {
         const ix: *Index = @ptrCast(@alignCast(ctx));
-        return ix.backend.vt.put(ix.backend.ctx, cid, bytes);
+        _ = try ix.backend.vt.put(ix.backend.ctx, cid, bytes);
     }
 
-    fn writeState(ix: *Index, s: *const State, maps: []const Map) !void {
+    fn writeState(ix: *Index, s: *const State, maps: []const Map, kept: bool) !void {
         var arena = std.heap.ArenaAllocator.init(ix.gpa);
         defer arena.deinit();
         const a = arena.allocator();
@@ -241,7 +263,8 @@ pub const Index = struct {
         errdefer b.vt.rollback(b.ctx);
         const sink = mst.Forest.Sink{ .ctx = ix, .put = sinkPut };
         for (maps) |m| try ix.forest.flush(s.roots[@intFromEnum(m)].get(), sink);
-        try b.vt.put(b.ctx, blk.cid, blk.bytes);
+        if (kept) try ix.forest.flush(s.kept.get(), sink);
+        _ = try b.vt.put(b.ctx, blk.cid, blk.bytes);
         try b.vt.setPointer(b.ctx, POINTER, blk.cid);
         try b.vt.commit(b.ctx);
         ix.commits += 1;
@@ -250,7 +273,7 @@ pub const Index = struct {
     }
 
     fn same(x: *const State, y: *const State) bool {
-        if (x.cursor != y.cursor or x.format != y.format or !optEq(x.tip.get(), y.tip.get())) return false;
+        if (x.cursor != y.cursor or x.format != y.format or !optEq(x.tip.get(), y.tip.get()) or !optEq(x.kept.get(), y.kept.get())) return false;
         for (x.roots, y.roots) |p, q| if (!optEq(p.get(), q.get())) return false;
         return true;
     }
@@ -264,7 +287,7 @@ pub const Index = struct {
                 for (&ms, 0..) |*m, i| m.* = @enumFromInt(i);
                 break :blk ms;
             };
-            try ix.writeState(&ix.work, &every);
+            try ix.writeState(&ix.work, &every, true);
             ix.committed = ix.work;
         }
         ix.forest.reset(true);
@@ -280,7 +303,7 @@ pub const Index = struct {
         s.format = ix.work.format;
         s.roots[@intFromEnum(Map.log)] = ix.work.roots[@intFromEnum(Map.log)];
         s.roots[@intFromEnum(Map.unique)] = ix.work.roots[@intFromEnum(Map.unique)];
-        try ix.writeState(&s, &.{ .log, .unique });
+        try ix.writeState(&s, &.{ .log, .unique }, false);
         ix.committed = s;
     }
 
@@ -349,8 +372,51 @@ pub const Index = struct {
 
     fn putValue(ix: *Index, a: std.mem.Allocator, v: Value) ![]u8 {
         const blk = try cbor.block(a, v);
-        try ix.backend.vt.put(ix.backend.ctx, blk.cid, blk.bytes);
+        const created = try ix.backend.vt.put(ix.backend.ctx, blk.cid, blk.bytes);
+        try ix.count(blk.cid, blk.bytes.len, created);
         return blk.cid;
+    }
+
+    // ------------------------------------------------------------ storage, counted (#130)
+
+    /// A block just stored (`created`: the backend made it): while counting, kept — and its bytes
+    /// added — unless the kernel kept it before. A block the backend created cannot be in `kept`
+    /// (nothing deletes blocks, and the kernel keeps only blocks the store holds), so only one the
+    /// backend held already is looked up.
+    fn count(ix: *Index, cid: []const u8, len: usize, created: bool) !void {
+        if (!ix.counting or ix.read_only) return;
+        if (!created and (try ix.forest.get(ix.scratch(), ix.work.kept.get(), cid)) != null) return;
+        ix.work.kept = Root.of(try ix.forest.put(ix.work.kept.get(), cid, cbor.int(len)));
+        ix.kept_bytes +|= len;
+    }
+
+    fn setCountingFn(ctx: *anyopaque, on: bool) bool {
+        const ix = self(ctx);
+        const was = ix.counting;
+        ix.counting = on;
+        return was;
+    }
+
+    fn keepFn(ctx: *anyopaque, a: std.mem.Allocator, cid: []const u8) anyerror!void {
+        const ix = self(ctx);
+        if (!ix.counting or ix.read_only) return;
+        if ((try ix.forest.get(ix.scratch(), ix.work.kept.get(), cid)) != null) return;
+        const b = (try ix.backend.vt.get(ix.backend.ctx, a, cid)) orelse return;
+        try ix.count(cid, b.len, true);
+    }
+
+    fn takeKeptFn(ctx: *anyopaque) u64 {
+        const ix = self(ctx);
+        const n = ix.kept_bytes;
+        ix.kept_bytes = 0;
+        return n;
+    }
+
+    /// The `kept` map's entries (tests, dump): CID → bytes.
+    pub fn keptAll(ix: *Index, a: std.mem.Allocator) ![]mst.KV {
+        var out = std.array_list.Managed(mst.KV).init(a);
+        try ix.forest.range(a, ix.work.kept.get(), null, null, &out);
+        return out.items;
     }
 
     // ------------------------------------------------------------ derivation (sqlite.ts)
@@ -667,14 +733,10 @@ pub const Index = struct {
         .state = stateFn,
         .edges = edgesFn,
         .processedState = processedStateFn,
-        .size = sizeFn,
+        .setCounting = setCountingFn,
+        .keep = keepFn,
+        .takeKept = takeKeptFn,
     };
-
-    fn sizeFn(ctx: *anyopaque) anyerror!u64 {
-        const ix = self(ctx);
-        const f = ix.backend.vt.size orelse return 0;
-        return f(ix.backend.ctx);
-    }
 
     /// #130: the state record as it stood when the last processed entry (the cursor's) had been
     /// processed. The maps but the log's are the committed ones — what the cursor's commit wrote,
@@ -738,9 +800,11 @@ pub const Index = struct {
         const ix = self(ctx);
         return ix.backend.vt.has(ix.backend.ctx, cid);
     }
-    fn putBlockFn(ctx: *anyopaque, cid: []const u8, b: []const u8) anyerror!void {
+    fn putBlockFn(ctx: *anyopaque, cid: []const u8, b: []const u8) anyerror!bool {
         const ix = self(ctx);
-        return ix.backend.vt.put(ix.backend.ctx, cid, b);
+        const created = try ix.backend.vt.put(ix.backend.ctx, cid, b);
+        try ix.count(cid, b.len, created);
+        return created;
     }
 
     fn chainOpenFn(ctx: *anyopaque, a: std.mem.Allocator, origin: Value) anyerror![]u8 {
