@@ -203,7 +203,8 @@ envelope. Answers are signed on the session through the instance's signer
   session; a key that identity's (#121, #126: the owner's
   rows name the owner's key; there is no `"owner"` sender symbol). `filter: "beef"` (#121): the door decodes the body's BEEF
   before the entry is written and the handler's `body` is the pointer
-  record's CID (an overlay's submit). **A signed request gets a signed
+  record's CID (an overlay's submit); a BEEF that does not check is a
+  refusal at the door (400, no thread). **A signed request gets a signed
   answer** (decided 2026-10-07, BRC-104 §6.4): a request carrying
   `x-bsv-auth-*` headers is a general message, and the front door verifies
   its session and signature and signs its answer on that session whatever
@@ -214,7 +215,13 @@ envelope. Answers are signed on the session through the instance's signer
   door as the kernel says: no row at the path, 404 (verified and signed
   when the request is signed); a row there needs a session and the request
   has none, 401 (the stock client shakes hands); none takes its identity,
-  403, signed on the session. The genesis seeds the default rows; an app's install adds its
+  403, signed on the session. A refusal at the door (#121: the row's
+  filter, no thread ran) of a signed request is signed too (#135): the host
+  answers it with a front-door call (fn `refusal`, the request as received,
+  at its entry's time), which verifies the session and signs the refusal
+  on it; only a request whose session does not verify — unknown, expired,
+  a bad signature — gets its refusal plain (there is no session to sign
+  on). The genesis seeds the default rows; an app's install adds its
   rows under `/<app>/` through the kernel's `dispatch` operation
   (docs/APPS.md §3); the kernel matches against the table as it stands at
   each step. The front door never sees the table: it gets the row

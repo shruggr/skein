@@ -19,10 +19,11 @@
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
+import { stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { now as clockNow } from "./clock.ts";
 import { admit2 } from "./genesis.ts";
-import type { Kernel, RequestAnswer } from "./kernel.ts";
+import type { Kernel, Refusal, RequestAnswer } from "./kernel.ts";
 
 /** A raw request as the host appends it: `path` as the client signed it, `route` what the routes table sees. */
 export interface FrontRequest {
@@ -98,14 +99,17 @@ export async function frontDoor(k: Kernel, req: FrontRequest, o: { now?: Stamp; 
   const waited = k.answer(entry, o.waitMs ?? ANSWER_WAIT_MS);
   const a = o.stop ? await Promise.race([waited, o.stop.then(() => undefined)]) : await waited;
   if (!a) return unavailable("the host is shutting down", { entry });
-  return await httpAnswer(k, entry, a);
+  return await httpAnswer(k, entry, a, req);
 }
 
-/** A request thread's answer as the HTTP response: its last step's, a read after it, or 500/503. */
-export async function httpAnswer(k: Kernel, entry: CID, a: RequestAnswer): Promise<FrontAnswer> {
+/**
+ * A request thread's answer as the HTTP response: its last step's, a read after it, or 500/503.
+ * `req`, the request as received: a door refusal of a signed one is answered by the front door.
+ */
+export async function httpAnswer(k: Kernel, entry: CID, a: RequestAnswer, req?: FrontRequest): Promise<FrontAnswer> {
   const at = { entry, ...(a.thread ? { thread: a.thread } : {}) };
   // #121: refused at the door (the middleware, or the row's filter): no thread ran; the refusal answers.
-  if (a.state === "refused") return { status: a.refused.status ?? 400, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: a.refused.code ?? "ERR_REFUSED", description: a.refused.reason }), ...at };
+  if (a.state === "refused") return await refusalAnswer(k, entry, a.refused, req, at);
   if (a.state === "errored") return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: a.error }), ...at };
   if (a.state !== "finished") return unavailable(`not answered yet (its thread is ${a.state}): try again`, at);
   const r = dagCbor.decode(a.answer) as { status?: number; headers?: Record<string, string>; body?: Uint8Array; read?: { caller?: unknown } };
@@ -119,6 +123,24 @@ export async function httpAnswer(k: Kernel, entry: CID, a: RequestAnswer): Promi
   }
   if (typeof r.status !== "number") return { status: 500, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_FRONT_DOOR", description: "the request's thread ended with no answer" }), ...at };
   return { status: r.status, headers: r.headers ?? {}, body: r.body ?? new Uint8Array(), ...at };
+}
+
+/**
+ * A door refusal's answer (#121, #135): a signed request gets it signed on its session — a
+ * front-door call (fn "refusal") with the request as received (a filter may have rewritten the
+ * record the entry names; the signature covers the bytes) at the entry's time — and an unsigned
+ * one, or one whose session does not verify (unknown, expired: the stock client shakes hands
+ * again), gets it plain.
+ */
+async function refusalAnswer(k: Kernel, entry: CID, refused: Refusal, req: FrontRequest | undefined, at: Partial<FrontAnswer>): Promise<FrontAnswer> {
+  const status = refused.status ?? 400, code = refused.code ?? "ERR_REFUSED";
+  const plain: FrontAnswer = { status, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code, description: refused.reason }), ...at };
+  if (!req || !Object.keys(req.headers).some((h) => h.toLowerCase().startsWith("x-bsv-auth-"))) return plain;
+  const time = (await k.store.get(entry) as { time?: Stamp }).time;
+  const c = await k.invoke("frontdoor", "refusal", dagCbor.encode({ request: httpRecord(req), refused: { status, code, reason: refused.reason } }), time ? { now: stampMs(time) } : {});
+  if (!c.ok) return plain; // a front door pinned before fn "refusal"
+  const x = dagCbor.decode(c.result) as { status: number; headers?: Record<string, string>; body?: Uint8Array };
+  return { status: x.status, headers: x.headers ?? {}, body: x.body ?? new Uint8Array(), fuel: c.fuel, ...at };
 }
 
 /** The request record an entry names. */

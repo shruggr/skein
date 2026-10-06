@@ -63,6 +63,17 @@
 //!                 so no step may answer it): the host calls this once the request's
 //!                 thread has verified it and ended; the handler runs as a call and
 //!                 the answer is signed on the session here (not recorded).
+//!   fn "refusal"  {request: <the request record itself, as received>, refused: {status, code?, reason}} → {status, headers, body}
+//!                 a request the door refused (#121: a refusal entry, no thread — a
+//!                 row's filter, a 400 for a BEEF that does not check; a session
+//!                 that does not verify): the host answers it with this call. A
+//!                 signed request whose session and signature verify (as of `now`,
+//!                 the entry's time) gets the refusal signed on its session (a
+//!                 signed request gets a signed answer); any other — unsigned, or
+//!                 a session unknown or expired — gets it plain (the stock client
+//!                 takes a plain 401 as a stale session and shakes hands again).
+//!                 The record is the host's, as received: a filter may have
+//!                 rewritten the one the entry names, and the signature covers the bytes.
 //!   fn "explore"  the explorer's route handler (explore.zig).
 //!
 //! Sessions are state (#68, sessions.zig): the head `frontdoor/sessions` (#77:
@@ -106,6 +117,7 @@ fn run(a: Allocator) !void {
     const arg = cbor.decode(a, Value.bytesOf(in.get("arg")) orelse "") catch return sk.report("the argument is not dag-cbor");
     if (eql(u8, func, "verify")) return sk.answer(a, try doorVerify(a, in, arg));
     if (eql(u8, func, "read")) return sk.answer(a, try read(a, in, arg));
+    if (eql(u8, func, "refusal")) return sk.answer(a, try refusal(a, in, arg));
     if (eql(u8, func, "explore")) {
         // In a step (the request's thread) the log's live state is no answer: the host reads it after (fn "read").
         if (in.get("step") != null) {
@@ -120,7 +132,7 @@ fn run(a: Allocator) !void {
         try m.put("body", .{ .bytes = r.body });
         return sk.answer(a, m.value());
     }
-    return sk.report("unknown fn (the front door is called for \"verify\", \"read\", and as the route handler \"explore\")");
+    return sk.report("unknown fn (the front door is called for \"verify\", \"read\", \"refusal\", and as the route handler \"explore\")");
 }
 
 // ---------------------------------------------------------------- the door (#121)
@@ -524,6 +536,25 @@ fn read(a: Allocator, in: Value, arg: Value) !Value {
     var resp = try respOf(a, out);
     resp.admit = null; // a read writes nothing
     if (v) |x| try sign(a, in, &resp, x);
+    return resp.value(a);
+}
+
+// ---------------------------------------------------------------- a refusal at the door (fn "refusal")
+
+/// A door refusal's answer (#121, #135): the refusal as a JSON error, signed on the request's
+/// session when the request is signed and verifies; plain otherwise. Nothing is written.
+fn refusal(a: Allocator, in: Value, arg: Value) !Value {
+    const req = arg.get("request") orelse return sk.report("refusal: no request");
+    const x = arg.get("refused") orelse return sk.report("refusal: no refused");
+    const status: u64 = @intCast(Value.intOf(x.get("status")) orelse 400);
+    var resp = try jsonError(a, status, Value.str(x.get("code")) orelse "ERR_REFUSED", Value.str(x.get("reason")) orelse "refused");
+    if (!signedRequest(req)) return resp.value(a);
+    const request_id = brc.headerOf(req.get("headers"), "x-bsv-auth-request-id") orelse return resp.value(a);
+    const v = verify(a, in, req, request_id) catch |err| switch (err) {
+        error.Malformed, error.Unauthorized => return resp.value(a),
+        else => return err,
+    };
+    try sign(a, in, &resp, v);
     return resp.value(a);
 }
 

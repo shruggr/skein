@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AuthFetch, PrivateKey } from "@bsv/sdk";
+import { AuthFetch, Beef, P2PKH, PrivateKey, Transaction } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { msStamp } from "../runtime/syscalls.ts";
 import { ephemeralWallet } from "../wallet.ts";
@@ -40,6 +40,8 @@ test("front door: every request is an entry and a thread; the handshake writes t
   await writeGenesis(k, {
     identity, owner: client, handle: "alpha", domain: "localhost",
     routes: [{ path: "/whoami", program: probe.toString(), fn: "whoami" }, { path: "/open", program: probe.toString(), fn: "whoami", auth: "none" }],
+    // #135: an open row behind the door's `beef` filter (no chain app here: every BEEF is refused at the door).
+    dispatch: [{ transport: "http", address: "/beef", sender: "*", program: probe.toString(), fn: "whoami", filter: "beef" }, { transport: "http", address: "/mine", sender: client, program: probe.toString(), fn: "whoami" }],
   });
   await k.start();
   await k.idle();
@@ -119,12 +121,36 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.notEqual(Buffer.from(await plainGet.arrayBuffer()).toString("hex"), client, "an unsigned request on an open row: the handler gets no caller");
   assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "an unsigned request on an open row: answered plain");
 
+  // #135: a door refusal (no thread ran) of a signed request is answered signed on its session too:
+  // the host asks the front door (fn "refusal") with the request as received. A BEEF the filter
+  // decodes is replaced in the record the entry names, so the signature verifies over the bytes sent.
+  const beef = new Beef();
+  beef.mergeRawTx(new Transaction(1, [], [{ lockingScript: new P2PKH().lock(clientKey.toPublicKey().toHash()), satoshis: 1 }], 0).toBinary());
+  answers.length = 0;
+  const refusedSigned = await af.fetch("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
+  assert.equal(refusedSigned.status, 400, "the filter refused the BEEF (no chain state to check it against)");
+  assert.match(await refusedSigned.text(), /no chain state/, "the refusal's reason, in the body AuthFetch verified");
+  assert.ok(signed(answers.at(-1)!) && !answers.at(-1)!.thread, "a door refusal (no thread) of a signed request: answered signed on its session");
+  const refusedRecord = await k.store.get((await k.store.get(answers.at(-1)!.entry!) as { request: CID }).request) as { body: unknown };
+  assert.ok(!(refusedRecord.body instanceof Uint8Array), "the record the refusal entry names has its BEEF replaced (the host signed over the bytes as received)");
+  answers.length = 0;
+  const refusedPlain = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
+  assert.equal(refusedPlain.status, 400);
+  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "the same refusal of an unsigned request: plain");
+  // 403: a stranger's signed request to a row for another key: verified, its 403 signed.
+  const stranger = new AuthFetch(ephemeralWallet(PrivateKey.fromRandom()), undefined, undefined, undefined, {}, door);
+  answers.length = 0;
+  const forbidden = await stranger.fetch("http://alpha.test/mine", { method: "GET" });
+  assert.equal(forbidden.status, 403);
+  assert.ok(signed(answers.at(-1)!), "a signed request no row takes for its key: its 403 signed");
+
   // Polls: an entry each (an access log), and the session table unchanged.
+  const s2 = (await sessions())!; // the stranger's handshake added one
   const n2 = await entries();
   for (let i = 0; i < 20; i++) await whoami();
   await k.idle();
   assert.equal(await entries(), n2 + 20, "20 polls: 20 entries");
-  assert.equal((await sessions())!.toString(), s1.toString(), "polls add no session");
+  assert.equal((await sessions())!.toString(), s2.toString(), "polls add no session");
 
   // Sessions are state: a new kernel process keeps them; the same client's next request is served at once.
   await k.stop();
@@ -140,6 +166,7 @@ test("front door: every request is an entry and a thread; the handshake writes t
   answers.length = 0;
   assert.equal(await whoami(), client);
   assert.deepEqual(statuses(), [401, 200, 200], "an expired session: 401, the handshake, the request again");
+  assert.ok(answers[0]!.thread === undefined && !Object.keys(answers[0]!.headers).some((h) => h.startsWith("x-bsv-auth-")), "#135: the expired session's 401 is a door refusal answered plain — no session to sign on; the stock client takes it as stale and shakes hands");
   await k.idle();
   const root2 = await k.store.get((await sessions())!) as unknown as { buckets: CID[] };
   const held2 = (await Promise.all(root2.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: unknown[] }).sessions))).flat();
