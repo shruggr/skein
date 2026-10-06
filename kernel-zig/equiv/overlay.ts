@@ -37,7 +37,7 @@
 // skein-overlay 0.7.3 (shruggr/skein#112): POST /submit answers its delivery
 // (200 {id}), never a STEAK; on that open route no one is answered, and the
 // admitting step's result record carries the STEAK. The verdict cases submit
-// by message instead — {fn: "submit", args: {beef, topics}} into box `overlay`
+// by message instead — {fn: "submit", args: {beef, topics}} into box `overlay/submit`
 // over a wallet's /sendMessage session (the tree has the messagebox for it) —
 // and read the answers (admitted / rejected, each naming the message) from the
 // steps' result records: no message reaches that sender. No request waits:
@@ -71,7 +71,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "067b94072a1ba0ceb0ae4af0b839d0d867f6a499";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "5e948536058220d34d819382369e1c7f468bf1a5";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -123,8 +123,8 @@ const ROWS = [
   // The overlay (#79): its own box, from events (its libp2p route's admits) and from itself (its watches).
   { address: "overlay", sender: "event", program: "overlay" },
   { address: "overlay", sender: "$self", program: "overlay" },
-  // skein-overlay 0.7.3 (#112): a submission is a message into the app's box, from anyone (the BEEF through the door's filter).
-  { address: "overlay", sender: "*", program: "overlay", filter: "beef" },
+  // skein-overlay 0.7.6 (#112, #128): a submission is a message into the box overlay/submit, from anyone (the BEEF through the door's filter).
+  { address: "overlay/submit", sender: "*", program: "overlay", filter: "beef" },
   { transport: "http", address: "/sendMessage", sender: "session", program: "messagebox", fn: "sendMessage" },
   // The overlay-express wire contract: open routes, as overlay-express is.
   // #121: the submit rows name the door's beef filter: the handler gets the BEEF's pointer record, never its bytes.
@@ -318,7 +318,7 @@ try {
   await router.bootRow("gate", { kind: "tree", root: src2.root, objects: src2.objects });
   const base = router.originOf("overlay");
   const kO = async () => (await router.hydrate("overlay")).kernel;
-  // skein-overlay 0.7.3 (#112): a submission by message, {fn: "submit", args: {beef, topics}} into box `overlay`, from a
+  // skein-overlay 0.7.3 (#112): a submission by message, {fn: "submit", args: {beef, topics}} into box `overlay/submit`, from a
   // wallet's BRC-104 session (/sendMessage); its answers name the message's id. No message reaches this sender (not in
   // the address book): the answers are in the steps' result records (answersTo).
   const submitterWallet = ephemeralWallet(key("8888"));
@@ -327,7 +327,7 @@ try {
     let b = sessions.get(h);
     if (!b) { b = new RawBox(submitterWallet, r.originOf(h)); sessions.set(h, b); }
     let id: CID;
-    try { ({ id } = await b.send((await r.hydrate(h)).identity, "overlay", { fn: "submit", args: { beef, topics } })); } catch (e) { process.stdout.write(`  (submit by message to ${h} refused: ${(e as Error).message})\n`); return { refused: (e as Error).message, answers: async () => [] as Array<Record<string, unknown>> }; }
+    try { ({ id } = await b.send((await r.hydrate(h)).identity, "overlay/submit", { fn: "submit", args: { beef, topics } })); } catch (e) { process.stdout.write(`  (submit by message to ${h} refused: ${(e as Error).message})\n`); return { refused: (e as Error).message, answers: async () => [] as Array<Record<string, unknown>> }; }
     await r.settled();
     return { id, refused: undefined as string | undefined, answers: () => answersTo(file, id) };
   };

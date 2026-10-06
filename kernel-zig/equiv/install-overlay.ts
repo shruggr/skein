@@ -19,7 +19,7 @@
 //     (which broadcasts it), admits it on the chain app's answer (Arcade's
 //     word); /overlay/lookup finds it; an HTTP /overlay/submit answers its
 //     delivery, {id} (skein-overlay 0.7.4, #112), and is admitted; a submission by
-//     message into box overlay is answered admitted, naming the message;
+//     message into box overlay/submit is answered admitted, naming the message;
 //   - BRC-22 → the chain app → BRC-24 over HTTP at the base URL
 //     /@<handle>/overlay (#111): a mined token's BEEF to <base>/submit with
 //     X-Topics: tm_demo, the chain app's answer proven (nothing broadcast),
@@ -71,7 +71,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "067b94072a1ba0ceb0ae4af0b839d0d867f6a499";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "5e948536058220d34d819382369e1c7f468bf1a5";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -240,11 +240,13 @@ try {
   check(code === 0, `skein plan install skein-overlay beside the chain app (requires chain/1 satisfied): exit ${code} ${err.join(" ")}`);
   check(["row       libp2p tm_demo from anyone → overlay.submit (filter beef)", "row       libp2p tm_demo-admit from anyone → overlay.peerAdmit", "row       libp2p tm_demo-proof from anyone → overlay.peerProof", "row       http /overlay/submit from anyone → overlay.submit (filter beef)", "row       http /overlay/lookup from anyone → overlay.lookup", "row       mailbox overlay from event → overlay", "row       mailbox overlay from $self → overlay"].every((x) => derived.some((l) => l.includes(x))) && derived.length === 7 && derived.filter((l) => l.includes("(filter beef)")).length === 2 && out.some((l) => l.includes("dispatch add http /overlay/submit from anyone → overlay.submit (filter beef)")), `the prompt shows the wiring derived from config.overlay, the filter of the submit rows (#121) among it (${derived.length} lines: ${derived.map((l) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "")).join(" | ")})`);
   check(!out.some((l) => /grants|mailbox (chain|status|submit) from .* → overlay/.test(l)), "no grants, no chain/status/submit box for the overlay (#79: the chain app's)");
+  // 0.7.6 (#128): the stock manifest's submission row is the box `submit` (overlay/submit here; the old own-box row "" is gone).
+  check(out.some((l) => l.includes("row       mailbox overlay/submit from anyone → overlay (filter beef)")) && !out.some((l) => l.includes("row       mailbox overlay from anyone")), `the prompt shows the manifest's submission row, the box overlay/submit from anyone (filter beef), and no own-box row from anyone (${out.filter((l) => /mailbox overlay\S* from/.test(l)).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")})`);
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.7.5" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.7.5), with config.overlay; no alias head `overlay`");
-  check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "http /overlay/lookup", "mailbox overlay"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)), `the dispatch table has the derived rows: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
+  check(app?.kind === "app" && app.version === "0.7.6" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.7.6), with config.overlay; no alias head `overlay`");
+  check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "http /overlay/lookup", "mailbox overlay", "mailbox overlay/submit"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)), `the dispatch table has the derived rows: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const topics1 = ["tm_demo", "tm_demo-admit", "tm_demo-proof"];
   const s1 = await until("the node subscribes the installed topics", () => { const s = served(); return s && topics1.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!s1 && s1.topics.length === 3, `live, no restart: the instance's node subscribes ${s1?.topics.join(", ")}`);
@@ -296,7 +298,7 @@ try {
   const subId = (await sub.json() as { id?: unknown }).id;
   const steak = await until("t2 admitted", async () => { await rA.settled(); return await steakOf(store, t2.id("hex")); }, 20_000).catch(() => undefined);
   check(sub.status === 200 && typeof subId === "string" && JSON.stringify(steak) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}', `POST /overlay/submit: ${sub.status} {id: ${String(subId).slice(0, 16)}…}; admitted, the STEAK in its step's result ${JSON.stringify(steak)}`);
-  // A submission by message (0.7.3+, #112): {fn: "submit", args: {beef, topics}} into box `overlay` (the manifest's row
+  // A submission by message (0.7.3+, #112): {fn: "submit", args: {beef, topics}} into box `overlay/submit` (0.7.6: the manifest's row `submit`
   // from anyone, filter beef) from a wallet's session; answered admitted, naming the message. No message reaches that
   // sender (not in the address book): the answer is in the step's result record.
   const tS = new Transaction();
@@ -305,10 +307,10 @@ try {
   tS.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 8_000 });
   await tS.sign();
   const submitter = new RawBox(ephemeralWallet(key("8888")), `http://127.0.0.1:${rA.port}/@ov`);
-  const { id: msgId } = await submitter.send((await rA.hydrate("ov")).identity, "overlay", { fn: "submit", args: { beef: new Uint8Array(tS.toBEEF()), topics: ["tm_demo"] } });
+  const { id: msgId } = await submitter.send((await rA.hydrate("ov")).identity, "overlay/submit", { fn: "submit", args: { beef: new Uint8Array(tS.toBEEF()), topics: ["tm_demo"] } });
   const msgA = await until("the message submission's answer", async () => { await rA.settled(); const a = await answersTo(store, msgId); return a.length ? a : undefined; }, 20_000).catch(() => [] as Array<Record<string, unknown>>);
   const msgR = msgA[0]?.result as { state?: string; status?: string; txid?: string; steak?: unknown } | undefined;
-  check(msgR?.state === "admitted" && msgR.txid === tS.id("hex") && JSON.stringify(steakShape(msgR.steak)) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}' && String(CID.asCID(msgA[0]!.replyTo)) === String(msgId), `a submission by message to box overlay: answered ${msgR?.state} (${msgR?.status}), naming the message, its STEAK ${JSON.stringify(steakShape(msgR?.steak))} (${msgA.length} answer(s))`);
+  check(msgR?.state === "admitted" && msgR.txid === tS.id("hex") && JSON.stringify(steakShape(msgR.steak)) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}' && String(CID.asCID(msgA[0]!.replyTo)) === String(msgId), `a submission by message to box overlay/submit: answered ${msgR?.state} (${msgR?.status}), naming the message, its STEAK ${JSON.stringify(steakShape(msgR?.steak))} (${msgA.length} answer(s))`);
   // 0.7.4: exactly one answer (0.7.3 answered it twice: op "answer" at admission, and "received" again when the
   // received step woke on its launched thread's end).
   check(msgA.length === 1, `the message submission was answered once (${msgA.length})`);
@@ -360,7 +362,7 @@ try {
   mf2.config.overlay = { topics: { tm_two: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: ["tm_two"] } }, gossip: { tm_two: true } };
   // skein-overlay 0.7.0 (#128): the stock manifest's row {address: "overlay", sender: "$owner"} is the box
   // overlay2/overlay here; register / deregister go there (0.7.5: only there — refused bad-args in any other box, the
-  // app's own included; submit is taken in any box routed to the engine).
+  // app's own included; 0.7.6: submissions in the box overlay2/submit).
   // 0.7.3: the manifest's libp2p row /skein/overlay/beef/1.0.0 (the want-answer stream) is global, not under the
   // app's name: two apps installing it clash ("app overlay has it"). Dropped from overlay2's copy — a design point
   // pending with David (one stream protocol per instance, or one per app).
