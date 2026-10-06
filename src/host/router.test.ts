@@ -153,7 +153,8 @@ test("router: sessions are state (#68) — the stock client's handshake is an en
 
 test("router: the host's headers feed (#102) reaches only the instances whose dispatch table takes events in box `chain` — a row added later subscribes, removed unsubscribes", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const conns: ServerResponse[] = [];
-  const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": hello\n\n"); conns.push(res); });
+  // Only the tip stream (no history here: the image's chain part, #132, stays empty and says so).
+  const server = createServer((req, res) => { if (!req.url?.endsWith("/tip/stream")) { res.writeHead(404).end(); return; } res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": hello\n\n"); conns.push(res); });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   t.after(() => { for (const c of conns) c.end(); server.close(); });
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/chaintracks/v2/tip/stream`;
@@ -165,7 +166,9 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   await h.router.settled();
   const subscribed = () => ["david", "a", "b"].filter((x) => h.router.feeds.hosts(x));
   assert.deepEqual(subscribed(), [], "no instance has a chain row yet");
-  assert.equal(conns.length, 0, "no connection without a subscriber");
+  // #132: the host listens itself (the default image's chain part grows by it): one connection, shared with the instances later.
+  await until("the host's own connection", () => conns[0]);
+  assert.equal(conns.length, 1, "one connection: the host's own, no instance's");
 
   // A row taking box `chain` from anyone (events included, as the chain app's `event` row does), added to `a`: `a` is subscribed, live.
   const programs = Object.keys(((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, unknown> }).programs);
@@ -178,7 +181,7 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   await until("a subscribed", async () => { await h.router.settled(); return h.router.feeds.hosts("a") || undefined; });
   assert.deepEqual(subscribed(), ["a"]);
   assert.ok(h.lines.includes(`[router] a: subscribed to the host's headers feed ${url}`), h.lines.join("\n"));
-  await until("connected", () => conns[0]);
+  assert.equal(conns.length, 1, "the same connection");
 
   // A header (chaintracks' JSON, mainnet block 1): an entry in `a`, nothing in `b` or `david`.
   const n0 = { a: await h.entries("a"), b: await h.entries("b"), david: await h.entries("david") };

@@ -18,6 +18,12 @@ docs/BOOTSTRAP.md, "The default image".
 - `etc/dispatch.json`: the claim row and the messagebox's box and http rows.
   The explorer row (`/explore`) is the claim's: the kernel writes it with
   the owner's key (#121).
+- `chain/` (#132): **not in the repo** — the host adds it. The image a
+  host boots skeins from is this directory with the whole header chain at
+  `chain/headers/<first>` (2016 raw headers a block) and `chain/tip`, grown
+  with every header the host receives (src/host/image-chain.ts; host.db
+  `image`, `image_chain`, `image_blocks`), so a skein is born with the
+  chain up to the current tip. docs/BOOTSTRAP.md, "The image's chain part".
 - `apps/git/`: shruggr/skein-git v0.1.2's tree (the same git tree as that
   tag's commit; its fetch is the SDK's `fetch` intention, #126; its manifest
   check is skein's checkManifest, rule for rule: an overlay may list no topics). Not wired: the management page installs it from here as the

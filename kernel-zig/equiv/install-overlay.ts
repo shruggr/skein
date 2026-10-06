@@ -73,7 +73,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
 const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "9e30a64451353145e950d001f79886a60c6f2bb1";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));

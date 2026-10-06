@@ -47,7 +47,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -123,7 +123,7 @@ try {
   check(code === 0, `skein plan install skein-chain: exit ${code} ${err.join(" ")}`);
   check(["event", "$self", "$owner"].every((who) => out.some((l) => l.includes(`row       mailbox chain from ${who} → chain`))) && out.some((l) => /row {7}mailbox chain\/status from \$status .*→ chain/.test(l)) && !out.some((l) => l.includes("mailbox chain from anyone")), `the prompt shows its rows (#79: no open box): ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.3.2", "the head chain/app is the app record (0.3.2)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.4.0", "the head chain/app is the app record (0.4.0)");
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
   const senderOf = (r: Record<string, unknown>) => r.sender instanceof Uint8Array ? Buffer.from(r.sender).toString("hex") : String(r.sender);
   check(rows.length === 4 && rows.every((r) => r.transport === "mailbox" && !("optional" in r)) && rows.map((r) => r.address).join(",") === "chain,chain,chain,chain/status"

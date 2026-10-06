@@ -265,6 +265,14 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   A header comes as hex or as chaintracks' JSON (Arcade's
   `/chaintracks/v2/tip/stream`: the 80 bytes are serialized from its
   fields, and one whose `hash` is not theirs is dropped).
+- **The image's chain part** (`src/host/image-chain.ts`, #132): the host
+  listens to its own feed too, and appends every header it brings to the
+  default image (`chain/headers/<first>`, 2016 raw headers a block, and
+  `chain/tip`: a new tree per header), filled from genesis at start out of
+  the feed's chaintracks history (`…/headers?height=&count=`). Its objects
+  and its current root are in host.db. A skein is created from the image as
+  it stands, so it is born with the chain up to the current tip; the chain
+  app loads it at its first step. Headers are pushed: no skein asks for one.
 - **The store**: one SQLite file per instance
   (`$SKEIN_HOME/instances/<handle>/runtime.db`), written by the kernel
   process.
@@ -406,7 +414,9 @@ a checkpoint. **The default image** (`images/default`, #89) is a tree whose
 genesis names no owner: it carries the claim row instead, and the first
 claim — its sender is the owner (#127): the owner's own message, or a claim
 the owner signed before the instance existed, forwarded by the instance
-manager — writes the owner's admin rows and removes the row. `BOOTSTRAP.md` has the detail.
+manager — writes the owner's admin rows and removes the row. The host
+adds the whole header chain to it (#132, `chain/`) and grows it with every
+header it receives, so a skein is born with the chain. `BOOTSTRAP.md` has the detail.
 
 ## Files in and out
 

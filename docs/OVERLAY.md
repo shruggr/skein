@@ -289,7 +289,7 @@ management page (`https://<handle>.skein.nexus/`: an app by repository URL
 and commit id), or from any machine with your wallet:
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-chain#22ae34d5646f30aef35b0efcad39a7be8ae7ac34 --origin https://<handle>.skein.nexus --out chain
+bin/skein plan install https://github.com/shruggr/skein-chain#e8d21021182ae02c673e2a2809cea5e1988bd47a --origin https://<handle>.skein.nexus --out chain
 bin/skein send https://<handle>.skein.nexus chain
 bin/skein plan install https://github.com/shruggr/skein-overlay#6851cc79e6a52b0f398b238e526e7ca02ac45d1c --origin https://<handle>.skein.nexus --out overlay
 bin/skein send https://<handle>.skein.nexus overlay

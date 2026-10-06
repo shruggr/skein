@@ -73,7 +73,11 @@
 // topics subscribed, an uninstall's unsubscribed, live (`syncDispatch`).
 // The host's headers feed (#102, `headersFeed`, SKEIN_HEADERS_URL; feeds.ts)
 // follows the table the same way: an enabled instance is subscribed while
-// a row of it takes events in box `chain` (the chain app's), else not.
+// a row of it takes events in box `chain` (the chain app's), else not. The
+// router itself listens to it too (#132, image-chain.ts): the default image
+// carries the whole header chain and grows with every header the feed
+// brings (filled from genesis at start from the feed's chaintracks history),
+// and createInstance boots each new skein from the image as it stands.
 //
 // Nothing here is an instance's clock but its providers (#69): a schedule
 // originates in a program's step, as a message to the cron provider; an
@@ -96,7 +100,8 @@ import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../run
 import { openStoreFile } from "../runtime/index-store.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
-import { boot, bootStore, imageSource, type BootSource, type Booted } from "./boot.ts";
+import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
+import { historyOf, ImageChain } from "./image-chain.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
@@ -329,8 +334,12 @@ export class Router {
   /** The control socket (control.ts), while this router listens on one. */
   private control?: { server: NetServer; path: string };
 
+  /** The default image (#89), with its chain part (#132): what createInstance boots a new skein from. */
+  readonly image: ImageChain;
+
   constructor(o: RouterOptions) {
     this.o = o;
+    this.image = new ImageChain({ db: o.db, history: historyOf(o.headersFeed), log: (l) => this.say("router", l) });
     this.stopping = new Promise<void>((r) => { this.stopNow = r; });
     this.feeds = new Feeds({
       admit: (h, box, ev) => this.admitEvent(h, box, ev), log: (s, l) => this.say(s, l),
@@ -448,6 +457,11 @@ export class Router {
 
   /** Hydrate every enabled row once (recovery at hydrate time: what a waiting thread awaits is handed to the providers again), then let them idle out. */
   async start(): Promise<void> {
+    // #132: the image's chain part, filled from the feed's history (from genesis once; then from near its tip), then grown by the feed.
+    if (this.o.headersFeed) {
+      void this.image.start();
+      this.feeds.listen(this.o.headersFeed, (raws) => { void this.image.headers(raws); });
+    }
     for (const row of this.o.db.list("enabled")) {
       try { await this.hydrate(row.handle); } catch (e) { this.say(row.handle, `not started: ${(e as Error).message}`); }
     }
@@ -813,7 +827,8 @@ export class Router {
     this.o.db.add(handle, { store, status: "disabled", domain: o.domain ?? await this.handleDomain() }); // H4: never the column's `localhost` on a host with a domain
     this.unpublished.add(handle);
     try {
-      await this.bootRow(handle, await imageSource(), { image: true, manager: o.host });
+      await this.image.ready; // #132: born with the chain as the host holds it
+      await this.bootRow(handle, await this.image.source(), { image: true, manager: o.host });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner.
@@ -824,7 +839,8 @@ export class Router {
       }
       if (o.host) this.o.db.setSetting("host_skein", handle);
       if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
-      this.say("router", `created ${handle} (${short(l.identity)}) from the default image, ${claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      const tip = this.image.tip();
+      this.say("router", `created ${handle} (${short(l.identity)}) from the default image${tip ? ` (its chain to ${tip.height})` : ""}, ${claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);

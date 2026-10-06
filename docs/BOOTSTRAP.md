@@ -48,6 +48,7 @@ images/default/
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
   apps/git/                               the git app: shruggr/skein-git v0.1.2's tree, copied, not wired
+  chain/headers/<first>, chain/tip        the chain part (#132): not in the repo — the host adds it (below)
 ```
 
 It has the four tables and the programs needed to be reachable and to
@@ -73,10 +74,72 @@ records), as any system tree wires its programs.
   raw block, the program and app records), then `head`, the `dispatch` row
   and `start`. Every other app is then deployed by hash through it.
 
+### The image's chain part (#132)
+
+**The image carries the whole header chain**, and grows with every header
+the host receives. Headers are network facts, not host facts, so they may
+be in the image; a skein holds the chain from genesis (every proof is
+verifiable, no checkpoint) and never asks for a header: headers are pushed.
+The default image is therefore a **host-maintained tree**: the static part
+(the repo's `images/default`, above) with `chain/` added at its root:
+
+```
+chain/headers/<first>   the raw 80-byte headers, concatenated in height order, 2016 per block; <first> the
+                        first one's height in 8 digits (00000000, 00002016, …); every block but the last
+                        is full, the last holds the rest
+chain/tip               {"height":<n>,"hash":"<the last header's hash, display hex>"} and a newline
+```
+
+The format is skein-sdk's (`chain/src/image.zig`); the host writes the same
+bytes (`src/host/image-chain.ts`):
+
+- **Grown per header.** Every header the host's headers feed brings
+  (`SKEIN_HEADERS_URL`, feeds.ts: the host listens to it itself, besides
+  the instances it subscribes) is appended: a new tree per header — the
+  last block (at most 2016 × 80 bytes), the tip, the two trees above them
+  and the root are rewritten; every full block stays as it is. A header
+  that links a little below the tip replaces from there (a reorg).
+- **Filled from history.** At start, the host fills the chain from the
+  feed's chaintracks service — its history by height, `…/headers?height=&count=`
+  beside `…/tip/stream` (80 bytes a header) — from genesis the first time,
+  afterwards from a little below its tip (a restart, a gap, a deeper reorg).
+  A header the feed brings that links to none near the tip goes the same
+  way; with no history service (a feed that is not chaintracks') it is
+  dropped and logged.
+- **Checked as the chain app checks**: each header links to the one
+  before, its target is usable, its hash meets it. The host does not judge
+  the network: the chain app refuses an image whose first header is not its
+  configured network's genesis.
+- **Kept in host.db**: the chain part's git objects in `image_blocks` (only
+  the current ones: what a write replaces it deletes), the current root and
+  `chain` tree in `host_settings` (`image`, `image_chain`). The static part
+  is scanned from the repo as before.
+
+**A skein is born with the chain up to the current tip**: the instance
+manager's `create` (and `skein-host init`, `skein-host add <h> --image
+default`) boots from the image as it stands — after the first fill at
+start — so its tree, and its store, carry `chain/headers`. The chain app
+(shruggr/skein-chain 0.4.0), installed later, loads them into its empty
+`chain/state` at its first step (it reads `main`, the genesis's tree; its
+docs/CHAIN.md, "Born with the chain"); from the skein's creation on, the
+feed pushes the tip per header as before. Replay: the image tree is the
+genesis's, so the chain app loads the same; nothing new is in the log. An
+instance made before #132 has no `chain/` in its tree and starts empty.
+
+Costs on mainnet (about 970 000 headers, 2026-10): the chain part is
+78 MB of header blocks in host.db; filling it from a local chaintracks
+takes about 10 s; each new skein's store starts with those 78 MB, and the
+chain app's first step takes about 15 s and adds about 330 MB (each header
+as its own block, and the `headers` and `heights` maps). A host store
+shared by the skeins (backlog) would hold the blocks once.
+
+A host with no headers feed has no chain part: the image is the static part
+alone, as before.
+
 The image's genesis is written by `skein-host add <h> --image <spec>`:
 
-- `default` (the repo's `images/default`), a directory, or a tree CID with
-  `--from <store.db>`;
+- `default` (the default image as this host holds it: `images/default` with
+  its chain part, #132), a directory, or a tree CID with `--from <store.db>`;
 - an outpoint (`<txid>_<vout>`) is refused for now: an image on chain is read
   through the ORDFS app, which is not built yet.
 
@@ -488,6 +551,18 @@ boot is written, and the process exits 0.
   in `bin/`, the order of defaults, the owner's admin rows first); its
   refusals.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
+- `src/host/image-chain.test.ts` (#132): the image's chain part filled from
+  a fake chaintracks history from genesis, grown per header (the full
+  blocks kept, the last block and the tip rewritten, the replaced objects
+  deleted), a reorg near the tip, a gap filled from the history (dropped
+  with none), a restart from host.db, refusals; the boot source the static
+  part with `chain/` beside it. `kernel-zig/equiv/image-chain.ts` (in
+  `run.sh`): on regtest, N headers in a fake chaintracks' history and M on
+  its tip stream, all before any skein exists; a skein created from the
+  image holds `chain/headers` and `chain/tip`; the chain app installed, the
+  next header is the first header event it takes, and its chain state then
+  holds every header from genesis (no feed replay); `add --image default`
+  boots from the same image; replayed.
 - `src/host/boot.test.ts` also resolves the default image: no owner, no
   admin rows, the claim row its one kernel row, the explorer route with the
   read rule `{op: "explore", owner: true}`, nothing at `/`, `/site` or

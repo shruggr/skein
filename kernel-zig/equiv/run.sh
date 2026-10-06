@@ -122,6 +122,9 @@ echo "== subscriptions (#119) and beacons (#126): two apps (programs/test/app-de
 echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by the owner's messages (skein plan install, #124), on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
 "${node[@]}" "$kz/equiv/chain.ts" || status=1
 
+echo "== the image carries the header chain (#132): a fake chaintracks' history (N regtest headers) and tip stream (M more), all before any skein exists; the host builds the default image's chain part from genesis at start and grows it per header; a skein created from the image holds chain/headers and chain/tip; its owner installs the chain app (shruggr/skein-chain at image-chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR); the next header is the first it takes, and its chain state holds all N + M + 1 from genesis (no feed replay); add --image default boots from the same image; replayed"
+"${node[@]}" "$kz/equiv/image-chain.ts" || status=1
+
 echo "== serve: the process interface, fuel exhaustion, its stores replayed"
 "${node[@]}" "$kz/equiv/serve.ts" || status=1
 

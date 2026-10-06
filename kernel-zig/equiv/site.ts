@@ -401,10 +401,11 @@ try {
   // ------------------------------------------------ 4. the host skein's page: its children
   await page.goto(`${sitePage}${search}`);
   await ready();
+  await page.click("[aria-controls=add-panel]"); // 0.7.x: the add form behind its link
   await page.fill("#add-locator input[name=handle]", "host");
   await page.click("#add-locator button[type=submit]");
   const hostId = db.get("host")!.identity!;
-  await page.waitForSelector(`tr[data-locator="${hostId}"]`, { timeout: 120_000 });
+  await page.waitForSelector(`[data-locator="${hostId}"]`, { timeout: 120_000 });
   check(true, "a locator for the host skein added from the page (its identity from its signed answer)");
   await page.goto(`${sitePage}${search}#/s/${hostId}`);
   await page.waitForSelector("#children", { timeout: 60_000 });
@@ -455,7 +456,7 @@ try {
     `the certificate removed from the wallet (relinquishCertificate), then registered again: a new serial (${"serialNumber" in again ? again.serialNumber : ""}), which the wallet acquires (${"error" in again ? again.error : `holds ${"held" in again ? again.held.length : 0}`})`);
   await page.goto(`${sitePage}${search}`);
   await ready();
-  await page.waitForSelector('tr[data-handle="you@localhost"]', { timeout: 60_000 });
+  await page.waitForSelector('[data-handle="you@localhost"]', { timeout: 60_000 });
   const handles = await page.locator("#handles").innerText();
   check(handles.includes("you@localhost") && handles.includes(`${base}/@you`), `"Your handles" shows it, resolved to its messagebox (${handles.replace(/\s+/g, " ").trim()})`);
 

@@ -68,7 +68,7 @@ const WALLET = abi === "component" ? { ...WALLET_P1, code: { wasm: rawCid(readFi
 const WALLET_CID = encode(WALLET).cid;
 // The chain app (#78, #79): SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "a4c91a4654ce8560ec7803c2254c7be1c55d5173";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

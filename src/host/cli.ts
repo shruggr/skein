@@ -100,7 +100,10 @@
 //                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
 //   SKEIN_HEADERS_URL     the host's headers feed (#102, feeds.ts): an SSE stream of block headers (hex, or chaintracks'
 //                         JSON: Arcade's http://127.0.0.1:8083/chaintracks/v2/tip/stream) that every enabled instance
-//                         whose dispatch table takes events in box `chain` (the chain app's row) is subscribed to
+//                         whose dispatch table takes events in box `chain` (the chain app's row) is subscribed to;
+//                         and the default image's chain part (#132, image-chain.ts): every header it brings is
+//                         appended to the image, which a chaintracks URL's history (`…/tip/stream` → `…/headers`)
+//                         fills from genesis at start
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -202,7 +205,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
           // A one-shot (#61): the router it boots through is closed before `add` returns, so the process exits.
           const router = new Router({ ...routerOptions(db, env), idleMs: 0 });
           try {
-            const src = await bootSourceOf(v.image !== undefined ? { boot: v.image === "default" ? DEFAULT_IMAGE : v.image, from: v.from } : v, r);
+            // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
+            const src = v.image === "default" ? await router.image.source() : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
             env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it from your wallet (skein plan claim, skein send)" : ""}`);
           } catch (e) {

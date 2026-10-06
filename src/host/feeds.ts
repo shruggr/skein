@@ -26,7 +26,8 @@
 // the Router's `headersFeed`): every enabled instance whose dispatch table
 // takes events in box `chain` is subscribed to it, the others not; the router
 // keeps that current as dispatch tables change (`host`). A genesis's `feeds`
-// are in addition.
+// are in addition. The host listens to it itself too (#132, `listen`): every
+// header it brings grows the default image's chain part (image-chain.ts).
 //
 // `box` defaults to "chain" (the wallet's sender-less subscription). Nothing
 // here judges an item: the instance's own chain tracker validates headers and
@@ -263,6 +264,7 @@ export class Feeds {
   private sse = new Map<string, Sse>();
   private declared = new Map<string, FeedSpec[]>();
   private hosted = new Map<string, FeedSpec>();
+  private listeners = new Map<string, (raws: Uint8Array[]) => void>();
   private queues = new Map<string, Queue>();
   private stopped = false;
 
@@ -284,6 +286,17 @@ export class Feeds {
     this.subscribe(handle);
   }
 
+  /**
+   * The host's own listener on a headers feed (#132: the default image's
+   * chain part grows by it): every header the stream brings, as well as the
+   * subscribers'. The connection stays open while a listener is on it.
+   */
+  listen(url: string, fn: (raws: Uint8Array[]) => void): void {
+    if (this.stopped) return;
+    this.listeners.set(url, fn);
+    this.connect(url);
+  }
+
   /** Whether `handle` is subscribed to the host's own feed. */
   hosts(handle: string): boolean { return this.hosted.has(handle); }
 
@@ -293,22 +306,27 @@ export class Feeds {
     const specs = [...(this.declared.get(handle) ?? []), ...(h ? [h] : [])];
     for (const [url, s] of this.sse) {
       if (s.subscribers.has(handle) && !specs.some((f) => f.kind === "headers" && f.url === url)) s.subscribers.delete(handle);
-      if (!s.subscribers.size) { void s.stream.stop(); this.sse.delete(url); }
+      if (!s.subscribers.size && !this.listeners.has(url)) { void s.stream.stop(); this.sse.delete(url); }
     }
     for (const f of specs) {
       if (f.kind !== "headers") continue;
-      let s = this.sse.get(f.url);
-      if (!s) {
-        const subscribers = new Map<string, string>();
-        const stream = new SseStream(f.url, (ev) => this.dispatch(f.url, subscribers, ev.data), {
-          backoff: this.o.backoff, fetch: this.o.fetch, log: (l) => this.say("router", `feed ${f.url}: ${l}`),
-        });
-        s = { stream, subscribers };
-        this.sse.set(f.url, s);
-        stream.start();
-      }
-      s.subscribers.set(handle, f.box ?? DEFAULT_BOX);
+      this.connect(f.url).subscribers.set(handle, f.box ?? DEFAULT_BOX);
     }
+  }
+
+  /** The one connection to `url`, opened if it is not. */
+  private connect(url: string): Sse {
+    let s = this.sse.get(url);
+    if (!s) {
+      const subscribers = new Map<string, string>();
+      const stream = new SseStream(url, (ev) => this.dispatch(url, subscribers, ev.data), {
+        backoff: this.o.backoff, fetch: this.o.fetch, log: (l) => this.say("router", `feed ${url}: ${l}`),
+      });
+      s = { stream, subscribers };
+      this.sse.set(url, s);
+      stream.start();
+    }
+    return s;
   }
 
   /** The declared feeds of `handle`. */
@@ -354,6 +372,7 @@ export class Feeds {
     let dropped = false;
     const hs = headersOf(data, (why) => { dropped = true; this.say("router", `feed ${url}: ${why}`); });
     if (!hs.length) { if (!dropped) this.say("router", `feed ${url}: an event with no header in it: ignored`); return; }
+    this.listeners.get(url)?.(hs);
     for (const [handle, box] of subscribers) for (const raw of hs) this.push(handle, box, { kind: "header", raw });
   }
 }
