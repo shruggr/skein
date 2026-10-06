@@ -70,6 +70,7 @@ const blobCid = (s: string) => {
 
 const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) });
+h.instance("site");
 const ih = { home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() };
 
 type Got = { status: number; type: string; etag: string; location: string; allow: string; body: string };

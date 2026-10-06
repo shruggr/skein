@@ -32,7 +32,7 @@ docs/BOOTSTRAP.md, "The default image".
   with every header the host receives (src/host/image-chain.ts; host.db
   `image`, `image_chain`, `image_blocks`), so a skein is born with the
   chain up to the current tip. docs/BOOTSTRAP.md, "The image's chain part".
-- `apps/git/`: shruggr/skein-git v0.1.2's tree (the same git tree as that
+- `apps/git/`: shruggr/skein-git v0.1.3's tree (#135: reads[] in the record) (the same git tree as that
   tag's commit; its fetch is the SDK's `fetch` intention, #126; its manifest
   check is skein's checkManifest, rule for rule: an overlay may list no topics). Not wired: the management page installs it from here as the
   owner (objects for its module and records, head, dispatch, start), and

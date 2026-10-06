@@ -94,7 +94,7 @@ export type Row = RowIn & { transport: "mailbox" | "http" | "libp2p" };
 
 /** A manifest checked: the fields as installed. */
 export interface Checked {
-  manifest: Omit<Manifest, "dispatch" | "reads"> & { dispatch: Row[]; reads: ReadIn[]; provides: Provide[]; requires: string[] };
+  manifest: Omit<Manifest, "dispatch" | "reads"> & { dispatch: Row[]; reads?: ReadIn[]; provides: Provide[]; requires: string[] };
   sources: Record<string, ProgramSource>;
   /** What `config.overlay` added (APPS.md §6): row keys (rowKey). */
   derived: Derived;
@@ -342,7 +342,8 @@ export function checkManifest(json: unknown, has: (path: string) => boolean): Ch
   if (bad.length) throw new ManifestError(bad);
   const { dispatch: _d, reads: _r, ...rest } = m as Manifest;
   void _d; void _r;
-  const out = { ...rest, dispatch: rows, reads, provides, requires };
+  // `reads` only when there are any (#135): the record of an app with none is as it was (and as the git app builds it).
+  const out = { ...rest, dispatch: rows, ...(reads.length ? { reads } : {}), provides, requires };
   return { manifest: out, sources, derived };
 }
 

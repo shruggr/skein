@@ -45,7 +45,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { wasmDirObjects } from "../../src/host/boot.ts";
-import { instanceView, planInstall, readApp, readStoredApp, sendInstall } from "../../src/host/install.ts";
+import { instanceView, planInstall, readApp, readStoredApp, readsIn, sendInstall } from "../../src/host/install.ts";
 import type { HttpRequest } from "../../src/host/providers.ts";
 import { fetchHttp } from "../../src/host/router.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
@@ -257,16 +257,18 @@ try {
   if (ov.result?.tree && ov.result.app) {
     const ovPlan = await planInstall(await readStoredApp(view, ov.result.tree), await instanceView(view), { modules: wasmDirObjects(join(here, "../../wasm")) });
     check(ovPlan.recordCid.equals(ov.result.app), `planInstall rebuilds its record: the same CID (${ovPlan.recordCid} = ${ov.result.app})`);
-    const ovRec = await kk.store.get(ov.result.app) as { dispatch?: Array<{ transport: string; address: string; sender: string; filter?: string }> };
+    const ovRec = await kk.store.get(ov.result.app) as { dispatch?: Array<{ transport: string; address: string; sender: string; filter?: string }>; reads?: Array<{ address: string; fn: string }> };
     const keys = (ovRec.dispatch ?? []).map((r) => `${r.transport} ${r.address} ${r.sender}${r.filter ? ` ${r.filter}` : ""}`).join(", ");
-    check(keys === "mailbox register $owner, mailbox submit * beef, mailbox  event, mailbox ov-dyn $self, http /submit * beef, http /lookup *",
-      `its rows as written, then the derived ones the manifest has not (the box "" from event is the app's box): ${keys}`);
+    check(keys === "mailbox register $owner, mailbox submit * beef, mailbox  event, mailbox ov-dyn $self, http /submit * beef" && JSON.stringify(ovRec.reads?.map((r) => `${r.address} ${r.fn}`)) === '["/lookup lookup"]',
+      `its rows as written, then the derived ones the manifest has not (the box "" from event is the app's box); #135: /lookup a read: ${keys} · reads ${JSON.stringify(ovRec.reads)}`);
     const sentOv = await sendInstall(ovPlan, (box, body) => owner.send(inst, box, dagCbor.decode(body)));
     await h.router.settled();
-    check(sentOv.messages === 1 + 6, `the install: head and six dispatch rows (${sentOv.messages} messages)`);
+    check(sentOv.messages === 1 + 2 + 5, `the install: objects (the reads record, #135), head ov-dyn/app and head reads, five dispatch rows (${sentOv.messages} messages)`);
     const table = (await instanceView(view)).dispatch.filter((r) => (r as { app?: string }).app === "ov-dyn").map((r) => `${r.transport} ${r.address}`).sort().join(", ");
-    check(table === "http /ov-dyn/lookup, http /ov-dyn/submit, mailbox ov-dyn, mailbox ov-dyn, mailbox ov-dyn/register, mailbox ov-dyn/submit",
+    check(table === "http /ov-dyn/submit, mailbox ov-dyn, mailbox ov-dyn, mailbox ov-dyn/register, mailbox ov-dyn/submit",
       `the kernel's table holds them under the app's name: ${table}`);
+    const reads = (await readsIn(await instanceView(view))).filter((r) => r.app === "ov-dyn").map((r) => `${r.address} ${r.fn}`);
+    check(JSON.stringify(reads) === '["/ov-dyn/lookup lookup"]', `#135: the reads head holds its /lookup: ${JSON.stringify(reads)}`);
   }
 } catch (err) {
   check(false, `threw: ${(err as Error).stack}`);

@@ -263,8 +263,9 @@ test("reads[] (#135): a path under the app's, a role, a fn, settings carried; no
   const app = (more: Record<string, unknown>) => ({ kind: "app", name: "site", version: "1.0.0", programs: { site: "bin/site.wasm" }, ...more });
   const ok = checkManifest(app({ reads: [{ address: "/", prefix: true, program: "site", fn: "get", root: "www" }, { address: "status", program: "site", fn: "status" }] }), (p) => files.has(p));
   assert.deepEqual(ok.manifest.reads, [{ address: "/", prefix: true, program: "site", fn: "get", root: "www" }, { address: "status", program: "site", fn: "status" }]);
-  assert.deepEqual(ok.manifest.reads.map((r) => readKey("site", r)), ["/site/*", "/site/status"]);
+  assert.deepEqual((ok.manifest.reads ?? []).map((r) => readKey("site", r)), ["/site/*", "/site/status"]);
   assert.deepEqual(ok.manifest.dispatch, [], "an app with reads only takes no messages");
+  assert.ok(!("reads" in checkManifest(app({ dispatch: [] }), (p) => files.has(p)).manifest), "no reads: no field (the record of an app with none is as before, and as the git app builds it)");
   const bad = (reads: unknown, more: Record<string, unknown> = {}) => { try { checkManifest(app({ reads, ...more }), (p) => files.has(p)); return ""; } catch (e) { return (e as ManifestError).problems.join("\n"); } };
   assert.match(bad([{ address: "/x", program: "site", fn: "get", sender: "*" }]), /reads\[0\]: sender: not a read's/);
   assert.match(bad([{ address: "/x", program: "site", fn: "get", transport: "http" }]), /reads\[0\]: transport: not a read's/);

@@ -44,10 +44,10 @@ export const ONBOARD_APP: PinnedApp = {
   rev: process.env.SKEIN_ONBOARD_REV ?? "2f8a7b1d33c2a6b8ebdeb2018eb63d354fd05879", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
-/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1); 0.1.2: the manifest checked by every rule of src/host/manifest.ts (an overlay may list no topics, #120; boxes relative to the app, #128). */
+/** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1); 0.1.2: the manifest checked by every rule of src/host/manifest.ts (an overlay may list no topics, #120; boxes relative to the app, #128); 0.1.3: reads[] in the record, /lookup a read (#135). */
 export const GIT_APP: PinnedApp = {
   name: "git", repo: "https://github.com/shruggr/skein-git",
-  rev: process.env.SKEIN_GIT_REV ?? "39a8b95a558af756e43d77a104b2a9a902c5b0a7", dir: process.env.SKEIN_GIT_DIR,
+  rev: process.env.SKEIN_GIT_REV ?? "37267301fb4f3f079e69b82ad0cecc2e5ae7b3e9", dir: process.env.SKEIN_GIT_DIR,
 };
 
 /** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.2: bundles on a skein with no address-book roles, #126; 0.6.3: the catalog pins the current releases, git 0.1.2 among them; 0.7.3: the page in the skein brand — header and wallet chip, skein cards, the handle/Register card, the logged-out landing page; 0.7.6: Register over the wallet's session, #135; 0.7.7: the page a read, reads[], #135). */
