@@ -196,7 +196,7 @@ is gone: nothing writes it, and a row a log already holds with it is still
 read that way, so such a log replays. A row is the permission: who may read the explorer is the
 explorer row's sender (there is no reads table since #115). `program` is
 the handler, or the string `kernel`: an admin row, `fn` its operation (or the
-claim, or the host's `tick`: #130, "Billing" below).
+claim, or `billing`: the host row, which the host's wake comes in on: #130, "Billing" below).
 `filter` (#121) names what the kernel's door runs on the package's content
 before the entry is written ("The door", below, "Requests"): `beef`. The
 rest is the handler's own (a file handler's `root` and `index`, #125; the install's
@@ -548,8 +548,8 @@ message   dag-cbor {to: bytes(33), box: text, body: bytes, subject?: <cid>}
     does not subscribe the topic; a beacon stands until its app's unbeacon
     or its app's uninstall (no row of the app left). "If the server goes
     down, it will not be pinging that beacon": a true heartbeat.
-  - `payment` (#130): the kernel's pay step's alone (below, "Billing"); any
-    other step's emit of it is refused.
+  - `payment` (#130): a pay step's (below, "Billing"): the kernel's, or any
+    app's — nothing refuses it; the host takes what pays its key.
   - The events the reference host wires today: `broadcast` (Arcade),
     `subscribe` / `unsubscribe` and `beacon` / `unbeacon` (its libp2p
     node), `deadline` and `fetch` (intentions: its waker, its HTTP proxy).
@@ -912,17 +912,18 @@ zero. (Before #38: the stamp, then
 (`kernel-zig/src/billing.zig`, `scheduler.zig` "billing"; the host's side:
 `src/host/billing.ts`, scripts/host/README.md "Billing".) A hosted skein
 pays for its own hosting from its own wallet. The kernel meters what is in
-its log; the host meters what never reaches it and reports it on a signed
-tick; the kernel prepays the host block by block, and every payment
-checkpoints the state on-chain. Nothing here runs without a host row: a
-skein with none is not billed and behaves as it did.
+its log and the storage it keeps; the host meters what never reaches the log
+and attests it on the entries it appends; the kernel prepays the host block
+by block, and every payment checkpoints the state on-chain. Nothing here
+runs without a host row: a skein with none is not billed by its kernel (a
+host that bills does not serve it: scripts/host/README.md).
 
 **The host row** is the owner's grant of a host and its rates — a kernel row
 of the dispatch table, written with an ordinary `dispatch` admin message
 (`skein plan host`), updated or removed the same way:
 
 ```
-{transport: "mailbox", address: "billing", sender: <the host's key>, program: "kernel", fn: "tick",
+{transport: "mailbox", address: "billing", sender: <the host's key>, program: "kernel", fn: "billing",
  x: <sats>, rates?: {fuel, storage, served, fetch, authfetch, publish}}
 ```
 
@@ -933,9 +934,9 @@ a time. The rates:
 
 | rate | sats per | metered |
 |---|---|---|
-| `fuel` | 10^9 fuel | every step's fuel (a request's thread, a handler, a shell segment, the pay step itself); the host's read calls (on its tick) |
-| `storage` | 10^6 bytes held for a day | at each tick, for the time since the last |
-| `served` | 10^6 bytes the host served | on the host's tick |
+| `fuel` | 10^9 fuel | every step's fuel (a request's thread, a handler, a shell segment, the pay step itself, a step resumed at a restart); the host's calls for it — its reads, its door's `verify` (on its attestation) |
+| `storage` | 10^6 bytes held for a day | the bytes the kernel kept (below), on every entry, for the time since the last charge |
+| `served` | 10^6 bytes the host served | on its attestation |
 | `fetch` | `fetch` intention | each one a step that ended without error recorded |
 | `authfetch` | exchange | each recorded authfetch call |
 | `publish` | libp2p publish | each message to the libp2p provider in box `publish`, or to a `libp2p` recipient at `topic:<name>` |
@@ -948,36 +949,71 @@ owner's `head` message naming it is refused, and so is every program's
 
 ```
 {kind: "billing", host: bytes(33), allowance: <sats>, paid: <sats>, tally: <nanosats>,
- lastTick: <ms>, ticks, tick: <the entry of the last tick>, bytes: <the store's size measured there>,
+ lastCharge: <ms: the entry time storage was last charged to>, bytes: <the bytes kept>,
  payments, asleep: bool}
 ```
 
 Allocation = (allowance + paid) sats; consumed = the tally (nanosats inside,
 so a cheap rate still counts).
 
-**The tick** (the kernel operation `tick`, at the host row): a message from
-the host's key, signed by it (the door checks the signature, as a
-provider's), in the row's box — `{kind: "tick", at: <the host's ms>,
-allowance: <sats>, fuel: <its read calls' fuel since its last tick>, served:
-<bytes served since>, log?: <the CID of its log record for the period>}`.
-The host's first tick starts the state: its `allowance` (the host's free
-allowance for this skein) is the allocation, `at` the last tick, its amounts
-on the tally. Each later one charges storage — the store's bytes, measured
-now (the backend's pages in use), for `at − lastTick` — and the host's
-amounts, at the row's rates, and advances `lastTick`. A tick from another
-key than the first tick row's is refused, as is one with a time before the
-last tick's and one while asleep; a tick from a key with no row matches no
-row (nothing runs). A tick from another host's key, once the owner moved
-the row to it, starts a new state for that host. The measurement is an
-input: a replay is served the source's measurement for that tick (the
-witness reads the billing head's records), as it is a signer's answers.
+**The host's wake** (the kernel operation `billing`, at the host row): a
+message from the host's key, signed by it (the door checks the signature, as
+a provider's), in the row's box — `{kind: "wake", allowance: <sats>,
+received: <sats>}`. There is no periodic message: the host sends one to
+start billing, when it has computed that what is outstanding reaches the
+allocation, and after each funding it hands in (scripts/host/README.md). The
+first from this host starts the state: its `allowance` (the host's free
+allowance for this skein) is the allocation, the entry's time the last
+charge, the bytes kept so far (another host's state) carried over. Every one
+sets `paid` to `received`: what the host has taken from this skein and not
+seen rejected. Between wakes `paid` counts what the kernel's own pay steps
+paid (checked against the transaction), so it does not pay twice for a
+block while the host waits on its broadcast; at a wake the host's word
+replaces that — a payment the host did not get (Arcade rejected it) no
+longer counts, so the pay step fires again; one an app made does, so the
+kernel does not pay that block again. A wake from another key than the
+first billing row's is refused; one from a key with no row matches no row
+(nothing runs). A wake from another host's key, once the owner moved the row
+to it, starts a new state for that host.
 
-**The meter**, after each entry is processed (`billingAfter`): what the
-entry used — its steps' fuel, its billable events — at the row's rates goes
-onto the tally, written under the entry (once). A function of the log, so a
-replay writes the same.
+**The host's attestation** rides on any entry the host appends, when it has
+external cost not yet reported, and only then: the entry's `attest: {fuel,
+served, log: <cid>, signature}` — the fuel of the calls it made for the
+skein (its reads, the door's `verify` at each admission) and the bytes it
+served since its last one, and the CID of its log record for that period —
+signed by the host's key (BRC-3: [2, "skein billing"], key `attestation`,
+counterparty anyone) over the dag-cbor of `{kind: "attestation", instance:
+<this skein's identity>, fuel, served, log}`. `admit` checks its form; the
+meter takes it when it verifies against the host row's key, and says so when
+it does not (nothing is taken). Taking the host's numbers — and its
+`received` — is part of the grant the owner gives a host; the log hash is
+what the host can prove them with.
 
-**The pay step** (decided 5, 6): when the tally reaches the allocation, the
+**Storage, counted** (index.zig `kept`): while the skein is billed, a block
+the store creates while the kernel processes an entry — `putBlock` says
+whether it created it (SQLite's INSERT OR IGNORE; IndexedDB's map) — is kept
+and its bytes added; a block the store held already is kept, and added, only
+if the kernel had not kept it yet. What an admission put (the door's
+records, the log append) is kept when its entry is processed (the entry, the
+record it names, the door's BEEF records and bodies); a pre-fill (the image)
+or a replay's copies count the first time the kernel itself stores them. So
+the count is a function of the log's processing, whatever else filled the
+store: a replay keeps the same blocks and counts the same bytes. The kept
+blocks are a map of the index, named in the state record as `kept` once
+there is one (a skein never billed keeps the state record it had). MST nodes
+and state records are not counted (the engine's overhead is the host's to
+price). Nothing deletes blocks today; what does will subtract what it
+deletes. Storage counts from when billing starts.
+
+**The meter**, after every entry is processed (`billingAfter`): what was used
+since the last evaluation — every step's fuel (a step resumed at a restart
+too: its fuel waits for the next entry's meter) and the billable events —
+the entry's attestation, and storage — the bytes kept for the time since
+`lastCharge` (this entry's time), then this entry's newly kept bytes added —
+at the row's rates go onto the tally, written under the entry (once, when
+anything changed). A function of the log, so a replay writes the same.
+
+**The pay step** (decided 5): when the tally reaches the allocation, the
 kernel launches a thread of the genesis's wallet program itself, under the
 entry it processes —
 
@@ -986,24 +1022,26 @@ entry it processes —
  launchedBy: <the entry>, input: <the entry>, at, nonce: "pay.<i>"}
 ```
 
-— and runs it now. The wallet pays the host X, or everything it has (less
-the fee) if that is less, to a BRC-29 key derived for the host
-(counterparty the host's key), in one transaction whose other output, 0
-sats, is `OP_FALSE OP_RETURN <checkpoint>`; it emits the transaction as the
-event `payment` — `{kind: "event", event: "payment", txid: <bitcoin-tx>, tx:
-<Atomic BEEF>, outputIndex, amount, to, remittance: {derivationPrefix,
-derivationSuffix, senderIdentityKey}, checkpoint, thread, …}` — and ingests
-it at the chain app as any transaction it builds. The kernel reads the
-payment off the step (the output at `outputIndex` must carry `amount`, an
-output of 0 sats must commit the checkpoint) and adds it to `paid`; while
-the tally is still at the allocation it pays again (at most
-`billing.MAX_PAYS` in one entry). No app can start, stop or alter it: only
-the kernel launches a thread whose `launchedBy` is the entry it processes
-(a launched thread is launched by a thread), the wallet refuses `pay`
-otherwise, and the kernel refuses an emit of `payment` from anything but
-that thread's own first step (`emit: payment: only the kernel's pay step
-emits it`). The host is the payee: what it does with the event (keep it,
-broadcast it) is its wiring.
+— and runs it now. It cannot be bypassed: it fires whenever the allocation
+is consumed. The wallet pays the host X, or everything it has (less the
+fee) if that is less, to the host's key by a pre-set rule for the pair —
+BRC-29, keyID `c2tlaW4= aG9zdGluZw==` (base64 "skein", "hosting"),
+counterparty the host's key; one key per (skein, host), which the host
+derives with counterparty the skein's identity — in one transaction whose
+other output, 0 sats, is `OP_FALSE OP_RETURN <checkpoint>`; it emits the
+transaction as the event `payment` — `{kind: "event", event: "payment",
+txid: <bitcoin-tx>, tx: <Atomic BEEF>, outputIndex, amount, to, remittance:
+{derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint, thread,
+…}` — and ingests it at the chain app as any transaction it builds. The
+kernel reads the payment off its own pay step (the output at `outputIndex`
+must carry `amount`, an output of 0 sats must commit the checkpoint) and
+adds it to `paid`; while the tally is still at the allocation it pays again
+(at most `billing.MAX_PAYS` in one entry). Any app may also launch a pay
+step or emit a `payment` (nothing refuses either): it reaches the host as
+any `payment` does, and counts once the host has taken it (the next wake's
+`received`); the kernel credits its own pay steps only, so no app can put
+its trigger off. The host is the payee: it takes what pays its key,
+broadcasts it, and serves on what it received.
 
 **The checkpoint** is the state record as it stood when the entry before
 the triggering one had been processed (`store.processedState`): the maps as
@@ -1015,20 +1053,25 @@ that very record).
 
 **Asleep** (decided 8): when the tally is at the allocation and the pay
 step pays nothing (an empty wallet, coins that do not cover the fee, no
-wallet program in the genesis), the state is `asleep`. The host then
-forwards nothing but payments and the instance's own messages to itself; the
-kernel meters nothing (the tally freezes) and refuses ticks, and after each
+wallet program in the genesis), the state is `asleep`. Its own usage and
+storage are not metered then (the tally freezes; the time asleep is not
+charged), an attestation is (the host's cost from before), and after each
 entry it processes it runs the pay step again: one that pays wakes it
-(`lastTick` moves to that entry's time, so the time asleep is not charged).
+(`lastCharge` moves to that entry's time). The host's gate follows what the
+host received, not this flag (scripts/host/README.md).
 
-**Funding** (decided 7) is the wallet's: the default image's row
-`{http, /wallet/fund, *, wallet, fund, filter: "beef"}` takes an Atomic BEEF
-(the door's `beef` filter validates it: no signature) with BRC-100
-internalizeAction's outputs in the header `x-skein-outputs`; the wallet's fn
-`fund` internalizes it and ingests it at the chain app. A funding whose
-transaction the chain app has not taken yet cannot be spent in a BEEF: the
-pay step then pays with the coins the chain state holds, or nothing yet, and
-the next entry (the chain app's ingest) tries again.
+**Funding** (decided 7, and the walk: funding with counterparty anyone) is
+the wallet's: the default image's row `{http, /wallet/fund, *, wallet, fund,
+filter: "beef"}` takes an Atomic BEEF and nothing else (the door's `beef`
+filter validates it: no signature). Its outputs paying the skein's funding
+key are internalized — BRC-29 by a pre-set rule, keyID `c2tlaW4=
+ZnVuZGluZw==` (base64 "skein", "funding"), counterparty anyone, so anyone
+derives the key from the identity key and only the skein holds its private
+key — and the transaction is ingested at the chain app; none paying it:
+refused. The host hands one in only once Arcade has accepted it. A funding
+whose transaction the chain app has not taken yet cannot be spent in a
+BEEF: the pay step then pays with the coins the chain state holds, or
+nothing yet, and the next entry (the chain app's ingest) tries again.
 
 ## Messages
 
@@ -1215,9 +1258,10 @@ path and shares every other node with the previous version, which stays
 readable.
 
 One **state record** names it all:
-`{kind: "skein-state", format: 1, log: <log tip>, cursor, heads: <root>, index: {<map>: <root>…}}`
+`{kind: "skein-state", format: 1, log: <log tip>, cursor, heads: <root>, index: {<map>: <root>…}, kept?: <root>}`
 (`format` 1: every step's update carries its fuel; a store without it predates
-fuel and is not run on).
+fuel and is not run on; `kept`, #130: the blocks a billed skein's kernel
+stored, its storage counted — "Billing" — absent until there is one).
 Its CID is the instance's single mutable pointer; the store is otherwise a
 pure key→bytes map of immutable records (SQLite today; IndexedDB in a
 browser, RocksDB on a server, a chain for checkpoints). The maps are a

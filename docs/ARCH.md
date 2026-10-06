@@ -107,16 +107,23 @@ out ends the step errored, deterministically, and it is never retried.
 hosting from its own wallet, by terms its owner grants: the host row, a
 kernel row of the dispatch table naming the host's key, X (the block it
 prepays) and the rates. The kernel meters what is in its log — every
-step's fuel, the `fetch`, `authfetch` and libp2p publish events, storage at
-each tick — onto a tally under its own head, `billing`; the host meters
-what never reaches it (its read calls' fuel, the bytes it serves) and
-reports it on a tick it signs. When the tally reaches the allocation (the
-host's free allowance plus every payment), the kernel itself starts the
-wallet's pay step: X to the host, or all it has, in a transaction emitted
-as the event `payment` whose other output commits the state record's CID
-(an on-chain checkpoint). With nothing to pay it is asleep: the host
-forwards it nothing but payments (`POST /fund/<handle>`), and a payment
-that lets it pay wakes it. No host row, nothing billed.
+step's fuel, the `fetch`, `authfetch` and libp2p publish events, and the
+storage it keeps (the bytes of the blocks it stores, counted as they are
+created), charged on every entry for the time held — onto a tally under its
+own head, `billing`; the host meters what never reaches it (its calls'
+fuel, its door's verify among them, the bytes it serves) and attests it,
+signed, on the next entry it appends — no periodic message. When the tally
+reaches the allocation (the host's free allowance plus what was paid), the
+kernel itself starts the wallet's pay step: X to the host's key for the
+pair (a pre-set BRC-29 rule), or all it has, in a transaction emitted as
+the event `payment` whose other output commits the state record's CID (an
+on-chain checkpoint). The host computes when that will be and wakes the
+skein then. It serves on what it received — payments it took and Arcade
+has not rejected — not on the kernel's count: unpaid, it forwards nothing
+but a funding (`POST /fund/<handle>`, the BEEF alone, paying the skein's
+funding key, broadcast and accepted first), which wakes it. Pricing exists
+only where the host defines it; on a host that bills, a skein with no host
+row is not served.
 
 The kernel has no disk, network or process table, and a step has no
 clock. A `call` (no entry, never replayed) is the exception: when the host

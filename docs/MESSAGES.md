@@ -1520,15 +1520,25 @@ scripts/host/README.md "Billing" the host's):
 
 | what | from → to | shape |
 |---|---|---|
-| the host row | the owner → the skein, box `dispatch` (`skein plan host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
-| a tick | the host's billing key → the skein, the host row's box, a signed `local` message | `{kind: "tick", at, allowance, fuel, served, log?: <cid of the host's period record>}` |
-| a payment | the skein's pay step → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
-| a funding | anyone → the host, `POST /fund/<handle>`; the host → the skein, an `http` request on `/wallet/fund` (open, the `beef` filter) | the body an Atomic BEEF; `x-skein-outputs`: BRC-100 internalizeAction outputs (JSON); `x-skein-description?` → `{txid, status, outputs}` |
+| the host row | the owner → the skein, box `dispatch` (`skein plan host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "billing", x, rates?}}` |
+| a wake | the host's billing key → the skein, the host row's box, a signed `local` message: the first (billing starts), the computed one (what is outstanding reaches the allocation), one after each funding | `{kind: "wake", allowance: <sats>, received: <sats the host has taken from the skein and not seen rejected>}` |
+| an attestation | the host → the skein, on any entry it appends while it has external cost unreported (the entry's field, not a message) | `attest: {fuel, served, log: <cid of the host's period record>, signature}` — signed by the host's key, [2, "skein billing"], key `attestation`, counterparty anyone, over dag-cbor `{kind: "attestation", instance: <the skein's identity>, fuel, served, log}` |
+| the door's fuel | the kernel → the host, the `admit` answer | `{re, ok: <the entry>, fuel: <the door's verify call>}` |
+| a payment | a pay step (the kernel's, or any app's) → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
+| a funding | anyone → the host, `POST /fund/<handle>`; once Arcade took it, the host → the skein, an `http` request on `/wallet/fund` (open, the `beef` filter) | the body an Atomic BEEF and nothing else, paying the skein's funding key → `{txid, status, outputs}` |
 
 The payment's transaction has two outputs before any change: the host's
-(P2PKH to the BRC-29 key `[2, "3241645161d8"]`, key ID `"<prefix>
-<suffix>"`, derived for the host by the skein, counterparty the host's key)
-and the checkpoint (0 sats, `OP_FALSE OP_RETURN <the CID, binary>`).
+(P2PKH to the BRC-29 key `[2, "3241645161d8"]`, key ID `"c2tlaW4=
+aG9zdGluZw=="` — base64 "skein", "hosting": a pre-set rule, one key per
+(skein, host) — derived for the host by the skein with counterparty the
+host's key, and by the host with counterparty the skein's identity) and the
+checkpoint (0 sats, `OP_FALSE OP_RETURN <the CID, binary>`). A funding's
+outputs pay the skein's funding key: BRC-29, key ID `"c2tlaW4=
+ZnVuZGluZw=="` (base64 "skein", "funding"), counterparty anyone — derivable
+by anyone from the skein's identity key; its remittance (what the wallet
+records) is that prefix and suffix with the anyone key
+(`0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798`) as
+the sender.
 
 ## Chat between instances
 

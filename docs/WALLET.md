@@ -296,11 +296,11 @@ it, and prints its CID. An error ends the step `errored`; no head moves.
 
 Its coins move on the messages its threads take — the owner's, and a
 program's that launches or calls it (as before #130) — the chain app's
-answers to them, and the kernel's pay step (#130: a thread the kernel
-launched under the entry it processes; docs/VM.md "Billing"). Only the pay
-step is the kernel's alone: a thread another program launched with `pay`
-is refused. Since #130 (and #116) the default image carries the wallet and
-its funding row (`/wallet/fund`, below).
+answers to them, and the pay step (#130: the kernel launches one under
+the entry it processes whenever the allocation is consumed — that cannot be
+bypassed — and any app may launch one too; docs/VM.md "Billing"). Since #130
+(and #116) the default image carries the wallet and its funding row
+(`/wallet/fund`, below).
 
 | body (owner) | does → result |
 |---|---|
@@ -309,8 +309,8 @@ its funding row (`/wallet/fund`, below).
 | `{op: "signAction", reference}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
 | `{op: "headers" \| "proof", …}` | refused: the chain app's (#79) |
-| args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest, outcome: "pending", awaiting: true}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
-| call fn `fund` (#130: the funding row's handler, `/wallet/fund`) | the body an Atomic BEEF (the door's pointer record), the header `x-skein-outputs` BRC-100 internalizeAction outputs (JSON): internalized, ingested (not awaited) → `200 {txid, status, outputs}` \| `400 {status: "error", code: "ERR_FUNDING", description}` |
+| args `{pay: {to, x, checkpoint}}` (#130: a pay step — the kernel's when the allocation is consumed, or an app's; not a message) | X sats to the host `to`, or all our coins less the fee if they do not cover X, to the host's key by the pre-set rule for the pair (BRC-29, keyID `c2tlaW4= aG9zdGluZw==`: base64 "skein", "hosting"; counterparty the host — the host derives it with counterparty this skein, no remittance needed); the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest, outcome: "pending", awaiting: true}`, or `{amount: 0, reason}` with nothing to pay with. Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
+| call fn `fund` (#130: the funding row's handler, `/wallet/fund`) | the body an Atomic BEEF (the door's pointer record) and nothing else: every output paying this skein's funding key — BRC-29, keyID `c2tlaW4= ZnVuZGluZw==` (base64 "skein", "funding"), counterparty anyone, derived by the signer — internalized as a payment from anyone, ingested (not awaited) → `200 {txid, status, outputs}` \| `400 {status: "error", code: "ERR_FUNDING", description}` (none paying it: `NoFundingOutput`) |
 
 | the chain app's answer (input `reply`) | result |
 |---|---|

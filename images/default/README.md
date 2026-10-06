@@ -21,9 +21,11 @@ docs/BOOTSTRAP.md, "The default image".
   "Billing").
 - `etc/dispatch.json`: the claim row, the messagebox's box and http rows, and
   the funding row (#130) `{http, /wallet/fund, *, wallet, fund, filter:
-  "beef"}`: a payment to the skein's wallet — an Atomic BEEF with the
-  header `x-skein-outputs` — validated at the door, internalized; the host
-  hands one in there (`POST /fund/<handle>`) even while the skein is asleep.
+  "beef"}`: a payment to the skein's wallet — an Atomic BEEF and nothing
+  else, paying its funding key (BRC-29 by a pre-set rule, counterparty
+  anyone) — validated at the door, internalized; the host hands one in there
+  (`POST /fund/<handle>`, once Arcade accepted it) even while the skein is
+  held unpaid.
   The explorer row (`/explore`) is the claim's: the kernel writes it with
   the owner's key (#121).
 - `chain/` (#132): **not in the repo** — the host adds it. The image a
