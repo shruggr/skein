@@ -40,7 +40,7 @@
 // (#16): nothing runs while the tab is closed; mail waits in the mailbox
 // instance and wakes fire late, at the next open.
 
-import { KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
+import { AuthFetch, KeyDeriver, PrivateKey, WalletWireProcessor, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, type HttpRequest, type HttpResponse, type Outgoing, type ProviderName } from "../../src/host/providers.ts";
 import type { CID } from "multiformats/cid";
@@ -252,7 +252,8 @@ export class BrowserHost {
   private async register(): Promise<string> {
     const { domain } = await (await fetch(`${this.origin}/.well-known/skein-host`)).json() as { domain: string };
     const sig = await this.o.wallet.createSignature({ protocolID: [2, "skein register"], keyID: this.o.handle, counterparty: "anyone", data: [...new TextEncoder().encode(`register ${this.o.handle}@${domain}`)] });
-    const r = await fetch(`${this.origin}/account/register`, { method: "POST", body: JSON.stringify({ username: this.o.handle, identityKey: this.identity, signature: [...sig.signature].map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    // #135: a registration is a signed request, over this identity's session with the host's origin.
+    const r = await new AuthFetch(this.o.wallet).fetch(`${this.origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: this.o.handle, identityKey: this.identity, signature: [...sig.signature].map((b) => b.toString(16).padStart(2, "0")).join("") }) });
     const j = await r.json() as { messagebox?: string; error?: string };
     this.log(`register ${this.o.handle}: HTTP ${r.status}${j.messagebox ? ` · ${j.messagebox}` : ` ${j.error ?? ""}`}`);
     if (!j.messagebox) throw new Error(`register ${this.o.handle}: ${j.error ?? r.status}`);

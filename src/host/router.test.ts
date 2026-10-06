@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
 import { MessageBoxClient } from "@bsv/message-box-client";
-import { Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { AuthFetch, Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
@@ -206,9 +206,10 @@ test("router: registration through the host skein (#113) — POST /account/regis
   await h.hostSkein();
   const k = async () => (await h.router.hydrate("host")).kernel;
   const head = async (name: string) => { const c = await (await k()).call("head", name) as CID | null; return c ? { cid: c, rec: await (await k()).store.get(c) as unknown as Record<string, unknown> } : undefined; };
-  const register = async (key: PrivateKey, username: string, o: { signer?: PrivateKey; text?: string } = {}) => {
+  // #135: a registration is a signed request, over the registrant's session with the host's origin (`session`: another key's).
+  const register = async (key: PrivateKey, username: string, o: { signer?: PrivateKey; text?: string; session?: PrivateKey } = {}) => {
     const { signature } = await new ProtoWallet(o.signer ?? key).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(o.text ?? `register ${username}@localhost`, "utf8") });
-    const r = await fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+    const r = await new AuthFetch(ephemeralWallet(o.session ?? key)).fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
     return { status: r.status, body: await r.json() as Record<string, unknown> & { certificate: Record<string, unknown> & { fields: Record<string, string>; serialNumber: string }; keyringForSubject: Record<string, string> } };
   };
   const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
@@ -225,6 +226,10 @@ test("router: registration through the host skein (#113) — POST /account/regis
   assert.equal((await register(dave, "dave", { text: "register dave" })).status, 401);
   assert.equal((await register(dave, "dave", { signer: PrivateKey.fromRandom() })).status, 401);
   assert.equal((await register(dave, "dave", { text: "register dave@id.skein.nexus" })).status, 401);
+  // #135: over another key's session, 403; with no session at all, 401 (the row takes a session).
+  assert.equal((await register(dave, "dave", { session: PrivateKey.fromRandom() })).status, 403);
+  const { signature: plainSig } = await new ProtoWallet(dave).createSignature({ protocolID: [2, "skein register"], keyID: "dave", counterparty: "anyone", data: Utils.toArray("register dave@localhost", "utf8") });
+  assert.equal((await fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "dave", identityKey: daveId, signature: Utils.toHex(plainSig) }) })).status, 401, "an unsigned registration: 401");
   assert.equal(h.db.get("dave"), undefined);
 
   const before = await h.entries("host");

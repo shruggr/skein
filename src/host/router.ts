@@ -20,7 +20,8 @@
 //   GET  /manifest.json                          → /onboard/manifest.json   BRC-169 §5.1
 //   GET  /.well-known/metanet-handles/resolve    → /onboard/resolve         BRC-169 §5.2
 //   GET  /.well-known/metanet-handles/search     → /onboard/search          BRC-169 §5.6
-//   POST /account/register                       → /onboard/register        a mailbox instance and its certificate
+//   POST /.well-known/auth                       → /.well-known/auth        the BRC-103 handshake (#135: a registration is signed)
+//   POST /account/register                       → /onboard/register        a mailbox instance and its certificate (signed)
 //   POST /account/profile                        → /onboard/profile         a handle holder's signed profile
 //   GET  /bsvalias/id/<handle>[@<domain>]        → /onboard/bsvalias/id/…   the paymail PKI, from the same records
 //   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
@@ -228,6 +229,8 @@ export const DISCOVERY: Record<string, string> = {
   [`GET ${RESOLVE_PATH}`]: `/${ONBOARD_APP}/resolve`,
   [`GET ${SEARCH_PATH}`]: `/${ONBOARD_APP}/search`,
   "POST /account/register": `/${ONBOARD_APP}/register`,
+  // #135: a registration is a signed request: the stock client's handshake at the host's own origin is the host skein's.
+  "POST /.well-known/auth": "/.well-known/auth",
   "POST /account/profile": `/${ONBOARD_APP}/profile`,
 };
 /** The paymail PKI (`GET /bsvalias/id/<handle>[@<domain>]`) → the app's prefix row `/onboard/bsvalias/id/…`. */

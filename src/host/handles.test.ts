@@ -14,7 +14,8 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { outpointToBytes } from "@1sat/templates";
 import { decodeProfile, encodeProfile } from "@1sat/utils";
-import { Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { AuthFetch, Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { ephemeralWallet } from "../wallet.ts";
 import { certify, HANDLE_CERTIFICATE_TYPE, issueHandleCertificate, issueSubjectCertificate, NO_REVOCATION_OUTPOINT } from "./handles.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { Signer } from "./signer.ts";
@@ -106,7 +107,8 @@ test("handles: the host skein serves BRC-169 (#113) — the manifest (the certif
   await h.hostSkein({ name: "Test host", note: "handles for the tests", icon: "https://example.test/icon.png" });
   const register = async (key: PrivateKey, username: string) => {
     const { signature } = await new ProtoWallet(key).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}@localhost`, "utf8") });
-    const r = await fetch(`${h.base}/account/register`, { method: "POST", body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+    // #135: a registration is a signed request, over the registrant's session with the host's origin.
+    const r = await new AuthFetch(ephemeralWallet(key)).fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
     assert.equal(r.status, 200, await r.clone().text());
   };
   const daveKey = PrivateKey.fromRandom(), dave = daveKey.toPublicKey().toString();

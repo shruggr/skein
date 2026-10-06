@@ -40,7 +40,8 @@
 //      lists alice under the skeins created there;
 //   5. a handle (#103, #113): the page's Register form (skein-site ≥ 0.5.3)
 //      signs `register <name>@<domain>` (/.well-known/skein-host for the
-//      domain) and posts it to /account/register: the host skein's app
+//      domain) and posts it to /account/register over your wallet's
+//      BRC-104 session with the host's origin (#135): the host skein's app
 //      has the instance manager create your mailbox instance and answers the
 //      handle certificate its record holds, which the wallet in the tab keeps
 //      (acquireCertificate, direct: encrypted fields, your keyring);
@@ -418,13 +419,23 @@ try {
   await page.waitForSelector("#register", { timeout: 60_000 });
   check((await page.locator("#handles").innerText()).includes("No handle certificate from localhost"), "the host skein's page finds its host (/.well-known/skein-host, the manifest): no handle certificate in your wallet yet");
   // The page's Register form (skein-site ≥ 0.5.3): your wallet signs `register you@localhost` (the domain from
-  // /.well-known/skein-host), POST /account/register, and the certificate it answers acquired (direct).
+  // /.well-known/skein-host), POST /account/register over your wallet's session with the host's origin (#135,
+  // skein-site ≥ 0.7.6), and the certificate it answers acquired (direct).
   const { publicKey: certifier } = await router.certifier.getPublicKey({ identityKey: true });
   await page.fill("#register input[name=handle]", "you");
+  // The status the form ends on, kept by an observer set before the click: over the session the registration
+  // answers in well under a second, and the page shows it for 300 ms before it renders the handle in the card's place.
+  await page.evaluate(() => {
+    const w = window as unknown as { regStatus?: { ok: boolean; text: string } };
+    new MutationObserver(() => {
+      const e = document.querySelector("#register-status.ok, #register-status.bad");
+      if (e && !w.regStatus) w.regStatus = { ok: e.classList.contains("ok"), text: e.textContent ?? "" };
+    }).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true });
+  });
   await page.click("#register button[type=submit]");
-  await page.waitForSelector("#register-status.ok, #register-status.bad", { timeout: 120_000 });
-  const regStatus = await page.locator("#register-status").innerText();
-  check(!(await page.locator("#register-status.bad").count()) && db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you && regStatus.includes(`${base}/@you`),
+  const reg = await (await page.waitForFunction(() => (window as unknown as { regStatus?: { ok: boolean; text: string } }).regStatus, null, { timeout: 120_000 })).jsonValue() as { ok: boolean; text: string };
+  const regStatus = reg.text;
+  check(reg.ok && db.mailboxOf(you)?.handle === "you" && db.identityOf("you", "localhost") === you && regStatus.includes(`${base}/@you`),
     `the page's Register form: signed over register you@localhost by the wallet in the tab, the host skein's app had the instance manager create your mailbox instance you@localhost (${regStatus.replace(/\s+/g, " ").slice(0, 160)})`);
   stores.push(db.get("you")!.store);
   const held = await page.evaluate(async ([c, type]) => {
@@ -439,11 +450,13 @@ try {
   // I1 (#113): "Remove from wallet" (relinquishCertificate: the toolbox keeps a deleted row, unique on type, certifier and
   // serial), then register again: the app issues under a new serial, so the wallet takes it.
   const again = await page.evaluate(async ([origin, me, certifierKey, type, old]) => {
-    const w = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }>; acquireCertificate(a: unknown): Promise<unknown>; relinquishCertificate(a: unknown): Promise<unknown>; listCertificates(a: unknown): Promise<{ certificates: Array<{ serialNumber: string }> }> } } }).site.wallet;
+    const site = (window as unknown as { site: { wallet: { createSignature(a: unknown): Promise<{ signature: number[] }>; acquireCertificate(a: unknown): Promise<unknown>; relinquishCertificate(a: unknown): Promise<unknown>; listCertificates(a: unknown): Promise<{ certificates: Array<{ serialNumber: string }> }> }; boxes: Map<string, { af: { fetch(url: string, init: unknown): Promise<Response> } }> } }).site;
+    const w = site.wallet;
     await w.relinquishCertificate({ type, serialNumber: old, certifier: certifierKey });
     const { domain } = await (await fetch(`${origin}/.well-known/skein-host`)).json() as { domain: string };
     const { signature } = await w.createSignature({ protocolID: [2, "skein register"], keyID: "you", counterparty: "anyone", data: Array.from(new TextEncoder().encode(`register you@${domain}`)) });
-    const r = await fetch(`${origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "you", identityKey: me, signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
+    // #135: a registration is a signed request — over the session the page's Register form opened with the host's origin.
+    const r = await site.boxes.get(origin)!.af.fetch(`${origin}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "you", identityKey: me, signature: signature.map((b) => b.toString(16).padStart(2, "0")).join("") }) });
     const v = await r.json() as { certificate: Record<string, unknown>; keyringForSubject: Record<string, string> };
     const c = v.certificate;
     try {

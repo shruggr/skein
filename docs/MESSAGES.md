@@ -538,8 +538,13 @@ refused. Two callers:
      "skein register"], keyID: <username>, counterparty: "anyone", data})`.
      The domain is in the text, so a signature for one host is not good at
      another.
-  3. `POST <origin>/account/register`, body JSON `{username, identityKey,
-     signature}`: `username` a host name label (a-z, 0-9, `-`, 1 to 63, not
+  3. `POST <origin>/account/register` over the wallet's BRC-104 session
+     with the host's origin (#135: a registration is a write, so a signed
+     request; the stock AuthFetch, its handshake at `<origin>/.well-known/auth`
+     the host skein's), body JSON `{username, identityKey,
+     signature}`: the registrant is the session's identity — no session
+     401, an `identityKey` that is not the session's 403 (skein-onboard
+     ≥ 0.3.3); `username` a host name label (a-z, 0-9, `-`, 1 to 63, not
      starting or ending with `-`), `identityKey` the key (hex, 33 bytes),
      `signature` hex DER. The router appends it to the host skein as a
      request entry (route `/onboard/register`); nothing in the router
@@ -1148,7 +1153,8 @@ appended as a request entry, the app's route handler answering:
 | `GET /.well-known/metanet-handles/resolve` | `/onboard/resolve` |
 | `GET /.well-known/metanet-handles/search` | `/onboard/search` |
 | `GET /bsvalias/id/<handle>[@<domain>]` | `/onboard/bsvalias/id/…` (a prefix row) |
-| `POST /account/register` | `/onboard/register` ("Mailbox instances", above) |
+| `POST /.well-known/auth` | `/.well-known/auth` (the BRC-103 handshake: the host skein's session, #135) |
+| `POST /account/register` | `/onboard/register` ("Mailbox instances", above; signed, #135) |
 | `POST /account/profile` | `/onboard/profile` |
 
 A host with no host skein answers them 404. The app's configuration

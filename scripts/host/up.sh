@@ -52,7 +52,7 @@
 #   owner.identity that is not owner-dev.identity) refuses them: that owner
 #   sends from its own wallet.
 #   7. the onboarding app (#90, #113) into the host skein (SKEIN_ONBOARD_APP,
-#      default shruggr/skein-onboard#v0.3.2; first the owner's claim of the
+#      default shruggr/skein-onboard#v0.3.3; first the owner's claim of the
 #      host skein, #127, a no-op once claimed), its config the handle domain
 #      (SKEIN_HANDLE_DOMAIN, default localhost) and the router's origin:
 #      POST /@host/onboard/call creates a skein for any wallet with a session,
@@ -176,7 +176,7 @@ echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer know
 
 # 7. The onboarding app (#90) into the host skein.
 if [ -n "$hostskein" ]; then
-  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.3.2}"
+  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.3.3}"
   # #127: the host skein is a bare image until the owner's own claim (its sender owns it); claimed already: refused, nothing changes.
   owner_send "$hostskein" claim 2> /dev/null || true
   config="{\"onboard\": {\"domain\": \"${SKEIN_HANDLE_DOMAIN:-localhost}\", \"origin\": \"${SKEIN_ROUTER_ORIGIN:-http://127.0.0.1:$port}\"}}"
