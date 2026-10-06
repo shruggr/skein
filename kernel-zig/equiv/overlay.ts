@@ -71,7 +71,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "5e948536058220d34d819382369e1c7f468bf1a5";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "9e30a64451353145e950d001f79886a60c6f2bb1";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
 const here = dirname(fileURLToPath(import.meta.url));

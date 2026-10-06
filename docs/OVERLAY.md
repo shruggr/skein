@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.6).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.7).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -61,19 +61,19 @@ AMM) has calls for its users to **register** and **deregister** a topic.
   update with the app's name.
 - **Deregister** emits `{event: "unsubscribe", topic}` for each; the app
   ends only its own subscriptions.
-- Both are taken only in the box `<app>/overlay` (0.7.5, #128; the
-  manifest's row from the owner): in any other box — the app's own
+- Both are taken only in the box `<app>/register` (0.7.7, #128; the
+  manifest's row from the owner, address `"register"`): in any other box — the app's own
   included — they are refused `bad-args`.
 
-The engine has three boxes (0.7.6, #128): `<app>/submit` takes
+The engine has three boxes (0.7.7, #128): `<app>/submit` takes
 submissions — a message `{fn: "submit", args: {beef, topics}}` from
 anyone, and POST `/<app>/submit`, which carries the same message into that
 box (the manifest's row, address `"submit"`, `filter: "beef"`; the old
-own-box row `""` is gone); `<app>/overlay` takes register / deregister
-from the owner; `<app>` is the engine's own, from events (gossiped
+own-box row `""` is gone); `<app>/register` takes register / deregister
+from the owner (the manifest's row, address `"register"`); `<app>` is the engine's own, from events (gossiped
 submissions, peers' admits) and `$self` (its watch and resume). A genesis
 row is used as written, so a genesis that wires them names them
-`overlay/submit` and `overlay/overlay`.
+`overlay/submit` and `overlay/register`.
 
 After the commit the host's libp2p node subscribes the topic. A message
 gossiped on it is handed to the kernel, which delivers it by the

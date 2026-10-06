@@ -140,7 +140,7 @@ approves (§3): the install prompt is the rows read aloud. A manifest asking
 for a row the owner did not approve is refused at install.
 
 **The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
-(#79): skein-overlay 0.7.6, skein-shell 0.1.1, skein-chat 0.1.0 and
+(#79): skein-overlay 0.7.7, skein-shell 0.1.1, skein-chat 0.1.0 and
 skein-site 0.6.2 are in this shape (skein-static, archived by #125, was). There are no grants: an app writes only `<name>/…`.
 
 **The app record** — the root of `<name>/app`, written by the install
@@ -543,11 +543,11 @@ marked "(derived: config.overlay)" in the prompt:
   (fn `peerAdmit`) and `<topic>-proof` (fn `peerProof`) per topic (#74).
 
 No `chain`, `chain/status` or `submit` box (the chain app's, and the app's own
-box), no grants. The engine's three boxes (skein-overlay 0.7.6, #128):
+box), no grants. The engine's three boxes (skein-overlay 0.7.7, #128):
 `<app>/submit` takes submissions, by message and by POST `/<app>/submit`,
 from anyone (`filter: "beef"`; the manifest's own row, address `"submit"`);
-`<app>/overlay` takes register / deregister from the owner (the manifest's
-row); `<app>` takes only the derived rows above, events and `$self`. An explicit row in the manifest with the same key
+`<app>/register` takes register / deregister from the owner (the manifest's
+row, address `"register"`); `<app>` takes only the derived rows above, events and `$self`. An explicit row in the manifest with the same key
 overrides the derived one. The host's libp2p node subscribes the derived
 topics once their rows are in the table, and unsubscribes them when they
 are removed. What the app **publishes** (`<topic>`, `<topic>-admit`,
