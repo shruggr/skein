@@ -702,10 +702,6 @@ fn run(a: std.mem.Allocator) !void {
     };
     // #130: called as the funding row's handler (an in-VM call from the front door's step).
     if (eql(u8, step.getText("kind") orelse "", "call")) return called(a, s, step);
-    // #130: a thread another program launched gets nothing from the wallet — its coins move only on
-    // the owner's message (a thread a message launched), the chain app's answers to it, and the
-    // kernel's pay step (launched by the entry): no app can spend them, or stop a payment by doing so.
-    try notLaunchedByAProgram(a, s, step);
     const args = step.get("args") orelse return error.BadInput;
     const me = (step.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
     const reply = step.get("reply");
@@ -931,17 +927,6 @@ fn run(a: std.mem.Allocator) !void {
 }
 
 // ---------------------------------------------------------------- billing (#130)
-
-/// A wallet thread is launched by a message (the owner's), or by the entry the kernel processes (the
-/// pay step); one launched by another program's thread is refused (#130: no app spends our coins).
-fn notLaunchedByAProgram(a: std.mem.Allocator, s: Store, step: Value) !void {
-    const o = try s.getValue(a, step.getCid("thread") orelse return error.BadInput);
-    const by = s.getValue(a, o.getCid("launchedBy") orelse return) catch return;
-    if (eql(u8, by.getText("kind") orelse "", "thread")) {
-        std.log.err("this thread was launched by another program's: the wallet acts on the owner's messages and the kernel's pay step only", .{});
-        return error.LaunchedByAProgram;
-    }
-}
 
 /// The pay step is the kernel's alone: its thread was launched by the entry it processes (a thread a
 /// program launches is launched by that program's thread), so an app that launches this program with

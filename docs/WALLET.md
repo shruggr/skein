@@ -294,13 +294,13 @@ program named `wallet` writes `wallet/…` (its default write scope). Each step 
 a new `wallet-state`, advances `wallet/state`, puts a `wallet-result`, keeps
 it, and prints its CID. An error ends the step `errored`; no head moves.
 
-Its coins move on the owner's messages (a thread a message launched), the
-chain app's answers to them, and the kernel's pay step (#130: a thread the
-kernel launched under the entry it processes; docs/VM.md "Billing"). A
-thread another program launched gets nothing: the step errors
-(`LaunchedByAProgram`), so no app spends the coins, or stops a payment to
-the host by draining them. Since #130 (and #116) the default image carries
-the wallet and its funding row (`/wallet/fund`, below).
+Its coins move on the messages its threads take — the owner's, and a
+program's that launches or calls it (as before #130) — the chain app's
+answers to them, and the kernel's pay step (#130: a thread the kernel
+launched under the entry it processes; docs/VM.md "Billing"). Only the pay
+step is the kernel's alone: a thread another program launched with `pay`
+is refused. Since #130 (and #116) the default image carries the wallet and
+its funding row (`/wallet/fund`, below).
 
 | body (owner) | does → result |
 |---|---|
