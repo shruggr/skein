@@ -523,7 +523,9 @@ host's libp2p node follows it), `byEnvelope`, `admit` (`{entry, request?}`: the 
 request as received, #68, its record beside the entry (#121: the kernel's
 door puts it, as it hands it back; a host may still put it first), a
 feed's or a proof's event; never a `mail` entry, K2; it answers the CID
-of the entry written, the admission or the refusal), `answer` (#66, below),
+of the entry written, the admission or the refusal, and — #130, beside it
+in the frame, `fuel` — the fuel of the door's `verify` call, the host's to
+attest), `answer` (#66, below),
 `call` (#40: host-side reads, below), `idle`, `start`, `running`; the kernel
 asks `wallet` (a BRC-100 wire frame: the host answers from the instance's
 ProtoWallet, the signer) and `http` (#126: one exchange for authfetch,

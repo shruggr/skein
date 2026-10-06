@@ -1442,8 +1442,8 @@ pub const Runtime = struct {
     /// on for an entry's processing, a resumed step and the pay step, and off for what is not the
     /// log's processing (an admission, the host's puts, a call).
     fn billingOn(rt: *Runtime, a: std.mem.Allocator) !bool {
+        const st = (try rt.billingState(a)) orelse return false; // one head lookup for a skein never billed
         const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return false) orelse return false;
-        const st = (try rt.billingState(a)) orelse return false;
         return std.mem.eql(u8, st.host, terms.host);
     }
 
@@ -1529,8 +1529,9 @@ pub const Runtime = struct {
         rt.usage = .{};
         const kept = rt.store.takeKept();
         if (rt.stopped or ctx.e.get("genesis") != null) return;
-        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return) orelse return;
+        // No billing state: never woken by its host, nothing to meter (one head lookup: an instance that is not billed pays no more).
         var st = (try rt.billingState(a)) orelse return;
+        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return) orelse return;
         // Another host's state (the owner moved hosts): the new host's first wake starts its own.
         if (!std.mem.eql(u8, st.host, terms.host)) return;
         const at = logm.stampOf(ctx.e.get("time")).?.ms();
