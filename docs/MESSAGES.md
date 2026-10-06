@@ -649,6 +649,8 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `fetch` (#126) | `{kind: "event", event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?, thread, step, app?}` (`sk.fetch`; the kernel adds `thread`, `step`) | an intention: its HTTP proxy performs it and answers (below, "Intentions"); re-offered at a start while the thread awaits it |
   | `beacon` (#126) | `{kind: "event", event: "beacon", app, topic, every, body}` | its libp2p node publishes a new frame on `topic` every `every` ms — `body`, the beat's time, the instance's signature — logging nothing per beat, without subscribing the topic — "libp2p (#51)", below |
   | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
+  | `liveness` (#138) | `{kind: "event", event: "liveness", app, topic, window}` | its liveness tool: the node subscribes `topic` without admitting its messages and keeps the verified beacon beats newer than `window` ms, the latest per sender, served at `GET /<app>/.live/<topic>` — "Liveness (#138)", below |
+  | `unliveness` (#138) | `{kind: "event", event: "unliveness", app, topic}` | `app`'s liveness on `topic` ends: its set is gone, the node leaves the topic when nothing else takes it |
   | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing: a log line |
 
   A non-broadcast record is `{kind: "event", event, app?, …the emit's
@@ -666,7 +668,9 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   kernel has); an unsubscribe names a subscription the app has (an app
   unsubscribes only its own). It checks a `beacon` (an installed app's;
   a topic; `every` from 1 000 ms to a day; `body` bytes, at most 64 KiB)
-  and an `unbeacon` (an installed app's; a topic), and a `fetch` (a method,
+  and an `unbeacon` (an installed app's; a topic), a `liveness` (an
+  installed app's; a topic; `window` an integer from 1 000 ms to a day) and
+  an `unliveness` (an installed app's; a topic), and a `fetch` (a method,
   an http(s) `url`, headers text, a body bytes; `thread` and `step` are
   its own).
 - **Errors** (the call's; the step may catch them): `emit: want {to:
@@ -1373,6 +1377,40 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   from the log (src/host/p2p.ts `beaconsOf`) and follows them live; an
   app's beacons stop when its rows are gone (an uninstall). If the host is
   down, nothing beats: a true heartbeat.
+- **Liveness (#138).** Who is beating on a topic stays outside the log: an
+  app declares once per topic `liveness {topic, window: <ms>}` (an event,
+  checked as it is emitted: an installed app's, a topic, `window` an
+  integer from 1 000 ms to a day) and stops it with `unliveness {topic}`;
+  no answer comes. Keyed by (app, topic) — an app's liveness replaces its
+  own window — folded from the log like the beacons (kernel-zig/src/
+  subscriptions.zig `livenessFold`; the host's src/host/liveness.ts
+  `livenessOf`), followed live; an app's liveness ends when its rows are
+  gone (an uninstall). The runtime's liveness tool (src/host/liveness.ts),
+  for each such topic:
+  - subscribes it at the instance's own node **without admitting** its
+    messages: no front-door call, no entry, nothing logged (a topic that a
+    row or subscription also takes is admitted as before, and the tool sees
+    it too);
+  - reads each message as a beacon beat (above) and checks its signature
+    against `sender`; one that does not verify is dropped (GossipSub:
+    reject);
+  - keeps the beats newer than `window` (by `at`, against the host's clock;
+    one dated more than a window ahead is not believed), the latest per
+    sender, with the peer that published it; the node's **own** beats on
+    the topic are written into the same set (gossip does not echo them);
+  - holds them in memory only: empty after a restart until the next beats.
+
+  The set is served by the host on the instance's origin, no program in
+  between:
+
+      GET /<app>/.live/<topic>     (http://<handle>.localhost:<port>/… or /@<handle>/…)
+      200 [{sender: <identity key, hex>, at: <ms>, body: <base64>, from: <peer ID>}, …]   newest first,
+          only the beats newer than that app's window
+      404 when <app> keeps no liveness for <topic>
+
+  An unsigned read: no entry, nothing logged; metered as a read (bytes
+  served, billing.ts). A runtime without the tool records the events and
+  nothing happens. Beats are unbilled for now (#130).
 - **What the node subscribes** (#72, #77, #119). The instance's node takes
   the genesis's `libp2p` (topics, protocols, listen), the topics and
   protocols named by the `libp2p` rows added since the genesis — an app's

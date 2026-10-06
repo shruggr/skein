@@ -29,6 +29,11 @@
 //                                         router's origin and the handle domain (the onboarding app's
 //                                         config.onboard.domain), for a page an instance serves (the management
 //                                         site) to find the manifest and register
+//   GET  /<app>/.live/<topic>             at an instance's origin (#138): the liveness tool's beats for that app's
+//                                         liveness on the topic (liveness.ts), served by the host, no program:
+//                                         JSON [{sender: <identity key, hex>, at: <ms>, body: <base64>, from: <peer
+//                                         ID>}], newest first; 404 when the app keeps no liveness for the topic.
+//                                         Unsigned, nothing logged; metered as a read (billing.ts)
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
 //   POST /fund/<handle>                   #130: a payment for an instance (its body an Atomic BEEF, the header
 //                                         x-skein-outputs BRC-100's internalizeAction outputs, JSON), handed in
@@ -111,6 +116,7 @@ import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, unavailable, type 
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { Kernel } from "./kernel.ts";
+import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { beaconEvent, beaconsOf, DEFAULT_LISTEN, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
@@ -203,6 +209,8 @@ interface Loaded {
   subs: Subscription[];
   /** The apps' beacons (#126): folded from the log at hydrate, then followed live; an uninstalled app's (no row left) dropped. */
   beacons: Beacon[];
+  /** The apps' liveness (#138): folded from the log at hydrate, then followed live; an uninstalled app's (no row left) dropped. */
+  live: Live[];
 }
 
 /** A request as the router takes it: the full URL (its host is the Host header's), lower-cased headers, the body. */
@@ -727,7 +735,9 @@ export class Router {
     const subs = await this.foldSubscriptions(row.store).catch((e) => { this.say(handle, `libp2p: the subscriptions not read: ${(e as Error).message}`); return [] as Subscription[]; });
     // #126: the apps' beacons, read from the log the same way.
     const beacons = await this.foldBeacons(row.store).catch((e) => { this.say(handle, `libp2p: the beacons not read: ${(e as Error).message}`); return [] as Beacon[]; });
-    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs, beacons };
+    // #138: the apps' liveness, read from the log the same way.
+    const live = await this.readLiveness(row.store).catch((e) => { this.say(handle, `libp2p: the liveness not read: ${(e as Error).message}`); return [] as Live[]; });
+    const l: Loaded = { row, kernel, identity, wallet, genesis: g as Record<string, unknown>, subs, beacons, live };
     // Its node (the genesis's libp2p and the dispatch table's libp2p rows), before anything it runs can publish or dial; the host's headers feed.
     await this.syncDispatch(l, true);
     this.loaded.set(handle, l);
@@ -997,9 +1007,10 @@ export class Router {
     this.followHeaders(l.row.handle, d.rows);
     // #126: an uninstalled app's beacons stop — an app with no row left in the table (an uninstall
     // removes every row naming the app and leaves its heads).
-    if (l.beacons.length) {
+    if (l.beacons.length || l.live.length) {
       const apps = new Set(d.rows.map((r) => (r as { app?: unknown }).app).filter((x): x is string => typeof x === "string"));
       l.beacons = l.beacons.filter((b) => apps.has(b.app));
+      l.live = l.live.filter((x) => apps.has(x.app)); // #138: and its liveness
     }
     await this.declareP2P(l, first);
   }
@@ -1008,8 +1019,16 @@ export class Router {
   private async declareP2P(l: Loaded, first = false): Promise<void> {
     if (!this.p2p) return;
     const rows = (l.rows ?? []) as unknown as Array<Record<string, unknown>>;
-    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, subscribedTopics(l.subs), l.beacons.length > 0)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
+    await this.p2p.declare(l.row.handle, libp2pConfig(l.genesis, rows, subscribedTopics(l.subs), l.beacons.length > 0 || l.live.length > 0)).catch((e) => this.say(l.row.handle, `libp2p: ${first ? "not started" : "not reconfigured"}: ${(e as Error).message}`));
     this.p2p.beacons(l.row.handle, l.beacons);
+    this.p2p.liveness(l.row.handle, l.live);
+  }
+
+  /** #138: the apps' liveness, folded from the instance's log (liveness.ts livenessOf), the store file read-only. */
+  private async readLiveness(store: string): Promise<Live[]> {
+    if (!this.p2p || !existsSync(store)) return [];
+    const s = openStoreFile(store, { readOnly: true });
+    try { return await livenessOf(s); } finally { s.close(); }
   }
 
   /** #126: the apps' beacons, folded from the instance's log (p2p.ts beaconsOf), the store file read-only. */
@@ -1041,6 +1060,7 @@ export class Router {
    */
   private topicEvent(handle: string, rec: Record<string, unknown>): void {
     if (rec.event === "beacon" || rec.event === "unbeacon") return this.beaconEvent(handle, rec);
+    if (rec.event === "liveness" || rec.event === "unliveness") return this.livenessEvent(handle, rec);
     const e = subscriptionEvent(rec);
     if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
     const topic = e.event === "subscribe" ? e.sub.topic : e.topic;
@@ -1055,6 +1075,44 @@ export class Router {
     const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event} ${topic}: ${(x as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
+  }
+
+  /**
+   * A `liveness` / `unliveness` event from `handle` (#138, after its step's commit; the kernel
+   * checked its shape as it was emitted): the liveness changes and the node's liveness tool follows
+   * it (P2PHost.liveness) — the topic subscribed without admitting its messages, or left. An instance
+   * still loading reads it from its log.
+   */
+  private livenessEvent(handle: string, rec: Record<string, unknown>): void {
+    const e = livenessEvent(rec);
+    if ("refused" in e) { this.say(handle, `libp2p: ${String(rec.event)}: ${e.refused}`); return; }
+    const apply = async () => {
+      const l = this.loaded.get(handle) ?? await this.loading.get(handle)?.catch(() => undefined);
+      if (!l || l.kernel.gone) return;
+      foldLiveness([e], l.live);
+      await this.declareP2P(l);
+    };
+    const p = apply().catch((x) => this.say(handle, `libp2p: ${e.event}: ${(x as Error).message}`));
+    this.syncing.add(p);
+    void p.finally(() => this.syncing.delete(p));
+  }
+
+  /**
+   * GET /<app>/.live/<topic> at an instance's origin (#138): the liveness tool's set for the app's
+   * liveness on the topic, served by the host — no program, no entry, nothing logged; metered as a
+   * read (bytes served). 404 when the app keeps no liveness for the topic (or the host has no libp2p).
+   */
+  private async liveRead(handle: string, route: string, app: string, topic: string): Promise<RouterResponse> {
+    const none = () => json(404, { status: "error", code: "ERR_NOT_FOUND", description: `app ${app} keeps no liveness for ${topic}` });
+    if (!this.p2p) return none();
+    try { await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
+    const closed = this.closed(handle);
+    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
+    const beats = this.p2p.live.read(handle, app, topic);
+    if (!beats) return none();
+    const r = json(200, beats.map((b) => ({ sender: b.sender, at: b.at, body: Buffer.from(b.body).toString("base64"), from: b.from })));
+    this.meter(handle, { at: stampMs(this.now()), op: `GET ${route}`, fuel: 0, bytes: r.body.length });
+    return r;
   }
 
   /**
@@ -1370,7 +1428,12 @@ export class Router {
       return json(200, { origin: this.origin(), domain: await this.handleDomain(), ...(billing ? { billing } : {}) });
     }
     const t = this.target(url);
-    if (t) return await this.held(this.forward(t.handle, t.route, url, req));
+    if (t) {
+      // #138: the liveness tool's read, the host's own (no program).
+      const live = req.method === "GET" ? /^\/([^/]+)\/\.live\/([^/]+)$/.exec(t.route) : null;
+      if (live) return await this.held(this.liveRead(t.handle, t.route, decodeURIComponent(live[1]!), decodeURIComponent(live[2]!)));
+      return await this.held(this.forward(t.handle, t.route, url, req));
+    }
     const path = url.pathname;
     // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
     const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);

@@ -119,6 +119,9 @@ echo "== an overlay installed as an app (#72, #79): shruggr/skein-chain and shru
 echo "== subscriptions (#119) and beacons (#126): two apps (programs/test/app-demo's module under other names) on a router with libp2p; refusals as emitted; an app's subscribe {topic, program, fn} → the node subscribes it, a message published on it from a second router delivered by the subscription to that app's fn; another app's subscription does not take the topic; unsubscribe stops delivery; a row wins; a restarted router and kernel read the subscriptions from the log; beacons (#126): a beacon beats on its own clock, seen by the second router, nothing logged per beat, stopped by an unbeacon and an uninstall, beaten again after a restart; replayed"
 "${node[@]}" "$kz/equiv/emit-events.ts" || status=1
 
+echo "== liveness (#138): two routers; an app on the second emits liveness for a topic an app on the first beacons on; the second's node subscribes it without admitting; GET /<app>/.live/<topic> (served by the host) shows the first's beat within a beat and the second's own; a bad signature never shows; the window drops a silent sender; unliveness and uninstall end it; replayed"
+"${node[@]}" "$kz/equiv/liveness.ts" || status=1
+
 echo "== the chain module (#78): shruggr/skein-chain (chain.ts's pinned commit, or \$SKEIN_CHAIN_DIR) by the owner's messages (skein plan install, #124), on a router with an Arcade; the feed's headers; ingest proven → answered at once; ingest unproven → broadcast → accepted (status) → proven (proof), each an answer; refused → rejected; status/proof reads; the same app at boot from a system tree; replayed"
 "${node[@]}" "$kz/equiv/chain.ts" || status=1
 

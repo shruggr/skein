@@ -27,6 +27,10 @@
 //              A redelivered message already admitted (its `p2p` event record is
 //              in the kernel's `unique` map) is refused at admit, nothing written:
 //              ignore.
+//              A topic only an app's liveness takes (#138, liveness.ts) is
+//              subscribed too, but its messages are never admitted: each is
+//              judged by the liveness tool alone (a beat whose instance
+//              signature verifies is kept and accepted, a bad one rejected).
 //              With the DHT on, each topic name is a rendezvous: provide the
 //              CID v1 raw sha2-256 of the name and dial the providers found
 //              (go-libp2p's RoutingDiscovery, as go-p2p-message-bus uses it).
@@ -77,6 +81,7 @@ import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
 import { verifyAnyone } from "../runtime/identity.ts";
+import { Liveness, type Live } from "./liveness.ts";
 
 export type DhtMode = "off" | "client" | "server";
 
@@ -217,7 +222,8 @@ export function libp2pOf(g: Record<string, unknown> | null | undefined): P2PInst
  * rows added since the genesis (an app's install; address: a topic, or
  * `/<protocol>`) — a genesis row alone subscribes nothing, as a route alone
  * did not — plus the topics the apps subscribed (#119, `subscribed`).
- * `beacons` (#126): an app's beacon needs the node, and adds no topic.
+ * `beacons` (#126): an app's beacon (or its liveness, #138: P2PHost.liveness
+ * subscribes those topics itself) needs the node, and adds no topic.
  * Undefined: no node — the genesis declares none and nothing needs one.
  */
 export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows: Array<Record<string, unknown>>, subscribed: string[] = [], beacons = false): P2PInstanceConfig | undefined {
@@ -255,7 +261,7 @@ export function libp2pConfig(g: Record<string, unknown> | null | undefined, rows
 export interface Subscription { app: string; topic: string; program: string; fn: string; filter?: string }
 export type SubscriptionEvent = { event: "subscribe"; sub: Subscription } | { event: "unsubscribe"; app: string; topic: string };
 
-const isTopic = (t: unknown): t is string => typeof t === "string" && t.length > 0 && !/[\s\0]/.test(t) && !t.startsWith("/");
+export const isTopic = (t: unknown): t is string => typeof t === "string" && t.length > 0 && !/[\s\0]/.test(t) && !t.startsWith("/");
 
 /** A `subscribe` / `unsubscribe` event record, read (subscriptions.zig eventOf); or why it is not one this host follows. */
 export function subscriptionEvent(rec: Record<string, unknown>): SubscriptionEvent | { refused: string } {
@@ -302,7 +308,7 @@ export async function beaconsOf(store: Pick<Store, "get" | "chains" | "edges">):
 }
 
 /** The event records the steps' updates list in `emitted` that `read` takes, in log order (the kernel's fold order, subscriptions.zig). */
-async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, read: (rec: Record<string, unknown>) => T | undefined): Promise<T[]> {
+export async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, read: (rec: Record<string, unknown>) => T | undefined): Promise<T[]> {
   type Obj = Record<string, unknown>;
   const ns = new Map<string, number>();
   const nOf = async (input: unknown): Promise<number> => {
@@ -432,6 +438,8 @@ interface Node {
   seqnos: Map<Uint8Array, bigint>;
   /** The beacons' timers (#126), by "<app> <topic>". */
   beats: Map<string, { beacon: Beacon; timer: ReturnType<typeof setInterval> }>;
+  /** The topics subscribed: the config's and the liveness tool's (#138). */
+  subscribed: Set<string>;
   timer?: ReturnType<typeof setInterval>;
 }
 
@@ -442,6 +450,8 @@ const u64 = (n: bigint): Uint8Array => { const b = new Uint8Array(8); new DataVi
 
 export class P2PHost {
   readonly o: P2POptions;
+  /** The liveness tool's state (#138): the apps' liveness and the beats kept, in memory. */
+  readonly live = new Liveness();
   private nodes = new Map<string, Node>();
   /** Each instance's declares, in order (one at a time). */
   private starting = new Map<string, Promise<unknown>>();
@@ -492,17 +502,15 @@ export class P2PHost {
   /** Bring a running node to `config`: subscribe and handle what is new, unsubscribe and unhandle what is gone. */
   private async reconfigure(n: Node, config: P2PInstanceConfig): Promise<void> {
     const was = n.config;
-    const ps = this.pubsub(n);
     const added = config.topics.filter((t) => !was.topics.includes(t));
     const removed = was.topics.filter((t) => !config.topics.includes(t));
     const addedP = config.protocols.filter((p) => !was.protocols.includes(p) && p !== MESSAGE_PROTOCOL);
     const removedP = was.protocols.filter((p) => !config.protocols.includes(p) && p !== MESSAGE_PROTOCOL);
     if (!added.length && !removed.length && !addedP.length && !removedP.length) { n.config = { ...config, listen: was.listen }; return; }
-    for (const t of removed) { ps.unsubscribe(t); ps.topicValidators.delete(t); }
-    for (const t of added) this.subscribe(n, t);
+    n.config = { ...config, listen: was.listen };
+    this.resubscribe(n);
     for (const p of removedP) await n.node.unhandle(p);
     for (const p of addedP) await this.handleProtocol(n, p);
-    n.config = { ...config, listen: was.listen };
     const list = (xs: string[]) => xs.join(", ") || "none";
     this.say(n.handle, `libp2p: topics ${list(config.topics)} (+${list(added)} −${list(removed)}); protocols ${list(config.protocols)} (+${list(addedP)} −${list(removedP)})`);
     if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(n.handle, `libp2p: discovery: ${(e as Error).message}`)), 200);
@@ -512,6 +520,36 @@ export class P2PHost {
     const ps = this.pubsub(n);
     ps.topicValidators.set(topic, (from: PeerId, msg: { type: string }) => this.validate(n, topic, from, msg as never));
     ps.subscribe(topic);
+    n.subscribed.add(topic);
+  }
+
+  /** Subscribe what the config and the liveness tool (#138) take, unsubscribe the rest: the topics added and removed. */
+  private resubscribe(n: Node): { added: string[]; removed: string[] } {
+    const want = new Set([...n.config.topics, ...this.live.topics(n.handle)]);
+    const ps = this.pubsub(n);
+    const removed = [...n.subscribed].filter((t) => !want.has(t));
+    const added = [...want].filter((t) => !n.subscribed.has(t));
+    for (const t of removed) { ps.unsubscribe(t); ps.topicValidators.delete(t); n.subscribed.delete(t); }
+    for (const t of added) this.subscribe(n, t);
+    return { added, removed };
+  }
+
+  /** The topics `handle`'s node subscribes now: its config's and its apps' liveness topics (#138). */
+  listening(handle: string): string[] { return [...(this.nodes.get(handle)?.subscribed ?? [])]; }
+
+  /**
+   * The liveness `handle`'s apps keep (#138, liveness.ts): the tool keeps it, and the node subscribes
+   * each topic (not admitting its messages) and leaves those no liveness nor config takes. One line
+   * when a topic is taken or left. No node: kept for when it starts.
+   */
+  liveness(handle: string, lives: Live[]): void {
+    this.live.set(handle, lives);
+    const n = this.nodes.get(handle);
+    if (!n) return;
+    const { added, removed } = this.resubscribe(n);
+    for (const t of added) this.say(handle, `libp2p: liveness ${t} (app ${lives.filter((l) => l.topic === t).map((l) => l.app).join(", ")})`);
+    for (const t of removed) this.say(handle, `libp2p: ${t} left`);
+    if (added.length) setTimeout(() => void this.discover(n).catch((e) => this.say(n.handle, `libp2p: discovery: ${(e as Error).message}`)), 200);
   }
 
   private async handleProtocol(n: Node, protocol: string): Promise<void> {
@@ -520,7 +558,7 @@ export class P2PHost {
 
   private async start(handle: string, config: P2PInstanceConfig): Promise<Node | undefined> {
     const h = this.o.host;
-    const n: Node = { handle, node: undefined as never, config, streams: new Map(), seqnos: new Map(), beats: new Map() };
+    const n: Node = { handle, node: undefined as never, config, streams: new Map(), seqnos: new Map(), beats: new Map(), subscribed: new Set() };
     const listen = [...(config.listen ?? h.listen), ...h.relays.map((r) => `${r.replace(/\/+$/, "")}/p2p-circuit`)];
     // An address that does not parse counts as private here; start() reports it when it is dialled or listened on.
     const privateDev = [...h.bootstrap, ...listen].every((a) => { try { return isPrivateAddr(multiaddr(a)); } catch { return true; } });
@@ -559,7 +597,7 @@ export class P2PHost {
     if (this.stopped) { await node.stop(); return undefined; }
     this.nodes.set(handle, n);
     if (h.mdns) node.addEventListener("peer:discovery", (e) => { void node.dial(e.detail.id).catch((err) => this.say(handle, `libp2p: mDNS peer ${e.detail.id}: ${(err as Error).message}`)); });
-    for (const topic of config.topics) this.subscribe(n, topic);
+    this.resubscribe(n);
     for (const protocol of [...config.protocols, ...(config.protocols.includes(MESSAGE_PROTOCOL) ? [] : [MESSAGE_PROTOCOL])]) await this.handleProtocol(n, protocol);
     this.say(handle, `libp2p: peer ${node.peerId} listening on ${node.getMultiaddrs().map(String).join(" ") || "(nothing)"}; topics ${config.topics.join(", ") || "none"}; protocols ${config.protocols.join(", ") || "none"}`);
     const discover = () => void this.discover(n).catch((e) => this.say(handle, `libp2p: discovery: ${(e as Error).message}`));
@@ -582,7 +620,7 @@ export class P2PHost {
       await node.dial(ma).catch((e) => this.say(n.handle, `libp2p: bootstrap ${a}: ${(e as Error).message}`));
     }
     if (this.o.host.dht === "off" || !(node.services as Record<string, unknown>).dht) return;
-    for (const topic of n.config.topics) {
+    for (const topic of [...n.subscribed]) {
       const cid = await topicCid(topic);
       await node.contentRouting.provide(cid, { signal: AbortSignal.timeout(20_000) }).catch((e) => { if (!timedOut(e)) this.say(n.handle, `libp2p: provide ${topic}: ${(e as Error).message}`); });
       try {
@@ -600,9 +638,15 @@ export class P2PHost {
     return (n.node.services as { pubsub: ReturnType<ReturnType<typeof gossipsub>> }).pubsub;
   }
 
-  /** The topic validator: one front-door call; its verdict is GossipSub's (async: forwarding waits on it). */
+  /**
+   * The topic validator: one front-door call; its verdict is GossipSub's (async: forwarding waits on
+   * it). A topic an app keeps liveness for (#138) is the liveness tool's too: it keeps a beat that
+   * verifies; when no config topic takes it, the tool's verdict is the only one (nothing admitted).
+   */
   private async validate(n: Node, topic: string, _source: PeerId, msg: { type: string; from: PeerId; data: Uint8Array; sequenceNumber: bigint; signature: Uint8Array }): Promise<TopicValidatorResult> {
     if (msg.type !== "signed") return TopicValidatorResult.Reject;
+    const live = this.live.takes(n.handle, topic) ? this.live.observe(n.handle, topic, msg.data, msg.from.toString()) : undefined;
+    if (!n.config.topics.includes(topic)) return live === "accept" ? TopicValidatorResult.Accept : live === "reject" ? TopicValidatorResult.Reject : TopicValidatorResult.Ignore;
     try {
       const a = await this.o.inbound(n.handle, {
         transport: "libp2p", topic, from: msg.from.toMultihash().bytes, seqno: u64(msg.sequenceNumber), signature: msg.signature, body: msg.data,
@@ -669,7 +713,10 @@ export class P2PHost {
         void (async () => {
           const sender = await identity(handle);
           if (!sender) return;
-          await this.publish(handle, b.topic, await beaconFrame(b.topic, b.body, Date.now(), sender, (d) => sign(handle, d)));
+          const frame = await beaconFrame(b.topic, b.body, Date.now(), sender, (d) => sign(handle, d));
+          await this.publish(handle, b.topic, frame);
+          // #138: the node's own beat into its liveness set (gossip does not echo it).
+          if (this.live.takes(handle, b.topic)) this.live.observe(handle, b.topic, frame, n.node.peerId.toString());
         })().catch(() => {});
       };
       n.beats.set(k, { beacon: b, timer: setInterval(beat, b.every) });
@@ -739,6 +786,7 @@ export class P2PHost {
     clearInterval(n.timer);
     for (const b of n.beats.values()) clearInterval(b.timer);
     n.beats.clear();
+    this.live.drop(handle);
     try { await n.node.stop(); } catch (e) { this.say(handle, `libp2p: stop: ${(e as Error).message}`); } // dropped either way
   }
 

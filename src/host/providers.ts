@@ -18,7 +18,8 @@
 //            `broadcast` — {kind: "broadcast", tx: <cid>, beef?}, the
 //            transaction's bytes as `body` — to the host's broadcaster (arc.ts: a
 //            durable queue, retries, one Arcade session; none: dropped with a line);
-//            `subscribe`/`unsubscribe`/`beacon`/`unbeacon` to the libp2p node;
+//            `subscribe`/`unsubscribe`/`beacon`/`unbeacon` to the libp2p node,
+//            `liveness`/`unliveness` (#138) to its liveness tool (liveness.ts);
 //            `deadline`/`fetch` are intentions (#126): the host signs the request
 //            for one with the instance's key and gives it to the service it is
 //            wired to (`route`: its waker, its HTTP proxy), whose signed answer
@@ -170,7 +171,7 @@ export interface ProvidersOptions {
   fetch(req: HttpRequest, from: string): Promise<HttpResponse>;
   /** The broadcaster (#58, #65: the host's Arcade), when the host has one: a broadcast event's transaction and BEEF, queued. */
   broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
-  /** The libp2p node's subscriptions (#119) and beacons (#126): a `subscribe` / `unsubscribe` / `beacon` / `unbeacon` record {kind: "event", event, app, topic, …} from `handle`. Absent: no libp2p node (dropped). */
+  /** The libp2p node's subscriptions (#119), beacons (#126) and liveness (#138): a `subscribe` / `unsubscribe` / `beacon` / `unbeacon` / `liveness` / `unliveness` record {kind: "event", event, app, topic, …} from `handle`. Absent: no libp2p node (dropped). */
   topicEvent?(handle: string, record: Record<string, unknown>): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
@@ -199,6 +200,8 @@ export interface ProvidersOptions {
   log?(source: string, line: string): void;
 }
 
+/** The events the libp2p node's wiring takes (`topicEvent`): subscriptions (#119), beacons (#126), liveness (#138). */
+const TOPIC_EVENTS: readonly string[] = ["subscribe", "unsubscribe", "beacon", "unbeacon", "liveness", "unliveness"];
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
 /** The fetch provider's refusal of a response over the request's `maxBytes` (#91). */
@@ -302,7 +305,7 @@ export class Providers {
       this.o.payment(handle, m);
       return;
     }
-    if ((out.address === "subscribe" || out.address === "unsubscribe" || out.address === "beacon" || out.address === "unbeacon") && m.kind === "event" && m.event === out.address) {
+    if (TOPIC_EVENTS.includes(out.address) && m.kind === "event" && m.event === out.address) {
       if (!this.o.topicEvent) { this.say(handle, `${out.address}: this host has no libp2p node: ignored`); return; }
       this.o.topicEvent(handle, m);
       return;

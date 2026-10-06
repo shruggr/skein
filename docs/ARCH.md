@@ -37,7 +37,8 @@ Inside:
   filesystem, reads by CID, heads, threads (`launch`, `await`, `deadline`,
   `call`), the signer (`wallet`), `emit` (a message — unsigned, its transport
   proves its sender, #126 step 4 — or an event:
-  an intention the runtime answers, a broadcast, a subscription, a beacon)
+  an intention the runtime answers, a broadcast, a subscription, a beacon,
+  a liveness)
   and `authfetch` (#126: the kernel's BRC-104 client, a recorded call — the
   one direct HTTP path);
 - **requests**: every package a transport carries in is an entry, and the
@@ -243,6 +244,13 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   It beats the apps' beacons (#126: every `every` ms a new frame on the
   topic — the body, the beat's time, the instance's signature — nothing
   logged per beat, the topic not subscribed).
+- **The liveness tool** (#138, `src/host/liveness.ts`): for each topic an
+  app keeps `liveness {topic, window}` for, the node subscribes it without
+  admitting its messages, verifies each beacon beat's instance signature
+  and keeps the latest per sender newer than `window` (its own beats too),
+  in memory; the host serves the set at `GET /<app>/.live/<topic>` on the
+  instance's origin (no program, no entry). A runtime without it records
+  the events and nothing happens.
 - **authfetch's bytes** (#126): the kernel asks the host for one HTTP
   exchange at a time (the serve frame `http`); the router carries it (its
   own URLs in process), and signs and checks nothing — the kernel did.
