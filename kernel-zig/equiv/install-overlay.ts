@@ -71,7 +71,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "3a74b229b073c4c5a9ac207b154bdf2d73d430dd";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "067b94072a1ba0ceb0ae4af0b839d0d867f6a499";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -243,7 +243,7 @@ try {
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.7.4" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.7.4), with config.overlay; no alias head `overlay`");
+  check(app?.kind === "app" && app.version === "0.7.5" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.7.5), with config.overlay; no alias head `overlay`");
   check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "http /overlay/lookup", "mailbox overlay"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)), `the dispatch table has the derived rows: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const topics1 = ["tm_demo", "tm_demo-admit", "tm_demo-proof"];
   const s1 = await until("the node subscribes the installed topics", () => { const s = served(); return s && topics1.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
@@ -359,7 +359,8 @@ try {
   mf2.name = "overlay2";
   mf2.config.overlay = { topics: { tm_two: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: ["tm_two"] } }, gossip: { tm_two: true } };
   // skein-overlay 0.7.0 (#128): the stock manifest's row {address: "overlay", sender: "$owner"} is the box
-  // overlay2/overlay here; register / deregister go there (the engine takes them in any box routed to it).
+  // overlay2/overlay here; register / deregister go there (0.7.5: only there — refused bad-args in any other box, the
+  // app's own included; submit is taken in any box routed to the engine).
   // 0.7.3: the manifest's libp2p row /skein/overlay/beef/1.0.0 (the want-answer stream) is global, not under the
   // app's name: two apps installing it clash ("app overlay has it"). Dropped from overlay2's copy — a design point
   // pending with David (one stream protocol per instance, or one per app).

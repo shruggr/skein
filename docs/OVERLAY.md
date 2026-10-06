@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.4).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.5).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -61,6 +61,11 @@ AMM) has calls for its users to **register** and **deregister** a topic.
   update with the app's name.
 - **Deregister** emits `{event: "unsubscribe", topic}` for each; the app
   ends only its own subscriptions.
+- Both are taken only in the box `<app>/overlay` (0.7.5, #128; the
+  manifest's row from the owner): in any other box — the app's own
+  included — they are refused `bad-args`. `submit` is taken in any box
+  routed to the engine. A genesis row is used as written, so a genesis that
+  wires the engine's register box names it `overlay/overlay`.
 
 After the commit the host's libp2p node subscribes the topic. A message
 gossiped on it is handed to the kernel, which delivers it by the
