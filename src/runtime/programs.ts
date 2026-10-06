@@ -22,11 +22,11 @@ export function rawCid(bytes: Uint8Array): CID {
 /** The modules as committed under wasm/ (see wasm/README.md). A test checks these against the files. */
 export const MODULES = {
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreih6spdkzfv7ypq6ooqjcx44ba2qziwhyhtyfsc3ceiak7dt67yss4"),
+  "wallet": CID.parse("bafkreif3x5guqzqtpw6vsmhhii4xk3o2rcekwg5d62xtsulrurdmmtdbtq"),
 } as const;
 
 /** The wallet program record's description (also the default image's bin/wallet.json: the same record, #116). */
-export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); the kernel's pay step, args {pay: {to, x, checkpoint}} (#130: X sats, or all it has if less, to the host, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`); called as the funding row's handler, fn fund (#130: an Atomic BEEF and BRC-29 remittances, internalized). Prints the result record's CID.";
+export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); a pay step, args {pay: {to, x, checkpoint}} (#130: the kernel's when the allocation is consumed, or any app's: X sats, or all it has if less, to the host's key by the pre-set BRC-29 rule for the pair, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`); called as the funding row's handler, fn fund (#130: an Atomic BEEF alone, the outputs paying this skein's funding key — BRC-29 by a pre-set rule, counterparty anyone — internalized). Prints the result record's CID.";
 
 /**
  * The wallet's state as records (issue #29; docs/WALLET.md): the `wallet`

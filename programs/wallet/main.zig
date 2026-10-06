@@ -42,22 +42,28 @@
 //!   {op: "list", basket?, includeSpent?}        our outputs in a basket (default "default")
 //!
 //! Billing (#130), two more:
-//!   args {pay: {to, x, checkpoint}}   the kernel's pay step — a thread the kernel launches itself
-//!                                     when the allocation is consumed (its origin's launchedBy is
-//!                                     the entry it processes; anything else is refused): pay the host
-//!                                     `to` (a BRC-29 key derived for it, counterparty the host) X sats,
-//!                                     or all we have if less, in one transaction whose other output,
-//!                                     0 sats, is `OP_FALSE OP_RETURN <checkpoint>` (the state record
-//!                                     CID); emit it as the event `payment` {txid, tx (Atomic BEEF),
-//!                                     outputIndex, amount, to, remittance, checkpoint} — the host's to
-//!                                     take — and ingest it at the chain app as any other. Nothing to
-//!                                     pay: no event (the kernel puts the instance to sleep).
+//!   args {pay: {to, x, checkpoint}}   a pay step — the kernel launches one itself whenever the
+//!                                     allocation is consumed, and any app may launch one too: pay the
+//!                                     host `to` X sats, or all we have if less, in one transaction
+//!                                     whose other output, 0 sats, is `OP_FALSE OP_RETURN <checkpoint>`
+//!                                     (the state record CID); emit it as the event `payment` {txid, tx
+//!                                     (Atomic BEEF), outputIndex, amount, to, remittance, checkpoint} —
+//!                                     the host's to take — and ingest it at the chain app as any other.
+//!                                     Nothing to pay: no event (the kernel puts the instance to sleep).
+//!                                     The payee key is BRC-29's by a pre-set rule for the pair (this
+//!                                     skein, the host): keyID "<hosting_prefix> <hosting_suffix>"
+//!                                     (base64 "skein", base64 "hosting"), counterparty the host — one
+//!                                     key per pair, which the host derives with counterparty this
+//!                                     skein's identity, no remittance needed.
 //!   call fn "fund"                    the route handler of the funding row (`/wallet/fund`, open, the
 //!                                     door's `beef` filter): the body an Atomic BEEF (the door's
-//!                                     pointer record), the header `x-skein-outputs` BRC-100's
-//!                                     internalizeAction outputs (JSON), `x-skein-description`
-//!                                     optional: internalized (SPV against the chain state), ingested
-//!                                     at the chain app (not awaited), answered {txid, status, outputs}.
+//!                                     pointer record) and nothing else. The outputs taken are those
+//!                                     paying this skein's funding key — BRC-29 by a pre-set rule,
+//!                                     keyID "<funding_prefix> <funding_suffix>" (base64 "skein",
+//!                                     base64 "funding"), counterparty anyone, so anyone (a funder,
+//!                                     the host) derives it from the identity key alone: internalized
+//!                                     (SPV against the chain state), ingested at the chain app (not
+//!                                     awaited), answered {txid, status, outputs}. None: refused.
 //!
 //! Recorded calls: the signer over the `wallet` import (getPublicKey,
 //! createSignature: no key is ever here). Every step stores a result record,
@@ -70,6 +76,16 @@ const chainlib = @import("chain");
 
 const cbor = w.cbor;
 const Value = cbor.Value;
+
+/// #130: the pre-set BRC-29 derivations (keyID "<prefix> <suffix>", protocol [2, "3241645161d8"]).
+/// A hosting payment: this skein → the host, counterparty the host (one key per pair).
+pub const hosting_prefix = "c2tlaW4="; // base64 "skein"
+pub const hosting_suffix = "aG9zdGluZw=="; // base64 "hosting"
+/// A funding: anyone → this skein, counterparty anyone (one key per skein, derivable from its identity).
+pub const funding_prefix = "c2tlaW4="; // base64 "skein"
+pub const funding_suffix = "ZnVuZGluZw=="; // base64 "funding"
+/// BRC-42's "anyone": the public key of private key 1 (the generator point, compressed).
+pub const anyone_key = [33]u8{ 0x02, 0x79, 0xbe, 0x66, 0x7e, 0xf9, 0xdc, 0xbb, 0xac, 0x55, 0xa0, 0x62, 0x95, 0xce, 0x87, 0x0b, 0x07, 0x02, 0x9b, 0xfc, 0xdb, 0x2d, 0xce, 0x28, 0xd9, 0x59, 0xf2, 0x81, 0x5b, 0x16, 0xf8, 0x17, 0x98 };
 const Store = w.store.Store;
 const Map = w.store.Map;
 const ChainState = w.chainstate.State;
@@ -802,7 +818,6 @@ fn run(a: std.mem.Allocator) !void {
         // To the chain app (it broadcasts it), unless a draft or noSend.
         if (created.reference == null and !created.no_send) to_ingest = created.beef;
     } else if (eql(u8, op, "pay")) {
-        try kernelLaunched(a, s, step);
         const to_b = body.getBytes("to") orelse return error.BadInput;
         if (to_b.len != 33) return error.BadInput;
         const x = body.getUint("x") orelse return error.BadInput;
@@ -928,17 +943,6 @@ fn run(a: std.mem.Allocator) !void {
 
 // ---------------------------------------------------------------- billing (#130)
 
-/// The pay step is the kernel's alone: its thread was launched by the entry it processes (a thread a
-/// program launches is launched by that program's thread), so an app that launches this program with
-/// `pay` gets nothing built or spent.
-fn kernelLaunched(a: std.mem.Allocator, s: Store, step: Value) !void {
-    const o = try s.getValue(a, step.getCid("thread") orelse return error.BadInput);
-    const by = o.getCid("launchedBy") orelse return error.NotThePayStep;
-    if (!eql(u8, by, o.getCid("input") orelse return error.NotThePayStep)) return error.NotThePayStep;
-    const e = try s.getValue(a, by);
-    if (!eql(u8, e.getText("kind") orelse "", "log")) return error.NotThePayStep;
-}
-
 const Paid = struct { txid: [32]u8, tx_cid: []const u8, amount: u64, beef: []const u8, prefix: []const u8, suffix: []const u8 };
 
 fn b64(a: std.mem.Allocator, b: []const u8) ![]u8 {
@@ -949,16 +953,17 @@ fn b64(a: std.mem.Allocator, b: []const u8) ![]u8 {
 }
 
 /// Pay the host `to` the next block (#130 decided 5): X when our coins cover it and the fee (with
-/// change), else all of them less the fee (no change). The payment's key is BRC-29's — a fresh
-/// derivation (prefix and suffix from the thread's random), counterparty the host, so only the host
-/// can spend it; the second output commits the checkpoint. Null: nothing to pay with.
+/// change), else all of them less the fee (no change). The payment's key is BRC-29's by the pre-set
+/// rule for the pair (#130: `hosting_prefix`, `hosting_suffix`), counterparty the host, so only the
+/// host can spend it and the host finds it without a remittance; the second output commits the
+/// checkpoint. The change keys are fresh (from the thread's random). Null: nothing to pay with.
 fn payHost(a: std.mem.Allocator, wal: *Wallet, signer: w.builder.Signer, to: [33]u8, x: u64, checkpoint: []const u8, rate: u64, held_only: bool) !?Paid {
-    var rnd: [48]u8 = undefined;
+    var rnd: [24]u8 = undefined;
     threadRandom(&rnd);
-    const prefix = try b64(a, rnd[0..12]);
-    const suffix = try b64(a, rnd[12..24]);
-    const change_prefix = try b64(a, rnd[24..36]);
-    const change_suffix = try b64(a, rnd[36..48]);
+    const prefix: []const u8 = hosting_prefix;
+    const suffix: []const u8 = hosting_suffix;
+    const change_prefix = try b64(a, rnd[0..12]);
+    const change_suffix = try b64(a, rnd[12..24]);
     var inputs = try wal.spendableInputs();
     if (held_only) {
         const c = try wal.chainOrFail();
@@ -1019,48 +1024,6 @@ fn emitPayment(a: std.mem.Allocator, p: Paid, to: []const u8, me: []const u8, ch
     _ = try result(a, sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
 }
 
-/// A header's value (the host keeps names lower-case).
-fn headerOf(headers: ?Value, name: []const u8) ?[]const u8 {
-    const hs = headers orelse return null;
-    if (hs != .map) return null;
-    for (hs.map) |e| if (std.ascii.eqlIgnoreCase(e.key, name)) return if (e.value == .text) e.value.text else null;
-    return null;
-}
-
-/// BRC-100 internalizeAction outputs as JSON (the header `x-skein-outputs`).
-fn specsOf(a: std.mem.Allocator, text: []const u8) ![]w.wallet.InternalizeOutput {
-    const j = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return error.BadOutputs;
-    if (j != .array or j.array.items.len == 0) return error.BadOutputs;
-    const specs = try a.alloc(w.wallet.InternalizeOutput, j.array.items.len);
-    const str = struct {
-        fn f(o: std.json.ObjectMap, k: []const u8) ![]const u8 {
-            const v = o.get(k) orelse return error.BadOutputs;
-            return if (v == .string) v.string else error.BadOutputs;
-        }
-    }.f;
-    for (j.array.items, specs) |x, *spec| {
-        if (x != .object) return error.BadOutputs;
-        const idx = x.object.get("outputIndex") orelse return error.BadOutputs;
-        if (idx != .integer or idx.integer < 0) return error.BadOutputs;
-        spec.* = .{ .output_index = @intCast(idx.integer) };
-        const protocol = try str(x.object, "protocol");
-        if (eql(u8, protocol, "wallet payment")) {
-            const r = x.object.get("paymentRemittance") orelse return error.BadOutputs;
-            if (r != .object) return error.BadOutputs;
-            const hex = try str(r.object, "senderIdentityKey");
-            var sender: [33]u8 = undefined;
-            if (hex.len != 66) return error.BadOutputs;
-            _ = std.fmt.hexToBytes(&sender, hex) catch return error.BadOutputs;
-            spec.payment = .{ .derivation_prefix = try str(r.object, "derivationPrefix"), .derivation_suffix = try str(r.object, "derivationSuffix"), .sender_identity_key = sender };
-        } else if (eql(u8, protocol, "basket insertion")) {
-            const r = x.object.get("insertionRemittance") orelse return error.BadOutputs;
-            if (r != .object) return error.BadOutputs;
-            spec.insertion = .{ .basket = try str(r.object, "basket"), .custom_instructions = if (r.object.get("customInstructions")) |c| (if (c == .string) c.string else null) else null };
-        } else return error.BadOutputs;
-    }
-    return specs;
-}
-
 /// Called (#130): the funding row's handler — an in-VM call from the front door's step — answering
 /// the route handler contract ({status, type, body}, dag-cbor on stdout).
 fn called(a: std.mem.Allocator, s: Store, in: Value) !void {
@@ -1080,27 +1043,41 @@ fn called(a: std.mem.Allocator, s: Store, in: Value) !void {
     try std.Io.File.stdout().writeStreamingAll(io(), ans);
 }
 
-/// A funding the host handed in (#130 decided 7): internalized — the outputs ours by the header's
-/// BRC-29 remittances, SPV against the chain state — the state advanced, the result kept, the
-/// transaction ingested at the chain app (not awaited: the request answers now). → the JSON answer.
+/// A funding the host handed in (#130: the host validated that it pays this skein's funding key,
+/// broadcast it and had Arcade accept it): the request's body an Atomic BEEF and nothing else. The
+/// outputs taken are every output paying the funding key — BRC-29 by the pre-set rule
+/// (`funding_prefix`, `funding_suffix`), counterparty anyone, derived here by the signer —
+/// internalized as payments from anyone (SPV against the chain state), the state advanced, the
+/// result kept, the transaction ingested at the chain app (not awaited: the request answers now).
+/// None paying it: refused. → the JSON answer.
 fn fund(a: std.mem.Allocator, s: Store, in: Value, func: []const u8) ![]const u8 {
     if (!eql(u8, func, "fund")) return error.UnknownFn;
     const req = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
-    const headers = req.get("headers");
-    const specs = try specsOf(a, headerOf(headers, "x-skein-outputs") orelse return error.NoOutputs);
-    const description = headerOf(headers, "x-skein-description") orelse "funding";
     const beef = switch (req.get("body") orelse return error.NoBeef) {
         // The door's `beef` filter put the pointer record where the bytes were.
         .cid => |c| try chainlib.record.beefOf(a, s, c),
         .bytes => |b| b,
         else => return error.NoBeef,
     };
+    const parsed = w.beef.parse(a, beef) catch return error.NoBeef;
+    const subject = parsed.atomic orelse return error.NotAtomicBeef;
+    const tx = (parsed.find(subject) orelse return error.NoBeef).tx orelse return error.NoBeef;
+    const key = try VmSigner.derive(&VmSigner.dummy, a, try w.brc29.keyId(a, funding_prefix, funding_suffix), anyone_key);
+    var specs: std.ArrayList(w.wallet.InternalizeOutput) = .empty;
+    for (tx.outputs, 0..) |o, i| if (w.brc29.pays(o.locking_script.bytes, key)) try specs.append(a, .{
+        .output_index = @intCast(i),
+        .payment = .{ .derivation_prefix = funding_prefix, .derivation_suffix = funding_suffix, .sender_identity_key = anyone_key },
+    });
+    if (specs.items.len == 0) {
+        std.log.err("no output pays this skein's funding key (BRC-29 {s} {s}, counterparty anyone)", .{ funding_prefix, funding_suffix });
+        return error.NoFundingOutput;
+    }
     const me = (in.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
     const net_name = if (in.get("defaults")) |d| d.getText("walletNetwork") orelse "main" else "main";
     const net_default = w.chain.Network.parse(net_name) orelse return error.BadConfig;
     const state_cid = try headOf(a, head_name);
     var wal = try Wallet.load(a, s, state_cid, try headOf(a, chain_head), net_default);
-    const res = try wal.internalize(beef, specs, description, &.{"funding"});
+    const res = try wal.internalize(beef, specs.items, "funding", &.{"funding"});
     const new_state = try wal.save();
     if (sk.advance(head_name.ptr, head_name.len, new_state.ptr, @intCast(new_state.len)) < 0) return failed();
     const txid_hex = try a.dupe(u8, &w.header.toHex(res.txid));
