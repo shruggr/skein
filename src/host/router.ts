@@ -54,8 +54,10 @@
 // nothing here — and the client's connection held until the thread the kernel
 // steps the front door on comes to rest; its answer, signed on the session
 // inside, is the response. Past `answerWaitMs`, or at shutdown, 503 +
-// Retry-After. An unsigned request for a message route is 401, for nothing
-// 404, answered without an entry.
+// Retry-After. An unsigned request goes through the door only at an open row
+// whose filter validates the payload (#135: signed or validated; answered
+// plain); otherwise for a message route it is 401, for nothing 404, answered
+// without an entry.
 //
 // What the instances send out goes through the host's providers (#70,
 // providers.ts): each kernel hands over the messages its steps emitted

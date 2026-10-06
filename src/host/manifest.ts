@@ -416,7 +416,7 @@ export interface OverlayWiring { rows: Row[]; reads: ReadIn[]; topics: string[] 
 
 const TOPIC = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 /** The fields of `config.overlay` (`status` is refused with its own reason). */
-const OVERLAY_FIELDS = ["topics", "lookups", "gossip"];
+const OVERLAY_FIELDS = ["topics", "lookups", "gossip", "market", "validator"];
 
 /**
  * The wiring `config.overlay` asks for (APPS.md §6, #79), or its problems. For
@@ -429,12 +429,13 @@ const OVERLAY_FIELDS = ["topics", "lookups", "gossip"];
  * `status` box (the chain app's), no grants: the engine writes `<app>/…`
  * only. No topics is accepted: the box rows, `/submit` and `/lookup` and no
  * per-topic rows — the topics registered at runtime get theirs from the
- * engine (#120). A field other than topics, lookups, gossip is refused (no
- * prefix declarations, #120). `isRole` tells which roles the manifest has.
+ * engine (#120). `market` ({window: <ms>}) and `validator` ({every: <ms>})
+ * are the engine's own settings, read from the app record: checked, no rows
+ * derived. A field other than these is refused (no prefix declarations, #120). `isRole` tells which roles the manifest has.
  */
 export function overlayWiring(app: string, ov: unknown, isRole: (role: string) => boolean): OverlayWiring | string[] {
   const bad: string[] = [];
-  if (!isMap(ov)) return ["want {topics?, lookups?, gossip?}"];
+  if (!isMap(ov)) return ["want {topics?, lookups?, gossip?, market?, validator?}"];
   if (!isRole(OVERLAY_ROLE)) bad.push(`the engine is the role "${OVERLAY_ROLE}": programs has none`);
   const topics: string[] = [];
   if (ov.topics !== undefined && !isMap(ov.topics)) bad.push("topics: want {<topic>: <role>}");
@@ -456,6 +457,9 @@ export function overlayWiring(app: string, ov: unknown, isRole: (role: string) =
   }
   if (ov.status !== undefined) bad.push("status: gone (#79): statuses are the chain app's (its `status` row); the overlay admits on the chain app's answer");
   if (ov.gossip !== undefined && (!isMap(ov.gossip) || Object.entries(ov.gossip).some(([t, on]) => typeof on !== "boolean" || !topics.includes(t)))) bad.push("gossip: want {<topic the overlay serves>: true | false}");
+  const ms = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v > 0;
+  if (ov.market !== undefined && (!isMap(ov.market) || !ms(ov.market.window) || Object.keys(ov.market).some((k) => k !== "window"))) bad.push("market: want {window: <ms>}");
+  if (ov.validator !== undefined && (!isMap(ov.validator) || !ms(ov.validator.every) || Object.keys(ov.validator).some((k) => k !== "every"))) bad.push("validator: want {every: <ms>}");
   if (bad.length) return bad;
   const http = (address: string, fn: string): Row => ({ transport: "http", address, sender: "*", program: OVERLAY_ROLE, fn });
   const read = (address: string, fn: string): ReadIn => ({ address, program: OVERLAY_ROLE, fn });

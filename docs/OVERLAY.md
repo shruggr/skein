@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.8.0).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.9.2).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -189,8 +189,13 @@ ov1: overlay 0.4.1 installed: 15 messages sent as the owner · head overlay/app 
 skein-overlay's `etc/app.json` names its topic managers and lookup services
 in `config.overlay` (`topics: {tm_demo: "topic-demo"}`, `lookups: {ls_demo:
 {program: "lookup-demo", topics: ["tm_demo"]}}`, `gossip: {tm_demo:
-true}`). The install derives these rows from it (src/host/manifest.ts
-`overlayWiring`, docs/APPS.md §6), all to the engine, role `overlay`:
+true}`; 0.9.0 adds the optional engine settings `market: {window: <ms>}`
+and `validator: {every: <ms>}`, from which nothing is derived; 0.9.2: the
+owner switches them at run time with `market {window}|{off}` /
+`validator {every}|{off}` in `<app>/register`, kept on `<app>/topics` and
+taking precedence over the manifest's). The install
+derives these rows from it (src/host/manifest.ts `overlayWiring`,
+docs/APPS.md §6), all to the engine, role `overlay`:
 
 | row | from | fn |
 |---|---|---|
@@ -205,11 +210,14 @@ true}`). The install derives these rows from it (src/host/manifest.ts
 **Two doors (#135).** `/overlay/lookup` is a **read**, derived into the
 manifest's `reads[]`: the host serves it by a call over the current state —
 anyone, signed or not, any method (BRC-24's POST), no entry. `/submit` is a
-**message route**: a signed request (BRC-104); the stock TopicBroadcaster's
-plain POST is a 401 now, and the stock AuthFetch does not carry `X-Topics`
-(it signs only content-type, authorization and `x-bsv-*`) — a signed HTTP
-submission names its topics beside the signed headers, or a submission goes
-by message into the box `overlay/submit`. The listing and documentation
+**message route** on an open row behind the `beef` filter, so it takes a
+request signed **or validated** (#135, David 2026-10-07: "signed or
+validatable. Validated."): the stock TopicBroadcaster's plain POST is
+admitted because its BEEF checks at the door (no sender key; a BEEF that
+does not check is the door's 400), and `X-Topics` is metadata beside it,
+not signed; a signed request (BRC-104) is verified and answered signed,
+`X-Topics` beside the signed headers. A submission also goes by message
+into the box `overlay/submit`. The listing and documentation
 paths are reads the manifest declares itself, `reads[]`:
 
 ```json
@@ -221,7 +229,7 @@ paths are reads the manifest declares itself, `reads[]`:
 ]
 ```
 
-(skein-overlay 0.8.0 declares them so; through 0.7.8 they were http rows,
+(skein-overlay 0.8.0 and later declare them so; through 0.7.8 they were http rows,
 message routes, and an unsigned GET a 401. The walkthrough below predates
 #135.) The chain app's
 four rows are its manifest's own; its `$status` row is left out on a host

@@ -29,16 +29,19 @@
 //!   {transport: "http", address: <path>, prefix?: true, sender: "*" | "session" | "owner" | <key>, program, fn, …}
 //!   exact paths first, then the longest prefix, the first whose sender
 //!   takes the identity the request claims (`x-bsv-auth-identity-key`).
-//!   Who passes (gate.zig, decided 2026-10-07): a signed request gets a
-//!   signed answer. A request carrying x-bsv-auth-* headers is a BRC-104
-//!   general message: its session and signature are verified here, for the
-//!   identity the kernel matched on, whatever the row's sender (`*`
-//!   included), and its answer is signed on that session (BRC-104 §6.4). A
-//!   request without them passes only on an open row (sender "*"): the
-//!   handler gets no caller and the answer is plain; any other row refuses
-//!   it 401 (the stock client shakes hands). The row's sender says only
-//!   which keys may reach the route: "*" any key with a session, or none;
-//!   "session" any key with a session; a key that identity. With no row the kernel says why (`refused`): "path"
+//!   Who passes (gate.zig; #135, 2026-10-07: signed or validated): a
+//!   request carrying x-bsv-auth-* headers is a BRC-104 general message:
+//!   its session and signature are verified here, for the identity the
+//!   kernel matched on, whatever the row's sender (`*` included), and its
+//!   answer is signed on that session (BRC-104 §6.4). A request without
+//!   them passes only on an open row (sender "*") whose `filter` validates
+//!   the payload (`beef`: the kernel's door checks every BUMP against the
+//!   chain state after this; one that does not check is the door's refusal
+//!   entry): the handler gets no caller and the answer is plain; any other
+//!   row refuses it 401 (the stock client shakes hands). The row's sender
+//!   says only which keys may reach the route: "*" any key with a session,
+//!   or none where the filter validates; "session" any key with a session;
+//!   a key that identity. With no row the kernel says why (`refused`): "path"
 //!   404 (verified and signed when the request is signed); "session" 401 (the stock client shakes hands); "sender" 403,
 //!   signed on the session once verified. The row is the handler's `match`.
 //!
@@ -148,7 +151,8 @@ fn run(a: Allocator) !void {
 /// matched, or why none. Who the package is from is checked here: BRC-104
 /// for http (a signed request, on any row: the session and the signature of
 /// the identity the kernel matched on; an unsigned one passes only on an open
-/// row, gate.zig), GossipSub's signature for a libp2p topic
+/// row whose filter validates the payload, gate.zig — the admission then
+/// carries no `verified`: no sender key), GossipSub's signature for a libp2p topic
 /// message, a `local` package's signature (or, the loopback, its record in the store). The answer is the
 /// door's outcome: {ok: true, verified?: {caller, theirs, requestId} | {key}}
 /// — written on the entry (`door.verified`), so the step does not verify
@@ -405,9 +409,14 @@ fn mutualAuthFailed() Resp {
     return .{ .status = 401, .body = "{\"status\":\"error\",\"code\":\"UNAUTHORIZED\",\"message\":\"Mutual-authentication failed!\"}" };
 }
 
-/// An open row (#77: sender "*"): any key with a session, or none (gate.zig).
+/// An open row (#77: sender "*"): any key with a session, or none where its filter validates (gate.zig).
 fn isOpen(r: Value) bool {
     return eql(u8, Value.str(r.get("sender")) orelse "", "*");
+}
+
+/// Whether the row's `filter` validates the payload (#135, gate.zig `validates`).
+fn validatedRow(r: Value) bool {
+    return gate.validates(Value.str(r.get("filter")));
 }
 
 /// Whether the request carries BRC-104 headers (x-bsv-auth-*): a general message, verified whatever the row.
@@ -420,7 +429,7 @@ fn signedRequest(req: Value) bool {
 
 /// The gate (gate.zig) for a request on the row the kernel matched.
 fn gateOf(row: Value, req: Value) gate.Gate {
-    return gate.gate(isOpen(row), signedRequest(req));
+    return gate.gate(isOpen(row), validatedRow(row), signedRequest(req));
 }
 
 /// A later step (#66): the thread the handler waited on has come to rest

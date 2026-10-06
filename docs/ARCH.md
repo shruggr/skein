@@ -235,8 +235,10 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
   front door's fn `read` (no entry, its fuel metered); a signed request for
   a message route is appended as a `request` entry and the host holds the
   connection until the thread comes to rest; past `answerWaitMs` (two
-  minutes) or at shutdown, 503 + Retry-After; an unsigned request for a
-  message route is 401, for nothing 404, no entry. Sessions are the front
+  minutes) or at shutdown, 503 + Retry-After; an unsigned request goes
+  through the door only at an open row whose `filter` validates the
+  payload (#135: signed or validated; answered plain), else for a
+  message route it is 401, for nothing 404, no entry. Sessions are the front
   door's records under `frontdoor/sessions`, so they survive a restart.
   Every message is an entry; a read is none and moves nothing.
 - **The libp2p node** (`src/host/p2p.ts`): one js-libp2p node per instance

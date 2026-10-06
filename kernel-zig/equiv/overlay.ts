@@ -34,14 +34,15 @@
 // standard gossip (#74) across three routers. Every store replays to itself
 // exactly (equiv/replays.ts).
 //
-// skein-overlay 0.7.3 (shruggr/skein#112): POST /submit answers its delivery
-// (200 {id}), never a STEAK; on that open route no one is answered, and the
-// admitting step's result record carries the STEAK. The verdict cases submit
-// by message instead — {fn: "submit", args: {beef, topics}} into box `overlay/submit`
+// skein-overlay 0.9.2 (shruggr/skein#112): POST /submit is BRC-22 and
+// synchronous again — the request waits on the engine's thread and is answered
+// the STEAK (503 + Retry-After at the router's bound; several waiters all
+// answered); a plain POST is admitted because its BEEF validates (#135). The
+// verdict cases also submit by message — {fn: "submit", args: {beef, topics}} into box `overlay/submit`
 // over a wallet's /sendMessage session (the tree has the messagebox for it) —
 // and read the answers (admitted / rejected, each naming the message) from the
-// steps' result records: no message reaches that sender. No request waits:
-// Arcade busy and no status provider leave the submitter unanswered until the
+// steps' result records: no message reaches that sender. By message, Arcade
+// busy and no status provider leave the submitter unanswered until the
 // verdict.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/overlay.ts
@@ -74,7 +75,7 @@ import { READS_HEAD, readsRecord } from "../../src/host/plan.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "28765fc7129e6e7a1c4d5cdf083b63d51bc978ca";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "af7625385121df203fa8a341f8dd9711b55e6ab0";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -88,7 +89,8 @@ const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok 
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 
 // #135, two doors: POST /submit is a message route — a signed request, X-Topics beside the signed headers
-// (src/testapps.ts signedSubmitter); the stock TopicBroadcaster's plain POST is a 401 now.
+// (src/testapps.ts signedSubmitter) — and, signed or validated, an open row behind the `beef` filter: the
+// stock TopicBroadcaster's plain POST is admitted because its BEEF validates (no sender key).
 const submitFetch = signedSubmitter(ephemeralWallet(key("8888")));
 
 // #135: the overlay's lookup, listings and documentation are reads — served by a call, anyone, signed or not, no
@@ -163,6 +165,8 @@ cpSync(sys, sys2, { recursive: true });
 
 // ---------------------------------------------------------------- regtest
 
+/** The STEAK of a tm_demo token admitted (output 0). */
+const STEAK = { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } };
 const sha256d = (b: Uint8Array) => createHash("sha256").update(createHash("sha256").update(b).digest()).digest();
 const internal = (displayHex: string) => Buffer.from(displayHex, "hex").reverse();
 const REGTEST_GENESIS = Buffer.from("0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f2002000000", "hex");
@@ -369,6 +373,7 @@ try {
   fund.addInput({ sourceTXID: "11".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
   fund.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 50_000 });
   fund.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 10_000 }); // #57: the gate instance's token
+  fund.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 10_000 }); // #112: the gate's HTTP token (0.9.2)
   const fundTxid = fund.id("hex");
   // Second in its block (a transaction at offset 0 is a coinbase, which the SDK holds to 100 blocks' maturity).
   const cb = "cb".repeat(32);
@@ -400,10 +405,10 @@ try {
   const facilitator = { send: async (_url: string, tagged: Parameters<HTTPSOverlayBroadcastFacilitator["send"]>[1]) => { sentBeefs.push(Uint8Array.from(tagged.beef)); const s = await new HTTPSOverlayBroadcastFacilitator(submitFetch as typeof fetch, true).send(base, tagged); steaks.push(s); return s; } };
   const broadcaster = new TopicBroadcaster(["tm_demo"], { networkPreset: "local", facilitator });
   const b1 = await broadcaster.broadcast(t1);
-  // skein-overlay 0.7.3 (#112): POST /submit answers its delivery, {id}, not a STEAK (the stock broadcaster reads that
-  // as an error); on the open route no one is answered: the admitting step's result record carries the STEAK.
+  // skein-overlay 0.9.2 (#112): POST /submit is BRC-22 again — the request waits on the engine's thread and is answered
+  // the STEAK (the stock broadcaster reads it as success); the admitting step's result record carries it too.
   await until("T1 admitted", async () => { await router.settled(); return (await steakOf(db, t1.id("hex"))) ? true : undefined; });
-  report.submit1 = { status: b1.status, delivered: /^[0-9a-f]{60,}$/.test(String((steaks.at(-1) as { id?: unknown } | undefined)?.id)), steak: await steakOf(db, t1.id("hex")) };
+  report.submit1 = { status: b1.status, answered: steaks.at(-1), steak: await steakOf(db, t1.id("hex")) };
   // #79: the chain app broadcast it (the overlay handed it over); the host posted it once, in Extended Format.
   report.posted1 = posted(t1.id("hex")).map((b) => Buffer.from(b).equals(Buffer.from(t1.toEF())));
 
@@ -558,13 +563,13 @@ try {
   };
   await router.settled();
   const held0 = heldBlocks();
-  const dupeHttp = await new HTTPSOverlayBroadcastFacilitator(submitFetch as typeof fetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo", "tm_other"] }) as { id?: unknown };
+  const dupeHttp = await new HTTPSOverlayBroadcastFacilitator(submitFetch as typeof fetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo", "tm_other"] }) as Record<string, unknown>;
   await router.settled();
   {
     const k = await kO();
     const last = (await entriesSince("overlay", 0)).filter((e) => e.transport === "http").at(-1)!;
     const body = (await k.store.get(last.request!) as unknown as { body: unknown }).body;
-    report.dupeBlocks = { bitcoinAndRaw: [held0, heldBlocks()], samePointer: !!CID.asCID(body) && (report.door121 as { pointer?: string }).pointer === String(body), delivered: typeof dupeHttp.id === "string" };
+    report.dupeBlocks = { bitcoinAndRaw: [held0, heldBlocks()], samePointer: !!CID.asCID(body) && (report.door121 as { pointer?: string }).pointer === String(body), delivered: eq(dupeHttp, STEAK) };
   }
   // The same dupe by message (0.7.3): answered `admitted` from the state at once, the STEAK of the topics it serves.
   {
@@ -577,12 +582,13 @@ try {
   const fwd = router as unknown as { forward(handle: string, ...rest: unknown[]): Promise<unknown> };
   const forward0 = fwd.forward.bind(router);
   let requests = 0, toDoor = 0;
-  // #135: what reaches the door — a signed request, or the handshake — is an entry; a read (a call) is none.
+  // #135: what reaches the door — a signed request, the handshake, or a plain POST /submit (an open row whose filter
+  // validates) — is an entry; a read (a call) is none.
   fwd.forward = async (handle, ...rest) => {
     if (handle === "overlay") {
       requests++;
       const [route, , req] = rest as [string, URL, { headers: Record<string, string> }];
-      if (route === "/.well-known/auth" || Object.keys(req.headers).some((k) => k.startsWith("x-bsv-auth-"))) toDoor++;
+      if (route === "/.well-known/auth" || route.endsWith("/submit") || Object.keys(req.headers).some((k) => k.startsWith("x-bsv-auth-"))) toDoor++;
     }
     return await forward0(handle, ...rest);
   };
@@ -624,12 +630,16 @@ try {
       status: res.status, code: answer.code, entries: (await logLen()) - len0, refused: e.refused?.stage, reason: /merkle root/.test(e.refused?.reason ?? ""),
       noThread: a.state === "refused", same: eq(await stateOf(), st0), pointer: !!CID.asCID(rec.body),
     };
+    // #135: the same bad BEEF plain (validated, not signed): the filter's refusal, a plain 400.
+    const resPlain = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: bad });
+    report.badBumpPlain = [resPlain.status, (await resPlain.json() as { code?: string }).code, Object.keys(Object.fromEntries(resPlain.headers)).some((h) => h.startsWith("x-bsv-auth-"))];
+    await router.settled();
   }
   report.lsHead = (await (await kO()).call("head", "overlay/ls_demo")) != null;
 
   // T2 spends the token into a new one (X-Topics as a JSON array, Atomic BEEF): the old one is retained.
   const r2 = await submitFetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": JSON.stringify(["tm_demo"]) }, body: new Uint8Array(t2.toAtomicBEEF()) });
-  report.submit2Delivered = [r2.status, typeof ((await r2.json()) as { id?: unknown }).id];
+  report.submit2Delivered = [r2.status, await r2.json().catch(() => undefined)];
   report.submit2 = await until("T2 admitted", async () => { await router.settled(); return await steakOf(db, t2.id("hex")); });
   report.lookup2 = (await look({ topic: "tm_demo" })).map((o) => [name(o.txid), o.outputIndex, o.verifies]);
   report.withSpent = (await look({ topic: "tm_demo", includeSpent: true })).map((o) => [name(o.txid), o.outputIndex]).sort();
@@ -661,9 +671,12 @@ try {
   report.doc = [doc.headers.get("content-type"), (await doc.text()).split("\n")[0]];
   await look({ topic: "tm_demo" });
   await submitFetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
-  // #135: the same submission plain (the stock TopicBroadcaster's): a message route, 401, no entry.
-  const plainSubmit = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t1.toBEEF()) });
-  report.plainSubmit = plainSubmit.status;
+  // #135: the same submission plain, by the stock facilitator over a plain fetch (the stock TopicBroadcaster's): signed
+  // or validated — its BEEF validates at the door: admitted (an entry), 200; a dupe, so the state stays.
+  let plainStatus = 0;
+  const plainFetch = (async (u: string | URL | Request, i?: RequestInit) => { const r = await fetch(u, i); plainStatus = r.status; return r; }) as typeof fetch;
+  await new HTTPSOverlayBroadcastFacilitator(plainFetch, true).send(base, { beef: t1.toBEEF(), topics: ["tm_demo"] }).catch(() => undefined);
+  report.plainSubmit = plainStatus;
   await router.settled();
   // #65, #79: `local` requests are entries too, not forwarded: the status provider's messages and the loopback (the
   // overlay's ingest and watch messages, the chain app's answers).
@@ -858,6 +871,27 @@ try {
     busy, steak: ok, submissions: await submissions(), queued: router.arc!.queued().some((q) => q.txid === gid), posts: posted(gid).length,
     state: (await settledIn(await kG(), [gid]))[0], live: gLive.outputs.map((o) => [Transaction.fromBEEF(o.beef).id("hex") === gid, o.outputIndex]),
   };
+  // 0.9.2 (#112: BRC-22 and synchronous again), over HTTP — a plain POST (#135: its BEEF validates): Arcade busy, the
+  // client waits on the submission's thread to the router's bound, 503 + Retry-After; a resubmission waits on the same
+  // thread (503 again, no second submission). Arcade takes it: two clients resubmitting at once both get the STEAK.
+  {
+    const h = new Transaction();
+    h.addInput({ sourceTransaction: fund, sourceOutputIndex: 2, unlockingScriptTemplate: new P2PKH().unlock(alice), sequence: 0xffffffff });
+    h.addOutput({ lockingScript: tokenScript(alice), satoshis: 1 });
+    h.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 9_000 });
+    await h.sign();
+    const submitH = () => fetch(`${gateBase}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(h.toBEEF()) });
+    const n0 = await submissions();
+    arcade.mode = "busy";
+    const h1 = await submitH();
+    const h2 = await submitH();
+    const first = [h1.status, h1.headers.get("retry-after")], again = [h2.status, h2.headers.get("retry-after")];
+    const busyThreads = (await submissions()) - n0;
+    arcade.mode = "ok";
+    const both = await Promise.all([submitH(), submitH()]);
+    report.transientHttp = { first, again, busyThreads, both: await Promise.all(both.map(async (r) => [r.status, await r.json().catch(() => undefined)])), threads: (await submissions()) - n0, posts: posted(h.id("hex")).length };
+    await router.settled();
+  }
 
   // #73: the fourth instance (no Arcade, no status provider): the chain app's broadcast is dropped (this host has
   // none) and the submission's thread waits for the chain app's answer; the client gets 503 at the bound, nothing
@@ -1044,7 +1078,7 @@ try {
   // (1) A submission over HTTP to A: admitted on its chain app's `accepted` (Arcade's RECEIVED) → A publishes the
   // BEEF as received on `tm_demo` and its verdict on `tm_demo-admit`.
   const sub = await submitFetch(`${gr("ga").originOf("ga")}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(gTok.toBEEF()) });
-  report.g74submit = [sub.status, typeof ((await sub.json()) as { id?: unknown }).id, await until("A admits", async () => { await gr("ga").settled(); return await steakOf(gDb.ga, gTokId); }).catch(() => undefined)];
+  report.g74submit = [sub.status, await sub.json().catch(() => undefined), await until("A admits", async () => { await gr("ga").settled(); return await steakOf(gDb.ga, gTokId); }).catch(() => undefined)];
   // B gets the raw submission by gossip, judges it, hands it to its chain app and waits: no status provider, so
   // nothing is admitted before the proof.
   await until("B holds the gossiped submission, pending", async () => (await pendingOf("gb")).has(gKey) || undefined);
@@ -1148,11 +1182,10 @@ if (report.ok === true) {
   await v.close();
 }
 
-const STEAK = { tm_demo: { outputsToAdmit: [0], coinsToRetain: [], coinsRemoved: [] } };
 process.stdout.write("== overlay services (#36, #79)\n");
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(report.chainState === "chain-state", `the headers (events in box chain) reached the chain app: chain/state is a chain-state (${String(report.chainState)})`);
-check(eq(report.submit1, { status: "error", delivered: true, steak: STEAK }), `TopicBroadcaster → POST /submit (0.7.3: 200 {id}, delivery only, which the stock broadcaster does not read as a STEAK): the token admitted on the chain app's answer, the STEAK in the admitting step's result (${JSON.stringify(report.submit1)})`);
+check(eq(report.submit1, { status: "success", answered: STEAK, steak: STEAK }), `TopicBroadcaster → POST /submit (0.9.2: BRC-22, synchronous): the token admitted on the chain app's answer, the STEAK answered and in the admitting step's result (${JSON.stringify(report.submit1)})`);
 check(eq(report.posted1, [true]), `#79: the chain app broadcast the token transaction the overlay handed it; the host posted it to Arcade once (Extended Format) before it was admitted (${JSON.stringify(report.posted1)})`);
 {
   const d = report.door121 as { filter?: string; linked?: boolean; kind?: string; grep?: [number, boolean]; identical?: boolean; txBlocks?: boolean[]; ingested?: boolean; ingests?: string[] } | undefined;
@@ -1163,7 +1196,7 @@ check(eq(report.posted1, [true]), `#79: the chain app broadcast the token transa
   const bb = report.badBump as Record<string, unknown> | undefined;
   check(eq(bb, { status: 400, code: "ERR_REFUSED", entries: 1, refused: "filter", reason: true, noThread: true, same: true, pointer: true }), `#121: a bad BUMP: a refusal entry (stage filter, "merkle root"), stored with its BEEF a pointer; nothing runs (no thread, no head moved); 400 to the client (${JSON.stringify(bb)})`);
   const db_ = report.dupeBlocks as { bitcoinAndRaw: [number, number]; samePointer: boolean } | undefined;
-  check(!!db_ && db_.bitcoinAndRaw[0] === db_.bitcoinAndRaw[1] && db_.samePointer && (db_ as { delivered?: boolean }).delivered === true, `#121: a held transaction submitted again writes no block (bitcoin and raw blocks ${JSON.stringify(db_?.bitcoinAndRaw)}), the same pointer record`);
+  check(!!db_ && db_.bitcoinAndRaw[0] === db_.bitcoinAndRaw[1] && db_.samePointer && (db_ as { delivered?: boolean }).delivered === true, `#121: a held transaction submitted again writes no block (bitcoin and raw blocks ${JSON.stringify(db_?.bitcoinAndRaw)}), the same pointer record; answered the first STEAK from the state (0.9.2)`);
   check(eq(report.lookupSame, [true, true]), `#121: the lookup answers the same bytes on the instance that took T1 over HTTP and the one that took it over GossipSub (${JSON.stringify(report.lookupSame)})`);
 }
 {
@@ -1181,7 +1214,7 @@ check(eq(report.lookupJson, { type: "output-list", outputs: [["t1", 0]] }), `the
 }
 check(eq(report.refusedSubmit, [1, "rejected", "NotAdmitted", 1, true]), `#50, #68, #112: a submission no topic takes: answered rejected (NotAdmitted), one entry; the overlay's, the lookup service's and the chain's heads where they were (${JSON.stringify(report.refusedSubmit)})`);
 check(report.lsHead === true, `#50, #79: ls_demo keeps its own storage under the head overlay/ls_demo`);
-check(eq(report.submit2Delivered, [200, "string"]) && eq(report.submit2, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [0], coinsRemoved: [] } }), `the spend (POST /submit, X-Topics a JSON array, Atomic BEEF: 200 {id}): a new token admitted, the old retained (${JSON.stringify([report.submit2Delivered, report.submit2])})`);
+check(eq(report.submit2Delivered, [200, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [0], coinsRemoved: [] } }]) && eq(report.submit2, { tm_demo: { outputsToAdmit: [0], coinsToRetain: [0], coinsRemoved: [] } }), `the spend (POST /submit, X-Topics a JSON array, Atomic BEEF: 200, its STEAK): a new token admitted, the old retained (${JSON.stringify([report.submit2Delivered, report.submit2])})`);
 check(eq(report.lookup2, [["t2", 0, true]]) && eq(report.withSpent, [["t1", 0], ["t2", 0]]), `the live set moves to the new token (spent-ness from the chain state); the old one stays for history (${JSON.stringify([report.lookup2, report.withSpent])})`);
 check(eq(report.afterReject, [["t1", 0, true]]), `#79: a DOUBLE_SPEND_ATTEMPTED for the spend: the chain app rejects it and answers the overlay's watch; its admittance vanishes, the consumed token is live again (${JSON.stringify(report.afterReject)})`);
 check(eq(report.t2Settled, [[false, false, true]]), `the chain state: the spend rejected, nothing pending (${JSON.stringify(report.t2Settled)})`);
@@ -1191,8 +1224,9 @@ check(eq(report.topics, { tm_demo: { name: "tm_demo", shortDescription: "Example
 check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdown"), `documentation (${JSON.stringify(report.doc)})`);
 {
   const [b, a, n, still, local, door] = (report.readsWrite ?? []) as [number, number, number, boolean, number, number];
-  check(n > 10 && n - door >= 5 && a === b + door && local >= 2 && still === true, `#135: every request to the door (signed, or the handshake) is an entry, a read none (${n} requests, ${door} to the door: ${b} → ${a}, besides ${local} \`local\` ones: the status provider's and the loopback's); the reads moved nothing (${still})`);
-  check(report.plainSubmit === 401, `#135: a plain POST /submit (the stock TopicBroadcaster's) is a message route unsigned: 401 (${String(report.plainSubmit)})`);
+  check(n > 10 && n - door >= 5 && a === b + door && local >= 2 && still === true, `#135: every request to the door (signed, the handshake, or a plain POST /submit: validated) is an entry, a read none (${n} requests, ${door} to the door: ${b} → ${a}, besides ${local} \`local\` ones: the status provider's and the loopback's); the reads moved nothing (${still})`);
+  check(report.plainSubmit === 200, `#135, signed or validated: a plain POST /submit (the stock facilitator's, X-Topics) is admitted because its BEEF validates: 200 (${String(report.plainSubmit)})`);
+  check(eq(report.badBumpPlain, [400, "ERR_REFUSED", false]), `#135: a bad BUMP plain: the filter's refusal, 400, answered plain (${JSON.stringify(report.badBumpPlain)})`);
 }
 check(eq(report.awaitingU, { state: [[false, true, false], [false, true, false], [false, true, false]], posts: [1, 1, 1] }), `#57, #79: three unproven tokens, each posted once by the chain app and admitted on its accepted, each unproven with its broadcast registered (${JSON.stringify(report.awaitingU)})`);
 check(eq(report.settledBySse, [[true, false, false], [true, false, false], [true, false, false]]), `#65: Arcade's SEEN_ON_NETWORK then MINED (proof events with merkle paths) over its SSE stream, to the chain app: proven, nothing registered (${JSON.stringify(report.settledBySse)})`);
@@ -1210,6 +1244,9 @@ check(eq(report.mined, { answer: ["admitted", "proven", STEAK], posted: 0, state
   check(!!t && eq(t.busy.first, []) && eq(t.busy.state, [false, true, false]) && t.busy.posts >= 1, `#57, #112: Arcade's 503: the host keeps it queued; nothing admitted; the submitter not answered yet (${JSON.stringify(t?.busy)})`);
   check(!!t && eq(t.busy.again, []) && t.busy.submissions === 1, `#112: a resubmission while pending launches no second submission and is not answered (${JSON.stringify(t?.busy)})`);
   check(!!t && eq(t.steak, [[["admitted", "pending", STEAK]], []]) && t.submissions === 1 && !t.queued && t.posts >= 2 && eq(t.state, [false, true, false]) && eq(t.live, [[true, 0]]), `#57, #112: the host's queue retries; Arcade takes it: accepted, admitted; the first submitter answered admitted with the STEAK (${JSON.stringify(t)})`);
+  const th = report.transientHttp as { first: unknown[]; again: unknown[]; busyThreads: number; both: unknown[]; threads: number; posts: number } | undefined;
+  check(!!th && eq(th.first, [503, "5"]) && eq(th.again, [503, "5"]) && th.busyThreads === 1, `#66, #112 (0.9.2): Arcade busy, a plain POST /submit: the client waited to the router's bound, 503 + Retry-After; a resubmission waits on the same thread, 503 again, no second submission (${JSON.stringify(th && [th.first, th.again, th.busyThreads])})`);
+  check(!!th && eq(th.both, [[200, STEAK], [200, STEAK]]) && th.threads === 1 && th.posts >= 2, `#66, #112 (0.9.2): Arcade takes it: two clients waiting on the same submission both get the STEAK (${JSON.stringify(th)})`);
   check(Array.isArray(report.firstAnswers) && report.firstAnswers.length === 1, `skein-overlay 0.7.4: the first submitter (by message) is answered exactly once (${JSON.stringify(report.firstAnswers)})`);
 }
 {
@@ -1222,7 +1259,7 @@ check(eq(report.edges, { sameRoot: true, children: [false, false, false], noNode
 
 process.stdout.write("== overlay gossip (#74, #79)\n");
 check(report.g74ok === true, `the gossip scenario ran${report.g74error ? `: ${report.g74error}` : ""}`);
-check(eq(report.g74submit, [200, "string", STEAK]), `A: POST /submit (200 {id}) admitted on its chain app's accepted (Arcade's RECEIVED) (${JSON.stringify(report.g74submit)})`);
+check(eq(report.g74submit, [200, STEAK, STEAK]), `A: POST /submit (200, the STEAK) admitted on its chain app's accepted (Arcade's RECEIVED) (${JSON.stringify(report.g74submit)})`);
 check(eq(report.g74bPending, { pending: true, applied: 0, proven: false }), `A re-published the raw submission on \`tm_demo\`: B (no status provider) judged it, handed it to its chain app, waits — nothing admitted before the proof (${JSON.stringify(report.g74bPending)})`);
 check(eq(report.g74cFirst, [["peer-admit", "tm_demo", true, true, [0], []]]), `A's verdict on \`tm_demo-admit\`: C records it as a peer-admit record from A's peer key under overlay/gossip (${JSON.stringify(report.g74cFirst)})`);
 check(eq(report.g74bAdmitted, { applied: 1, pending: false, block: true, aBlock: true, live: [[true, 0]] }), `A's chain app proved it; A published \`tm_demo-proof\`; B's route checked the BUMP against its chain state, B's chain app proved it, B admitted at the proof (${JSON.stringify(report.g74bAdmitted)})`);

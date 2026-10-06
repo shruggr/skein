@@ -147,15 +147,31 @@ sessions, and verifies nothing.
 
 ### The front door: two doors (#135)
 
-Decided 2026-10-07 (David): "The security boundary is absolute." Every
-entry in the log came from a key.
+Decided 2026-10-07 (David): "The security boundary is absolute." And
+corrected the same day: "I never, ever said or meant to say signed only.
+The security boundary is signed or validatable. Validated." A request is
+admitted when it is **signed** (a session and a signature: the sender is a
+key) **or validated** (the payload proves itself: today the row's `beef`
+filter — every BUMP checked against the chain state; the transactions
+carry their own signatures). A read needs neither. Anything else is
+refused.
 
-1. **The kernel's door admits messages only.** A message is a key, a
-   signature, a row. There is no unsigned path into it: an `http` row of
-   the dispatch table is a **message route**, and a request reaches it
-   signed (BRC-104: `x-bsv-auth-*` headers) — verified at the door and
-   answered signed on its session, whatever the row's sender (`*` means
-   any key, never no key).
+1. **The kernel's door admits messages and validated payloads.** An
+   `http` row of the dispatch table is a **message route**: a request
+   reaches it signed (BRC-104: `x-bsv-auth-*` headers) — verified at the
+   door and answered signed on its session, whatever the row's sender.
+   The one unsigned path is an **open row (sender `*`) whose `filter`
+   validates the payload** (`beef`): the door admits a plain request
+   there when the filter passes it — a payload the filter refuses is the
+   door's refusal entry, answered plain (400) — and the handler's answer
+   is plain. Its admission carries no sender key: the entry's `door` is
+   `{filter: "beef", beefs: [<pointer record>]}` with no `verified`, and
+   the handler gets no `caller` (as with a gossiped submission, submitter
+   identity is not involved). On any other row an unsigned request is
+   refused 401. `X-Topics` and the like are metadata beside the payload,
+   not signed: "it's just metadata about which things this is going to be
+   validated against. It's still just self-validating." A signed request
+   to the same open row is verified and answered signed.
 2. **Reads are `call`s.** A path the instance's **reads** name is served by
    the host as a kernel `call` of a program's function over the current
    state — the front door's fn `read` with the request as received and the
@@ -172,10 +188,11 @@ entry in the log came from a key.
    refuses the clash, and so does `skein plan reads`). A read wins → the
    call. A row wins, or nothing matches: a signed request goes through the
    kernel's door (an entry; a path no row takes is the door's signed 404);
-   an unsigned one is answered by the host with no entry — **401** when a
-   row is at the path (a message route: sign it; the stock client shakes
-   hands), else **404**. The handshake (`/.well-known/auth`) is the
-   door's, signed or not.
+   so does an unsigned one at an open row whose filter validates (1.,
+   above: an entry, answered plain); any other unsigned one is answered by
+   the host with no entry — **401** when a row is at the path (a message
+   route: sign it; the stock client shakes hands), else **404**. The
+   handshake (`/.well-known/auth`) is the door's, signed or not.
 
 **Where reads come from.** The head `reads` (src/host/plan.ts
 `READS_HEAD`): its root `{kind: "reads", reads: [{address: <the path as
@@ -193,10 +210,12 @@ root moves.
 | path (examples) | door |
 |---|---|
 | `/site/*`, the owner's `/`, `/onboard/resolve`, `/onboard/search`, `/onboard/manifest.json`, `/onboard/bsvalias/id/*`, `/<overlay>/lookup`, `/<overlay>/listTopicManagers` … | a read: a call, anyone |
-| `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/<overlay>/submit`, `/amm/call`, `/wallet/fund`, `/explore*` | a message route: signed |
+| `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/amm/call`, `/wallet/fund`, `/explore*` | a message route: signed |
+| `/<overlay>/submit` (open, `filter: beef`) | a message route: signed, or validated (a plain POST whose BEEF checks) |
 
-A plain write — the stock TopicBroadcaster's POST `/submit`, an unsigned
-profile — gets 401 and shakes hands. The host's funding hand-in to
+The stock TopicBroadcaster's plain POST `/submit` is admitted: its BEEF
+validates. Any other plain write — an unsigned profile — gets 401 and
+shakes hands. The host's funding hand-in to
 `/wallet/fund` is a message too: the host signs it over a BRC-104 session
 with its billing key (docs/WALLET.md, Billing).
 

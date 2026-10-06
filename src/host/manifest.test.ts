@@ -244,6 +244,20 @@ test("config.overlay: its problems", () => {
   assert.ok(!Array.isArray(w) && w.rows.filter((r) => r.address === "ov2").length === 2, "the app's own box, by its name");
 });
 
+test("config.overlay: market {window} and validator {every} are the engine's settings: accepted, checked, no rows derived", () => {
+  const ov = { ...demoOverlay, market: { window: 60_000 }, validator: { every: 30_000 } };
+  const c = checkManifest(overlayApp(ov), (p) => overlayFiles.has(p));
+  const plain = checkManifest(overlayApp(demoOverlay), (p) => overlayFiles.has(p));
+  assert.deepEqual(c.derived, plain.derived, "the same wiring as without them");
+  assert.deepEqual(c.manifest.dispatch, plain.manifest.dispatch);
+  assert.deepEqual(c.manifest.reads, plain.manifest.reads);
+  const p = (x: unknown) => overlayProblems(overlayApp(x)).join("\n");
+  assert.equal(p({ market: { window: 1 } }), "");
+  assert.equal(p({ validator: { every: 1 } }), "");
+  for (const bad of [{ market: 5 }, { market: {} }, { market: { window: "1m" } }, { market: { window: 0 } }, { market: { window: 1.5 } }, { market: { window: 1, extra: 1 } }]) assert.match(p(bad), /market: want \{window: <ms>\}/, JSON.stringify(bad));
+  for (const bad of [{ validator: true }, { validator: {} }, { validator: { every: -1 } }, { validator: { every: 1, window: 1 } }]) assert.match(p(bad), /validator: want \{every: <ms>\}/, JSON.stringify(bad));
+});
+
 test("config.overlay with no topics (#120): accepted; the box, /submit and /lookup derived, no per-topic rows", () => {
   const rows = ["mailbox overlay event", "mailbox overlay $self", "http /overlay/submit *"];
   for (const ov of [{}, { topics: {} }, { lookups: { ls_demo: "lookup-demo" } }, { topics: {}, lookups: { ls_demo: { program: "lookup-demo" } } }]) {
@@ -287,7 +301,7 @@ test("reads[] (#135): a path under the app's, a role, a fn, settings carried; no
 
 test("config.overlay: no prefix declarations (#120): prefixes refused, in the overlay and in a lookup service", () => {
   const p = (ov: unknown) => overlayProblems(overlayApp(ov)).join("\n");
-  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "mandala" } } }), /prefixes: not a field \(want topics, lookups, gossip; no prefix declarations, #120\)/);
+  assert.match(p({ prefixes: { tm_: { program: "topic-demo", active: "mandala" } } }), /prefixes: not a field \(want topics, lookups, gossip, market, validator; no prefix declarations, #120\)/);
   assert.match(p({ topics: { tm_demo: "topic-demo" }, prefixes: {} }), /prefixes: not a field/);
   assert.match(p({ lookups: { ls_demo: { program: "lookup-demo", prefixes: ["tm_"] } } }), /lookups\.ls_demo: prefixes: not a field \(want program, topics\)/);
   assert.match(p({ topics: { tm_demo: "topic-demo" }, extra: 1 }), /extra: not a field/);

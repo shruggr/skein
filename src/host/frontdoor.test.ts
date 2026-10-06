@@ -6,7 +6,9 @@
 // its signed requests verify inside the VM and the answers verify at the
 // client. A refusal (401, 404) of a signed request is recorded and changes
 // nothing else; an unsigned request is no entry (#135: the second door is
-// for reads; a row is a message route). A poll costs an entry. Sessions survive a new kernel process; an expired one is a
+// for reads; a row is a message route) — but at an open row whose filter
+// validates the payload (`beef`): admitted with no sender key, answered
+// plain (#135: signed or validated). A poll costs an entry. Sessions survive a new kernel process; an expired one is a
 // 401 and the stock client shakes hands again by itself.
 
 import { test } from "node:test";
@@ -16,13 +18,16 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AuthFetch, Beef, P2PKH, PrivateKey, Transaction } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
+import { encode } from "../runtime/cid.ts";
 import { msStamp } from "../runtime/syscalls.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { rawCid } from "./boot.ts";
-import { frontDoorFetch, routeOf, type FrontAnswer } from "./frontdoor.ts";
-import { writeGenesis } from "./genesis.ts";
+import { appendRequest, frontDoorFetch, routeOf, type FrontAnswer } from "./frontdoor.ts";
+import { keyBytes, writeGenesis } from "./genesis.ts";
 import { Kernel, KERNEL_BIN } from "./kernel.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL } from "./providers.ts";
 
 const PROBE = new URL("../../kernel-zig/test/call/probe.wasm", import.meta.url);
 
@@ -134,10 +139,49 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.ok(signed(answers.at(-1)!) && !answers.at(-1)!.thread, "a door refusal (no thread) of a signed request: answered signed on its session");
   const refusedRecord = await k.store.get((await k.store.get(answers.at(-1)!.entry!) as { request: CID }).request) as unknown as { body: unknown };
   assert.ok(!(refusedRecord.body instanceof Uint8Array), "the record the refusal entry names has its BEEF replaced (the host signed over the bytes as received)");
+  // #135, signed or validated: the same request unsigned reaches the door's filter (an open row whose
+  // filter validates the payload) — refused there, answered plain.
+  const plain = (x: FrontAnswer) => !Object.keys(x.headers).some((h) => h.startsWith("x-bsv-auth-"));
   answers.length = 0;
   const refusedPlain = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
-  assert.equal(refusedPlain.status, 401, "#135: the same request unsigned never reaches the door's filter: 401, plain");
-  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")) && !answers.at(-1)!.entry, "answered by the host, plain, no entry");
+  assert.equal(refusedPlain.status, 400, "#135: unsigned at an open row behind `filter: beef`: through the door, the filter's refusal");
+  assert.match(await refusedPlain.text(), /no chain state/);
+  assert.ok(plain(answers.at(-1)!) && answers.at(-1)!.entry && !answers.at(-1)!.thread, "a refusal entry, no thread, answered plain");
+
+  // A chain state for the filter to check against (the owner's `head` message: no headers, so a BEEF with
+  // no BUMP passes as unproven, the chain app's to judge).
+  {
+    const state = await k.store.put({ kind: "chain-state", network: "main", maps: { headers: null } } as never);
+    const bodyBytes = dagCbor.encode({ name: "chain/state", tree: state });
+    const unsigned = { kind: "mail", op: "put", sender: keyBytes(client), recipient: keyBytes(identity), box: "head", body: encode(dagCbor.decode(bodyBytes)).cid, nonce: new Uint8Array(16) };
+    const { signature } = await ephemeralWallet(clientKey).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
+    await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
+    await k.idle();
+    assert.ok(((await k.call("head", "chain/state")) as CID | null)?.equals(state), "the chain state is set");
+  }
+  // A good BEEF unsigned: validated at the door, the handler's plain answer (no caller); the admission
+  // carries no sender key (`door` names the filter and the BEEF's pointer record, no `verified`).
+  answers.length = 0;
+  const validated = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
+  assert.equal(validated.status, 200, await validated.clone().text());
+  // The probe answers the first `caller` its scan finds: with none in the request, the in-VM call's own (a program CID), never a key.
+  const vb = Buffer.from(await validated.arrayBuffer());
+  assert.ok(vb.byteLength !== 33 && vb[0] === 0x01, `the handler got no caller key (${vb.toString("hex")})`);
+  assert.ok(plain(answers.at(-1)!) && answers.at(-1)!.thread, "a thread ran; answered plain");
+  const admitted = await k.store.get(answers.at(-1)!.entry!) as { door?: { verified?: unknown; filter?: string; beefs?: CID[] }; refused?: unknown };
+  assert.ok(!admitted.refused && admitted.door?.filter === "beef" && admitted.door.beefs?.length === 1 && admitted.door.verified == null, `the admission: the filter, the BEEF's pointer record, no sender key (${JSON.stringify(Object.keys(admitted.door ?? {}))})`);
+  // A bad BEEF unsigned (a BEEF pattern that does not decode): the filter's refusal, plain 400.
+  answers.length = 0;
+  const bad = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()).subarray(0, 12) });
+  assert.equal(bad.status, 400);
+  assert.match(await bad.text(), /does not decode/);
+  assert.ok(plain(answers.at(-1)!) && !answers.at(-1)!.thread, "refused at the door, answered plain");
+  // The same good BEEF signed: verified, the handler sees the caller, the answer signed.
+  answers.length = 0;
+  const validatedSigned = await af.fetch("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
+  assert.equal(validatedSigned.status, 200);
+  assert.equal(Buffer.from(await validatedSigned.arrayBuffer()).toString("hex"), client, "a signed request at the same row: the verified caller");
+  assert.ok(signed(answers.at(-1)!), "answered signed on its session");
   // 403: a stranger's signed request to a row for another key: verified, its 403 signed.
   const stranger = new AuthFetch(ephemeralWallet(PrivateKey.fromRandom()), undefined, undefined, undefined, {}, door);
   answers.length = 0;

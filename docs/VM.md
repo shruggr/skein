@@ -832,8 +832,10 @@ host's side.
 ### Requests: the front door stepped on the package (#68, #66)
 
 Every message a transport carries in is an entry (#135: an HTTP request is
-a message when it is signed — a read is a call, above, and an unsigned
-request at a message route is the host's 401, no entry) — since #121 as the door
+admitted when it is signed, or validated — unsigned at an open row whose
+`filter` validates the payload, its admission with no sender key; a read is
+a call, above, and any other unsigned request at a message route is the
+host's 401, no entry) — since #121 as the door
 hands it back: `{kind: "log", …, request: <record>, transport, door? |
 refused?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
 `middleware[transport]`, else its front door for `http`, `libp2p` and

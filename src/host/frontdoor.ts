@@ -26,9 +26,14 @@
 // the host's meter), the request as received, signed or not, any method —
 // a signed one verified and answered signed on its session. A row wins, or
 // nothing matches: a signed request goes through the door (appended, its
-// thread waited on: frontDoor); an unsigned one is answered here, 401 when
-// a row is at the path (a message route: sign it), else 404 — never an
-// entry. The handshake (/.well-known/auth) is the door's.
+// thread waited on: frontDoor). An unsigned one goes through the door only
+// at an open row (sender `*`) whose filter validates the payload (#135,
+// David 2026-10-07: "signed or validatable. Validated." — `beef`, every
+// BUMP checked against the chain state; one that does not check is the
+// door's refusal, answered plain): admitted with no sender key, answered
+// plain. Any other unsigned request is answered here, 401 when a row is at
+// the path (a message route: sign it), else 404 — never an entry. The
+// handshake (/.well-known/auth) is the door's.
 
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
@@ -174,6 +179,12 @@ export const HANDSHAKE_PATH = "/.well-known/auth";
 /** Whether a request carries BRC-104 headers (x-bsv-auth-*): a signed request. */
 export const isSigned = (headers: Record<string, string>): boolean => Object.keys(headers).some((h) => h.toLowerCase().startsWith("x-bsv-auth-"));
 
+/** The door filters that prove a payload (#135; kernel-zig/src/door.zig, programs/frontdoor/gate.zig `validating`). */
+export const VALIDATING_FILTERS: readonly string[] = ["beef"];
+
+/** Whether a row admits an unsigned request (#135: signed or validated): open (sender `*`) and its filter validates the payload. */
+export const validatesUnsigned = (row: DispatchRow): boolean => row.sender === "*" && VALIDATING_FILTERS.includes(String(row.filter ?? ""));
+
 /** The reads head as last read, per kernel: its root and its reads. */
 const readsSeen = new WeakMap<Kernel, { root: string; reads: ReadEntry[] }>();
 
@@ -220,7 +231,8 @@ export async function serveRead(k: Kernel, req: FrontRequest, read: ReadEntry, o
 
 /**
  * One HTTP request through the two doors (#135): a read served by a call (serveRead); a signed
- * request for a row, or for nothing, through the door (frontDoor); an unsigned one for a row 401,
+ * request for a row, or for nothing, through the door (frontDoor); an unsigned one through the door
+ * only for an open row whose filter validates the payload (validatesUnsigned), else for a row 401,
  * for nothing 404 — answered here, nothing appended. The handshake goes to the door.
  */
 export async function serveHttp(k: Kernel, req: FrontRequest, o: { now?: Stamp; waitMs?: number; stop?: Promise<unknown> } = {}): Promise<FrontAnswer> {
@@ -231,7 +243,7 @@ export async function serveHttp(k: Kernel, req: FrontRequest, o: { now?: Stamp; 
     const rows = reads.length || !signed ? (await k.dispatch()).rows : [];
     const to = routeOf(reads, rows, route);
     if (to && "read" in to) return await serveRead(k, req, to.read, o);
-    if (!signed) {
+    if (!signed && !(to && validatesUnsigned(to.row))) {
       return to
         ? { status: 401, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_UNAUTHORIZED", description: `${route}: a message route — the request is signed (BRC-104: shake hands at ${HANDSHAKE_PATH})` }) }
         : { status: 404, headers: { "content-type": "application/json" }, body: jsonBody({ status: "error", code: "ERR_NOT_FOUND", description: `nothing at ${route} (no read, no message route)` }) };

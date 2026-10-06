@@ -17,8 +17,9 @@
 //   - the second router publishes a token on tm_demo: the installed overlay
 //     judges it with the manifest's topic manager, hands it to the chain app
 //     (which broadcasts it), admits it on the chain app's answer (Arcade's
-//     word); /overlay/lookup finds it; an HTTP /overlay/submit answers its
-//     delivery, {id} (skein-overlay 0.7.4, #112), and is admitted; a submission by
+//     word); /overlay/lookup finds it; an HTTP /overlay/submit answers the
+//     STEAK (BRC-22, synchronous again in skein-overlay 0.9.2, #112) — plain
+//     and unsigned too (#135: its BEEF validates); a submission by
 //     message into box overlay/submit is answered admitted, naming the message;
 //   - BRC-22 → the chain app → BRC-24 over HTTP at the base URL
 //     /@<handle>/overlay (#111): a mined token's BEEF to <base>/submit with
@@ -71,7 +72,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "28765fc7129e6e7a1c4d5cdf083b63d51bc978ca";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "af7625385121df203fa8a341f8dd9711b55e6ab0";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -248,7 +249,7 @@ try {
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.8.0" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.8.0), with config.overlay; no alias head `overlay`");
+  check(app?.kind === "app" && app.version === "0.9.2" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.9.2), with config.overlay; no alias head `overlay`");
   check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "mailbox overlay", "mailbox overlay/submit"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)) && !rowsT.some((r) => r.transport === "http" && r.address !== "/overlay/submit"), `the dispatch table has the derived rows, and no http row but /submit: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
   const readsT = (((await record("reads"))?.reads ?? []) as Array<{ address: string; fn: string; app?: string }>).filter((r) => r.app === "overlay").map((r) => `${r.address} ${r.fn}`).sort();
   check(JSON.stringify(readsT) === JSON.stringify(["/overlay/getDocumentationForLookupServiceProvider lookupDocumentation", "/overlay/getDocumentationForTopicManager topicDocumentation", "/overlay/listLookupServiceProviders listLookupServiceProviders", "/overlay/listTopicManagers listTopicManagers", "/overlay/lookup lookup"]), `#135: the reads head has the overlay's reads — the derived /lookup and the manifest's four: ${readsT.join(", ")}`);
@@ -260,7 +261,7 @@ try {
   const alice = key("3333");
   const fund = new Transaction();
   fund.addInput({ sourceTXID: "72".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
-  for (let i = 0; i < 5; i++) fund.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 10_000 });
+  for (let i = 0; i < 6; i++) fund.addOutput({ lockingScript: new P2PKH().lock(alice.toPublicKey().toHash()), satoshis: 10_000 });
   const fundTxid = fund.id("hex");
   const cb = "cb".repeat(32);
   fund.merklePath = new MerklePath(1, [[{ offset: 0, hash: cb }, { offset: 1, hash: fundTxid, txid: true }]]);
@@ -295,18 +296,23 @@ try {
   check(!!found1, `a token published on tm_demo by the other router: judged by the manifest's topic manager, admitted on the chain app's answer (Arcade's word), found by /overlay/lookup (ls_demo) (${found1?.join(", ")})`);
   check(arcade.posts.some((b) => FakeArcade.txOf(b).id("hex") === t1.id("hex")), "the chain app broadcast it (the host's Arcade got it)");
 
-  // An HTTP submit to /overlay/submit (0.7.3+, #112): 200 {id}, its delivery; on the open route no one is answered,
-  // the admitting step's result record carries the STEAK.
+  // An HTTP submit to /overlay/submit (0.9.2, #112: BRC-22 again): the request waits on the engine's thread and
+  // is answered the STEAK; the admitting step's result record carries it too.
   const t2 = token(1);
   await t2.sign();
-  // #135: unsigned, the stock client's POST is 401 and no entry; signed (X-Topics beside), it is the message.
-  const n401 = (await (await kA()).store.get((await (await kA()).tip())!) as unknown as { n: number }).n;
-  const plain = await fetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t2.toBEEF()) });
-  check(plain.status === 401 && (await (await kA()).store.get((await (await kA()).tip())!) as unknown as { n: number }).n === n401, `#135: a plain POST /overlay/submit (the stock TopicBroadcaster's): 401, no entry (${plain.status})`);
+  // #135, signed or validated: unsigned, the stock client's POST is admitted because its BEEF validates (the open row's
+  // `beef` filter; no sender key), 200; a bad BEEF plain is the filter's refusal, 400. Signed (X-Topics beside), the same.
+  const tP = token(5);
+  await tP.sign();
+  const plain = await fetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(tP.toBEEF()) });
+  const steakP = await plain.json().catch(() => undefined);
+  check(plain.status === 200 && JSON.stringify(steakP) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}' && !plain.headers.has("x-bsv-auth-signature"), `#135: a plain POST /overlay/submit (the stock TopicBroadcaster's, X-Topics): ${plain.status}, admitted, the STEAK answered plain (BRC-22, 0.9.2) ${JSON.stringify(steakP)}`);
+  const badPlain = await fetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(tP.toBEEF()).subarray(0, 12) });
+  check(badPlain.status === 400 && !badPlain.headers.has("x-bsv-auth-signature"), `#135: a bad BEEF plain: the door's filter refuses it, 400, answered plain (${badPlain.status})`);
   const sub = await submitFetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t2.toBEEF()) });
-  const subId = (await sub.json() as { id?: unknown }).id;
+  const subSteak = await sub.json().catch(() => undefined);
   const steak = await until("t2 admitted", async () => { await rA.settled(); return await steakOf(store, t2.id("hex")); }, 20_000).catch(() => undefined);
-  check(sub.status === 200 && typeof subId === "string" && JSON.stringify(steak) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}', `POST /overlay/submit: ${sub.status} {id: ${String(subId).slice(0, 16)}…}; admitted, the STEAK in its step's result ${JSON.stringify(steak)}`);
+  check(sub.status === 200 && JSON.stringify(subSteak) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}' && JSON.stringify(steak) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}', `POST /overlay/submit, signed (0.9.2: BRC-22, synchronous): ${sub.status}, the STEAK answered ${JSON.stringify(subSteak)}; its step's result ${JSON.stringify(steak)}`);
   // A submission by message (0.7.3+, #112): {fn: "submit", args: {beef, topics}} into box `overlay/submit` (0.7.6: the manifest's row `submit`
   // from anyone, filter beef) from a wallet's session; answered admitted, naming the message. No message reaches that
   // sender (not in the address book): the answer is in the step's result record.
@@ -340,9 +346,9 @@ try {
   await rA.settled();
   const postsBefore = arcade.posts.length;
   const subM = await submitFetch(`${base}/submit`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-topics": "tm_demo" }, body: new Uint8Array(tM.toBEEF()) });
-  const subMId = (await subM.json() as { id?: unknown }).id;
+  const subMSteak = await subM.json().catch(() => undefined);
   const steakM = await until("tM admitted", async () => { await rA.settled(); return await steakOf(store, tM.id("hex")); }, 20_000).catch(() => undefined);
-  check(subM.status === 200 && typeof subMId === "string" && JSON.stringify(steakM) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}', `BRC-22 POST ${base.replace(/^http:\/\/[^/]+/, "")}/submit (X-Topics: tm_demo, a mined token's BEEF): ${subM.status} {id}; admitted, its STEAK ${JSON.stringify(steakM)}`);
+  check(subM.status === 200 && JSON.stringify(subMSteak) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}' && JSON.stringify(steakM) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}', `BRC-22 POST ${base.replace(/^http:\/\/[^/]+/, "")}/submit (X-Topics: tm_demo, a mined token's BEEF): ${subM.status}, its STEAK answered ${JSON.stringify(subMSteak)}`);
   // The chain app's answer: proven from the BEEF at once, nothing broadcast.
   const chainApp = ((await record("chain/app")) as { programs: Record<string, CID> }).programs.chain!;
   const stateOf = async (txid: string) => { const r = await (await kA()).invoke(chainApp, "status", dagCbor.encode({ txid })); return r.ok ? (dagCbor.decode(r.result) as { state?: string }).state : String(r.error); };
