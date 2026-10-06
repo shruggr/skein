@@ -192,12 +192,16 @@ try {
     try {
       res = await callerBox.af.fetch(`${h.base}/@inst/app-demo/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     } catch (e) {
-      // The front door's "no route" is not signed (no handler took the request): AuthFetch throws on it.
+      // A door refusal (no thread ran) is not signed: AuthFetch throws on it.
       const m = /Received HTTP (\d+)/.exec((e as Error).message);
       if (m) return { status: Number(m[1]), v: {} as { fn?: string; result?: { count: number }; error?: { code: string } } };
       throw e;
     }
-    return { status: res.status, v: JSON.parse(await res.text()) as { fn?: string; result?: { count: number }; error?: { code: string } } };
+    // 2026-10-07: every answer to a signed request is signed, an open row's too (the site handler's 405 is text, not JSON).
+    const text = await res.text();
+    let v: { fn?: string; result?: { count: number }; error?: { code: string } } = {};
+    try { v = JSON.parse(text); } catch { /* not JSON */ }
+    return { status: res.status, v };
   };
   let c = await call({ fn: "demo.counter.add", args: { by: 2 } });
   check(c.status === 200 && c.v.result?.count === 7, `POST /app-demo/call add {by: 2}: ${c.status} ${JSON.stringify(c.v)}`);
