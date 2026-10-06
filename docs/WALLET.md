@@ -294,6 +294,14 @@ program named `wallet` writes `wallet/…` (its default write scope). Each step 
 a new `wallet-state`, advances `wallet/state`, puts a `wallet-result`, keeps
 it, and prints its CID. An error ends the step `errored`; no head moves.
 
+Its coins move on the owner's messages (a thread a message launched), the
+chain app's answers to them, and the kernel's pay step (#130: a thread the
+kernel launched under the entry it processes; docs/VM.md "Billing"). A
+thread another program launched gets nothing: the step errors
+(`LaunchedByAProgram`), so no app spends the coins, or stops a payment to
+the host by draining them. Since #130 (and #116) the default image carries
+the wallet and its funding row (`/wallet/fund`, below).
+
 | body (owner) | does → result |
 |---|---|
 | `{op: "internalize", tx, outputs, description, labels?}` | BRC-100 `internalizeAction`, then ingested → `{txid, status, outputs, ingest, outcome: "pending", awaiting: true}` |
@@ -301,6 +309,8 @@ it, and prints its CID. An error ends the step `errored`; no head moves.
 | `{op: "signAction", reference}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
 | `{op: "headers" \| "proof", …}` | refused: the chain app's (#79) |
+| args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest, outcome: "pending", awaiting: true}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
+| call fn `fund` (#130: the funding row's handler, `/wallet/fund`) | the body an Atomic BEEF (the door's pointer record), the header `x-skein-outputs` BRC-100 internalizeAction outputs (JSON): internalized, ingested (not awaited) → `200 {txid, status, outputs}` \| `400 {status: "error", code: "ERR_FUNDING", description}` |
 
 | the chain app's answer (input `reply`) | result |
 |---|---|
