@@ -245,7 +245,8 @@ etc/reads.json           the form before #115, still read: who may call a route 
   (docs/MESSAGES.md): an `http` row is an exact address or a prefix (exact
   first, then the longest prefix), the program and function the front door
   calls with the request, sender `"*"` for an open route (an overlay's,
-  docs/OVERLAY.md), `"session"` for BRC-104, or a key (#121: the owner's rows name the
+  docs/OVERLAY.md; a signed request on it is still verified and answered
+  signed), `"session"` for BRC-104, or a key (#121: the owner's rows name the
   owner's key; #115's `"owner"` is read only in a row a log already holds); a row's `read: op` names an op `etc/reads.json` must
   allow the caller, folded into the row's sender at genesis (the genesis
   has no reads table). The default http rows

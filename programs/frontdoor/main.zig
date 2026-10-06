@@ -29,13 +29,18 @@
 //!   {transport: "http", address: <path>, prefix?: true, sender: "*" | "session" | "owner" | <key>, program, fn, …}
 //!   exact paths first, then the longest prefix, the first whose sender
 //!   takes the identity the request claims (`x-bsv-auth-identity-key`).
-//!   `sender` "*" is an open route: no session is checked and the handler
-//!   gets no caller (an overlay's submit and lookup); any other needs the
-//!   BRC-103/104 session and signature verified here, for the identity the
-//!   kernel matched on. With no row the kernel says why (`refused`):
-//!   "path" 404; "session" 401 (the stock client shakes hands); "sender"
-//!   403, signed on the session once verified. The row is the handler's
-//!   `match`.
+//!   Who passes (gate.zig, decided 2026-10-07): a signed request gets a
+//!   signed answer. A request carrying x-bsv-auth-* headers is a BRC-104
+//!   general message: its session and signature are verified here, for the
+//!   identity the kernel matched on, whatever the row's sender (`*`
+//!   included), and its answer is signed on that session (BRC-104 §6.4). A
+//!   request without them passes only on an open row (sender "*"): the
+//!   handler gets no caller and the answer is plain; any other row refuses
+//!   it 401 (the stock client shakes hands). The row's sender says only
+//!   which keys may reach the route: "*" any key with a session, or none;
+//!   "session" any key with a session; a key that identity. With no row the kernel says why (`refused`): "path"
+//!   404 (verified and signed when the request is signed); "session" 401 (the stock client shakes hands); "sender" 403,
+//!   signed on the session once verified. The row is the handler's `match`.
 //!
 //! The route handler contract (docs/MESSAGES.md, "Route handlers"): called
 //! with {caller?, method, path, route, query, headers, body, contentType,
@@ -78,6 +83,7 @@ const explore = @import("explore.zig");
 const p2p = @import("libp2p.zig");
 const sessions = @import("sessions.zig");
 const message = @import("message");
+const gate = @import("gate.zig");
 
 const Value = cbor.Value;
 const Allocator = std.mem.Allocator;
@@ -123,8 +129,9 @@ fn run(a: Allocator) !void {
 /// written (scheduler.zig `door`). Read only. `arg` is {request: <the
 /// request record itself>, transport, match?, refused?} — the row the kernel
 /// matched, or why none. Who the package is from is checked here: BRC-104
-/// for http (a row that is not open: the session and the signature of the
-/// identity the kernel matched on), GossipSub's signature for a libp2p topic
+/// for http (a signed request, on any row: the session and the signature of
+/// the identity the kernel matched on; an unsigned one passes only on an open
+/// row, gate.zig), GossipSub's signature for a libp2p topic
 /// message, a `local` package's signature (or, the loopback, its record in the store). The answer is the
 /// door's outcome: {ok: true, verified?: {caller, theirs, requestId} | {key}}
 /// — written on the entry (`door.verified`), so the step does not verify
@@ -143,8 +150,13 @@ fn doorVerify(a: Allocator, in: Value, arg: Value) !Value {
     if (eql(u8, Value.str(req.get("route")) orelse "/", brc.WELL_KNOWN)) return doorOk(a, null);
     const r = arg.get("match");
     const refused = Value.str(arg.get("refused")) orelse "path";
-    if (r == null and !eql(u8, refused, "sender")) return doorOk(a, null);
-    if (r) |row| if (isOpen(row)) return doorOk(a, null);
+    // No row: the step answers (404, 401) — signed when the request is (a 404 for a general message, verified here).
+    if (r == null and !eql(u8, refused, "sender") and !(eql(u8, refused, "path") and signedRequest(req))) return doorOk(a, null);
+    if (r) |row| switch (gateOf(row, req)) {
+        .plain => return doorOk(a, null),
+        .refuse => return doorRefused(a, 401, "UNAUTHORIZED", "Mutual-authentication failed!"),
+        .verify => {},
+    };
     const request_id = brc.headerOf(req.get("headers"), "x-bsv-auth-request-id") orelse return doorRefused(a, 401, "UNAUTHORIZED", "Mutual-authentication failed!");
     const v = verify(a, in, req, request_id) catch |err| return switch (err) {
         error.Malformed => doorRefused(a, 400, "ERR_AUTH_MALFORMED", "The authentication request is malformed."),
@@ -331,12 +343,20 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     // #115: the kernel matched the row on the identity the request claims; this verifies the claim.
     const r = in.get("match");
     const refused = Value.str(in.get("refused")) orelse "path";
-    if (r == null and !eql(u8, refused, "sender")) {
+    // A signed request with no row at its path is verified and its 404 signed (a signed request gets a signed answer).
+    if (r == null and !eql(u8, refused, "sender") and !(eql(u8, refused, "path") and signedRequest(req))) {
         resp = if (eql(u8, refused, "session")) mutualAuthFailed() else try jsonError(a, 404, "ERR_NOT_FOUND", "no route for this path");
         return resp.value(a);
     }
-    if (r) |row| if (isOpen(row)) return routed(a, in, row, rc, req, null);
-    // BRC-104: a general message.
+    if (r) |row| switch (gateOf(row, req)) {
+        .plain => return routed(a, in, row, rc, req, null),
+        .refuse => {
+            resp = mutualAuthFailed();
+            return resp.value(a);
+        },
+        .verify => {},
+    };
+    // BRC-104: a general message (on any row, an open one too).
     const headers = req.get("headers");
     const request_id = brc.headerOf(headers, "x-bsv-auth-request-id") orelse {
         resp = mutualAuthFailed();
@@ -357,7 +377,7 @@ fn http(a: Allocator, in: Value, rc: []const u8, req: Value) !Value {
     // The session's identity is the one the kernel matched on (verify checks the claimed key is the
     // session's): no row there takes it (#77: a row for one identity takes that identity's session only).
     const row = r orelse {
-        resp = try jsonError(a, 403, "ERR_FORBIDDEN", "no route here takes this identity");
+        resp = if (eql(u8, refused, "path")) try jsonError(a, 404, "ERR_NOT_FOUND", "no route for this path") else try jsonError(a, 403, "ERR_FORBIDDEN", "no route here takes this identity");
         try sign(a, in, &resp, v);
         return resp.value(a);
     };
@@ -368,9 +388,22 @@ fn mutualAuthFailed() Resp {
     return .{ .status = 401, .body = "{\"status\":\"error\",\"code\":\"UNAUTHORIZED\",\"message\":\"Mutual-authentication failed!\"}" };
 }
 
-/// An open row (#77: sender "*"): no session is checked and the handler gets no caller.
+/// An open row (#77: sender "*"): any key with a session, or none (gate.zig).
 fn isOpen(r: Value) bool {
     return eql(u8, Value.str(r.get("sender")) orelse "", "*");
+}
+
+/// Whether the request carries BRC-104 headers (x-bsv-auth-*): a general message, verified whatever the row.
+fn signedRequest(req: Value) bool {
+    const hs = req.get("headers") orelse return false;
+    if (hs != .map) return false;
+    for (hs.map) |e| if (gate.isAuthHeader(e.key)) return true;
+    return false;
+}
+
+/// The gate (gate.zig) for a request on the row the kernel matched.
+fn gateOf(row: Value, req: Value) gate.Gate {
+    return gate.gate(isOpen(row), signedRequest(req));
 }
 
 /// A later step (#66): the thread the handler waited on has come to rest

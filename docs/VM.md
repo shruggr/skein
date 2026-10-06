@@ -180,7 +180,9 @@ the address comes from: a `mailbox` row's address is a box (`*`: any box, a
 mailbox instance's catch-all); an `http` row's a path (`prefix: true` for a
 prefix; exact paths match first, then the longest prefix); a `libp2p` row's
 a pubsub topic, or `/<protocol>` for a stream protocol. `sender` is who the
-row admits: `*` anyone (an open route; it takes events too), `event`
+row admits: `*` anyone (an open route; it takes events too; over http a
+signed request on it is still verified and answered signed, docs/MESSAGES.md
+"The instance as an HTTP server"), `event`
 (mailbox only, #79) events and never a message — the host's wiring into a
 box (a feed's header, the broadcaster's proof, a route's admit), so a box
 that takes events need not be open; a key that identity (a message's

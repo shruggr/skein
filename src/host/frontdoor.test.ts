@@ -98,6 +98,27 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.equal((await sessions())!.toString(), s1.toString(), "a refusal moves nothing");
   assert.ok(answers.every((a) => a.thread), "each answered by its own thread (the refusal recorded on it)");
 
+  // 2026-10-07: a signed request is verified and answered signed on its session whatever the row's
+  // sender — an open row (`*`) included; the row's sender is who may reach it, not how the wire is answered.
+  const signed = (x: FrontAnswer) => !!x.headers["x-bsv-auth-signature"] && x.headers["x-bsv-auth-your-nonce"] !== undefined;
+  answers.length = 0;
+  const openSigned = await af.fetch("http://alpha.test/open", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  assert.equal(openSigned.status, 200);
+  assert.equal(Buffer.from(await openSigned.arrayBuffer()).toString("hex"), client, "a signed request on an open row: the handler sees the verified caller");
+  assert.ok(signed(answers.at(-1)!), "a signed request on an open row: its answer signed on the session (AuthFetch verified it)");
+  const openGet = await af.fetch("http://alpha.test/open", { method: "GET" });
+  assert.equal(openGet.status, 200);
+  assert.equal(Buffer.from(await openGet.arrayBuffer()).toString("hex"), client);
+  assert.ok(signed(answers.at(-1)!), "a signed GET on an open row: answered signed");
+  const nowhere = await af.fetch("http://alpha.test/nowhere", { method: "GET" });
+  assert.equal(nowhere.status, 404);
+  assert.ok(signed(answers.at(-1)!), "a signed request no row is at: its 404 signed");
+  answers.length = 0;
+  const plainGet = await door("http://alpha.test/open", { method: "GET" });
+  assert.equal(plainGet.status, 200);
+  assert.notEqual(Buffer.from(await plainGet.arrayBuffer()).toString("hex"), client, "an unsigned request on an open row: the handler gets no caller");
+  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "an unsigned request on an open row: answered plain");
+
   // Polls: an entry each (an access log), and the session table unchanged.
   const n2 = await entries();
   for (let i = 0; i < 20; i++) await whoami();

@@ -197,16 +197,24 @@ envelope. Answers are signed on the session through the instance's signer
   settings}`. The kernel matches them (dispatch.zig `forHttp`): exact
   addresses first, then prefixes, longest first; within each, the first row
   in table order whose sender takes the identity the request claims.
-  `sender` `"*"` is an open route (no session is checked, the handler gets
-  no caller: an overlay's submit and lookup); `"session"` any identity
-  with a BRC-104 session; a key that identity's (#121, #126: the owner's
+  `sender` says only which keys may reach the route, never how the wire
+  is answered: `"*"` any key with a session, or none (an open route: an
+  overlay's submit and lookup); `"session"` any identity with a BRC-104
+  session; a key that identity's (#121, #126: the owner's
   rows name the owner's key; there is no `"owner"` sender symbol). `filter: "beef"` (#121): the door decodes the body's BEEF
   before the entry is written and the handler's `body` is the pointer
-  record's CID (an overlay's submit). A request no row takes is
-  refused by the front door as the kernel says: no row at the path, 404;
-  a row there needs a session and the request has none, 401 (the stock
-  client shakes hands); none takes its identity, 403, signed on the
-  session. The genesis seeds the default rows; an app's install adds its
+  record's CID (an overlay's submit). **A signed request gets a signed
+  answer** (decided 2026-10-07, BRC-104 §6.4): a request carrying
+  `x-bsv-auth-*` headers is a general message, and the front door verifies
+  its session and signature and signs its answer on that session whatever
+  the row's sender, `*` included (the handler gets its `caller`); a bad
+  signature or an unknown or expired session is a plain 401, as on any
+  row. A request without those headers reaches only an open row, answered
+  plain with no caller. A request no row takes is refused by the front
+  door as the kernel says: no row at the path, 404 (verified and signed
+  when the request is signed); a row there needs a session and the request
+  has none, 401 (the stock client shakes hands); none takes its identity,
+  403, signed on the session. The genesis seeds the default rows; an app's install adds its
   rows under `/<app>/` through the kernel's `dispatch` operation
   (docs/APPS.md §3); the kernel matches against the table as it stands at
   each step. The front door never sees the table: it gets the row
@@ -243,8 +251,8 @@ envelope. Answers are signed on the session through the instance's signer
 ### Route handlers: the program-facing contract (#68, #66)
 
 A route handler is a program function the front door calls, in-VM, in its
-step on a request, once the request has verified (or, on an `auth: "none"`
-route, at once). Being part of that step, everything the handler does —
+step on a request, once the request has verified (or, unsigned on an open
+route — sender `*`, a system tree's `auth: "none"` — at once). Being part of that step, everything the handler does —
 records it puts, records it keeps, threads it launches, records or threads
 it awaits, heads it moves, recorded calls it makes — is the step's, on the
 request's thread, recorded and replayed with it. Its input is the ordinary
@@ -253,7 +261,7 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
 (dag-cbor):
 
 ```
-{ caller?:     bytes(33)       the identity the BRC-104 session proved (absent on an open route)
+{ caller?:     bytes(33)       the identity the BRC-104 session proved (absent for an unsigned request, on an open route)
   method, path, route, query,  the request as received (path as the client signed it; route as the table saw it)
   headers:     {name: value}   names lower-cased, x-bsv-auth-* included
   body:        bytes | <cid>  as received; #121: on a row whose `filter` is `beef`, the BEEF's pointer record (docs/VM.md "The door")
