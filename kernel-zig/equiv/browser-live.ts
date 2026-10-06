@@ -1,8 +1,11 @@
 // The browser build live (issue #35): a skein instance in headless Chrome —
 // the wasm kernel in a Worker over IndexedDB, the page as its host
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
-// with a scripted inference peer. The page identity (a wallet in the tab over
-// a test key here; Yours in use) registers its mailbox instance on the router;
+// with a scripted inference peer, and a host skein with the onboarding app
+// (shruggr/skein-onboard at src/testapps.ts's pinned commit). The page
+// identity (a wallet in the tab over a test key here; Yours in use) registers
+// its mailbox instance through it, over its BRC-104 session with the host's
+// origin (#135);
 // the chat app is installed into the browser instance by the install client's
 // plan (src/host/install.ts planInstall, over a copy of the browser's store)
 // sent as the page identity, its owner, on the page wallet's BRC-104 session
@@ -25,16 +28,15 @@ import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateKey } from "@bsv/sdk";
-import { RawBox } from "../../src/client/raw.ts";
+import { AuthFetch, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { RawBox, signClaim } from "../../src/client/raw.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { Router } from "../../src/host/router.ts";
-import { fakeDiscovery } from "../../src/host/fake-discovery.ts";
+import { Router, type SignedClaim } from "../../src/host/router.ts";
 import { InferPeer } from "../../src/peers/infer.ts";
 import { instanceView, planInstall, readApp, sendInstall } from "../../src/host/install.ts";
 import { wasmDirObjects } from "../../src/host/boot.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { appCheckout, CHAT_APP } from "../../src/testapps.ts";
+import { appCheckout, CHAT_APP, installApps, ONBOARD_APP } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { buildPage, servePage } from "../../web/kernel/serve.ts";
 import { chromium, playwright, writeStore } from "./browser.ts";
@@ -64,19 +66,26 @@ const keys = new Map<string, PrivateKey>();
 const ownerKey = key(), inferKey = key(), pageKey = key();
 const inferId = inferKey.toPublicKey().toString(), pageId = pageKey.toPublicKey().toString();
 const router: Router = new Router({
-  db, walletFor: (row) => ephemeralWallet(keys.get(row.handle)!), home,
-  // No host skein here (#113): discovery over host.db (a fixture); the page's registration is answered below.
-  discovery: fakeDiscovery(db, () => router),
+  db, home,
+  walletFor: (row) => { let k = keys.get(row.handle); if (!k) { k = key(); keys.set(row.handle, k); } return ephemeralWallet(k); },
   owner: ownerKey.toPublicKey().toString(), infer: inferId, idleMs: 0, kernel: { command: kernelBin, env: { SKEIN_HOME: home } },
   log: (s, l) => { if (verbose) console.log(`  | [${s}] ${l}`); },
 });
 await router.listen(0);
 const base = `http://127.0.0.1:${router.port}`;
-// The inference peer's mailbox instance.
-keys.set("infer", key());
-db.add("infer", { kind: "mailbox", owner: inferId, store: join(home, "instances", "infer", "runtime.db"), identity: keys.get("infer")!.toPublicKey().toString() });
-keys.set("page", key()); // the page identity's mailbox instance, registered by the page itself
+// The host skein (#113, #135): claimed by the owner's own signed claim, the onboarding app installed; the host's origin's
+// BRC-169 requests and the page's registration (over its session with the host's origin) are its app's.
+const owner = ephemeralWallet(ownerKey);
+await router.createInstance("host", ownerKey.toPublicKey().toString(), { host: true, claim: await signClaim(owner) as SignedClaim });
+await router.hydrate("host");
+await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], { config: { onboard: { domain: "localhost", origin: base } } });
+// The inference peer's mailbox instance, registered through the host skein as the page's is (#135: over its session).
 const iw = ephemeralWallet(inferKey);
+{
+  const { signature } = await new ProtoWallet(inferKey).createSignature({ protocolID: [2, "skein register"], keyID: "infer", counterparty: "anyone", data: Utils.toArray("register infer@localhost", "utf8") });
+  const r = await new AuthFetch(iw).fetch(`${base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "infer", identityKey: inferId, signature: Utils.toHex(signature) }) });
+  if (r.status !== 200) throw new Error(`register infer: HTTP ${r.status} ${await r.text()}`);
+}
 // The peer answers the browser instance at the page identity's mailbox instance (its address book, below).
 const peer = new InferPeer({
   log: () => {}, wallet: iw, providers: { ripper: { baseUrl: "http://ripper.test/v1", apiKey: "k" } },
