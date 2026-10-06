@@ -2475,6 +2475,10 @@ pub const Runtime = struct {
         if (std.mem.eql(u8, name, "beacon") or std.mem.eql(u8, name, "unbeacon")) {
             if (subsm.beaconProblem(a, name, m, app) catch return error.OutOfMemory) |why| return imp.failWith(why);
         }
+        // #138: a liveness is declared by an installed app, its shape checked as it is emitted.
+        if (std.mem.eql(u8, name, "liveness") or std.mem.eql(u8, name, "unliveness")) {
+            if (subsm.livenessProblem(a, name, m, app) catch return error.OutOfMemory) |why| return imp.failWith(why);
+        }
         var fields = m;
         if (std.mem.eql(u8, name, "fetch")) {
             // #126: an intention — the step awaits it (sk.fetch), and the runtime answers it.
