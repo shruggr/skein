@@ -1518,8 +1518,9 @@ pub const Runtime = struct {
         const used = rt.usage;
         rt.usage = .{};
         if (rt.stopped or ctx.e.get("genesis") != null) return;
-        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return) orelse return;
+        // No billing state: never ticked, nothing to meter (one head lookup: an instance that is not billed pays no more).
         var st = (try rt.billingState(a)) orelse return;
+        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return) orelse return;
         // Another host's state (the owner moved hosts): the new host's first tick starts its own.
         if (!std.mem.eql(u8, st.host, terms.host)) return;
         const at = logm.stampOf(ctx.e.get("time")).?.ms();

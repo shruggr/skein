@@ -1171,7 +1171,8 @@ export class Router {
     const cfg = this.o.billing;
     if (!cfg || l.kernel.gone) return;
     const handle = l.row.handle;
-    const rows = (await l.kernel.dispatch()).rows;
+    // The table as syncDispatch just read it (it follows the table when the host has libp2p or a headers feed), else read now.
+    const rows = (this.p2p || this.o.headersFeed) && l.rows ? l.rows : (await l.kernel.dispatch()).rows;
     const terms = termsOf(rows);
     if (!terms) {
       if (this.views.has(handle)) { this.views.delete(handle); this.o.db.forgetBilling(handle); this.say(handle, "billing: no host row: not billed"); }
