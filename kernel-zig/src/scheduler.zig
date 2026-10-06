@@ -59,6 +59,8 @@ const engine = @import("engine.zig");
 const doorm = @import("door.zig");
 const subsm = @import("subscriptions.zig");
 const authfetch = @import("authfetch.zig");
+const billing = @import("billing.zig");
+const bitcoin = @import("bitcoin.zig");
 const Store = @import("store.zig").Store;
 const Rejected = @import("store.zig").Rejected;
 const Value = cbor.Value;
@@ -100,6 +102,9 @@ const wallet_calls = [_]u8{ 8, 11, 12, 13, 14, 15, 16 };
 pub const Witness = struct {
     arena: std.heap.ArenaAllocator,
     map: std.StringHashMap(Value),
+    /// #130: what the source's kernel measured its store at at each tick (the tick's entry → bytes),
+    /// read from its billing head's records: a measurement is an input, served on replay.
+    measured: std.StringHashMap(u64),
 
     fn key(a: std.mem.Allocator, thread: []const u8, step: i128, i: i128) ![]u8 {
         return std.fmt.allocPrint(a, "{x} {d} {d}", .{ thread, step, i });
@@ -108,7 +113,7 @@ pub const Witness = struct {
     /// Every signer record the source's thread chains list (scheduler.ts witnessFrom).
     pub fn from(gpa: std.mem.Allocator, s: Store) !*Witness {
         const w = try gpa.create(Witness);
-        w.* = .{ .arena = std.heap.ArenaAllocator.init(gpa), .map = std.StringHashMap(Value).init(gpa) };
+        w.* = .{ .arena = std.heap.ArenaAllocator.init(gpa), .map = std.StringHashMap(Value).init(gpa), .measured = std.StringHashMap(u64).init(gpa) };
         const a = w.arena.allocator();
         for (try s.threads(a)) |t| {
             for ((try s.chainUpdates(a, t)) orelse &.{}) |u| {
@@ -124,7 +129,19 @@ pub const Witness = struct {
                 }
             }
         }
+        // #130: the billing head's records name the tick each measured at.
+        if (try s.chainUpdates(a, try heads.headOrigin(a, billing.HEAD))) |ups| for (ups) |u| {
+            const uv = (try s.get(a, u)) orelse continue;
+            const rec = s.getOpt(a, Value.cidOf(uv.get("tree")) orelse continue) orelse continue;
+            const st = billing.State.of(rec) orelse continue;
+            const k = try std.fmt.allocPrint(a, "{x}", .{st.tick});
+            if (!w.measured.contains(k)) try w.measured.put(k, st.bytes);
+        };
         return w;
+    }
+
+    fn measuredAt(w: *Witness, a: std.mem.Allocator, entry: []const u8) ?u64 {
+        return w.measured.get(std.fmt.allocPrint(a, "{x}", .{entry}) catch return null);
     }
 
     fn find(w: *Witness, a: std.mem.Allocator, thread: []const u8, step: i64, i: usize) !?Value {
@@ -200,6 +217,9 @@ pub const Runtime = struct {
     /// unsubscribe events, kept in `life` — derived, never written; null until needed, and again
     /// after a step that subscribed or unsubscribed (folded again from the store when next needed).
     subs: ?[]subsm.Sub = null,
+    /// #130: what the entry being processed used — its steps' fuel and the billable events — for
+    /// the meter (billingAfter); reset as each entry starts.
+    usage: billing.Usage = .{},
     /// authfetch's BRC-103 sessions (#126), per server base URL, in memory only.
     sessions: authfetch.Sessions,
 
@@ -707,7 +727,10 @@ pub const Runtime = struct {
                 const a = arena.allocator();
                 const e = try rt.getOrNotFound(a, cid);
                 last_error = "";
+                rt.usage = .{};
                 try rt.process(a, cid, e);
+                // #130: the meter, and the pay step when the allocation is consumed (no host row: nothing).
+                try rt.billingAfter(a, .{ .cid = cid, .e = e });
                 rt.cursor = @intCast((Value.intOf(e.get("n")) orelse rt.cursor) + 1);
                 try rt.store.cursorSet(rt.cursor);
             }
@@ -829,6 +852,9 @@ pub const Runtime = struct {
                 rt.say("message {s}: no route to {s}; not sent", .{ short(a, mc), shortKey(to) });
                 continue;
             };
+            // #130: a libp2p publish is a billable event — a message to the libp2p provider in box
+            // `publish`, or to a `libp2p` recipient at a topic (the node publishes its package).
+            if (isPublish(e, Value.str(m.get("box")) orelse "")) rt.usage.publish +|= 1;
             if (!std.mem.eql(u8, e.transport, "mailbox")) {
                 try rt.handOver(a, mc, root);
                 continue;
@@ -1230,7 +1256,12 @@ pub const Runtime = struct {
             return;
         };
         const by = heads.By{ .thread = null, .input = ctx.cid, .at = at };
-        const done = if (std.mem.eql(u8, op, "claim")) rt.claim(a, row, Value.bytesOf(m.get("sender")).?, body, by) else rt.kernelOpBody(a, op, body, by);
+        const done = if (std.mem.eql(u8, op, "claim"))
+            rt.claim(a, row, Value.bytesOf(m.get("sender")).?, body, by)
+        else if (std.mem.eql(u8, op, billing.OP))
+            rt.tick(a, row, Value.bytesOf(m.get("sender")).?, body, by)
+        else
+            rt.kernelOpBody(a, op, body, by);
         done catch |err| switch (err) {
             error.Refused => {
                 rt.say("{s}: kernel {s} refused: {s}; nothing done", .{ what, op, last_error });
@@ -1273,6 +1304,7 @@ pub const Runtime = struct {
             const name = Value.str(body.get("name")) orelse return refuse(a, "want {{name, tree}}", .{});
             const tree = Value.cidOf(body.get("tree")) orelse Value.cidOf(body.get("root")) orelse return refuse(a, "want {{name, tree}}", .{});
             if (!heads.isHeadName(name)) return refuse(a, "bad head name {s}", .{try json.quoted(a, name)});
+            if (std.mem.eql(u8, name, billing.HEAD)) return refuse(a, "the head {s} is the kernel's own (#130: the billing state)", .{billing.HEAD});
             if (!(try rt.store.has(tree))) return refuse(a, "tree {s} is not in the store", .{fmtCid(a, tree)});
             _ = try heads.advanceHead(a, rt.store, name, tree, by);
             rt.say("kernel head: {s} → {s} (owner {s})", .{ name, short(a, tree), heads.ownerOf(name) });
@@ -1384,6 +1416,219 @@ pub const Runtime = struct {
         const out = a.alloc(u8, 33) catch return null;
         _ = std.fmt.hexToBytes(out, s) catch return null;
         return if (secp.isKey(out)) out else null;
+    }
+
+    // ------------------------------------------------------------ billing (#130)
+
+    /// The billing state (billing.zig): the head `billing`'s record, or null (never billed).
+    pub fn billingState(rt: *Runtime, a: std.mem.Allocator) !?billing.State {
+        const root = (try rt.store.headTree(a, billing.HEAD)) orelse return null;
+        return billing.State.of(rt.store.getOpt(a, root) orelse return null);
+    }
+
+    fn writeBilling(rt: *Runtime, a: std.mem.Allocator, st: billing.State, by: heads.By) !void {
+        _ = try heads.advanceHead(a, rt.store, billing.HEAD, try rt.store.put(a, try st.value(a)), by);
+    }
+
+    /// The store's size at a tick: measured (the backend's pages in use) — an input, so a replay
+    /// is served the source's measurement for that tick (the witness), as a signer's answer is.
+    fn measure(rt: *Runtime, a: std.mem.Allocator, entry: []const u8) !u64 {
+        if (rt.witness) |w| if (w.measuredAt(a, entry)) |b| return b;
+        return rt.store.size();
+    }
+
+    /// The host's tick (#130 decided 4): a message from the host's key — the host row's sender —
+    /// signed (the door checked it), at the host row: {kind: "tick", at, allowance, fuel, served,
+    /// log?}. The first from this host starts the billing state (its allowance the allocation,
+    /// its time the last tick); after that each charges storage — the store's bytes, measured now,
+    /// for the time since the last tick — and the host's amounts (its read calls' fuel, the bytes
+    /// it served) at the row's rates, and advances the last tick. Refused: another key than the
+    /// host row's, a body that is no tick, a time before the last tick's, an asleep instance (the
+    /// tally is frozen until a payment comes). Validated whole, then written under the entry.
+    fn tick(rt: *Runtime, a: std.mem.Allocator, row: dispatch.Row, sender: []const u8, body: Value, by: heads.By) !void {
+        _ = row;
+        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse &.{}) orelse return refuse(a, "no host row (a kernel `tick` row with x)", .{});
+        if (!std.mem.eql(u8, terms.host, sender)) return refuse(a, "the host is the first tick row's key ({s}), not this sender", .{shortKey(terms.host)});
+        const t = switch (billing.tickOf(body)) {
+            .ok => |x| x,
+            .bad => |why| return refuse(a, "{s}", .{why}),
+        };
+        const prev = try rt.billingState(a);
+        const fresh = prev == null or !std.mem.eql(u8, prev.?.host, sender);
+        var st: billing.State = undefined;
+        if (fresh) {
+            st = .{ .host = sender, .allowance = t.allowance, .last_tick = t.at, .tick = by.input, .bytes = 0 };
+        } else {
+            st = prev.?;
+            if (st.asleep) return refuse(a, "asleep: the tally is frozen until a payment comes", .{});
+            if (t.at < st.last_tick) return refuse(a, "its time {d} is before the last tick's {d}", .{ t.at, st.last_tick });
+        }
+        const bytes = try rt.measure(a, by.input);
+        const storage = if (fresh) 0 else billing.priceStorage(terms.rates, bytes, t.at - st.last_tick);
+        const host = billing.priceHost(terms.rates, t.fuel, t.served);
+        st.tally += storage + host;
+        if (!fresh) st.ticks += 1;
+        st.last_tick = t.at;
+        st.tick = by.input;
+        st.bytes = bytes;
+        try rt.writeBilling(a, st, by);
+        rt.say("kernel tick: host {s}{s} · {d} bytes held · storage {d} + host {d} nsat · tally {d} of {d} nsat", .{ shortKey(sender), if (fresh) " (billing starts)" else "", bytes, storage, host, st.tally, st.allocation() });
+    }
+
+    /// Whether a message out by `e` in `box` is a libp2p publish (a billable event).
+    fn isPublish(e: addressbook.Entry, box: []const u8) bool {
+        if (std.mem.eql(u8, e.transport, "libp2p")) return std.mem.startsWith(u8, e.address, "topic:");
+        return std.mem.eql(u8, e.transport, "local") and std.mem.eql(u8, e.address, "libp2p") and std.mem.eql(u8, box, "publish");
+    }
+
+    /// The genesis's wallet program (#116: the wallet is core), or null.
+    fn walletProgram(rt: *Runtime) ?[]const u8 {
+        const ps = (rt.genesis orelse return null).get("programs") orelse return null;
+        return if (ps == .map) Value.cidOf(ps.get("wallet")) else null;
+    }
+
+    /// Why a step may not emit a `payment` (null: it may): only the kernel's pay step — the genesis's
+    /// wallet program on a thread the kernel launched under the entry it processes (launchedBy is
+    /// that entry: no program can launch one, for a launched thread is launched by a thread), its
+    /// first step, as the thread's own program (not a callee), once.
+    fn payProblem(rt: *Runtime, st: *StepState) ?[]const u8 {
+        const no = "only the kernel's pay step emits it (#130: the wallet program the kernel launches when the allocation is consumed)";
+        if (st.progs.items.len != 1 or st.n != 1) return no;
+        const o = rt.store.getOpt(st.a, st.origin) orelse return no;
+        const args = o.get("args") orelse return no;
+        if (args != .map or args.get("pay") == null) return no;
+        const by = Value.cidOf(o.get("launchedBy")) orelse return no;
+        if (!std.mem.eql(u8, by, Value.cidOf(o.get("input")) orelse return no)) return no;
+        if (!logm.isLogEntry(rt.store.getOpt(st.a, by) orelse return no)) return no;
+        if (!std.mem.eql(u8, Value.cidOf(o.get("program")) orelse return no, rt.walletProgram() orelse return no)) return no;
+        for (st.emitted.items) |c| if (rt.store.getOpt(st.a, c)) |r| if (isEvent(r) and std.mem.eql(u8, Value.str(r.get("event")).?, billing.PAYMENT)) return "one payment per pay step";
+        return null;
+    }
+
+    /// The meter and the prepayment (#130), after each entry is processed, when the instance has a
+    /// host row and that host has ticked (the billing state is its): what the entry used — its
+    /// steps' fuel and its billable events (rt.usage) — at the row's rates, onto the tally. While
+    /// the tally has reached the allocation, the kernel starts its pay step (payStep): the wallet
+    /// pays the next block — X, or all it has if less — and the payment extends the allocation;
+    /// nothing to pay: asleep. Asleep (decided 8), nothing is metered (the tally freezes) and each
+    /// entry processed — only a payment reaches it — is followed by a pay step: one that pays
+    /// wakes it (the time asleep is not charged). Written under the entry, once. A function of
+    /// the log (fuel and the rest are deterministic), so a replay writes the same.
+    fn billingAfter(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx) !void {
+        const used = rt.usage;
+        rt.usage = .{};
+        if (rt.stopped or ctx.e.get("genesis") != null) return;
+        const terms = billing.termsOf((try dispatch.current(a, rt.store)) orelse return) orelse return;
+        var st = (try rt.billingState(a)) orelse return;
+        // Another host's state (the owner moved hosts): the new host's first tick starts its own.
+        if (!std.mem.eql(u8, st.host, terms.host)) return;
+        const at = logm.stampOf(ctx.e.get("time")).?.ms();
+        var dirty = false;
+        var i: usize = 0;
+        if (st.asleep) {
+            const paid = try rt.payStep(a, ctx, terms, i);
+            i += 1;
+            rt.usage = .{};
+            if (paid == 0) return;
+            st.asleep = false;
+            st.paid += paid;
+            st.payments += 1;
+            st.last_tick = @max(st.last_tick, at);
+            dirty = true;
+            rt.say("billing: awake: paid {d} sats; allocation {d} nsat", .{ paid, st.allocation() });
+        } else {
+            const cost = billing.priceUsage(terms.rates, used);
+            if (cost > 0) {
+                st.tally += cost;
+                dirty = true;
+            }
+        }
+        while (!st.asleep and st.tally >= st.allocation() and i < billing.MAX_PAYS) : (i += 1) {
+            const paid = try rt.payStep(a, ctx, terms, i);
+            st.tally += billing.priceUsage(terms.rates, rt.usage);
+            rt.usage = .{};
+            dirty = true;
+            if (paid == 0) {
+                st.asleep = true;
+                rt.say("billing: asleep: the allocation is consumed ({d} of {d} nsat) and the wallet pays nothing; the host forwards only payments now", .{ st.tally, st.allocation() });
+                break;
+            }
+            st.paid += paid;
+            st.payments += 1;
+            rt.say("billing: paid {d} sats (x {d}); allocation {d} nsat, tally {d}", .{ paid, terms.x, st.allocation(), st.tally });
+        }
+        if (dirty) try rt.writeBilling(a, st, .{ .thread = null, .input = ctx.cid, .at = at });
+    }
+
+    /// The pay step (#130 decided 5, 6): a thread of the genesis's wallet program the kernel launches
+    /// itself, under the entry it processes — origin {kind: "thread", program: <wallet>, args: {pay:
+    /// {to: <the host's key>, x, checkpoint: <the state record CID>}}, launchedBy: <the entry>,
+    /// input: <the entry>, at, nonce: "pay.<i>"} — run now. `checkpoint` is the state record as it
+    /// stood when the entry before this one had been processed (store.processedState: the same on
+    /// every machine that consumed the log). The wallet pays the host X, or all it has if less, in
+    /// one transaction whose other output commits that CID, and emits it as the event `payment`
+    /// (paymentOf). The sats paid, or 0: nothing paid (no wallet, an empty one, a step that failed).
+    fn payStep(rt: *Runtime, a: std.mem.Allocator, ctx: Ctx, terms: billing.Terms, i: usize) !u64 {
+        const wallet = rt.walletProgram() orelse {
+            rt.say("billing: the genesis has no wallet program: nothing pays", .{});
+            return 0;
+        };
+        const checkpoint = (try rt.store.processedState(a)) orelse return 0;
+        var pay = cbor.MapBuilder.init(a);
+        try pay.put("to", .{ .bytes = terms.host });
+        try pay.put("x", cbor.int(terms.x));
+        try pay.put("checkpoint", cbor.cidv(checkpoint));
+        var args = cbor.MapBuilder.init(a);
+        try args.put("pay", pay.value());
+        var origin = cbor.MapBuilder.init(a);
+        try origin.put("kind", cbor.string("thread"));
+        try origin.put("program", cbor.cidv(wallet));
+        try origin.put("args", args.value());
+        try origin.put("launchedBy", cbor.cidv(ctx.cid));
+        try origin.put("input", cbor.cidv(ctx.cid));
+        try origin.put("at", cbor.int(logm.stampOf(ctx.e.get("time")).?.ms()));
+        try origin.put("nonce", cbor.string(try std.fmt.allocPrint(a, "pay.{d}", .{i})));
+        const t = try rt.store.chainOpen(a, origin.value());
+        // Not run again when it has (an entry processed again after a cut-off).
+        if (try rt.store.chainTip(a, t)) |tip| if (std.mem.eql(u8, tip, t)) {
+            rt.say("billing: pay step {s} (x {d} sats to {s})", .{ short(a, t), terms.x, shortKey(terms.host) });
+            try rt.run(a, t);
+        };
+        return rt.paymentOf(a, t, checkpoint);
+    }
+
+    /// What the pay step `t` paid: its first update's `payment` event — {kind: "event", event:
+    /// "payment", txid: <bitcoin-tx CID>, outputIndex, amount, …} — checked against the
+    /// transaction in the store: the output at `outputIndex` carries `amount`, and an output of 0
+    /// sats commits `checkpoint`. 0 when there is none or it does not hold.
+    fn paymentOf(rt: *Runtime, a: std.mem.Allocator, t: []const u8, checkpoint: []const u8) !u64 {
+        const ups = (try rt.store.chainUpdates(a, t)) orelse return 0;
+        if (ups.len == 0) return 0;
+        const u = (try rt.store.get(a, ups[0])) orelse return 0;
+        if (!stateIs(u, "finished") and !stateIs(u, "waiting")) return 0;
+        const emitted = u.get("emitted") orelse return 0;
+        if (emitted != .array) return 0;
+        const script = try billing.checkpointScript(a, checkpoint);
+        for (emitted.array) |x| {
+            const ev = rt.store.getOpt(a, Value.cidOf(x) orelse continue) orelse continue;
+            if (!isEvent(ev) or !std.mem.eql(u8, Value.str(ev.get("event")).?, billing.PAYMENT)) continue;
+            const amount = Value.intOf(ev.get("amount")) orelse return 0;
+            const vout = Value.intOf(ev.get("outputIndex")) orelse return 0;
+            const raw = (try rt.store.bytes(a, Value.cidOf(ev.get("txid")) orelse return 0)) orelse return 0;
+            const tx = bitcoin.parseTx(a, raw) catch return 0;
+            if (amount < 1 or vout < 0 or vout >= tx.outputs.len or tx.outputs[@intCast(vout)].value != amount) {
+                rt.say("billing: pay step {s}: its payment is not the transaction's output", .{short(a, t)});
+                return 0;
+            }
+            var committed = false;
+            for (tx.outputs) |o| committed = committed or (o.value == 0 and std.mem.eql(u8, o.script, script));
+            if (!committed) {
+                rt.say("billing: pay step {s}: its transaction does not commit the state record", .{short(a, t)});
+                return 0;
+            }
+            return @intCast(amount);
+        }
+        return 0;
     }
 
     /// A plain entry (#29: a header, a proof, a transaction status the host
@@ -1696,6 +1941,8 @@ pub const Runtime = struct {
         emitted: std.array_list.Managed([]const u8),
         /// Whether a subscribe / unsubscribe is among them (#119): the kept subscriptions are folded again.
         subscribed: bool = false,
+        /// #130: the `fetch` intentions it recorded (a billable event each).
+        fetches: u64 = 0,
         /// The step's deadline (ms), if it set one (#29): a waiting step rests until it at most —
         /// a `deadline` event recorded when the step ends (#126), which the step awaits.
         until: ?i64 = null,
@@ -1754,6 +2001,7 @@ pub const Runtime = struct {
                 try em.put("message", cbor.string(msg));
                 try m.put("error", em.value());
                 _ = rt.store.chainAppend(a, origin, m.value()) catch {};
+                rt.usage.fuel +|= meter.used(); // #130: an errored step's fuel is metered too
                 after_rested = true;
                 break :blk;
             };
@@ -1946,6 +2194,9 @@ pub const Runtime = struct {
             try u.put("error", em.value());
         }
         _ = try rt.store.chainAppend(a, origin, u.value());
+        // #130: the meter — the step's fuel; a step that ended without error, its `fetch` intentions.
+        rt.usage.fuel +|= meter.used();
+        if (!errored) rt.usage.fetch +|= st.fetches;
 
         // The log line.
         var line = std.array_list.Managed(u8).init(a);
@@ -2059,6 +2310,7 @@ pub const Runtime = struct {
     fn hAdvance(imp: *program.Imports, name: []const u8, t: []const u8) program.Err!void {
         const st = stepOf(imp);
         if (!heads.isHeadName(name)) return imp.failFmt("advance: bad head name {s}", .{try json.quoted(st.a, name)});
+        if (std.mem.eql(u8, name, billing.HEAD)) return imp.failFmt("advance: {s} is the kernel's own (#130: the billing state); no program writes it", .{billing.HEAD});
         const run_ = &st.progs.items[st.progs.items.len - 1];
         const prog = run_.record;
         const pname = Value.str(prog.get("name")) orelse "?";
@@ -2228,11 +2480,19 @@ pub const Runtime = struct {
             if (fetchProblem(m)) |why| return imp.failFmt("emit: fetch: {s}", .{why});
             fields = try ownedBy(a, m, st.origin, st.n);
         }
+        // #130: a payment is the kernel's pay step's alone — the wallet program the kernel launched
+        // on its own (no program can launch one: a launched thread is launched by a thread), as the
+        // thread's own program (not a callee). Anything else naming it is refused.
+        if (std.mem.eql(u8, name, billing.PAYMENT)) if (st.rt.payProblem(st)) |why| return imp.failFmt("emit: payment: {s}", .{why});
         const rec = logm.eventRecord(a, fields, name, app) catch |err| switch (err) {
             error.Reserved => return imp.failWith("emit: an event's `kind` and `app` are the kernel's to set"),
             error.OutOfMemory => return error.OutOfMemory,
         };
-        return listEvent(st, imp, rec);
+        const before = st.emitted.items.len;
+        const c = try listEvent(st, imp, rec);
+        // #130: a `fetch` intention is a billable event.
+        if (std.mem.eql(u8, name, "fetch") and st.emitted.items.len > before) st.fetches += 1;
+        return c;
     }
 
     /// Why a `fetch` intention (#126) is not one: {event: "fetch", method, url, headers?: {name:
@@ -2400,6 +2660,7 @@ pub const Runtime = struct {
                 return imp.fatalWith(.diverged, try std.fmt.allocPrint(a, "{s} step {d} call {d}: the authfetch request differs from the recorded one", .{ short(a, st.origin), st.n, i }));
             }
             try st.calls.append(rt.store.put(a, x) catch return imp.failWith("store error"));
+            rt.usage.authfetch +|= 1; // #130: a billable event, metered as recorded (replay: the same)
             if (Value.bytesOf(x.get("answer"))) |ans| return ans;
             return imp.failWith(Value.str(x.get("error")) orelse "authfetch: failed");
         }
@@ -2430,6 +2691,7 @@ pub const Runtime = struct {
         }
         try rec.put("calls", .{ .array = ac.calls.items });
         try st.calls.append(rt.store.put(a, rec.value()) catch return imp.failWith("store error"));
+        rt.usage.authfetch +|= 1; // #130: a billable event
         return answer orelse imp.failWith(out.failed);
     }
 
@@ -2966,6 +3228,8 @@ pub const Runtime = struct {
             return;
         }
         const c = try rt.store.chainAppend(a, t.origin, m.value());
+        // #130: a segment's fuel, metered as it is written (a re-execution verifies, writes nothing).
+        if (!std.mem.eql(u8, state, "running")) rt.usage.fuel +|= t.meter.used();
         const hist = try a.alloc([]const u8, t.history.len + 1);
         @memcpy(hist[0..t.history.len], t.history);
         hist[t.history.len] = c;

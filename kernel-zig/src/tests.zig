@@ -27,6 +27,7 @@ test {
     _ = @import("beef.zig");
     _ = @import("door_test.zig");
     _ = @import("authfetch.zig");
+    _ = @import("billing.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {

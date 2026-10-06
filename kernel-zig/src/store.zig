@@ -64,6 +64,13 @@ pub const VTable = struct {
     state: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
     /// The edges into `to` (a binary CID), with `rel` only if given, in key order (from, seq, ord).
     edges: *const fn (ctx: *anyopaque, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) anyerror![]Edge,
+    /// #130: the state record as it stood when the last processed entry had been processed — the
+    /// maps as committed then, the log cut back to that entry (entries admitted since and their
+    /// unique keys left out) — its CID (null: none yet); nothing written. A function of the log up
+    /// to there: the same on every machine that consumed it (index.zig).
+    processedState: *const fn (ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8,
+    /// #130: the bytes the store holds, as its backend measures them (0: it cannot say).
+    size: *const fn (ctx: *anyopaque) anyerror!u64,
 };
 
 pub const Store = struct {
@@ -156,5 +163,11 @@ pub const Store = struct {
     }
     pub fn edges(s: Store, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) ![]Edge {
         return s.vt.edges(s.ctx, a, to, rel);
+    }
+    pub fn processedState(s: Store, a: std.mem.Allocator) !?[]u8 {
+        return s.vt.processedState(s.ctx, a);
+    }
+    pub fn size(s: Store) !u64 {
+        return s.vt.size(s.ctx);
     }
 };

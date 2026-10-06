@@ -203,7 +203,21 @@ pub const SqliteStore = struct {
         .rollback = rollbackFn,
         .pointer = pointerFn,
         .setPointer = setPointerFn,
+        .size = sizeFn,
     };
+
+    /// #130: the bytes the file holds — its pages in use (page_count − freelist_count) × page_size.
+    fn sizeFn(ctx: *anyopaque) anyerror!u64 {
+        const s = self(ctx);
+        var v: [3]i64 = undefined;
+        for ([_][]const u8{ "PRAGMA page_count", "PRAGMA freelist_count", "PRAGMA page_size" }, &v) |q, *x| {
+            const st = try s.db.prepare(q);
+            x.* = if (try st.step()) st.int(0) else 0;
+            st.done();
+        }
+        const pages = @max(0, v[0] - v[1]);
+        return @intCast(pages * v[2]);
+    }
 
     fn self(ctx: *anyopaque) *SqliteStore {
         return @ptrCast(@alignCast(ctx));

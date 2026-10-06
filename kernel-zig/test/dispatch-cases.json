@@ -193,6 +193,21 @@
         { "kind": "libp2p", "name": "/pq", "who": {}, "want": null },
         { "kind": "http", "path": "/pq", "who": {}, "want": "t6" }
       ]
+    },
+    {
+      "name": "mailbox: the host row (#130) is a kernel row like an admin row: a message from the host's key in its box matches it; a second tick row matches its own key's (which one is the host is the kernel's: the first, billing.zig termsOf)",
+      "updates": [
+        { "op": "add", "row": { "transport": "mailbox", "address": "billing", "sender": "$A", "program": "kernel", "fn": "tick", "x": 1000, "rates": { "fuel": 1, "storage": 2 }, "id": "h1" } },
+        { "op": "add", "row": { "transport": "mailbox", "address": "billing", "sender": "$B", "program": "kernel", "fn": "tick", "x": 5, "id": "h2" } },
+        { "op": "add", "row": { "transport": "mailbox", "address": "billing", "sender": "$A", "program": "kernel", "fn": "tick", "x": 2000, "rates": { "fuel": 1, "storage": 2 }, "id": "h1b" } }
+      ],
+      "fold": ["h1b", "h2"],
+      "cases": [
+        { "kind": "mail", "sender": "A", "box": "billing", "want": "h1b" },
+        { "kind": "mail", "sender": "B", "box": "billing", "want": "h2" },
+        { "kind": "mail", "sender": "C", "box": "billing", "want": null },
+        { "kind": "event", "box": "billing", "want": null }
+      ]
     }
   ]
 }

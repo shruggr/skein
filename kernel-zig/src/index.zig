@@ -71,6 +71,8 @@ pub const Backend = struct {
         rollback: *const fn (ctx: *anyopaque) void,
         pointer: *const fn (ctx: *anyopaque, a: std.mem.Allocator, name: []const u8) anyerror!?[]u8,
         setPointer: *const fn (ctx: *anyopaque, name: []const u8, cid: []const u8) anyerror!void,
+        /// #130: the bytes the backend holds (a file's pages in use); absent: it cannot say (0).
+        size: ?*const fn (ctx: *anyopaque) anyerror!u64 = null,
     };
 };
 
@@ -664,7 +666,51 @@ pub const Index = struct {
         .commit = commitFn,
         .state = stateFn,
         .edges = edgesFn,
+        .processedState = processedStateFn,
+        .size = sizeFn,
     };
+
+    fn sizeFn(ctx: *anyopaque) anyerror!u64 {
+        const ix = self(ctx);
+        const f = ix.backend.vt.size orelse return 0;
+        return f(ix.backend.ctx);
+    }
+
+    /// #130: the state record as it stood when the last processed entry (the cursor's) had been
+    /// processed. The maps but the log's are the committed ones — what the cursor's commit wrote,
+    /// for an entry being processed now touches only the working state — and the log and unique
+    /// maps are cut back to the entries before the cursor (a host admits ahead of processing: the
+    /// committed log may hold entries not processed yet, and their unique keys). So it is a
+    /// function of the log up to that entry: a replay, which appends the whole log first, comes to
+    /// the same record. Its CID; nothing is written (the record is what a store that had admitted
+    /// no further committed there, and anyone who replays the log to that entry computes it).
+    fn processedStateFn(ctx: *anyopaque, a: std.mem.Allocator) anyerror!?[]u8 {
+        const ix = self(ctx);
+        if (!ix.has_state or ix.read_only) return null;
+        var s = ix.committed;
+        const n = s.cursor;
+        if (n <= 0) return null;
+        const scr = ix.scratch();
+        var log_root = s.roots[@intFromEnum(Map.log)].get();
+        var uniq_root = s.roots[@intFromEnum(Map.unique)].get();
+        var ahead = std.array_list.Managed(mst.KV).init(scr);
+        try ix.forest.range(scr, log_root, try cat(scr, .{n}), null, &ahead);
+        for (ahead.items) |kv| {
+            log_root = try ix.forest.delete(log_root, kv.key);
+            const ec = Value.cidOf(kv.value) orelse continue;
+            const e = ix.blockValue(scr, ec) catch continue;
+            const u = (try ix.uniqueOf(scr, e)) orelse continue;
+            const held = (try ix.forest.get(scr, uniq_root, u)) orelse continue;
+            if (Value.cidOf(held)) |hc| if (std.mem.eql(u8, hc, ec)) {
+                uniq_root = try ix.forest.delete(uniq_root, u);
+            };
+        }
+        const tip = (try ix.forest.get(scr, log_root, try cat(scr, .{n - 1}))) orelse return null;
+        s.roots[@intFromEnum(Map.log)] = Root.of(log_root);
+        s.roots[@intFromEnum(Map.unique)] = Root.of(uniq_root);
+        s.tip = Root.of(Value.cidOf(tip) orelse return null);
+        return try cbor.cidOfValue(a, try stateValue(a, &s));
+    }
 
     fn edgesFn(ctx: *anyopaque, a: std.mem.Allocator, to: []const u8, rel: ?[]const u8) anyerror![]storem.Edge {
         return self(ctx).edgesTo(a, to, rel);
