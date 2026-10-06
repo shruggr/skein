@@ -4,7 +4,7 @@
 // instance of the stock system on a router:
 //
 //   skein-site (shruggr/skein-site at the commit src/testapps.ts pins, cloned
-//   by the install itself; or $SKEIN_SITE_DIR; 0.6.1, #125): the head
+//   by the install itself; or $SKEIN_SITE_DIR; 0.6.2, #125): the head
 //   `site/app` is the app record (the manifest as installed, linking the
 //   tree; no alias head), its one row is served under /site/ (the files of
 //   its own tree's www) out of the kernel's dispatch table; the owner's own
@@ -96,7 +96,7 @@ try {
   code = await cli("install", siteSpec, "--instance", "inst");
   check(code === 0, `skein plan install skein-site, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
   const st = await record("site/app");
-  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.6.1" && (await record("site")) === undefined, `the head site/app is the app record (0.6.1), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
+  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.6.2" && (await record("site")) === undefined, `the head site/app is the app record (0.6.2), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
   const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
   check((await appRows("site")).join(",") === "http /site/*", `the dispatch table has the site's row: ${(await appRows("site")).join(", ")}`);
   let r = await get("/site/");
