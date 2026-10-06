@@ -339,12 +339,12 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 |---|---|---|
 | [shruggr/skein](https://github.com/shruggr/skein) | kernel, boundary programs (front door, messagebox, resolve), the wallet program, the node host, the client | log format 8 |
 | [shruggr/skein-sdk](https://github.com/shruggr/skein-sdk) | the Zig package every program is written against: the `skein` imports, codecs, `app`, `files`, `chain`, wallet library, WIT | v0.6.0 |
-| [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.3.1 |
-| [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.7.0 |
+| [shruggr/skein-chain](https://github.com/shruggr/skein-chain) | the chain app: the one writer of `chain/state`, ingest a BEEF, the only broadcaster | v0.3.2 |
+| [shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) | the overlay engine app: BRC-22/24 over topic managers and lookup services | v0.7.3 |
 | [shruggr/skein-shell](https://github.com/shruggr/skein-shell) | the shell app: `run`, and the shell itself (brush, coreutils, the toolset, python's stdlib) | v0.1.1 |
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager (the wallet's signed claim forwarded, #127) | v0.3.2 |
-| [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.0 |
+| [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.1 |
 | [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site, an app (#125: its page at `/site/`, served from its own tree by skein-sdk's `files`; the owner may add a row for `/`): locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.6.2 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
