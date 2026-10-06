@@ -1,7 +1,7 @@
 # Overlay services
 
 The overlay engine is an app in its own repository,
-[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.7).
+[shruggr/skein-overlay](https://github.com/shruggr/skein-overlay) (0.7.8).
 Its `docs/OVERLAY.md` is the reference: the submission flow, the overlay's
 state and its split from the chain app, the engine's box and config, the
 topic contract, the lookup contract, the wire, the gossip, and a system
@@ -58,7 +58,10 @@ AMM) has calls for its users to **register** and **deregister** a topic.
   `peerProof`); `filter: "beef"` where the handler takes BEEF, as the
   derived rows carry it. The kernel checks it (the program is the app's, the
   fn named, the topic not a `/<protocol>`) and records it on the step's
-  update with the app's name.
+  update with the app's name. `seed: [txid…]` (0.7.8) judges transactions
+  the chain state already holds under the new topic at registration (an
+  app seeds it from its discovery topic); the answer adds `seeded` and
+  `missing`.
 - **Deregister** emits `{event: "unsubscribe", topic}` for each; the app
   ends only its own subscriptions.
 - Both are taken only in the box `<app>/register` (0.7.7, #128; the
