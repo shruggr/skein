@@ -219,13 +219,15 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 - **The libp2p node** (`src/host/p2p.ts`): one js-libp2p node per instance
   whose genesis config declares `libp2p` or whose installed apps added
   libp2p rows; it follows the dispatch table live as apps install and
-  uninstall. Its peer key is a secp256k1 child of the master secret, never a
-  wallet root. GossipSub with StrictSign, noise + yamux, TCP and WebSocket,
+  uninstall. Its peer key is a secp256k1 child of the instance's root key
+  (#129: [2, "skein instance"], `libp2p:<handle>`, self — what the
+  instance's signer answers for that derivation), not the root itself. GossipSub with StrictSign, noise + yamux, TCP and WebSocket,
   optional Kademlia DHT with topic rendezvous, mDNS, bootstrap peers,
   circuit relays. Each topic message or stream frame is appended as a
   request; the front door's verdict (accept, reject, ignore) is GossipSub's.
-  It beats the apps' beacons (#126: a body published on a topic every
-  `every` ms, nothing logged per beat, the topic not subscribed).
+  It beats the apps' beacons (#126: every `every` ms a new frame on the
+  topic — the body, the beat's time, the instance's signature — nothing
+  logged per beat, the topic not subscribed).
 - **authfetch's bytes** (#126): the kernel asks the host for one HTTP
   exchange at a time (the serve frame `http`); the router carries it (its
   own URLs in process), and signs and checks nothing — the kernel did.

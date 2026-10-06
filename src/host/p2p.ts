@@ -5,9 +5,11 @@
 // kernel's dispatch table (#72, #77: a topic, or a `/<protocol>`) — each
 // with its own peer key, all inside the router process:
 //
-//   peer key   a secp256k1 key derived from the master secret with BRC-42/43
-//              ([2, "skein instance"], key ID `libp2p:<handle>`, self — signer.ts
-//              peerKey): a child, never a wallet root. The peer ID is the identity
+//   peer key   a secp256k1 key derived from the INSTANCE's root key with BRC-42/43
+//              (#129: [2, "skein instance"], key ID `libp2p:<handle>`, self — signer.ts
+//              peerKey): the key the instance's signer answers for getPublicKey with
+//              those arguments, so a program computes its own peer ID; a child, not
+//              the root. The peer ID is the identity
 //              multihash of the key's protobuf (type secp256k1, the 33-byte
 //              compressed key), so the key reads straight out of the peer ID.
 //   node       GossipSub (StrictSign: every message is signed by its publisher's
@@ -68,10 +70,13 @@ import { isPrivate, lpStream, type LengthPrefixedStream } from "@libp2p/utils";
 import { webSockets } from "@libp2p/websockets";
 import { multiaddr, type Multiaddr } from "@multiformats/multiaddr";
 import type { PrivateKey } from "@bsv/sdk";
+import * as dagCbor from "@ipld/dag-cbor";
 import { createLibp2p } from "libp2p";
 import type { Store } from "../runtime/store.ts";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
+import { verifyAnyone } from "../runtime/identity.ts";
 
 export type DhtMode = "off" | "client" | "server";
 
@@ -130,6 +135,14 @@ export interface P2POptions {
   /** One front-door call for an inbound message or frame (Router.p2pInbound). */
   inbound(handle: string, call: InboundCall): Promise<InboundAnswer>;
   log?(source: string, line: string): void;
+  /**
+   * Signs `data` with the instance's signer (#126 beacons), as the host signs
+   * an intention request (Router's `sign`: [2, "metanet handles envelope"],
+   * key ID `send`, counterparty anyone). With `identity` (the instance's
+   * identity key, 33 bytes). Absent: a beacon publishes nothing.
+   */
+  sign?(handle: string, data: Uint8Array): Promise<Uint8Array>;
+  identity?(handle: string): Promise<Uint8Array | undefined>;
   /** How often topics are re-advertised and looked up in the DHT, and bootstrap peers redialled (ms). */
   discoveryMs?: number;
 }
@@ -333,14 +346,52 @@ async function emittedEvents<T>(store: Pick<Store, "get" | "chains" | "edges">, 
 //
 // An app's installed program declares `beacon {topic, every, body}` once (and
 // `unbeacon {topic}` to stop it); the kernel records it on the step's update
-// like `subscribe` and answers nothing. The node publishes `body` on `topic`
-// every `every` ms on its own clock — GossipSub signs it with the node's key
-// — logs nothing per beat, and does not subscribe the topic for it. A beacon
+// like `subscribe` and answers nothing. The node publishes a NEW message on
+// `topic` every `every` ms on its own clock (David, #126: "The instance has
+// declared its intent. The beacon needs to generate a new message every
+// time."): the beat's frame (beaconFrame), the body plus the beat's time,
+// signed by the instance's signer — fresh and attributable to the instance,
+// not only to its peer key (GossipSub signs the message too). It logs nothing
+// per beat, and does not subscribe the topic for it. A beacon
 // stands until its app's unbeacon or its app's uninstall (no row of the app
 // left in the dispatch table: Router.syncDispatch). Folded from the log like the
 // subscriptions (beaconsOf), keyed by (app, topic).
 
 export interface Beacon { app: string; topic: string; every: number; body: Uint8Array }
+
+/**
+ * A beat as published (#126): dag-cbor {body, at, sender, signature}. `at`:
+ * the beat's time (ms since the epoch, the host's clock); `sender`: the
+ * instance's identity key (33 bytes); `signature`: the instance's (DER),
+ * [2, "metanet handles envelope"] / `send` / counterparty anyone, over
+ * sha2-256 of beaconPreimage — dag-cbor {kind: "beacon", topic, body, at,
+ * sender}: the topic is signed, not carried. A receiver checks the signature
+ * (beaconProblem) and `at` against its own clock.
+ */
+export interface BeaconBeat { body: Uint8Array; at: number; sender: Uint8Array; signature: Uint8Array }
+
+/** What a beat's signature covers. */
+export function beaconPreimage(topic: string, b: Omit<BeaconBeat, "signature">): Uint8Array {
+  return dagCbor.encode({ kind: "beacon", topic, body: b.body, at: b.at, sender: b.sender });
+}
+
+/** A beat's frame for `topic`, signed by `sign` (the instance's signer). */
+export async function beaconFrame(topic: string, body: Uint8Array, at: number, sender: Uint8Array, sign: (data: Uint8Array) => Promise<Uint8Array>): Promise<Uint8Array> {
+  const signature = await sign(beaconPreimage(topic, { body, at, sender }));
+  return dagCbor.encode({ body, at, sender, signature });
+}
+
+/** A beat read from a frame on `topic`, its signature checked against its sender; or why it is not one. */
+export function beaconBeat(topic: string, frame: Uint8Array): BeaconBeat | { problem: string } {
+  let v: Record<string, unknown>;
+  try { v = dagCbor.decode(frame) as Record<string, unknown>; } catch { return { problem: "not dag-cbor" }; }
+  if (!v || typeof v !== "object") return { problem: "not a map" };
+  const { body, at, sender, signature } = v;
+  if (!(body instanceof Uint8Array) || typeof at !== "number" || !(sender instanceof Uint8Array) || sender.length !== 33 || !(signature instanceof Uint8Array)) return { problem: "want {body: bytes, at: int, sender: bytes(33), signature: bytes}" };
+  const b = { body, at, sender, signature };
+  if (!verifyAnyone(Buffer.from(sender).toString("hex"), SIGN_PROTOCOL, MESSAGE_KEY_ID, beaconPreimage(topic, b), signature)) return { problem: "the signature is not the sender's" };
+  return b;
+}
 export type BeaconEvent = { event: "beacon"; beacon: Beacon } | { event: "unbeacon"; app: string; topic: string };
 
 /** A `beacon` / `unbeacon` event record, read; or why it is not one this host follows. */
@@ -591,7 +642,8 @@ export class P2PHost {
   }
 
   /**
-   * The beacons `handle`'s node beats (#126): each published on its topic
+   * The beacons `handle`'s node beats (#126): each a new frame (beaconFrame:
+   * the body, the beat's time, the instance's signature) published on its topic
    * every `every` ms, from now on — the topic not subscribed; nothing logged
    * per beat (a failed beat is dropped: the next one is the retry). One line
    * when a beacon starts, changes or stops. No node: nothing beats.
@@ -609,7 +661,17 @@ export class P2PHost {
     }
     for (const [k, b] of want) {
       if (n.beats.has(k)) continue;
-      const beat = () => { if (this.nodes.get(handle) === n) void this.publish(handle, b.topic, b.body).catch(() => {}); };
+      // Each beat a new frame: the body, now, signed by the instance's signer (beaconFrame).
+      const beat = () => {
+        if (this.nodes.get(handle) !== n) return;
+        const { sign, identity } = this.o;
+        if (!sign || !identity) return;
+        void (async () => {
+          const sender = await identity(handle);
+          if (!sender) return;
+          await this.publish(handle, b.topic, await beaconFrame(b.topic, b.body, Date.now(), sender, (d) => sign(handle, d)));
+        })().catch(() => {});
+      };
       n.beats.set(k, { beacon: b, timer: setInterval(beat, b.every) });
       beat();
       this.say(handle, `libp2p: beacon ${b.topic} (app ${b.app}) every ${b.every} ms, ${b.body.length} bytes`);

@@ -6,8 +6,11 @@
 // instance's identity key is that child's public key; provisioning an
 // instance is picking an id. The router answers the kernel's `wallet` import
 // from it in process (kernel.ts); the router has no identity of its own. Its
-// libp2p host (#51) signs as a second child per instance: [2, "skein instance"], key ID
-// `libp2p:<handle>`, self (peerKey). Its providers (#70: the HTTP proxy,
+// libp2p host (#51, #129) signs as a child of the INSTANCE's root key: [2,
+// "skein instance"], key ID `libp2p:<handle>`, counterparty self (peerKey) —
+// exactly what the instance's program gets when it asks its signer for that
+// public key, so a program knows its own peer ID. The master is only how this
+// host hands each instance its root. Its providers (#70: the HTTP proxy,
 // the waker, the libp2p node, the broadcaster — providers.ts) are third
 // children, one per provider for the whole host: [2, "skein provider"], key
 // ID = the provider's name (providerKey). The host's BRC-169 certifier key
@@ -56,12 +59,15 @@ export class Signer {
   }
 
   /**
-   * An instance's libp2p peer key (#51): a BRC-42 child of the master, key ID
-   * `libp2p:<handle>` — never the instance's root. Its peer ID is the identity
-   * multihash of the compressed key (p2p.ts peerIdOf).
+   * An instance's libp2p peer key (#51, #129): a BRC-42 child of the
+   * instance's root key (instanceKey), protocol [2, "skein instance"], key ID
+   * `libp2p:<handle>`, counterparty self — the key whose public half the
+   * instance's signer answers for getPublicKey with those arguments. Not the
+   * root itself. Its peer ID is the identity multihash of the compressed key
+   * (p2p.ts peerIdOf).
    */
   peerKey(id: string): PrivateKey {
-    return this.deriver.derivePrivateKey(INSTANCE_PROTOCOL, `libp2p:${id}`, "self");
+    return new KeyDeriver(this.instanceKey(id)).derivePrivateKey(INSTANCE_PROTOCOL, `libp2p:${id}`, "self");
   }
 
   /** The instance's identity key (hex): what `skein-host add` records. */

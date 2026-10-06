@@ -370,6 +370,9 @@ export class Router {
         keyOf: o.peerKeyFor, discoveryMs: o.libp2pDiscoveryMs,
         inbound: (h, c) => this.p2pInbound(h, c),
         log: (s, l) => this.say(s, l),
+        // #126: a beacon's beat signed by the instance's signer, as an intention request is.
+        sign: (h, data) => this.signAs(h, data),
+        identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
       });
     }
     // Without a host's own provider keys: a router's own, fresh (a test's).
@@ -382,12 +385,7 @@ export class Router {
       keyOf,
       append: (h, pkg) => this.appendLocal(h, pkg),
       identity: async (h) => { const id = this.o.db.get(h)?.identity; return id ? keyBytes(id) : undefined; },
-      sign: async (h, data) => {
-        const row = this.o.db.get(h);
-        if (!row) throw new Error(`no instance ${h}`);
-        const { signature } = await (await this.o.walletFor(row)).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] });
-        return Uint8Array.from(signature);
-      },
+      sign: (h, data) => this.signAs(h, data),
       fetch: (req, from) => this.http(req, from),
       ...(this.arc ? { broadcast: (h: string, tx: Uint8Array, beef?: Uint8Array) => { this.arc!.enqueue(h, tx, beef); } } : {}),
       ...(p2p ? { topicEvent: (h: string, rec: Record<string, unknown>) => this.topicEvent(h, rec) } : {}),
@@ -556,6 +554,14 @@ export class Router {
       this.settle(l);
       return e;
     });
+  }
+
+  /** Sign `data` with `handle`'s signer: [2, "metanet handles envelope"] / `send` / anyone — an intention request's signature (providers.ts), a beacon's beat (p2p.ts beaconFrame). */
+  private async signAs(handle: string, data: Uint8Array): Promise<Uint8Array> {
+    const row = this.o.db.get(handle);
+    if (!row) throw new Error(`no instance ${handle}`);
+    const { signature } = await (await this.o.walletFor(row)).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...data] });
+    return Uint8Array.from(signature);
   }
 
   /**

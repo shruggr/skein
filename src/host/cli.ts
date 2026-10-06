@@ -221,7 +221,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
         const [handle, flag, ...more] = rest;
         if (!handle || more.length || (flag !== undefined && flag !== "--peer")) { env.err(USAGE); return 2; }
         const signer = new Signer(masterKey(env.vars, home));
-        // The libp2p peer ID (#51): the identity multihash of the peer key, a child of the master with key ID libp2p:<handle>.
+        // The libp2p peer ID (#51): the identity multihash of the peer key, a child of the instance's root key (#129: key ID libp2p:<handle>, self).
         env.out(flag ? peerIdOf(signer.peerKey(handle)).toString() : signer.identity(handle));
         return 0;
       }
@@ -288,7 +288,7 @@ function frontDoorKeys(vars: Env["vars"], home: string): (row: InstanceRow) => s
   return (row) => signer.identity(row.handle);
 }
 
-/** Each row's libp2p peer ID (#51): derived from the master secret (key ID libp2p:<handle>), whether or not it runs a node; "-" with no master secret. */
+/** Each row's libp2p peer ID (#51): derived from the instance's root key (#129: key ID libp2p:<handle>, self), whether or not it runs a node; "-" with no master secret. */
 function peerIds(vars: Env["vars"], home: string): (row: InstanceRow) => string {
   const file = vars.SKEIN_MASTER_KEY_FILE || join(home, "master.key");
   if (!vars.SKEIN_MASTER_KEY && !existsSync(file)) return () => "-";

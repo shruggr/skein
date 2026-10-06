@@ -11,10 +11,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrivateKey, ProtoWallet } from "@bsv/sdk";
+import { PrivateKey, ProtoWallet, WalletWireProcessor, WalletWireTransceiver } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { INSTANCE_PROTOCOL, Signer } from "./signer.ts";
-import { foldSubscriptions, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
+import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL as SIGN_PROTOCOL } from "./providers.ts";
+import { beaconBeat, beaconFrame, foldSubscriptions, hostP2PConfig, keyOfPeerId, libp2pConfig, libp2pOf, MESSAGE_PROTOCOL, P2PHost, peerIdOf, subscribedTopics, subscriptionEvent, topicCid, type Frame, type InboundAnswer, type InboundCall } from "./p2p.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function until<T>(f: () => T | undefined | false, what: string, ms = 15_000): Promise<T> {
@@ -27,13 +28,17 @@ async function until<T>(f: () => T | undefined | false, what: string, ms = 15_00
   }
 }
 
-test("p2p: the peer key is a child of the master (key ID libp2p:<handle>), and the peer ID carries its compressed key", async () => {
+test("p2p: the peer key is a child of the instance's root key (#129: [2, \"skein instance\"] / libp2p:<handle> / self), what the instance's signer answers, and the peer ID carries its compressed key", async () => {
   const master = PrivateKey.fromHex("33".repeat(32));
   const o = new Signer(master);
   const k = o.peerKey("martha");
-  const { publicKey } = await new ProtoWallet(master).getPublicKey({ protocolID: INSTANCE_PROTOCOL, keyID: "libp2p:martha", counterparty: "self" });
-  assert.equal(k.toPublicKey().toString(), publicKey, "[2, \"skein instance\"] / libp2p:martha / self");
-  assert.notEqual(k.toPublicKey().toString(), o.identity("martha"), "never the instance's root key");
+  const args = { protocolID: INSTANCE_PROTOCOL, keyID: "libp2p:martha", counterparty: "self" } as const;
+  // A program asks its signer: the kernel's `wallet` frames go to a WalletWireProcessor over the instance's signer (kernel.ts).
+  const { publicKey } = await new WalletWireTransceiver(new WalletWireProcessor(o.wallet("martha"))).getPublicKey(args);
+  assert.equal(k.toPublicKey().toString(), publicKey, "the instance's signer, over the wire: [2, \"skein instance\"] / libp2p:martha / self");
+  assert.equal((await new ProtoWallet(o.instanceKey("martha")).getPublicKey(args)).publicKey, publicKey, "a ProtoWallet over the instance's root");
+  assert.notEqual((await new ProtoWallet(master).getPublicKey(args)).publicKey, publicKey, "not a child of the master");
+  assert.notEqual(k.toPublicKey().toString(), o.identity("martha"), "not the instance's root key itself");
   const id = peerIdOf(k);
   assert.equal(keyOfPeerId(id.toString()), publicKey, "peer ID → key");
   assert.equal(Buffer.from(id.toMultihash().bytes).toString("hex"), `0025080212${"21"}${publicKey}`, "identity multihash of protobuf {secp256k1, 33 bytes}");
@@ -189,3 +194,22 @@ test("p2p: an instance's config as its dispatch table's libp2p rows ask (#72, #7
   assert.equal(b.node("beta"), undefined);
 });
 
+
+test("p2p: a beacon's beat (#126) is a new frame each time — {body, at, sender, signature}, signed by the instance's signer over the topic too", async () => {
+  const o = new Signer(PrivateKey.fromHex("44".repeat(32)));
+  const w = o.wallet("martha");
+  const sender = Uint8Array.from(Buffer.from(o.identity("martha"), "hex"));
+  const sign = async (d: Uint8Array) => Uint8Array.from((await w.createSignature({ protocolID: SIGN_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...d] })).signature);
+  const body = new TextEncoder().encode("alive");
+  const f1 = await beaconFrame("t", body, 1000, sender, sign), f2 = await beaconFrame("t", body, 2000, sender, sign);
+  assert.notDeepEqual(f1, f2, "a new frame per beat");
+  const b1 = beaconBeat("t", f1), b2 = beaconBeat("t", f2);
+  assert.ok(!("problem" in b1) && !("problem" in b2));
+  assert.equal(b1.at, 1000); assert.equal(b2.at, 2000);
+  assert.deepEqual([...b1.body], [...body]);
+  assert.match(String((beaconBeat("u", f1) as { problem: string }).problem), /signature/, "the topic is signed: another topic's beat does not verify");
+  const other = Uint8Array.from(Buffer.from(o.identity("kurt"), "hex"));
+  const forged = (await import("@ipld/dag-cbor")).encode({ ...(b1 as object), sender: other });
+  assert.match(String((beaconBeat("t", forged) as { problem: string }).problem), /signature/, "another sender: no");
+  assert.match(String((beaconBeat("t", body) as { problem: string }).problem), /dag-cbor|want/);
+});

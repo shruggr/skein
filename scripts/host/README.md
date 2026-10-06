@@ -298,8 +298,10 @@ broadcast <txid> → Arcade: HTTP 202 RECEIVED`) and per status routed
 libp2p (#51): an instance whose `etc/config.json` declares `libp2p:
 {topics?, protocols?, listen?}`, or whose installed apps added libp2p rows,
 gets a libp2p node in the host process,
-with its own peer key (a child of `~/.skein/master.key`, key ID
-`libp2p:<handle>`). `skein-host list` prints every row's peer ID (last
+with its own peer key (#129: a child of the instance's root key — itself a
+child of `~/.skein/master.key` — protocol [2, "skein instance"], key ID
+`libp2p:<handle>`, counterparty self; what the instance's signer answers for
+that derivation). `skein-host list` prints every row's peer ID (last
 column) and `skein-host identity <handle> --peer` prints one; it is the
 identity multihash of the compressed secp256k1 key, so the key reads out of
 it. Topic messages and stream frames reach the instance through its front

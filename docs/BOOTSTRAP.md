@@ -213,7 +213,7 @@ etc/reads.json           the form before #115, still read: who may call a route 
   the address book does not name.
 - **`libp2p`** (#51) becomes the genesis's `libp2p: {topics, protocols,
   listen?}`: the host's libp2p node runs for the instance (its own peer key,
-  derived from the master secret, key ID `libp2p:<handle>`), subscribes
+  derived from the instance's root key, key ID `libp2p:<handle>`, #129), subscribes
   `topics` and serves `protocols`. Each topic message and stream frame is a
   front-door step routed by the dispatch table's `libp2p` row for the topic
   or protocol (docs/MESSAGES.md, "libp2p"): a topic's row comes from

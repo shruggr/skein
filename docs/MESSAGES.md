@@ -627,7 +627,7 @@ record   {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box,
   | `unsubscribe` (#119) | `{kind: "event", event: "unsubscribe", app, topic}` | `app`'s subscription to `topic` ends; the node leaves the topic when nothing else takes it |
   | `deadline` (#126) | `{kind: "event", event: "deadline", at, thread, step, app?}` — the kernel records it (the `deadline` import, a shell's sleep), never an emit | an intention: its waker answers at `at` (below, "Intentions"); re-offered at a start while the thread awaits it |
   | `fetch` (#126) | `{kind: "event", event: "fetch", method, url, headers?, body?, timeoutMs?, maxBytes?, thread, step, app?}` (`sk.fetch`; the kernel adds `thread`, `step`) | an intention: its HTTP proxy performs it and answers (below, "Intentions"); re-offered at a start while the thread awaits it |
-  | `beacon` (#126) | `{kind: "event", event: "beacon", app, topic, every, body}` | its libp2p node publishes `body` on `topic` every `every` ms, logging nothing per beat, without subscribing the topic — "libp2p (#51)", below |
+  | `beacon` (#126) | `{kind: "event", event: "beacon", app, topic, every, body}` | its libp2p node publishes a new frame on `topic` every `every` ms — `body`, the beat's time, the instance's signature — logging nothing per beat, without subscribing the topic — "libp2p (#51)", below |
   | `unbeacon` (#126) | `{kind: "event", event: "unbeacon", app, topic}` | `app`'s beacon on `topic` stops |
   | any other | `{kind: "event", event: <name>, app?, …fields}` | nothing: a log line |
 
@@ -1332,8 +1332,21 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   body: bytes}` (an event, checked as it is emitted: an installed app's, a
   topic, `every` from 1 000 ms to a day, `body` at most 64 KiB) and stops it
   with `unbeacon {topic}`; no answer comes. The instance's node publishes
-  `body` on `topic` every `every` ms on its own clock — GossipSub signs it
-  with the node's key — and logs nothing per beat; the beacon does not make
+  a NEW message on `topic` every `every` ms on its own clock — the declared
+  body plus the beat's time, signed by the instance's signer (as the host
+  signs an intention request), so each beat is fresh and attributable to
+  the instance — and logs nothing per beat. The beat as published (p2p.ts
+  `beaconFrame`; `beaconBeat` reads and checks one):
+
+      dag-cbor {body: bytes, at: int (ms since the epoch, the host's clock),
+                sender: bytes(33) (the instance's identity key),
+                signature: bytes (DER)}
+
+  `signature` is the instance's, [2, "metanet handles envelope"] / key ID
+  `send` / counterparty anyone, over sha2-256 of dag-cbor {kind: "beacon",
+  topic, body, at, sender} — the topic is signed, not carried. GossipSub
+  signs the message too, with the node's peer key. A receiver checks the
+  signature against `sender` and `at` against its own clock. The beacon does not make
   the node subscribe the topic (a node with nothing else to do is started
   for it). Keyed by (app, topic) like a subscription; the host folds them
   from the log (src/host/p2p.ts `beaconsOf`) and follows them live; an
@@ -1418,9 +1431,14 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   signature. The front door checks the record and its body and admits it;
   one from another sender is `reject`, one for another identity `ignore`,
   and a frame that is not a package is `reject` (on a topic, `ignore`). The
-  reference host's peer key is not the instance's identity (a child of the
-  master secret, `libp2p:<handle>`), so an instance's own emit over libp2p
-  names a sender its peer ID does not carry, and is refused.
+  reference host's peer key is not the instance's identity: it is a child of
+  the instance's root key (#129: [2, "skein instance"], key ID
+  `libp2p:<handle>`, counterparty self — what the instance's signer answers
+  for getPublicKey with those arguments, so a program knows its own peer
+  ID). A receiver cannot tie that child to the identity (a self-derived key
+  is computable only by its holder), so an instance's own emit over libp2p
+  names a sender its peer ID does not carry, and is refused
+  (equiv/emit-events.ts pins it; #126 call 4, open).
 
 Outbound is the `libp2p` provider (above, "The providers"): a step emits
 `publish`, `dial`, `send` or `close` to it and awaits the answer; a dialed

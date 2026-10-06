@@ -36,7 +36,18 @@
 //     second without subscribing it — B sees the beats; nothing is written to
 //     A's log and no host line per beat; an unbeacon stops it; after the
 //     restart the node beats what it folds from the log; an uninstall of
-//     evt-a stops it.
+//     evt-a stops it. Each beat is a new frame (p2p.ts beaconFrame: {body,
+//     at, sender, signature}): two consecutive beats differ in `at`, and both
+//     verify against the instance's identity key.
+//
+//   - a message over libp2p (#126 call 4, #129): the instances' signers are
+//     the reference host's (signer.ts: root per handle, peer key a child of
+//     that root). The owner adds pub to ev's address book as transport
+//     `libp2p`, address pub's peer ID; app-demo installed on ev, pub asks it
+//     (box app-demo, from anyone) `demo.counter.get`, and the answer — ev's emit to pub — goes out
+//     on /skein/message/1.0.0 from ev's node; pub's front door judges it:
+//     refused, as built (the proved peer key is not the record's sender, and
+//     a receiver cannot tie a self-derived child to its root; David to decide).
 //
 // The instance's store then replays to itself exactly.
 //
@@ -55,7 +66,7 @@ import { main } from "../../src/host/cli.ts";
 import { ownerCli } from "../../src/testapps.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { Signer } from "../../src/host/signer.ts";
-import { peerIdOf, subscriptionsOf } from "../../src/host/p2p.ts";
+import { beaconBeat, MESSAGE_PROTOCOL, peerIdOf, subscriptionsOf, type InboundAnswer, type InboundCall } from "../../src/host/p2p.ts";
 import { Router } from "../../src/host/router.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
@@ -110,7 +121,8 @@ hdbA.add("ev", { store: join(home, "instances/ev/runtime.db") });
 const hdbB = new HostDb(join(home, "pub-host.db"));
 hdbB.add("pub", { store: join(home, "instances/pub/runtime.db") });
 const lines: string[] = [];
-const common = { walletFor: () => ephemeralWallet(key("1111")), home, owner, idleMs: 0, providerKeyFor: (n: string) => signer.providerKey(n), peerKeyFor: (x: string) => signer.peerKey(x), answerWaitMs: 6000, kernel: { command: kernel, env: { SKEIN_HOME: home } }, libp2pDiscoveryMs: 300 };
+// The reference host's signers (signer.ts): each instance's root a child of the master, its peer key a child of that root (#129).
+const common = { walletFor: (row: { handle: string }) => signer.wallet(row.handle), home, owner, idleMs: 0, providerKeyFor: (n: string) => signer.providerKey(n), peerKeyFor: (x: string) => signer.peerKey(x), answerWaitMs: 6000, kernel: { command: kernel, env: { SKEIN_HOME: home } }, libp2pDiscoveryMs: 300 };
 const log = (who: string) => (s: string, l: string) => { lines.push(`[${who}:${s}] ${l}`); if (process.env.VERBOSE) process.stdout.write(`  | [${who}:${s}] ${l}\n`); };
 const routerA = () => new Router({
   ...common, db: hdbA,
@@ -261,8 +273,12 @@ try {
 
   // ------------------------------------------------ beacons (#126): declared once, beaten by the node, nothing logged per beat
   // What B's node takes on demo_beat from A's node, as its validator sees each message (B has no row there: it ignores them, one line each).
-  const beats: Array<{ at: number; data: string }> = [];
-  const seenBeat = (from: string, data: Uint8Array) => { if (from === idOf("ev")) beats.push({ at: Date.now(), data: new TextDecoder().decode(data) }); };
+  const beats: Array<{ at: number; data: string; beat?: { at: number; sender: string } }> = [];
+  const seenBeat = (from: string, data: Uint8Array) => {
+    if (from !== idOf("ev")) return;
+    const b = beaconBeat("demo_beat", data);
+    beats.push({ at: Date.now(), data: "problem" in b ? `(${b.problem})` : new TextDecoder().decode(b.body), ...("problem" in b ? {} : { beat: { at: b.at, sender: Buffer.from(b.sender).toString("hex") } }) });
+  };
   const ps = pubPs() as unknown as { topicValidators: Map<string, (from: { toString(): string }, msg: { data: Uint8Array }) => unknown> };
   const validate = ps.topicValidators.get("demo_beat")!;
   ps.topicValidators.set("demo_beat", (from, msg) => { seenBeat(from.toString(), msg.data); return validate(from, msg); });
@@ -274,7 +290,9 @@ try {
   const tipBefore = await (await rA.hydrate("ev")).kernel.store.log.tip();
   const linesBefore = lines.length;
   await until("three beats seen by the second router", () => beats.length >= 3 || undefined, 15_000).catch(() => undefined);
-  check(beats.length >= 3 && beats.every((b) => b.data === "evt-a lives"), `the node publishes the body on demo_beat on its own clock, signed by its key: the second router sees ${beats.length} beats`);
+  check(beats.length >= 3 && beats.every((b) => b.data === "evt-a lives"), `the node publishes the body on demo_beat on its own clock, signed by its key: the second router sees ${beats.length} beats (${beats[0]?.data})`);
+  const [b1, b2] = beats.slice(-2).map((b) => b.beat);
+  check(!!b1 && !!b2 && b2.at > b1.at && b1.sender === identity && b2.sender === identity, `each beat a new frame (#126): two consecutive beats differ in \`at\` (${b1?.at} → ${b2?.at}) and both verify against the instance's key (${b1?.sender === identity && b2?.sender === identity})`);
   check(!served().includes("demo_beat"), `the node does not subscribe the beacon's topic (${served().join(", ")})`);
   const tipAfter = await (await rA.hydrate("ev")).kernel.store.log.tip();
   check(!!tipBefore && !!tipAfter && tipBefore.equals(tipAfter) && !lines.slice(linesBefore).some((l) => l.startsWith("[a:") && /demo_beat/.test(l)), "nothing per beat: no entry in the instance's log, no line in the host's");
@@ -310,6 +328,26 @@ try {
   const uninstalledAt = beats.length;
   await sleep(3000);
   check(beats.length === uninstalledAt && lines.some((l) => /libp2p: beacon demo_beat \(app evt-a\) stopped/.test(l)), `an uninstall stops the app's beacon (${beats.length - uninstalledAt} beats after)`);
+
+  // ------------------------------------------------ a message over libp2p (#126 call 4, #129)
+  code = await cli("install", join(here, "../../programs/test/app-demo"), "--instance", "ev");
+  check(code === 0, `skein plan install app-demo: exit ${code} ${err.join(" ")}`);
+  const pubId = (await rB.hydrate("pub")).identity;
+  const ab = await new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@ev`).send(identity, "peers", { op: "add", key: Uint8Array.from(Buffer.from(pubId, "hex")), transport: "libp2p", address: idOf("pub") });
+  await rA.settled();
+  check(!!ab, `the owner adds pub to ev's address book (transport libp2p, address pub's peer ID)`);
+  const judged: Array<{ call: InboundCall; answer: InboundAnswer }> = [];
+  const inbound = rB.p2pInbound.bind(rB);
+  rB.p2pInbound = async (h: string, call: InboundCall) => { const answer = await inbound(h, call); if (call.protocol === MESSAGE_PROTOCOL) judged.push({ call, answer }); return answer; };
+  await new RawBox(signer.wallet("pub"), `http://127.0.0.1:${rA.port}/@ev`).send(identity, "app-demo", { fn: "demo.counter.get", args: {} });
+  await rA.settled();
+  const j = await until("pub's front door judges ev's message", () => judged[0], 20_000).catch(() => undefined);
+  await rB.settled();
+  check(!!j && peerIdOf(signer.peerKey("ev")).toMultihash().bytes.every((x, i) => j.call.from[i] === x), "ev's emit to pub goes out over libp2p from ev's node: the proved peer is ev's peer key — a child of ev's root (#129)");
+  // As built (#126 step 4, call 4 — David to decide): the record's sender is ev's identity, the peer the transport
+  // proved is ev's peer key (a child of that identity's root, #129), and nothing ties the two at the receiver — the
+  // child is derived with counterparty self, which only ev can compute. So it is refused; this check pins that.
+  check(j?.answer.verdict === "reject" && /the sender is not the peer that sent it/.test(j.answer.reason ?? ""), `ev's emit to a libp2p recipient, at the receiver (#126 call 4): refused — the sender (ev's identity) is not the proved peer (ev's peer key): ${j ? `${j.answer.verdict}${j.answer.reason ? ` — ${j.answer.reason}` : ""}` : "nothing judged"}`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {
