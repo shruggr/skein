@@ -71,7 +71,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "6851cc79e6a52b0f398b238e526e7ca02ac45d1c";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "3a74b229b073c4c5a9ac207b154bdf2d73d430dd";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "22ae34d5646f30aef35b0efcad39a7be8ae7ac34";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -327,7 +327,7 @@ try {
     let b = sessions.get(h);
     if (!b) { b = new RawBox(submitterWallet, r.originOf(h)); sessions.set(h, b); }
     let id: CID;
-    try { ({ id } = await b.send((await r.hydrate(h)).identity, "overlay", { fn: "submit", args: { beef, topics } }, { sign: true })); } catch (e) { process.stdout.write(`  (submit by message to ${h} refused: ${(e as Error).message})\n`); return { refused: (e as Error).message, answers: async () => [] as Array<Record<string, unknown>> }; }
+    try { ({ id } = await b.send((await r.hydrate(h)).identity, "overlay", { fn: "submit", args: { beef, topics } })); } catch (e) { process.stdout.write(`  (submit by message to ${h} refused: ${(e as Error).message})\n`); return { refused: (e as Error).message, answers: async () => [] as Array<Record<string, unknown>> }; }
     await r.settled();
     return { id, refused: undefined as string | undefined, answers: () => answersTo(file, id) };
   };
@@ -815,11 +815,10 @@ try {
   const firstA = await answered(g1r, router, 1, 20_000);
   await router.settled();
   const ok = [firstA.slice(0, 1).map(gist), (await g2r.answers()).map(gist)];
-  // Noted, not checked: skein-overlay 0.7.3 answers a by-message submission whose thread it launched twice — once
-  // at admission (op "answer"), again when the received step wakes on that thread's end and routes the submission
-  // anew (op "received": a dupe, "admitted from the state"). Reported to the overlay stream.
+  // 0.7.4: a by-message submission whose thread it launched is answered once (0.7.3 answered it twice — at
+  // admission, op "answer", and again when the received step woke on that thread's end, op "received").
   const firstOps = (await g1r.answers()).map((a) => a.op);
-  if (firstOps.length !== 1) process.stdout.write(`  (note: the first submitter was answered ${firstOps.length} times: ${firstOps.join(", ")})\n`);
+  report.firstAnswers = firstOps;
   const gateResolver = new LookupResolver({ networkPreset: "local", hostOverrides: { ls_demo: [gateBase] } });
   const gLive = await gateResolver.query({ service: "ls_demo", query: { topic: "tm_demo" } }) as { outputs: Array<{ beef: number[]; outputIndex: number }> };
   report.transient = {
@@ -1175,6 +1174,7 @@ check(eq(report.mined, { answer: ["admitted", "proven", STEAK], posted: 0, state
   check(!!t && eq(t.busy.first, []) && eq(t.busy.state, [false, true, false]) && t.busy.posts >= 1, `#57, #112: Arcade's 503: the host keeps it queued; nothing admitted; the submitter not answered yet (${JSON.stringify(t?.busy)})`);
   check(!!t && eq(t.busy.again, []) && t.busy.submissions === 1, `#112: a resubmission while pending launches no second submission and is not answered (${JSON.stringify(t?.busy)})`);
   check(!!t && eq(t.steak, [[["admitted", "pending", STEAK]], []]) && t.submissions === 1 && !t.queued && t.posts >= 2 && eq(t.state, [false, true, false]) && eq(t.live, [[true, 0]]), `#57, #112: the host's queue retries; Arcade takes it: accepted, admitted; the first submitter answered admitted with the STEAK (${JSON.stringify(t)})`);
+  check(Array.isArray(report.firstAnswers) && report.firstAnswers.length === 1, `skein-overlay 0.7.4: the first submitter (by message) is answered exactly once (${JSON.stringify(report.firstAnswers)})`);
 }
 {
   const p = report.noProviderPending as { answers: number; state: boolean[]; live: number; statusRow: boolean } | undefined;
