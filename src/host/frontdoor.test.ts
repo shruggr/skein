@@ -182,6 +182,21 @@ test("front door: every request is an entry and a thread; the handshake writes t
   assert.equal(validatedSigned.status, 200);
   assert.equal(Buffer.from(await validatedSigned.arrayBuffer()).toString("hex"), client, "a signed request at the same row: the verified caller");
   assert.ok(signed(answers.at(-1)!), "answered signed on its session");
+  // #135, signed or validated: a JSON body with no BEEF, unsigned — the filter found nothing to validate,
+  // so nothing admits it: the door's refusal (stage "filter"), plain 400, no thread, the handler never ran.
+  answers.length = 0;
+  const nothing = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hello: "world" }) });
+  assert.equal(nothing.status, 400);
+  assert.match(await nothing.text(), /nothing to validate/);
+  assert.ok(plain(answers.at(-1)!) && answers.at(-1)!.entry && !answers.at(-1)!.thread, "a refusal entry, no thread, answered plain");
+  const nothingEntry = await k.store.get(answers.at(-1)!.entry!) as { refused?: { stage?: string; reason?: string; status?: number } };
+  assert.deepEqual([nothingEntry.refused?.stage, nothingEntry.refused?.reason, nothingEntry.refused?.status], ["filter", "nothing to validate", 400]);
+  // The same signed: the signature admits it; the handler runs and sees the caller.
+  answers.length = 0;
+  const nothingSigned = await af.fetch("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hello: "world" }) });
+  assert.equal(nothingSigned.status, 200);
+  assert.equal(Buffer.from(await nothingSigned.arrayBuffer()).toString("hex"), client, "signed, no BEEF: the verified caller");
+  assert.ok(signed(answers.at(-1)!) && answers.at(-1)!.thread, "a thread ran; answered signed");
   // 403: a stranger's signed request to a row for another key: verified, its 403 signed.
   const stranger = new AuthFetch(ephemeralWallet(PrivateKey.fromRandom()), undefined, undefined, undefined, {}, door);
   answers.length = 0;

@@ -604,6 +604,12 @@ pub const Runtime = struct {
                 rt.say("door: {s} request refused by its row's filter {s}: {s}", .{ transport, f, why });
                 return refusedEntry(a, entry, try rt.store.put(a, rec), "filter", why, 400, null);
             }
+            // #135, signed or validated: unsigned, and the filter found nothing to validate — neither.
+            const verified = said.get("verified");
+            if (doorm.nothingValidated(verified != null and verified.? != .null, x)) |why| {
+                rt.say("door: an unsigned {s} request refused at its row's filter {s}: {s}", .{ transport, f, why });
+                return refusedEntry(a, entry, try rt.store.put(a, rec), "filter", why, 400, null);
+            }
         };
         return withRequest(a, entry, try rt.store.put(a, rec), d.value(), null);
     }

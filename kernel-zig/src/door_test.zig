@@ -151,3 +151,29 @@ test "door: the beef filter checks every BUMP against chain/state, stores each b
     try std.testing.expect(p.value.get("body").? == .bytes);
     try std.testing.expect(p.value.get("args").?.array[0] == .cid);
 }
+
+test "door: an unsigned request whose filter found nothing to validate is refused; a signed one is not (#135)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ss = try SqliteStore.open(std.testing.allocator, std.testing.io, ":memory:");
+    defer ss.close();
+    const s = ss.store();
+
+    // A JSON body, no BEEF: the filter passes it as it is and validates nothing.
+    var pkg = cbor.MapBuilder.init(a);
+    try pkg.put("kind", cbor.string("http"));
+    try pkg.put("body", .{ .bytes = "{\"hello\": \"world\"}" });
+    const x = try door.filterBeef(a, s, pkg.value());
+    try std.testing.expect(x.refused == null);
+    try std.testing.expectEqual(@as(usize, 0), x.beefs.len);
+    try std.testing.expectEqualStrings(door.NOTHING_VALIDATED, door.nothingValidated(false, x).?);
+    try std.testing.expect(door.nothingValidated(true, x) == null);
+
+    // A filter's own refusal stands as it is (no second reason); a BEEF that decoded validates.
+    const refused: door.Filtered = .{ .value = pkg.value(), .beefs = &.{}, .refused = "a BEEF that does not decode" };
+    try std.testing.expect(door.nothingValidated(false, refused) == null);
+    const one: []const []const u8 = &.{"cid"};
+    const validated: door.Filtered = .{ .value = pkg.value(), .beefs = one };
+    try std.testing.expect(door.nothingValidated(false, validated) == null);
+}

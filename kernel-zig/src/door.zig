@@ -166,6 +166,18 @@ const Walk = struct {
     }
 };
 
+/// The refusal an admission comes to when nothing admits the sender (#135: signed or validated):
+/// an unsigned request (no `verified` sender) on a row whose filter validated nothing — the
+/// package held no BEEF to check, so the filter proved nothing and the request is neither signed
+/// nor validated. A signed request is admitted by its signature whatever the filter found; a
+/// filter's own refusal stands as it is.
+pub const NOTHING_VALIDATED = "nothing to validate";
+
+pub fn nothingValidated(signed: bool, x: Filtered) ?[]const u8 {
+    if (signed or x.refused != null or x.beefs.len > 0) return null;
+    return NOTHING_VALIDATED;
+}
+
 /// The `beef` filter over a package (any dag-cbor value: a request record).
 pub fn filterBeef(a: std.mem.Allocator, s: Store, v: Value) !Filtered {
     var w = Walk{ .a = a, .s = s };

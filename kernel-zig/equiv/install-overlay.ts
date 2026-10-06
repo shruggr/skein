@@ -301,7 +301,8 @@ try {
   const t2 = token(1);
   await t2.sign();
   // #135, signed or validated: unsigned, the stock client's POST is admitted because its BEEF validates (the open row's
-  // `beef` filter; no sender key), 200; a bad BEEF plain is the filter's refusal, 400. Signed (X-Topics beside), the same.
+  // `beef` filter; no sender key), 200; a bad BEEF plain is the filter's refusal, 400; a plain POST with no BEEF is
+  // neither signed nor validated, the door's refusal "nothing to validate", 400. Signed (X-Topics beside), the same.
   const tP = token(5);
   await tP.sign();
   const plain = await fetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(tP.toBEEF()) });
@@ -309,6 +310,9 @@ try {
   check(plain.status === 200 && JSON.stringify(steakP) === '{"tm_demo":{"outputsToAdmit":[0],"coinsToRetain":[],"coinsRemoved":[]}}' && !plain.headers.has("x-bsv-auth-signature"), `#135: a plain POST /overlay/submit (the stock TopicBroadcaster's, X-Topics): ${plain.status}, admitted, the STEAK answered plain (BRC-22, 0.9.2) ${JSON.stringify(steakP)}`);
   const badPlain = await fetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(tP.toBEEF()).subarray(0, 12) });
   check(badPlain.status === 400 && !badPlain.headers.has("x-bsv-auth-signature"), `#135: a bad BEEF plain: the door's filter refuses it, 400, answered plain (${badPlain.status})`);
+  const noBeef = await fetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "content-type": "application/json", "x-topics": "tm_demo" }, body: JSON.stringify({ hello: "world" }) });
+  const noBeefText = await noBeef.text();
+  check(noBeef.status === 400 && /nothing to validate/.test(noBeefText) && !noBeef.headers.has("x-bsv-auth-signature"), `#135: a plain POST with no BEEF: neither signed nor validated — the door refuses it, 400, answered plain (${noBeef.status} ${noBeefText})`);
   const sub = await submitFetch(`${rA.originOf("ov")}/overlay/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: new Uint8Array(t2.toBEEF()) });
   const subSteak = await sub.json().catch(() => undefined);
   const steak = await until("t2 admitted", async () => { await rA.settled(); return await steakOf(store, t2.id("hex")); }, 20_000).catch(() => undefined);
