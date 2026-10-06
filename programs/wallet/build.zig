@@ -50,6 +50,8 @@ fn programExe(b: *std.Build, wasi: std.Build.ResolvedTarget, component: bool) *s
         .strip = true,
         .imports = &.{
             .{ .name = "wallet", .module = sdk.module("wallet") },
+            // #130: the BEEF pointer record's encoder (chain.record.beefOf), for a funding the door decoded.
+            .{ .name = "chain", .module = sdk.module("chain") },
             .{ .name = "build_options", .module = opts.createModule() },
         },
     });

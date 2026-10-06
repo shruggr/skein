@@ -17,7 +17,8 @@ for p in messagebox frontdoor resolve wallet; do
   sed -i -E "s|(\.name = \"$p\", \.cid = \")[a-z0-9]+(\")|\1$c\2|" kernel-zig/src/programs.zig
   echo "$p $c"
 done
-# #89: the default image names the front door and the messagebox by CID.
-for p in messagebox frontdoor; do cid "$p" > "images/default/bin/$p.cid"; done
+# #89: the default image names the front door and the messagebox by CID; #116, #130: and the wallet
+# (the wallet is core: every skein made from the image pays its host from it).
+for p in messagebox frontdoor wallet; do cid "$p" > "images/default/bin/$p.cid"; done
 c=$(cid wallet)
 sed -i -E "s|(\"wallet\": CID.parse\(\")[a-z0-9]+(\"\))|\1$c\2|" src/runtime/programs.ts

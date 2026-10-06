@@ -41,12 +41,32 @@
 //!   {op: "signAction", reference}                BRC-100 signAction for a draft (signAndProcess: false)
 //!   {op: "list", basket?, includeSpent?}        our outputs in a basket (default "default")
 //!
+//! Billing (#130), two more:
+//!   args {pay: {to, x, checkpoint}}   the kernel's pay step — a thread the kernel launches itself
+//!                                     when the allocation is consumed (its origin's launchedBy is
+//!                                     the entry it processes; anything else is refused): pay the host
+//!                                     `to` (a BRC-29 key derived for it, counterparty the host) X sats,
+//!                                     or all we have if less, in one transaction whose other output,
+//!                                     0 sats, is `OP_FALSE OP_RETURN <checkpoint>` (the state record
+//!                                     CID); emit it as the event `payment` {txid, tx (Atomic BEEF),
+//!                                     outputIndex, amount, to, remittance, checkpoint} — the host's to
+//!                                     take — and ingest it at the chain app as any other. Nothing to
+//!                                     pay: no event (the kernel puts the instance to sleep).
+//!   call fn "fund"                    the route handler of the funding row (`/wallet/fund`, open, the
+//!                                     door's `beef` filter): the body an Atomic BEEF (the door's
+//!                                     pointer record), the header `x-skein-outputs` BRC-100's
+//!                                     internalizeAction outputs (JSON), `x-skein-description`
+//!                                     optional: internalized (SPV against the chain state), ingested
+//!                                     at the chain app (not awaited), answered {txid, status, outputs}.
+//!
 //! Recorded calls: the signer over the `wallet` import (getPublicKey,
 //! createSignature: no key is ever here). Every step stores a result record,
 //! keeps it in the thread, and prints its CID (hex) on stdout; the result
 //! names the transactions it is about as `refs` with rel `mentions`.
 const std = @import("std");
 const w = @import("wallet");
+/// The SDK's chain module (#130): the BEEF pointer record's encoder, for a funding the door decoded.
+const chainlib = @import("chain");
 
 const cbor = w.cbor;
 const Value = cbor.Value;
@@ -654,6 +674,13 @@ fn encodeOutputs(a: std.mem.Allocator, outputs: []const w.wallet.Wallet.CreateOu
 /// itself in box `chain` (the host's loopback; the chain app's row from `$self`). → the message's CID,
 /// which the step then awaits: each of the chain app's answers names it as `replyTo`.
 fn ingest(a: std.mem.Allocator, me: []const u8, beef: []const u8) ![]const u8 {
+    const c = try emitIngest(a, me, beef);
+    if (sk.@"await"(c.ptr, @intCast(c.len)) < 0) return failed();
+    return c;
+}
+
+/// The `ingest` message to the chain app, emitted (not awaited) → its CID.
+fn emitIngest(a: std.mem.Allocator, me: []const u8, beef: []const u8) ![]const u8 {
     const body = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{
         .{ .key = "fn", .value = .{ .text = "ingest" } },
         .{ .key = "args", .value = .{ .map = try a.dupe(cbor.Entry, &.{.{ .key = "beef", .value = .{ .bytes = beef } }}) } },
@@ -663,9 +690,7 @@ fn ingest(a: std.mem.Allocator, me: []const u8, beef: []const u8) ![]const u8 {
         .{ .key = "box", .value = .{ .text = chain_box } },
         .{ .key = "body", .value = .{ .bytes = body } },
     }) });
-    const c = try result(a, sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
-    if (sk.@"await"(c.ptr, @intCast(c.len)) < 0) return failed();
-    return c;
+    return try result(a, sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
 }
 
 fn run(a: std.mem.Allocator) !void {
@@ -675,6 +700,12 @@ fn run(a: std.mem.Allocator) !void {
         std.log.err("input record ({d} bytes): {s}", .{ input_bytes.len, @errorName(e) });
         return e;
     };
+    // #130: called as the funding row's handler (an in-VM call from the front door's step).
+    if (eql(u8, step.getText("kind") orelse "", "call")) return called(a, s, step);
+    // #130: a thread another program launched gets nothing from the wallet — its coins move only on
+    // the owner's message (a thread a message launched), the chain app's answers to it, and the
+    // kernel's pay step (launched by the entry): no app can spend them, or stop a payment by doing so.
+    try notLaunchedByAProgram(a, s, step);
     const args = step.get("args") orelse return error.BadInput;
     const me = (step.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
     const reply = step.get("reply");
@@ -683,6 +714,10 @@ fn run(a: std.mem.Allocator) !void {
     if (reply != null and reply.? == .map) {
         op = "callback";
         body = try s.getValue(a, reply.?.getCid("body") orelse return error.BadInput);
+    } else if (args.get("pay")) |p| {
+        // #130: the kernel's pay step.
+        op = "pay";
+        body = p;
     } else if (args.getCid("body")) |bc| {
         body = try s.getValue(a, bc);
         op = body.getText("op") orelse return error.BadBody;
@@ -770,6 +805,37 @@ fn run(a: std.mem.Allocator) !void {
         if (created.reference) |r| try out.append(a, .{ .key = "reference", .value = .{ .cid = r } });
         // To the chain app (it broadcasts it), unless a draft or noSend.
         if (created.reference == null and !created.no_send) to_ingest = created.beef;
+    } else if (eql(u8, op, "pay")) {
+        try kernelLaunched(a, s, step);
+        const to_b = body.getBytes("to") orelse return error.BadInput;
+        if (to_b.len != 33) return error.BadInput;
+        const x = body.getUint("x") orelse return error.BadInput;
+        const checkpoint = body.getCid("checkpoint") orelse return error.BadInput;
+        var ws = w.builder.WireSigner{ .ctx = &VmSigner.dummy, .call = VmSigner.call };
+        // Coins whose ancestry the chain state cannot prove yet (a funding the chain app has not
+        // ingested) make no BEEF: then only the coins whose transactions it holds.
+        const paid = payHost(a, &wal, ws.signer(), to_b[0..33].*, x, checkpoint, fee_rate, false) catch |e| switch (e) {
+            error.MissingAncestor, error.MissingProof => blk: {
+                wal = try Wallet.load(a, s, state_cid, try headOf(a, chain_head), net_default);
+                break :blk try payHost(a, &wal, ws.signer(), to_b[0..33].*, x, checkpoint, fee_rate, true);
+            },
+            else => return e,
+        };
+        if (paid) |p| {
+            try emitPayment(a, p, to_b, me, checkpoint);
+            try out.appendSlice(a, &.{
+                .{ .key = "txid", .value = .{ .text = try a.dupe(u8, &w.header.toHex(p.txid)) } },
+                .{ .key = "amount", .value = .{ .uint = p.amount } },
+                .{ .key = "checkpoint", .value = .{ .cid = checkpoint } },
+            });
+            to_ingest = p.beef;
+        } else {
+            mutates = false;
+            try out.appendSlice(a, &.{
+                .{ .key = "amount", .value = .{ .uint = 0 } },
+                .{ .key = "reason", .value = .{ .text = "nothing to pay with: no coins, or none that covers the fee" } },
+            });
+        }
     } else if (eql(u8, op, "callback")) {
         // The chain app's answer to our `ingest`: accepted (wait on), proven or rejected (done), or an error.
         const r = reply.?;
@@ -862,6 +928,215 @@ fn run(a: std.mem.Allocator) !void {
     var line = try hexAlloc(a, res_cid);
     line = try std.mem.concat(a, u8, &.{ line, "\n" });
     try std.Io.File.stdout().writeStreamingAll(io(), line);
+}
+
+// ---------------------------------------------------------------- billing (#130)
+
+/// A wallet thread is launched by a message (the owner's), or by the entry the kernel processes (the
+/// pay step); one launched by another program's thread is refused (#130: no app spends our coins).
+fn notLaunchedByAProgram(a: std.mem.Allocator, s: Store, step: Value) !void {
+    const o = try s.getValue(a, step.getCid("thread") orelse return error.BadInput);
+    const by = s.getValue(a, o.getCid("launchedBy") orelse return) catch return;
+    if (eql(u8, by.getText("kind") orelse "", "thread")) {
+        std.log.err("this thread was launched by another program's: the wallet acts on the owner's messages and the kernel's pay step only", .{});
+        return error.LaunchedByAProgram;
+    }
+}
+
+/// The pay step is the kernel's alone: its thread was launched by the entry it processes (a thread a
+/// program launches is launched by that program's thread), so an app that launches this program with
+/// `pay` gets nothing built or spent.
+fn kernelLaunched(a: std.mem.Allocator, s: Store, step: Value) !void {
+    const o = try s.getValue(a, step.getCid("thread") orelse return error.BadInput);
+    const by = o.getCid("launchedBy") orelse return error.NotThePayStep;
+    if (!eql(u8, by, o.getCid("input") orelse return error.NotThePayStep)) return error.NotThePayStep;
+    const e = try s.getValue(a, by);
+    if (!eql(u8, e.getText("kind") orelse "", "log")) return error.NotThePayStep;
+}
+
+const Paid = struct { txid: [32]u8, tx_cid: []const u8, amount: u64, beef: []const u8, prefix: []const u8, suffix: []const u8 };
+
+fn b64(a: std.mem.Allocator, b: []const u8) ![]u8 {
+    const enc = std.base64.standard.Encoder;
+    const out = try a.alloc(u8, enc.calcSize(b.len));
+    _ = enc.encode(out, b);
+    return out;
+}
+
+/// Pay the host `to` the next block (#130 decided 5): X when our coins cover it and the fee (with
+/// change), else all of them less the fee (no change). The payment's key is BRC-29's — a fresh
+/// derivation (prefix and suffix from the thread's random), counterparty the host, so only the host
+/// can spend it; the second output commits the checkpoint. Null: nothing to pay with.
+fn payHost(a: std.mem.Allocator, wal: *Wallet, signer: w.builder.Signer, to: [33]u8, x: u64, checkpoint: []const u8, rate: u64, held_only: bool) !?Paid {
+    var rnd: [48]u8 = undefined;
+    threadRandom(&rnd);
+    const prefix = try b64(a, rnd[0..12]);
+    const suffix = try b64(a, rnd[12..24]);
+    const change_prefix = try b64(a, rnd[24..36]);
+    const change_suffix = try b64(a, rnd[36..48]);
+    var inputs = try wal.spendableInputs();
+    if (held_only) {
+        const c = try wal.chainOrFail();
+        var held: std.ArrayList(w.builder.Input) = .empty;
+        for (inputs) |in| if (try c.holds(in.source_txid)) try held.append(a, in);
+        inputs = held.items;
+    }
+    if (inputs.len == 0) return null;
+    const frame = try w.wire.getPublicKeyFrameFor(a, w.brc29.security_level, w.brc29.protocol_name, try w.brc29.keyId(a, prefix, suffix), .{ .other = to }, false);
+    const payee = try w.wire.publicKeyResult(try VmSigner.call(undefined, a, frame));
+    const pay_script = try a.dupe(u8, &w.brc29.p2pkh(payee));
+    var cp: std.ArrayList(u8) = .empty;
+    try cp.appendSlice(a, &.{ 0x00, 0x6a, @intCast(checkpoint.len) });
+    try cp.appendSlice(a, checkpoint);
+    var outs = [2]w.builder.Output{ .{ .satoshis = x, .locking_script = pay_script }, .{ .satoshis = 0, .locking_script = cp.items } };
+    var n: ?usize = null;
+    var have: u64 = 0;
+    for (inputs, 1..) |in, k| {
+        have += in.satoshis;
+        if (have >= x + try w.builder.estimateFee(a, k, &outs, 25, rate)) {
+            n = k;
+            break;
+        }
+    }
+    const use = if (n) |k| inputs[0..k] else inputs;
+    if (n == null) {
+        const fee = try w.builder.estimateFee(a, inputs.len, &outs, 25, rate);
+        if (have <= fee) return null;
+        outs[0].satoshis = have - fee;
+    }
+    const change_key = w.builder.Key{ .key_id = try w.brc29.keyId(a, change_prefix, change_suffix), .counterparty = .self };
+    const built = try w.builder.build(a, signer, use, &outs, change_key, rate, true);
+    const cos = [_]w.wallet.Wallet.CreateOutput{
+        .{ .satoshis = outs[0].satoshis, .locking_script = outs[0].locking_script, .description = "hosting" },
+        .{ .satoshis = 0, .locking_script = outs[1].locking_script, .description = "checkpoint" },
+    };
+    const created = try wal.recordSigned(built, .{ .description = "hosting", .outputs = &cos, .labels = &.{"hosting"} }, change_prefix, change_suffix);
+    return .{ .txid = built.txid, .tx_cid = try a.dupe(u8, &w.store.hashCid(.tx, built.txid)), .amount = outs[0].satoshis, .beef = created.beef, .prefix = prefix, .suffix = suffix };
+}
+
+/// The payment as an event (#130 decided 6): the host's to take (its wiring: keep it, broadcast it).
+/// `remittance` is BRC-29's, so the host can derive the key it pays.
+fn emitPayment(a: std.mem.Allocator, p: Paid, to: []const u8, me: []const u8, checkpoint: []const u8) !void {
+    const msg = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "event", .value = .{ .text = "payment" } },
+        .{ .key = "txid", .value = .{ .cid = p.tx_cid } },
+        .{ .key = "tx", .value = .{ .bytes = p.beef } },
+        .{ .key = "outputIndex", .value = .{ .uint = 0 } },
+        .{ .key = "amount", .value = .{ .uint = p.amount } },
+        .{ .key = "to", .value = .{ .bytes = to } },
+        .{ .key = "remittance", .value = .{ .map = try a.dupe(cbor.Entry, &.{
+            .{ .key = "derivationPrefix", .value = .{ .text = p.prefix } },
+            .{ .key = "derivationSuffix", .value = .{ .text = p.suffix } },
+            .{ .key = "senderIdentityKey", .value = .{ .text = try hexAlloc(a, me) } },
+        }) } },
+        .{ .key = "checkpoint", .value = .{ .cid = checkpoint } },
+    }) });
+    _ = try result(a, sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
+}
+
+/// A header's value (the host keeps names lower-case).
+fn headerOf(headers: ?Value, name: []const u8) ?[]const u8 {
+    const hs = headers orelse return null;
+    if (hs != .map) return null;
+    for (hs.map) |e| if (std.ascii.eqlIgnoreCase(e.key, name)) return if (e.value == .text) e.value.text else null;
+    return null;
+}
+
+/// BRC-100 internalizeAction outputs as JSON (the header `x-skein-outputs`).
+fn specsOf(a: std.mem.Allocator, text: []const u8) ![]w.wallet.InternalizeOutput {
+    const j = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return error.BadOutputs;
+    if (j != .array or j.array.items.len == 0) return error.BadOutputs;
+    const specs = try a.alloc(w.wallet.InternalizeOutput, j.array.items.len);
+    const str = struct {
+        fn f(o: std.json.ObjectMap, k: []const u8) ![]const u8 {
+            const v = o.get(k) orelse return error.BadOutputs;
+            return if (v == .string) v.string else error.BadOutputs;
+        }
+    }.f;
+    for (j.array.items, specs) |x, *spec| {
+        if (x != .object) return error.BadOutputs;
+        const idx = x.object.get("outputIndex") orelse return error.BadOutputs;
+        if (idx != .integer or idx.integer < 0) return error.BadOutputs;
+        spec.* = .{ .output_index = @intCast(idx.integer) };
+        const protocol = try str(x.object, "protocol");
+        if (eql(u8, protocol, "wallet payment")) {
+            const r = x.object.get("paymentRemittance") orelse return error.BadOutputs;
+            if (r != .object) return error.BadOutputs;
+            const hex = try str(r.object, "senderIdentityKey");
+            var sender: [33]u8 = undefined;
+            if (hex.len != 66) return error.BadOutputs;
+            _ = std.fmt.hexToBytes(&sender, hex) catch return error.BadOutputs;
+            spec.payment = .{ .derivation_prefix = try str(r.object, "derivationPrefix"), .derivation_suffix = try str(r.object, "derivationSuffix"), .sender_identity_key = sender };
+        } else if (eql(u8, protocol, "basket insertion")) {
+            const r = x.object.get("insertionRemittance") orelse return error.BadOutputs;
+            if (r != .object) return error.BadOutputs;
+            spec.insertion = .{ .basket = try str(r.object, "basket"), .custom_instructions = if (r.object.get("customInstructions")) |c| (if (c == .string) c.string else null) else null };
+        } else return error.BadOutputs;
+    }
+    return specs;
+}
+
+/// Called (#130): the funding row's handler — an in-VM call from the front door's step — answering
+/// the route handler contract ({status, type, body}, dag-cbor on stdout).
+fn called(a: std.mem.Allocator, s: Store, in: Value) !void {
+    const func = in.getText("fn") orelse "";
+    var status: u64 = 200;
+    const body = fund(a, s, in, func) catch |e| blk: {
+        status = 400;
+        var o: std.Io.Writer.Allocating = .init(a);
+        try std.json.Stringify.value(.{ .status = "error", .code = "ERR_FUNDING", .description = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (last_error_len > 0) ": " else "", last_error[0..last_error_len] }) }, .{}, &o.writer);
+        break :blk o.written();
+    };
+    const ans = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "status", .value = .{ .uint = status } },
+        .{ .key = "type", .value = .{ .text = "application/json" } },
+        .{ .key = "body", .value = .{ .bytes = body } },
+    }) });
+    try std.Io.File.stdout().writeStreamingAll(io(), ans);
+}
+
+/// A funding the host handed in (#130 decided 7): internalized — the outputs ours by the header's
+/// BRC-29 remittances, SPV against the chain state — the state advanced, the result kept, the
+/// transaction ingested at the chain app (not awaited: the request answers now). → the JSON answer.
+fn fund(a: std.mem.Allocator, s: Store, in: Value, func: []const u8) ![]const u8 {
+    if (!eql(u8, func, "fund")) return error.UnknownFn;
+    const req = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
+    const headers = req.get("headers");
+    const specs = try specsOf(a, headerOf(headers, "x-skein-outputs") orelse return error.NoOutputs);
+    const description = headerOf(headers, "x-skein-description") orelse "funding";
+    const beef = switch (req.get("body") orelse return error.NoBeef) {
+        // The door's `beef` filter put the pointer record where the bytes were.
+        .cid => |c| try chainlib.record.beefOf(a, s, c),
+        .bytes => |b| b,
+        else => return error.NoBeef,
+    };
+    const me = (in.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
+    const net_name = if (in.get("defaults")) |d| d.getText("walletNetwork") orelse "main" else "main";
+    const net_default = w.chain.Network.parse(net_name) orelse return error.BadConfig;
+    const state_cid = try headOf(a, head_name);
+    var wal = try Wallet.load(a, s, state_cid, try headOf(a, chain_head), net_default);
+    const res = try wal.internalize(beef, specs, description, &.{"funding"});
+    const new_state = try wal.save();
+    if (sk.advance(head_name.ptr, head_name.len, new_state.ptr, @intCast(new_state.len)) < 0) return failed();
+    const txid_hex = try a.dupe(u8, &w.header.toHex(res.txid));
+    const rec = try s.putValue(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        .{ .key = "kind", .value = .{ .text = "wallet-result" } },
+        .{ .key = "op", .value = .{ .text = "fund" } },
+        .{ .key = "txid", .value = .{ .text = txid_hex } },
+        .{ .key = "status", .value = .{ .text = @tagName(res.status) } },
+        .{ .key = "outputs", .value = .{ .uint = res.outputs } },
+        .{ .key = "state", .value = .{ .cid = new_state } },
+        .{ .key = "refs", .value = .{ .array = try a.dupe(Value, &.{.{ .map = try a.dupe(cbor.Entry, &.{
+            .{ .key = "to", .value = .{ .cid = try a.dupe(u8, &w.store.hashCid(.tx, res.txid)) } },
+            .{ .key = "rel", .value = .{ .text = "mentions" } },
+        }) }}) } },
+    }) });
+    if (sk.keep(rec.ptr, @intCast(rec.len)) < 0) return failed();
+    // To the chain app, as every transaction the wallet takes (#79); its answers are not awaited here.
+    _ = try emitIngest(a, me, beef);
+    var o: std.Io.Writer.Allocating = .init(a);
+    try std.json.Stringify.value(.{ .txid = txid_hex, .status = @tagName(res.status), .outputs = res.outputs }, .{}, &o.writer);
+    return o.written();
 }
 
 /// Later entries win (a result may name its txid twice).
