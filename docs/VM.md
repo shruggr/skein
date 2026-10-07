@@ -284,7 +284,7 @@ against those reads in the kernel's match.)
     owner — the step and call input `owner` — is the genesis's, else the key
     the head `claim` names (none before the claim). Two ways it arrives:
     the owner's own message to the instance (a bare image: whoever sends the
-    claim first owns it — `skein plan claim`, then `skein send`); or a claim
+    claim first owns it — `skein claim`); or a claim
     the owner signed **before the instance existed**, naming no recipient —
     the one message that may name none (the mail record without
     `recipient`, signed by its sender — one of the few messages that sign
@@ -294,7 +294,7 @@ against those reads in the kernel's match.)
     a new instance as its first entry, a `local` request (`create`, #90,
     MESSAGES.md). The host signs nothing for the owner.
   `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
-  [--sender key] <box> <handler>` send them, and `skein plan
+  [--sender key] <box> <handler>` send them, and `skein
   install|uninstall|dispatch|peers|deploy|claim` builds them for any BRC-100
   wallet to send (#124). No reply. **No program reaches a kernel
   table** (#87): every program emits as the instance, and no default row
@@ -931,7 +931,7 @@ skein with none is not billed and behaves as it did.
 
 **The host row** is the owner's grant of a host and its rates — a kernel row
 of the dispatch table, written with an ordinary `dispatch` admin message
-(`skein plan host`), updated or removed the same way:
+(`skein host`), updated or removed the same way:
 
 ```
 {transport: "mailbox", address: "billing", sender: <the host's key>, program: "kernel", fn: "tick",

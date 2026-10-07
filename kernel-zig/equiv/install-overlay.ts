@@ -1,7 +1,7 @@
 // Overlays installed as apps (#72 build 3, #79; docs/APPS.md §6) end to end:
 // shruggr/skein-chain and shruggr/skein-overlay at pinned commits (or
 // $SKEIN_CHAIN_DIR / $SKEIN_OVERLAY_DIR), installed as the owner's messages (#124:
-// `skein plan install`, sent to /sendMessage) into an instance of the stock system whose genesis has no
+// `skein install`, sent to /sendMessage) into an instance of the stock system whose genesis has no
 // overlay config and no libp2p — on a router with libp2p and an Arcade (so a
 // `$status` provider) — while a second router runs a plain instance
 // subscribed to the overlays' topics:
@@ -215,7 +215,7 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
     const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: home, port: rA.port!, owner: ownerWallet, settled: () => rA.settled() }, args) : undefined;
     if (o) { out.push(...o.out); err.push(...o.err); }
     const code = o ? o.code : await main(args, {
@@ -238,10 +238,10 @@ try {
 
   // ------------------------------------------------ the chain app, then the overlay: on one instance (#79)
   code = await cli("install", chainDir, "--instance", "ov");
-  check(code === 0, `skein plan install skein-chain: exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein install skein-chain: exit ${code} ${err.join(" ")}`);
   code = await cli("install", overlayDir, "--instance", "ov");
   const derived = out.filter((l) => l.includes("(derived: config.overlay)"));
-  check(code === 0, `skein plan install skein-overlay beside the chain app (requires chain/1 satisfied): exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein install skein-overlay beside the chain app (requires chain/1 satisfied): exit ${code} ${err.join(" ")}`);
   check(["row       libp2p tm_demo from anyone → overlay.submit (filter beef)", "row       libp2p tm_demo-admit from anyone → overlay.peerAdmit", "row       libp2p tm_demo-proof from anyone → overlay.peerProof", "row       http /overlay/submit from anyone → overlay.submit (filter beef)", "read      /overlay/lookup → overlay.lookup (anyone, by a call: nothing logged)", "row       mailbox overlay from event → overlay", "row       mailbox overlay from $self → overlay"].every((x) => derived.some((l) => l.includes(x))) && derived.length === 7 && derived.filter((l) => l.includes("(filter beef)")).length === 2 && out.some((l) => l.includes("dispatch add http /overlay/submit from anyone → overlay.submit (filter beef)")), `the prompt shows the wiring derived from config.overlay, the filter of the submit rows (#121) among it (${derived.length} lines: ${derived.map((l) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "")).join(" | ")})`);
   check(!out.some((l) => /grants|mailbox (chain|status|submit) from .* → overlay/.test(l)), "no grants, no chain/status/submit box for the overlay (#79: the chain app's)");
   // 0.7.6 (#128): the stock manifest's submission row is the box `submit` (overlay/submit here; the old own-box row "" is gone).
@@ -459,7 +459,7 @@ try {
 
   // ------------------------------------------------ uninstall: the rows go, the node unsubscribes
   code = await cli("uninstall", "overlay", "--instance", "ov");
-  check(code === 0, `skein plan uninstall overlay: exit ${code} ${out[0]} ${err.join(" ")}`);
+  check(code === 0, `skein uninstall overlay: exit ${code} ${out[0]} ${err.join(" ")}`);
   const left = await appRows();
   check(left.length === 0 && (await appRows("overlay2")).length > 0, `no overlay rows left in the dispatch table (${left.length}); overlay2's stand`);
   const s3 = await until("the node unsubscribes overlay's topics", () => { const s = served(); return s && s.topics.length === 3 && s.topics.every((t) => t.startsWith("tm_two")) ? s : undefined; }, 10_000).catch(() => undefined);

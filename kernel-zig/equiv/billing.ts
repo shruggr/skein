@@ -5,7 +5,7 @@
 //   - two skeins from the default image (#89: the wallet in it since #130/#116,
 //     and the funding row /wallet/fund), each claimed by the owner's signed
 //     claim and given the chain app (shruggr/skein-chain, wallet.ts's pin);
-//   - alice: the owner grants the host (`skein plan host`: the host row, the
+//   - alice: the owner grants the host (`skein host`: the host row, the
 //     host's key from /.well-known/skein-host, a tiny X); the host ticks her
 //     at once (billing starts, its free allowance her allocation); a funding
 //     delivered to the host (POST /fund/alice) is handed in on her funding

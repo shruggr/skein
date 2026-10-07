@@ -1,6 +1,6 @@
 // Subscriptions (#119) end to end: two routers with libp2p. On A, one
 // instance (`ev`, the stock system, no libp2p in its genesis) gets two apps
-// by the owner's messages (`skein plan install`, #124), both the module
+// by the owner's messages (`skein install`, #124), both the module
 // programs/test/app-demo under other names: `evt-a` (no libp2p row) and
 // `evt-b` (an exact libp2p row `demo_mine` → its fn `topic`). A message
 // {kind: "app-demo-event", emit: {event, …}} in the app's box makes the app
@@ -146,7 +146,7 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
     const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: home, port: rA.port!, owner: ownerWallet, settled: () => rA.settled() }, args) : undefined;
     if (o) { out.push(...o.out); err.push(...o.err); }
     const code = o ? o.code : await main(args, {
@@ -208,9 +208,9 @@ try {
 
   // ------------------------------------------------ install: evt-b's row's topic only
   let code = await cli("install", treeA, "--instance", "ev");
-  check(code === 0, `skein plan install evt-a (no libp2p row): exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein install evt-a (no libp2p row): exit ${code} ${err.join(" ")}`);
   code = await cli("install", treeB, "--instance", "ev");
-  check(code === 0 && out.some((l) => /row\s+libp2p demo_mine from anyone → demo\.topic/.test(l)), `skein plan install evt-b (an exact row demo_mine): exit ${code} ${err.join(" ")} ${out.filter((l) => l.includes("libp2p")).join(" | ")}`);
+  check(code === 0 && out.some((l) => /row\s+libp2p demo_mine from anyone → demo\.topic/.test(l)), `skein install evt-b (an exact row demo_mine): exit ${code} ${err.join(" ")} ${out.filter((l) => l.includes("libp2p")).join(" | ")}`);
   let topics = await until("the node subscribes evt-b's row", () => served().length ? served() : undefined).catch(() => served());
   check(topics.join(",") === "demo_mine", `the node subscribes the row's topic: ${topics.join(", ")}`);
 
@@ -323,7 +323,7 @@ try {
   await until("the beacon beats after the restart", () => beats.length > afterRestart + 1 || undefined, 10_000).catch(() => undefined);
   check(beats.length > afterRestart + 1, `after the restart the node beats the beacon it folds from the log (${beats.length - afterRestart} beats)`);
   code = await cli("uninstall", "evt-a", "--instance", "ev");
-  check(code === 0, `skein plan uninstall evt-a: exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein uninstall evt-a: exit ${code} ${err.join(" ")}`);
   await sleep(1500);
   const uninstalledAt = beats.length;
   await sleep(3000);
@@ -331,7 +331,7 @@ try {
 
   // ------------------------------------------------ a message over libp2p (#126 call 4, #129)
   code = await cli("install", join(here, "../../programs/test/app-demo"), "--instance", "ev");
-  check(code === 0, `skein plan install app-demo: exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein install app-demo: exit ${code} ${err.join(" ")}`);
   const pubId = (await rB.hydrate("pub")).identity;
   const ab = await new RawBox(ownerWallet, `http://127.0.0.1:${rA.port}/@ev`).send(identity, "peers", { op: "add", key: Uint8Array.from(Buffer.from(pubId, "hex")), transport: "libp2p", address: idOf("pub") });
   await rA.settled();

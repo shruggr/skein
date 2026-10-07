@@ -41,9 +41,25 @@ const hexOf = (b: Uint8Array): string => Buffer.from(b).toString("hex");
  * takes the owner from the signer. {message, body: its dag-cbor bytes}.
  */
 export async function signClaim(wallet: WalletInterface, body: { messagebox?: string; handle?: string; domain?: string } = {}, originator?: string): Promise<{ message: Record<string, unknown>; body: Uint8Array }> {
-  const bytes = dagCbor.encode(body);
+  return await signMessage(wallet, { box: "claim", body: dagCbor.encode(body) }, originator);
+}
+
+/**
+ * A message signed by `wallet` in its own process (#142): the mail record {kind: "mail", op: "put",
+ * sender, recipient?, box, body: <the body's CID>, nonce, signature}, signed as every message is
+ * ([2, "metanet handles envelope"], key "send", counterparty anyone, over the record's dag-cbor
+ * without `signature`) — what the front door checks on a message carried in `local` (a provider's
+ * answer, a forwarded claim, the operator's message over the host's control socket). `recipient`
+ * (hex) names the instance; a claim names none (#127). {message, body: the body's dag-cbor bytes}.
+ */
+export async function signMessage(wallet: WalletInterface, m: { recipient?: string; box: string; body: Uint8Array }, originator?: string): Promise<{ message: Record<string, unknown>; body: Uint8Array }> {
+  const bytes = m.body;
   const me = (await wallet.getPublicKey({ identityKey: true }, originator)).publicKey;
-  const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(me, "hex")), box: "claim", body: encode(dagCbor.decode(bytes)).cid, nonce: globalThis.crypto.getRandomValues(new Uint8Array(16)) };
+  const unsigned = {
+    kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(me, "hex")),
+    ...(m.recipient ? { recipient: Uint8Array.from(Buffer.from(m.recipient, "hex")) } : {}),
+    box: m.box, body: encode(dagCbor.decode(bytes)).cid, nonce: globalThis.crypto.getRandomValues(new Uint8Array(16)),
+  };
   const { signature } = await wallet.createSignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: "anyone", data: [...dagCbor.encode(unsigned)] }, originator);
   return { message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bytes };
 }
@@ -97,6 +113,15 @@ export class RawBox {
     return this.peer;
   }
 
+  /** The session, made (the handshake happens on the first request). */
+  async ready(): Promise<void> { await this.ensurePeer(this.wallet, this.originator); }
+
+  /** The identity key (hex) the other side's session answers as, once a request has been answered. */
+  peerIdentity(): string | undefined {
+    const p = (this.af.peers as Record<string, { identityKey?: string }>)[new URL(this.url).origin];
+    return p?.identityKey;
+  }
+
   private async post(path: string, body: Record<string, unknown>): Promise<{ status: number; v: Record<string, unknown> }> {
     await this.ensurePeer(this.wallet, this.originator);
     const r = await this.af.fetch(`${this.url}${path}`, { method: "POST", headers: { "content-type": "application/cbor" }, body: dagCbor.encode(body) as unknown as BodyInit });
@@ -121,7 +146,7 @@ export class RawBox {
   /**
    * A BRC-33 request with a JSON body on the session (`path` under the box URL, e.g. "/sendMessage"):
    * what any BRC-100 wallet's BRC-104 client sends (`1sat authfetch POST <origin>/sendMessage --body @file`,
-   * the owner's admin messages `skein plan` writes, src/client/admin.ts). The status and the answer's text.
+   * the owner's admin messages as JSON, src/client/admin.ts messageJson). The status and the answer's text.
    */
   async postJson(path: string, json: string): Promise<{ status: number; text: string }> {
     await this.ensurePeer(this.wallet, this.originator);

@@ -1,5 +1,5 @@
 // The chain module (#78) end to end: shruggr/skein-chain at a pinned commit
-// (or $SKEIN_CHAIN_DIR), installed as the owner's messages (`skein plan install`, sent to /sendMessage, #124)
+// (or $SKEIN_CHAIN_DIR), installed as the owner's messages (`skein install`, sent to /sendMessage, #124)
 // into an instance of the stock system on a router with an Arcade (so a
 // broadcaster and a `$status` provider), called by the instance's owner (a
 // mailbox of its own on the same host; #79: the chain app takes calls from
@@ -108,7 +108,7 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
     const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, args) : undefined;
     if (o) { out.push(...o.out); err.push(...o.err); }
     const code = o ? o.code : await main(args, {
@@ -120,7 +120,7 @@ try {
   };
   const spec = process.env.SKEIN_CHAIN_DIR ?? `${CHAIN_REPO}#${CHAIN_REV}`;
   const code = await cli("install", spec, "--instance", "ch");
-  check(code === 0, `skein plan install skein-chain: exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein install skein-chain: exit ${code} ${err.join(" ")}`);
   check(["event", "$self", "$owner"].every((who) => out.some((l) => l.includes(`row       mailbox chain from ${who} → chain`))) && out.some((l) => /row {7}mailbox chain\/status from \$status .*→ chain/.test(l)) && !out.some((l) => l.includes("mailbox chain from anyone")), `the prompt shows its rows (#79: no open box): ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
   const app = await record("chain/app");
   check(app?.kind === "app" && app.name === "chain" && app.version === "0.4.0", "the head chain/app is the app record (0.4.0)");

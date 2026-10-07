@@ -1,6 +1,6 @@
 // The app manifest (#72, #76, #77, #79; docs/APPS.md §2): `etc/app.json` in an
 // app's tree, checked and normalised here for the install client (install.ts,
-// `skein plan install`, #124). Pure: the tree is asked only whether a path exists.
+// `skein install`, #124). Pure: the tree is asked only whether a path exists.
 //
 // What the checks enforce (each failure is one line of ManifestError):
 //

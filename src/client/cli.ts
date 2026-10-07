@@ -8,12 +8,11 @@
 //   skein import <dir>
 //   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
 //   skein head <name> <tree-cid>
-//   skein dispatch add|remove [--sender <identity-key>] <box> <handler-cid>
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
 //   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
 //   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
-//   skein plan … | skein send <origin> <dir>   the owner's admin messages as files, and their delivery
-//                                              by a BRC-100 wallet (#124: src/client/admin-cli.ts)
+//   skein install|uninstall|dispatch|reads|peers|host|claim|deploy …   the operator's admin messages,
+//                                              signed here with the operator's key and sent (#142: src/client/admin-cli.ts)
 
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
@@ -26,7 +25,6 @@ export type Command =
   | { cmd: "import"; dir: string }
   | { cmd: "run"; tree?: string; cwd?: string; env?: Record<string, string>; line: string }
   | { cmd: "head"; name: string; tree: string }
-  | { cmd: "dispatch"; op: "add" | "remove"; sender?: string; box: string; handler: string }
   | { cmd: "inbox"; wait: boolean; timeout: number; ack: boolean; json: boolean }
   | { cmd: "chat"; text: string; tree?: string; model?: string; fresh: boolean; wait: boolean; timeout: number }
   | { cmd: "talk"; tree?: string; model?: string; fresh: boolean; timeout: number }
@@ -37,12 +35,11 @@ export const USAGE = `usage:
   skein import <dir>
   skein run [--tree <cid>] [--cwd <path>] [--env K=V]... -- '<cmd>'
   skein head <name> <tree-cid>
-  skein dispatch add|remove [--sender <identity-key>] <box> <handler-cid>
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]
-  skein plan install|uninstall|dispatch|peers|deploy|claim …   the owner's admin messages as files (skein plan help)
-  skein send <origin> <dir>                             those files to <origin>/sendMessage by the wallet (\`1sat authfetch\`)`;
+  skein install|uninstall|dispatch|reads|peers|host|claim|deploy …   the operator's admin messages, signed with its key
+                                                        and sent (skein install --help)`;
 
 export const DEFAULT_TIMEOUT = 120;
 
@@ -90,12 +87,6 @@ export function parseCli(argv: string[]): Command {
       const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
       if (positionals.length !== 2) throw new Error("head: expected <name> <tree-cid>");
       return { cmd: "head", name: positionals[0]!, tree: positionals[1]! };
-    }
-    case "dispatch": {
-      const { values, positionals } = parseArgs({ args: rest, options: { sender: { type: "string" } }, allowPositionals: true });
-      const [op, box, handler] = positionals;
-      if (positionals.length !== 3 || (op !== "add" && op !== "remove")) throw new Error("dispatch: expected add|remove [--sender <identity-key>] <box> <handler>");
-      return { cmd: "dispatch", op, box: box!, handler: handler!, ...(values.sender !== undefined && { sender: values.sender }) };
     }
     case "inbox": {
       const { values } = parseArgs({
@@ -169,11 +160,13 @@ function show(r: Result, json: boolean): void {
 // ---------------------------------------------------------------- main
 
 export async function main(argv: string[]): Promise<number> {
-  // #124: building admin messages needs no wallet; sending them is the wallet's (its own command).
-  if (argv[0] === "plan" || argv[0] === "send") {
-    const { planMain, sendMain } = await import("./admin-cli.ts");
-    const env = { vars: process.env, out: (l: string) => process.stdout.write(`${l}\n`), err: (l: string) => process.stderr.write(`${l}\n`) };
-    return argv[0] === "plan" ? planMain(argv.slice(1), env) : sendMain(argv.slice(1), env);
+  // #142: the operator's admin messages, signed in this process with its key (host.env configures where it is).
+  const { ADMIN_COMMANDS, ADMIN_USAGE, adminMain } = await import("./admin-cli.ts");
+  if ((ADMIN_COMMANDS as readonly string[]).includes(argv[0] ?? "")) {
+    const { withHostEnv } = await import("../host/hostenv.ts");
+    const env = { vars: withHostEnv(process.env), out: (l: string) => process.stdout.write(`${l}\n`), err: (l: string) => process.stderr.write(`${l}\n`) };
+    if (argv.includes("--help") || argv.includes("-h")) { env.out(ADMIN_USAGE); return 0; }
+    return adminMain(argv[0]!, argv.slice(1), env);
   }
   const c = parseCli(argv);
   if (c.cmd === "help") { console.log(USAGE); return 0; }
@@ -201,11 +194,6 @@ export async function main(argv: string[]): Promise<number> {
     }
     case "head": {
       const s = await client.head(c.name, c.tree);
-      console.log(s.cid);
-      return 0;
-    }
-    case "dispatch": {
-      const s = await client.dispatch(c);
       console.log(s.cid);
       return 0;
     }

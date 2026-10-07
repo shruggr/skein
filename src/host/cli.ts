@@ -1,7 +1,9 @@
 #!/usr/bin/env -S node --experimental-strip-types --no-warnings
 // `skein-host`: the host's management database (instances.ts, $SKEIN_HOME/host.db)
 // and the router (router.ts, #33) that serves every enabled row.
-//   skein-host init [--owner <hex>] [--handle host]   the host skein (#90): the operator's own instance
+//   skein-host run                    the host (#142): on the first run it makes the host skein, then serves
+//   skein-host init [--handle host]   the first run's part alone: the host skein made (once), nothing served
+//   skein-host grant <key> [--apps] [--instance <handle>]   a key's admin rows (and with --apps its owner rows)
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance (#40) for an identity outside the
 //                                     host: Router.createInstance with image `mailbox`, the instance manager's own create (#113)
@@ -29,24 +31,23 @@
 // genesis names no owner and carries the claim row (`default`: the repo's
 // images/default, the default image; an outpoint is refused until the ORDFS
 // app exists). Its claim row admits anyone: the first claim's sender owns it
-// (#127) — the owner claims it from a wallet (`skein plan claim --recipient
-// <its identity> --out claim`, then `skein send <its origin> claim`); the host
+// (#127) — the owner claims it (`skein claim --instance <handle>` or
+// `skein claim <its origin>`, or a wallet's own claim message); the host
 // holds no owner's key and sends no claim.
-// `init` (#90) creates the host skein: the operator's own instance, from the
-// default image — Router.createInstance, as the instance manager's `create`
-// — with the instance manager in its address book (no other instance's book
-// names it), and recorded in host.db as the host skein. It is a bare image
-// (#127: no signed claim to forward): the operator (`--owner`, else
-// SKEIN_OWNER, the key it is for) claims it from a wallet as above, the first
-// thing once the router runs. Once; a second `init` says which instance it
-// is. The operator, as the owner, then installs the onboarding app into it
-// from a wallet (#124: `skein
-// plan install https://github.com/shruggr/skein-onboard#v0.3.4 --origin
-// <the host skein's origin> --config '{"onboard": {"domain": "<the handle
-// domain>"}}' --out plan` and `skein send <origin> plan`, or the management
-// page). The onboarding app is the host's BRC-169 server (#113): registrations,
-// the handle certificates (through the certifier provider), resolve, search,
-// the manifest — the router maps its own origin's requests onto it.
+// `run` (#142) is the one command a host needs. Its settings are $SKEIN_HOME/host.env (every `SKEIN_*`
+// line; the environment wins: hostenv.ts) — they configure the commands, and through `run` how the host
+// skein is first built; a later change does not reach into a live skein. On the first run (no host skein in
+// host.db) it makes the master secret and host.db as before, the operator's key (SKEIN_OPERATOR_KEY,
+// default $SKEIN_HOME/operator.key: used if present, made if not, plain, 0600) and the HOST SKEIN —
+// Router.createInstance with `host`: from the host image (images/host merged over images/default: the
+// chain, git, site and onboarding apps), its genesis naming the operator's key as its owner (its admin
+// rows, its explorer row and every app's `$owner` rows at birth; no claim row), the onboarding app's config
+// from host.env (domain SKEIN_HANDLE_DOMAIN, default the router origin's domain; origin
+// SKEIN_ROUTER_ORIGIN; name SKEIN_HOST_NAME; note SKEIN_HOST_NOTE), the instance manager and the certifier in
+// its address book, published at once — and prints its identity and URLs. Later runs start what exists.
+// `init` is the first run's part alone. `grant` gives another key (a browser wallet's) the host skein's
+// admin rows — the operator's message, signed with its key and handed to the running host
+// (src/client/target.ts, the control socket's `message` op).
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the signer's (signer.ts, #18): derived from the router's master
 // secret with key ID = the handle, no wallet process; `--derive` sets it again
@@ -54,12 +55,11 @@
 // `roster` prints the front end's roster (roster.ts), which `run` also serves
 // at /roster.json; `roster --for h` prints h's ROSTER.md (#27: the rows it
 // `knows`; `knows` sets them). `peers <handle> list` reads an instance's
-// address book from its store. Nothing here writes into an instance as its
-// owner (#124): installing an app, a dispatch row, an address-book entry, a
-// directory into `main` are the owner's messages, built by `skein plan` (or
-// the management page) and sent by the owner's wallet to the instance's
-// /sendMessage. Nothing registers itself anywhere: a key in no address book
-// is "no route".
+// address book from its store. Nothing here writes into a running instance
+// on its own: installing an app, a dispatch row, an address-book entry, a
+// directory into `main` are the owner's messages (the client `skein`, #142,
+// signs them with the operator's key; the management page with a wallet).
+// Nothing registers itself anywhere: a key in no address book is "no route".
 // `event` (#60, #69) sends one message from the host's cron provider into a
 // box of an instance now, as a tick due now would be (cron.ts): the JSON
 // object given, its kind "cron" unless it names one, `due` now; the instance
@@ -75,14 +75,16 @@
 // (every enabled row's started at start, any other on demand; stopped only
 // past SKEIN_IDLE_MS, which is unset by default), the providers (the waker, the cron
 // provider among them), the signer, the fuel ledger; plus the host page. It
-// reads (bin/skein-host fills it from $SKEIN_HOME):
-//   SKEIN_HOME            default ~/.skein; host.db and master.key live here
+// reads ($SKEIN_HOME/host.env, under the environment):
+//   SKEIN_HOME            default ~/.skein; host.db, master.key, operator.key and host.env live here
+//   SKEIN_OPERATOR_KEY    the operator's key file (#142), default $SKEIN_HOME/operator.key: the host skein's owner
+//   SKEIN_HANDLE_DOMAIN, SKEIN_HOST_NAME, SKEIN_HOST_NOTE   the onboarding app's config at the host skein's birth
 //   SKEIN_MASTER_KEY      the master secret (hex), else SKEIN_MASTER_KEY_FILE, else $SKEIN_HOME/master.key (made if absent)
 //   SKEIN_ROUTER_PORT     the router, default 8100: an instance at http://<handle>.localhost:8100 (or /@<handle>)
 //   SKEIN_ROUTER_ORIGIN   the router's own public origin, default http://127.0.0.1:{port}: where BRC-169 discovery is
 //                         answered (the host skein's onboarding app, #113), and the geneses' resolveOrigin. The manifest's
-//                         URLs, the handle domain, the host's name, note and icon and the ORDFS route are the onboarding
-//                         app's config (config.onboard: domain, origin, name, note, icon, ordfs), written at install
+//                         URLs, the handle domain, the host's name and note are the onboarding app's config
+//                         (config.onboard), written at the host skein's birth from these settings
 //   SKEIN_INSTANCE_ORIGIN an instance's origin template, default http://{handle}.localhost:{port}
 //   SKEIN_OWNER_MESSAGEBOX the owner's messagebox URL for new geneses, default its mailbox instance here
 //   SKEIN_IDLE_MS         stop a kernel this long after its last work (ms); default 0: never (#40)
@@ -96,8 +98,7 @@
 //   SKEIN_ARC_URL         the host's Arcade (#58, #65, arc.ts): where the instances' broadcast events go (a durable
 //                         queue), one status subscription, the instances' status provider; SKEIN_ARC_TOKEN its one callback token (required with it);
 //                         SKEIN_ARC_EVENTS_URL its SSE service (default <url>/events); SKEIN_ARC_CALLBACK_URL where Arcade
-//                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only).
-//                         Also read from $SKEIN_HOME/host.env (SKEIN_ARC_* lines)
+//                         posts webhooks (this router's /arc/callback as Arcade reaches it; unset: SSE only)
 //   SKEIN_BILLING         `off`: this host bills no one (#130, billing.ts); else it bills a skein whose host row names its
 //                         key, by SKEIN_BILLING_X (sats a skein prepays at a time), SKEIN_BILLING_RATES (JSON {fuel,
 //                         storage, served, fetch, authfetch, publish}: whole sats), SKEIN_BILLING_ALLOWANCE (the free
@@ -126,10 +127,11 @@ import { openStoreFile } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
 import { masterKey, Signer } from "./signer.ts";
 import { CONTROL_SOCKET, controlRequest } from "./control.ts";
+import { homeOf as homeOfVars, identityOf, operatorKey, withHostEnv } from "./hostenv.ts";
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { addressBook } from "./deploy.ts";
-import { hostDomain, Router, type RouterOptions } from "./router.ts";
+import { fetchHttp, hostDomain, Router, type RouterOptions } from "./router.ts";
 import { billingConfig, DEV_BILLING, NSAT } from "./billing.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
@@ -143,7 +145,11 @@ export interface Env {
 }
 
 const USAGE = `usage:
-  skein-host init [--owner <hex>] [--handle host]          the host skein (#90): the operator's instance, from the default image, for --owner (default SKEIN_OWNER) to claim from a wallet (skein plan claim); once
+  skein-host run                                          the host: on the first run the host skein (owned by the operator's key), then the router on :8100
+                                                          (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
+  skein-host init [--handle host]                         the first run's part alone: the host skein (#142), once; nothing served
+  skein-host grant <key> [--apps] [--instance <handle>]   the key's admin rows (and with --apps the apps' owner rows) in the host skein (or
+                                                          <handle>): the operator's messages, to the running host
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance for an identity outside the host (#40): the instance manager's create (#113)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
@@ -156,7 +162,6 @@ const USAGE = `usage:
   skein-host reclaim [--grace ms] [--yes]                 #130: the instances asleep past the grace (SKEIN_BILLING_GRACE_MS); --yes reclaims them:
                                                           disabled, row and store removed (through the running router)
   skein-host enable|disable|remove <handle>
-  skein-host run                                          the router on :8100 (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host peers <handle> list                          its address book, from its store: key, transport, address, handle, source
@@ -165,16 +170,17 @@ const USAGE = `usage:
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
-  skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein plan claim)
+  skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>   a new instance from an image: no owner, a claim row from anyone (#89; claim it: skein claim)
   skein-host system <dir>                                 write the stock system (what code genesis has) as a system tree
   skein-host pack <handle|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
-the owner's messages (installing an app, dispatch rows, the address book, a directory into main) are built by
-\`skein plan\` and sent by the owner's wallet to the instance's /sendMessage (#124; scripts/host/README.md)`;
+settings: $SKEIN_HOME/host.env (every SKEIN_* line; the environment wins). The owner's messages (installing an app,
+dispatch rows, the address book, a directory into main) are the client's: \`skein install|dispatch|… --instance <handle>\``;
 
-export const homeOf = (vars: Env["vars"]) => vars.SKEIN_HOME || join(vars.HOME ?? ".", ".skein");
+export const homeOf = homeOfVars;
 
-export async function main(argv: string[], env: Env): Promise<number> {
+export async function main(argv: string[], given: Env): Promise<number> {
   const [cmd, ...rest] = argv;
+  const env: Env = { ...given, vars: withHostEnv(given.vars) }; // #142: host.env's SKEIN_* under the environment
   const home = homeOf(env.vars);
   if (!cmd || cmd === "help" || cmd === "-h" || cmd === "--help") { env.out(USAGE); return cmd ? 0 : 2; }
   mkdirSync(home, { recursive: true });
@@ -218,7 +224,7 @@ export async function main(argv: string[], env: Env): Promise<number> {
             // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
             const src = v.image === "default" ? await router.image.source() : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
-            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it from your wallet (skein plan claim, skein send)" : ""}`);
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein claim --instance ${handle})" : ""}`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
@@ -230,6 +236,8 @@ export async function main(argv: string[], env: Env): Promise<number> {
       }
       case "init":
         return await initCmd(db, rest, env);
+      case "grant":
+        return await grantCmd(db, rest, env);
       case "identity": {
         // The signer's key (signer.ts) for an instance: the BRC-104 identity its front door answers as.
         const [handle, flag, ...more] = rest;
@@ -337,7 +345,7 @@ export function originOf(vars: Env["vars"], handle: string): string {
   return (vars.SKEIN_INSTANCE_ORIGIN || "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", vars.SKEIN_ROUTER_PORT || "8100");
 }
 
-/** `skein-host peers <handle> list`: the instance's address book, read from its store (#124: writing it is the owner's `peers` messages, `skein plan peers`). */
+/** `skein-host peers <handle> list`: the instance's address book, read from its store (#124: writing it is the owner's `peers` messages, `skein peers`). */
 async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const [handle, op, ...more] = rest;
   if (!handle || more.length || op !== "list") { env.err(USAGE); return 2; }
@@ -411,16 +419,38 @@ async function eventCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   }
 }
 
+/** The onboarding app's config at the host skein's birth (#142), from the settings: domain, origin, name, note. */
+export function onboardConfig(v: Env["vars"]): Record<string, Record<string, unknown>> {
+  const port = v.SKEIN_ROUTER_PORT || "8100";
+  const origin = (v.SKEIN_ROUTER_ORIGIN || "http://127.0.0.1:{port}").replace("{port}", port).replace(/\/+$/, "");
+  return { onboard: { onboard: { domain: v.SKEIN_HANDLE_DOMAIN || hostDomain(origin), origin, ...(v.SKEIN_HOST_NAME ? { name: v.SKEIN_HOST_NAME } : {}), ...(v.SKEIN_HOST_NOTE ? { note: v.SKEIN_HOST_NOTE } : {}) } } };
+}
+
 /**
- * `skein-host init [--owner <hex>] [--handle host]` (#90): the host skein —
- * Router.createInstance with `host`, through a router of this command's own
- * (closed afterwards), unpublished until that router is closed: a running
- * router serves only enabled rows, so it hydrates the host skein on its first
- * request, after this process has let go of the store. Once: a second `init`
- * prints which instance is the host skein.
+ * The first run's part (#142): the operator's key (made if absent) and the host skein —
+ * Router.createInstance with `host`: the host image, the operator's key its owner in its genesis, the
+ * onboarding app's config from the settings — published at once. What it prints is what a human needs.
+ */
+async function createHostSkein(router: Router, db: HostDb, handle: string, env: Env): Promise<InstanceRow> {
+  const op = operatorKey(env.vars, { create: true });
+  const owner = identityOf(op.key);
+  const t0 = Date.now();
+  const config = onboardConfig(env.vars);
+  const c = await router.createInstance(handle, owner, { host: true, appConfig: config });
+  const cfg = config.onboard!.onboard as { domain: string; origin: string };
+  env.out(`skein-host: first run — the host skein ${c.handle} ${c.identity} at ${c.url}, owned by the operator's key ${owner} (${op.path}${op.made ? ", made now, mode 0600" : ""}) · ${Date.now() - t0} ms`);
+  env.out(`skein-host: apps chain, git, site, onboard installed at birth · handles @${cfg.domain} · registrations and BRC-169 at ${cfg.origin}/`);
+  env.out(`skein-host: to manage it from a browser wallet: skein-host grant <the wallet's identity key> --apps · the operator's own messages: skein install|dispatch|… --instance ${c.handle}`);
+  return db.get(handle)!;
+}
+
+/**
+ * `skein-host init [--handle host]` (#90, #142): the first run's part alone — the host skein made through
+ * a router of this command's own (closed afterwards; the running router hydrates it on its first
+ * request). Once: a second `init` prints which instance is the host skein.
  */
 async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { owner: { type: "string" }, handle: { type: "string" } } });
+  const { values: v, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { handle: { type: "string" } } });
   if (positionals.length) { env.err(USAGE); return 2; }
   const had = db.hostSkein();
   if (had) {
@@ -428,24 +458,48 @@ async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
     env.out(`the host skein: ${had.handle}@${had.domain} (${had.identity ? short(had.identity) : "-"}) ${had.status}`);
     return 0;
   }
-  const owner = v.owner ?? env.vars.SKEIN_OWNER;
-  if (!owner || !/^0[23][0-9a-f]{64}$/.test(owner)) { env.err("skein-host init: the operator's identity key: --owner <hex>, or SKEIN_OWNER"); return 2; }
-  const handle = v.handle ?? "host";
+  if (await routerAt(env.vars)) { env.err("skein-host init: a router serves this host: `skein-host run` makes the host skein on its first run (restart it)"); return 1; }
   const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
-  let c: { handle: string; identity: string; url: string };
   try {
-    c = await router.createInstance(handle, owner, { host: true, publish: false });
+    await createHostSkein(router, db, v.handle ?? "host", env);
+    return 0;
   } catch (e) {
     env.err(`skein-host init: ${(e as Error).message}`);
     return 1;
   } finally {
     await router.close();
   }
-  db.setStatus(handle, "enabled");
-  env.out(`${c.handle}: the host skein (${short(c.identity)}), from the default image, for ${short(owner)} to claim · at ${c.url} · the instance manager in its address book`);
-  env.out(`next, as the owner (#127; the router running), first: skein plan claim --recipient ${c.identity} --out claim, then skein send ${c.url} claim (its claim row admits anyone until then: the first claim's sender owns it)`);
-  env.out(`then (#124): skein plan install https://github.com/shruggr/skein-onboard#v0.3.4 --origin ${c.url} --config '{"onboard": {"domain": "<the handle domain>", "origin": "<the router's origin>"}}' --out plan, then skein send ${c.url} plan (the onboarding app: registration and BRC-169)`);
-  return 0;
+}
+
+/**
+ * `skein-host grant <key> [--apps] [--instance <handle>] [--dry-run]` (#142): the key's admin rows (the
+ * kernel's four operations and the explorer row) in the host skein (or `handle`), and with --apps every
+ * installed app's `$owner` rows from it — the operator's messages (src/client/admin.ts planGrant), signed
+ * with its key and handed to the running host over its control socket.
+ */
+async function grantCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
+  const { values: v, positionals: [key, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { apps: { type: "boolean" }, instance: { type: "string" }, "dry-run": { type: "boolean" } } });
+  if (!key || more.length) { env.err(USAGE); return 2; }
+  const handle = v.instance ?? db.hostSkein()?.handle;
+  if (!handle) { env.err("skein-host grant: no host skein yet (skein-host run)"); return 1; }
+  const { planGrant, messageJson } = await import("../client/admin.ts");
+  const { localTarget } = await import("../client/target.ts");
+  const { keyWallet } = await import("../wallet.ts");
+  let t: import("../client/target.ts").Target | undefined;
+  try {
+    t = localTarget(env.vars, handle, keyWallet(operatorKey(env.vars).key));
+    const p = await planGrant(await t.view(), key, { apps: v.apps });
+    for (const l of p.prompt) env.out(l);
+    if (v["dry-run"]) { for (const m of p.messages) env.out(messageJson(p.recipient, m)); return 0; }
+    for (const m of p.messages) await t.send(m.box, m.body);
+    env.out(`${handle}: ${p.messages.length} row${p.messages.length === 1 ? "" : "s"} granted to ${short(key)}`);
+    return 0;
+  } catch (e) {
+    env.err(`skein-host grant: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await t?.close();
+  }
 }
 
 /**
@@ -567,6 +621,8 @@ const ROOT = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 export interface RunOptions {
   /** The router's options beyond what the environment gives (tests). */
   router?: Partial<RouterOptions>;
+  /** false: no host skein on the first run (tests that make their own). */
+  firstRun?: boolean;
 }
 
 export interface Host {
@@ -601,6 +657,9 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, home,
     origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
+    // #142: settings host.env may give (the environment's are read where they are used, too).
+    ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
+    ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
     libp2p: hostP2PConfig(v, home),
     headersFeed: v.SKEIN_HEADERS_URL || undefined,
     arc: hostArcConfig(v, home),
@@ -799,7 +858,6 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   const v = env.vars;
   const home = homeOf(v);
   const router = new Router({ ...routerOptions(db, env), ...o.router });
-  const enabled = db.list("enabled");
   const mport = Number(v.SKEIN_ROUTER_PORT ?? 8100);
   const mserver = await router.listen(mport).then((s) => s, (e: Error) => { env.err(`skein-host: router: ${e.message}`); return undefined; });
   // The control socket (#60): `skein-host event` reaches this router's kernels through it.
@@ -813,9 +871,14 @@ export async function runHost(db: HostDb, env: Env, o: RunOptions = {}): Promise
   if (router.arc) env.out(`skein-host: broadcaster: broadcast events → Arcade ${router.o.arc!.url}; proofs and statuses (the status provider) from ${router.arc.eventsUrl()}${router.o.arc!.callbackUrl ? ` and webhooks at /arc/callback (${router.o.arc!.callbackUrl})` : ""}`);
   else env.out("skein-host: no Arcade (SKEIN_ARC_URL): a broadcast event is dropped; a new genesis names no status provider");
   await router.start();
+  // #142: the first run makes the host skein (owned by the operator's key); later runs start what exists.
+  if (!db.hostSkein() && o.firstRun !== false) {
+    try { await createHostSkein(router, db, "host", env); } catch (e) { env.err(`skein-host: the host skein: ${(e as Error).message}`); }
+  }
+  const enabled = db.list("enabled");
   env.out(`skein-host: routing for ${enabled.length} enabled instances (${enabled.map((r) => r.handle).join(", ") || "none"})`);
   const hs = db.hostSkein();
-  env.out(hs ? `skein-host: the host skein is ${hs.handle} (${hs.identity ? short(hs.identity) : "-"}) at ${router.originOf(hs.handle)}: the instance manager takes its messages only` : "skein-host: no host skein (skein-host init): the instance manager acts for nobody");
+  env.out(hs ? `skein-host: the host skein is ${hs.handle} (${hs.identity ? short(hs.identity) : "-"}) at ${router.originOf(hs.handle)}: the instance manager takes its messages only` : "skein-host: no host skein: the instance manager acts for nobody");
   const live = (row: InstanceRow) => router.loaded.has(row.handle);
   const port = Number(v.SKEIN_HOST_PORT || 4600);
   const page = async () => hostPage(db.list("enabled").map((r): HostRow => {

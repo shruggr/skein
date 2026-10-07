@@ -8,16 +8,18 @@
 //   explorer row (#121: every sender is a key, and the claim brings the
 //   owner's), and it takes no owner's message in an admin box.
 //
-//   The owner claims it with a message from the owner's wallet (`skein plan
-//   claim`, sent to /sendMessage): the owner is the message's sender (#127),
+//   The owner claims it with a message from the owner's wallet (`skein
+//   claim`, sent on its session): the owner is the message's sender (#127),
 //   never a key in the body — a body naming another `owner` changes nothing.
 //   In one step the kernel writes the sender's four admin rows and the
 //   explorer row with the sender's key (#121), and removes the claim row; the
 //   head `claim` names what was claimed (the sender as owner, the messagebox);
 //   the owner's mailbox goes into the address book. A second claim (a
 //   stranger's sendMessage into `claim`) finds no row and is refused. The
-//   owner then installs programs/test/app-demo with the owner's messages
-//   (`skein plan install`, #124) and calls it.
+//   owner adds its rows into the apps installed at birth (#142: `skein
+//   install images/default/apps/git --instance`, signed in the client, over
+//   the host's control socket: the head again and git's owner row), then installs
+//   programs/test/app-demo with the owner's messages and calls it.
 //
 //   A claim signed before the instance existed (#127: naming no recipient,
 //   what a registrant's page signs and the host forwards) claims a fresh
@@ -42,6 +44,8 @@ import type { CID } from "multiformats/cid";
 import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox, signClaim } from "../../src/client/raw.ts";
 import { planClaim } from "../../src/client/admin.ts";
+import { adminMain } from "../../src/client/admin-cli.ts";
+import { writeFileSync } from "node:fs";
 import { encode } from "../../src/runtime/cid.ts";
 import { main } from "../../src/host/cli.ts";
 import { ownerCli, sendPlan } from "../../src/testapps.ts";
@@ -80,7 +84,7 @@ try {
   const kernelRows = async (handle = "inst") => (await rows(handle)).filter((r) => r.program === "kernel").map((r) => `${r.address}<-${r.sender instanceof Uint8Array ? hex(r.sender).slice(0, 8) : r.sender}`);
   const cli = async (...args: string[]) => {
     const out: string[] = [], err: string[] = [];
-    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
     const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, args) : undefined;
     if (o) { out.push(...o.out); err.push(...o.err); }
     const code = o ? o.code : await main(args, {
@@ -136,9 +140,21 @@ try {
   check(/403 ERR_NOT_SUBSCRIBED/.test(byStranger), `a stranger's sendMessage into \`claim\` is refused (${byStranger})`);
   check((await kernelRows()).every((x) => x.endsWith(`<-${owner8}`)), "the admin rows are still the owner's");
 
+  // ------------------------------------------------ the owner's rows into the apps installed at birth (#141, #142)
+  // `skein install images/default/apps/git --instance inst`, signed with the owner's key in the client, over the host's
+  // control socket: the tree and the record are the instance's already, so the head (unchanged) and git's $owner row go.
+  await h.router.listenControl(join(h.home, "host.sock"));
+  const keyFile = join(h.home, "operator.key");
+  writeFileSync(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
+  const iout: string[] = [], ierr: string[] = [];
+  const icode = await adminMain("install", [join(imageDir, "apps/git"), "--instance", "inst"], { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l) => iout.push(l), err: (l) => ierr.push(l) });
+  await h.router.settled();
+  const gitRow = (await rows()).find((x) => x.app === "git" && x.address === "git");
+  check(icode === 0 && iout.some((l) => /: 2 messages sent/.test(l)) && !!gitRow && hex(gitRow.sender) === h.ownerId, `skein install images/default/apps/git --instance inst after the claim: two messages, the head again and git's owner row (${[...iout, ...ierr].filter((l) => /sent|dispatch add|install:/.test(l)).join(" | ")})`);
+
   // ------------------------------------------------ the owner installs an app
   let r = await cli("install", demoDir, "--instance", "inst");
-  check(r.code === 0, `skein plan install app-demo into the claimed image: exit ${r.code} ${r.err.join(" ")}`);
+  check(r.code === 0, `skein install app-demo into the claimed image: exit ${r.code} ${r.err.join(" ")}`);
   const app = await (await k()).call("head", "app-demo/app") as CID | null;
   check(!!app, "the head app-demo/app is the app record");
   const call = async (body: unknown) => {

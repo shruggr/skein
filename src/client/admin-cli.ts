@@ -1,87 +1,243 @@
-// `skein plan` and `skein send` (#124): the owner's admin messages as files,
-// and their delivery by a BRC-100 wallet (src/client/admin.ts).
+// The operator's admin commands (#124, #142): each builds the owner's messages (admin.ts, plan.ts), signs
+// them in this process with the operator's key (SKEIN_OPERATOR_KEY, default $SKEIN_HOME/operator.key;
+// hostenv.ts) and delivers them (target.ts) — no other process, no wallet command.
 //
-//   skein plan install <repo-url#commit | dir> <where> [--config json] [--out dir]
-//   skein plan uninstall <app> <where> [--out dir]
-//   skein plan dispatch add|remove [--sender key] <box> <handler> <where> [--out dir]
-//   skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
-//   skein plan reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--out dir]
-//   skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--out dir]
-//   skein plan peers remove <key> <where> [--out dir]
-//   skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]
-//   skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]
-//   skein plan host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--out dir]
-//   skein send <origin> <dir>
+//   skein install <catalog-name | url#commit | dir> <where> [--config <file.json>] [--dry-run]
+//   skein uninstall <app> <where> [--dry-run]
+//   skein dispatch add|remove [--sender key] <box> <handler> <where> [--dry-run]
+//   skein dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--dry-run]
+//   skein reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--dry-run]
+//   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
+//   skein peers remove <key> <where> [--dry-run]
+//   skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
+//   skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]
+//   skein deploy <dir> [--only glob,glob | --all] <where> [--dry-run]
 //
-// <where> is how the plan reads the instance: `--origin <url>` (its explorer,
-// the owner's, read through the wallet: `1sat authfetch GET`), or `--store
-// <runtime.db>` (its store file, read only, on the host). `dispatch`, `peers`
-// `claim` (#127: an image's claim row, from anyone; the sender owns it),
-// and `deploy` also take `--recipient <identity key>` alone (no reads: a
-// deploy then sends every object and the head). With `--out` the plan is a
-// directory — prompt.txt and 001-<box>.json, … — else the prompt goes to
-// stderr and the messages to stdout, one JSON body per line. `send` POSTs a
-// directory's files in order to <origin>/sendMessage with the wallet
-// ($SKEIN_AUTHFETCH, default `1sat authfetch`), stopping at the first answer
-// that is not 2xx.
+// <where> is the instance: `--instance <handle>` (on this host machine: host.db's row, its store read
+// read-only, the messages over the running host's control socket), or its origin `<url>` (one BRC-104
+// session: the messages, and the explorer's reads — the owner's), or `--store <runtime.db>` (its store
+// file, read-only: planned and printed, nothing sent). `--dry-run` prints the prompt and the messages
+// (their `/sendMessage` JSON, one a line) and sends nothing.
+//
+// `install` of a catalog name or `<url>#<commit>` sends one message to the instance's git app — `git.clone
+// {url, hash}`: the VM fetches that commit by hash and keeps its tree (#91) — reads the answer, plans the
+// install from the stored tree, and sends the head, the rows and the start: nothing of the app's tree or
+// modules crosses from here. A catalog name is looked up in the instance's own site tree
+// (www/catalog.json). A directory is read here and its objects sent (what the instance lacks); installing
+// a tree the instance holds already (an image's app, `images/default/apps/<app>`) sends only what changes:
+// the owner's rows after a claim. `--dry-run` with a clone still sends the clone (the tree is read from the
+// instance), then sends nothing more.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { CID } from "multiformats/cid";
-import { authfetchPoster, authfetchReader, deliver, explorerView, messageJson, oversized, planClaim, planDeploy, planDispatch, planFiles, planHost, planInstallApp, planPeers, planReads, planUninstallApp, writePlan, type AdminPlan, type HostTerms, type PeerChange } from "./admin.ts";
-import type { InstanceView } from "../host/plan.ts";
+import { appHead, readStoredApp, type AppTree, type InstanceView } from "../host/plan.ts";
+import { identityOf, operatorKey, type Vars } from "../host/hostenv.ts";
+import { keyWallet } from "../wallet.ts";
+import { catalogOf, messageJson, planClaim, planDeploy, planDispatch, planHost, planInstallApp, planPeers, planReads, planUninstallApp, type AdminPlan, type HostTerms, type PeerChange } from "./admin.ts";
+import { localTarget, remoteTarget, stdoutOf, type Target } from "./target.ts";
 
-export const PLAN_USAGE = `usage:
-  skein plan install <repo-url#commit | dir> <where> [--config json] [--out dir]   an app (docs/APPS.md §3): objects, head <app>/app, its dispatch rows, start
-  skein plan uninstall <app> <where> [--out dir]                                     its stop, then its dispatch rows removed (the heads are left)
-  skein plan dispatch add|remove [--sender key] <box> <handler> <where> [--out dir]  a mailbox row of the dispatch table (#77)
-  skein plan dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--out dir]
-                                                                                     an http row (#125: e.g. an app's handler at /); <handler>: a program
-                                                                                     record CID, a genesis program, or <app>.<role> (the installed app's)
-  skein plan reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--out dir]
-                                                                                     the owner's own read (#135: e.g. the site at /): served by a call,
-                                                                                     anyone, signed or not; the reads head (needs --origin or --store)
-  skein plan peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--out dir]
-  skein plan peers remove <key> <where> [--out dir]                                  an address-book entry (#70)
-  skein plan deploy <dir> [--only glob,glob | --all] <where> [--out dir]             a directory into main (objects, head)
-  skein plan claim [--messagebox url] [--handle h@d] <where> [--out dir]             an image's claim (#127): the wallet that sends it owns the instance
-  skein plan host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--out dir]
-                                                                                     the host row (#130): the host and its rates, granted (--from: the terms
-                                                                                     the host publishes at /.well-known/skein-host)
-  skein send <origin> <dir>                                                          the files, in order, to <origin>/sendMessage by the wallet
-<where>: --origin <url> (the explorer, read by the wallet: \`1sat authfetch GET\`; the owner's) | --store <runtime.db> (read only)
-         | --recipient <key> (dispatch, peers, deploy, claim: no reads)
-the wallet: $SKEIN_AUTHFETCH, default \`1sat authfetch\` (load its env first: set -a; . ~/.1sat/cli/wallet.env; set +a)`;
+export const ADMIN_USAGE = `usage (the operator's messages, signed with SKEIN_OPERATOR_KEY, default $SKEIN_HOME/operator.key):
+  skein install <catalog-name | url#commit | dir> <where> [--config <file.json>] [--dry-run]
+                                                     an app (docs/APPS.md §3): a name from the instance's catalog or a repository
+                                                     and commit, cloned by the instance's git app; head <app>/app, its rows, start
+  skein uninstall <app> <where> [--dry-run]          its stop, then its dispatch rows removed (the heads are left)
+  skein dispatch add|remove [--sender key] <box> <handler> <where> [--dry-run]     a mailbox row of the dispatch table (#77)
+  skein dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--dry-run]
+                                                     an http row; <handler>: a program record CID, a genesis program, or <app>.<role>
+  skein reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--dry-run]
+                                                     the owner's own read (#135: e.g. the site at /)
+  skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
+  skein peers remove <key> <where> [--dry-run]      an address-book entry (#70)
+  skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
+                                                     the host row (#130)
+  skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]               an image's claim (#127): the key that sends it owns it
+  skein deploy <dir> [--only glob,glob | --all] <where> [--dry-run]               a directory into main (objects, head)
+<where>: --instance <handle> (this host machine: over its control socket) | <origin> (one BRC-104 session)
+         | --store <runtime.db> (read only: planned and printed, nothing sent)`;
+
+export const ADMIN_COMMANDS = ["install", "uninstall", "dispatch", "reads", "peers", "host", "claim", "deploy"] as const;
 
 export interface AdminEnv {
-  vars: Record<string, string | undefined>;
+  vars: Vars;
   out(line: string): void;
   err(line: string): void;
 }
 
-const where = { origin: { type: "string" }, store: { type: "string" }, recipient: { type: "string" }, out: { type: "string" } } as const;
+const where = { instance: { type: "string" }, store: { type: "string" }, "dry-run": { type: "boolean" } } as const;
+type Where = { instance?: string; store?: string; "dry-run"?: boolean };
 
-/** The instance as the plan reads it: --origin (its explorer, through the wallet) or --store (its file). */
-async function viewOf(v: { origin?: string; store?: string }, env: AdminEnv): Promise<{ view: InstanceView; close(): void }> {
-  if (v.origin && v.store) throw new Error("--origin or --store, not both");
-  if (v.origin) return { view: await explorerView(authfetchReader(v.origin, (env.vars.SKEIN_AUTHFETCH || "1sat authfetch").split(/\s+/))), close: () => {} };
-  if (v.store) {
+const isUrl = (s: string) => /^https?:\/\/[^/]/.test(s);
+
+/** The instance the command is for: --instance, an origin (the last positional), or --store (read only). */
+interface Session { target?: Target; view(): Promise<InstanceView>; identity(): Promise<string>; dry: boolean; close(): Promise<void> }
+
+async function sessionOf(v: Where, origin: string | undefined, env: AdminEnv): Promise<Session> {
+  const given = [v.instance !== undefined, origin !== undefined, v.store !== undefined].filter(Boolean).length;
+  if (given !== 1) throw new Error("where is the instance: --instance <handle>, its origin <url>, or --store <runtime.db> (one)");
+  if (v.store !== undefined) {
     if (!existsSync(v.store)) throw new Error(`--store ${v.store}: no such file`);
     const { openStoreFile } = await import("../runtime/index-store.ts");
     const { instanceView } = await import("../host/install.ts");
     const s = openStoreFile(v.store, { readOnly: true });
-    try { return { view: await instanceView(s), close: () => s.close() }; } catch (e) { s.close(); throw e; }
+    let view: InstanceView;
+    try { view = await instanceView(s); } catch (e) { s.close(); throw e; }
+    return { view: async () => view, identity: async () => view.identity, dry: true, close: async () => s.close() };
   }
-  throw new Error("where is the instance: --origin <url> or --store <runtime.db>");
+  const key = operatorKey(env.vars).key;
+  const wallet = keyWallet(key);
+  const target = v.instance !== undefined ? localTarget(env.vars, v.instance, wallet) : await remoteTarget(origin!, wallet);
+  return { target, view: () => target.view(), identity: async () => target.identity, dry: !!v["dry-run"], close: () => target.close() };
 }
 
-/** The programs a handler may name (#125): the genesis's by name, and `<app>.<role>` — the installed app's (its app record's `programs`). */
-async function handlerPrograms(view: InstanceView | undefined, handler: string): Promise<Record<string, CID>> {
-  const programs = { ...(view?.programs as Record<string, CID> | undefined) };
+/** The origin among the positionals: the last one when it is a URL and the command takes one more than it needs. */
+function splitOrigin(positionals: string[], needs: number): { args: string[]; origin?: string } {
+  if (positionals.length === needs + 1 && isUrl(positionals.at(-1)!)) return { args: positionals.slice(0, -1), origin: positionals.at(-1) };
+  return { args: positionals };
+}
+
+const json = (what: string, text: string): Record<string, unknown> => {
+  let v: unknown;
+  try { v = JSON.parse(text); } catch { v = undefined; }
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(`${what}: a JSON object`);
+  return v as Record<string, unknown>;
+};
+
+/** Print the plan; unless it is a dry run, send its messages in order (signed here, over the target). */
+async function deliver(p: AdminPlan, s: Session, env: AdminEnv): Promise<number> {
+  for (const l of p.prompt) env.out(l);
+  if (s.dry || !s.target) {
+    for (const m of p.messages) env.out(messageJson(p.recipient, m));
+    env.out(`${p.messages.length} message${p.messages.length === 1 ? "" : "s"} to ${p.recipient} (not sent)`);
+    return 0;
+  }
+  const t0 = Date.now();
+  for (const m of p.messages) await s.target.send(m.box, m.body);
+  env.out(`${s.target.where}: ${p.messages.length} message${p.messages.length === 1 ? "" : "s"} sent (${Date.now() - t0} ms)`);
+  return 0;
+}
+
+/** `skein <command> …` for the admin commands. */
+export async function adminMain(cmd: string, argv: string[], env: AdminEnv): Promise<number> {
+  let s: Session | undefined;
+  try {
+    switch (cmd) {
+      case "install": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, config: { type: "string" } } });
+        const { args: [spec, ...more], origin } = splitOrigin(positionals, 1);
+        if (!spec || more.length) { env.err(ADMIN_USAGE); return 2; }
+        const config = v.config !== undefined ? json(`--config ${v.config}`, readFileSync(v.config, "utf8")) : undefined;
+        s = await sessionOf(v, origin, env);
+        return await install(spec, s, config, env);
+      }
+      case "uninstall": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: where });
+        const { args: [app, ...more], origin } = splitOrigin(positionals, 1);
+        if (!app || more.length) { env.err(ADMIN_USAGE); return 2; }
+        s = await sessionOf(v, origin, env);
+        return await deliver(await planUninstallApp(app, await s.view()), s, env);
+      }
+      case "dispatch": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, sender: { type: "string" }, http: { type: "boolean" }, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
+        const { args: [op, box, handler, ...more], origin } = splitOrigin(positionals, 3);
+        if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
+        if (!v.http && (v.prefix || v.fn !== undefined || v.settings !== undefined)) { env.err("skein dispatch: --prefix, --fn and --settings are an http row's (--http)"); return 2; }
+        const settings = v.settings !== undefined ? json("skein dispatch --settings", v.settings) : undefined;
+        s = await sessionOf(v, origin, env);
+        const programs = await handlerPrograms(s, handler);
+        return await deliver(planDispatch(await s.identity(), { op, sender: v.sender, box: box!, handler, ...(v.http ? { http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } } : {}) }, programs), s, env);
+      }
+      case "reads": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
+        const { args: [op, path, handler, ...more], origin } = splitOrigin(positionals, 3);
+        if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
+        const settings = v.settings !== undefined ? json("skein reads --settings", v.settings) : undefined;
+        s = await sessionOf(v, origin, env);
+        const programs = await handlerPrograms(s, handler);
+        return await deliver(await planReads(await s.view(), { op, path: path!, handler, http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } }, programs), s, env);
+      }
+      case "peers": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, transport: { type: "string" }, handle: { type: "string" } } });
+        const op = positionals[0];
+        const { args: [, key, address, ...more], origin } = splitOrigin(positionals, op === "remove" ? 2 : 3);
+        const shape = op === "remove" ? !!key && !address : op === "add" ? !!key && !!address : false;
+        if (more.length || !shape || ((v.transport ?? v.handle) !== undefined && op !== "add")) { env.err(ADMIN_USAGE); return 2; }
+        const transport = (v.transport ?? "mailbox") as "mailbox" | "libp2p" | "local";
+        if (!["mailbox", "libp2p", "local"].includes(transport)) { env.err("skein peers: --transport is mailbox, libp2p or local"); return 2; }
+        if (op === "add" && transport === "mailbox" && !isUrl(address!)) { env.err(`skein peers: ${address} is not an http(s) URL`); return 2; }
+        const named = v.handle !== undefined ? handleOf(v.handle) : {};
+        const change: PeerChange = op === "add" ? { op: "add", key: key!, transport, address: address!, ...named } : { op: "remove", key: key! };
+        s = await sessionOf(v, origin, env);
+        return await deliver(planPeers(await s.identity(), [change]), s, env);
+      }
+      case "claim": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, messagebox: { type: "string" }, handle: { type: "string" } } });
+        const { args: more, origin } = splitOrigin(positionals, 0);
+        if (more.length) { env.err(ADMIN_USAGE); return 2; }
+        if (v.messagebox !== undefined && !isUrl(v.messagebox)) { env.err(`skein claim: ${v.messagebox} is not an http(s) URL`); return 2; }
+        const named = v.handle !== undefined ? handleOf(v.handle) : {};
+        s = await sessionOf(v, origin, env);
+        const p = planClaim(await s.identity(), { messagebox: v.messagebox, ...named });
+        if (s.dry || !s.target) return await deliver(p, s, env);
+        for (const l of p.prompt) env.out(l);
+        await s.target.claim(p.messages[0]!.body as Record<string, unknown>);
+        env.out(`${s.target.where}: the claim sent`);
+        return 0;
+      }
+      case "host": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, x: { type: "string" }, rates: { type: "string" }, from: { type: "string" } } });
+        const { args: [op, key, ...more], origin } = splitOrigin(positionals, v.from !== undefined ? 1 : 2);
+        if (more.length || (op !== "add" && op !== "remove") || (!key && v.from === undefined) || (key && v.from !== undefined)) { env.err(ADMIN_USAGE); return 2; }
+        let terms: HostTerms;
+        if (v.from !== undefined) {
+          const r = await fetch(new URL("/.well-known/skein-host", v.from));
+          const b = (await r.json() as { billing?: HostTerms }).billing;
+          if (!r.ok || !b) throw new Error(`${v.from}: no billing terms at /.well-known/skein-host`);
+          terms = { key: b.key, x: b.x, rates: b.rates };
+        } else {
+          const rates = v.rates !== undefined ? json("skein host --rates", v.rates) as Record<string, number> : undefined;
+          terms = { key: key!, x: Number(v.x ?? (op === "remove" ? 1 : NaN)), ...(rates ? { rates } : {}) };
+        }
+        s = await sessionOf(v, origin, env);
+        return await deliver(planHost(await s.identity(), op, terms), s, env);
+      }
+      case "deploy": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, only: { type: "string" }, all: { type: "boolean" } } });
+        const { args: [dir, ...more], origin } = splitOrigin(positionals, 1);
+        if (!dir || more.length || (v.all && v.only !== undefined)) { env.err(ADMIN_USAGE); return 2; }
+        const only = v.all ? [] : v.only !== undefined ? v.only.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
+        s = await sessionOf(v, origin, env);
+        return await deliver(await planDeploy(resolve(dir), await s.view(), { only }), s, env);
+      }
+      default:
+        env.err(ADMIN_USAGE);
+        return 2;
+    }
+  } catch (e) {
+    env.err(`skein ${cmd}: ${(e as Error).message}`);
+    return 1;
+  } finally {
+    await s?.close();
+  }
+}
+
+function handleOf(given: string): { handle?: string; domain?: string } {
+  const h = given.replace(/^@/, "");
+  const at = h.lastIndexOf("@");
+  const named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h };
+  if (!named.handle || (at > 0 && !named.domain)) throw new Error(`--handle ${given}: want handle@domain`);
+  return named;
+}
+
+/** The programs a handler may name (#125): the genesis's by name, and `<app>.<role>` — the installed app's. */
+async function handlerPrograms(s: Session, handler: string): Promise<Record<string, CID>> {
   const role = /^([a-z0-9][a-z0-9-]*)\.([A-Za-z0-9_-]+)$/.exec(handler);
+  const needsView = !!role || !/^baf/.test(handler);
+  if (!needsView) return {};
+  const view = await s.view();
+  const programs = { ...(view.programs as Record<string, CID>) };
   if (role && !programs[handler]) {
-    if (!view) throw new Error(`handler ${handler}: an app's program needs the instance's view (--origin or --store), not --recipient`);
     const { appRecordIn } = await import("../host/plan.ts");
     const app = await appRecordIn(view, role[1]!);
     if (!app) throw new Error(`handler ${handler}: no app ${role[1]} installed (no head ${role[1]}/app)`);
@@ -92,182 +248,66 @@ async function handlerPrograms(view: InstanceView | undefined, handler: string):
   return programs;
 }
 
-/** The view, or with --recipient alone the key only. */
-async function targetOf(v: { origin?: string; store?: string; recipient?: string }, env: AdminEnv): Promise<{ view?: InstanceView; recipient: string; close(): void }> {
-  if (v.recipient !== undefined) {
-    if (v.origin || v.store) throw new Error("--recipient goes alone (no reads)");
-    if (!/^0[23][0-9a-f]{64}$/.test(v.recipient)) throw new Error(`--recipient ${v.recipient}: not an identity key (hex)`);
-    return { recipient: v.recipient, close: () => {} };
-  }
-  const { view, close } = await viewOf(v, env);
-  return { view, recipient: view.identity, close };
-}
+const hexOf = (k: unknown) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "");
 
-function emit(p: AdminPlan, out: string | undefined, env: AdminEnv): void {
-  const big = oversized(p);
-  if (big.length) {
-    const max = Math.max(...big.map((b) => b.bytes));
-    p = { ...p, prompt: [...p.prompt, `  note      ${big.length} message${big.length === 1 ? " is" : "s are"} over 4 MB as JSON (the largest ${(max / 1e6).toFixed(1)} MB: a module travels whole): \`1sat authfetch\` refuses a body that large ("Authentication message exceeds the byte limit"); send those with a wallet that takes them`] };
-  }
-  if (out) {
-    for (const l of p.prompt) env.out(l);
-    const files = writePlan(resolve(out), p);
-    env.out(`${out}: prompt.txt and ${files.length} message${files.length === 1 ? "" : "s"} to ${p.recipient}`);
-    return;
-  }
-  for (const l of p.prompt) env.err(l);
-  for (const m of p.messages) env.out(messageJson(p.recipient, m));
-}
-
-export async function planMain(argv: string[], env: AdminEnv): Promise<number> {
-  const [what, ...rest] = argv;
-  try {
-    switch (what) {
-      case "install": {
-        const { values: v, positionals: [spec, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, config: { type: "string" } } });
-        if (!spec || more.length || v.recipient !== undefined) { env.err(PLAN_USAGE); return 2; }
-        let config: Record<string, unknown> | undefined;
-        if (v.config !== undefined) {
-          try { config = JSON.parse(v.config) as Record<string, unknown>; } catch { config = undefined; }
-          if (!config || typeof config !== "object" || Array.isArray(config)) { env.err("skein plan install --config: a JSON object ({<program>: {…}}), merged over the manifest's config"); return 2; }
-        }
-        const { fetchApp, readApp } = await import("../host/install.ts");
-        const { wasmDirObjects, WASM_DIR } = await import("../host/boot.ts");
-        const tree = await readApp(fetchApp(spec));
-        const { view, close } = await viewOf(v, env);
-        try {
-          emit(await planInstallApp(tree, view, { config, modules: wasmDirObjects(WASM_DIR) }), v.out, env);
-        } finally { close(); }
-        return 0;
-      }
-      case "uninstall": {
-        const { values: v, positionals: [app, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: where });
-        if (!app || more.length || v.recipient !== undefined) { env.err(PLAN_USAGE); return 2; }
-        const { view, close } = await viewOf(v, env);
-        try { emit(await planUninstallApp(app, view), v.out, env); } finally { close(); }
-        return 0;
-      }
-      case "dispatch": {
-        const { values: v, positionals: [op, box, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, sender: { type: "string" }, http: { type: "boolean" }, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
-        if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(PLAN_USAGE); return 2; }
-        if (!v.http && (v.prefix || v.fn !== undefined || v.settings !== undefined)) { env.err("skein plan dispatch: --prefix, --fn and --settings are an http row's (--http)"); return 2; }
-        let settings: Record<string, unknown> | undefined;
-        if (v.settings !== undefined) {
-          try { settings = JSON.parse(v.settings) as Record<string, unknown>; } catch { settings = undefined; }
-          if (!settings || typeof settings !== "object" || Array.isArray(settings)) { env.err("skein plan dispatch --settings: a JSON object (the handler's own settings, e.g. {\"root\":\"www\"})"); return 2; }
-        }
-        const t = await targetOf(v, env);
-        try {
-          const programs = await handlerPrograms(t.view, handler);
-          emit(planDispatch(t.recipient, { op, sender: v.sender, box: box!, handler, ...(v.http ? { http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } } : {}) }, programs), v.out, env);
-        } finally { t.close(); }
-        return 0;
-      }
-      case "reads": {
-        const { values: v, positionals: [op, path, handler, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
-        if (!handler || more.length || (op !== "add" && op !== "remove") || v.recipient !== undefined) { env.err(PLAN_USAGE); return 2; }
-        let settings: Record<string, unknown> | undefined;
-        if (v.settings !== undefined) {
-          try { settings = JSON.parse(v.settings) as Record<string, unknown>; } catch { settings = undefined; }
-          if (!settings || typeof settings !== "object" || Array.isArray(settings)) { env.err("skein plan reads --settings: a JSON object (the function's own settings, e.g. {\"root\":\"www\"})"); return 2; }
-        }
-        const { view, close } = await viewOf(v, env);
-        try {
-          const programs = await handlerPrograms(view, handler);
-          emit(await planReads(view, { op, path: path!, handler, http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } }, programs), v.out, env);
-        } finally { close(); }
-        return 0;
-      }
-      case "peers": {
-        const { values: v, positionals: [op, key, address, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, transport: { type: "string" }, handle: { type: "string" } } });
-        const shape = op === "remove" ? !!key && !address : op === "add" ? !!key && !!address : false;
-        if (more.length || !shape || ((v.transport ?? v.handle) !== undefined && op !== "add")) { env.err(PLAN_USAGE); return 2; }
-        const transport = (v.transport ?? "mailbox") as "mailbox" | "libp2p" | "local";
-        if (!["mailbox", "libp2p", "local"].includes(transport)) { env.err("skein plan peers: --transport is mailbox, libp2p or local"); return 2; }
-        if (op === "add" && transport === "mailbox" && !/^https?:\/\/[^/]/.test(address!)) { env.err(`skein plan peers: ${address} is not an http(s) URL`); return 2; }
-        let named: { handle?: string; domain?: string } = {};
-        if (v.handle !== undefined) {
-          const h = v.handle.replace(/^@/, "");
-          const at = h.lastIndexOf("@");
-          named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h };
-          if (!named.handle || (at > 0 && !named.domain)) { env.err(`skein plan peers: --handle ${v.handle}: want handle@domain`); return 2; }
-        }
-        const change: PeerChange = op === "add" ? { op: "add", key: key!, transport, address: address!, ...named } : { op: "remove", key: key! };
-        const t = await targetOf(v, env);
-        try { emit(planPeers(t.recipient, [change]), v.out, env); } finally { t.close(); }
-        return 0;
-      }
-      case "claim": {
-        const { values: v, positionals: more } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, messagebox: { type: "string" }, handle: { type: "string" } } });
-        if (more.length) { env.err(PLAN_USAGE); return 2; }
-        if (v.messagebox !== undefined && !/^https?:\/\/[^/]/.test(v.messagebox)) { env.err(`skein plan claim: ${v.messagebox} is not an http(s) URL`); return 2; }
-        let named: { handle?: string; domain?: string } = {};
-        if (v.handle !== undefined) {
-          const h = v.handle.replace(/^@/, "");
-          const at = h.lastIndexOf("@");
-          named = at > 0 ? { handle: h.slice(0, at), domain: h.slice(at + 1) } : { handle: h };
-          if (!named.handle || (at > 0 && !named.domain)) { env.err(`skein plan claim: --handle ${v.handle}: want handle@domain`); return 2; }
-        }
-        const t = await targetOf(v, env);
-        try { emit(planClaim(t.recipient, { messagebox: v.messagebox, ...named }), v.out, env); } finally { t.close(); }
-        return 0;
-      }
-      case "host": {
-        const { values: v, positionals: [op, key, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, x: { type: "string" }, rates: { type: "string" }, from: { type: "string" } } });
-        if (more.length || (op !== "add" && op !== "remove") || (!key && v.from === undefined) || (key && v.from !== undefined)) { env.err(PLAN_USAGE); return 2; }
-        let terms: HostTerms;
-        if (v.from !== undefined) {
-          const r = await fetch(new URL("/.well-known/skein-host", v.from));
-          const b = (await r.json() as { billing?: HostTerms }).billing;
-          if (!r.ok || !b) throw new Error(`${v.from}: no billing terms at /.well-known/skein-host`);
-          terms = { key: b.key, x: b.x, rates: b.rates };
-        } else {
-          let rates: Record<string, number> | undefined;
-          if (v.rates !== undefined) {
-            try { rates = JSON.parse(v.rates) as Record<string, number>; } catch { rates = undefined; }
-            if (!rates || typeof rates !== "object" || Array.isArray(rates)) { env.err("skein plan host --rates: a JSON object {fuel, storage, served, fetch, authfetch, publish}"); return 2; }
-          }
-          terms = { key: key!, x: Number(v.x ?? (op === "remove" ? 1 : NaN)), ...(rates ? { rates } : {}) };
-        }
-        const t = await targetOf(v, env);
-        try { emit(planHost(t.recipient, op, terms), v.out, env); } finally { t.close(); }
-        return 0;
-      }
-      case "deploy": {
-        const { values: v, positionals: [dir, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { ...where, only: { type: "string" }, all: { type: "boolean" } } });
-        if (!dir || more.length || (v.all && v.only !== undefined)) { env.err(PLAN_USAGE); return 2; }
-        const only = v.all ? [] : v.only !== undefined ? v.only.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
-        const t = await targetOf(v, env);
-        try { emit(await planDeploy(resolve(dir), t.view ?? { identity: t.recipient }, { only }), v.out, env); } finally { t.close(); }
-        return 0;
-      }
-      default:
-        env.err(PLAN_USAGE);
-        return what === undefined || what === "help" ? 0 : 2;
+/**
+ * `skein install`: the tree — a directory read here, or a commit the instance's git app clones by hash (a
+ * catalog name gives the URL and the commit) — then the plan from it, printed, and its messages sent.
+ */
+async function install(spec: string, s: Session, config: Record<string, unknown> | undefined, env: AdminEnv): Promise<number> {
+  const { wasmDirObjects, WASM_DIR } = await import("../host/boot.ts");
+  let view = await s.view();
+  let tree: AppTree;
+  let cloned: { tree: CID; app: CID } | undefined;
+  if (existsSync(spec) && statSync(spec).isDirectory()) {
+    const { readApp } = await import("../host/install.ts");
+    tree = await readApp(resolve(spec));
+  } else {
+    let url: string, hash: string;
+    const m = /^(.+)#([0-9a-fA-F]{40})$/.exec(spec);
+    if (m) { url = m[1]!; hash = m[2]!.toLowerCase(); } else if (/^[a-z0-9][a-z0-9-]*$/.test(spec)) {
+      const cat = await catalogOf(view);
+      const e = cat.find((x) => x.name === spec);
+      if (!e) throw new Error(`${spec}: not in the instance's catalog (it names ${cat.map((x) => x.name).join(", ") || "nothing"}); give <url>#<commit>`);
+      url = e.url; hash = e.hash.toLowerCase();
+      env.out(`catalog: ${e.name}${e.version ? ` ${e.version}` : ""} = ${url}#${hash}`);
+    } else throw new Error(`${spec}: a catalog name, <url>#<40-hex commit>, or a directory`);
+    if (!s.target) throw new Error("--store reads a store file: it cannot ask the instance's git app to clone (give a directory, or --instance / an origin)");
+    // The git app takes `git.clone` from its owner's row (box git): a key with none would wait for nothing.
+    const me = identityOf(operatorKey(env.vars).key);
+    if (!view.dispatch.some((r) => r.transport === "mailbox" && r.address === "git" && (r.sender === "*" || hexOf(r.sender) === me))) {
+      throw new Error(`the instance's git app takes git.clone only from its owner's row, and ${me.slice(0, 10)}… has none in box git${view.heads.some((h) => h.name === appHead("git")) ? " (the owner adds it: skein install images/default/apps/git, from the owner's key)" : " (no git app installed)"}`);
     }
-  } catch (e) {
-    env.err(`skein plan ${what}: ${(e as Error).message}`);
-    return 1;
+    const t0 = Date.now();
+    const id = await s.target.send("git", { fn: "git.clone", args: { url, hash } });
+    const end = await s.target.answer(id);
+    if (end.state === "errored") throw new Error(`git.clone: the git app's thread errored: ${JSON.stringify(end.error ?? {})}`);
+    const out = stdoutOf(end) as { result?: { tree?: CID; app?: CID }; error?: { code?: string; message?: string } } | undefined;
+    if (out?.error) throw new Error(`git.clone: ${out.error.code}: ${out.error.message}`);
+    if (!out?.result?.tree || !out.result.app) throw new Error(`git.clone: no {tree, app} in the answer (${JSON.stringify(out)})`);
+    cloned = { tree: out.result.tree, app: out.result.app };
+    env.out(`git.clone ${url}#${hash}: tree ${cloned.tree} · app record ${cloned.app} (${Date.now() - t0} ms, in the instance)`);
+    view = await s.view();
+    tree = await readStoredApp(view.store, cloned.tree);
   }
-}
-
-/** `skein send <origin> <dir>`: the plan's files, in order, by the wallet's command; stops at the first non-2xx. */
-export async function sendMain(argv: string[], env: AdminEnv): Promise<number> {
-  const { positionals: [origin, dir, ...more] } = parseArgs({ args: argv, allowPositionals: true, options: {} });
-  if (!origin || !dir || more.length || !/^https?:\/\/[^/]/.test(origin)) { env.err(PLAN_USAGE); return 2; }
-  const files = existsSync(dir) ? planFiles(dir) : [];
-  if (!files.length) { env.err(`skein send: no message files (001-<box>.json, …) in ${dir}`); return 1; }
-  const prompt = resolve(dir, "prompt.txt");
-  if (existsSync(prompt)) for (const l of readFileSync(prompt, "utf8").trimEnd().split("\n")) env.out(l);
-  const cmd = (env.vars.SKEIN_AUTHFETCH || "1sat authfetch").split(/\s+/);
-  try {
-    const done = await deliver(files, authfetchPoster(origin, cmd), (d) => env.out(`${d.file.slice(d.file.lastIndexOf("/") + 1)}: ${d.status}${d.status >= 200 && d.status <= 299 ? "" : ` ${d.text.slice(0, 300)}`}`));
-    const last = done.at(-1)!;
-    if (last.status < 200 || last.status > 299) { env.err(`skein send: stopped at ${last.file} (${last.status}); ${files.length - done.length} not sent`); return 1; }
-    env.out(`${origin}: ${done.length} message${done.length === 1 ? "" : "s"} sent`);
-    return 0;
-  } catch (e) {
-    env.err(`skein send: ${(e as Error).message}`);
-    return 1;
+  const p = await planInstallApp(tree, view, { config, modules: wasmDirObjects(WASM_DIR) });
+  if (cloned && !config && !p.recordCid.equals(cloned.app)) p.prompt.push(`  note      the plan's app record ${p.recordCid} is not the git app's ${cloned.app}`);
+  await deliver(p, s, env);
+  if (s.dry || !s.target) return 0;
+  // Installed when its head names the record (the kernel takes the messages in order).
+  // Its start may move the head on at once (the app's `state`): the record without `state` is what counts.
+  const { encode } = await import("../runtime/cid.ts");
+  const bare = (r: Record<string, unknown>) => { const { state: _s, ...rest } = r; void _s; return encode(rest as never).cid; };
+  const want = bare(p.record as unknown as Record<string, unknown>);
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    const v = await s.view();
+    const root = v.heads.find((h) => h.name === appHead(p.app))?.root;
+    const rec = root ? await v.store.get(root).catch(() => undefined) as Record<string, unknown> | undefined : undefined;
+    if (rec && bare(rec).equals(want)) break;
+    if (Date.now() > deadline) throw new Error(`${p.app}: head ${appHead(p.app)} does not name ${p.recordCid} after 120 s (the instance's log says why)`);
+    await new Promise((r) => setTimeout(r, 300));
   }
+  env.out(`installed ${p.app} ${p.version} into ${s.target.where}`);
+  return 0;
 }

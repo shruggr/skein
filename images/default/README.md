@@ -34,11 +34,14 @@ docs/BOOTSTRAP.md, "The default image".
   `<app>/app` and `reads` in `heads`. The same CIDs as an install by
   messages, except that no row whose manifest sender is `$owner` is written
   (an image has no owner): chain's `chain` row from the owner and git's
-  only row. The owner adds those after the claim: `skein plan install
-  <the app's tree>` again sends the head (unchanged) and just those rows,
-  as the install writes them (with `app`; chain's with `filter: beef`).
-  `skein plan dispatch add` also adds a row, but without `app`, and a
-  mailbox row there takes no settings.
+  only row. The owner adds those after the claim: `skein install
+  images/default/apps/<app> (--instance <handle> | <origin>)` sends the
+  head (unchanged) and just those rows, as the install writes them (with
+  `app`; chain's with `filter: beef`). The host skein is the exception: it
+  boots from the host image (`images/host` merged over this one, with the
+  onboarding app) with the operator's key named in its genesis, so its
+  `$owner` rows are written at birth (docs/BOOTSTRAP.md, "The host image
+  and the host skein").
 - `apps/chain/`, `apps/git/`, `apps/site/`: shruggr/skein-chain v0.4.0
   (e8d2102), shruggr/skein-git v0.1.3 (3726730), shruggr/skein-site v0.7.7
   (52a7534) — each the same git tree as that tag's commit.

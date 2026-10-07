@@ -38,7 +38,7 @@
 //
 // **Two paths to the tree** (#91; docs/APPS.md §3). This client reads it from
 // a directory or clones a repository itself (`readApp`, `fetchApp`:
-// `skein plan install`, #124; a coding-session tool). Or the instance already holds
+// `skein install`, #124; a coding-session tool). Or the instance already holds
 // it: the git app (shruggr/skein-git) cloned one commit into the store by
 // hash and answered {tree, app}; `readStoredApp` reads that tree out of the
 // store (reads are open), and the same `planInstall` rebuilds the app record

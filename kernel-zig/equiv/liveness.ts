@@ -115,7 +115,7 @@ try {
   const install = async (r: Router, home: string, handle: string, app: string) => {
     const o = await ownerCli({ home, port: r.port!, owner: ownerWallet, settled: () => r.settled() }, ["install", appTree(app), "--instance", handle]);
     await r.settled();
-    check(o.code === 0, `skein plan install ${app} on ${handle}: exit ${o.code} ${o.err.join(" ")}`);
+    check(o.code === 0, `skein install ${app} on ${handle}: exit ${o.code} ${o.err.join(" ")}`);
   };
   await install(r1, home1, "one", "live-a");
   await install(r2, home2, "two", "live-b");

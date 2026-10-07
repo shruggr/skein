@@ -1,8 +1,8 @@
 // The browser build live (issue #35): a skein instance in headless Chrome —
 // the wasm kernel in a Worker over IndexedDB, the page as its host
 // (web/kernel/host.ts) — against a router on a scratch port (never :8100)
-// with a scripted inference peer, and a host skein with the onboarding app
-// (shruggr/skein-onboard at src/testapps.ts's pinned commit). The page
+// with a scripted inference peer, and a host skein from the host image (#142)
+// with the onboarding app (images/host). The page
 // identity (a wallet in the tab over a test key here; Yours in use) registers
 // its mailbox instance through it, over its BRC-104 session with the host's
 // origin (#135);
@@ -73,12 +73,12 @@ const router: Router = new Router({
 });
 await router.listen(0);
 const base = `http://127.0.0.1:${router.port}`;
-// The host skein (#113, #135): claimed by the owner's own signed claim, the onboarding app installed; the host's origin's
-// BRC-169 requests and the page's registration (over its session with the host's origin) are its app's.
-const owner = ephemeralWallet(ownerKey);
-await router.createInstance("host", ownerKey.toPublicKey().toString(), { host: true, claim: await signClaim(owner) as SignedClaim });
+// The host skein (#113, #135, #142): from the host image, owned by the owner's key at birth, the onboarding app installed
+// with its config; the host's origin's BRC-169 requests and the page's registration (over its session with the host's
+// origin) are its app's.
+await router.createInstance("host", ownerKey.toPublicKey().toString(), { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base } } } });
 await router.hydrate("host");
-await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], { config: { onboard: { domain: "localhost", origin: base } } });
+await router.settled();
 // The inference peer's mailbox instance, registered through the host skein as the page's is (#135: over its session).
 const iw = ephemeralWallet(inferKey);
 {

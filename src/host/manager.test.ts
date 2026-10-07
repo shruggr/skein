@@ -1,7 +1,8 @@
 // The instance manager (#90) with the real kernel, driven by signed messages
 // as the host skein's onboarding app sends them: the host skein is created
-// from the default image with the manager in its address book (no other
-// instance's book names it); `create` boots a child from the default image,
+// from the host image (#142: owned by the operator at birth, the onboarding
+// app installed) with the manager in its address book (no other instance's
+// book names it); `create` boots a child from the default image,
 // forwards its owner's own signed claim (#127: no recipient, signed before
 // the child existed) as its first entry after the genesis, then publishes
 // it — a create with no claim, another key's claim or a forged one is
@@ -40,10 +41,16 @@ test("the instance manager: create (the owner's claim forwarded before published
   };
   const manager = h.router.providers.key("manager");
 
-  // The host skein: the default image, claimed for the operator, the manager in its book.
-  const host = await h.router.createInstance("host", h.ownerId, { host: true, claim: await signClaim(h.owner) });
+  // The host skein (#142): the host image, its genesis naming the operator, the manager in its book; no claim.
+  await assert.rejects(h.router.createInstance("host", h.ownerId, { host: true, claim: await signClaim(h.owner) }), /born owned/);
+  const host = await h.router.createInstance("host", h.ownerId, { host: true });
   assert.equal(h.db.hostSkein()?.handle, "host");
   assert.equal(h.db.get("host")!.status, "enabled");
+  const hostRows = ((await (await h.router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>);
+  assert.deepEqual(hostRows.filter((r) => r.program === "kernel").map((r) => `${r.address}<-${hex(r.sender)}`), ["objects", "head", "dispatch", "peers"].map((op) => `${op}<-${h.ownerId}`), "the operator's admin rows at birth, no claim row");
+  assert.ok(hostRows.some((r) => r.address === "/explore" && hex(r.sender) === h.ownerId), "the operator's explorer row");
+  assert.ok(hostRows.some((r) => r.app === "git" && r.address === "git" && hex(r.sender) === h.ownerId), "git's $owner row holds the operator's key");
+  assert.ok(hostRows.some((r) => r.app === "onboard"), "the onboarding app installed at birth");
   const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   assert.ok((await roles("host")).includes("manager"), "the host skein's address book names the instance manager");
 

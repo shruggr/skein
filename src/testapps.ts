@@ -1,9 +1,8 @@
 // The shell app and the chat app for tests and equivs (#83), the
 // onboarding app (#90), the git app (#91) and the management site (#125). A genesis has no shell, no
 // `run`, no `chat`: a test that runs them installs the apps first, through
-// the real install path (the owner's messages `skein plan install` builds,
-// src/client/admin.ts, POSTed to the instance's /sendMessage on the owner's
-// BRC-104 session as any wallet sends them, #124), from a
+// the real install path (the owner's messages src/client/admin.ts builds, sent
+// on the owner's BRC-104 session as the client sends them, #142), from a
 // checkout at the commit pinned here — $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR /
 // $SKEIN_ONBOARD_DIR / $SKEIN_GIT_DIR name a checkout instead,
 // $SKEIN_SHELL_REV / $SKEIN_CHAT_REV / $SKEIN_ONBOARD_REV / $SKEIN_GIT_REV
@@ -17,7 +16,7 @@ import { join } from "node:path";
 import { AuthFetch, type WalletInterface } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { join as joinPath } from "node:path";
-import { deliver, planFiles, planInstallApp, planUninstallApp, messageJson, type AdminPlan } from "./client/admin.ts";
+import { planInstallApp, planUninstallApp, type AdminPlan } from "./client/admin.ts";
 import { RawBox } from "./client/raw.ts";
 import { WASM_DIR, wasmDirObjects } from "./host/boot.ts";
 import { HostDb } from "./host/instances.ts";
@@ -91,33 +90,19 @@ export async function viewOf(h: Pick<InstallHost, "home">, handle: string): Prom
 }
 
 /**
- * Deliver a plan as any wallet does (#124): each message's `/sendMessage` JSON body (src/client/admin.ts
- * messageJson, what `skein plan` writes), POSTed in order on the wallet's BRC-104 session with the
- * instance's front door; throws at the first answer that is not 200.
+ * Deliver a plan as the operator's client does (#142): each message on the wallet's BRC-104 session with the
+ * instance's front door (dag-cbor bodies, src/client/raw.ts), in order; throws at the first refusal.
  */
 export async function sendPlan(h: Pick<InstallHost, "port" | "owner" | "settled">, handle: string, p: AdminPlan, wallet: WalletInterface = h.owner): Promise<number> {
   const box = new RawBox(wallet, `http://127.0.0.1:${h.port}/@${handle}`);
-  for (const m of p.messages) {
-    const r = await box.postJson("/sendMessage", messageJson(p.recipient, m));
-    if (r.status !== 200) throw new Error(`sendMessage ${m.box}: ${r.status} ${r.text.slice(0, 300)}`);
-  }
+  for (const m of p.messages) await box.send(p.recipient, m.box, m.body);
   await h.settled();
   return p.messages.length;
 }
 
-/** Deliver a plan directory (`skein plan … --out dir`) as `skein send` does, with `wallet`'s session instead of `1sat authfetch`; throws at the first answer that is not 200. */
-export async function sendDir(h: Pick<InstallHost, "port" | "owner" | "settled">, handle: string, dir: string, wallet: WalletInterface = h.owner): Promise<number> {
-  const box = new RawBox(wallet, `http://127.0.0.1:${h.port}/@${handle}`);
-  const done = await deliver(planFiles(dir), (json) => box.postJson("/sendMessage", json));
-  const last = done.at(-1);
-  if (last && last.status !== 200) throw new Error(`${last.file}: ${last.status} ${last.text.slice(0, 300)}`);
-  await h.settled();
-  return done.length;
-}
-
 /**
- * Install the app in `dir` into `handle` as its owner: planned from the instance's store (`skein plan
- * install --store`), `config` merged over the manifest's, then sent (sendPlan). The prompt.
+ * Install the app in `dir` into `handle` as its owner: planned from the instance's store (as `skein install
+ * --store` plans), `config` merged over the manifest's, then sent (sendPlan). The prompt.
  */
 export async function installApp(h: InstallHost, handle: string, dir: string, o: { config?: Record<string, unknown>; wallet?: WalletInterface } = {}): Promise<string[]> {
   await h.settled();
@@ -128,7 +113,7 @@ export async function installApp(h: InstallHost, handle: string, dir: string, o:
   return p.prompt;
 }
 
-/** Uninstall `app` from `handle` as its owner (`skein plan uninstall`, then sent). The prompt. */
+/** Uninstall `app` from `handle` as its owner (planned as `skein uninstall` plans, then sent). The prompt. */
 export async function uninstallApp(h: InstallHost, handle: string, app: string, o: { wallet?: WalletInterface } = {}): Promise<string[]> {
   await h.settled();
   const view = await viewOf(h, handle);
@@ -141,8 +126,7 @@ export async function uninstallApp(h: InstallHost, handle: string, app: string, 
 /**
  * What the equivs ran as `skein-host install|uninstall` before #124, now the owner's path: `install <dir>
  * --instance <h> [--config json] [--dry-run]` or `uninstall <app> --instance <h>` — planned from the
- * instance's store (`skein plan … --store`) and, unless a dry run, sent by `wallet` (default the owner) to
- * its /sendMessage (sendPlan). `out`: the prompt, then `<h>: <app> <version> installed|upgraded: <n>
+ * instance's store and, unless a dry run, sent by `wallet` (default the owner) on its session (sendPlan). `out`: the prompt, then `<h>: <app> <version> installed|upgraded: <n>
  * messages sent` (or `<h>: <app> uninstalled: …`); `err` and code 1 when planning or a send fails.
  */
 export async function ownerCli(h: InstallHost, args: string[], wallet: WalletInterface = h.owner): Promise<{ code: number; out: string[]; err: string[] }> {

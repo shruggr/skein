@@ -20,20 +20,24 @@ skein whoami
 skein import <dir>                                   # tree objects -> the kernel's objects operation; prints the tree CID
 skein run [--tree <cid>] [--cwd p] [--env K=V]... -- '<cmd>'   # no --tree: the instance's `main` head
 skein head <name> <cid>                              # the kernel's head operation: "<name> is now <cid>"
-skein dispatch add|remove [--sender <key>] <box> <handler>    # the kernel's dispatch operation: a mailbox row; handler: a program record CID (`skein plan dispatch` also takes a name the genesis gives)
 skein inbox [--wait] [--timeout s] [--no-ack] [--json]
 skein chat "<text>" [--tree <cid>] [--model ripper/qwen38] [--new] [--wait] [--timeout s]
 skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
-skein plan install|uninstall|dispatch|peers|deploy …  # the owner's admin messages as /sendMessage JSON files (no wallet: admin.ts)
-skein send <origin> <dir>                            # those files, in order, by the wallet's BRC-104 client (`1sat authfetch`)
+skein install|uninstall|dispatch|reads|peers|host|claim|deploy … (--instance <h> | <origin>) [--dry-run]
+                                                     # the owner's admin messages, signed here with the operator's key
 ```
 
-`plan` and `send` (#124, src/client/admin-cli.ts, admin.ts) need no wallet
-of the client's own: the plan reads the instance through its explorer with
-the owner's wallet (`--origin`, `1sat authfetch GET`) or from its store file
-(`--store`), and writes the prompt and one `/sendMessage` body per message;
-any BRC-100 wallet sends them (scripts/host/README.md, "The owner's
-messages").
+The admin commands (#124, #142: src/client/admin-cli.ts, admin.ts,
+target.ts) sign each message in this process with the operator's key
+(`SKEIN_OPERATOR_KEY`, default `$SKEIN_HOME/operator.key`; settings from
+`$SKEIN_HOME/host.env`) and deliver it: `--instance <handle>` over the
+running host's control socket (on the host machine; the plan reads the
+store file read-only), an origin on one BRC-104 session (the plan reads
+the explorer on it). `--store <runtime.db>` plans from a store file and
+prints; `--dry-run` prints the prompt and the messages and sends nothing.
+`skein install <url>#<commit>` (or a name from the instance's catalog) has
+the instance's git app clone the commit in the VM; nothing of the app's
+tree crosses from here.
 
 ## Chat
 

@@ -33,13 +33,13 @@ import { CID } from "multiformats/cid";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
 import { programRecord, RAW, rawCid, wasmKind } from "../runtime/programs.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
-import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
+import { GIT_RAW, hashBlob, hashTree, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
-import { appRecordIn, planInstall, planOwnerRead, READS_HEAD, readStoredApp, type InstanceView, type ReadEntry, type ViewStore } from "./plan.ts";
-import { CLAIM_ROW, codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type PathRowSpec, type BoxRowSpec, type System } from "./genesis.ts";
+import { appRecordIn, mergeConfig, planInstall, planOwnerRead, READS_HEAD, readStoredApp, type InstanceView, type ReadEntry, type ViewStore } from "./plan.ts";
+import { CLAIM_ROW, codeSystem, keyBytes, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type PathRowSpec, type BoxRowSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
@@ -264,8 +264,17 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
   let s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
+  const isClaim = (r: DispatchRow) => r.program === "kernel" && r.fn === "claim";
   // An image (#89): no owner, so it must be claimable — its rows carry the claim row.
-  if (!c.owner && !s.dispatch.some((r) => r.program === "kernel" && r.fn === "claim")) throw new Error(`an image (a genesis with no owner) needs a claim row in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
+  if (!c.owner && !s.dispatch.some(isClaim)) throw new Error(`an image (a genesis with no owner) needs a claim row in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
+  // An image booted with its owner named (#142: the host skein): born as a claim would leave it — the owner's admin
+  // rows (above), the owner's explorer row (the front door's `explore` at /explore and below), no claim row.
+  if (c.owner && s.dispatch.some(isClaim)) {
+    const explorer: DispatchRow[] = programs.frontdoor && !s.dispatch.some((r) => r.transport === "http" && r.address === "/explore")
+      ? [{ transport: "http", address: "/explore", prefix: true, sender: keyBytes(c.owner), program: programs.frontdoor, fn: "explore" }]
+      : [];
+    s = { ...s, dispatch: [...s.dispatch.filter((r) => !isClaim(r)), ...explorer] };
+  }
   let apps: Booted["apps"];
   if (t.apps) {
     const born = await installAtBirth(k, src.objects, t, s, c);
@@ -281,8 +290,9 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
  * #141: the apps an image installs at birth (etc/apps.json), planned as an install by messages
  * would be (plan.ts: readStoredApp over the app's tree in the image, planInstall, planOwnerRead)
  * against the instance as its genesis will stand — the same records, rows and heads, the rows from
- * `$owner` left out when the genesis names no owner. Their records are put into the store; the
- * rows and heads go into the genesis.
+ * `$owner` left out when the genesis names no owner (and holding the owner's key when it names one,
+ * #142). An app's config given at creation (`appConfig`) is merged over its manifest's, as an
+ * install's `--config` is. Their records are put into the store; the rows and heads go into the genesis.
  */
 export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, objects: Objects, t: SystemTree, s: System, c: Genesis2Config): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
   const local = new MemBlocks();
@@ -321,6 +331,9 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, o
   const apps: Array<{ name: string; version: string; notes: string[] }> = [];
   for (const path of t.apps!.install) {
     const app = await readStoredApp(store, t.appTrees![path]!);
+    // #142: an app's config at birth (the host skein's onboard: its domain, origin, name and note from host.env), merged as `--config` is.
+    const config = c.appConfig?.[app.checked.manifest.name];
+    if (config) app.checked.manifest.config = mergeConfig(app.checked.manifest.config, config);
     const p = await planInstall(app, view, { modules: objects, image: !c.owner });
     await take(p.records, p.heads);
     for (const r of p.rows) { rows.push(r.row); view.dispatch.push(r.row); }
@@ -415,8 +428,51 @@ export function wasmDirObjects(dir: string): Objects {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 /** The repo's pinned modules (wasm/): what a system tree's `bin/*.cid` names. */
 export const WASM_DIR = join(ROOT, "wasm");
-/** The default image (#89): one genesis for everyone, no owner in it, a claim row. */
+/** The default image (#89): a user skein's — no owner in it, a claim row. */
 export const DEFAULT_IMAGE = join(ROOT, "images/default");
+/** The host image's own part (#142): merged over the default image (mergeImages), the host skein's image. */
+export const HOST_IMAGE = join(ROOT, "images/host");
+
+/**
+ * Two image trees merged (#142: images are starting trees that merge): every path of `over` added to
+ * `base`. A directory in both is merged; a file in both must be the same blob — except `etc/apps.json`,
+ * whose `install` and `reads` lists are joined (an app in both is refused). Any other path in both is a
+ * collision, refused with its path. The installer's own checks (boxes, heads, paths) run when the merged
+ * image's apps are installed at birth (installAtBirth). The new trees and the merged apps.json go into
+ * `out`; every other object stays where it was.
+ */
+export async function mergeImages(objects: Objects, base: CID, over: CID, out: MemBlocks): Promise<CID> {
+  const tree = async (cid: CID) => parseTree(await need(objects, cid, "an image tree"), cid);
+  const blob = async (cid: CID, path: string) => {
+    const b = gitBody(await need(objects, cid, path), "blob");
+    if (!b) throw new Error(`${path}: not a file`);
+    return Buffer.from(b).toString("utf8");
+  };
+  const merge = async (a: CID, b: CID, at: string): Promise<CID> => {
+    const entries = new Map((await tree(a)).map((e) => [e.name, e]));
+    for (const e of await tree(b)) {
+      const path = at ? `${at}/${e.name}` : e.name;
+      const had = entries.get(e.name);
+      if (!had || had.cid.equals(e.cid)) { entries.set(e.name, e); continue; }
+      if (had.mode === "40000" && e.mode === "40000") { entries.set(e.name, { ...e, cid: await merge(had.cid, e.cid, path) }); continue; }
+      if (path === APPS && had.mode !== "40000" && e.mode !== "40000") {
+        const x = JSON.parse(await blob(had.cid, path)) as ImageApps, y = JSON.parse(await blob(e.cid, path)) as ImageApps;
+        const both = (x.install ?? []).filter((p) => (y.install ?? []).includes(p));
+        if (both.length) throw new Error(`${APPS}: ${both.join(", ")} installed by both images`);
+        const reads = [...(x.reads ?? []), ...(y.reads ?? [])];
+        const h = hashBlob(new TextEncoder().encode(`${JSON.stringify({ install: [...(x.install ?? []), ...(y.install ?? [])], ...(reads.length ? { reads } : {}) }, null, 2)}\n`));
+        await out.putBlock(h.cid, h.object);
+        entries.set(e.name, { ...e, cid: h.cid });
+        continue;
+      }
+      throw new Error(`images: ${path} is in both images (a merge adds paths; it does not replace one)`);
+    }
+    const t = hashTree([...entries.values()]);
+    await out.putBlock(t.cid, t.object);
+    return t.cid;
+  };
+  return await merge(base, over, "");
+}
 
 /**
  * An image as a boot source (#89, #90): a directory (default: the default

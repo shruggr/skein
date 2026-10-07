@@ -94,7 +94,7 @@ const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 const submitFetch = signedSubmitter(ephemeralWallet(key("8888")));
 
 // #135: the overlay's lookup, listings and documentation are reads — served by a call, anyone, signed or not, no
-// entry. A system tree's genesis holds no reads head: the owner writes it (objects + head reads), as `skein plan
+// entry. A system tree's genesis holds no reads head: the owner writes it (objects + head reads), as `skein
 // reads add` does, the overlay's program the genesis's.
 const OVERLAY_READS: Array<[string, string]> = [["/lookup", "lookup"], ["/listTopicManagers", "listTopicManagers"], ["/listLookupServiceProviders", "listLookupServiceProviders"], ["/getDocumentationForTopicManager", "topicDocumentation"], ["/getDocumentationForLookupServiceProvider", "lookupDocumentation"]];
 async function addReads(r: Router, h: string): Promise<void> {

@@ -114,7 +114,7 @@ Every genesis that names an owner seeds the owner's four admin rows
 (`sender` the owner, `program` `kernel`); an image (the default image,
 docs/BOOTSTRAP.md) names none and seeds the claim row instead: the owner's
 own message takes it (#127) — sent to the instance (a bare image: the first
-claim's sender owns it; `skein plan claim`), or signed before the instance
+claim's sender owns it; `skein claim`), or signed before the instance
 existed and forwarded by the host's instance manager as its first entry
 (`create`, #90), before the instance is published. A claim is the one
 message that may name **no recipient**: the mail record without
@@ -125,11 +125,12 @@ sender's key alone checks it; SDK `message.zig` ≥ 0.6.1, the front door, the
 kernel's `isMail`. #127 is its own mechanism, untouched by #126 step 4. Any other message naming none is not admitted. Delegating administration is the owner adding a row
 with the same operation and another sender. A refused operation (a bad
 body, a record not in the store) is a log line and nothing written. The
-client commands: `skein plan install|uninstall|dispatch|peers|deploy`
-build the owner's messages as `/sendMessage` JSON bodies and any BRC-100
-wallet sends them (`skein send`, `1sat authfetch`; #124, docs/APPS.md §3);
-`skein import` (objects), `skein head` and `skein dispatch` send one each
-through the client's own wallet. An app's own writes are heads under its name,
+client commands: `skein install|uninstall|dispatch|reads|peers|host|claim|deploy`
+build the owner's messages, sign them in the client's process with the
+operator's key and send them — over the host's control socket (op
+`message`: a signed `local` request) on the host machine, else on one
+BRC-104 session (#124, #142, docs/APPS.md §3); `skein import` (objects) and
+`skein head` send one each through the client's own wallet. An app's own writes are heads under its name,
 `<app>/…` (docs/VM.md, "Heads"); the front door's sessions are
 `frontdoor/sessions`.
 
@@ -185,7 +186,7 @@ refused.
    `serveHttp`). The reads and the `http` rows are matched together as the
    table matches its rows — exact paths first, then the longest prefix;
    **a read and a row never share a path** (address and prefix: the install
-   refuses the clash, and so does `skein plan reads`). A read wins → the
+   refuses the clash, and so does `skein reads`). A read wins → the
    call. A row wins, or nothing matches: a signed request goes through the
    kernel's door (an entry; a path no row takes is the door's signed 404);
    so does an unsigned one at an open row whose filter validates (1.,
@@ -201,7 +202,7 @@ An app's manifest declares its reads (`reads[]`, docs/APPS.md §2; the
 overlay's `/lookup` is derived from `config.overlay`); the install writes
 them into the head beside the others' (the kernel's `objects` and `head`
 operations, as the owner) — an upgrade replaces them, an uninstall takes
-them out. The owner adds reads of its own (`skein plan reads add|remove
+them out. The owner adds reads of its own (`skein reads add|remove
 [--prefix] --fn f [--settings json] <path> <handler>`; no `app`, so an
 app's upgrade or uninstall leaves them): the site at `/` is one. State, so
 replay-derived, as the dispatch table is; the host reads the head when its
@@ -867,7 +868,7 @@ The address book is one of the kernel's four tables (#77). Who writes it:
   by every genesis, or a delegate's; source `admin`): `{op: "add", key,
   transport?, address? | url?, handle?, domain?}` | `{op: "remove",
   key}` — `url` alone, or no `transport`, is a mailbox. No program runs.
-  `skein plan peers add <key> <address> [--transport t]
+  `skein peers add <key> <address> [--transport t]
   [--handle h@d]` / `remove <key>`, sent by the owner's wallet (#124), and
   `skein-host peers <agent> list`; `scripts/host/up.sh` writes the owner,
   the inference peer and the other agents into every agent this way;
@@ -954,9 +955,9 @@ skein's address book alone (`skein-host init` writes that genesis; no
 other instance's book names them), and they act only on a message from the
 host skein's identity, sent from the host skein: any other is not acted on
 and not answered (a line in the host's log). A host skein made before #113
-has no `certifier` entry: the owner's `peers` message adds it (`skein plan
+has no `certifier` entry: the owner's `peers` message adds it (`skein
 peers add <certifier key> certifier --transport local
---origin <the host skein's origin>`, sent) (the key: what the
+--instance <the host skein>`) (the key: what the
 host's manifest published as `metanet.trust.publicKey` before #113 — the
 master secret's child under `[2, "skein provider"]`, key ID `certifier`). A refusal is an answer: `{error}` for a handle that is not a
 hostname label or is taken, an owner that is not a key, another image, a
@@ -1246,8 +1247,9 @@ appended as a request entry, the app's route handler answering:
 | `POST /account/profile` | `/onboard/profile` |
 
 A host with no host skein answers them 404. The app's configuration
-(`config.onboard` of its installed manifest, written by `skein plan install
-… --config '{"onboard": {…}}'`, sent by the owner's wallet): `domain`, the **handle domain** (default
+(`config.onboard` of its installed manifest, written at the host skein's
+birth from the host's settings, #142, or by `skein install
+images/host/apps/onboard --config <file.json>`): `domain`, the **handle domain** (default
 `localhost`); `origin`, where the manifest says resolve and search are
 (default `https://<domain>`); `name`, `note`, `icon`, the host's
 presentation in `metanet.trust` (§5.1); `ordfs`, the ORDFS content route
@@ -1604,7 +1606,7 @@ scripts/host/README.md "Billing" the host's):
 
 | what | from → to | shape |
 |---|---|---|
-| the host row | the owner → the skein, box `dispatch` (`skein plan host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
+| the host row | the owner → the skein, box `dispatch` (`skein host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
 | a tick | the host's billing key → the skein, the host row's box, a signed `local` message | `{kind: "tick", at, allowance, fuel, served, log?: <cid of the host's period record>}` |
 | a payment | the skein's pay step → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
 | a funding | anyone → the host, `POST /fund/<handle>`; the host → the skein, a signed `http` request on `/wallet/fund` (#135: sender `session`, over a BRC-104 session with the host's billing key; the `beef` filter) | the body an Atomic BEEF; `x-skein-outputs`: BRC-100 internalizeAction outputs (JSON); `x-skein-description?` (the host hands them in as `x-bsv-skein-outputs` / `x-bsv-skein-description`, signed) → `{txid, status, outputs}` |

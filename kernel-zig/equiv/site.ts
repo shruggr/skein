@@ -2,13 +2,12 @@
 // `skein-host run` runs it (runHost: the signer over a master secret, the
 // providers, the instance manager), with its host skein:
 //
-//   `skein-host init --owner <you>` creates the host skein from the default
-//   image, which you claim from your wallet (#127: `skein plan claim`, the
-//   sender owning it); the default
-//   image (#141: chain, git and site installed at birth); you install the onboarding app and the
-//   management site (shruggr/skein-site, an app: its page at /site/) into it
-//   as the owner's messages (`skein plan install`, #124), and send the site's
-//   optional root read (`skein plan reads add … / site.site`, #135).
+//   `skein-host init` (#142: the first run's part of `run`) creates the host
+//   skein from the host image, owned by your key ($SKEIN_HOME/operator.key) at
+//   birth: chain, git, site (its page at /site/, the owner's read at /) and the
+//   onboarding app installed, its config from the settings (host.env names the
+//   host); you install the onboarding app's tree again with a config the
+//   settings do not carry (`skein install <dir> --config --instance host`).
 //
 //   The wallet's grouped request (#97): GET /manifest.json at the host skein's
 //   own origin is the site's manifest.json, by that root read (the protocols,
@@ -81,9 +80,8 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
-import { appCheckout, ONBOARD_APP, ownerCli, sendDir, sendPlan, SITE_APP } from "../../src/testapps.ts";
-import { planClaim } from "../../src/client/admin.ts";
-import { planMain } from "../../src/client/admin-cli.ts";
+import { appCheckout, ownerCli, SITE_APP } from "../../src/testapps.ts";
+import { adminMain } from "../../src/client/admin-cli.ts";
 import { HANDLE_CERTIFICATE_TYPE } from "../../src/host/handles.ts";
 import { decodeProfile } from "@1sat/utils";
 import { outpointFromBytes, outpointToBytes } from "@1sat/templates";
@@ -232,7 +230,7 @@ const lines: string[] = [];
 const out = (l: string) => { lines.push(l); if (verbose) process.stdout.write(`  | ${l}\n`); };
 const cli = async (args: string[], who?: { wallet: WalletInterface; id: string }) => {
   const o: string[] = [], e: string[] = [];
-  // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent by who's wallet to /sendMessage.
+  // #124: install/uninstall are the owner's messages, planned and sent on who's session.
   if (who && (args[0] === "install" || args[0] === "uninstall")) {
     const r = await ownerCli({ home, port, owner: who.wallet, settled: () => host!.router.settled() }, args);
     for (const l of [...r.out, ...r.err]) out(l);
@@ -252,28 +250,30 @@ const db = new HostDb(join(home, "host.db"));
 const pw = await playwright();
 const browser = await pw.chromium.launch({ executablePath: chromium(), headless: true });
 try {
-  let r = await cli(["init", "--owner", you]);
-  check(r.code === 0, `skein-host init --owner <you>: exit ${r.code} ${r.err.join(" ")}`);
+  // #142: the host's settings in host.env (the host's name for the manifest); your key is the operator's.
+  await fs.writeFile(join(home, "host.env"), `# the host\nSKEIN_HOST_NAME="Test host"\n`);
+  await fs.writeFile(join(home, "operator.key"), `${youKey.toHex()}\n`, { mode: 0o600 });
+  let r = await cli(["init"]);
+  check(r.code === 0 && r.out.some((l) => l.includes(`owned by the operator's key ${you}`)), `skein-host init: the host skein, owned by your key at birth: exit ${r.code} ${r.err.join(" ")}`);
   stores.push(db.get("host")!.store);
-  host = await runHost(db, { vars: { ...vars, SKEIN_OWNER: you }, out, err: out });
+  host = await runHost(db, { vars, out, err: out });
   const router = host.router;
-  // #127: the host skein is a bare image; you claim it from your wallet (skein plan claim, skein send): the sender owns it.
-  await sendPlan({ port, owner: ephemeralWallet(youKey), settled: () => router.settled() }, "host", planClaim(db.get("host")!.identity!));
-  check(((await (await router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>).some((x) => x.program === "kernel" && x.address === "objects" && hex(x.sender) === you), "you claim the host skein from your wallet (#127)");
-  // #113: the handle domain and the host's origin in the app's config; #104: the host's name in the manifest, no
-  // avatarURL (nothing fetched from a public ORDFS gateway).
-  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } })], { wallet: ephemeralWallet(youKey), id: you });
+  check(((await (await router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>).some((x) => x.program === "kernel" && x.address === "objects" && hex(x.sender) === you), "the host skein's admin rows are yours from its genesis (#142: no claim)");
+  // The onboarding app, installed at birth (domain and origin from the settings, the name from host.env); #104: no
+  // avatarURL (nothing fetched from a public ORDFS gateway) — a config the settings do not carry, so the owner
+  // installs the same tree again with it (`skein install <dir> --config`, over the host's control socket).
+  const cfg = join(home, "onboard.json");
+  await fs.writeFile(cfg, JSON.stringify({ onboard: { domain: "localhost", origin: base, name: "Test host", ordfs: "" } }));
+  const io: string[] = [];
+  const ic = await adminMain("install", [join(repoRoot, "images/host/apps/onboard"), "--instance", "host", "--config", cfg], { vars: { ...vars, SKEIN_OPERATOR_KEY: join(home, "operator.key") }, out: (l) => { io.push(l); out(l); }, err: (l) => { io.push(l); out(l); } });
   await router.settled();
-  check(r.code === 0, `the onboarding app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
-  // #125: the management site, an app the host's owner installs, and its optional root read (the owner's own).
-  r = await cli(["install", appCheckout(SITE_APP), "--instance", "host"], { wallet: ephemeralWallet(youKey), id: you });
-  await router.settled();
-  check(r.code === 0, `the site app installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
-  const rootPlan = join(home, "root-row");
-  const pe: string[] = [];
-  const pc = await planMain(["reads", "add", "--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", db.get("host")!.store, "--out", rootPlan], { vars: {}, out, err: (l) => { pe.push(l); out(l); } });
-  const rootSent = pc === 0 ? await sendDir({ port, owner: ephemeralWallet(youKey), settled: () => router.settled() }, "host", rootPlan) : 0;
-  check(pc === 0 && rootSent === 2, `the owner's root read for the site (#135: skein plan reads add … / site.site — objects, head reads), sent: ${pc} ${rootSent} ${pe.join(" ")}`);
+  check(ic === 0 && io.some((l) => l.startsWith("installed onboard 0.3.4 into host")), `the onboarding app's config, installed again by the owner (skein install … --config): exit ${ic} ${io.filter((l) => /sent|install|skein/.test(l)).join(" | ")}`);
+  // #125: the management site, installed at birth with its root read (#141); a site checkout ($SKEIN_SITE_DIR) over it.
+  if (SITE_APP.dir) {
+    r = await cli(["install", appCheckout(SITE_APP), "--instance", "host"], { wallet: ephemeralWallet(youKey), id: you });
+    await router.settled();
+    check(r.code === 0, `the site checkout installed into the host skein: exit ${r.code} ${r.err.join(" ")}`);
+  }
 
   // ------------------------------------------------ the wallet's grouped request (#97): /manifest.json at the host skein's own origin
   // (host.localhost:<port>, the origin a wallet takes the page's originator from); the router's origin keeps its own.

@@ -117,6 +117,11 @@ export interface Genesis2Config {
    * not is left out (a tree may take statuses on a host with no Arcade).
    */
   providers?: Record<string, string>;
+  /**
+   * #142: an installed app's config at birth, by app name, merged over its manifest's `config` as an
+   * install's `--config` is (the host skein's onboard: domain, origin, name, note from host.env).
+   */
+  appConfig?: Record<string, Record<string, unknown>>;
 }
 
 /** One address book entry a genesis seeds (#70): key → transport and address. */
@@ -163,7 +168,7 @@ export const KERNEL_OPS = [...ADMIN_OPS, "claim", "tick"] as const;
  * The claim row (#89): an image's one wildcard row to the kernel. A message
  * in box `claim`, from anyone: its sender is the owner (#127) — in one step
  * the kernel writes the sender's four admin rows and removes this row (a
- * second claim finds no row). The owner's own message (`skein plan claim`),
+ * second claim finds no row). The owner's own message (`skein claim`),
  * or a claim the owner signed before the instance existed, which the host's
  * instance manager forwards as its first entry before the hostname is
  * published (Router.createInstance).
@@ -511,7 +516,8 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
   }
   // The reads are resolved only for rows that name a read op (an image's tree has none, and no `$owner`).
   const rows = dispatch.some((r) => typeof r.read === "string") ? foldReads(dispatch, resolveReads(c, reads), c.owner) : dispatch;
-  let names: System["names"] = c.owner ? [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }] : [];
+  // A tree booted with an owner and no owner's handle (#142: the host skein from its image) names no one.
+  let names: System["names"] = c.owner && (c.ownerHandle || !tree) ? [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }] : [];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });
   if (config.names) names = config.names.map((n) => ({ identityKey: keyOf(n.identityKey, c), handle: n.handle, domain: n.domain }));
   const peers = config.peers

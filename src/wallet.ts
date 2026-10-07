@@ -35,6 +35,14 @@ export async function connectWallet(config: WalletConfig): Promise<WalletInterfa
  * process exits. A ProtoWallet has keys but no actions; those reject.
  */
 export function ephemeralWallet(key: PrivateKey = PrivateKey.fromRandom()): WalletInterface {
+  return keyWallet(key);
+}
+
+/**
+ * A wallet over one private key (#142: the operator's, from its key file): it signs, derives and opens
+ * BRC-103/104 sessions (a ProtoWallet); it has no actions (no coins), and those reject.
+ */
+export function keyWallet(key: PrivateKey): WalletInterface {
   return new Proxy(new ProtoWallet(key), {
     get(t, p) {
       // `then` must stay undefined or awaiting the wallet would call it.

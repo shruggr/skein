@@ -4,7 +4,7 @@
 // with test files added to its tree, installed as the owner's messages (#124)
 // into an instance on a router. The app's one read (#135, `reads[]`) is
 // `/site/*` (its `/`, namespaced by the install); the owner adds two reads of
-// its own to the same function (`skein plan reads add`: the reads head):
+// its own to the same function (`skein reads add`: the reads head):
 // `/favicon.ico` exact (a file root) and `/` exact (a directory root: its
 // index). The function serves the app's own tree (the head site/app's
 // record, its `tree`), under the read's root (`www`), by a call.
@@ -103,7 +103,7 @@ try {
   await installApp(ih, "site", app);
   const k = (await h.router.hydrate("site")).kernel;
   const rec = await k.store.get(await k.call("head", "site/app") as CID) as { programs: { site: CID } };
-  // The owner's own reads of the same function (#125, #135; `skein plan reads add … site.site`): the reads head.
+  // The owner's own reads of the same function (#125, #135; `skein reads add … site.site`): the reads head.
   const programs = { "site.site": rec.programs.site };
   for (const [address, prefix, root] of [["/favicon.ico", false, "www/favicon.ico"], ["/", false, "www"]] as const) {
     const view = await viewOf(ih, "site");
