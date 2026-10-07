@@ -70,12 +70,12 @@ import { RawBox } from "../../src/client/raw.ts";
 import { Signer } from "../../src/host/signer.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { chunk } from "../../src/client/bundle.ts";
+import { encode } from "../../src/runtime/cid.ts";
 import { signedSubmitter } from "../../src/testapps.ts";
-import { READS_HEAD, readsRecord } from "../../src/host/plan.ts";
 
 // The apps under test (#71, #78): SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits are cloned.
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "af7625385121df203fa8a341f8dd9711b55e6ab0";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "ccaee43c1d7d74554f76f2eead38cd84f0aa379a"; // v0.10.0 (#143)
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
 const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
 const here = dirname(fileURLToPath(import.meta.url));
@@ -93,19 +93,25 @@ const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 // stock TopicBroadcaster's plain POST is admitted because its BEEF validates (no sender key).
 const submitFetch = signedSubmitter(ephemeralWallet(key("8888")));
 
-// #135: the overlay's lookup, listings and documentation are reads — served by a call, anyone, signed or not, no
-// entry. A system tree's genesis holds no reads head: the owner writes it (objects + head reads), as `skein
-// reads add` does, the overlay's program the genesis's.
+// #135, #143: the overlay's lookup, listings and documentation are read routes — filters only, the engine's
+// functions answer: anyone, signed or not, no entry. A filter is `<app>.<filter>`, the function an app record
+// declares: a system tree has no app record for its genesis-wired engine, so root writes one (objects + head
+// overlay/app: its programs the genesis's, its filters) and its read routes (dispatch), as an install would.
 const OVERLAY_READS: Array<[string, string]> = [["/lookup", "lookup"], ["/listTopicManagers", "listTopicManagers"], ["/listLookupServiceProviders", "listLookupServiceProviders"], ["/getDocumentationForTopicManager", "topicDocumentation"], ["/getDocumentationForLookupServiceProvider", "lookupDocumentation"]];
 async function addReads(r: Router, h: string): Promise<void> {
   const l = await r.hydrate(h);
-  const g = await l.kernel.genesis() as { programs: Record<string, CID> };
-  const rec = readsRecord(OVERLAY_READS.map(([address, fn]) => ({ address, program: g.programs.overlay!, fn })));
+  const g = await l.kernel.genesis() as { programs: Record<string, CID>; tree: CID };
+  const app = encode({
+    kind: "app", name: "overlay", version: "0.10.0", programs: { overlay: g.programs.overlay! }, provides: [], requires: [], routes: [], tree: g.tree,
+    filters: Object.fromEntries(OVERLAY_READS.map(([, fn]) => [fn, `overlay.${fn}`])),
+  } as never);
   const box = new RawBox(ephemeralWallet(key("2222")), r.originOf(h));
-  for (const b of chunk([{ cid: rec.cid, bytes: rec.bytes }])) await box.send(l.identity, "objects", b);
-  await box.send(l.identity, "head", { name: READS_HEAD, tree: rec.cid });
+  for (const b of chunk([{ cid: app.cid, bytes: app.bytes }])) await box.send(l.identity, "objects", b);
+  await box.send(l.identity, "head", { name: "overlay/app", tree: app.cid });
+  for (const [address, fn] of OVERLAY_READS) await box.send(l.identity, "dispatch", { op: "add", row: { transport: "http", address, filters: [`overlay.${fn}`] } });
   await r.settled();
-  if (String(await l.kernel.call("head", READS_HEAD)) !== String(rec.cid)) throw new Error(`${h}: the reads head not written`);
+  const rows = (await l.kernel.dispatch()).rows.filter((x) => OVERLAY_READS.some(([a]) => a === x.address));
+  if (rows.length !== OVERLAY_READS.length) throw new Error(`${h}: the read routes not written (${rows.length})`);
 }
 
 function clone(repo: string, rev: string, dir: string): string {
@@ -137,25 +143,24 @@ writeFileSync(join(sys, "bin/lookup-demo.json"), JSON.stringify({ inputs: {}, de
 // engine's app is its program's name), the chain app the stock `chain/`.
 const config = () => JSON.stringify({ defaults: { walletNetwork: "regtest", overlayTopics: JSON.stringify({ tm_demo: "topic-demo" }), overlayLookups: JSON.stringify({ ls_demo: { program: "lookup-demo", topics: ["tm_demo"] } }) }, scopes: { overlay: ["overlay/"], "lookup-demo": ["overlay/"] } });
 writeFileSync(join(sys, "etc/config.json"), config());
-const http = (address: string, fn: string) => ({ transport: "http", address, sender: "*", program: "overlay", fn });
+const http = (address: string, fn: string) => ({ transport: "http", address, program: "overlay", fn });
 const ROWS = [
-  // The chain app (#78, #79): the host's events, the instance's own apps and the owner as callers, the status provider.
-  { address: "chain", sender: "event", program: "chain" },
-  { address: "chain", sender: "$self", program: "chain", filter: "beef" },
-  { address: "chain", sender: "$owner", program: "chain", filter: "beef" },
-  { address: "chain/status", sender: "$status", program: "chain" },
-  // The overlay (#79): its own box, from events (its libp2p route's admits) and from itself (its watches).
-  { address: "overlay", sender: "event", program: "overlay" },
-  { address: "overlay", sender: "$self", program: "overlay" },
+  // The chain app (#78, #79, #143): the host's events (an event route), messages (the instance's own apps, root), the status provider.
+  { transport: "event", address: "chain", program: "chain" },
+  { address: "chain", program: "chain", filters: ["kernel.beef"] },
+  { address: "chain/status", program: "chain" },
+  // The overlay (#79): its own box, events (its libp2p route's admits) and messages (its watches, by the loopback).
+  { transport: "event", address: "overlay", program: "overlay" },
+  { address: "overlay", program: "overlay" },
   // skein-overlay 0.7.6 (#112, #128): a submission is a message into the box overlay/submit, from anyone (the BEEF through the door's filter).
-  { address: "overlay/submit", sender: "*", program: "overlay", filter: "beef" },
-  { transport: "http", address: "/sendMessage", sender: "session", program: "messagebox", fn: "sendMessage" },
-  // The overlay-express wire contract: /submit a message route (#135: signed); the lookup, listings and documentation
-  // are reads (addReads, the reads head).
-  // #121: the submit rows name the door's beef filter: the handler gets the BEEF's pointer record, never its bytes.
-  { ...http("/submit", "submit"), filter: "beef" },
+  { address: "overlay/submit", program: "overlay", filters: ["kernel.beef"] },
+  { transport: "http", address: "/sendMessage", filters: ["kernel.brc104"], program: "messagebox", fn: "sendMessage" },
+  // The overlay-express wire contract: /submit validated by kernel.beef (signed or not, #135); the lookup, listings
+  // and documentation are read routes (addReads).
+  // #121: the submit routes name kernel.beef: the handler gets the BEEF's pointer record, never its bytes.
+  { ...http("/submit", "submit"), filters: ["kernel.beef"] },
   // #57: the same submit fn on a GossipSub topic.
-  { transport: "libp2p", address: "tm_demo", sender: "*", program: "overlay", fn: "submit", filter: "beef" },
+  { transport: "libp2p", address: "tm_demo", program: "overlay", fn: "submit", filters: ["kernel.beef"] },
 ];
 writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(ROWS));
 writeFileSync(join(sys, "README.md"), "An overlay node: tm_demo and ls_demo, and the chain app.\n");
@@ -437,7 +442,7 @@ try {
       const back = pr && isBeefRecord(pr) ? await beefOf(pr, async (c) => await v.bytes(c)) : undefined;
       const txs = await headMap(k, "chain/state", "txs");
       report.door121 = {
-        filter: submitEntry?.door?.filter, linked: !!pointer && (submitEntry?.door?.beefs ?? []).some((c) => c.equals(pointer)), kind: pr?.kind,
+        filter: (submitEntry?.door as { filters?: string[] } | undefined)?.filters?.[0], linked: !!pointer && (submitEntry?.door?.beefs ?? []).some((c) => c.equals(pointer)), kind: pr?.kind,
         grep: [holding, total > 0], identical: !!back && Buffer.from(back).equals(Buffer.from(wire)),
         txBlocks: pr ? await Promise.all(pr.txs.map(async (c) => Buffer.from(await v.bytes(c)).toString("hex").length > 0)) : [],
         pointer: String(pointer),
@@ -582,15 +587,18 @@ try {
   const fwd = router as unknown as { forward(handle: string, ...rest: unknown[]): Promise<unknown> };
   const forward0 = fwd.forward.bind(router);
   let requests = 0, toDoor = 0;
-  // #135: what reaches the door — a signed request, the handshake, or a plain POST /submit (an open row whose filter
-  // validates) — is an entry; a read (a call) is none.
+  // #135, #143: what the door admits — the handshake, a POST /submit kernel.beef passes (signed or not), a signed request
+  // at any other route but a read route — is an entry; a read route's answer is none, nor is a rejection (a bad BUMP: 400).
+  const readPaths = new Set(OVERLAY_READS.map(([p]) => p));
   fwd.forward = async (handle, ...rest) => {
+    const res = await forward0(handle, ...rest);
     if (handle === "overlay") {
       requests++;
       const [route, , req] = rest as [string, URL, { headers: Record<string, string> }];
-      if (route === "/.well-known/auth" || route.endsWith("/submit") || Object.keys(req.headers).some((k) => k.startsWith("x-bsv-auth-"))) toDoor++;
+      const status = (res as { status?: number }).status;
+      if (route === "/.well-known/auth" || (route.endsWith("/submit") && status !== 400) || (!readPaths.has(route) && !route.endsWith("/submit") && Object.keys(req.headers).some((k) => k.startsWith("x-bsv-auth-")))) toDoor++;
     }
-    return await forward0(handle, ...rest);
+    return res;
   };
   const stateOf = async () => { const k = await kO(); return [String(await k.call("head", "overlay/state")), String(await k.call("head", "overlay/ls_demo")), String(await k.call("head", "chain/state"))]; };
   const before = await logLen();
@@ -608,9 +616,8 @@ try {
   await router.settled();
   report.refusedSubmit = [refusedA.length, ...gist(refusedA[0]).map((x) => typeof x === "string" ? x.split(":")[0] : x), (await logLen()) - lenBeforeRefused, eq(await stateOf(), state0)];
 
-  // #121: a bad BUMP — T1's BEEF with its funding's BUMP sibling changed (the root is not block 1's): refused at the
-  // door. The entry is written (a refusal entry, stage filter, its BEEF still a pointer: stored, reconstructible) and
-  // nothing runs: no thread for it, no head moved; the client gets the refusal (400).
+  // #121, #143: a bad BUMP — T1's BEEF with its funding's BUMP sibling changed (the root is not block 1's): rejected at
+  // the door by kernel.beef. No entry is written, nothing runs, no head moved; the client gets the rejection (400).
   {
     const good = new Uint8Array(t1.toBEEF());
     const at = Buffer.from(good).indexOf(Buffer.from("cb".repeat(32), "hex"));
@@ -621,14 +628,8 @@ try {
     const res = await submitFetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: bad });
     const answer = await res.json() as { code?: string; description?: string };
     await router.settled();
-    const k = await kO();
-    const last = (await entriesSince("overlay", len0)).at(-1)!;
-    const e = await k.store.get(last.cid) as unknown as { refused?: { stage: string; reason: string }; door?: unknown };
-    const a = await k.answer(last.cid, 0);
-    const rec = await k.store.get(last.request!) as unknown as { body: unknown };
     report.badBump = {
-      status: res.status, code: answer.code, entries: (await logLen()) - len0, refused: e.refused?.stage, reason: /merkle root/.test(e.refused?.reason ?? ""),
-      noThread: a.state === "refused", same: eq(await stateOf(), st0), pointer: !!CID.asCID(rec.body),
+      status: res.status, code: answer.code, entries: (await logLen()) - len0, reason: /merkle root/.test(answer.description ?? ""), same: eq(await stateOf(), st0),
     };
     // #135: the same bad BEEF plain (validated, not signed): the filter's refusal, a plain 400.
     const resPlain = await fetch(`${base}/submit`, { method: "POST", headers: { "x-topics": "tm_demo" }, body: bad });
@@ -966,8 +967,8 @@ const gossipTree = (dir: string, topics: string[]) => {
   const c = JSON.parse(readFileSync(join(sys, "etc/config.json"), "utf8")) as Record<string, unknown>;
   writeFileSync(join(dir, "etc/config.json"), JSON.stringify({ ...c, libp2p: { topics } }));
   writeFileSync(join(dir, "etc/dispatch.json"), JSON.stringify([...ROWS,
-    { transport: "libp2p", address: "tm_demo-admit", sender: "*", program: "overlay", fn: "peerAdmit" },
-    { transport: "libp2p", address: "tm_demo-proof", sender: "*", program: "overlay", fn: "peerProof" }]));
+    { transport: "libp2p", address: "tm_demo-admit", program: "overlay", fn: "peerAdmit" },
+    { transport: "libp2p", address: "tm_demo-proof", program: "overlay", fn: "peerProof" }]));
 };
 gossipTree(join(home, "system-gossip-ab"), ["tm_demo", "tm_demo-proof"]);
 gossipTree(join(home, "system-gossip-c"), ["tm_demo-admit"]);
@@ -1189,12 +1190,12 @@ check(eq(report.submit1, { status: "success", answered: STEAK, steak: STEAK }), 
 check(eq(report.posted1, [true]), `#79: the chain app broadcast the token transaction the overlay handed it; the host posted it to Arcade once (Extended Format) before it was admitted (${JSON.stringify(report.posted1)})`);
 {
   const d = report.door121 as { filter?: string; linked?: boolean; kind?: string; grep?: [number, boolean]; identical?: boolean; txBlocks?: boolean[]; ingested?: boolean; ingests?: string[] } | undefined;
-  check(d?.filter === "beef" && d.linked === true && d.kind === "beef", `#121: the submit's entry: the door ran the row's beef filter; its request names the BEEF's pointer record, listed in door.beefs (${JSON.stringify(d)})`);
+  check(d?.filter === "kernel.beef" && d.linked === true && d.kind === "beef", `#121: the submit's entry: the door ran the row's beef filter; its request names the BEEF's pointer record, listed in door.beefs (${JSON.stringify(d)})`);
   check(!!d?.grep && d.grep[0] === 0 && d.grep[1], `#121: no block in the store holds the submitted BEEF's bytes (a grep of every block: ${JSON.stringify(d?.grep)})`);
   check(d?.identical === true && !!d.txBlocks?.length && d.txBlocks.every(Boolean), `#121: the record's bytes back (beef.ts beefOf over its blocks: each transaction a bitcoin-tx block) are the submitted bytes`);
   check(d?.ingested === true && !!d.ingests?.length && d.ingests.every((x) => x === "the pointer"), `#121: the chain app ingested it from the pointer record's CID — every ingest message the overlay sent carries the CID, none the bytes (${JSON.stringify(d?.ingests)})`);
   const bb = report.badBump as Record<string, unknown> | undefined;
-  check(eq(bb, { status: 400, code: "ERR_REFUSED", entries: 1, refused: "filter", reason: true, noThread: true, same: true, pointer: true }), `#121: a bad BUMP: a refusal entry (stage filter, "merkle root"), stored with its BEEF a pointer; nothing runs (no thread, no head moved); 400 to the client (${JSON.stringify(bb)})`);
+  check(eq(bb, { status: 400, code: "ERR_BEEF", entries: 0, reason: true, same: true }), `#121, #143: a bad BUMP: rejected by kernel.beef ("merkle root"), no entry, nothing runs; 400 to the client (${JSON.stringify(bb)})`);
   const db_ = report.dupeBlocks as { bitcoinAndRaw: [number, number]; samePointer: boolean } | undefined;
   check(!!db_ && db_.bitcoinAndRaw[0] === db_.bitcoinAndRaw[1] && db_.samePointer && (db_ as { delivered?: boolean }).delivered === true, `#121: a held transaction submitted again writes no block (bitcoin and raw blocks ${JSON.stringify(db_?.bitcoinAndRaw)}), the same pointer record; answered the first STEAK from the state (0.9.2)`);
   check(eq(report.lookupSame, [true, true]), `#121: the lookup answers the same bytes on the instance that took T1 over HTTP and the one that took it over GossipSub (${JSON.stringify(report.lookupSame)})`);
@@ -1226,7 +1227,7 @@ check(Array.isArray(report.doc) && String(report.doc[0]).startsWith("text/markdo
   const [b, a, n, still, local, door] = (report.readsWrite ?? []) as [number, number, number, boolean, number, number];
   check(n > 10 && n - door >= 5 && a === b + door && local >= 2 && still === true, `#135: every request to the door (signed, the handshake, or a plain POST /submit: validated) is an entry, a read none (${n} requests, ${door} to the door: ${b} → ${a}, besides ${local} \`local\` ones: the status provider's and the loopback's); the reads moved nothing (${still})`);
   check(report.plainSubmit === 200, `#135, signed or validated: a plain POST /submit (the stock facilitator's, X-Topics) is admitted because its BEEF validates: 200 (${String(report.plainSubmit)})`);
-  check(eq(report.badBumpPlain, [400, "ERR_REFUSED", false]), `#135: a bad BUMP plain: the filter's refusal, 400, answered plain (${JSON.stringify(report.badBumpPlain)})`);
+  check(eq(report.badBumpPlain, [400, "ERR_BEEF", false]), `#135: a bad BUMP plain: the filter's refusal, 400, answered plain (${JSON.stringify(report.badBumpPlain)})`);
 }
 check(eq(report.awaitingU, { state: [[false, true, false], [false, true, false], [false, true, false]], posts: [1, 1, 1] }), `#57, #79: three unproven tokens, each posted once by the chain app and admitted on its accepted, each unproven with its broadcast registered (${JSON.stringify(report.awaitingU)})`);
 check(eq(report.settledBySse, [[true, false, false], [true, false, false], [true, false, false]]), `#65: Arcade's SEEN_ON_NETWORK then MINED (proof events with merkle paths) over its SSE stream, to the chain app: proven, nothing registered (${JSON.stringify(report.settledBySse)})`);
@@ -1251,7 +1252,7 @@ check(eq(report.mined, { answer: ["admitted", "proven", STEAK], posted: 0, state
 }
 {
   const p = report.noProviderPending as { answers: number; state: boolean[]; live: number; statusRow: boolean } | undefined;
-  check(!!p && p.answers === 0 && eq(p.state, [false, true, false]) && p.live === 0 && p.statusRow === false, `#73: no Arcade, no status provider (the chain app's \`status\` row left out): the submission handed to the chain app, pending; not answered; nothing admitted (${JSON.stringify(p)})`);
+  check(!!p && p.answers === 0 && eq(p.state, [false, true, false]) && p.live === 0 && p.statusRow === true, `#73: no Arcade, no status provider (#143: the chain app's \`status\` route stands — no sender; nothing comes into it): the submission handed to the chain app, pending; not answered; nothing admitted (${JSON.stringify(p)})`);
   const v = report.noProviderProven as { state: boolean[]; live: number; answers: unknown[][] } | undefined;
   check(!!v && eq(v.state, [true, false, false]) && v.live === 1 && v.answers[0]?.[0] === "admitted" && v.answers[0]?.[1] === "proven", `#73: its proof, fed directly: the chain app answers proven — admitted at the proof, the submitter answered admitted (proven) (${JSON.stringify(v)})`);
 }

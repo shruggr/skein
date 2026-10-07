@@ -97,6 +97,10 @@ const Walk = struct {
     opened: bool = false,
     beefs: std.ArrayList([]const u8) = .empty,
     refused: ?[]const u8 = null,
+    /// What a pass stores (#143: a rejection writes nothing — no entry names it, so nothing may be left in the store).
+    pending: std.ArrayList(Pending) = .empty,
+
+    const Pending = struct { cid: []const u8, bytes: []const u8 };
 
     fn refuse(w: *Walk, comptime f: []const u8, args: anytype) !void {
         if (w.refused == null) w.refused = try std.fmt.allocPrint(w.a, f, args);
@@ -130,7 +134,7 @@ const Walk = struct {
             w.headers = try Headers.open(a, w.s);
             w.opened = true;
         }
-        // Check every BUMP before anything is stored; a refusal still stores what decoded (lossless).
+        // Check every BUMP before anything is stored; nothing is stored unless the whole package passes (flush, #143).
         const checked = try a.alloc(beef.Checked, d.bumps.len);
         var nodes: std.ArrayList(beef.Node) = .empty;
         for (d.bumps, checked, 0..) |p, *c, i| {
@@ -163,14 +167,20 @@ const Walk = struct {
         for (d.txs) |t| if (t.raw) |raw| try w.once(try beef.txCid(a, t.txid), raw);
         for (d.bumps) |p| try w.once(try cidm.ofRaw(a, p.bytes), p.bytes);
         if (w.refused == null) for (nodes.items) |n| try w.once(try beef.txCid(a, n.hash), &n.bytes);
-        const rc = try w.s.put(a, try beef.record(a, d, checked));
-        try w.beefs.append(a, rc);
-        return cbor.cidv(rc);
+        const blk = try cbor.block(a, try beef.record(a, d, checked));
+        try w.pending.append(a, .{ .cid = blk.cid, .bytes = blk.bytes });
+        try w.beefs.append(a, blk.cid);
+        return cbor.cidv(blk.cid);
     }
 
     fn once(w: *Walk, c: []const u8, b: []const u8) !void {
-        if (try w.s.has(c)) return;
-        try w.s.putBlock(c, b);
+        try w.pending.append(w.a, .{ .cid = try w.a.dupe(u8, c), .bytes = try w.a.dupe(u8, b) });
+    }
+
+    /// Store what the walk decoded: once, and only when it passed.
+    fn flush(w: *Walk) !void {
+        if (w.refused != null) return;
+        for (w.pending.items) |x| if (!(try w.s.has(x.cid))) try w.s.putBlock(x.cid, x.bytes);
     }
 };
 
@@ -189,6 +199,7 @@ pub fn nothingValidated(principal: bool, x: Filtered) ?[]const u8 {
 pub fn filterBeef(a: std.mem.Allocator, s: Store, v: Value) !Filtered {
     var w = Walk{ .a = a, .s = s };
     const out = try w.walk(v);
+    try w.flush();
     return .{ .value = out, .beefs = w.beefs.items, .refused = w.refused };
 }
 

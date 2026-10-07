@@ -644,6 +644,12 @@ pub const Runtime = struct {
             if (m.row) |v| route = dispatch.rowOf(v);
         }
         if (route) |r| {
+            // A signed request at a route whose filters name no kernel.brc104 (#135: a signed request gets a signed
+            // answer): its session found and checked on the request as received — before a filter rewrites it — only
+            // for the answer to be signed on (`door.verified`); it yields no principal and admits nothing.
+            if (std.mem.eql(u8, transport, "http") and doorm.signedRequest(record) and !namesFilter(r, doorm.BRC104)) {
+                if (try rt.brc104Session(a, record, at)) |v| ch.verified = v;
+            }
             for (r.filters) |f| {
                 if (try rt.filter(a, f.string, transport, r, &ch, at)) |out| return .{ .answered = out };
             }
@@ -651,6 +657,34 @@ pub const Runtime = struct {
             if (try rt.gateOf(a, r, ch.principal)) |no| return .{ .answered = no };
         }
         return .{ .entry = try withRequest(a, entry, try rt.store.put(a, ch.request), try doorValue(a, &ch, null)) };
+    }
+
+    fn namesFilter(r: dispatch.Row, name: []const u8) bool {
+        for (r.filters) |f| if (std.mem.eql(u8, f.string, name)) return true;
+        return false;
+    }
+
+    /// kernel.brc104's check of a request, its session as `door.verified` ({caller, theirs, requestId}); null when it
+    /// does not hold.
+    fn brc104Session(rt: *Runtime, a: std.mem.Allocator, req: Value, at: i64) !?Value {
+        const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
+        switch (try doorm.brc104(a, rt.store, w, req, at, rt.sessionTtl())) {
+            .reject => return null,
+            .pass => |v| {
+                var m = cbor.MapBuilder.init(a);
+                try m.put("caller", .{ .bytes = v.caller });
+                try m.put("theirs", cbor.string(v.theirs));
+                try m.put("requestId", cbor.string(v.request_id));
+                return m.value();
+            },
+        }
+    }
+
+    /// `defaults.sessionTtlMs` (a day when unset).
+    fn sessionTtl(rt: *Runtime) i64 {
+        const d = rt.genesis.?.get("defaults") orelse return 86_400_000;
+        const t = Value.str(d.get("sessionTtlMs")) orelse return 86_400_000;
+        return std.fmt.parseInt(i64, t, 10) catch 86_400_000;
     }
 
     fn reject(status: i128, code: ?[]const u8, reason: []const u8) Answered {
@@ -721,13 +755,8 @@ pub const Runtime = struct {
         try ch.ran.append(cbor.string(name));
         if (std.mem.eql(u8, name, doorm.BRC104)) {
             if (!std.mem.eql(u8, transport, "http")) return reject(500, "ERR_FILTER", "kernel.brc104 checks an http request");
-            const ttl: i64 = blk: {
-                const d = rt.genesis.?.get("defaults") orelse break :blk 86_400_000;
-                const t = Value.str(d.get("sessionTtlMs")) orelse break :blk 86_400_000;
-                break :blk std.fmt.parseInt(i64, t, 10) catch 86_400_000;
-            };
             const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
-            switch (try doorm.brc104(a, rt.store, w, ch.request, at, ttl)) {
+            switch (try doorm.brc104(a, rt.store, w, ch.request, at, rt.sessionTtl())) {
                 .reject => |x| return .{ .kind = "reject", .status = x.status, .code = x.code, .reason = x.reason, .fuel = ch.fuel },
                 .pass => |v| {
                     ch.principal = v.caller;

@@ -40,7 +40,7 @@ import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
 import { mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
-import { CLAIM_ROW, codeSystem, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
+import { CLAIM_ROW, codeSystem, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
@@ -251,7 +251,10 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
   // A tree that names no http route takes the stock ones (the handshake, the messagebox's, the explorer), as a tree
   // with no etc/routes.json did before #143; each is dropped when the tree lacks its program.
-  const specs = t.dispatch.some((r) => r.transport === "http") ? t.dispatch : [...t.dispatch, ...STOCK_HTTP];
+  // The handshake route is the transport's own: a tree that names http routes of its own gets it too.
+  const specs = t.dispatch.some((r) => r.transport === "http")
+    ? [...t.dispatch, ...(t.dispatch.some((r) => r.transport === "http" && r.address === HANDSHAKE_ROW.address) ? [] : [HANDSHAKE_ROW])]
+    : [...t.dispatch, ...STOCK_HTTP];
   let s: System = resolveSystem(c, programs, t.config, t.root, specs);
   const isClaim = (r: DispatchRow) => r.program === "kernel" && r.fn === "claim";
   // An image (#89, #143): no root, so it must be claimable — its routes carry the claim route.

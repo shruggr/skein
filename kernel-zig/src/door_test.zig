@@ -1,7 +1,7 @@
 // The `beef` filter (door.zig) over a store with a chain state: the BUMP
 // check against chain/state's headers, the blocks it stores (each once),
 // the package it hands back (no BEEF bytes, a link to the pointer record),
-// a refusal, and the bytes put back (restore).
+// a rejection (nothing stored), and the bytes put back (restore).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -121,16 +121,18 @@ test "door: the beef filter checks every BUMP against chain/state, stores each b
     try std.testing.expectEqualSlices(u8, got.beefs[0], again.beefs[0]);
     try std.testing.expectEqual(before, (try ss.allCids(a)).len);
 
-    // A BUMP whose sibling is changed: its root is not the header's — refused, its BEEF still a pointer.
+    // A BUMP whose sibling is changed: its root is not the header's — rejected (#143: nothing stored, no entry names it).
     const bad_wire = try a.dupe(u8, wire);
     bad_wire[5 + 5] ^= 0xff;
     var bad = cbor.MapBuilder.init(a);
     try bad.put("body", .{ .bytes = bad_wire });
+    const held = (try ss.allCids(a)).len;
     const r = try door.filterBeef(a, s, bad.value());
     try std.testing.expect(r.refused != null);
     try std.testing.expect(contains(r.refused.?, "merkle root"));
     try std.testing.expect(r.value.get("body").? == .cid);
-    try std.testing.expectEqualSlices(u8, bad_wire, Value.bytesOf((try door.restore(a, s, r.value, r.beefs)).get("body")).?);
+    try std.testing.expectEqual(held, (try ss.allCids(a)).len);
+    try std.testing.expect(!(try s.has(r.beefs[0])));
 
     // A BUMP at a height chain/state has no header for: refused.
     var hi = try a.dupe(u8, wire);
