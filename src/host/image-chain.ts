@@ -40,7 +40,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import { headTree } from "../runtime/heads.ts";
 import type { Store } from "../runtime/store.ts";
 import { hashBlob, hashTree, parseTree, readBlob, readTree, type Entry } from "../runtime/tree.ts";
-import { anyOf, DEFAULT_IMAGE, dirSource, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
+import { anyOf, DEFAULT_IMAGE, dirSource, HOST_IMAGE, MemBlocks, mergeImages, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import type { HostDb } from "./instances.ts";
 
 /** Headers per block (skein-sdk `image.per_block`). */
@@ -86,6 +86,8 @@ export interface ImageChainOptions {
   page?: number;
   /** The static part (default: the repo's images/default). */
   dir?: string;
+  /** The host image's own part (#142, default: the repo's images/host), merged over the static part. */
+  hostDir?: string;
   fetch?: typeof fetch;
   log?(line: string): void;
 }
@@ -108,6 +110,7 @@ export class ImageChain {
   private last: Buffer = Buffer.alloc(0);
   private queue: Promise<unknown> = Promise.resolve();
   private stat?: Promise<{ root: CID; entries: Entry[]; objects: Objects }>;
+  private hostStat?: Promise<{ root: CID; entries: Entry[]; objects: Objects }>;
   /** Settles once the first sync (start) is done: what a creation waits for. */
   ready: Promise<void> = Promise.resolve();
 
@@ -205,7 +208,7 @@ export class ImageChain {
     const headers = hashTree(blocks.map((cid, k) => ({ mode: "100644", name: blockName(k * PER_BLOCK), cid })));
     const tip = hashBlob(Buffer.from(tipText));
     const chain = hashTree([{ mode: "40000", name: "headers", cid: headers.cid }, { mode: "100644", name: "tip", cid: tip.cid }]);
-    const root = await this.rootWith(chain.cid);
+    const root = await this.rootWith(chain.cid, await this.static());
     for (const x of [headers, tip, chain, root]) puts.set(x.cid.toString(), x.object);
     // The objects this tree no longer names.
     const old = this.o.db.setting("image_chain");
@@ -232,9 +235,21 @@ export class ImageChain {
     return this.stat;
   }
 
+  /** #142: the host image's static part — images/host merged over images/default (boot.ts mergeImages), once. */
+  private hostStatic(): Promise<{ root: CID; entries: Entry[]; objects: Objects }> {
+    this.hostStat ??= (async () => {
+      const base = await this.static();
+      const own = await dirSource(this.o.hostDir ?? HOST_IMAGE);
+      const merged = new MemBlocks();
+      const objects = anyOf(merged, base.objects, own.objects);
+      const root = await mergeImages(objects, base.root, own.root, merged);
+      return { root, entries: parseTree((await objects.get(root))!), objects };
+    })();
+    return this.hostStat;
+  }
+
   /** The image's root: the static part's entries, `chain` among them. */
-  private async rootWith(chain: CID): Promise<{ cid: CID; object: Uint8Array }> {
-    const s = await this.static();
+  private async rootWith(chain: CID, s: { entries: Entry[] }): Promise<{ cid: CID; object: Uint8Array }> {
     return hashTree([...s.entries.filter((e) => e.name !== "chain"), { mode: "40000", name: "chain", cid: chain }]);
   }
 
@@ -244,12 +259,20 @@ export class ImageChain {
    * repo's images/default, as before). Its objects: host.db's, the scan's,
    * the repo's pinned modules.
    */
-  async source(): Promise<BootSource> {
-    const s = await this.static();
-    const objects = anyOf(s.objects, wasmDirObjects(WASM_DIR), { get: async (cid) => this.o.db.imageBlock(cid.toString()) });
+  async source(o: { host?: boolean } = {}): Promise<BootSource> {
+    const s = o.host ? await this.hostStatic() : await this.static();
+    const chainObjects = { get: async (cid: CID) => this.o.db.imageBlock(cid.toString()) };
     const chain = this.o.db.setting("image_chain");
+    if (o.host) {
+      // The host image (#142): its root is not kept in host.db; the chain part's objects are the same.
+      const root = chain ? await this.rootWith(Cid.parse(chain), s) : undefined;
+      const mem = new MemBlocks();
+      if (root) await mem.putBlock(root.cid, root.object);
+      return { kind: "tree", root: root?.cid ?? s.root, objects: anyOf(mem, s.objects, wasmDirObjects(WASM_DIR), chainObjects) };
+    }
+    const objects = anyOf(s.objects, wasmDirObjects(WASM_DIR), chainObjects);
     if (!chain) return { kind: "tree", root: s.root, objects };
-    const root = await this.rootWith(Cid.parse(chain));
+    const root = await this.rootWith(Cid.parse(chain), s);
     // The static part changed since the last write (a new checkout): this root is the current one.
     if (this.o.db.setting("image") !== root.cid.toString()) this.o.db.writeImage(new Map([[root.cid.toString(), root.object]]), new Set([this.o.db.setting("image") ?? ""]), { image: root.cid.toString() });
     return { kind: "tree", root: root.cid, objects };

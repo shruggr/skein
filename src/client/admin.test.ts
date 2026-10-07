@@ -1,17 +1,21 @@
-// The owner's admin messages as files (#124, admin.ts): the JSON body the
-// messagebox reads as DAG-JSON is the same record the page sends as dag-cbor;
-// the files in order; delivery stops at the first answer that is not 2xx;
-// the wallet's command (`1sat authfetch … --json`) read through its notices.
+// The owner's admin messages (#124, #142, admin.ts): the JSON body a dry run
+// prints, read as DAG-JSON, is the same record the client sends as dag-cbor;
+// the kernel's bodies; host.env and the operator's key; a message signed in
+// the client's own process.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { PrivateKey, ProtoWallet } from "@bsv/sdk";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
 import { encode } from "../runtime/cid.ts";
-import { authfetchPoster, authfetchReader, deliver, messageJson, oversized, planDispatch, planFiles, planPeers, writePlan, type AdminPlan } from "./admin.ts";
+import { messageJson, planDispatch, planPeers } from "./admin.ts";
+import { signMessage } from "./raw.ts";
+import { identityOf, operatorKey, withHostEnv } from "../host/hostenv.ts";
+import { keyWallet } from "../wallet.ts";
 
 const KEY = `02${"ab".repeat(32)}`;
 
@@ -51,48 +55,32 @@ test("planDispatch --http (#125): the owner's http row (prefix, fn, the handler'
   assert.throws(() => planDispatch(KEY, { op: "add", box: "x", sender: "session", handler: String(prog) }), /an http row's/);
 });
 
-test("writePlan / planFiles / deliver: numbered files in order, an earlier plan's removed; delivery stops at the first non-2xx", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "skein-admin-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const plan = (n: number): AdminPlan => ({ prompt: ["a plan"], recipient: KEY, messages: Array.from({ length: n }, (_, i) => ({ box: i % 2 ? "head" : "objects", body: { i } })) });
-  writePlan(dir, plan(12));
-  writePlan(dir, plan(3));
-  assert.deepEqual(readdirSync(dir).sort(), ["001-objects.json", "002-head.json", "003-objects.json", "prompt.txt"]);
-  assert.equal(readFileSync(join(dir, "prompt.txt"), "utf8"), "a plan\n");
-  const seen: number[] = [];
-  const done = await deliver(planFiles(dir), async (json) => {
-    const i = (JSON.parse(json) as { message: { body: { i: number } } }).message.body.i;
-    seen.push(i);
-    return { status: i === 1 ? 403 : 200, text: "" };
-  });
-  assert.deepEqual(seen, [0, 1], "stopped at the 403");
-  assert.deepEqual(done.map((d) => d.status), [200, 403]);
-  assert.deepEqual(oversized(plan(1), 10).map((b) => b.index), [0]);
+test("host.env (#142): every SKEIN_* line, quotes and comments stripped, the environment wins; the operator's key made once, 0600", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "skein-hostenv-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  writeFileSync(join(home, "host.env"), "# the host\nSKEIN_ROUTER_ORIGIN=https://id.example.com\nexport SKEIN_HANDLE_DOMAIN='example.com'\nSKEIN_HOST_NAME=\"A host\"\nSKEIN_ROUTER_PORT=8100 # the port\nOTHER=1\n");
+  const v = withHostEnv({ SKEIN_HOME: home, SKEIN_ROUTER_PORT: "9000" });
+  assert.deepEqual([v.SKEIN_ROUTER_ORIGIN, v.SKEIN_HANDLE_DOMAIN, v.SKEIN_HOST_NAME, v.SKEIN_ROUTER_PORT, v.OTHER], ["https://id.example.com", "example.com", "A host", "9000", undefined]);
+  assert.throws(() => operatorKey(v), /no operator key/);
+  const made = operatorKey(v, { create: true });
+  assert.equal(made.made, true);
+  assert.equal(statSync(made.path).mode & 0o777, 0o600);
+  const again = operatorKey(v, { create: true });
+  assert.deepEqual([again.made, identityOf(again.key)], [false, identityOf(made.key)]);
+  const wif = join(home, "wif.key");
+  writeFileSync(wif, `${made.key.toWif()}\n`);
+  assert.equal(identityOf(operatorKey({ SKEIN_HOME: home, SKEIN_OPERATOR_KEY: wif }).key), identityOf(made.key), "a WIF key file reads as the same key");
 });
 
-test("the wallet's command: `<cmd> <method> <url> [--body @file] --json`, its dotenv notices skipped; 404 is no record", async (t) => {
-  const dir = mkdtempSync(join(tmpdir(), "skein-authfetch-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const fake = join(dir, "authfetch");
-  writeFileSync(fake, `#!/usr/bin/env bash
-echo "$@" >> "${join(dir, "calls")}"
-echo "◇ injected env (0) from .env"
-case "$2" in
-  */explore) echo '{"status": 200, "ok": true, "headers": {}, "body": "{\\"heads\\":{}}"}' ;;
-  */explore/record/*) echo '{"status": 404, "ok": false, "headers": {}, "body": "not found"}'; exit 1 ;;
-  */sendMessage) echo '{"status": 200, "ok": true, "headers": {}, "body": {"status": "success"}}' ;;
-esac
-`);
-  chmodSync(fake, 0o755);
-  const read = authfetchReader("http://x.localhost:1/", [fake]);
-  assert.deepEqual(await read(""), { heads: {} });
-  assert.equal(await read("/record/bafy"), undefined);
-  const f = join(dir, "001-head.json");
-  writeFileSync(f, "{}");
-  assert.deepEqual(await authfetchPoster("http://x.localhost:1", [fake])("{}", f), { status: 200, text: '{"status":"success"}' });
-  assert.deepEqual(readFileSync(join(dir, "calls"), "utf8").trim().split("\n"), [
-    "GET http://x.localhost:1/explore --json",
-    "GET http://x.localhost:1/explore/record/bafy --json",
-    `POST http://x.localhost:1/sendMessage --body @${f} --json`,
-  ]);
+test("signMessage (#142): the mail record the front door checks — sender, recipient, box, the body's CID, signed by the key", async () => {
+  const key = PrivateKey.fromRandom();
+  const m = await signMessage(keyWallet(key), { recipient: KEY, box: "git", body: dagCbor.encode({ fn: "git.clone", args: { url: "https://x", hash: "ab".repeat(20) } }) });
+  const rec = m.message as { kind: string; op: string; sender: Uint8Array; recipient: Uint8Array; box: string; body: unknown; signature: Uint8Array };
+  assert.deepEqual([rec.kind, rec.op, rec.box, Buffer.from(rec.sender).toString("hex"), Buffer.from(rec.recipient).toString("hex")], ["mail", "put", "git", key.toPublicKey().toString(), KEY]);
+  assert.equal(String(rec.body), String(encode(dagCbor.decode(m.body) as never).cid));
+  const { signature, ...unsigned } = rec;
+  const ok = await new ProtoWallet("anyone").verifySignature({ protocolID: [2, "metanet handles envelope"], keyID: "send", counterparty: key.toPublicKey().toString(), data: [...dagCbor.encode(unsigned)], signature: [...signature], forSelf: false });
+  assert.equal(ok.valid, true);
+  const c = await signMessage(keyWallet(key), { box: "claim", body: dagCbor.encode({}) });
+  assert.equal((c.message as { recipient?: unknown }).recipient, undefined, "a claim names no recipient (#127)");
 });

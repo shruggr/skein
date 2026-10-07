@@ -2,14 +2,15 @@
 // end on a host as `skein-host run` runs it (runHost: the signer over a
 // master secret, the control socket, the providers):
 //
-//   `skein-host init --owner <operator>` creates the host skein from the
-//   default image, the instance manager in its address book — a bare image,
-//   its claim row from anyone (#127): the operator claims it with a message
-//   from the operator's wallet (`skein plan claim`), the sender owning it; a
-//   second claim finds no row. A second `init` only says which it is;
-//   `skein-host list` names it `host`. The operator installs the onboarding app
-//   (shruggr/skein-onboard at src/testapps.ts's pinned commit, or
-//   $SKEIN_ONBOARD_DIR) into it as the owner's messages (`skein plan install`, #124).
+//   #142: `skein-host init` (the first run's part of `run`) creates the host
+//   skein from the host image (the default image and the onboarding app,
+//   shruggr/skein-onboard v0.3.4 in images/host), its genesis naming the
+//   operator's key ($SKEIN_HOME/operator.key) as its owner: the operator's
+//   admin rows and explorer row, git's and chain's `$owner` rows with the
+//   operator's key, no claim row (a claim finds none); the onboarding app's
+//   config (domain, origin) from the settings; the instance manager in its
+//   address book; published at once. A second `init` only says which it is;
+//   `skein-host list` names it `host`.
 //
 //   A client — a wallet with a BRC-104 session to the host skein, nothing
 //   else — POSTs {fn: "onboard.create", args: {handle: "alice", claim}} to
@@ -48,7 +49,7 @@ import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
 import { masterKey, Signer } from "../../src/host/signer.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { appCheckout, ONBOARD_APP, ownerCli, sendPlan } from "../../src/testapps.ts";
+import { ownerCli, sendPlan } from "../../src/testapps.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import type { WalletInterface } from "@bsv/sdk";
 
@@ -98,37 +99,51 @@ const stores: string[] = [];
 let host: Awaited<ReturnType<typeof runHost>> | undefined;
 const db = new HostDb(join(home, "host.db"));
 try {
-  // ------------------------------------------------ init: the host skein
-  let r = await cli(["init", "--owner", operatorId]);
-  const said = r.out.find((l) => /^host: the host skein .* to claim .* the instance manager in its address book/.test(l));
-  check(r.code === 0 && !!said, `skein-host init --owner <operator>: exit ${r.code} ${said ?? [...r.out, ...r.err].join(" ")}`);
+  // ------------------------------------------------ init: the host skein, owned by the operator's key at birth
+  await fs.writeFile(join(home, "operator.key"), `${operatorKey.toHex()}\n`, { mode: 0o600 });
+  let r = await cli(["init"]);
+  const said = r.out.find((l) => /first run — the host skein host .* owned by the operator's key /.test(l) && l.includes(operatorId));
+  check(r.code === 0 && !!said, `skein-host init: exit ${r.code} ${said ?? [...r.out, ...r.err].join(" ")}`);
   r = await cli(["init"]);
   check(r.code === 0 && r.out.some((l) => /^the host skein: host@localhost/.test(l)), `a second init says which instance is the host skein: ${r.out.join(" ")}`);
   r = await cli(["list"]);
   check(r.out.some((l) => /^host@localhost\thost\tenabled\t/.test(l)), "skein-host list names it: kind host, enabled");
   stores.push(db.get("host")!.store);
 
-  host = await runHost(db, { vars: { ...vars, SKEIN_OWNER: operatorId }, out, err: out });
+  host = await runHost(db, { vars, out, err: out });
   const router = host.router;
   const k = async (handle: string) => (await router.hydrate(handle)).kernel;
   const genesisBook = async (handle: string) => (((await (await k(handle)).genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   check((await genesisBook("host")).includes("manager"), "the host skein's address book names the instance manager");
-  const kernelRows = async (handle: string) => ((await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>).filter((x) => x.program === "kernel");
-  check((await kernelRows("host")).map((x) => `${x.address}<-${x.sender}`).join(",") === "claim<-*", "the host skein is a bare image: its one kernel row, the claim row from anyone");
-  // #127: the operator claims it from the operator's wallet (skein plan claim --recipient <identity>, skein send): the sender owns it.
-  const hostId = db.get("host")!.identity!;
-  await sendPlan({ port, owner: operator, settled: () => router.settled() }, "host", planClaim(hostId));
+  const allRows = async (handle: string) => ((await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>);
+  const kernelRows = async (handle: string) => (await allRows(handle)).filter((x) => x.program === "kernel");
   const hostRows = await kernelRows("host");
-  check(hostRows.length === 4 && hostRows.every((x) => hex(x.sender) === operatorId), "the operator's claim, from the operator's wallet: the host skein's four admin rows are the operator's");
+  check(hostRows.map((x) => `${x.address}<-${hex(x.sender)}`).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${operatorId}`).join(","), "the host skein's kernel rows are the operator's four admin rows: no claim row");
+  const rows = await allRows("host");
+  check(rows.some((x) => x.address === "/explore" && hex(x.sender) === operatorId), "the operator's explorer row");
+  check(rows.some((x) => x.app === "git" && x.address === "git" && hex(x.sender) === operatorId) && rows.some((x) => x.app === "chain" && x.address === "chain" && hex(x.sender) === operatorId), "git's and chain's $owner rows hold the operator's key");
+  const hostId = db.get("host")!.identity!;
   const late = await sendPlan({ port, owner: client, settled: () => router.settled() }, "host", planClaim(hostId)).then(() => "sent", (e: Error) => e.message);
-  check(/403/.test(late) && (await kernelRows("host")).every((x) => hex(x.sender) === operatorId), `a second claim (another wallet's) finds no row: ${late.slice(0, 80)}`);
+  check(/403/.test(late) && (await kernelRows("host")).every((x) => hex(x.sender) === operatorId), `a claim (another wallet's) finds no row: ${late.slice(0, 80)}`);
 
-  // ------------------------------------------------ the operator installs the onboarding app
-  // #113: the handle domain and the host's origin (where the manifest says resolve is) in the app's config.
-  r = await cli(["install", appCheckout(ONBOARD_APP), "--instance", "host", "--config", JSON.stringify({ onboard: { domain: "localhost", origin: base } })], { wallet: operator, id: operatorId });
+  // ------------------------------------------------ the onboarding app, installed at birth with the settings' config
+  const onboardRoot = await (await k("host")).call("head", "onboard/app") as CID | null;
+  const onboard = onboardRoot ? await (await k("host")).store.get(onboardRoot) as { version?: string; config?: { onboard?: { domain?: string; origin?: string } } } : undefined;
+  check(onboard?.version === "0.3.4" && onboard.config?.onboard?.domain === "localhost" && onboard.config.onboard.origin === base, `onboard ${onboard?.version} installed at birth, config.onboard ${JSON.stringify(onboard?.config?.onboard)}`);
+  check(rows.some((x) => x.app === "onboard" && x.address === "/onboard/call" && x.sender === "session") && rows.some((x) => x.app === "onboard" && x.address === "/onboard/register" && x.sender === "session"), "its rows: /onboard/call and /onboard/register (#135) from any session");
+
+  // ------------------------------------------------ grant: another key's admin rows, signed by the operator's key, over the control socket
+  const grantee = PrivateKey.fromRandom(), granteeId = grantee.toPublicKey().toString();
+  const before = await (await new RawBox(ephemeralWallet(grantee), `${base}/@host`).af.fetch(`${base}/@host/explore`)).status;
+  r = await cli(["grant", granteeId, "--apps"]);
   await router.settled();
-  check(r.code === 0 && r.out.some((l) => /onboard 0\.3\.4 installed/.test(l)), `skein plan install skein-onboard --origin host --config {onboard: {domain, origin}}: exit ${r.code} ${r.err.join(" ")}`);
-  check(r.out.some((l) => /row +http \/onboard\/call from session → onboard\.call/.test(l)) && r.out.some((l) => /row +http \/onboard\/register from session → onboard\.register/.test(l)), "its rows: /onboard/call and /onboard/register (#135) from any session; resolve, search, the manifest, profile, paymail from anyone");
+  const granted = await allRows("host");
+  const theirs = granted.filter((x) => hex(x.sender) === granteeId).map((x) => `${x.app ? `${String(x.app)}:` : ""}${x.address}`).sort();
+  check(r.code === 0 && theirs.join(",") === ["/explore", "chain:chain", "dispatch", "git:git", "head", "objects", "peers"].join(","), `skein-host grant <key> --apps: its admin rows, explorer row and the apps' owner rows (${theirs.join(", ")}; ${r.err.join(" ")})`);
+  const after = await (await new RawBox(ephemeralWallet(grantee), `${base}/@host`).af.fetch(`${base}/@host/explore`)).status;
+  check(before === 403 && after === 200, `the granted key reads the explorer: ${before} → ${after}`);
+  r = await cli(["grant", granteeId]);
+  check(r.code === 0 && r.out.some((l) => /every row already there/.test(l)), `a second grant sends nothing: ${r.out.join(" ")}`);
 
   // ------------------------------------------------ a client creates a skein
   /** onboard.create with `w`'s own signed claim (#127; `claim: null`: none, `claimBy`: another wallet's), as dag-json. */

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
-import { planMain } from "../client/admin-cli.ts";
+import { adminMain } from "../client/admin-cli.ts";
 import { planDeploy } from "../client/admin.ts";
 import { RawBox } from "../client/raw.ts";
 import { InferPeer } from "../peers/infer.ts";
@@ -24,7 +24,7 @@ import { openStoreFile } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
 import { currentDispatch, senderText } from "../runtime/dispatch.ts";
 import { readFile, readTree, walk } from "../runtime/tree.ts";
-import { CHAT_APP, sendDir, sendPlan, viewOf } from "../testapps.ts";
+import { CHAT_APP, sendPlan, viewOf } from "../testapps.ts";
 import { collect, iso, T0 } from "../testkit.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { main } from "./cli.ts";
@@ -103,12 +103,16 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
     }
     return s;
   };
+  // #142: the client signs with the operator's key (here the owner's) and delivers over the control socket.
+  await h.router.listenControl(join(h.home, "host.sock"));
+  const keyFile = join(h.home, "operator.key");
+  await fs.writeFile(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
   const env = (vars: Record<string, string> = {}) => {
     const out: string[] = [], err: string[] = [];
     return {
       out, err,
       env: {
-        vars: { SKEIN_HOME: h.home, SKEIN_ROUTER_PORT: String(h.router.port), SKEIN_MASTER_KEY: "11".repeat(32), ...vars },
+        vars: { SKEIN_HOME: h.home, SKEIN_ROUTER_PORT: String(h.router.port), SKEIN_MASTER_KEY: "11".repeat(32), SKEIN_OPERATOR_KEY: keyFile, ...vars },
         out: (l: string) => out.push(l), err: (l: string) => err.push(l),
       },
     };
@@ -206,29 +210,31 @@ test("skein plan deploy: the filtered tree through `objects` as the owner sets m
   assert.equal((await collect(s.edges.query({ kind: "thread", program: loop }))).length, 1);
 });
 
-test("skein plan deploy --recipient (no reads): every object and the head; another key's messages are refused", { skip }, async (t) => {
-  const { h, store, env, host } = await setup(t, ["kurt"]);
+test("skein deploy: a directory into main on a session with the instance's origin (objects, head); a stranger's key is refused", { skip }, async (t) => {
+  const { h, store, env } = await setup(t, ["kurt"]);
   const dir = await agentDir(t);
-  const out = await tmp(t);
   const e = env();
-  const id = h.db.get("kurt")!.identity!;
-  assert.equal(await planMain(["deploy", dir, "--recipient", id, "--out", out], e.env), 0, e.err.join("\n"));
-  assert.deepEqual((await fs.readdir(out)).sort(), ["001-objects.json", "002-head.json", "prompt.txt"]);
-  const head = JSON.parse(await fs.readFile(join(out, "002-head.json"), "utf8")) as { message: { recipient: string; messageBox: string; body: { name: string; tree: { "/": string } } } };
-  assert.deepEqual([head.message.recipient, head.message.messageBox, head.message.body.name], [id, "head", "main"]);
   await h.router.hydrate("kurt");
-  await assert.rejects(sendDir(host, "kurt", out, ephemeralWallet(PrivateKey.fromRandom())), /403/, "a stranger's objects are refused");
-  assert.equal(await sendDir(host, "kurt", out), 2);
-  await mainIs(await store("kurt"), head.message.body.tree["/"]);
+  await h.router.settled();
+  const origin = `${h.base}/@kurt`;
+  assert.equal(await adminMain("deploy", [dir, origin, "--dry-run"], e.env), 0, e.err.join("\n"));
+  const root = /→ main (\S+)/.exec(e.out.join("\n"))?.[1];
+  const sent = e.out.filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as { message: { recipient: string; messageBox: string } });
+  assert.ok(root && sent.length && sent.every((m) => m.message.recipient === h.db.get("kurt")!.identity! && m.message.messageBox === "objects"), e.out.join("\n"));
+  const stranger = join(h.home, "stranger.key");
+  await fs.writeFile(stranger, `${PrivateKey.fromRandom().toHex()}\n`);
+  assert.equal(await adminMain("deploy", [dir, origin], { ...e.env, vars: { ...e.env.vars, SKEIN_OPERATOR_KEY: stranger } }), 1, "a stranger's objects are refused");
+  assert.match(e.err.at(-1)!, /403/);
+  assert.equal(await adminMain("deploy", [dir, origin], e.env), 0, e.err.join("\n"));
+  await h.router.settled();
+  await mainIs(await store("kurt"), root!);
 });
 
-test("skein plan dispatch: a message to box `dispatch` as the owner changes a running instance's dispatch table (a kernel operation), a handler named from its genesis; no new genesis", { skip }, async (t) => {
-  const { h, env, store, host } = await setup(t, ["martha"]);
+test("skein dispatch --instance: a message to box `dispatch` as the owner, over the control socket, changes a running instance's dispatch table (a kernel operation), a handler named from its genesis; no new genesis", { skip }, async (t) => {
+  const { h, env, store } = await setup(t, ["martha"]);
   const s = await store("martha");
   const e = env();
-  const work = await tmp(t);
-  let n = 0;
-  const plan = async (...argv: string[]) => { const out = join(work, String(++n)); const code = await planMain(["dispatch", ...argv, "--store", h.db.get("martha")!.store, "--out", out], e.env); if (code === 0) await sendDir(host, "martha", out); return code; };
+  const plan = async (...argv: string[]) => { const code = await adminMain("dispatch", [...argv, "--instance", "martha"], e.env); await h.router.settled(); return code; };
   const genesis = (await collect(s.log.entries(0)))[0]!.cid;
   const before = await until("the genesis processed (its seed rows)", () => currentDispatch(s));
   const resolve = (await programsOf(s)).resolve!;

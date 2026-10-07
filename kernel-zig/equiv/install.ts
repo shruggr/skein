@@ -1,6 +1,6 @@
-// Installing apps (#72, #76, #79) end to end, as the owner's messages (#124:
-// `skein plan install|uninstall`, src/client/admin.ts, each /sendMessage JSON
-// body POSTed on the owner's session; src/testapps.ts ownerCli), into an
+// Installing apps (#72, #76, #79) end to end, as the owner's messages (#124,
+// #142: src/client/admin.ts, sent on the owner's session; src/testapps.ts
+// ownerCli; the owner's root read by `skein reads` over the control socket), into an
 // instance of the stock system on a router:
 //
 //   skein-site (shruggr/skein-site at the commit src/testapps.ts pins, cloned
@@ -9,7 +9,7 @@
 //   tree; no alias head), its one read (#135, `reads[]`) is served under
 //   /site/ (the files of its own tree's www) by a call, out of the reads head
 //   — no dispatch row, no entry; the owner's own read puts the same function
-//   at `/` (`skein plan reads add`), which an uninstall leaves; a read at a
+//   at `/` (`skein reads add`), which an uninstall leaves; a read at a
 //   row's path refused; uninstalled, its reads are gone.
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
@@ -31,16 +31,16 @@
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/install.ts
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PrivateKey } from "@bsv/sdk";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
-import { planMain } from "../../src/client/admin-cli.ts";
+import { adminMain } from "../../src/client/admin-cli.ts";
 import { main } from "../../src/host/cli.ts";
-import { ownerCli, sendDir, SITE_APP } from "../../src/testapps.ts";
+import { ownerCli, SITE_APP } from "../../src/testapps.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -229,21 +229,25 @@ try {
   c = await call({ fn: "demo.counter.get" });
   check(c.status === 404, `after uninstall, /app-demo/call is no route: ${c.status}`);
   check((await record("app-demo/app"))?.kind === "app", "the head app-demo/app is left");
-  // The owner's own read (#125, #135): the same function at `/` — `skein plan reads add`, sent as the owner.
-  const rootArgs = ["--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--store", h.db.get("inst")!.store];
-  const rootPlan = join(work, "root-row");
-  const plan = async (...args: string[]) => {
+  // The owner's own read (#125, #135): the same function at `/` — `skein reads add`, signed with the owner's key
+  // in the client and handed to the host over its control socket (#142).
+  await h.router.listenControl(join(h.home, "host.sock"));
+  const keyFile = join(h.home, "operator.key");
+  writeFileSync(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
+  const rootArgs = ["--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--instance", "inst"];
+  const skein = async (cmd: string, ...args: string[]) => {
     out.length = 0; err.length = 0;
-    const c = await planMain(args, { vars: {}, out: (l) => out.push(l), err: (l) => err.push(l) });
+    const c = await adminMain(cmd, args, { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l) => out.push(l), err: (l) => err.push(l) });
+    await h.router.settled();
     if (process.env.VERBOSE) for (const l of [...out, ...err]) process.stdout.write(`  | ${l}\n`);
     return c;
   };
-  const sendRoot = () => sendDir({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "inst", rootPlan);
-  code = await plan("reads", "add", ...rootArgs, "--out", rootPlan);
-  check(code === 0 && out.some((l) => /^reads add \/\* → .+\.get \(root www\) \(the owner's/.test(l)), `skein plan reads add --prefix … / site.site: the owner's read, planned (${code}: ${[...out, ...err].join(" | ")})`);
-  code = await plan("reads", "add", "--fn", "get", "/sendMessage", "site.site", "--store", h.db.get("inst")!.store, "--out", join(work, "clash"));
+  code = await skein("reads", "add", ...rootArgs, "--dry-run");
+  check(code === 0 && out.some((l) => /^reads add \/\* → .+\.get \(root www\) \(the owner's/.test(l)), `skein reads add --prefix … / site.site --dry-run: the owner's read, planned (${code}: ${[...out, ...err].join(" | ")})`);
+  code = await skein("reads", "add", "--fn", "get", "/sendMessage", "site.site", "--store", h.db.get("inst")!.store);
   check(code !== 0 && err.some((l) => /an http row is at that path/.test(l)), `a read at a row's path (/sendMessage) refused at the plan (${code}: ${err.join(" | ")})`);
-  await sendRoot();
+  code = await skein("reads", "add", ...rootArgs);
+  check(code === 0, `skein reads add --instance inst: sent (${code}: ${[...out, ...err].join(" | ")})`);
   r = await get("/");
   check(r.status === 200 && r.body.includes('src="app.js"'), `GET / : the site, by the owner's read (${r.status})`);
   r = await get("/app.js");
@@ -260,10 +264,9 @@ try {
   check((await appReads("site")).length === 0 && (await appRows("app-demo")).length === 0, "no app reads or rows left");
   r = await get("/");
   check(r.status === 200, `the owner's root read is the owner's: the uninstall leaves it (GET / ${r.status})`);
-  code = await plan("reads", "remove", ...rootArgs, "--out", rootPlan);
-  await sendRoot();
+  code = await skein("reads", "remove", ...rootArgs);
   r = await get("/");
-  check(code === 0 && r.status === 404, `skein plan reads remove with the same arguments: the root read is gone (${code}, GET / ${r.status})`);
+  check(code === 0 && r.status === 404, `skein reads remove with the same arguments: the root read is gone (${code}, GET / ${r.status})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

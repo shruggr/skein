@@ -8,18 +8,29 @@
 //
 //   {"op": "event", "handle": h, "box": b, "event": {…}}   → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
 //   {"op": "reclaim", "handle": h}                       → {"ok": true, "entry": ""} | {"ok": false, "error": "…"}
+//   {"op": "message", "handle": h, "message": "<base64>", "body": "<base64>"}
+//                                                       → {"ok": true, "entry": "<cid>"} | {"ok": false, "error": "…"}
 //
 // `event` is `skein-host event` (cli.ts): the router sends it as a message
-// from its cron provider, a tick due now (Router.cronEvent, #69). (#127: no
-// claim here — the owner of an instance is the claim's sender, and the host
-// holds no owner's key: the owner's wallet sends it, `skein plan claim`.)
+// from its cron provider, a tick due now (Router.cronEvent, #69).
+// `message` (#142) is a message the client `skein` signed in its own process
+// (src/client/raw.ts signMessage: the operator's key), delivered on the host
+// machine: `message` its mail record's dag-cbor, `body` the body's bytes. The
+// router appends it as received, a `local` request (Router.messageLocal →
+// appendLocal, the path a forwarded claim takes): the front door checks its
+// signature and admits it by the dispatch table, as any signed message. The
+// router signs nothing; the answer is the entry, once the front door has
+// judged it (a refusal is an error).
 
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 
 export const CONTROL_SOCKET = "host.sock";
 
-export type ControlRequest = { op: "event"; handle: string; box: string; event: Record<string, unknown> } | { op: "reclaim"; handle: string };
+export type ControlRequest =
+  | { op: "event"; handle: string; box: string; event: Record<string, unknown> }
+  | { op: "reclaim"; handle: string }
+  | { op: "message"; handle: string; message: string; body: string };
 export type ControlAnswer = { ok: true; entry: string } | { ok: false; error: string };
 
 /** What the socket's owner does with a request (the router: cronEvent). */
@@ -27,20 +38,28 @@ export interface ControlHandler {
   event(handle: string, box: string, event: Record<string, unknown>): Promise<string>;
   /** #130: `skein-host reclaim --yes` (Router.reclaim); absent: refused. */
   reclaim?(handle: string): Promise<void>;
+  /** #142: a signed message for `handle` (its mail record's dag-cbor and its body), appended as a `local` request (Router.messageLocal); absent: refused. */
+  message?(handle: string, message: Uint8Array, body: Uint8Array): Promise<string>;
 }
 
-const MAX_LINE = 1 << 20;
+/** The longest request line: ours to choose (#142) — a message carries a module whole (base64), so 64 MiB. */
+export const MAX_LINE = 64 << 20;
 
 /** A request line, checked. */
 function requestOf(line: string): ControlRequest {
   let r: unknown;
   try { r = JSON.parse(line); } catch { throw new Error("not JSON"); }
   const o = r as Record<string, unknown> | null;
+  if (o && typeof o === "object" && o.op === "message") {
+    if (typeof o.handle !== "string" || !o.handle) throw new Error("a message names its instance (handle)");
+    if (typeof o.message !== "string" || typeof o.body !== "string") throw new Error("a message is {message, body}, each base64");
+    return o as unknown as ControlRequest;
+  }
   if (o && typeof o === "object" && o.op === "reclaim") {
     if (typeof o.handle !== "string" || !o.handle) throw new Error("a reclaim names its instance (handle)");
     return o as unknown as ControlRequest;
   }
-  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event} or {op: \"reclaim\", handle}");
+  if (!o || typeof o !== "object" || o.op !== "event") throw new Error("want {op: \"event\", handle, box, event}, {op: \"reclaim\", handle} or {op: \"message\", handle, message, body}");
   if (typeof o.handle !== "string" || !o.handle || typeof o.box !== "string" || !o.box) throw new Error("an event names its instance (handle) and its box");
   if (!o.event || typeof o.event !== "object" || Array.isArray(o.event)) throw new Error("the event is a JSON object");
   return o as unknown as ControlRequest;
@@ -83,6 +102,11 @@ function serveOne(s: Socket, h: ControlHandler): void {
     if (nl < 0) { if (buf.length > MAX_LINE) reply({ ok: false, error: "request too long" }); return; }
     let req: ControlRequest;
     try { req = requestOf(buf.slice(0, nl)); } catch (e) { reply({ ok: false, error: (e as Error).message }); return; }
+    if (req.op === "message") {
+      if (!h.message) { reply({ ok: false, error: "this router takes no messages here" }); return; }
+      h.message(req.handle, Buffer.from(req.message, "base64"), Buffer.from(req.body, "base64")).then((entry) => reply({ ok: true, entry }), (e: Error) => reply({ ok: false, error: e.message }));
+      return;
+    }
     if (req.op === "reclaim") {
       if (!h.reclaim) { reply({ ok: false, error: "this router reclaims nothing" }); return; }
       h.reclaim(req.handle).then(() => reply({ ok: true, entry: "" }), (e: Error) => reply({ ok: false, error: e.message }));

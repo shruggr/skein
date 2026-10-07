@@ -534,6 +534,7 @@ export class Router {
     const server = await listenControl(path, {
       event: async (h, box, ev) => (await this.cronEvent(h, box, ev)).toString(),
       reclaim: (h) => this.reclaim(h),
+      message: async (h, m, body) => (await this.messageLocal(h, m, body)).toString(),
     });
     this.control = { server, path };
     this.say("router", `control socket at ${path}`);
@@ -613,6 +614,29 @@ export class Router {
       this.settle(l);
       return e;
     });
+  }
+
+  /**
+   * #142: a message signed outside the host (the client `skein`, with the operator's key), delivered on
+   * the host machine over the control socket: its mail record (dag-cbor) and body, appended as a `local`
+   * request (appendLocal — the path a forwarded claim takes). The front door checks the signature and
+   * admits it by the dispatch table as it would any signed message; this waits for its verdict and
+   * throws on a refusal. The host signs nothing. The entry.
+   */
+  async messageLocal(handle: string, messageBytes: Uint8Array, body: Uint8Array): Promise<CID> {
+    if (!this.o.db.get(handle)) throw new Error(`no instance ${handle}`);
+    let message: unknown;
+    try { message = dagCbor.decode(messageBytes); } catch { throw new Error("the message is not dag-cbor"); }
+    if (!message || typeof message !== "object" || Array.isArray(message) || !(message as { signature?: unknown }).signature) throw new Error("not a signed message (a mail record with its signature)");
+    const entry = await this.appendLocal(handle, { kind: "message", message, body });
+    const l = await this.hydrate(handle);
+    const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
+    if (a.state === "refused") throw new Error(`refused at the door (${a.refused.stage}): ${a.refused.reason}`);
+    if (a.state === "errored") throw new Error(`the front door failed: ${a.error}`);
+    if (a.state !== "finished") throw new Error(`not judged in time (${a.state}); entry ${entry}`);
+    const v = dagCbor.decode(a.answer) as { verdict?: string; reason?: string };
+    if (v.verdict !== "accept") throw new Error(`${v.verdict ?? "not accepted"}: ${v.reason ?? ""}`.trim());
+    return entry;
   }
 
   /** Sign `data` with `handle`'s signer: [2, "metanet handles envelope"] / `send` / anyone — an intention request's signature (providers.ts), a beacon's beat (p2p.ts beaconFrame). */
@@ -773,14 +797,16 @@ export class Router {
    * Boot a row's empty store from a system tree or a checkpoint (issue #4,
    * boot.ts) before its first hydration; the row's identity is its signer's.
    */
-  async bootRow(handle: string, src: BootSource, o: { image?: boolean; manager?: boolean } = {}): Promise<Booted> {
+  async bootRow(handle: string, src: BootSource, o: { image?: boolean; manager?: boolean; owner?: string; appConfig?: Genesis2Config["appConfig"] } = {}): Promise<Booted> {
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
     if (this.loaded.has(handle)) throw new Error(`${handle} is loaded: boot only an empty store`);
     if (o.image && src.kind !== "tree") throw new Error("an image is a system tree");
     if (o.manager && !o.image) throw new Error("the instance manager is the host skein's, and the host skein is an image");
+    if ((o.owner || o.appConfig) && !o.image) throw new Error("an owner and app config at birth are an image's (#142)");
     const identity = await rootIdentity(await this.o.walletFor(row));
-    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : o.image ? this.imageConfig(row, identity, { manager: o.manager }) : this.genesisConfig(row, identity, src.kind === "code");
+    // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
+    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { owner: o.owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
     const b = await bootStore({ db: row.store, handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
@@ -861,13 +887,14 @@ export class Router {
    * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
    * registrations) and `skein-host add --mailbox` both come here.
    */
-  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean } = {}): Promise<{ handle: string; identity: string; url: string }> {
+  async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"] } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
     if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
+    if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
     const claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
     if (!claim && o.needsClaim) claimOf(undefined);
     if (claim) claimProblem(claim, owner);
@@ -878,7 +905,9 @@ export class Router {
     this.unpublished.add(handle);
     try {
       await this.image.ready; // #132: born with the chain as the host holds it
-      await this.bootRow(handle, await this.image.source(), { image: true, manager: o.host });
+      // #142: the host skein from the host image (images/host over images/default), its genesis naming `owner`
+      // (the operator's key): the owner's admin rows and the apps' `$owner` rows at birth, `appConfig` merged.
+      await this.bootRow(handle, await this.image.source({ host: o.host }), { image: true, manager: o.host, ...(o.host ? { owner, ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
         // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner.
@@ -890,7 +919,7 @@ export class Router {
       if (o.host) this.o.db.setSetting("host_skein", handle);
       if (o.publish !== false) { this.o.db.setStatus(handle, "enabled"); await this.refollowHeaders(handle); }
       const tip = this.image.tip();
-      this.say("router", `created ${handle} (${short(l.identity)}) from the default image${tip ? ` (its chain to ${tip.height})` : ""}, ${claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
+      this.say("router", `created ${handle} (${short(l.identity)}) from the ${o.host ? "host" : "default"} image${tip ? ` (its chain to ${tip.height})` : ""}, ${o.host ? `owned by ${short(owner)}` : claim ? `claimed by ${short(owner)}` : "unclaimed (its claim row from anyone)"}${o.publish !== false ? `, at ${this.originOf(handle)}` : ""}${o.host ? ": the host skein" : ""}`);
       return { handle, identity: l.identity, url: this.originOf(handle) };
     } finally {
       this.unpublished.delete(handle);

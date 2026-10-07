@@ -161,6 +161,17 @@ export type AppRecord = Omit<Checked["manifest"], "programs"> & { programs: Reco
 
 // ---------------------------------------------------------------- the plan
 
+/** A manifest's `config` with `over` merged in: per program, its keys over the manifest's. */
+export function mergeConfig(base: Record<string, unknown> | undefined, over: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [k, x] of Object.entries(over)) {
+    const b = out[k];
+    out[k] = x && typeof x === "object" && !Array.isArray(x) && b && typeof b === "object" && !Array.isArray(b) ? { ...b as Record<string, unknown>, ...x as Record<string, unknown> } : x;
+  }
+  return out;
+}
+
+
 /** A dispatch change the install sends: the row as the kernel takes it (sender resolved, program a CID, address as served, `app`), and how to show it. */
 export interface RowOp { op: "add" | "remove"; row: DispatchRow & { app: string }; label: string; role?: string }
 export interface HeadOp { name: string; tree: CID }

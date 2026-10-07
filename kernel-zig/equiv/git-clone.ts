@@ -29,7 +29,11 @@
 //      box "register", the box "submit" with filter beef): cloned, its record
 //      rebuilt by the client (the same CID), installed — its rows and the
 //      derived ones, the boxes resolved under its name;
-//   5. the instance's store replays to itself exactly.
+//   5. the client's `skein install <url>#<hash> --instance` (#142): one
+//      git.clone message, the plan from the stored tree, head and row sent —
+//      signed in the client with the operator's key, over the host's control
+//      socket; a key with no row in box git is refused before anything is sent;
+//   6. the instance's store replays to itself exactly.
 //
 //   node --experimental-strip-types --no-warnings kernel-zig/equiv/git-clone.ts
 
@@ -44,6 +48,7 @@ import { PrivateKey } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
+import { adminMain } from "../../src/client/admin-cli.ts";
 import { wasmDirObjects } from "../../src/host/boot.ts";
 import { instanceView, planInstall, readApp, readStoredApp, readsIn, sendInstall } from "../../src/host/install.ts";
 import type { HttpRequest } from "../../src/host/providers.ts";
@@ -105,6 +110,21 @@ ovGit("init", "-q", "-b", "main");
 ovGit("add", "-A");
 ovGit("commit", "-qm", "ov-dyn");
 const hashOv = ovGit("rev-parse", "HEAD");
+
+// #142: an app for `skein install <url>#<hash> --instance`: app-demo's module under another name, one row from the owner.
+const twoRepo = join(repos, "app-two");
+mkdirSync(join(twoRepo, "etc"), { recursive: true });
+cpSync(join(demoDir, "bin"), join(twoRepo, "bin"), { recursive: true });
+writeFileSync(join(twoRepo, "etc/app.json"), JSON.stringify({ kind: "app", name: "app-two", version: "0.1.0", programs: { two: "bin/app-demo.wasm" }, dispatch: [{ address: "", sender: "$owner", program: "two" }] }, null, 2));
+const twoGit = (...args: string[]) => {
+  const r = spawnSync("git", args, { cwd: twoRepo, env: gitEnv, encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+  return r.stdout.trim();
+};
+twoGit("init", "-q", "-b", "main");
+twoGit("add", "-A");
+twoGit("commit", "-qm", "app-two");
+const hashTwo = twoGit("rev-parse", "HEAD");
 
 /** `git http-backend` as a CGI under node:http. Under /liar/ the server swaps the wanted commit for B's: a pack of another commit. */
 function backend(req: IncomingMessage, res: ServerResponse, body: Buffer, path: string): void {
@@ -270,6 +290,31 @@ try {
     const reads = (await readsIn(await instanceView(view))).filter((r) => r.app === "ov-dyn").map((r) => `${r.address} ${r.fn}`);
     check(JSON.stringify(reads) === '["/ov-dyn/lookup lookup"]', `#135: the reads head holds its /lookup: ${JSON.stringify(reads)}`);
   }
+
+  // ------------------------------------------------ 6. the client: `skein install <url>#<hash> --instance` (#142)
+  // One message to the git app (the clone in the VM), the plan from the stored tree, head + row: signed with the
+  // operator's key (here the owner's) in the client, handed to the host over its control socket. No objects.
+  await h.router.listenControl(join(h.home, "host.sock"));
+  const keyFile = join(h.home, "operator.key");
+  writeFileSync(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
+  const out: string[] = [], err: string[] = [];
+  const env = { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
+  const asked2 = asked.length;
+  const code = await adminMain("install", [`${repoUrl.replace(/app-demo$/, "app-two")}#${hashTwo}`, "--instance", "inst"], env);
+  await h.router.settled();
+  const two = await record("app-two/app");
+  const cloneLine = out.find((l) => l.startsWith("git.clone "));
+  check(code === 0 && two?.kind === "app" && out.some((l) => l.startsWith("installed app-two 0.1.0 into inst (this host)")), `skein install <url>#<hash> --instance inst: exit ${code} (${[...out, ...err].join(" | ")})`);
+  check(!!cloneLine && asked.length - asked2 === 2, `the commit came by the git app's clone in the VM, two fetches (${cloneLine})`);
+  check(out.some((l) => /objects ×1 \(0 records\) · head ×1 · dispatch ×1/.test(l)) && out.some((l) => /: 2 messages sent/.test(l)), `nothing of the tree crossed from the client: head and one row (${out.filter((l) => /messages/.test(l)).join(" | ")})`);
+  const twoRow = (await instanceView(view)).dispatch.find((r) => (r as { app?: string }).app === "app-two");
+  check(!!twoRow && Buffer.from(twoRow.sender as Uint8Array).toString("hex") === h.ownerId, "its $owner row holds the operator's key");
+  // A stranger's key: no row in box git, refused before anything is sent.
+  const strangerKey = join(h.home, "stranger.key");
+  writeFileSync(strangerKey, `${PrivateKey.fromRandom().toHex()}\n`);
+  const n2 = asked.length;
+  const refused = await adminMain("install", [`${repoUrl}#${hashA}`, "--instance", "inst"], { ...env, vars: { ...env.vars, SKEIN_OPERATOR_KEY: strangerKey } });
+  check(refused === 1 && /takes git.clone only from its owner's row/.test(err.at(-1) ?? "") && asked.length === n2, `a key with no row in box git: refused, nothing fetched (${err.at(-1)})`);
 } catch (err) {
   check(false, `threw: ${(err as Error).stack}`);
 } finally {

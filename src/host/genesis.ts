@@ -117,6 +117,11 @@ export interface Genesis2Config {
    * not is left out (a tree may take statuses on a host with no Arcade).
    */
   providers?: Record<string, string>;
+  /**
+   * #142: an installed app's config at birth, by app name, merged over its manifest's `config` as an
+   * install's `--config` is (the host skein's onboard: domain, origin, name, note from host.env).
+   */
+  appConfig?: Record<string, Record<string, unknown>>;
 }
 
 /** One address book entry a genesis seeds (#70): key → transport and address. */
@@ -511,7 +516,8 @@ export function resolveSystem(c: Genesis2Config, programs: Record<string, CID>, 
   }
   // The reads are resolved only for rows that name a read op (an image's tree has none, and no `$owner`).
   const rows = dispatch.some((r) => typeof r.read === "string") ? foldReads(dispatch, resolveReads(c, reads), c.owner) : dispatch;
-  let names: System["names"] = c.owner ? [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }] : [];
+  // A tree booted with an owner and no owner's handle (#142: the host skein from its image) names no one.
+  let names: System["names"] = c.owner && (c.ownerHandle || !tree) ? [{ identityKey: keyBytes(c.owner), ...(c.ownerHandle ?? { handle: "david", domain: "localhost" }) }] : [];
   if (c.infer) names.push({ identityKey: keyBytes(c.infer), ...(c.inferHandle ?? { handle: "infer", domain: "localhost" }) });
   if (config.names) names = config.names.map((n) => ({ identityKey: keyOf(n.identityKey, c), handle: n.handle, domain: n.domain }));
   const peers = config.peers

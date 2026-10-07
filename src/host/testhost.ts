@@ -117,16 +117,17 @@ export async function testHost(t: { after(f: () => unknown): void }, o: { idleMs
     /** A mailbox instance's row (a fixture's: its genesis at first hydration; the product path is the manager's create, Router.createInstance image `mailbox`). */
     mailbox(handle: string, whose: string) { db.add(handle, { kind: "mailbox", owner: whose, store: join(home, "instances", handle, "runtime.db"), identity: keyOf(handle).toPublicKey().toString() }); },
     /**
-     * The host skein (#90, #113): `host` from the default image, claimed by
-     * the owner's own signed claim, forwarded (#127), the instance manager and the certifier in its address book;
-     * the onboarding app installed with `config` over its manifest's (default:
-     * domain `localhost`, origin this router's). Its own origin's BRC-169
-     * requests are then the app's.
+     * The host skein (#90, #113, #142): `host` from the host image (the
+     * default image with the onboarding app), its genesis naming the owner
+     * (the operator's key here), the instance manager and the certifier in
+     * its address book; the onboarding app's config at birth over its
+     * manifest's (default: domain `localhost`, origin this router's). Its own
+     * origin's BRC-169 requests are then the app's.
      */
     async hostSkein(config: Record<string, unknown> = {}) {
-      const c = await router.createInstance("host", ownerId, { host: true, claim: await signClaim(owner) as SignedClaim });
+      const c = await router.createInstance("host", ownerId, { host: true, appConfig: { onboard: { onboard: { domain: "localhost", origin: base, ...config } } } });
       await router.hydrate("host");
-      await installApps({ home, port: router.port, owner, settled: () => router.settled() }, "host", [ONBOARD_APP], { config: { onboard: { domain: "localhost", origin: base, ...config } } });
+      await router.settled();
       return c;
     },
     origin: (handle: string) => router.originOf(handle),
