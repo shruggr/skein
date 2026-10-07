@@ -151,7 +151,7 @@ try {
   aliceDb = h.db.get("alice")!.store;
   bobDb = h.db.get("bob")!.store;
   const g = await (await h.router.hydrate("alice")).kernel.genesis() as { programs: Record<string, CID>; dispatch: Array<{ address: string; fn?: string; filter?: string }> };
-  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund" && r.fn === "fund" && r.filter === "beef" && (r as { sender?: unknown }).sender === "session") };
+  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund" && r.fn === "fund" && Array.isArray((r as { filters?: unknown }).filters) && ((r as { filters: string[] }).filters).includes("kernel.beef")) };
 
   // The chain app in both (the door's `beef` filter and the wallet's SPV read its headers).
   const chainDir = process.env.SKEIN_CHAIN_DIR ?? (() => {
@@ -269,9 +269,8 @@ try {
   const rec = dagCbor.decode(last.record) as { kind: string; lines: Array<{ bytes: number }> };
   report.tick = { counted: t1.ticks === t0.ticks + 1, logCid: encode(rec).cid.toString() === last.log, kind: rec.kind, lines: rec.lines.length > 0, tallied: t1.tally > t0.tally };
 
-  // A tick signed by another key: not the host row's (a second tick row for that key, added by the owner) — refused.
+  // A tick signed by another key: not the host row's `host` (#143: one route per box, no sender — the tick checks its key) — refused.
   const stranger = new PrivateKey("7777", 16);
-  await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", planHost(alice, "add", { key: stranger.toPublicKey().toString(), x: 5 }));
   const body = { kind: "tick", at: Date.now(), allowance: 1_000_000, fuel: 0, served: 0 };
   const bodyBytes = dagCbor.encode(body);
   const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(stranger.toPublicKey().toString(), "hex")), recipient: Uint8Array.from(Buffer.from(alice, "hex")), box: "billing", body: encode(body).cid, nonce: Uint8Array.from(Buffer.alloc(16, 7)) };
@@ -302,7 +301,7 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(report.published === true, "the host publishes its terms at /.well-known/skein-host (its billing key, X, the rates)");
-check(eq(report.image, { wallet: true, fundRow: true }), `the default image carries the wallet and the funding row /wallet/fund (#135: sender session — the host hands a payment in signed with its billing key; the beef filter) (${JSON.stringify(report.image)})`);
+check(eq(report.image, { wallet: true, fundRow: true }), `the default image carries the wallet and the funding route /wallet/fund (#143: kernel.beef — the payment validates itself) (${JSON.stringify(report.image)})`);
 check(eq(report.beforeTerms, { billing: true, open: true }), "no host row: no billing state, the host forwards as usual");
 check(report.fundDirect === 401, `#135: the funding row directly, unsigned: 401 (a message route; the host's hand-in is signed) (${String(report.fundDirect)})`);
 check(eq(report.funded, [200, true]), `a funding delivered to the host (POST /fund/alice) is handed in on the funding row and internalized (${JSON.stringify(report.funded)})`);

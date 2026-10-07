@@ -100,13 +100,13 @@ function appTree(name: string, rows: Array<Record<string, unknown>>): string {
   copyFileSync(wasm, join(dir, "bin/app-demo.wasm"));
   writeFileSync(join(dir, "etc/app.json"), JSON.stringify({
     kind: "app", name, version: "0.1.0", programs: { demo: "bin/app-demo.wasm" }, provides: [], requires: [],
-    dispatch: [{ address: name, sender: "$owner", program: "demo" }, ...rows],
+    routes: [{ address: "", handler: "demo" }, ...rows],
     description: `#119's test app ${name}: app-demo's module, emitting the events it is asked to`,
   }, null, 2));
   return dir;
 }
 const treeA = appTree("evt-a", []);
-const treeB = appTree("evt-b", [{ transport: "libp2p", address: "demo_mine", sender: "*", program: "demo", fn: "topic" }]);
+const treeB = appTree("evt-b", [{ transport: "libp2p", address: "demo_mine", handler: "demo.topic" }]);
 
 // ---------------------------------------------------------------- two routers with libp2p
 const key = (h: string) => new PrivateKey(h, 16);
@@ -210,7 +210,7 @@ try {
   let code = await cli("install", treeA, "--instance", "ev");
   check(code === 0, `skein install evt-a (no libp2p row): exit ${code} ${err.join(" ")}`);
   code = await cli("install", treeB, "--instance", "ev");
-  check(code === 0 && out.some((l) => /row\s+libp2p demo_mine from anyone → demo\.topic/.test(l)), `skein install evt-b (an exact row demo_mine): exit ${code} ${err.join(" ")} ${out.filter((l) => l.includes("libp2p")).join(" | ")}`);
+  check(code === 0 && out.some((l) => /route\s+libp2p demo_mine → demo\.topic/.test(l)), `skein install evt-b (an exact row demo_mine): exit ${code} ${err.join(" ")} ${out.filter((l) => l.includes("libp2p")).join(" | ")}`);
   let topics = await until("the node subscribes evt-b's row", () => served().length ? served() : undefined).catch(() => served());
   check(topics.join(",") === "demo_mine", `the node subscribes the row's topic: ${topics.join(", ")}`);
 

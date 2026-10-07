@@ -1,33 +1,29 @@
-// The default image and the claim (#89, #127), end to end on a router:
+// The default image and the claim (#89, #127, #143), end to end on a router:
 //
 //   an instance booted from the default image (images/default) — its genesis
-//   names no owner and has no admin rows, only the claim row (box `claim`,
-//   from anyone, to the kernel); it serves the management site at `/`,
-//   `/site/` and `/manifest.json` (#141: chain, git and site installed at
-//   birth, the owner's read at `/`), it has no
-//   explorer row (#121: every sender is a key, and the claim brings the
-//   owner's), and it takes no owner's message in an admin box.
+//   names no root; its admin routes are root's and nobody holds root; the
+//   claim route (box `claim`, open, to the kernel); it serves the management
+//   site at `/`, `/site/` and `/manifest.json` (#141: chain, git and site
+//   installed at birth, root's read route at `/`); its explorer is root's
+//   (403 before the claim), and the gate takes no message in an admin box.
 //
 //   The owner claims it with a message from the owner's wallet (`skein
-//   claim`, sent on its session): the owner is the message's sender (#127),
-//   never a key in the body — a body naming another `owner` changes nothing.
-//   In one step the kernel writes the sender's four admin rows and the
-//   explorer row with the sender's key (#121), and removes the claim row; the
-//   head `claim` names what was claimed (the sender as owner, the messagebox);
-//   the owner's mailbox goes into the address book. A second claim (a
-//   stranger's sendMessage into `claim`) finds no row and is refused. The
-//   owner adds its rows into the apps installed at birth (#142: `skein
-//   install images/default/apps/git --instance`, signed in the client, over
-//   the host's control socket: the head again and git's owner row), then installs
-//   programs/test/app-demo with the owner's messages and calls it.
+//   claim`, sent on its session): root is granted to the message's sender
+//   (#127, #143), never a key in the body — a body naming another key changes
+//   nothing. In one step the kernel writes the grants and removes the claim
+//   route; the head `claim` names what was claimed (the sender as claimant,
+//   the messagebox); the claimant's mailbox goes into the address book. A
+//   second claim (a stranger's message into `claim`) finds no route. Nothing
+//   waits on the claim (#143: git's `call` is root's), and root installs
+//   programs/test/app-demo with its messages and calls it.
 //
 //   A claim signed before the instance existed (#127: naming no recipient,
 //   what a registrant's page signs and the host forwards) claims a fresh
 //   image for its signer, as the instance's first entry; a message naming no
 //   recipient in any other box is refused at the front door.
 //
-//   An instance that is owned already refuses a claim: a stock instance whose
-//   owner added a claim row to its table keeps its rows when a claim comes.
+//   An instance with root held refuses a claim: a stock instance whose root
+//   added a claim route to its table keeps its grants when a claim comes.
 //
 //   `skein-host add --image default` writes the same image (its genesis: no
 //   owner, the image's tree); `--image <outpoint>` is refused (no ORDFS app yet).
@@ -81,7 +77,13 @@ try {
   stores.push(h.db.get("inst")!.store);
   const k = async (handle = "inst") => (await h.router.hydrate(handle)).kernel;
   const rows = async (handle = "inst") => (await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>;
-  const kernelRows = async (handle = "inst") => (await rows(handle)).filter((r) => r.program === "kernel").map((r) => `${r.address}<-${r.sender instanceof Uint8Array ? hex(r.sender).slice(0, 8) : r.sender}`);
+  const kernelRows = async (handle = "inst") => (await rows(handle)).filter((r) => r.program === "kernel").map((r) => String(r.address));
+  /** The root holders (hex, 8) as the head `grants` names them (#143). */
+  const roots = async (handle = "inst") => {
+    const c = await (await k(handle)).call("head", "grants") as CID | null;
+    if (!c) return [];
+    return (((await (await k(handle)).store.get(c)) as { roles?: Record<string, Uint8Array[]> }).roles?.root ?? []).map((x) => hex(x).slice(0, 8));
+  };
   const cli = async (...args: string[]) => {
     const out: string[] = [], err: string[] = [];
     // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
@@ -99,37 +101,38 @@ try {
   const image = await dirSource(imageDir);
   check(!!booted.tree && booted.tree.equals(image.root), `booted from the default image's tree ${booted.tree} (programs ${booted.programs.join(", ")})`);
   const g = (await genesisOf("inst"))!;
-  check(g.owner === undefined && (g.tree as CID).equals(image.root), "the genesis names no owner, and the image's tree");
-  check((await kernelRows()).join(",") === "claim<-*", `the only kernel row is the claim row, from anyone: ${(await kernelRows()).join(", ")}`);
+  check(g.root === undefined && g.owner === undefined && (g.tree as CID).equals(image.root), "the genesis names no root, and the image's tree");
+  check((await kernelRows()).join(",") === "objects,head,dispatch,peers,grant,claim" && (await roots()).length === 0, `the admin routes (root's: nobody holds it) and the claim route: ${(await kernelRows()).join(", ")}`);
   for (const path of ["/", "/site/", "/site/app.js", "/manifest.json"]) {
     const r = await fetch(`${h.base}/@inst${path}`);
-    check(r.status === 200, `GET ${path}: 200, the site installed at birth serves it (#141: its read under /site/, the owner's read at /): ${r.status}`);
+    check(r.status === 200, `GET ${path}: 200, the site installed at birth serves it (#141: its read route under /site/, root's at /): ${r.status}`);
   }
-  check(["chain/app", "git/app", "site/app", "reads"].every((n) => g.heads && (g.heads as Record<string, unknown>)[n]), `#141: the genesis names the heads chain/app, git/app, site/app and reads (${Object.keys((g.heads as object) ?? {}).join(", ")})`);
-  const unread = await fetch(`${h.base}/@inst/explore`);
-  check(unread.status === 404, `before the claim there is no explorer row (#121: the claim writes it with the owner's key): ${unread.status}`);
-  check(!(await rows()).some((x) => x.sender === "owner"), "#121: no row names the `owner` symbol");
-  const before = await new RawBox(h.owner, `${h.base}/@inst`).send(inst, "objects", { records: [] }).then(() => "sent", (e: Error) => e.message);
-  check(/403 ERR_NOT_SUBSCRIBED/.test(before), `before the claim, the owner's message to \`objects\` is refused: no admin row (${before})`);
+  check(["chain/app", "git/app", "site/app"].every((n) => g.heads && (g.heads as Record<string, unknown>)[n]), `#141: the genesis names the heads chain/app, git/app and site/app (${Object.keys((g.heads as object) ?? {}).join(", ")})`);
+  const unread = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore`, { method: "GET" });
+  check(unread.status === 403, `before the claim the explorer is nobody's (#143: root's, and no one holds root): ${unread.status}`);
+  check(!(await rows()).some((x) => x.sender !== undefined), "#143: no route names a sender");
+  const linesB = h.lines.length;
+  await new RawBox(h.owner, `${h.base}/@inst`).send(inst, "objects", { records: [] });
+  await h.router.settled();
+  check(h.lines.slice(linesB).some((l) => /in objects from .*: objects is gated \(root\).*recorded, nothing runs/.test(l)), "before the claim, the owner's message to `objects` is gated away: root's, and nobody holds root");
 
   // ------------------------------------------------ the claim: the owner's own message (#127)
   const stranger = PrivateKey.fromRandom(), strangerId = stranger.toPublicKey().toString();
   const lines0 = h.lines.length;
   const plan = planClaim(inst, { messagebox: h.origin("david") });
-  (plan.messages[0]!.body as Record<string, unknown>).owner = strangerId; // a key in the body is not read: the sender is the owner
+  (plan.messages[0]!.body as Record<string, unknown>).owner = strangerId; // a key in the body is not read: root goes to the sender
   await sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "inst", plan);
-  check(h.lines.slice(lines0).some((l) => /kernel claim: owner [0-9a-f]+: admin rows objects, head, dispatch, peers, the explorer row; the claim row removed; the owner's messagebox in the address book/.test(l)), "the kernel took the claim in one step (one log line)");
-  const explorer = (await rows()).filter((x) => x.transport === "http" && x.address === "/explore");
-  check(explorer.length === 1 && explorer[0]!.prefix === true && explorer[0]!.fn === "explore" && explorer[0]!.sender instanceof Uint8Array && hex(explorer[0]!.sender) === h.ownerId, `#121: the claim wrote the explorer row with the owner's real key (${explorer.map((x) => x.sender instanceof Uint8Array ? hex(x.sender).slice(0, 8) : String(x.sender)).join(", ")})`);
+  check(h.lines.slice(lines0).some((l) => /kernel claim: root [0-9a-f]+; the claim route removed; the claimant's messagebox in the address book/.test(l)), "the kernel took the claim in one step (one log line)");
   const owner8 = h.ownerId.slice(0, 8);
-  check((await kernelRows()).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${owner8}`).join(","), `the owner's four admin rows, the claim row gone: ${(await kernelRows()).join(", ")}`);
+  check((await roots()).join(",") === owner8, `#143: root granted to the claim's sender, not the body's key (${(await roots()).join(", ")})`);
+  check((await kernelRows()).join(",") === "objects,head,dispatch,peers,grant", `the claim route gone: ${(await kernelRows()).join(", ")}`);
   const claimRoot = await (await k()).call("head", "claim") as CID | null;
-  const claimed = claimRoot ? await (await k()).store.get(claimRoot) as { owner?: unknown; messagebox?: string } : undefined;
-  check(hex(claimed?.owner) === h.ownerId && claimed?.messagebox === h.origin("david"), `the head \`claim\` names what was claimed: the sender as owner (not the body's key) and its messagebox (${claimed?.messagebox})`);
+  const claimed = claimRoot ? await (await k()).store.get(claimRoot) as { claimant?: unknown; messagebox?: string } : undefined;
+  check(hex(claimed?.claimant) === h.ownerId && claimed?.messagebox === h.origin("david"), `the head \`claim\` names what was claimed: the sender (not the body's key) and its messagebox (${claimed?.messagebox})`);
   const peers = await (await k()).call("head", "peers") as CID | null;
   const book = peers ? await Promise.all((((await (await k()).store.get(peers)) as { peers?: Array<{ peer: CID }> }).peers ?? []).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array; address: string; source: string })) : [];
   check(book.some((p) => hex(p.key) === h.ownerId && p.address === h.origin("david") && p.source === "claim"), "the owner's messagebox is in the address book (source claim)");
-  // #92: the image's read rule {op: explore, owner: true} — the owner as the front door sees it now, the claim's.
+  // The explorer: root's (the genesis's roles) — the claimant's now.
   const ex = await new RawBox(h.owner, `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore/head/claim`, { method: "GET" });
   check(ex.status === 200 && (await ex.text()).includes(claimRoot!.toString()), `after the claim the owner reads the explorer: GET /explore/head/claim → ${ex.status}`);
   const other = await new RawBox(ephemeralWallet(PrivateKey.fromRandom()), `${h.base}/@inst`).af.fetch(`${h.base}/@inst/explore`, { method: "GET" });
@@ -137,20 +140,19 @@ try {
 
   // ------------------------------------------------ a second claim
   const byStranger = await new RawBox(ephemeralWallet(stranger), `${h.base}/@inst`).send(inst, "claim", { owner: strangerId }).then(() => "sent", (e: Error) => e.message);
-  check(/403 ERR_NOT_SUBSCRIBED/.test(byStranger), `a stranger's sendMessage into \`claim\` is refused (${byStranger})`);
-  check((await kernelRows()).every((x) => x.endsWith(`<-${owner8}`)), "the admin rows are still the owner's");
+  check(/403 ERR_NOT_SUBSCRIBED/.test(byStranger), `a stranger's sendMessage into \`claim\` finds no route (${byStranger})`);
+  check((await roots()).join(",") === owner8, "root is still the claimant's alone");
 
-  // ------------------------------------------------ the owner's rows into the apps installed at birth (#141, #142)
-  // `skein install images/default/apps/git --instance inst`, signed with the owner's key in the client, over the host's
-  // control socket: the tree and the record are the instance's already, so the head (unchanged) and git's $owner row go.
+  // ------------------------------------------------ the apps installed at birth: nothing to add (#141, #143)
+  // `skein install images/default/apps/git --instance inst`, signed with the root key in the client, over the host's
+  // control socket: the tree, the record and the routes are the instance's already — nothing is sent.
   await h.router.listenControl(join(h.home, "host.sock"));
   const keyFile = join(h.home, "operator.key");
   writeFileSync(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
   const iout: string[] = [], ierr: string[] = [];
   const icode = await adminMain("install", [join(imageDir, "apps/git"), "--instance", "inst"], { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l) => iout.push(l), err: (l) => ierr.push(l) });
   await h.router.settled();
-  const gitRow = (await rows()).find((x) => x.app === "git" && x.address === "git");
-  check(icode === 0 && iout.some((l) => /: 2 messages sent/.test(l)) && !!gitRow && hex(gitRow.sender) === h.ownerId, `skein install images/default/apps/git --instance inst after the claim: two messages, the head again and git's owner row (${[...iout, ...ierr].filter((l) => /sent|dispatch add|install:/.test(l)).join(" | ")})`);
+  check(icode === 0 && iout.some((l) => /: 1 message sent/.test(l)), `skein install images/default/apps/git --instance inst after the claim: one message (the head again: the image wrote its routes) (${[...iout, ...ierr].filter((l) => /sent|dispatch add|install:/.test(l)).join(" | ")})`);
 
   // ------------------------------------------------ the owner installs an app
   let r = await cli("install", demoDir, "--instance", "inst");
@@ -171,19 +173,18 @@ try {
   }, 20_000).catch(() => undefined);
   check(!!ticked, "its start scheduled a heartbeat with the cron provider ($cron, from the image's address book), and the tick came");
 
-  // ------------------------------------------------ an owned instance refuses a claim
+  // ------------------------------------------------ an instance with root held refuses a claim
   h.instance("owned");
   await h.router.hydrate("owned");
   stores.push(h.db.get("owned")!.store);
   const ownedId = h.db.get("owned")!.identity!;
-  await new RawBox(h.owner, `${h.base}/@owned`).send(ownedId, "dispatch", { op: "add", row: { transport: "mailbox", address: "claim", sender: "*", program: "kernel", fn: "claim" } });
+  await new RawBox(h.owner, `${h.base}/@owned`).send(ownedId, "dispatch", { op: "add", row: { transport: "mailbox", address: "claim", program: "kernel", fn: "claim" } });
   await h.router.settled();
-  check((await kernelRows("owned")).includes("claim<-*"), "the owner of a stock instance added a claim row");
-  const lines2 = h.lines.length;
-  await new RawBox(ephemeralWallet(stranger), `${h.base}/@owned`).send(ownedId, "claim", {});
+  check(!(await kernelRows("owned")).includes("claim"), "#143: root of a stock instance cannot add a claim route (root is held: refused)");
+  const late = await new RawBox(ephemeralWallet(stranger), `${h.base}/@owned`).send(ownedId, "claim", {}).then(() => "sent", (e: Error) => e.message);
   await h.router.settled();
-  check(h.lines.slice(lines2).some((l) => /kernel claim refused: the genesis names its owner: this instance is not an image; nothing done/.test(l)), "a claim into an owned instance is refused, nothing done");
-  check((await kernelRows("owned")).filter((x) => x.startsWith("claim")).length === 1 && (await kernelRows("owned")).filter((x) => !x.startsWith("claim")).every((x) => x.endsWith(`<-${owner8}`)), "its rows are unchanged");
+  check(/403 ERR_NOT_SUBSCRIBED/.test(late), `a claim into it finds no route, nothing done (${late})`);
+  check((await roots("owned")).join(",") === owner8, "its grants are unchanged");
 
   // ------------------------------------------------ skein-host add --image
   r = await cli("add", "fresh", "--image", `${"ab".repeat(32)}_0`);
@@ -191,7 +192,7 @@ try {
   r = await cli("add", "fresh", "--image", "default");
   check(r.code === 0 && r.out.some((l) => l.includes(`booted from the image ${image.root}`)), `skein-host add fresh --image default: exit ${r.code} ${[...r.out, ...r.err].join(" ")}`);
   const fg = await genesisOf("fresh");
-  check(!!fg && fg.owner === undefined && (fg.tree as CID).equals(image.root) && (fg.dispatch as Array<{ fn?: string }>).filter((x) => x.fn).map((x) => x.fn).includes("claim"), "its genesis: no owner, the default image's tree, the claim row");
+  check(!!fg && fg.root === undefined && (fg.tree as CID).equals(image.root) && (fg.dispatch as Array<{ fn?: string }>).filter((x) => x.fn).map((x) => x.fn).includes("claim"), "its genesis: no root, the default image's tree, the claim route");
 
   // ------------------------------------------------ a claim signed before the instance existed (#127)
   await h.image("fresh2");
@@ -209,7 +210,7 @@ try {
   check(fwd.message.recipient === undefined, "the signed claim names no recipient");
   await h.router.appendLocal("fresh2", { kind: "message", message: fwd.message, body: fwd.body });
   await h.router.settled();
-  check((await kernelRows("fresh2")).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${signerId.slice(0, 8)}`).join(","), `the forwarded claim: the signer owns it (${(await kernelRows("fresh2")).join(", ")})`);
+  check((await roots("fresh2")).join(",") === signerId.slice(0, 8), `the forwarded claim: the signer is root (${(await roots("fresh2")).join(", ")})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {

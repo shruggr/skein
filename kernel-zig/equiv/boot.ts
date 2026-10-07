@@ -167,7 +167,7 @@ try {
     copyFileSync(COMPONENT, join(sys, "bin/wallet.wasm"));
     await fs.writeFile(join(sys, "bin/wallet.json"), JSON.stringify({ inputs: WALLET.inputs, services: WALLET.services, description: WALLET.description }));
     const rows = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8"));
-    await fs.writeFile(join(sys, "etc/dispatch.json"), JSON.stringify([...rows, { address: "wallet", sender: "$owner", program: "wallet" }]));
+    await fs.writeFile(join(sys, "etc/dispatch.json"), JSON.stringify([...rows, { address: "wallet", program: "wallet" }]));
     config.defaults.walletNetwork = "regtest";
   } else process.stdout.write("note: no wallet component build (programs/wallet: zig build component); the component handler case is skipped\n");
   await fs.writeFile(join(sys, "etc/config.json"), JSON.stringify(config));
@@ -199,7 +199,7 @@ try {
     check(g.tree?.toString() === scope.toString() && g.defaults.model === "ripper/booted", `${h}: the genesis names the tree and takes its config`);
     check(String(await k.call("head", "main")) === scope.toString(), `${h}: main is the system tree`);
     check(Object.keys(g.programs).sort().join() === `frontdoor,messagebox,resolve${withComponent ? ",wallet" : ""}`, `${h}: its programs are bin/'s, no shell (#83: an app) (${Object.keys(g.programs)})`);
-    check(keyHex((await k.genesis() as { owner: Uint8Array }).owner) === ownerId, `${h}: $owner is the host's owner`);
+    check(keyHex((await k.genesis() as { root: Uint8Array[] }).root?.[0]) === ownerId, `${h}: root is the host's owner (#143)`);
   }
   await talk(router, ["alpha", "beta"], home);
   await router.stop();

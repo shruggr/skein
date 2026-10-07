@@ -5,20 +5,24 @@
 //! certificate issued through the host's certifier and recorded here, and
 //! resolved and searched from those records.
 //!
-//! Rows and reads (installed under /onboard/; the router maps the host's own
-//! origin onto them: docs/MESSAGES.md in skein, "BRC-169 is discovery"). A
-//! row is a message route: a signed request, an entry. A read
-//! (shruggr/skein#135) is served by a call over the current state: anyone,
-//! signed or not, nothing logged.
+//! Routes (installed under /onboard/; the router maps the host's own origin
+//! onto them: docs/MESSAGES.md in skein, "BRC-169 is discovery";
+//! shruggr/skein#143, docs/APPS.md §2). A route with a handler: the request
+//! passes its filters (kernel.brc104: the BRC-104 session and signature, its
+//! key the principal) and the gate (role `user`: any principal), and is an
+//! entry. A read route: no handler — its one filter answers over the current
+//! state ({answer: {status, type, body}}): anyone, signed or not, nothing
+//! logged.
 //!
-//!   POST /onboard/call           row, sender session   {fn: "onboard.create", args: {handle, image?, claim}} → {handle, identity, url}
-//!   POST /onboard/register       row, sender session   {username, identityKey, signature} → a mailbox instance and its certificate
-//!                                                       (identityKey the session's: shruggr/skein#135, a write is signed)
-//!   POST /onboard/profile        row, sender *         {handle, record, signature} → the holder's signed profile kept (a write: signed)
-//!   GET  /onboard/resolve        read                  ?handle=<handle>[@<domain>] → BRC-169 §5.2
-//!   GET  /onboard/search         read                  ?q=&limit= → BRC-169 §5.6
-//!   GET  /onboard/manifest.json  read                  BRC-169 §5.1: the trust anchor (the certifier's key), the endpoints
-//!   GET  /onboard/bsvalias/id/…  read (prefix)         the paymail PKI
+//!   POST /onboard/call           kernel.brc104, user   {fn: "onboard.create", args: {handle, image?, claim}} → {handle, identity, url}
+//!   POST /onboard/register       kernel.brc104, user   {username, identityKey, signature} → a mailbox instance and its certificate
+//!                                                       (identityKey the principal's: shruggr/skein#135, a write is signed)
+//!   POST /onboard/profile        kernel.brc104, user   {handle, record, signature} → the holder's signed profile kept
+//!                                                       (the body signed by the handle's key, checked here: any session may carry it)
+//!   GET  /onboard/resolve        read (filter resolve)  ?handle=<handle>[@<domain>] → BRC-169 §5.2
+//!   GET  /onboard/search         read (filter search)   ?q=&limit= → BRC-169 §5.6
+//!   GET  /onboard/manifest.json  read (filter manifest) BRC-169 §5.1: the trust anchor (the certifier's key), the endpoints
+//!   GET  /onboard/bsvalias/id/…  read (filter paymail, prefix)  the paymail PKI
 //!
 //! The configuration (`config.onboard` of the installed manifest; skein-host
 //! install --config writes it): `domain` — the one domain this host's handles
@@ -55,8 +59,9 @@
 //! Error codes of /onboard/call (the SDK's, `app.Code`, and one more):
 //! bad-request 400, bad-args 400, not-admitted 403, unknown-fn 404, refused
 //! 409 (the instance manager said no), failed 500 (the thread errored: no
-//! manager here, …). The open routes answer `{error}` (register, profile) or
-//! §5.3's `{metanetHandles, error: {code, message}}` (resolve).
+//! manager here, …). register and profile answer `{error}`; the read routes' filters
+//! answer `{answer: <the response>}`, its body `{error}` or (resolve) §5.3's
+//! `{metanetHandles, error: {code, message}}`.
 const std = @import("std");
 const cbor = @import("cbor");
 const sk = @import("sk");
@@ -72,7 +77,7 @@ const b64 = std.base64.standard;
 pub const NAME = "onboard";
 /// The one `{fn, args}` function: `<interface>.<function>` (skein-sdk `app`'s naming).
 pub const CREATE = "onboard.create";
-/// The operator's: an existing mailbox instance (a host.db row made before #113) recorded and certified.
+/// Root's (#143): an existing mailbox instance (a host.db row made before #113) recorded and certified.
 pub const ADOPT = "onboard.adopt";
 /// Where a created instance is recorded: `onboard/instances/<handle>` → the manager's answer.
 pub const INSTANCES = "onboard/instances/";
@@ -113,11 +118,12 @@ fn run(a: Allocator) !void {
         if (eql(u8, func, "call")) return sk.answer(a, try route(a, in, req));
         if (eql(u8, func, "register")) return sk.answer(a, try register(a, in, req));
         if (eql(u8, func, "profile")) return sk.answer(a, try profile(a, in, req));
-        if (eql(u8, func, "resolve")) return sk.answer(a, try resolve(a, req));
-        if (eql(u8, func, "search")) return sk.answer(a, try search(a, req));
-        if (eql(u8, func, "manifest")) return sk.answer(a, try manifestRoute(a));
-        if (eql(u8, func, "paymail")) return sk.answer(a, try paymail(a, req));
-        return sk.report("onboard answers the fns call, register, profile, resolve, search, manifest and paymail (its routes)");
+        // The read routes' filters (#143): each answers the request; nothing is logged.
+        if (eql(u8, func, "resolve")) return sk.answer(a, try filterAnswer(a, try resolve(a, req)));
+        if (eql(u8, func, "search")) return sk.answer(a, try filterAnswer(a, try search(a, req)));
+        if (eql(u8, func, "manifest")) return sk.answer(a, try filterAnswer(a, try manifestRoute(a)));
+        if (eql(u8, func, "paymail")) return sk.answer(a, try filterAnswer(a, try paymail(a, req)));
+        return sk.report("onboard answers the fns call, register, profile (its handlers) and resolve, search, manifest, paymail (its filters)");
     }
     if (eql(u8, kind, "step")) return work(a, in);
     return sk.report("onboard is called (its routes) or stepped (its threads)");
@@ -171,6 +177,32 @@ fn json(a: Allocator, status: u16, v: Value) !Value {
     try m.put("type", cbor.string("application/json"));
     try m.put("body", .{ .bytes = try dagjson.encode(a, v) });
     return m.value();
+}
+
+/// A read route's answer as its filter gives it (#143, docs/APPS.md §2 "Filters"): `{answer:
+/// {status, type, body}}` — the request ends with it, and nothing is logged.
+pub fn filterAnswer(a: Allocator, response: Value) !Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("answer", response);
+    return m.value();
+}
+
+/// Whether `key` holds root in this skein (#143): the kernel's head `grants`,
+/// `{kind: "grants", roles: {root: [<key>…]}}` — the genesis's root holders, the
+/// claimant, and whom root granted root since.
+pub fn holdsRoot(grants: ?Value, key: []const u8) bool {
+    const g = grants orelse return false;
+    if (!eql(u8, Value.str(g.get("kind")) orelse "", "grants")) return false;
+    const roles: Value = g.get("roles") orelse return false;
+    const list: Value = roles.get("root") orelse return false;
+    if (list != .array) return false;
+    for (list.array) |k| if (eql(u8, Value.bytesOf(k) orelse "", key)) return true;
+    return false;
+}
+
+fn grantsOf(a: Allocator) !?Value {
+    const c = (try sk.head(a, "grants")) orelse return null;
+    return try sk.get(a, c);
 }
 
 /// `{error}` with a status: register's and profile's refusals.
@@ -304,12 +336,13 @@ fn handleOfKey(a: Allocator, idx: Value, key: []const u8) !?[]const u8 {
 
 // ---------------------------------------------------------------- the /call route: onboard.create, onboard.adopt
 
-/// What a call's body asks: {fn, args} checked down to its own args. `owner`: adopt's (hex).
+/// What a call's body asks: {fn, args} checked down to its own args. `owner`: adopt's (hex):
+/// the mailbox instance's key (args, not the step input: #143 has no `owner` input).
 /// `claim`: create's — the caller's own signed claim {message, body} (shruggr/skein#127):
 /// a message in box `claim`, signed by the caller's wallet and naming no recipient (the
 /// instance does not exist yet), passed to the instance manager, which forwards it into
-/// the new instance as its first entry; the kernel takes the owner from its signer. This
-/// app does not sign it, read it or change it.
+/// the new instance as its first entry; the kernel grants root there to its signer (#143).
+/// This app does not sign it, read it or change it.
 pub const Ask = struct { func: []const u8, handle: []const u8, image: ?[]const u8 = null, owner: ?[]const u8 = null, claim: ?Value = null };
 
 /// The body {fn: "onboard.create" | "onboard.adopt", args} → the args,
@@ -381,6 +414,7 @@ fn registrationRecord(a: Allocator, in: Value, req: Value, username: []const u8,
 
 fn route(a: Allocator, in: Value, req: Value) !Value {
     if (!eql(u8, Value.str(req.get("method")) orelse "", "POST")) return failure(a, "", .{ .status = 400, .code = "bad-request", .message = "POST {fn: \"onboard.create\", args: {handle, image?}}" });
+    // The principal kernel.brc104 yielded (the route's filter; the gate's role `user` passed it).
     const caller = Value.bytesOf(req.get("caller")) orelse return failure(a, "", .{ .status = 403, .code = "not-admitted", .message = "no session: create needs a BRC-104 session (its key owns the new skein)" });
     const raw = Value.bytesOf(req.get("body")) orelse "";
     const ct = Value.str(req.get("contentType")) orelse "";
@@ -393,8 +427,9 @@ fn route(a: Allocator, in: Value, req: Value) !Value {
     };
     if (req.get("resolved")) |r| return finish(a, r, ask.func);
     if (eql(u8, ask.func, ADOPT)) {
-        // The operator's: an existing mailbox instance (host.db) recorded and certified, as a registration without the holder's signature.
-        if (!eql(u8, Value.bytesOf(in.get("owner")) orelse "", caller)) return failure(a, ADOPT, .{ .status = 403, .code = "not-admitted", .message = "adopt is the host skein owner's" });
+        // Root's (#143: a key holding root in the host skein — the operator's): an existing
+        // mailbox instance (host.db) recorded and certified, as a registration without the holder's signature.
+        if (!holdsRoot(try grantsOf(a), caller)) return failure(a, ADOPT, .{ .status = 403, .code = "not-admitted", .message = "adopt is root's (a key holding root in the host skein)" });
         const key = sk.unhex(a, ask.owner.?).?;
         if (!isLabel(ask.handle)) return failure(a, ADOPT, .{ .status = 400, .code = "bad-args", .message = "args.handle: a host name label" });
         if (try registrationRefusal(a, ask.handle, key)) |why| return failure(a, ADOPT, .{ .status = 409, .code = "refused", .message = why });
@@ -475,7 +510,7 @@ fn failure(a: Allocator, name: []const u8, f: Fail) !Value {
     return json(a, f.status, m.value());
 }
 
-// ---------------------------------------------------------------- register (an open route)
+// ---------------------------------------------------------------- register (kernel.brc104, role user)
 
 /// What a registration's body says, checked.
 pub const Registration = struct { username: []const u8, key: []const u8, signature: []const u8 };
@@ -534,7 +569,7 @@ fn finishRegister(a: Allocator, resolved: Value) !Value {
     return json(a, 200, out);
 }
 
-// ---------------------------------------------------------------- the paymail PKI (an open route)
+// ---------------------------------------------------------------- the paymail PKI (a read route: its filter)
 
 /// GET /onboard/bsvalias/id/<handle>[@<domain>] (the router's /bsvalias/id/…): {bsvalias, handle, pubkey} from the records.
 fn paymail(a: Allocator, req: Value) !Value {
@@ -724,7 +759,7 @@ fn registerThread(a: Allocator, in: Value, args: Value) !void {
     return askManager(a, handle, subject, cbor.string("mailbox"), domain, null);
 }
 
-// ---------------------------------------------------------------- the profile (an open route)
+// ---------------------------------------------------------------- the profile (kernel.brc104, role user; the body signed by the handle's key)
 
 /// A signed profile record checked: the holder's signature over the DAG-CBOR
 /// bytes, a map whose `domain` is ours, `name` text, `avatar` 36 bytes.
@@ -789,7 +824,7 @@ fn profileOf(a: Allocator, handle: []const u8) !?Value {
     return try sk.get(a, c);
 }
 
-// ---------------------------------------------------------------- resolve, search, the manifest (open routes)
+// ---------------------------------------------------------------- resolve, search, the manifest (read routes: their filters)
 
 /// A `handle` query as §5.2 has it: `[@]handle[+tag][@domain]`, any case → (handle, domain).
 pub fn parseHandle(a: Allocator, q: []const u8, own: []const u8) !struct { handle: []const u8, domain: []const u8 } {
@@ -1034,4 +1069,28 @@ test "the configuration: the domain and origin, defaults" {
     try std.testing.expectEqualStrings("http://127.0.0.1:8100", set.origin);
     try std.testing.expect(set.name == null);
     try std.testing.expectEqualStrings("", set.ordfs);
+}
+
+test "a read route's filter answers {answer: <the response>}; adopt is root's (the grants head)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const r = try filterAnswer(a, try plainError(a, 404, "not found"));
+    const ans = r.get("answer").?;
+    try std.testing.expectEqual(@as(i128, 404), Value.intOf(ans.get("status")).?);
+    try std.testing.expectEqualStrings("application/json", Value.str(ans.get("type")).?);
+    try std.testing.expectEqualStrings("{\"error\":\"not found\"}", Value.bytesOf(ans.get("body")).?);
+    const root = sk.unhex(a, vector_key).?;
+    var other = root[0..33].*;
+    other[1] ^= 1;
+    const keys = try a.alloc(Value, 1);
+    keys[0] = .{ .bytes = root };
+    var roles = cbor.MapBuilder.init(a);
+    try roles.put("root", .{ .array = keys });
+    var g = cbor.MapBuilder.init(a);
+    try g.put("kind", cbor.string("grants"));
+    try g.put("roles", roles.value());
+    try std.testing.expect(holdsRoot(g.value(), root));
+    try std.testing.expect(!holdsRoot(g.value(), &other));
+    try std.testing.expect(!holdsRoot(null, root));
 }

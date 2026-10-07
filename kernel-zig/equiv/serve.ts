@@ -182,7 +182,7 @@ try {
   await fs.mkdir(join(tree, "etc"));
   await fs.writeFile(join(tree, "bin/cron-demo.wasm"), readFileSync(join(here, "../../programs/test/cron-demo/cron-demo.wasm")));
   await fs.writeFile(join(tree, "bin/messagebox.wasm"), readFileSync(join(here, "../../wasm/messagebox.wasm")));
-  await fs.writeFile(join(tree, "etc/subscriptions.json"), JSON.stringify([{ sender: "$owner", box: "schedule", handler: "cron-demo" }, { box: "tick", handler: "cron-demo" }, { box: ":ack", handler: "messagebox" }]));
+  await fs.writeFile(join(tree, "etc/dispatch.json"), JSON.stringify([{ address: "schedule", program: "cron-demo" }, { address: "tick", program: "cron-demo" }, { transport: "event", address: ":ack", program: "messagebox" }]));
   db.add("crontest", { store: join(home, "instances/crontest/runtime.db") });
   const src = await dirSource(tree);
   await router.bootRow("crontest", { kind: "tree", root: src.root, objects: src.objects });

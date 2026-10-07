@@ -1,5 +1,5 @@
 {
   "inputs": {},
   "services": [],
-  "description": "shruggr/skein-site's route handler (#125): the files of the app's own tree (the head site/app's record, its tree) under the row's root, by skein-sdk's files module; called by the front door with each request on its http rows."
+  "description": "shruggr/skein-site's filter (#125, #143): the files of the app's own tree (the head site/app's record, its tree) under the route's root, by skein-sdk's files module, as a filter's answer; called by the kernel's door with each request on a read route that lists it."
 }

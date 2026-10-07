@@ -248,7 +248,7 @@ try {
   check(JSON.stringify(conf.scopes?.chain) === '["chain/"]', `the stock scopes name chain/ for a genesis-wired chain program (${JSON.stringify(conf.scopes?.chain)})`);
   writeFileSync(join(sys, "etc/config.json"), JSON.stringify(conf));
   const rowsAt = JSON.parse(readFileSync(join(sys, "etc/dispatch.json"), "utf8")) as unknown[];
-  rowsAt.push({ address: "chain", sender: "event", program: "chain" }, { address: "chain", sender: "$self", program: "chain", filter: "beef" }, { address: "chain", sender: "$owner", program: "chain", filter: "beef" }, { address: "chain/status", sender: "$status", program: "chain" });
+  rowsAt.push({ transport: "event", address: "chain", program: "chain" }, { address: "chain", filters: ["kernel.beef"], program: "chain" }, { address: "chain/status", program: "chain" });
   writeFileSync(join(sys, "etc/dispatch.json"), JSON.stringify(rowsAt));
   const bootId = h.instance("boot");
   const src = await dirSource(sys);

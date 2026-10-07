@@ -73,7 +73,7 @@ const providers = new Signer(new PrivateKey("a77e57", 16));
 const router = new Router({
   db: hostDb, walletFor: () => ephemeralWallet(new PrivateKey("1111", 16)), home, providerKeyFor: (n) => providers.providerKey(n),
   owner: ownerId, idleMs: 0, http: network, kernel: { command: kernel, env: { SKEIN_HOME: home } },
-  genesis: { subscriptions: [{ box: "fetch", sender: ownerId, handler: FETCH_CID }] },
+  genesis: { subscriptions: [{ box: "fetch", handler: FETCH_CID }] },
   log: (s, l) => { if (process.env.VERBOSE) process.stdout.write(`  | [${s}] ${l}\n`); },
 });
 await router.listen(0);

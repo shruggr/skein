@@ -37,25 +37,6 @@
     }
   ],
   "requires": [],
-  "dispatch": [
-    {
-      "address": "app-demo",
-      "sender": "*",
-      "program": "demo"
-    },
-    {
-      "address": "tick",
-      "sender": "$cron",
-      "program": "demo"
-    },
-    {
-      "transport": "http",
-      "address": "/call",
-      "sender": "session",
-      "program": "demo",
-      "fn": "call"
-    }
-  ],
   "start": {
     "body": {
       "kind": "app-demo-start"
@@ -66,5 +47,23 @@
       "kind": "app-demo-stop"
     }
   },
-  "description": "A counter (skein's test app for install, #72/#76/#77): demo.counter/1 over its head's state (app-demo/app), a heartbeat from the cron provider scheduled by its start message."
+  "description": "A counter (skein's test app for install, #72/#76/#77): demo.counter/1 over its head's state (app-demo/app), a heartbeat from the cron provider scheduled by its start message.",
+  "routes": [
+    {
+      "address": "",
+      "handler": "demo"
+    },
+    {
+      "address": "tick",
+      "handler": "demo"
+    },
+    {
+      "transport": "http",
+      "address": "/call",
+      "filters": [
+        "kernel.brc104"
+      ],
+      "handler": "demo.call"
+    }
+  ]
 }

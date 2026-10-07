@@ -111,13 +111,14 @@ input[type=text]:focus-visible{outline:2px solid var(--acc);outline-offset:0}
 .suffix{font-family:var(--mono);font-size:14px;color:var(--mut);padding-right:10px;white-space:nowrap}
 .status{margin:4px 0;white-space:pre-wrap;font-size:14px}
 .status:empty{display:none}
-.wait{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:14px;color:var(--mut)}
-.wait[hidden]{display:none}
-.wait img{width:22px;height:22px;flex:none;mix-blend-mode:lighten;animation:wait-turn 2.4s linear infinite}
+/* the wait (0.7.4): the mark turning beside the step being taken; .wait alone is the colour of an unattested hint */
+.waiting{display:flex;align-items:center;gap:8px;margin:4px 0;font-size:14px;color:var(--mut)}
+.waiting[hidden]{display:none}
+.waiting img{width:22px;height:22px;flex:none;mix-blend-mode:lighten;animation:wait-turn 2.4s linear infinite}
 .wait-secs{font-variant-numeric:tabular-nums;white-space:nowrap}
 @keyframes wait-turn{to{transform:rotate(360deg)}}
 @keyframes wait-pulse{50%{opacity:.4}}
-@media (prefers-reduced-motion:reduce){.wait img{animation:wait-pulse 2.4s ease-in-out infinite}}
+@media (prefers-reduced-motion:reduce){.waiting img{animation:wait-pulse 2.4s ease-in-out infinite}}
 
 /* ---- handles */
 .handles{display:grid;grid-template-columns:minmax(0,560px);gap:18px}
@@ -139,9 +140,153 @@ svg.avatar{background:#1E2843}
 .find-row{max-width:560px;margin:0}
 .find-row input[type=text]{flex:1 1 240px}
 
+/* ---- ids: shortened, expandable, copyable */
+.idv{display:inline-flex;align-items:center;gap:2px;max-width:100%;vertical-align:middle;font-family:var(--mono);font-size:13px;color:var(--fg2)}
+.idv-text{font:inherit;color:inherit;background:none;border:0;padding:2px 0;min-height:28px;border-radius:3px;cursor:pointer;text-align:left;overflow-wrap:anywhere;font-weight:400;display:inline}
+span.idv-text{cursor:text;min-height:0}
+button.idv-text:hover{color:var(--fg);border:0;text-decoration:underline dotted;text-underline-offset:3px}
+.idv.open{display:inline-flex;align-items:flex-start}
+.idv.open .idv-text{word-break:break-all}
+.idv-copy{flex:none;min-height:28px;min-width:28px;padding:0 4px;border:0;background:none;color:var(--mut);display:inline-flex;align-items:center;gap:4px;font-family:var(--body);font-size:12px;font-weight:400}
+.idv-copy:hover{color:var(--fg);border:0}
+.idv-copy.copied{color:var(--ok)}
+.idv-done:empty{display:none}
+.meta .idv,.contact-meta .idv{font-size:12px;color:var(--mut)}
+.tile .idv{font-size:15px;color:var(--fg)}
+.offscreen{position:fixed;left:-9999px;top:0;opacity:0}
+
 /* ---- a skein's pages, the explorer, the inbox (tables, tabs) */
 .skein-head{display:flex;flex-direction:column;gap:12px;margin-bottom:6px}
-.skein-head h1{overflow-wrap:anywhere}
+.skein-head h1{overflow-wrap:anywhere;font-size:40px}
+.skein-head .url{font-size:13px}
+main.skein{gap:24px}
+main.skein>.sec+.sec{margin-top:8px}
+.back{font-size:14px;text-decoration:none;align-self:flex-start;min-height:32px;display:inline-flex;align-items:center}
+main>.back{margin-bottom:-4px}
+.sec-title{font-family:var(--display);font-weight:400;font-size:22px;margin:0}
+.card-h{font-family:var(--display);font-weight:400;font-size:22px;letter-spacing:-.01em;line-height:1.25;margin:0}
+.card.notice{border-color:var(--dash)}
+.ver{font-family:var(--mono);font-size:12px;color:var(--mut)}
+.tag{display:inline-flex;align-items:center;font-size:11px;line-height:1.4;color:var(--mut);border:1px solid var(--line);border-radius:10px;padding:1px 8px;white-space:nowrap;font-family:var(--body);font-weight:400}
+.tag.new{color:var(--acc);border-color:var(--outline)}
+.mono{font-family:var(--mono)}
+
+/* the task: the clone's steps, its error, the review */
+.task{display:flex;flex-direction:column;gap:8px}
+.task:has(> #prompt:empty):has(> .waiting[hidden]):has(> .status:empty){display:none}
+
+
+/* installed apps: a table whose rows are cards */
+table.app-cards{display:block;margin:0}
+table.app-cards>tbody{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(260px,100%),1fr));gap:16px}
+tr.app-card{display:flex;flex-direction:column;gap:10px}
+tr.app-card>td{display:block;border:0;padding:0}
+.app-title{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.app-name{font-family:var(--display);font-weight:400;font-size:20px;color:var(--fg);text-decoration:none;line-height:1.25}
+a.app-name:hover{color:var(--acc)}
+.app-desc{font-size:14px;line-height:1.5;color:var(--fg2);display:-webkit-box!important;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+tr.app-card>td.app-title{display:flex}
+tr.app-card>td.actions{display:flex;margin-top:auto;padding-top:4px;gap:8px}
+.app-card .confirm.asking{gap:8px}
+.app-card .btn,.app-card button{font-size:13px;padding:8px 12px}
+.app-card button.quiet{padding:8px 6px}
+
+/* add an app, from a repository */
+.two-col{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start}
+.catalog-card,.repo-card{display:flex;flex-direction:column;gap:12px}
+table.catalog{margin:0}
+table.catalog td{padding:12px 0;border-bottom:0;border-top:1px solid var(--line);vertical-align:middle}
+table.catalog td:first-child{display:flex;flex-direction:column;gap:2px;padding-right:12px}
+.cat-desc{font-size:13px;color:var(--fg2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.cat-act{width:1%;text-align:right;white-space:nowrap}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.field>label{font-size:14px;font-weight:500;color:var(--fg)}
+.field input[type=text],.field select{width:100%;flex:none}
+select{font:inherit;font-family:var(--mono);font-size:13px;min-height:40px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--ground);color:var(--fg);max-width:100%}
+select:focus-visible{outline:2px solid var(--acc);outline-offset:0}
+.commit-line{display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px}
+.check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--fg2)}
+.check input{accent-color:var(--rust);width:16px;height:16px}
+
+/* the review */
+.card.review{display:flex;flex-direction:column;gap:12px;border-color:var(--outline)}
+.review-desc{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+dl.facts{margin:0;display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px 20px;font-size:14px}
+dl.facts dt{color:var(--mut)}
+dl.facts dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.url-text{font-family:var(--mono);font-size:13px;color:var(--acc)}
+.review-rows{margin:0;display:flex;flex-direction:column;gap:6px}
+.review-rows li{margin:0;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.row-line{display:inline-flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline;min-width:0}
+.row-where{font-family:var(--mono);font-size:13px;color:var(--fg)}
+.row-who{font-size:14px;color:var(--fg2)}
+.row-to{font-family:var(--mono);font-size:12px}
+details.exact summary,details.manual summary,details.services summary{color:var(--acc);font-size:13px;min-height:32px;display:flex;align-items:center}
+details.exact pre{max-height:16em;margin-top:6px;font-size:12px}
+button.danger{border-color:var(--bad);color:var(--bad)}
+button.danger:hover{border-color:var(--bad);background:rgba(242,135,122,.1);color:var(--fg)}
+
+/* inline confirm */
+.confirm{display:inline-flex;flex-wrap:wrap;align-items:center;gap:6px 10px;min-width:0}
+.confirm.asking{flex-basis:100%}
+.confirm-q{font-size:14px;color:var(--fg)}
+.confirm-btns{display:inline-flex;gap:8px;align-items:center}
+.confirm-card{display:flex;flex-direction:column;gap:10px;border:1px solid var(--line);border-radius:8px;padding:14px;margin-top:10px}
+.confirm-card p{margin:0;font-size:14px}
+
+/* one app: its rows */
+.app-detail{display:flex;flex-direction:column;gap:12px}
+.app-detail .app-name{font-size:26px}
+.perm-list{margin:0;display:flex;flex-direction:column}
+.perm-list>li{margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding:12px 0;border-top:1px solid var(--line)}
+.perm-list>li .row-line{flex:1 1 20em}
+.perm-list>li.missing .row-where{color:var(--fg2)}
+.card>.perm-list{margin-top:6px}
+/* Roles (#143): each role, what it gates, its holders, Grant */
+.role-list{margin:6px 0 0;display:flex;flex-direction:column}
+.role-list>li.role{margin:0;display:flex;flex-direction:column;gap:8px;padding:12px 0;border-top:1px solid var(--line)}
+.role-top{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.role-name{font-family:var(--mono);font-weight:600}
+.role-holders{margin:0;display:flex;flex-direction:column;gap:6px;font-size:14px}
+.role-holder{margin:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.grant-form{flex-wrap:wrap;gap:8px}
+.grant-form select,.grant-form input{min-width:0;flex:1 1 12em}
+.grant-review{flex:1 1 100%}
+#routes th{text-align:left;font-weight:600;color:var(--fg2)}
+.add-row{display:flex;flex-direction:column;gap:12px}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(220px,100%),1fr));gap:14px 18px}
+.card section,.card>.help{margin:0}
+
+/* the overview */
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));gap:16px}
+.tile{display:flex;flex-direction:column;gap:6px;min-width:0}
+.tile-label{font-size:13px;color:var(--mut)}
+.tile-value{font-family:var(--display);font-size:22px;line-height:1.25;min-width:0;overflow-wrap:anywhere}
+.tile-sub{font-size:13px;color:var(--fg2)}
+.card.identity{display:flex;flex-direction:column;gap:12px}
+
+/* contacts */
+.find-contact{display:flex;flex-direction:column;gap:12px}
+.find-contact .find-row{max-width:none}
+.find-contact .find-row input[type=text]{flex:1 1 260px}
+.found{display:flex;align-items:center;gap:14px;padding:14px;border:1px solid var(--line);border-radius:8px;flex-wrap:wrap}
+.found-body{flex:1 1 14em;display:flex;flex-direction:column;gap:2px;min-width:0}
+.contacts{padding:0;overflow:hidden}
+.contacts-head{padding:18px 20px 14px}
+.contacts-head p{margin:6px 0 0}
+.contacts-empty{padding:0 20px 18px;margin:0}
+.contact-list{margin:0}
+.contact-list>li.contact{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:14px;align-items:center;padding:14px 20px;border-top:1px solid var(--line);margin:0}
+.contact-list .confirm.asking{grid-column:1/-1}
+.contact-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.contact-name{font-weight:600}
+.contact-meta{font-size:12px;color:var(--mut);overflow-wrap:anywhere}
+.avatar-md{width:40px;height:40px}
+details.services{border-top:1px solid var(--line);padding:6px 20px}
+details.services[open]{padding-bottom:0}
+details.services .contact-list>li.contact{padding-left:0;padding-right:0}
+.manual-row{margin-top:8px}
+.key-line{display:flex;align-items:center;flex-wrap:wrap;gap:4px}
 nav.tabs{display:flex;gap:20px;flex-wrap:wrap;border-bottom:1px solid var(--line);font-size:15px}
 nav.tabs a{color:var(--fg2);text-decoration:none;min-height:40px;display:inline-flex;align-items:center;border-bottom:2px solid transparent;margin-bottom:-1px}
 nav.tabs a:hover{color:var(--fg)}
@@ -182,6 +327,7 @@ button.big{font-size:16px;min-height:44px;padding:12px 22px}
 main.landing+footer{border-top:0}
 @media (max-width:860px){
   .how-grid{grid-template-columns:minmax(0,1fr);gap:32px}
+  .two-col{grid-template-columns:minmax(0,1fr)}
 }
 
 /* ---- phone width */
@@ -200,4 +346,12 @@ main.landing+footer{border-top:0}
   .hero-mark{flex-basis:100%}
   .hero-mark img{width:200px}
   .how-grid{padding-top:40px;padding-bottom:40px}
+  .skein-head h1{font-size:32px}
+  dl.facts{grid-template-columns:minmax(0,1fr);gap:2px 0}
+  dl.facts dd+dt{margin-top:10px}
+  .contacts-head{padding:16px 16px 12px}
+  .contact-list>li.contact{padding:14px 16px;grid-template-columns:auto minmax(0,1fr)}
+  .contact-list>li.contact>.confirm{grid-column:2}
+  details.services{padding:6px 16px}
+  .contacts-empty{padding:0 16px 16px}
 }

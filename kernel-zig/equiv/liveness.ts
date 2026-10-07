@@ -75,7 +75,7 @@ function appTree(name: string): string {
   copyFileSync(wasm, join(dir, "bin/app-demo.wasm"));
   writeFileSync(join(dir, "etc/app.json"), JSON.stringify({
     kind: "app", name, version: "0.1.0", programs: { demo: "bin/app-demo.wasm" }, provides: [], requires: [],
-    dispatch: [{ address: name, sender: "$owner", program: "demo" }],
+    routes: [{ address: "", handler: "demo" }],
     description: `#138's test app ${name}: app-demo's module, emitting the events it is asked to`,
   }, null, 2));
   return dir;

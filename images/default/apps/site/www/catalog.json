@@ -11,7 +11,7 @@
       "description": "Chain state: headers, transactions, proofs; ingests BEEF and broadcasts." },
     { "name": "overlay", "version": "0.7.7", "url": "https://github.com/shruggr/skein-overlay", "hash": "9e30a64451353145e950d001f79886a60c6f2bb1",
       "description": "The overlay engine: BRC-22 submit and BRC-24 lookup over topic managers. Needs the chain app." },
-    { "name": "onboard", "version": "0.3.4", "url": "https://github.com/shruggr/skein-onboard", "hash": "2f8a7b1d33c2a6b8ebdeb2018eb63d354fd05879",
+    { "name": "onboard", "version": "0.4.0", "url": "https://github.com/shruggr/skein-onboard", "hash": "189b7c2df3041c4914dcf189ade4c8ca241a9b5f",
       "description": "Creates skeins for others through the host's instance manager. Only works in a host skein." }
   ]
 }

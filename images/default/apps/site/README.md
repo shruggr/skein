@@ -2,14 +2,15 @@
 
 The management site of a [skein](https://github.com/shruggr/skein), as an
 app (shruggr/skein#125): installed in a skein, it serves the page at
-`/site/`, and at `/` when the owner adds that read (below). The files are
+`/site/`, and at `/` by root's own route (the default image has it; below). The files are
 the same everywhere; what makes the page yours is the wallet in your
 browser. A skein from the default image serves nothing until something is
 installed: the host's own skein carries this app, installed by the host's
-owner, and you manage your skeins from there, the page talking to each one
-directly. Version **0.7.7** (shruggr/skein#92; the Inbox, #99; handles,
-#103; profiles and search, #104; the wallet's grouped request, #97; an app,
-#125; the signed claim, shruggr/skein#127).
+operator (root), and you manage your skeins from there, the page talking to
+each one directly. Version **0.9.0** (shruggr/skein#92; the Inbox, #99;
+handles, #103; profiles and search, #104; the wallet's grouped request, #97;
+an app, #125; the signed claim, shruggr/skein#127; routes, filters and
+roles, shruggr/skein#143).
 
 ## What it does
 
@@ -27,26 +28,44 @@ directly. Version **0.7.7** (shruggr/skein#92; the Inbox, #99; handles,
   remove one (the wallet relinquishes the output).
 - **Create a skein** (on a host skein, where the onboarding app is
   installed): your wallet signs the new skein's claim (skein's `signClaim`:
-  a message naming no recipient, whose sender becomes the owner, #127), and
+  a message naming no recipient; the kernel grants root to its sender, #127, #143), and
   `POST /onboard/call {fn: "onboard.create", args: {handle, claim}}` (as
   DAG-JSON) on your session; the answer `{handle, identity, url}`; the page writes a
   locator and opens the new skein's view here (a new skein serves no page:
   it is managed from this one).
 - **A skein's page.** Its apps (the heads `<app>/app`), read from its
-  explorer (`/explore`, a read the owner may make). **Install**: the
-  catalog (`catalog.json`: our apps as a repository URL and a commit id) or
-  any URL and commit id. The git app comes first, from the tree a skein of
-  the default image carries (`apps/git`); then each install is one message
-  to the git app's box, `{fn: "git.clone", args: {url, hash}}`, its answer
-  `{tree, app}` read from the thread that message launched; the manifest is
-  read out of the stored tree, the app record rebuilt in the page (skein's
-  own install plan, `src/host/plan.ts`) and checked against the git app's,
-  and the rows and reads it asks for are shown resolved against this skein. On your
-  approval the page sends the head (and the reads head, shruggr/skein#135), the dispatch rows and the start, signed
-  by you. **Uninstall**: the stop, then its rows and reads removed. **Address book**:
-  entries added or removed by a `peers` message you approve.
+  explorer (`/explore`, root's). **Install** (root's: the page says so when
+  your key does not hold root): the catalog (`catalog.json`: our apps as a
+  repository URL and a commit id) or any URL and commit id. The git app
+  comes first, from the tree a skein of the default image carries
+  (`apps/git`); then each install is one message to the git app's box,
+  `{fn: "git.clone", args: {url, hash}}` (its function gated by root), its
+  answer `{tree, app}` read from the thread that message launched; the
+  manifest is read out of the stored tree, the app record rebuilt in the
+  page (skein's own install plan, `src/host/plan.ts` `planInstall`) and
+  checked against the git app's, and its routes (each resolved by skein's
+  `wiring`: transport, address as served, filters, handler), its filters
+  and its roles are shown. On your approval the page sends the objects, the
+  head, the routes and the start, signed by you. The install grants
+  nothing: you are root (shruggr/skein#143). **Uninstall**: the stop, then
+  its routes removed; its data and its roles' grants stay. **An app's
+  page**: its routes as the table holds them (the ones its manifest asks
+  for that are missing marked; installing it again restores them) and its
+  **roles** — `root`, `user` and the app's own (`<app>.<role>`), each with
+  the functions it gates (the app record's `roles`) and its holders (the
+  kernel's head `grants`, `{kind: "grants", roles: {<role>: [<key>…]}}`).
+  Root grants a role to a key (yours, a contact's, or one typed) and
+  revokes it, each one `grant` message `{op: "add" | "remove", role,
+  principal}` you approve; `user` is any signed-in key and is never
+  granted; the last root holder cannot be revoked here. **From a
+  repository**: a github.com URL lists its tags and its default branch's
+  head (GitHub's public API, unsigned), else the commit id is typed.
+  **Contacts** (the address book): a handle resolved at its domain and
+  added (`handle` and `domain` apart, as the address book keeps them), or a
+  key and mailbox URL; removed, each by a `peers` message you approve.
 - **Explorer**: the log, threads, a thread, any record (git trees
-  browsable), what points at a record (edges), the dispatch table.
+  browsable), what points at a record (edges), the routes (transport,
+  address, filters, handler, whose).
 - **On a host skein**: the skeins created there (`onboard/instances/…`),
   each openable through a locator.
 - **Your handles; register one** (on a skein a skein host runs). The page
@@ -107,7 +126,7 @@ A BRC-100 wallet that seeks grouped permission (wallet-toolbox's
 `WalletPermissionsManager`, `seekGroupedPermission`) reads
 `<origin>/manifest.json` of the page's origin (shruggr/skein#97). The app
 serves it at `/site/manifest.json`; at the origin's `/manifest.json` only
-with the owner's root read (below), and a host's router may answer that path
+with root's route at `/` (below), and a host's router may answer that path
 itself. It asks once, under `metanet`, for:
 
 - `groupPermissions`, granted together on the first call: the protocols
@@ -137,7 +156,7 @@ and baskets. The wallet asks for those as they come.
 
 ```
 etc/app.json      the manifest (skein docs/APPS.md §2)
-bin/site.wasm     the one program: a route handler (Zig, WASI preview1; src/main.zig), built by `zig build bin`
+bin/site.wasm     the one program: a read route's filter (Zig, WASI preview1; src/main.zig), built by `zig build bin`
 bin/site.json     its program record's description
 www/              the page, served as it is in the tree
 src/, build.zig, build.zig.zon, lib/, build.mjs, package.json   how bin/site.wasm and www/'s bundles are made
@@ -146,11 +165,13 @@ src/, build.zig, build.zig.zon, lib/, build.mjs, package.json   how bin/site.was
 The program serves **the app's own tree**: on each request it reads the
 head `site/app` (the app record the install wrote), takes its `tree`, and
 answers with skein-sdk's `files.serve` (`lib/files.zig`: the file under the
-read's `root`, a directory's `index.html`, a 301 for a directory named
+route's `root`, a directory's `index.html`, a 301 for a directory named
 without its `/`, the blob's CID as the ETag and 304 on `If-None-Match`, 404,
-405). A read (shruggr/skein#135, the second door): the host serves it by a
-call over the current state — anyone, signed or not, any method, no entry
-in the log — and it puts nothing and moves no head.
+405), as a filter's answer `{answer: {status, type, headers, body}}`. Its
+route is a read route (shruggr/skein#143: no handler; its one filter, the
+manifest's `get`, answers): the kernel's door calls it over the current
+state — anyone, signed or not, any method, no entry in the log — and it
+puts nothing and moves no head.
 
 The manifest (description left out):
 
@@ -158,54 +179,51 @@ The manifest (description left out):
 {
   "kind": "app",
   "name": "site",
-  "version": "0.7.7",
+  "version": "0.9.0",
   "programs": { "site": "bin/site.wasm" },
   "provides": [{ "interface": "site/1", "functions": { "get": { "writes": false,
     "args": { "method?": "string", "route?": "string", "path?": "string", "query?": "string", "headers?": "map", "match?": "map" },
     "answer": { "status": "int", "type": "string", "headers": "map", "body": "bytes" } } } }],
   "requires": [],
-  "reads": [
-    { "address": "/", "prefix": true, "program": "site", "fn": "get", "root": "www" }
+  "filters": { "get": "site.get" },
+  "routes": [
+    { "transport": "http", "address": "/", "prefix": true, "filters": ["get"], "root": "www" }
   ]
 }
 ```
 
-The app has no dispatch rows: it takes no messages. The read's address is
+The app takes no messages: its one route is a read route. Its address is
 relative to `/site/` (APPS.md §2: an app's paths are under its name), so the
-install asks for `read /site/* → site.get (root www)`. The page's links are relative (`app.js`, `style.css`,
+install asks for `route http /site/ prefix [site.get] → (a read: its filters
+answer, nothing logged) (root www)`. The page's links are relative (`app.js`, `style.css`,
 `catalog.json`), so it works under `/site/` and at `/`; the skein it was
 served by is its URL less a trailing `/site`.
 
 ## Install
 
-From the management page of a skein you own (Install, by URL and commit
-id), or with skein's reference client as the owner:
+From the management page of a skein where you hold root (Install, by URL
+and commit id), or with skein's reference client as root:
 
 ```
-skein plan install https://github.com/shruggr/skein-site#<the v0.7.7 commit> --origin <the skein's URL> --out plan
+skein plan install https://github.com/shruggr/skein-site#<the v0.9.0 commit> --origin <the skein's URL> --out plan
 skein send <the skein's URL> plan
 ```
 
-**The site at the root (optional).** An app's paths are under its name;
-the root is the owner's. To serve the page at `/` too, the owner adds a
-read of their own — the instance's reads head (`reads`), to the same
-program (the site's program record, `programs.site` of the head
-`site/app`'s record):
+**The site at the root.** An app's paths are under its name; the root is
+root's. The default image carries root's own route putting the page at
+`/` (shruggr/skein#143: a route with no `app`, so an upgrade of the site
+keeps it and an uninstall leaves it):
 
 ```
-{address: "/", prefix: true, program: <programs.site>, fn: "get", root: "www"}
+{transport: "http", address: "/", prefix: true, filters: ["site.get"], root: "www"}
 ```
 
-With skein's client: `skein plan reads add --prefix --fn get --settings
-'{"root":"www"}' / site.site --origin <url> --out root`, then `skein send
-<url> root` (an `objects` message with the new reads record, and `head
-reads`). A prefix read at `/` is the instance's catch-all: exact paths and
-longer prefixes (the messagebox, the explorer, every app's `/<name>/…`)
-match first, reads and rows alike; any other path is the site's (a 404
-when the tree has no such file), and `/manifest.json` is the page's
-grouped request. The read is the owner's, not the app's (no `app` field):
-an upgrade of the site keeps it, and an uninstall leaves it (remove it with
-`skein plan reads remove …` and the same arguments).
+Elsewhere, root adds it with one `dispatch` message (skein's
+`planRootRoute`, `skein dispatch`). A prefix route at `/` is the instance's
+catch-all: exact paths and longer prefixes (the messagebox, the explorer,
+every app's `/<name>/…`) match first; any other path is the site's (a 404
+when the tree has no such file), and `/manifest.json` is the page's grouped
+request.
 
 ## Files
 
@@ -235,16 +253,16 @@ SKEIN_DIR=../skein node build.mjs     # a skein checkout at lib/SKEIN_REV, with 
 The chunks' names hash the modules' paths, so the same bytes come out only
 with the skein checkout at `../skein` as above.
 
-The handler (Zig 0.16.0, `mise.toml`):
+The filter (Zig 0.16.0, `mise.toml`):
 
 ```
 zig build          # zig-out/bin/site.wasm
 zig build bin      # the same, into bin/site.wasm (committed; the build is reproducible)
-zig build test     # the handler's checks (natively)
+zig build test     # the filter's checks (natively)
 ```
 
 skein runs the app end to end: `kernel-zig/equiv/site.ts` (the page in
-headless Chrome, installed in a host skein), `files.ts` (the handler's
+headless Chrome, installed in a host skein), `files.ts` (the filter's
 answers) and `install.ts` (the install and uninstall), at a commit of this
 repository pinned in skein's `src/testapps.ts`.
 
@@ -252,6 +270,6 @@ repository pinned in skein's `src/testapps.ts`.
 
 | | |
 |---|---|
-| this app | 0.7.7 (tag `v0.7.7`): the page is a read (`reads[]`, shruggr/skein#135: served by a call, anyone, nothing logged), the owner's root a read (`skein plan reads add`); Save profile posts over your wallet's session (a write: signed); the bundles from skein's two-door plan (an app's reads into the reads head); the catalog pins onboard 0.3.4 and git 0.1.3. 0.7.6: Register posts over your wallet's BRC-104 session with the host's origin — a registration is a write, so a signed request (shruggr/skein#135); the catalog pins onboard 0.3.3. 0.7.5: the catalog pins skein-chain v0.4.0. 0.7.4: the page in the skein brand (0.7.0: header + wallet chip, skein cards, handle/Register card, self-hosted fonts, the mark), the logged-out landing page (0.7.1), quiet without a wallet (0.7.2); manifest and package versions aligned (0.7.3); Create shows the wait (the mark turning, the seconds counting) while the new skein loads the chain. 0.6.3: the catalog pins the current releases (git 0.1.2, shell 0.1.1, chain 0.3.2, overlay 0.7.7, onboard 0.3.2). 0.6.2: the bundles rebuilt on a skein whose address book has no roles (shruggr/skein#126); the address book page has no role column |
+| this app | 0.9.0 (tag `v0.9.0`): routes, filters and roles (shruggr/skein#143) — the manifest's read route with its filter `get` (the program answers `{answer: …}`); the bundles from skein's routes-roles (`planInstall` resolves routes, the install sends no key); an app's Permissions page becomes its Routes (read only) and Roles (root, user and the app's own, the holders from the head `grants`, granted and revoked by root with the kernel's `grant` message); the automatic setup of owner rows and its card are gone (root needs no rows); the review shows routes, filters and roles; the explorer's dispatch table is the Routes view (transport, address, filters, handler); Overview shows root's holders; the catalog pins onboard 0.4.0. 0.8.1: setup is automatic — on the owner's first visit the page sends the rows from you the image's apps lack (a status card while it runs, then what was added, dismissible; Try again on a failure); a contact added by handle keeps `handle` and `domain` apart (docs/MESSAGES.md, the address book), an older entry's full handle still shown. 0.8.0: a skein's pages redesigned — tabs Apps (the default: Finish setup, the installed apps as cards with Upgrade and Uninstall, Add an app, From a repository with GitHub's versions resolved to a commit, the review read from the plan, the skeins created there), Contacts (add by handle) and Overview; an app's page with its rows (remove one, add one, as skein's `wiring` builds it); the heads under the explorer; every key, CID and commit expandable and copyable; no window.confirm. 0.7.7: the page is a read (`reads[]`, shruggr/skein#135: served by a call, anyone, nothing logged), the owner's root a read (`skein plan reads add`); Save profile posts over your wallet's session (a write: signed); the bundles from skein's two-door plan (an app's reads into the reads head); the catalog pins onboard 0.3.4 and git 0.1.3. 0.7.6: Register posts over your wallet's BRC-104 session with the host's origin — a registration is a write, so a signed request (shruggr/skein#135); the catalog pins onboard 0.3.3. 0.7.5: the catalog pins skein-chain v0.4.0. 0.7.4: the page in the skein brand (0.7.0: header + wallet chip, skein cards, handle/Register card, self-hosted fonts, the mark), the logged-out landing page (0.7.1), quiet without a wallet (0.7.2); manifest and package versions aligned (0.7.3); Create shows the wait (the mark turning, the seconds counting) while the new skein loads the chain. 0.6.3: the catalog pins the current releases (git 0.1.2, shell 0.1.1, chain 0.3.2, overlay 0.7.7, onboard 0.3.2). 0.6.2: the bundles rebuilt on a skein whose address book has no roles (shruggr/skein#126); the address book page has no role column |
 | skein-sdk | v0.6.0, by tag tarball and hash in `build.zig.zon` (`cbor`, `sk`, `files`; no wallet) |
-| skein | the bundles from `lib/SKEIN_REV`; the app installs into a skein with the #77 manifest shape |
+| skein | the bundles from `lib/SKEIN_REV` (shruggr/skein routes-roles); the app installs into a skein with the #143 manifest shape (log format 9) |

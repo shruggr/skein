@@ -3,11 +3,10 @@
 // master secret, the control socket, the providers):
 //
 //   #142: `skein-host init` (the first run's part of `run`) creates the host
-//   skein from the host image (the default image and the onboarding app,
-//   shruggr/skein-onboard v0.3.4 in images/host), its genesis naming the
-//   operator's key ($SKEIN_HOME/operator.key) as its owner: the operator's
-//   admin rows and explorer row, git's and chain's `$owner` rows with the
-//   operator's key, no claim row (a claim finds none); the onboarding app's
+//   skein from the host image (the default image and the onboarding app in
+//   images/host), its genesis's `root` the operator's key
+//   ($SKEIN_HOME/operator.key) (#143): the admin routes, no claim route (a
+//   claim finds none); the onboarding app's
 //   config (domain, origin) from the settings; the instance manager in its
 //   address book; published at once. A second `init` only says which it is;
 //   `skein-host list` names it `host`.
@@ -117,33 +116,37 @@ try {
   check((await genesisBook("host")).includes("manager"), "the host skein's address book names the instance manager");
   const allRows = async (handle: string) => ((await (await k(handle)).dispatch()).rows as Array<Record<string, unknown>>);
   const kernelRows = async (handle: string) => (await allRows(handle)).filter((x) => x.program === "kernel");
+  /** A role's holders (hex) as the head `grants` names them (#143). */
+  const holders = async (handle: string, role = "root") => {
+    const c = await (await k(handle)).call("head", "grants") as CID | null;
+    return c ? ((((await (await k(handle)).store.get(c)) as { roles?: Record<string, Uint8Array[]> }).roles?.[role] ?? []).map(hex)) : [];
+  };
   const hostRows = await kernelRows("host");
-  check(hostRows.map((x) => `${x.address}<-${hex(x.sender)}`).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${operatorId}`).join(","), "the host skein's kernel rows are the operator's four admin rows: no claim row");
+  check(hostRows.map((x) => x.address).join(",") === "objects,head,dispatch,peers,grant", "the host skein's kernel routes are the admin routes: no claim route");
+  check((await holders("host")).join(",") === operatorId, "#143: root is the operator's key, from the genesis");
   const rows = await allRows("host");
-  check(rows.some((x) => x.address === "/explore" && hex(x.sender) === operatorId), "the operator's explorer row");
-  check(rows.some((x) => x.app === "git" && x.address === "git" && hex(x.sender) === operatorId) && rows.some((x) => x.app === "chain" && x.address === "chain" && hex(x.sender) === operatorId), "git's and chain's $owner rows hold the operator's key");
+  check(rows.some((x) => x.address === "/explore" && x.fn === "explore") && rows.some((x) => x.app === "git" && x.address === "git") && rows.every((x) => x.sender === undefined), "the explorer route, git's route; no route names a sender");
   const hostId = db.get("host")!.identity!;
   const late = await sendPlan({ port, owner: client, settled: () => router.settled() }, "host", planClaim(hostId)).then(() => "sent", (e: Error) => e.message);
-  check(/403/.test(late) && (await kernelRows("host")).every((x) => hex(x.sender) === operatorId), `a claim (another wallet's) finds no row: ${late.slice(0, 80)}`);
+  check(/403/.test(late) && (await holders("host")).join(",") === operatorId, `a claim (another wallet's) finds no route: ${late.slice(0, 80)}`);
 
   // ------------------------------------------------ the onboarding app, installed at birth with the settings' config
   const onboardRoot = await (await k("host")).call("head", "onboard/app") as CID | null;
   const onboard = onboardRoot ? await (await k("host")).store.get(onboardRoot) as { version?: string; config?: { onboard?: { domain?: string; origin?: string } } } : undefined;
-  check(onboard?.version === "0.3.4" && onboard.config?.onboard?.domain === "localhost" && onboard.config.onboard.origin === base, `onboard ${onboard?.version} installed at birth, config.onboard ${JSON.stringify(onboard?.config?.onboard)}`);
-  check(rows.some((x) => x.app === "onboard" && x.address === "/onboard/call" && x.sender === "session") && rows.some((x) => x.app === "onboard" && x.address === "/onboard/register" && x.sender === "session"), "its rows: /onboard/call and /onboard/register (#135) from any session");
+  check(!!onboard && onboard.config?.onboard?.domain === "localhost" && onboard.config.onboard.origin === base, `onboard ${onboard?.version} installed at birth, config.onboard ${JSON.stringify(onboard?.config?.onboard)}`);
+  const brc = (x: Record<string, unknown>) => Array.isArray(x.filters) && x.filters.includes("kernel.brc104");
+  check(rows.some((x) => x.app === "onboard" && x.address === "/onboard/call" && brc(x)) && rows.some((x) => x.app === "onboard" && x.address === "/onboard/register" && brc(x)), "its routes: /onboard/call and /onboard/register behind kernel.brc104 (#135, #143)");
 
-  // ------------------------------------------------ grant: another key's admin rows, signed by the operator's key, over the control socket
+  // ------------------------------------------------ grant: root to another key, signed by the operator's key, over the control socket
   const grantee = PrivateKey.fromRandom(), granteeId = grantee.toPublicKey().toString();
   const before = await (await new RawBox(ephemeralWallet(grantee), `${base}/@host`).af.fetch(`${base}/@host/explore`)).status;
-  r = await cli(["grant", granteeId, "--apps"]);
+  r = await cli(["grant", granteeId, "--role", "root"]);
   await router.settled();
-  const granted = await allRows("host");
-  const theirs = granted.filter((x) => hex(x.sender) === granteeId).map((x) => `${x.app ? `${String(x.app)}:` : ""}${x.address}`).sort();
-  check(r.code === 0 && theirs.join(",") === ["/explore", "chain:chain", "dispatch", "git:git", "head", "objects", "peers"].join(","), `skein-host grant <key> --apps: its admin rows, explorer row and the apps' owner rows (${theirs.join(", ")}; ${r.err.join(" ")})`);
+  check(r.code === 0 && (await holders("host")).includes(granteeId), `skein-host grant <key> --role root: the grants head names it (${r.err.join(" ")})`);
   const after = await (await new RawBox(ephemeralWallet(grantee), `${base}/@host`).af.fetch(`${base}/@host/explore`)).status;
   check(before === 403 && after === 200, `the granted key reads the explorer: ${before} → ${after}`);
   r = await cli(["grant", granteeId]);
-  check(r.code === 0 && r.out.some((l) => /every row already there/.test(l)), `a second grant sends nothing: ${r.out.join(" ")}`);
+  check(r.code === 0 && r.out.some((l) => /the grants say so already/.test(l)), `a second grant sends nothing: ${r.out.join(" ")}`);
 
   // ------------------------------------------------ a client creates a skein
   /** onboard.create with `w`'s own signed claim (#127; `claim: null`: none, `claimBy`: another wallet's), as dag-json. */
@@ -165,15 +168,15 @@ try {
   check(c.status === 200 && res?.handle === "alice" && res.url === `${base}/@alice`, `POST /onboard/call create alice → ${c.status} ${c.text}`);
   const alice = db.get("alice");
   check(!!alice && alice.status === "enabled" && alice.identity === res?.identity, `alice exists, published, her identity as answered (${alice?.identity?.slice(0, 8)})`);
-  const aliceRows = ((await (await k("alice")).dispatch()).rows as Array<Record<string, unknown>>).filter((x) => x.program === "kernel");
-  check(aliceRows.map((x) => `${x.address}<-${hex(x.sender)}`).join(",") === ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${clientId}`).join(","), "alice is claimed by the client's own signed claim: the client's admin rows, her claim row gone");
+  const aliceRows = await kernelRows("alice");
+  check(aliceRows.map((x) => x.address).join(",") === "objects,head,dispatch,peers,grant" && (await holders("alice")).join(",") === clientId, "alice is claimed by the client's own signed claim: the client is root, her claim route gone");
   stores.push(alice!.store);
   const s = openStoreFile(alice!.store, { readOnly: true });
   const first: Array<Record<string, unknown>> = [];
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
   check(first[0]?.transport === "local", "the forwarded claim is alice's first entry after her genesis: her hostname was published after it");
   check(!(await genesisBook("alice")).includes("manager"), "alice's address book has no instance manager");
-  // #125: an image serves no page; her explorer row (her owner's key) answers at her url, wanting a session.
+  // Her explorer route (kernel.brc104, root's) answers at her url, wanting a session.
   const page = await fetch(`${res?.url}/explore`);
   check(page.status === 401, `alice answers at her url (nothing at /: #125): GET ${res?.url}/explore with no session → ${page.status}`);
   const rec = await (await k("host")).call("head", "onboard/instances/alice") as CID | null;

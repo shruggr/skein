@@ -14,7 +14,7 @@
 export { RawBox, signClaim } from "skein/src/client/raw.ts";
 export { chunk } from "skein/src/client/bundle.ts";
 export { appHead, appRecordIn, describe, planInstall, planUninstall, readStoredApp, sendInstall, sendUninstall, wiring } from "skein/src/host/plan.ts";
-export { dispatchOrigin, fold, rowKey, senderText } from "skein/src/runtime/dispatch.ts";
+export { dispatchOrigin, fold, rowKey } from "skein/src/runtime/dispatch.ts";
 export { headOrigin } from "skein/src/runtime/heads.ts";
 export { lookup, parseTree, readBlob, readTree } from "skein/src/runtime/tree.ts";
 export { encode as encodeBlock } from "skein/src/runtime/cid.ts";

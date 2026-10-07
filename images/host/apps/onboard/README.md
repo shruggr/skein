@@ -9,34 +9,42 @@ certificate. Every handle the host certifies is recorded here; resolve,
 search and the manifest are answered from those records. The app asks the
 host's **instance manager** for every instance and the host's **certifier**
 for every signature; it holds no key. It finds both in its address book by
-transport and address (`local` `manager`, `local` `certifier`). Version **0.3.4**.
+transport and address (`local` `manager`, `local` `certifier`). Version **0.4.0**.
 
 ## What it is
 
-One program, `bin/onboard.wasm`, on three rows and four reads (installed
-under `/onboard/`). A row is a message route: the request is signed (a
-BRC-104 session) and is an entry in the log. A read (shruggr/skein#135) is
-served by a call over the current state: anyone, signed or not, any method,
-nothing logged.
+One program, `bin/onboard.wasm`, on seven routes (installed under
+`/onboard/`; skein `docs/APPS.md` §2, shruggr/skein#143). Three have a
+handler: the request passes the kernel's `kernel.brc104` filter (a BRC-104
+session and its signature; the session's key is the **principal**) and the
+gate (each handler's function is gated by the standard role `user`: any
+principal), and is an entry in the log. Four are **read routes**: no
+handler, one filter of this app's that answers the request over the current
+state — anyone, signed or not, any method, nothing logged.
 
-| route | | sender | body / query | answer |
+| route | filters | role | body / query | answer |
 |---|---|---|---|---|
-| `POST /onboard/call` | row | `session` | `{fn: "onboard.create", args: {handle, image?, claim}}` | `{fn, result: {handle, identity, url}}` |
-| `POST /onboard/register` | row | `session` | `{username, identityKey, signature}` | `{handle, domain, identityKey, messagebox, certificate, keyringForSubject}` |
-| `POST /onboard/profile` | row | `*` (any key, signed) | `{handle, record, signature}` | `{handle, profile, displayName?, avatarURL?}` |
-| `GET /onboard/resolve` | read | | `?handle=<handle>[@<domain>]` | BRC-169 §5.2 |
-| `GET /onboard/search` | read | | `?q=&limit=` | BRC-169 §5.6 |
-| `GET /onboard/manifest.json` | read | | | BRC-169 §5.1 |
-| `GET /onboard/bsvalias/id/<handle>[@<domain>]` | read (prefix) | | | the paymail PKI |
+| `POST /onboard/call` | `kernel.brc104` | `user` | `{fn: "onboard.create", args: {handle, image?, claim}}` | `{fn, result: {handle, identity, url}}` |
+| `POST /onboard/register` | `kernel.brc104` | `user` | `{username, identityKey, signature}` | `{handle, domain, identityKey, messagebox, certificate, keyringForSubject}` |
+| `POST /onboard/profile` | `kernel.brc104` | `user` | `{handle, record, signature}` | `{handle, profile, displayName?, avatarURL?}` |
+| `GET /onboard/resolve` | `resolve` (read) | | `?handle=<handle>[@<domain>]` | BRC-169 §5.2 |
+| `GET /onboard/search` | `search` (read) | | `?q=&limit=` | BRC-169 §5.6 |
+| `GET /onboard/manifest.json` | `manifest` (read) | | | BRC-169 §5.1 |
+| `GET /onboard/bsvalias/id/<handle>[@<domain>]` | `paymail` (read, prefix) | | | the paymail PKI |
 
-The profile writes (it keeps the holder's signed record), so it is a row:
-a signed request, over any key's session, as registration is.
+The manifest declares the four as filters (`"filters": {"resolve":
+"onboard.resolve", …}`); each answers `{answer: {status, type, body}}`,
+the response the route gives. The profile writes (it keeps the holder's
+signed record), so it has a handler and takes a signed request, over any
+key's session; the record itself is signed by the handle's key, and that
+signature is what the handler checks (the session's key need not be the
+handle's).
 
 The host's router maps its own origin onto these (skein
 `docs/MESSAGES.md`, "BRC-169 is discovery"): `/manifest.json`,
 `/.well-known/metanet-handles/resolve` and `/search` and
-`/bsvalias/id/…` reach the reads, `POST /account/register` and `POST
-/account/profile` the rows, in the host skein.
+`/bsvalias/id/…` reach the read routes, `POST /account/register` and `POST
+/account/profile` the handlers, in the host skein.
 
 ### Configuration
 
@@ -111,8 +119,9 @@ is whoever signed its claim (shruggr/skein#127), and the page signs it:
   owner, image?, domain, claim}`); the manager checks that its sender is
   the session's key and forwards it into the new instance as its first
   entry, before the hostname is published. The instance's front door checks
-  the signature, and the kernel writes the signer's admin rows and removes
-  the claim row. The host signs nothing for the owner.
+  the signature, and the kernel grants **root** to the signer (the head
+  `grants`, shruggr/skein#143) and removes the claim route. The host signs
+  nothing for the owner.
 - No claim: 400 `bad-args` (`args.claim: missing`). Another key's claim,
   or one whose signature does not hold: 409 `refused`, and the instance is
   left unpublished.
@@ -129,12 +138,14 @@ this domain or not the shape; 404 no such handle) and kept under
 
 ### Error codes of `/onboard/call`
 
-`bad-request` 400, `bad-args` 400, `not-admitted` 403 (no session),
+`bad-request` 400, `bad-args` 400, `not-admitted` 403 (no session; for
+`onboard.adopt`, a key that does not hold root in the host skein — the
+kernel's head `grants`),
 `unknown-fn` 404, `refused` 409 (the instance manager said no), `failed`
 500 (the thread failed: for one, no instance manager or certifier in this
-skein's address book, because the app is not in the host skein). The
-routes answer `{error}` (register, profile) or §5.3's `{metanetHandles,
-error: {code, message}}` (resolve).
+skein's address book, because the app is not in the host skein). register
+and profile answer `{error}`; the read routes' bodies are `{error}` or
+§5.3's `{metanetHandles, error: {code, message}}` (resolve).
 
 `src/main.zig` documents the contract in full.
 
@@ -145,12 +156,12 @@ certifier in its address book); then the operator installs this app into
 it:
 
 ```
-skein-host install https://github.com/shruggr/skein-onboard#v0.3.4 --instance host \
+skein-host install https://github.com/shruggr/skein-onboard#v0.4.0 --instance host \
   --config '{"onboard": {"domain": "skein.nexus"}}'
 ```
 
 A host skein made before the certifier was in the host skein's address
-book needs its entry, sent by the owner: `skein plan peers add <certifier
+book needs its entry, sent by root: `skein plan peers add <certifier
 key> certifier --transport local …` (the key: what the host's manifest
 published as `metanet.trust.publicKey` before this app served it — the
 master secret's child under `[2, "skein provider"]`, key ID `certifier`).
@@ -184,9 +195,9 @@ certificate), at the commit pinned in `src/testapps.ts`.
 
 | | |
 |---|---|
-| this app | 0.3.4 (tag `v0.3.4`): resolve, search, the manifest and the paymail PKI are reads (`reads[]`, shruggr/skein#135: served by a call, nothing logged); `/profile` stays a row and takes a signed request; 0.3.3: `/register` takes a session, the registrant its identity (shruggr/skein#135); 0.3.2: skein-sdk v0.7.1; 0.3.1: the manager and the certifier found by `sk.peerAt("local", …)` (the address book has no roles, shruggr/skein#126); 0.3.0: `onboard.create` takes the caller's signed claim (shruggr/skein#127) |
+| this app | 0.4.0 (tag `v0.4.0`): routes, filters and roles (shruggr/skein#143): `routes` with `kernel.brc104` and the role `user` for call, register and profile; the four reads are read routes whose filters answer `{answer: …}`; `onboard.adopt` is root's (the kernel's head `grants`; no `owner` step input); 0.3.4: resolve, search, the manifest and the paymail PKI are reads (`reads[]`, shruggr/skein#135: served by a call, nothing logged); `/profile` stays a row and takes a signed request; 0.3.3: `/register` takes a session, the registrant its identity (shruggr/skein#135); 0.3.2: skein-sdk v0.7.1; 0.3.1: the manager and the certifier found by `sk.peerAt("local", …)` (the address book has no roles, shruggr/skein#126); 0.3.0: `onboard.create` takes the caller's signed claim (shruggr/skein#127) |
 | skein-sdk | v0.7.1, by tag tarball and hash in `build.zig.zon` (`cbor`, `sk`, `app`, `dagjson`, `secp`; no wallet) |
-| skein | log format 8; skein's tests pin this repo by commit |
+| skein | log format 9 (shruggr/skein#143); skein's tests pin this repo by commit |
 
 ## Contributing
 

@@ -124,7 +124,7 @@ const h = await testHost({ after: (f) => afters.push(f) }, {
   genesis: {
     // The owner's box → the wallet (genesis-wired: its writes the stock scope wallet/). Headers, proofs and
     // statuses are the chain app's (installed below), not the wallet's.
-    subscriptions: [{ box: "wallet", sender: ownerId, handler: WALLET_CID }],
+    subscriptions: [{ box: "wallet", handler: WALLET_CID }],
     defaults: { walletNetwork: "regtest", walletFeeRate: "100" },
     feeds: [{ kind: "headers", url: SSE_URL }],
   },

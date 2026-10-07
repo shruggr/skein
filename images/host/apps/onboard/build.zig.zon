@@ -1,6 +1,6 @@
 .{
     .name = .skein_onboard,
-    .version = "0.3.4",
+    .version = "0.4.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x9428be2eb46a85de,
     .dependencies = .{
