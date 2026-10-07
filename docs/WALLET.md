@@ -299,8 +299,11 @@ program's that launches or calls it (as before #130) — the chain app's
 answers to them, and the kernel's pay step (#130: a thread the kernel
 launched under the entry it processes; docs/VM.md "Billing"). Only the pay
 step is the kernel's alone: a thread another program launched with `pay`
-is refused. Since #130 (and #116) the default image carries the wallet and
-its funding row (`/wallet/fund`, below).
+is refused. Since #130 (and #116) the default image carries the wallet,
+with no route to it: root funds a skein by the `internalize` message below,
+on a route of its own to the wallet (`skein routes add wallet wallet
+<where>`: box `wallet`, the genesis program `wallet`). A BRC-169 delivery message to the skein's own mailbox is the
+coming path for a payment from anyone else.
 
 | body (owner) | does → result |
 |---|---|
@@ -310,7 +313,6 @@ its funding row (`/wallet/fund`, below).
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
 | `{op: "headers" \| "proof", …}` | refused: the chain app's (#79) |
 | args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest, outcome: "pending", awaiting: true}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
-| call fn `fund` (#130: the funding row's handler, `/wallet/fund`, sender `session` — #135: a message route; the host hands a payment in from POST `/fund/<handle>` over a BRC-104 session signed with its billing key) | the body an Atomic BEEF (the door's pointer record), the header `x-bsv-skein-outputs` BRC-100 internalizeAction outputs (JSON), `x-bsv-skein-description` optional (x-bsv-* so the session's signature covers them; the host translates from the public `x-skein-outputs` / `x-skein-description`): internalized, ingested (not awaited) → `200 {txid, status, outputs}` \| `400 {status: "error", code: "ERR_FUNDING", description}` |
 
 | the chain app's answer (input `reply`) | result |
 |---|---|

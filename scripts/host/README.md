@@ -604,7 +604,7 @@ It publishes them:
 
 ```
 GET /.well-known/skein-host  → {origin, domain, billing: {key, x, rates: {fuel, storage, served, fetch, authfetch, publish},
-                                 allowance, tickMs, graceMs, fund: "<origin>/fund/{handle}"}}
+                                 allowance, tickMs, graceMs}}
 ```
 
 The owner grants them as the skein's **host row** (a kernel row of its
@@ -651,30 +651,18 @@ remittance, the checkpoint CID): the host keeps it (host.db
 derives from the billing key) and broadcasts it (its Arcade, once). What
 else it does with it is its own.
 
-**Funding.** A payment for a skein is delivered to the host:
-
-```
-POST <the host's origin>/fund/<handle>
-  content-type: application/octet-stream
-  x-skein-outputs: [{"outputIndex": 0, "protocol": "wallet payment",
-                     "paymentRemittance": {"derivationPrefix": …, "derivationSuffix": …, "senderIdentityKey": …}}]
-  x-skein-description: <optional>
-  <body: the Atomic BEEF>
-→ the skein's answer: 200 {txid, status, outputs} | 400 {status: "error", code: "ERR_FUNDING", description}
-```
-
-The host hands it in on the skein's funding row (`/wallet/fund`: open, the
-door's `beef` filter validates it, the wallet internalizes it) — asleep or
-not. The same request to the skein's own origin works while it is awake.
+**Funding.** Root funds a skein by the wallet's `internalize` message on
+a route of its own to the wallet (docs/WALLET.md); the host has no funding
+endpoint. A BRC-169 delivery message to the skein's own mailbox is the
+coming path.
 
 **The gate.** Asleep (consumed ≥ allocation, nothing paid) or with terms this
-host does not serve, a skein gets nothing from the host but a payment
-through `/fund/<handle>` and its own messages to itself (the loopback: its
+host does not serve, a skein gets nothing from the host but its own
+messages to itself (the loopback: its
 wallet's ingest at the chain app, the chain app's answers): a request is
 `402 {code: "ERR_PAYMENT_REQUIRED"}` (its owner's too), a libp2p message is
 ignored, a provider's answer, a cron tick, a feed's header, a status is not
-carried in (a log line), and no tick is sent. A funding that lets it pay
-wakes it.
+carried in (a log line), and no tick is sent. Nothing wakes it today.
 
 **Grace and reclaim.** host.db `billing.asleep_since` is when the host first
 saw it asleep. Past `SKEIN_BILLING_GRACE_MS` the host may reclaim it;

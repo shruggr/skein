@@ -19,10 +19,9 @@
 //             Arcade), the output checked against the BRC-29 key the remittance derives.
 //   the gate  asleep (the kernel's billing state says so: consumed ≥ allocation and nothing paid) or
 //             the terms not this host's: nothing is forwarded to the instance — a request is 402,
-//             a libp2p message ignored, a provider's answer, a feed's event dropped — but a payment
-//             for it (POST /fund/<handle> on the host's origin, handed in on the funding row,
-//             FUND_ROUTE, a message: signed with the host's billing key over a BRC-104 session, #135) and its own messages to itself (the loopback: its wallet's ingest at the
-//             chain app). No tick is sent; the tally is frozen in the kernel.
+//             a libp2p message ignored, a provider's answer, a feed's event dropped — but its own
+//             messages to itself (the loopback: its wallet's ingest at the chain app). No tick is sent;
+//             the tally is frozen in the kernel.
 //   grace     when it went asleep is in host.db; past the grace the host may reclaim it
 //             (`skein-host reclaim`): disabled, its row and store removed. Nothing does it on its own.
 //
@@ -38,20 +37,6 @@ export const BILLING_HEAD = "billing";
 export const TICK_OP = "tick";
 /** The host row's box by convention (the row's address is what a tick goes to). */
 export const BILLING_BOX = "billing";
-/** The funding row's path in an instance (the default image's: the wallet's fn `fund`, the `beef` filter). */
-export const FUND_ROUTE = "/wallet/fund";
-/** The host's funding endpoint: POST <the host's origin>/fund/<handle>. */
-export const FUND_PREFIX = "/fund/";
-/** The header carrying BRC-100 internalizeAction outputs (JSON) with a funding: the public one, at POST /fund/<handle>. */
-export const OUTPUTS_HEADER = "x-skein-outputs";
-export const DESCRIPTION_HEADER = "x-skein-description";
-/**
- * #135: the same headers as the host hands a funding in, on its BRC-104 session (signed with its
- * billing key) to the funding row — x-bsv-*, so the session's signature covers them (the SDK's
- * AuthFetch signs those); the wallet's `fund` reads these.
- */
-export const SIGNED_OUTPUTS_HEADER = "x-bsv-skein-outputs";
-export const SIGNED_DESCRIPTION_HEADER = "x-bsv-skein-description";
 export const NSAT = 1_000_000_000n;
 
 export const RATE_NAMES = ["fuel", "storage", "served", "fetch", "authfetch", "publish"] as const;
@@ -201,10 +186,10 @@ export function tickBody(at: number, cfg: BillingConfig, p: Period, log: CID): R
 /** What the host knows of a billed instance after it last read it. */
 export interface BillingView { terms?: Terms; state?: BillingState; mismatch?: string }
 
-/** Why the host forwards nothing to the instance but a payment (undefined: it forwards as usual). */
-export function closedBy(v: BillingView | undefined, fundAt: string): string | undefined {
+/** Why the host forwards nothing to the instance (undefined: it forwards as usual). */
+export function closedBy(v: BillingView | undefined): string | undefined {
   if (!v?.terms) return undefined;
   if (v.mismatch) return `this host does not serve these terms: ${v.mismatch}`;
-  if (v.state?.asleep && v.state.host === v.terms.host) return `asleep: its allocation is consumed and its wallet paid nothing; a payment to it wakes it (POST ${fundAt})`;
+  if (v.state?.asleep && v.state.host === v.terms.host) return `asleep: its allocation is consumed and its wallet paid nothing`;
   return undefined;
 }

@@ -43,7 +43,7 @@ outpoint later. A new skein starts from it and is then claimed.
 images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
   bin/wallet.cid, bin/*.json              the wallet (#116, #130) and the program records' inputs and descriptions
-  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; the wallet's funding row;
+  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows (no route to the wallet);
                                           no explorer row (#121: the claim writes it with the owner's key)
   etc/apps.json                           the apps installed at birth (#141) and the owner's read at `/`
   etc/routes.json                         empty

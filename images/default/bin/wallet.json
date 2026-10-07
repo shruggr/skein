@@ -10,5 +10,5 @@
     "wallet",
     "http"
   ],
-  "description": "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); the kernel's pay step, args {pay: {to, x, checkpoint}} (#130: X sats, or all it has if less, to the host, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`); called as the funding row's handler, fn fund (#130: an Atomic BEEF and BRC-29 remittances, internalized). Prints the result record's CID."
+  "description": "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); the kernel's pay step, args {pay: {to, x, checkpoint}} (#130: X sats, or all it has if less, to the host, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`). Prints the result record's CID."
 }

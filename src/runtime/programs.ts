@@ -22,11 +22,11 @@ export function rawCid(bytes: Uint8Array): CID {
 /** The modules as committed under wasm/ (see wasm/README.md). A test checks these against the files. */
 export const MODULES = {
   // The wallet's state inside the VM (issue #29): Zig, wasm32-wasi (programs/wallet over the SDK's wallet library, built by scripts/build-programs.sh).
-  "wallet": CID.parse("bafkreigycl2vprpy5g34uv42hp7wggrnjme4zdzwfbvy3b3bz7wvxwpzme"),
+  "wallet": CID.parse("bafkreictmxlfyinxpao6f4wpuk3lo6kba43ltii52nxnunm4aumrmpqbae"),
 } as const;
 
 /** The wallet program record's description (also the default image's bin/wallet.json: the same record, #116). */
-export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); the kernel's pay step, args {pay: {to, x, checkpoint}} (#130: X sats, or all it has if less, to the host, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`); called as the funding row's handler, fn fund (#130: an Atomic BEEF and BRC-29 remittances, internalized). Prints the result record's CID.";
+export const WALLET_DESCRIPTION = "The wallet (#29, #79, #116: core): its own records under wallet/ over the chain app's chain/state. A message's body {op: internalize|createAction|signAction|list, …} (BRC-100's; every transaction ingested at the chain app); the kernel's pay step, args {pay: {to, x, checkpoint}} (#130: X sats, or all it has if less, to the host, the state record committed in a 0-sat OP_RETURN output, emitted as the event `payment`). Prints the result record's CID.";
 
 /**
  * The wallet's state as records (issue #29; docs/WALLET.md): the `wallet`

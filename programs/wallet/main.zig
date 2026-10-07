@@ -41,7 +41,7 @@
 //!   {op: "signAction", reference}                BRC-100 signAction for a draft (signAndProcess: false)
 //!   {op: "list", basket?, includeSpent?}        our outputs in a basket (default "default")
 //!
-//! Billing (#130), two more:
+//! Billing (#130), one more:
 //!   args {pay: {to, x, checkpoint}}   the kernel's pay step — a thread the kernel launches itself
 //!                                     when the allocation is consumed (its origin's launchedBy is
 //!                                     the entry it processes; anything else is refused): pay the host
@@ -52,14 +52,6 @@
 //!                                     outputIndex, amount, to, remittance, checkpoint} — the host's to
 //!                                     take — and ingest it at the chain app as any other. Nothing to
 //!                                     pay: no event (the kernel puts the instance to sleep).
-//!   call fn "fund"                    the route handler of the funding row (`/wallet/fund`, sender
-//!                                     session — #135: the host hands a payment in over a BRC-104
-//!                                     session signed with its billing key — the door's `beef`
-//!                                     filter): the body an Atomic BEEF (the door's pointer record),
-//!                                     the header `x-bsv-skein-outputs` BRC-100's internalizeAction
-//!                                     outputs (JSON), `x-bsv-skein-description` optional (x-bsv-*:
-//!                                     headers the SDK's AuthFetch signs): internalized (SPV against the chain state), ingested
-//!                                     at the chain app (not awaited), answered {txid, status, outputs}.
 //!
 //! Recorded calls: the signer over the `wallet` import (getPublicKey,
 //! createSignature: no key is ever here). Every step stores a result record,
@@ -67,8 +59,6 @@
 //! names the transactions it is about as `refs` with rel `mentions`.
 const std = @import("std");
 const w = @import("wallet");
-/// The SDK's chain module (#130): the BEEF pointer record's encoder, for a funding the door decoded.
-const chainlib = @import("chain");
 
 const cbor = w.cbor;
 const Value = cbor.Value;
@@ -702,8 +692,6 @@ fn run(a: std.mem.Allocator) !void {
         std.log.err("input record ({d} bytes): {s}", .{ input_bytes.len, @errorName(e) });
         return e;
     };
-    // #130: called as the funding row's handler (an in-VM call from the front door's step).
-    if (eql(u8, step.getText("kind") orelse "", "call")) return called(a, s, step);
     const args = step.get("args") orelse return error.BadInput;
     const me = (step.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
     const reply = step.get("reply");
@@ -1019,112 +1007,6 @@ fn emitPayment(a: std.mem.Allocator, p: Paid, to: []const u8, me: []const u8, ch
         .{ .key = "checkpoint", .value = .{ .cid = checkpoint } },
     }) });
     _ = try result(a, sk.emit, .{ msg.ptr, @as(u32, @intCast(msg.len)) });
-}
-
-/// A header's value (the host keeps names lower-case).
-fn headerOf(headers: ?Value, name: []const u8) ?[]const u8 {
-    const hs = headers orelse return null;
-    if (hs != .map) return null;
-    for (hs.map) |e| if (std.ascii.eqlIgnoreCase(e.key, name)) return if (e.value == .text) e.value.text else null;
-    return null;
-}
-
-/// BRC-100 internalizeAction outputs as JSON (the header `x-bsv-skein-outputs`).
-fn specsOf(a: std.mem.Allocator, text: []const u8) ![]w.wallet.InternalizeOutput {
-    const j = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return error.BadOutputs;
-    if (j != .array or j.array.items.len == 0) return error.BadOutputs;
-    const specs = try a.alloc(w.wallet.InternalizeOutput, j.array.items.len);
-    const str = struct {
-        fn f(o: std.json.ObjectMap, k: []const u8) ![]const u8 {
-            const v = o.get(k) orelse return error.BadOutputs;
-            return if (v == .string) v.string else error.BadOutputs;
-        }
-    }.f;
-    for (j.array.items, specs) |x, *spec| {
-        if (x != .object) return error.BadOutputs;
-        const idx = x.object.get("outputIndex") orelse return error.BadOutputs;
-        if (idx != .integer or idx.integer < 0) return error.BadOutputs;
-        spec.* = .{ .output_index = @intCast(idx.integer) };
-        const protocol = try str(x.object, "protocol");
-        if (eql(u8, protocol, "wallet payment")) {
-            const r = x.object.get("paymentRemittance") orelse return error.BadOutputs;
-            if (r != .object) return error.BadOutputs;
-            const hex = try str(r.object, "senderIdentityKey");
-            var sender: [33]u8 = undefined;
-            if (hex.len != 66) return error.BadOutputs;
-            _ = std.fmt.hexToBytes(&sender, hex) catch return error.BadOutputs;
-            spec.payment = .{ .derivation_prefix = try str(r.object, "derivationPrefix"), .derivation_suffix = try str(r.object, "derivationSuffix"), .sender_identity_key = sender };
-        } else if (eql(u8, protocol, "basket insertion")) {
-            const r = x.object.get("insertionRemittance") orelse return error.BadOutputs;
-            if (r != .object) return error.BadOutputs;
-            spec.insertion = .{ .basket = try str(r.object, "basket"), .custom_instructions = if (r.object.get("customInstructions")) |c| (if (c == .string) c.string else null) else null };
-        } else return error.BadOutputs;
-    }
-    return specs;
-}
-
-/// Called (#130): the funding row's handler — an in-VM call from the front door's step — answering
-/// the route handler contract ({status, type, body}, dag-cbor on stdout).
-fn called(a: std.mem.Allocator, s: Store, in: Value) !void {
-    const func = in.getText("fn") orelse "";
-    var status: u64 = 200;
-    const body = fund(a, s, in, func) catch |e| blk: {
-        status = 400;
-        var o: std.Io.Writer.Allocating = .init(a);
-        try std.json.Stringify.value(.{ .status = "error", .code = "ERR_FUNDING", .description = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ @errorName(e), if (last_error_len > 0) ": " else "", last_error[0..last_error_len] }) }, .{}, &o.writer);
-        break :blk o.written();
-    };
-    const ans = try cbor.encode(a, .{ .map = try a.dupe(cbor.Entry, &.{
-        .{ .key = "status", .value = .{ .uint = status } },
-        .{ .key = "type", .value = .{ .text = "application/json" } },
-        .{ .key = "body", .value = .{ .bytes = body } },
-    }) });
-    try std.Io.File.stdout().writeStreamingAll(io(), ans);
-}
-
-/// A funding the host handed in (#130 decided 7): internalized — the outputs ours by the header's
-/// BRC-29 remittances, SPV against the chain state — the state advanced, the result kept, the
-/// transaction ingested at the chain app (not awaited: the request answers now). → the JSON answer.
-fn fund(a: std.mem.Allocator, s: Store, in: Value, func: []const u8) ![]const u8 {
-    if (!eql(u8, func, "fund")) return error.UnknownFn;
-    const req = try cbor.decode(a, in.getBytes("arg") orelse return error.BadInput);
-    const headers = req.get("headers");
-    // #135: x-bsv-* headers, so the session's signature covers them (the SDK's AuthFetch signs those).
-    const specs = try specsOf(a, headerOf(headers, "x-bsv-skein-outputs") orelse return error.NoOutputs);
-    const description = headerOf(headers, "x-bsv-skein-description") orelse "funding";
-    const beef = switch (req.get("body") orelse return error.NoBeef) {
-        // The door's `beef` filter put the pointer record where the bytes were.
-        .cid => |c| try chainlib.record.beefOf(a, s, c),
-        .bytes => |b| b,
-        else => return error.NoBeef,
-    };
-    const me = (in.get("self") orelse return error.BadInput).getBytes("identity") orelse return error.BadInput;
-    const net_name = if (in.get("defaults")) |d| d.getText("walletNetwork") orelse "main" else "main";
-    const net_default = w.chain.Network.parse(net_name) orelse return error.BadConfig;
-    const state_cid = try headOf(a, head_name);
-    var wal = try Wallet.load(a, s, state_cid, try headOf(a, chain_head), net_default);
-    const res = try wal.internalize(beef, specs, description, &.{"funding"});
-    const new_state = try wal.save();
-    if (sk.advance(head_name.ptr, head_name.len, new_state.ptr, @intCast(new_state.len)) < 0) return failed();
-    const txid_hex = try a.dupe(u8, &w.header.toHex(res.txid));
-    const rec = try s.putValue(a, .{ .map = try a.dupe(cbor.Entry, &.{
-        .{ .key = "kind", .value = .{ .text = "wallet-result" } },
-        .{ .key = "op", .value = .{ .text = "fund" } },
-        .{ .key = "txid", .value = .{ .text = txid_hex } },
-        .{ .key = "status", .value = .{ .text = @tagName(res.status) } },
-        .{ .key = "outputs", .value = .{ .uint = res.outputs } },
-        .{ .key = "state", .value = .{ .cid = new_state } },
-        .{ .key = "refs", .value = .{ .array = try a.dupe(Value, &.{.{ .map = try a.dupe(cbor.Entry, &.{
-            .{ .key = "to", .value = .{ .cid = try a.dupe(u8, &w.store.hashCid(.tx, res.txid)) } },
-            .{ .key = "rel", .value = .{ .text = "mentions" } },
-        }) }}) } },
-    }) });
-    if (sk.keep(rec.ptr, @intCast(rec.len)) < 0) return failed();
-    // To the chain app, as every transaction the wallet takes (#79); its answers are not awaited here.
-    _ = try emitIngest(a, me, beef);
-    var o: std.Io.Writer.Allocating = .init(a);
-    try std.json.Stringify.value(.{ .txid = txid_hex, .status = @tagName(res.status), .outputs = res.outputs }, .{}, &o.writer);
-    return o.written();
 }
 
 /// Later entries win (a result may name its txid twice).

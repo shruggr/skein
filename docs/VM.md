@@ -993,19 +993,16 @@ that very record).
 **Asleep** (decided 8): when the tally is at the allocation and the pay
 step pays nothing (an empty wallet, coins that do not cover the fee, no
 wallet program in the genesis), the state is `asleep`. The host then
-forwards nothing but payments and the instance's own messages to itself; the
+forwards nothing but the instance's own messages to itself; the
 kernel meters nothing (the tally freezes) and refuses ticks, and after each
 entry it processes it runs the pay step again: one that pays wakes it
 (`lastTick` moves to that entry's time, so the time asleep is not charged).
 
-**Funding** (decided 7) is the wallet's: the default image's row
-`{http, /wallet/fund, session, wallet, fund, filter: "beef"}` (#135: a
-message route — the host hands a payment in over a BRC-104 session signed
-with its billing key) takes an Atomic BEEF (the door's `beef` filter
-validates it) with BRC-100 internalizeAction's outputs in the header
-`x-bsv-skein-outputs` (signed with the request; the host translates the
-public `x-skein-outputs` of POST `/fund/<handle>`); the wallet's fn
-`fund` internalizes it and ingests it at the chain app. A funding whose
+**Funding** is the wallet's: root sends it the `internalize` message
+(docs/WALLET.md) on a route of its own to the wallet; the wallet
+internalizes the payment and ingests it at the chain app; a BRC-169
+delivery message to the skein's own mailbox is the coming path. Root's
+messages are held at the gate too: nothing wakes an asleep skein today. A funding whose
 transaction the chain app has not taken yet cannot be spent in a BEEF: the
 pay step then pays with the coins the chain state holds, or nothing yet, and
 the next entry (the chain app's ingest) tries again.

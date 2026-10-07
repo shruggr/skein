@@ -201,10 +201,7 @@ are apart. Every HTTP request goes to the kernel's door
 |---|---|
 | `/site/*`, root's `/`, `/onboard/resolve`, `/onboard/search`, `/onboard/manifest.json`, `/onboard/bsvalias/id/*`, `/<overlay>/lookup`, `/<overlay>/listTopicManagers` … | read routes: filters only, anyone, nothing logged |
 | `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/amm/call`, `/explore*` | `kernel.brc104`: signed |
-| `/<overlay>/submit`, `/wallet/fund` | `kernel.beef`: validated |
-
-The host's funding hand-in to `/wallet/fund` is validated by its BEEF
-(docs/WALLET.md, Billing).
+| `/<overlay>/submit` | `kernel.beef`: validated |
 
 ```
 request {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
@@ -1541,7 +1538,7 @@ scripts/host/README.md "Billing" the host's):
 | the host row | the owner → the skein, box `dispatch` (`skein host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
 | a tick | the host's billing key → the skein, the host row's box, a signed `local` message | `{kind: "tick", at, allowance, fuel, served, log?: <cid of the host's period record>}` |
 | a payment | the skein's pay step → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
-| a funding | anyone → the host, `POST /fund/<handle>`; the host → the skein, a signed `http` request on `/wallet/fund` (#135: sender `session`, over a BRC-104 session with the host's billing key; the `beef` filter) | the body an Atomic BEEF; `x-skein-outputs`: BRC-100 internalizeAction outputs (JSON); `x-skein-description?` (the host hands them in as `x-bsv-skein-outputs` / `x-bsv-skein-description`, signed) → `{txid, status, outputs}` |
+| a funding | root → the skein, box `wallet` (root's own route to the wallet) | `{op: "internalize", tx, outputs, description}` (docs/WALLET.md); a BRC-169 delivery message to the skein's mailbox is the coming path |
 
 The payment's transaction has two outputs before any change: the host's
 (P2PKH to the BRC-29 key `[2, "3241645161d8"]`, key ID `"<prefix>

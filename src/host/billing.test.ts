@@ -3,9 +3,9 @@
 // record, host.db's bookkeeping (asleep since, the grace, payments), the owner's plan (`skein
 // host`) — and, with the real Zig kernel, the meter and the gate on an instance with no wallet: its
 // host row starts billing at the host's first tick; a tick from another key is refused; consumed ≥
-// allocation with nothing to pay with is asleep, and then the host forwards nothing but a payment
-// and the instance's own messages; an instance with no host row is untouched. (The whole loop —
-// payments, the checkpoint, funding, waking — is kernel-zig/equiv/billing.ts.)
+// allocation with nothing to pay with is asleep, and then the host forwards nothing but the
+// instance's own messages; an instance with no host row is untouched. (The whole loop —
+// payments, the checkpoint — is kernel-zig/equiv/billing.ts.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -71,12 +71,12 @@ test("billing: the kernel's state as the host reads it; allocation, the host's a
   assert.equal(stateOf({ ...rec, asleep: "no" }), undefined);
   assert.equal(priceHost({ fuel: 2, storage: 0, served: 3, fetch: 0, authfetch: 0, publish: 0 }, 1_000_000_000, 1_000_000), 5n * NSAT, "two sats of read fuel and three of bytes served (billing.zig priceHost)");
   const terms = termsOf([{ transport: "mailbox", address: "billing", host: Uint8Array.from(Buffer.from(host, "hex")), program: "kernel", fn: "tick", x: 5 }])!;
-  assert.equal(closedBy(undefined, "u"), undefined, "no view: open");
-  assert.equal(closedBy({}, "u"), undefined, "no host row: open (not billed)");
-  assert.equal(closedBy({ terms, state: s }, "u"), undefined);
-  assert.match(closedBy({ terms, state: { ...s, asleep: true } }, "http://h/fund/a")!, /^asleep: .*POST http:\/\/h\/fund\/a/);
-  assert.match(closedBy({ terms, mismatch: "x 1 is below this host's 5" }, "u")!, /does not serve these terms/);
-  assert.equal(closedBy({ terms, state: { ...s, host: key(12), asleep: true } }, "u"), undefined, "another host's state is not this host's to gate on");
+  assert.equal(closedBy(undefined), undefined, "no view: open");
+  assert.equal(closedBy({}), undefined, "no host row: open (not billed)");
+  assert.equal(closedBy({ terms, state: s }), undefined);
+  assert.match(closedBy({ terms, state: { ...s, asleep: true } })!, /^asleep: /);
+  assert.match(closedBy({ terms, mismatch: "x 1 is below this host's 5" })!, /does not serve these terms/);
+  assert.equal(closedBy({ terms, state: { ...s, host: key(12), asleep: true } }), undefined, "another host's state is not this host's to gate on");
 });
 
 test("billing: the period's log record — what the tick commits to (its CID)", () => {
@@ -188,11 +188,6 @@ test("billing: the meter and the gate with the real kernel — no wallet to pay 
   assert.equal((await state("a"))!.tally, asleep.tally, "the tally is frozen while asleep");
   // No tick is sent to it.
   assert.equal(await h.router.billingTick("a"), undefined);
-  // The funding endpoint reaches it even so (a code genesis has no funding row: its front door answers 404).
-  const f = await fetch(`${h.base}/fund/a`, { method: "POST", headers: { "x-skein-outputs": "[]" }, body: Buffer.from([1, 2, 3]) });
-  assert.equal(f.status, 404, "past the gate, to the instance (which has no funding row)");
-  assert.equal((await fetch(`${h.base}/fund/a`, { method: "POST", body: Buffer.from([1]) })).status, 400, "a funding names its outputs");
-  assert.equal((await fetch(`${h.base}/fund/nobody`, { method: "POST", headers: { "x-skein-outputs": "[]" }, body: Buffer.from([1]) })).status, 404);
 
   // b: no host row — no billing state, served, nothing in host.db; a tick signed by a stranger finds no row there.
   assert.equal(await state("b"), undefined);

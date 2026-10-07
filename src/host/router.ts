@@ -35,11 +35,6 @@
 //                                         ID>}], newest first; 404 when the app keeps no liveness for the topic.
 //                                         Unsigned, nothing logged; metered as a read (billing.ts)
 //   POST /arc/callback                    Arcade's webhook (Bearer: the host token)
-//   POST /fund/<handle>                   #130: a payment for an instance (its body an Atomic BEEF, the header
-//                                         x-skein-outputs BRC-100's internalizeAction outputs, JSON), handed in
-//                                         on its funding row (/wallet/fund; #135: a message, signed by the host's
-//                                         billing key over a session, the outputs as x-bsv-skein-outputs) — even
-//                                         asleep: the one thing the gate lets through (billing.ts)
 //
 // The broadcaster (#58, #65, arc.ts) takes the instances' broadcast events
 // (a durable queue in host.db, retries, one Arcade session) and routes what
@@ -103,11 +98,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Server as NetServer } from "node:net";
 import { join } from "node:path";
-import { AuthFetch, KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
+import { KeyDeriver, P2PKH, PrivateKey, ProtoWallet, Transaction, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
 import { rootIdentity } from "../runtime/identity.ts";
-import { ephemeralWallet } from "../wallet.ts";
 import { DEFAULTS, short, stampMs } from "../runtime/log.ts";
 import type { Stamp } from "../runtime/syscalls.ts";
 import { ARC_ROUTE, Broadcaster, type ArcConfig } from "./arc.ts";
@@ -119,7 +113,7 @@ import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { historyOf, ImageChain, skeinTip } from "./image-chain.ts";
-import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
+import { ANSWER_WAIT_MS, appendRequest, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
 import { DoorAnswered, Kernel } from "./kernel.ts";
@@ -129,7 +123,7 @@ import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
-import { allocation, BILLING_HEAD, closedBy, DESCRIPTION_HEADER, FUND_PREFIX, FUND_ROUTE, mismatch, OUTPUTS_HEADER, Period, SIGNED_DESCRIPTION_HEADER, SIGNED_OUTPUTS_HEADER, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
+import { allocation, BILLING_HEAD, closedBy, mismatch, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -1264,9 +1258,9 @@ export class Router {
 
   // ---------------------------------------------------------------- billing (#130, billing.ts)
 
-  /** Why this host forwards nothing to `handle` but a payment (undefined: it forwards as usual). */
+  /** Why this host forwards nothing to `handle` (undefined: it forwards as usual). */
   closed(handle: string): string | undefined {
-    return closedBy(this.views.get(handle), `${this.origin()}${FUND_PREFIX}${handle}`);
+    return closedBy(this.views.get(handle));
   }
 
   /** A billed instance as this host last read it (#130). */
@@ -1305,9 +1299,8 @@ export class Router {
     this.views.set(handle, view);
     const mine = state && state.host === terms.host ? state : undefined;
     this.o.db.setBilling(handle, { host: terms.host, ...(mine ? { tally: mine.tally, allocation: allocation(mine) } : {}), asleep: !!mine?.asleep, ...(why ? { mismatch: why } : {}) }, stampMs(this.now()));
-    const fundAt = `${this.origin()}${FUND_PREFIX}${handle}`;
-    const closed = closedBy(view, fundAt);
-    if (closed !== closedBy(was, fundAt)) this.say(handle, closed ? `billing: closed — ${closed}` : "billing: open");
+    const closed = closedBy(view);
+    if (closed !== closedBy(was)) this.say(handle, closed ? `billing: closed — ${closed}` : "billing: open");
     if (why || mine?.asleep) return;
     if (mine) this.firstTicks.delete(handle);
     else if (this.firstTicks.has(handle)) return; // sent: the timer sends it again
@@ -1378,45 +1371,6 @@ export class Router {
     })().catch((e) => this.say(handle, `billing: payment: ${(e as Error).message}`));
     this.syncing.add(p);
     void p.finally(() => this.syncing.delete(p));
-  }
-
-  /**
-   * A payment for `handle` delivered to this host (#130 decided 7: POST /fund/<handle>): handed in
-   * on the instance's funding row (FUND_ROUTE: a message route, sender `session` — #135: the host
-   * sends it over a BRC-104 session of its own, signed with its billing key, the outputs and the
-   * description in the signed x-bsv-skein-* headers; the door's `beef` filter validates it, the
-   * wallet internalizes it) — past the gate, which lets nothing else through while it is asleep —
-   * and the instance's answer returned.
-   */
-  private async fund(handle: string, req: RouterRequest): Promise<RouterResponse> {
-    const row = this.o.db.get(handle);
-    if (!HANDLE.test(handle) || row?.status !== "enabled") return json(404, { status: "error", code: "ERR_NOT_FOUND", description: `no instance ${handle} here` });
-    const outputs = req.headers[OUTPUTS_HEADER];
-    if (!outputs) return json(400, { status: "error", code: "ERR_FUNDING", description: `${OUTPUTS_HEADER}: the payment's outputs, BRC-100 internalizeAction's (JSON), with the Atomic BEEF as the body` });
-    let l: Loaded;
-    try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    const headers: Record<string, string> = { "content-type": "application/octet-stream", [SIGNED_OUTPUTS_HEADER]: outputs, ...(req.headers[DESCRIPTION_HEADER] ? { [SIGNED_DESCRIPTION_HEADER]: req.headers[DESCRIPTION_HEADER] } : {}) };
-    // #135: a message — signed. A session of the host's own (its billing key) with the instance's front door, in process: each request to it straight to the door.
-    const door = (async (input: string | URL | Request, init: RequestInit = {}) => {
-      const r = input instanceof Request ? input : new Request(input, init);
-      const url = new URL(r.url);
-      const a = await frontDoor(l.kernel, { method: r.method, path: url.pathname, route: url.pathname, query: url.search, headers: headerMap(r.headers), body: new Uint8Array(await r.arrayBuffer()) }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
-      return new Response(a.body.length ? Buffer.from(a.body) : null, { status: a.status, headers: a.headers });
-    }) as typeof fetch;
-    const af = new AuthFetch(ephemeralWallet(this.providerKey("billing")), undefined, undefined, undefined, {}, door);
-    let r: Response;
-    try {
-      r = await af.fetch(`http://${handle}.fund.invalid${FUND_ROUTE}`, { method: "POST", headers, body: Buffer.from(req.body) });
-    } catch (e) {
-      this.settle(l);
-      this.say(handle, `billing: a payment not handed in: ${(e as Error).message}`);
-      return json(502, { status: "error", code: "ERR_FUNDING", description: `the instance's answer did not verify: ${(e as Error).message}` });
-    }
-    this.settle(l);
-    this.say(handle, `billing: a payment handed in: ${r.status}`);
-    const out: Record<string, string> = {};
-    r.headers.forEach((v, k) => { if (!k.startsWith("x-bsv-auth-")) out[k] = v; });
-    return { status: r.status, headers: out, body: new Uint8Array(await r.arrayBuffer()) };
   }
 
   /**
@@ -1501,7 +1455,7 @@ export class Router {
     if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
       // #130: the terms this host bills by — what an owner grants as the host row (`skein host`).
       const b = this.o.billing;
-      const billing = b ? { key: this.providers.key("billing"), x: b.x, rates: b.rates, allowance: b.allowance, tickMs: b.tickMs, graceMs: b.graceMs, fund: `${this.origin()}${FUND_PREFIX}{handle}` } : undefined;
+      const billing = b ? { key: this.providers.key("billing"), x: b.x, rates: b.rates, allowance: b.allowance, tickMs: b.tickMs, graceMs: b.graceMs } : undefined;
       return json(200, { origin: this.origin(), domain: await this.handleDomain(), ...(billing ? { billing } : {}) });
     }
     const t = this.target(url);
@@ -1522,7 +1476,6 @@ export class Router {
       return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "this host has no host skein (skein-host init): no BRC-169 here" });
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
-    if (req.method === "POST" && path.startsWith(FUND_PREFIX)) return await this.held(this.fund(decodeURIComponent(path.slice(FUND_PREFIX.length)), req));
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
   }
 
@@ -1573,7 +1526,7 @@ export class Router {
     if (this.stopped) return unavailable("the host is shutting down");
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    // #130: asleep, or terms this host does not serve: nothing is forwarded (a payment comes in at /fund/<handle>).
+    // #130: asleep, or terms this host does not serve: nothing is forwarded.
     const closed = this.closed(handle);
     if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
     // #135: two doors — a read by a call, a signed request through the door (serveHttp).

@@ -90,9 +90,7 @@ test("an image (#89): the default image resolves into a genesis with no root, th
   assert.deepEqual([explorer.prefix, explorer.filters, explorer.fn], [true, ["kernel.brc104"], "explore"], "the explorer route: behind kernel.brc104, gated by root");
   const http = (g.dispatch as Array<{ transport: string; address: string }>).filter((r) => r.transport === "http").map((r) => r.address);
   assert.ok(!http.some((a) => a === "/" || a === "/site" || a === "/manifest.json"), `#125: no site and no static in the image's own routes (${http.join(", ")})`);
-  assert.ok(http.every((a) => /^\/(messagebox\/)?(sendMessage|listMessages|acknowledgeMessage)$/.test(a) || ["/wallet/fund", "/explore", "/.well-known/auth"].includes(a)), "the image's http routes: the handshake, the messagebox's, the explorer and (#130) the wallet's funding route");
-  const fund = (g.dispatch as Array<{ address: string; program: CID; fn?: string; filters?: string[] }>).find((r) => r.address === "/wallet/fund")!;
-  assert.deepEqual([fund.program.toString(), fund.fn, fund.filters], [programs.wallet!.toString(), "fund", ["kernel.beef"]], "#130, #135: the funding route — validated by kernel.beef, the wallet's fund");
+  assert.ok(http.every((a) => /^\/(messagebox\/)?(sendMessage|listMessages|acknowledgeMessage)$/.test(a) || ["/explore", "/.well-known/auth"].includes(a)), "the image's http routes: the handshake, the messagebox's and the explorer");
   // The image names the kernel's pinned front door and messagebox: the tree's .cid files are the wasm/ modules'.
   for (const n of ["frontdoor", "messagebox", "wallet"]) assert.ok(s.modules.find((m) => m.name === n)!.bytes, `bin/${n}.cid names the module in wasm/ (scripts/pin-programs.sh keeps it current)`);
 });

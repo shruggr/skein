@@ -118,8 +118,10 @@ host's free allowance plus every payment), the kernel itself starts the
 wallet's pay step: X to the host, or all it has, in a transaction emitted
 as the event `payment` whose other output commits the state record's CID
 (an on-chain checkpoint). With nothing to pay it is asleep: the host
-forwards it nothing but payments (`POST /fund/<handle>`), and a payment
-that lets it pay wakes it. No host row, nothing billed.
+forwards it nothing, root's messages included: nothing wakes it today.
+Root funds a skein by the wallet's `internalize` message; a BRC-169
+delivery message to its mailbox is the coming path. No host row, nothing
+billed.
 
 The kernel has no disk, network or process table, and a step has no
 clock. A `call` (no entry, never replayed) is the exception: when the host

@@ -3,22 +3,24 @@
 // feed and a fake Arcade (as equiv/wallet.ts):
 //
 //   - two skeins from the default image (#89: the wallet in it since #130/#116,
-//     and the funding row /wallet/fund), each claimed by the owner's signed
-//     claim and given the chain app (shruggr/skein-chain, wallet.ts's pin);
-//   - alice: the owner grants the host (`skein host`: the host row, the
-//     host's key from /.well-known/skein-host, a tiny X); the host ticks her
-//     at once (billing starts, its free allowance her allocation); a funding
-//     delivered to the host (POST /fund/alice) is handed in on her funding
-//     row (the door's `beef` filter, the wallet internalizes);
+//     no route to it), each claimed by the owner's signed claim and given the
+//     chain app (shruggr/skein-chain, wallet.ts's pin);
+//   - alice: root funds her by the wallet's `internalize` message (root's own
+//     route to the wallet first: `skein routes add wallet`); the owner grants
+//     the host (`skein host`: the host row, the host's key from
+//     /.well-known/skein-host, a tiny X); the host ticks her at once (billing
+//     starts, its free allowance her allocation);
 //   - usage (requests: each an entry and a front-door step, its fuel at the
 //     row's rate) consumes the allocation: the kernel's pay step pays the host
 //     X — a `payment` event the host keeps and broadcasts, its output to the
 //     host's BRC-29 key, its other output the checkpoint (the state record's
 //     CID, recomputed here by replaying her log to that entry) — again and
 //     again, then all the wallet has (less than X), then nothing: asleep;
-//   - asleep: a request is 402, a tick is not sent, an owner's `head` message
-//     for `billing` and a forged tick are not taken; a second funding through
-//     the host wakes her (the pay step on the new funds); requests are served;
+//   - awake: an owner's `head` message for `billing` and a forged tick are
+//     not taken; a tick charges storage and the host's amounts;
+//   - asleep: a request is 402, a tick is not sent, the owner's messages are
+//     held at the gate — her `internalize` too: nothing wakes her (a BRC-169
+//     delivery message to her mailbox is the coming path);
 //   - bob: no host row — nothing billed, no billing head, served as before; an
 //     app (programs/test/app-demo) emitting `payment` is refused;
 //   - both stores replay to themselves exactly (equiv/replays.ts), the store
@@ -34,7 +36,7 @@ import { fileURLToPath } from "node:url";
 import { KeyDeriver, MerklePath, P2PKH, PrivateKey, ProtoWallet, Transaction, UnlockingScript } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
 import { CID } from "multiformats/cid";
-import { planHost } from "../../src/client/admin.ts";
+import { planHost, planRoute } from "../../src/client/admin.ts";
 import { RawBox, signClaim } from "../../src/client/raw.ts";
 import { FakeArcade } from "../../src/host/fake-arcade.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL } from "../../src/host/providers.ts";
@@ -42,7 +44,7 @@ import type { SignedClaim } from "../../src/host/router.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { encode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
-import { installApp, ownerCli, sendPlan } from "../../src/testapps.ts";
+import { installApp, ownerCli, sendPlan, viewOf } from "../../src/testapps.ts";
 import { stateOf, type BillingConfig } from "../../src/host/billing.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -120,7 +122,7 @@ coin.addOutput({ lockingScript: new P2PKH().lock(ownerKey.toPublicKey().toHash()
 const coinTxid = coin.id("hex");
 coin.merklePath = new MerklePath(101, [[{ offset: 0, hash: coinTxid, txid: true }]]);
 
-/** A BRC-29 payment from the owner to `to` (its identity), spending the coin's output `vout`: the Atomic BEEF and the outputs header. */
+/** A BRC-29 payment from the owner to `to` (its identity), spending the coin's output `vout`: the Atomic BEEF and its internalizeAction outputs. */
 async function funding(to: string, vout: number, sats: number, tag: string) {
   const prefix = Buffer.from(`${tag}-prefix`).toString("base64"), suffix = Buffer.from(`${tag}-suffix`).toString("base64");
   const key = new KeyDeriver(ownerKey).derivePublicKey([2, "3241645161d8"], `${prefix} ${suffix}`, to, false);
@@ -128,16 +130,17 @@ async function funding(to: string, vout: number, sats: number, tag: string) {
   tx.addInput({ sourceTransaction: coin, sourceOutputIndex: vout, unlockingScriptTemplate: new P2PKH().unlock(ownerKey), sequence: 0xffffffff });
   tx.addOutput({ lockingScript: new P2PKH().lock(key.toHash()), satoshis: sats });
   await tx.sign();
-  const outputs = JSON.stringify([{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: prefix, derivationSuffix: suffix, senderIdentityKey: ownerId } }]);
+  const outputs = [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: prefix, derivationSuffix: suffix, senderIdentityKey: ownerId } }];
   return { beef: new Uint8Array(tx.toAtomicBEEF()), outputs, txid: tx.id("hex") };
 }
-/** The funding delivered to the host (#130 decided 7): POST /fund/<handle>. */
-async function fundAtHost(handle: string, f: { beef: Uint8Array; outputs: string }) {
-  const r = await fetch(`${h.base}/fund/${handle}`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-skein-outputs": f.outputs }, body: Buffer.from(f.beef) });
-  const text = await r.text();
+/** Root funds `handle` (identity `to`) by the wallet's `internalize` message: the status of its delivery. */
+async function internalizeBy(handle: string, to: string, f: { beef: Uint8Array; outputs: unknown[] }): Promise<number> {
+  const s = await new RawBox(owner, `${h.base}/@${handle}`).send(to, "wallet", { op: "internalize", tx: f.beef, outputs: f.outputs, description: "funding" })
+    .then(() => 200, (e: Error) => Number(/HTTP (\d+)/.exec(e.message)?.[1] ?? 0));
   await h.router.settled();
-  return { status: r.status, text };
+  return s;
 }
+const atArcade = (txid: string) => arcade.posts.some((x) => FakeArcade.txOf(x).id("hex") === txid);
 
 let aliceDb = "", bobDb = "";
 try {
@@ -151,7 +154,7 @@ try {
   aliceDb = h.db.get("alice")!.store;
   bobDb = h.db.get("bob")!.store;
   const g = await (await h.router.hydrate("alice")).kernel.genesis() as { programs: Record<string, CID>; dispatch: Array<{ address: string; fn?: string; filter?: string }> };
-  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund" && r.fn === "fund" && Array.isArray((r as { filters?: unknown }).filters) && ((r as { filters: string[] }).filters).includes("kernel.beef")) };
+  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund") };
 
   // The chain app in both (the door's `beef` filter and the wallet's SPV read its headers).
   const chainDir = process.env.SKEIN_CHAIN_DIR ?? (() => {
@@ -179,13 +182,15 @@ try {
   // No host row yet: nothing billed.
   report.beforeTerms = { billing: (await billingOf("alice")) === undefined, open: h.router.closed("alice") === undefined };
 
-  // The owner funds alice through the host, before granting it: the funding row takes it as any time (#135: the host hands it in signed, with its billing key).
+  // Root funds alice before granting the host: its own route to the wallet (`skein routes add wallet`), then the wallet's `internalize` message.
+  {
+    const view = await viewOf(h, "alice");
+    try { await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", await planRoute(view, { op: "add", address: "wallet", handler: g.programs.wallet!.toString() })); } finally { view.close(); }
+  }
   const f1 = await funding(alice, 0, 700, "one");
-  // Until her chain app has taken header 101 (the door checks the BUMP against it: before, a refusal).
-  const r1 = await until("the funding taken", async () => { const r = await fundAtHost("alice", f1); return r.status === 200 ? r : (await sleep(250), undefined); }, 60_000);
-  report.funded = [r1.status, JSON.parse(r1.text).txid === f1.txid];
-  // #143: the funding route's one filter is kernel.beef — the same funding sent to it directly, unsigned, is taken too (the payment validates itself; already internalized, nothing new).
-  report.fundDirect = (await fetch(`${h.base}/@alice/wallet/fund`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-bsv-skein-outputs": f1.outputs }, body: Buffer.from(f1.beef) })).status;
+  // Until her chain app has taken header 101 (the wallet's SPV reads its headers: before, the step errors); internalized, the chain app broadcasts it.
+  const r1 = await until("the funding internalized", async () => { const st = await internalizeBy("alice", alice, f1); if (st !== 200) return st; for (let i = 0; i < 20 && !atArcade(f1.txid); i++) await sleep(250); return atArcade(f1.txid) ? st : undefined; }, 60_000);
+  report.funded = [r1, atArcade(f1.txid)];
 
   // The owner grants the host (#130 decided 1): the host row, with the terms the host publishes.
   await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", planHost(alice, "add", { key: hostTerms.billing!.key, x: BILLING.x, rates: BILLING.rates }));
@@ -224,6 +229,31 @@ try {
     } finally { await v.close(); }
   }
 
+  // Not the owner's to touch: an owner's `head` message for `billing` is refused (the kernel's own).
+  const before = await (await h.router.hydrate("alice")).kernel.call("head", "billing") as CID;
+  await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", { prompt: [], recipient: alice, messages: [{ box: "head", body: { name: "billing", tree: before } }] });
+  report.headRefused = kernelLines().some((l) => /kernel head refused: the head billing is the kernel's own/.test(l));
+
+  // A tick now (awake): storage for the time since the last, the host's amounts (the bytes it served), the period's log record kept.
+  const t0 = (await billingOf("alice"))!;
+  await h.router.billingTick("alice");
+  await h.router.settled();
+  const t1 = (await billingOf("alice"))!;
+  const ticks = h.db.billingTicks("alice");
+  const last = ticks.at(-1)!;
+  const rec = dagCbor.decode(last.record) as { kind: string; lines: Array<{ bytes: number }> };
+  report.tick = { counted: t1.ticks === t0.ticks + 1, logCid: encode(rec).cid.toString() === last.log, kind: rec.kind, lines: rec.lines.length > 0, tallied: t1.tally > t0.tally };
+
+  // A tick signed by another key: not the host row's `host` (#143: one route per box, no sender — the tick checks its key) — refused.
+  const stranger = new PrivateKey("7777", 16);
+  const body = { kind: "tick", at: Date.now(), allowance: 1_000_000, fuel: 0, served: 0 };
+  const bodyBytes = dagCbor.encode(body);
+  const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(stranger.toPublicKey().toString(), "hex")), recipient: Uint8Array.from(Buffer.from(alice, "hex")), box: "billing", body: encode(body).cid, nonce: Uint8Array.from(Buffer.alloc(16, 7)) };
+  const { signature } = await new ProtoWallet(stranger).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
+  await h.router.appendLocal("alice", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
+  await h.router.settled();
+  report.strangerTick = { refused: kernelLines().some((l) => /kernel tick refused: the host is the first tick row's key/.test(l)), unchanged: (await billingOf("alice"))!.host === t1.host };
+
   // Drain: the wallet pays X while it can, then what it has, then nothing — asleep.
   const asleep = await until("asleep", async () => {
     pokes++;
@@ -243,41 +273,11 @@ try {
   report.gate = { status: gate.status, code: (await gate.json() as { code: string }).code, tick: await h.router.billingTick("alice") === undefined, reclaimable: h.db.reclaimable(Date.now() + 10, BILLING.graceMs).some((r) => r.instance === "alice") };
   const frozen = (await billingOf("alice"))!.tally;
 
-  // The owner too is held at the gate: an admin message is 402.
+  // The owner too is held at the gate: an admin message is 402, and so is root's `internalize` — nothing wakes her (the BRC-169 delivery message to her mailbox is the coming path).
   const held = await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", planHost(alice, "add", { key: hostTerms.billing!.key, x: BILLING.x, rates: BILLING.rates })).then(() => 200, (e: Error) => /402/.test(e.message) ? 402 : 0);
-  report.ownerHeld = held;
-
-  // The second funding, delivered to the host: past the gate; the pay step fires on it; she is awake.
   const f2 = await funding(alice, 1, 900, "two");
-  const r2 = await fundAtHost("alice", f2);
-  const awake = await until("awake again", async () => { await h.router.settled(); const b = await billingOf("alice"); return b && !b.asleep ? b : undefined; }, 60_000);
-  report.woke = { funded: r2.status, frozenWhileAsleep: awake.tally >= frozen, paidMore: awake.paid > asleep.paid, open: h.router.closed("alice") === undefined, served: await poke("alice") };
-  report.hostDbAwake = h.db.billing("alice")?.asleep_since === null;
-
-  // Not the owner's to touch: an owner's `head` message for `billing` is refused (the kernel's own).
-  const before = await (await h.router.hydrate("alice")).kernel.call("head", "billing") as CID;
-  await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", { prompt: [], recipient: alice, messages: [{ box: "head", body: { name: "billing", tree: before } }] });
-  report.headRefused = kernelLines().some((l) => /kernel head refused: the head billing is the kernel's own/.test(l));
-
-  // A tick now: storage for the time since the last, the host's amounts (the bytes it served), the period's log record kept.
-  const t0 = (await billingOf("alice"))!;
-  await h.router.billingTick("alice");
-  await h.router.settled();
-  const t1 = (await billingOf("alice"))!;
-  const ticks = h.db.billingTicks("alice");
-  const last = ticks.at(-1)!;
-  const rec = dagCbor.decode(last.record) as { kind: string; lines: Array<{ bytes: number }> };
-  report.tick = { counted: t1.ticks === t0.ticks + 1, logCid: encode(rec).cid.toString() === last.log, kind: rec.kind, lines: rec.lines.length > 0, tallied: t1.tally > t0.tally };
-
-  // A tick signed by another key: not the host row's `host` (#143: one route per box, no sender — the tick checks its key) — refused.
-  const stranger = new PrivateKey("7777", 16);
-  const body = { kind: "tick", at: Date.now(), allowance: 1_000_000, fuel: 0, served: 0 };
-  const bodyBytes = dagCbor.encode(body);
-  const unsigned = { kind: "mail", op: "put", sender: Uint8Array.from(Buffer.from(stranger.toPublicKey().toString(), "hex")), recipient: Uint8Array.from(Buffer.from(alice, "hex")), box: "billing", body: encode(body).cid, nonce: Uint8Array.from(Buffer.alloc(16, 7)) };
-  const { signature } = await new ProtoWallet(stranger).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
-  await h.router.appendLocal("alice", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
-  await h.router.settled();
-  report.strangerTick = { refused: kernelLines().some((l) => /kernel tick refused: the host is the first tick row's key/.test(l)), unchanged: (await billingOf("alice"))!.host === t1.host };
+  report.ownerHeld = [held, await internalizeBy("alice", alice, f2)];
+  report.stillAsleep = { asleep: (await billingOf("alice"))!.asleep, frozen: (await billingOf("alice"))!.tally === frozen, closed: h.router.closed("alice") !== undefined };
 
   // bob: no host row — not billed, served as before; an app emitting `payment` is refused.
   for (let i = 0; i < 5; i++) await poke("bob");
@@ -301,10 +301,9 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(report.published === true, "the host publishes its terms at /.well-known/skein-host (its billing key, X, the rates)");
-check(eq(report.image, { wallet: true, fundRow: true }), `the default image carries the wallet and the funding route /wallet/fund (#143: kernel.beef — the payment validates itself) (${JSON.stringify(report.image)})`);
+check(eq(report.image, { wallet: true, fundRow: false }), `the default image carries the wallet, and no funding route (${JSON.stringify(report.image)})`);
 check(eq(report.beforeTerms, { billing: true, open: true }), "no host row: no billing state, the host forwards as usual");
-check(report.fundDirect === 200, `#143: the funding route directly, unsigned: taken (kernel.beef only; the payment validates itself) (${String(report.fundDirect)})`);
-check(eq(report.funded, [200, true]), `a funding delivered to the host (POST /fund/alice) is handed in on the funding row and internalized (${JSON.stringify(report.funded)})`);
+check(eq(report.funded, [200, true]), `root's route to the wallet, then its \`internalize\` message: the funding internalized, the chain app broadcasts it (${JSON.stringify(report.funded)})`);
 const st = (report.started ?? {}) as Record<string, unknown>;
 check(st.host === true && st.allowance === BILLING.allowance && st.ticks === 1 && st.bytes === true, `the owner's host row: the host ticks at once, billing starts — the host's key, its allowance the allocation, the store measured (${JSON.stringify(st)})`);
 const fp = (report.firstPayment ?? {}) as Record<string, unknown>;
@@ -317,11 +316,9 @@ const dr = (report.drained ?? {}) as Record<string, unknown>;
 check(dr.asleep === true && dr.overspent === true && dr.paidSum === true && dr.payments === true && (dr.fullX as number) >= 1 && dr.partial === true && dr.allOurs === true, `drained: X while it could, then all it had (less than X), then nothing — asleep, consumed ≥ allocation (${JSON.stringify(dr)})`);
 check(eq(report.hostDb, { asleepSince: true }), "the host records when it went asleep (the grace counts from it)");
 check(eq(report.gate, { status: 402, code: "ERR_PAYMENT_REQUIRED", tick: true, reclaimable: true }), `asleep: a request is 402, no tick is sent, past the grace it is reclaimable (nothing deleted) (${JSON.stringify(report.gate)})`);
-check(report.ownerHeld === 402, `asleep, the owner's messages are held at the gate too: 402 (${report.ownerHeld})`);
+check(eq(report.ownerHeld, [402, 402]), `asleep, the owner's messages are held at the gate too, root's \`internalize\` among them: 402 (${JSON.stringify(report.ownerHeld)})`);
+check(eq(report.stillAsleep, { asleep: true, frozen: true, closed: true }), `nothing wakes her: still asleep, the tally frozen (${JSON.stringify(report.stillAsleep)})`);
 check(report.headRefused === true, "the owner's `head` message for `billing` is refused: the kernel's own");
-const wk = (report.woke ?? {}) as Record<string, unknown>;
-check(wk.funded === 200 && wk.frozenWhileAsleep === true && wk.paidMore === true && wk.open === true && wk.served === 404, `a second funding through the host: past the gate, the pay step fires on it, she is awake and served (${JSON.stringify(wk)})`);
-check(report.hostDbAwake === true, "awake: host.db clears the asleep time");
 check(eq(report.tick, { counted: true, logCid: true, kind: "host-log", lines: true, tallied: true }), `a tick: storage and the host's amounts on the tally, the period's log record kept, its CID the tick's (${JSON.stringify(report.tick)})`);
 check(eq(report.strangerTick, { refused: true, unchanged: true }), `a tick from a key that is not the host row's (the first tick row) is refused (${JSON.stringify(report.strangerTick)})`);
 check(eq(report.bob, { billing: true, served: 404, hostDb: true }), `no host row: nothing billed, served as before (${JSON.stringify(report.bob)})`);

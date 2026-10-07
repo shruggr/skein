@@ -1,7 +1,7 @@
 # The default image
 
 One genesis for everyone, with no root in it (#89, #143). It has the front
-door, the messagebox, the wallet (#116, #130) and its funding route, the
+door, the messagebox, the wallet (#116, #130), the
 admin routes (root's: nobody holds root yet) and the claim route, open:
 the first claim's sender is granted root (#127: never a key in its body) —
 the claimant's own message, or a claim signed before the instance existed,
@@ -20,11 +20,8 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
 - `etc/dispatch.json` (#143: routes, no senders): the claim route, `:ack`
   (an event route), the handshake route, the messagebox's http routes and
   the explorer behind `kernel.brc104` (the explorer gated by root: every
-  genesis's `roles`), and the funding route `{http, /wallet/fund,
-  filters: ["kernel.beef"], wallet, fund}`: a payment to the skein's wallet —
-  an Atomic BEEF with the header `x-skein-outputs` — validated at the door,
-  internalized; the host hands one in there (`POST /fund/<handle>`) even
-  while the skein is asleep.
+  genesis's `roles`). No route to the wallet: root funds the skein by the
+  wallet's `internalize` message on a route of its own (docs/WALLET.md).
 - `etc/apps.json` (#141, #143): the apps installed at birth — `apps/chain`,
   `apps/git`, `apps/site`, in that order — and root's own route `/`
   (prefix): the read route `{filters: ["site.get"], root: "www"}`. The

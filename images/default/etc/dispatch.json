@@ -78,14 +78,5 @@
     ],
     "program": "frontdoor",
     "fn": "explore"
-  },
-  {
-    "transport": "http",
-    "address": "/wallet/fund",
-    "filters": [
-      "kernel.beef"
-    ],
-    "program": "wallet",
-    "fn": "fund"
   }
 ]

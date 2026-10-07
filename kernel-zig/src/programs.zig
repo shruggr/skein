@@ -20,7 +20,7 @@ pub const Module = struct { name: []const u8, cid: []const u8 };
 /// (shruggr/skein-overlay).
 pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
-    .{ .name = "wallet", .cid = "bafkreigycl2vprpy5g34uv42hp7wggrnjme4zdzwfbvy3b3bz7wvxwpzme" },
+    .{ .name = "wallet", .cid = "bafkreictmxlfyinxpao6f4wpuk3lo6kba43ltii52nxnunm4aumrmpqbae" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
     .{ .name = "messagebox", .cid = "bafkreifbr44kbggt6g5nsownbdhticimoz47kqxzzyoyrcvvsmqd36yvq4" },
     // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
