@@ -7,10 +7,11 @@
 // nothing; sessions are records and survive a killed kernel. The host's
 // headers feed (#102) reaches only the instances with a row taking events in
 // box `chain`, following their dispatch tables live. A registration from a
-// page (#103, #113): signed by the key over `register <name>@<domain>`,
-// carried by the router into the host skein, where the onboarding app asks
-// the instance manager for the mailbox and the certifier for the handle
-// certificate, records both and answers.
+// skein (#103, #113, #131): signed by the key over `register <name>@<domain>`,
+// naming the skein that hosts the handle, carried by the router into the host
+// skein, where the onboarding app asks the instance manager whether the key
+// holds root on that skein and the certifier for the handle certificate,
+// records it and answers; no instance is made.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,9 +20,8 @@ import { createServer, type ServerResponse } from "node:http";
 import { MessageBoxClient } from "@bsv/message-box-client";
 import { AuthFetch, Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
-import { RawBox } from "../client/raw.ts";
+import { RawBox, signClaim } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
-import { main } from "./cli.ts";
 import { sendPlan } from "../testapps.ts";
 import { testHost, until } from "./testhost.ts";
 import { HANDLE_CERTIFICATE_TYPE, NO_REVOCATION_OUTPOINT } from "./handles.ts";
@@ -201,20 +201,23 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   assert.ok(h.lines.includes(`[router] a: unsubscribed from the host's headers feed ${url}`));
 });
 
-test("router: registration through the host skein (#113) — POST /account/register is an entry in the host skein, answered by its onboarding app; the instance manager creates the mailbox; a second registration a new serial, the record's trail two long; resolve the current certificate; a taken, second or reserved name 409; host.db and the host skein's records agree", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
+test("router: registration from a skein (#113, #131) — POST /account/register {…, skein} is an entry in the host skein, answered by its onboarding app; the instance manager confirms the key holds root on that skein and no instance is made; the handle's messagebox is the skein's origin; again a new serial, the trail two long; pointed at another skein of the key's; a skein the key holds no root on 403, none here 404; a taken, second, reserved or instance's name 409", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 240_000 }, async (t) => {
   const h = await testHost(t);
   await h.hostSkein();
   const k = async () => (await h.router.hydrate("host")).kernel;
   const head = async (name: string) => { const c = await (await k()).call("head", name) as CID | null; return c ? { cid: c, rec: await (await k()).store.get(c) as unknown as Record<string, unknown> } : undefined; };
   // #135: a registration is a signed request, over the registrant's session with the host's origin (`session`: another key's).
-  const register = async (key: PrivateKey, username: string, o: { signer?: PrivateKey; text?: string; session?: PrivateKey } = {}) => {
+  const register = async (key: PrivateKey, username: string, o: { signer?: PrivateKey; text?: string; session?: PrivateKey; skein?: string | null } = {}) => {
     const { signature } = await new ProtoWallet(o.signer ?? key).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(o.text ?? `register ${username}@localhost`, "utf8") });
-    const r = await new AuthFetch(ephemeralWallet(o.session ?? key)).fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+    const body = { username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature), ...(o.skein === null ? {} : { skein: o.skein ?? "dsk" }) };
+    const r = await new AuthFetch(ephemeralWallet(o.session ?? key)).fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     return { status: r.status, body: await r.json() as Record<string, unknown> & { certificate: Record<string, unknown> & { fields: Record<string, string>; serialNumber: string }; keyringForSubject: Record<string, string> } };
   };
   const { publicKey: certifier } = await h.router.certifier.getPublicKey({ identityKey: true });
   const dave = PrivateKey.fromRandom(), daveId = dave.toPublicKey().toString();
   h.instance("alpha");
+  // Dave's skein first (#131: a handle is registered from a skein): claimed by his key, so he holds root there.
+  const dsk = await h.router.createInstance("dsk", daveId, { claim: await signClaim(ephemeralWallet(dave)) });
 
   // Where a page finds the router and the handle domain (the app's config): at any host name.
   for (const url of [`${h.base}/.well-known/skein-host`, `http://alpha.localhost:${h.router.port}/.well-known/skein-host`]) {
@@ -229,14 +232,27 @@ test("router: registration through the host skein (#113) — POST /account/regis
   // #135: over another key's session, 403; with no session at all, 401 (the row takes a session).
   assert.equal((await register(dave, "dave", { session: PrivateKey.fromRandom() })).status, 403);
   const { signature: plainSig } = await new ProtoWallet(dave).createSignature({ protocolID: [2, "skein register"], keyID: "dave", counterparty: "anyone", data: Utils.toArray("register dave@localhost", "utf8") });
-  assert.equal((await fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "dave", identityKey: daveId, signature: Utils.toHex(plainSig) }) })).status, 401, "an unsigned registration: 401");
-  assert.equal(h.db.get("dave"), undefined);
+  assert.equal((await fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username: "dave", identityKey: daveId, signature: Utils.toHex(plainSig), skein: "dsk" }) })).status, 401, "an unsigned registration: 401");
+  // #131: no skein named: 400 (a handle is registered from a skein); a skein not on this host: 404.
+  const none = await register(dave, "dave", { skein: null });
+  assert.equal(none.status, 400);
+  assert.match(String(none.body.error), /skein: the skein that hosts the handle/);
+  const away = await register(dave, "dave", { skein: "nowhere" });
+  assert.equal(away.status, 404, JSON.stringify(away.body));
+  assert.match(String(away.body.error), /no skein nowhere on this host/);
+  assert.equal(await head("onboard/handles/dave"), undefined);
 
+  const rows = h.db.list().length;
   const before = await h.entries("host");
   const first = await register(dave, "dave");
   assert.equal(first.status, 200, JSON.stringify(first.body));
   const { certificate: c, keyringForSubject, ...rest } = first.body;
-  assert.deepEqual(rest, { handle: "dave", domain: "localhost", identityKey: daveId, messagebox: h.origin("dave") });
+  assert.deepEqual(rest, { handle: "dave", domain: "localhost", identityKey: daveId, messagebox: dsk.url });
+  assert.equal(dsk.url, h.origin("dsk"), "the handle's messagebox is the hosting skein's origin");
+  // #131: no instance made — no row for the handle, no manager's create recorded for it.
+  assert.equal(h.db.get("dave"), undefined);
+  assert.equal(h.db.list().length, rows);
+  assert.equal(await head("onboard/instances/dave"), undefined);
   // An entry in the host skein: the request as received (its path the client's, its route the app's).
   const requests: Array<Record<string, unknown>> = [];
   const s = (await k()).store;
@@ -247,110 +263,87 @@ test("router: registration through the host skein (#113) — POST /account/regis
     e = entry.prev ?? null;
   }
   assert.ok(requests.some((r) => r.kind === "http" && r.method === "POST" && r.path === "/account/register"), "the registration is a request entry in the host skein");
-  // The instance manager created the mailbox: a mailbox row for dave's key at the app's domain, published.
-  const row = h.db.get("dave")!;
-  assert.deepEqual([row.kind, row.owner, row.domain, row.status], ["mailbox", daveId, "localhost", "enabled"]);
-  const mgr = await head("onboard/instances/dave");
-  assert.equal(mgr?.rec.handle, "dave");
-  assert.equal(mgr?.rec.url, h.origin("dave"));
-  assert.equal(Buffer.from(mgr!.rec.identity as Uint8Array).toString("hex"), row.identity, "onboard/instances/dave → the manager's answer");
-  assert.equal((await fetch(`${h.base}/@dave/listMessages`, { method: "POST" })).status !== 404, true, "the mailbox instance answers at its origin");
   // The holder's certificate, as a wallet's acquireCertificate (direct) takes it.
   assert.equal(c.type, HANDLE_CERTIFICATE_TYPE);
-  assert.equal(c.subject, daveId);
+  assert.equal(c.subject, daveId, "the subject is the registrant's key, not the skein's");
   assert.equal(c.certifier, certifier);
   assert.equal(c.revocationOutpoint, NO_REVOCATION_OUTPOINT);
   const m = new MasterCertificate(c.type as string, c.serialNumber, c.subject as string, c.certifier as string, c.revocationOutpoint as string, c.fields, keyringForSubject, c.signature as string);
   assert.equal(await m.verify(), true);
   assert.deepEqual({ ...await MasterCertificate.decryptFields(new ProtoWallet(dave), keyringForSubject, c.fields, certifier) }, { handle: "dave", domain: "localhost" });
-  // The answer is the app's record: onboard/handles/dave → the certificate record; its serial the hash of the issuance record.
+  // The answer is the app's record: onboard/handles/dave → the certificate record (the hosting skein's identity in it); its serial the hash of the issuance record.
   const r1 = (await head("onboard/handles/dave"))!;
   assert.equal(r1.rec.kind, "handle-certificate");
   assert.equal(r1.rec.serialNumber, c.serialNumber);
+  assert.equal(r1.rec.messagebox, dsk.url);
+  assert.equal(Buffer.from(r1.rec.skein as Uint8Array).toString("hex"), dsk.identity, "the record names the hosting skein");
   assert.deepEqual((r1.rec.holder as { certificate: unknown }).certificate, c, "the answer is the certificate the app recorded");
   assert.equal(Buffer.from(r1.rec.subject as Uint8Array).toString("hex"), daveId);
   const issuance = r1.rec.issuance as CID;
   assert.equal(c.serialNumber, Utils.toBase64(Array.from(issuance.multihash.digest)), "the serial number is the issuance record's hash");
   assert.equal(r1.rec.prev, undefined);
 
-  // The same key and name again: the same mailbox, a new certificate with a new serial; the trail two records long.
-  const again = await register(dave, "dave");
+  // The same key and name again, the skein named by its identity: a new certificate with a new serial; the trail two records long.
+  const again = await register(dave, "dave", { skein: dsk.identity });
   assert.equal(again.status, 200, JSON.stringify(again.body));
   assert.notEqual(again.body.certificate.serialNumber, c.serialNumber);
+  assert.equal(again.body.messagebox, dsk.url);
   const r2 = (await head("onboard/handles/dave"))!;
   assert.equal(r2.rec.serialNumber, again.body.certificate.serialNumber);
   assert.ok((r2.rec.prev as CID).equals(r1.cid), "the head's record names the first: two entries");
-  assert.equal(h.db.list().filter((x) => x.owner === daveId).length, 1, "one mailbox");
 
-  // Resolve answers the current certificate (plaintext fields), from the app's record.
+  // Resolve answers the current certificate (plaintext fields), from the app's record; the messagebox the skein's.
   const res = await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=dave`);
   assert.equal(res.status, 200);
   const ra = await res.json() as Record<string, unknown> & { certificate: Certificate };
   assert.equal(ra.certificate.serialNumber, again.body.certificate.serialNumber);
-  assert.deepEqual([ra.identityKey, ra.messagebox, ra.domain], [daveId, h.origin("dave"), "localhost"]);
+  assert.deepEqual([ra.identityKey, ra.messagebox, ra.domain], [daveId, dsk.url, "localhost"]);
   assert.equal(await new Certificate(ra.certificate.type, ra.certificate.serialNumber, ra.certificate.subject, ra.certificate.certifier, ra.certificate.revocationOutpoint, ra.certificate.fields, ra.certificate.signature).verify(), true);
+  assert.equal((await fetch(`${h.base}/@dsk/listMessages`, { method: "POST" })).status !== 404, true, "the messagebox answers at the skein's origin");
 
-  // 409: another key's name; the key's second name; an instance's handle (the manager refuses); the reserved labels.
-  const eve = PrivateKey.fromRandom();
-  const taken = await register(eve, "dave");
+  // Pointed at another skein of his: the handle moves (resolve answers the newest record).
+  const dsk2 = await h.router.createInstance("dsk2", daveId, { claim: await signClaim(ephemeralWallet(dave)) });
+  const moved = await register(dave, "dave", { skein: "dsk2" });
+  assert.equal(moved.status, 200, JSON.stringify(moved.body));
+  assert.equal(moved.body.messagebox, dsk2.url);
+  assert.equal(((await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=dave`)).json()) as { messagebox: string }).messagebox, dsk2.url);
+
+  // 403: a skein the key holds no root on (dave's, for eve); nothing recorded.
+  const eve = PrivateKey.fromRandom(), eveId = eve.toPublicKey().toString();
+  const notRoot = await register(eve, "evie", { skein: "dsk" });
+  assert.equal(notRoot.status, 403, JSON.stringify(notRoot.body));
+  assert.match(String(notRoot.body.error), /does not hold root on the skein dsk/);
+  assert.equal(await head("onboard/handles/evie"), undefined);
+  // 409: another key's name; the key's second name; an instance's handle here; the reserved labels. 400: not a label.
+  await h.router.createInstance("esk", eveId, { claim: await signClaim(ephemeralWallet(eve)) });
+  const taken = await register(eve, "dave", { skein: "esk" });
   assert.equal(taken.status, 409);
   assert.match(String(taken.body.error), /dave is taken/);
   const second = await register(dave, "dave2");
   assert.equal(second.status, 409);
   assert.match(String(second.body.error), /already registered as dave/);
-  const inst = await register(eve, "alpha");
+  const inst = await register(eve, "alpha", { skein: "esk" });
   assert.equal(inst.status, 409, JSON.stringify(inst.body));
-  assert.match(String(inst.body.error), /alpha is taken/);
+  assert.match(String(inst.body.error), /alpha is taken \(an instance on this host\)/);
   for (const name of ["id", "host"]) {
-    const r = await register(eve, name);
+    const r = await register(eve, name, { skein: "esk" });
     assert.equal(r.status, 409);
     assert.match(String(r.body.error), /reserved/);
   }
-  assert.equal((await register(eve, "e.ve")).status, 400);
-  assert.equal(h.db.list().filter((x) => x.owner === eve.toPublicKey().toString()).length, 0);
+  assert.equal((await register(eve, "e.ve", { skein: "esk" })).status, 400);
+  // eve's own handle, from her skein.
+  const evie = await register(eve, "evie", { skein: "esk" });
+  assert.equal(evie.status, 200, JSON.stringify(evie.body));
+  assert.equal(evie.body.messagebox, h.origin("esk"));
+  // #131: onboard.create may not take a registered handle's name (the manager is never asked).
+  const made = await new RawBox(ephemeralWallet(eve), `${h.base}/@host`).af.fetch(`${h.base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.create", args: { handle: "dave", claim: { message: { kind: "mail" }, body: { "/": { bytes: "oA" } } } } }) });
+  assert.equal(made.status, 409, await made.clone().text());
+  assert.match(await made.text(), /handle dave is taken/);
+  assert.equal(h.db.get("dave"), undefined);
 
-  // host.db and the host skein's records agree: every handle the index names is a mailbox row of its subject at its domain, and the other way round.
+  // The index: every handle the app recorded names its subject; no host.db row was made for one.
   const idx = (await head("onboard/index"))!.rec as { handles: Record<string, CID>; keys: Record<string, string> };
-  const recorded: string[] = [];
-  for (const [handle, cid] of Object.entries(idx.handles)) {
-    const rec = await (await k()).store.get(cid) as unknown as { subject: Uint8Array; domain: string; messagebox: string };
-    const r = h.db.get(handle)!;
-    assert.deepEqual([r.kind, r.owner, r.domain, h.origin(handle)], ["mailbox", Buffer.from(rec.subject).toString("hex"), rec.domain, rec.messagebox]);
-    assert.equal(idx.keys[r.owner!], handle);
-    recorded.push(handle);
-  }
-  assert.deepEqual(h.db.list().filter((x) => x.kind === "mailbox").map((x) => x.handle), recorded);
-});
-
-test("router: a mailbox registered before #113 (a host.db row the app has no record of) listed by skein-host import-handles with the owner's request — onboard.adopt sent by the owner's wallet (#124), the manager's answer for the row, at the app's domain; then it resolves, and the paymail PKI answers from the same record; adopt is the owner's", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
-  const h = await testHost(t);
-  await h.hostSkein();
-  const old = PrivateKey.fromRandom().toPublicKey().toString();
-  h.mailbox("olde", old);
-  h.db.add("olde", { domain: "id.skein.nexus" });
-  assert.equal((await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=olde`)).status, 404, "no record: not resolved");
-  const out: string[] = [], err: string[] = [];
-  const run = async () => { out.length = 0; err.length = 0; return await main(["import-handles"], { vars: { SKEIN_HOME: h.home, HOME: h.home, SKEIN_ROUTER_PORT: String(h.router.port) }, out: (l) => out.push(l), err: (l) => err.push(l) }); };
-  assert.equal(await run(), 0, err.join("\n"));
-  // #124: each line is the owner's request for the wallet to send; sent here on the owner's session.
-  assert.equal(out.length, 1, out.join("\n"));
-  const body = /--body '(.*)'$/.exec(out[0]!)![1]!;
-  assert.deepEqual(JSON.parse(body), { fn: "onboard.adopt", args: { handle: "olde", owner: old } });
-  const adopted = await new RawBox(h.owner, `${h.base}/@host`).af.fetch(`${h.base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body });
-  const v = JSON.parse(await adopted.text()) as { result?: { domain?: string; serialNumber?: string } };
-  assert.equal(adopted.status, 200, JSON.stringify(v));
-  assert.equal(v.result?.domain, "localhost");
-  assert.ok(v.result?.serialNumber);
-  assert.equal(h.db.get("olde")!.domain, "localhost", "the row's domain is the app's now");
-  const r = await (await fetch(`${h.base}/.well-known/metanet-handles/resolve?handle=olde`)).json() as { identityKey: string; messagebox: string; certificate: Certificate };
-  assert.deepEqual([r.identityKey, r.messagebox, r.certificate.subject], [old, h.origin("olde"), old]);
-  assert.equal(await run(), 0);
-  assert.deepEqual([out, err], [[], ["every mailbox instance is recorded"]]);
-  // The paymail PKI, from the app's record (the domain the app's when none is given).
-  for (const q of ["olde", "olde@localhost"]) assert.deepEqual(await (await fetch(`${h.base}/bsvalias/id/${q}`)).json(), { bsvalias: "1.0", handle: "olde@localhost", pubkey: old });
-  assert.equal((await fetch(`${h.base}/bsvalias/id/nobody`)).status, 404);
-  // Another key's session may not adopt.
-  const stranger = ephemeralWallet(PrivateKey.fromRandom());
-  const no = await new RawBox(stranger, `${h.base}/@host`).af.fetch(`${h.base}/@host/onboard/call`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ fn: "onboard.adopt", args: { handle: "x", owner: old } }) });
-  assert.equal(no.status, 403);
+  assert.deepEqual(Object.keys(idx.handles).sort(), ["dave", "evie"]);
+  assert.deepEqual([idx.keys[daveId], idx.keys[eveId]], ["dave", "evie"]);
+  assert.deepEqual(h.db.list().filter((x) => x.kind === "mailbox").map((x) => x.handle), []);
 });

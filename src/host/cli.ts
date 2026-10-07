@@ -5,19 +5,17 @@
 //   skein-host init [--handle host]   the first run's part alone: the host skein made (once), nothing served
 //   skein-host grant <key> [--role root|<app>.<role>] [--remove] [--instance <handle>]   a grant (#143)
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-//   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance (#40) for an identity outside the
-//                                     host: Router.createInstance with image `mailbox`, the instance manager's own create (#113)
+//   skein-host add <handle> --mailbox --owner <hex> [--domain d]   the dev agents' mailbox (#40) for an identity outside
+//                                     the host (Router.addMailbox): never a handle's (#131: a handle is registered from a skein)
 //   skein-host knows <handle> [a,b | --all | --none]
 //   skein-host list                   handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
 //   skein-host identity <handle> [--peer]   an instance's identity key (from the master secret); --peer: its libp2p peer ID
-//   skein-host mailboxes              the mailbox instances: handle, whose (owner), front-door key, status, store
+//   skein-host mailboxes              the dev agents' mailboxes (#40): handle, whose (owner), front-door key, status, store
 //   skein-host ledger [handle]        the fuel ledger: what callers' calls (the front doors' reads) cost
 //   skein-host enable|disable|remove <handle>
 //   skein-host run
 //   skein-host roster [--for <handle>]
 //   skein-host peers <handle> list    its address book, read from its store
-//   skein-host import-handles         the host.db mailbox instances the host skein's onboarding app has no record
-//                                     of (#113), each with the request that adopts it — for the owner's wallet to send
 //   skein-host event <handle> <box> [json]
 //   skein-host add <handle> --boot <dir|tree-cid> [--from store.db] | --packet <file> [--scope cid] [--proofs roots.json]
 //   skein-host add <handle> --image <default | dir | tree-cid [--from store.db] | outpoint>
@@ -152,11 +150,11 @@ const USAGE = `usage:
                                                           a grant (#143; root by default) in the host skein (or <handle>):
                                                           the operator's message, to the running host
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
-  skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance for an identity outside the host (#40): the instance manager's create (#113)
+  skein-host add <handle> --mailbox --owner <hex> [--domain d]   the dev agents' mailbox for an identity outside the host (#40); never a handle's (#131)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
   skein-host list                                         handle, kind, status, identity, front-door key, wallet|owner, store, tree, libp2p peer ID
   skein-host identity <handle> [--peer]                   an instance's identity key; --peer: its libp2p peer ID (#51)
-  skein-host mailboxes                                    the mailbox instances: handle, owner, front-door key, status, store
+  skein-host mailboxes                                    the dev agents' mailboxes (#40): handle, owner, front-door key, status, store
   skein-host ledger [handle]                              the fuel ledger: calls and fuel per instance, caller, op
   skein-host billing [handle]                             #130: each billed instance as the router last read it (tally, allocation, asleep since,
                                                           terms not served), its ticks' log records and its payments
@@ -166,8 +164,6 @@ const USAGE = `usage:
   skein-host roster                                       the front end's roster JSON
   skein-host roster --for <handle>                        that agent's ROSTER.md
   skein-host peers <handle> list                          its address book, from its store: key, transport, address, handle, source
-  skein-host import-handles                               the mailbox instances in host.db the host skein's onboarding app has no record of (#113), each with
-                                                          the owner's request that adopts it (onboard.adopt): \`1sat authfetch POST <origin>/onboard/call --body '…'\`
   skein-host event <handle> <box> [json]                  a message from the cron provider into <box> now, as a tick due now ({...json, kind: "cron" unless named, due: now}); through the running router's control socket, else a router of its own
   skein-host add <handle> --boot <dir | tree-cid [--from store.db]>          boot a new instance from a system tree (docs/BOOTSTRAP.md)
   skein-host add <handle> --packet <file> [--scope cid] [--proofs roots.json]   … from a packet: a system tree, or a checkpoint to restore
@@ -201,8 +197,8 @@ export async function main(argv: string[], given: Env): Promise<number> {
         const f: RowFields = { domain: v.domain, identity: v.identity, store: v.store, tree: v.tree, status: v.disabled ? "disabled" : undefined };
         if (v.knows !== undefined) f.knows = knowsColumn(handles(v.knows));
         if (v.mailbox) {
-          // A mailbox instance (#40): the front door and the messagebox, keeping mail for --owner. #113: the instance
-          // manager's own create (image `mailbox`), through a router of this command's own — the one creation path.
+          // The dev agents' mailbox (#40): the front door and the messagebox, keeping mail for --owner, through a router
+          // of this command's own. Not a handle's (#131): a handle is registered from a skein.
           if (!v.owner || !/^0[23][0-9a-f]{64}$/.test(v.owner)) { env.err("skein-host add --mailbox: --owner <identity key, hex>"); return 2; }
           if ([v.boot, v.packet, v.image, v.identity, v.store, v.tree].some((x) => x !== undefined) || v.derive) { env.err("skein-host add --mailbox: only --owner and --domain"); return 2; }
           return await mailboxCmd(db, handle, v.owner, v.domain, env);
@@ -285,8 +281,6 @@ export async function main(argv: string[], given: Env): Promise<number> {
         return await peersCmd(db, rest, env);
       case "event":
         return await eventCmd(db, rest, env);
-      case "import-handles":
-        return await importHandlesCmd(db, rest, env);
       case "system":
         return await systemCmd(rest, env);
       case "pack":
@@ -504,15 +498,14 @@ async function grantCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
 }
 
 /**
- * `skein-host add <handle> --mailbox --owner <hex> [--domain d]` (#40, #113):
- * Router.createInstance with image `mailbox` — what the instance manager does
- * for the onboarding app's registrations — through a router of this
- * command's own. The same owner and handle again: kept (printed).
+ * `skein-host add <handle> --mailbox --owner <hex> [--domain d]` (#40):
+ * Router.addMailbox through a router of this command's own — the dev agents'
+ * mailbox, never a handle's (#131). The same owner and handle again: kept (printed).
  */
 async function mailboxCmd(db: HostDb, handle: string, owner: string, domain: string | undefined, env: Env): Promise<number> {
   const router = new Router({ ...routerOptions(db, env), idleMs: 0, cron: false });
   try {
-    const c = await router.createInstance(handle, owner, { image: "mailbox", ...(domain ? { domain } : {}) });
+    const c = await router.addMailbox(handle, owner, { ...(domain ? { domain } : {}) });
     const r = db.get(handle)!;
     env.out(`${r.handle}@${r.domain} ${r.status} · store ${r.store} · ${short(c.identity)} · mailbox instance for ${short(owner)} at ${c.url}`);
     return 0;
@@ -526,34 +519,6 @@ async function mailboxCmd(db: HostDb, handle: string, owner: string, domain: str
 
 /** An outpoint as an image is named on chain: `<txid>_<vout>` (or `.`/`:`). */
 const isOutpoint = (s: string) => /^[0-9a-f]{64}[_.:][0-9]+$/.test(s);
-
-/**
- * `skein-host import-handles` (#113): the mailbox instances host.db has and
- * the host skein's onboarding app does not (a registration before the app
- * took them; its public resolve says), each printed with the request that
- * adopts it: `{fn: "onboard.adopt", args: {handle, owner}}` POSTed to the
- * host skein's /onboard/call on the owner's session — the owner's wallet
- * sends it (#124: `1sat authfetch POST <origin>/onboard/call --body '…'`).
- * The app asks the instance manager (which answers for the existing row, at
- * the app's domain), issues the certificate and records it, so the handle
- * resolves. The running router serves the host skein.
- */
-async function importHandlesCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  if (rest.length) { env.err(USAGE); return 2; }
-  const host = db.hostSkein();
-  if (!host) { env.err("skein-host import-handles: no host skein (skein-host init)"); return 1; }
-  const local = `${(env.vars.SKEIN_HOST_URL || `http://127.0.0.1:${env.vars.SKEIN_ROUTER_PORT || 8100}`).replace(/\/+$/, "")}/@${host.handle}`;
-  const origin = originOf(env.vars, host.handle);
-  let n = 0;
-  for (const r of db.list().filter((x) => x.kind === "mailbox" && x.owner)) {
-    const known = await fetch(`${local}/onboard/resolve?handle=${encodeURIComponent(r.handle)}`).then((x) => x.json() as Promise<{ identityKey?: string }>).catch(() => ({ identityKey: undefined }));
-    if (known.identityKey === r.owner) continue;
-    n++;
-    env.out(`1sat authfetch POST ${origin}/onboard/call --body '${JSON.stringify({ fn: "onboard.adopt", args: { handle: r.handle, owner: r.owner } })}'`);
-  }
-  env.err(n ? `${n} mailbox instance${n === 1 ? "" : "s"} to adopt: the owner's wallet sends each line above` : "every mailbox instance is recorded");
-  return 0;
-}
 
 /** The URL of a router answering for this host (its /manifest.json), if one does. */
 async function routerAt(vars: Env["vars"]): Promise<string | undefined> {

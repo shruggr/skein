@@ -99,8 +99,9 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   skein's onboarding app (shruggr/skein-onboard, #113): the router carries
   `/manifest.json`, `/.well-known/metanet-handles/resolve` and `/search`,
   `/bsvalias/id/…`, `POST /account/register` and `POST /account/profile`
-  into the host skein. The app registers handles (a mailbox instance from
-  the instance manager, signed over `register <name>@<domain>`), has the
+  into the host skein. The app registers handles from a skein (#131: signed
+  over `register <name>@<domain>`, naming the hosting skein, whose root the
+  key must hold; no instance is made, the messagebox is that skein), has the
   host's certifier (a child of `master.key`, never in an instance) sign each
   handle certificate under a serial of its own, records every issue, and
   answers resolve, search and the manifest from those records. The handle
@@ -183,19 +184,21 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   requests beyond itself: run it with `SKEIN_HTTP=fetch`. Every skein from
   the default image serves the same page (shruggr/skein-site); one page
   manages skeins on many hosts, each through its locator.
-- **A handle from the page** (#103). On the same page, "Register a handle"
-  asks the host for `<name>@<domain>` for your key (the domain is the
-  router's host name, `id.skein.nexus` in production; the page finds the
-  router through `/.well-known/skein-host`, which the router answers at every
-  skein's origin): your wallet signs the request, the host creates your
-  mailbox instance and answers with the BRC-52 handle certificate, and your
-  wallet keeps it (`acquireCertificate`). "Your handles" lists those
-  certificates (`listCertificates`) and the mailbox each resolves to. The
-  labels `id` and `host` and every instance's handle are refused.
+- **A handle from your skein** (#103, #131). On a skein's Overview, when
+  your key holds root there, "Register a handle for this skein" asks the
+  host for `<name>@<domain>` for your key (the domain is the onboarding
+  app's `config.onboard.domain`; the page finds the router through
+  `/.well-known/skein-host`, which the router answers at every skein's
+  origin): your wallet signs the request, the host checks your key holds
+  root on that skein and answers with the BRC-52 handle certificate — its
+  messagebox that skein — and your wallet keeps it (`acquireCertificate`).
+  "Your handles" lists those certificates (`listCertificates`) and the
+  mailbox each resolves to. The labels `id` and `host` and every
+  instance's handle are refused.
 - **Your profile** (#104). Each of your handles has a Profile form: a name
   and an avatar (an image inscription, by outpoint). Your wallet signs the
   profile record (the OpNS one: DAG-CBOR `{domain, name?, avatar?}`), and
-  the page writes it to your mailbox instance as its owner. The host serves
+  the page posts it to the host (`/account/profile`). The host serves
   it with the handle when it is resolved or found; the page shows it as
   signed by the handle's key. "Find a handle" searches the host by handle
   or name.
@@ -235,10 +238,11 @@ bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs
   `/acknowledgeMessage`) on a BRC-104 session, bodies dag-cbor
   (`application/cbor`, BRC-231) or JSON. A message's id is the CID of its
   record; an answer names it in `replyTo`.
-- What an instance sends you goes to your mailbox instance (an instance with
-  only the front door and the messagebox): a registration makes one (#113),
-  or `skein-host add <h> --mailbox --owner <key>` on a host with no host
-  skein.
+- Mail to your handle goes to the skein you registered it from (#131).
+  On a dev host, what the code-genesis agents send the owner goes to the
+  owner's dev mailbox (`skein-host add <h> --mailbox --owner <key>`, #40:
+  an instance with only the front door and the messagebox, never a
+  handle's).
 - libp2p: an instance with libp2p rows gets a node in the host; topic
   messages and stream frames go through the same front door.
 - App routes live under `/<app>/` (an overlay's `/<app>/submit`,

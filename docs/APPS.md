@@ -427,13 +427,16 @@ messages: none of it is the host's (#124).
   `listCertificates`. #113: the host skein's onboarding app takes it now, and
   the signature covers the domain (`register <name>@<domain>`, the domain
   from `/.well-known/skein-host`): skein-site 0.5.2 signs `register <name>`
-  and is refused until it follows docs/MESSAGES.md "Mailbox instances".
+  and is refused until it follows docs/MESSAGES.md "Handles". #131
+  (skein-site 0.10.0): no Register on the host page; a skein's Overview,
+  for a key holding root there, registers a handle for that skein (its
+  messagebox the skein).
 - **Profiles** (#104, skein-site 0.4.0): each handle's Profile form (a name,
   an avatar outpoint) signed by your wallet and written to your mailbox
   instance (`objects`, `head profile`); handles shown with their avatar or
   an identicon; "Find a handle" over the host's search endpoint. #113: the
   host serves the profile the onboarding app keeps, posted to
-  `/account/profile` (docs/MESSAGES.md "Mailbox instances"); the mailbox
+  `/account/profile` (docs/MESSAGES.md "Handles"); the mailbox
   instance's head is read no more, so the form has to post there.
 - **One grouped permission request** (#97, skein-site 0.5.0; 0.5.2 without
   the spending allowance): the site's `manifest.json`, served at

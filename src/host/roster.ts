@@ -153,7 +153,7 @@ ${info.router ? `<p class="mut">router <code>${esc(info.router)}</code>${info.or
 <table><tr><th>handle</th><th>identity</th><th>status</th><th>pid</th><th>store</th><th>tree</th><th>origin</th></tr>
 ${body}</table>
 ${info.mailboxes ? `<h2 style="font-size:16px">mailbox instances</h2>${info.mailboxes.length ? `<table><tr><th>handle</th><th>whose</th><th>origin</th></tr>
-${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.owner ?? "")}">${esc((m.owner ?? "").slice(0, 16))}…</td><td class="k">${esc(info.originOf?.(m.handle) ?? "")}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (skein-host add --mailbox, or POST /account/register)</p>`}` : ""}</body></html>`;
+${info.mailboxes.map((m) => `<tr><td><b>${esc(m.handle)}</b>@${esc(m.domain)}</td><td class="k" title="${esc(m.owner ?? "")}">${esc((m.owner ?? "").slice(0, 16))}…</td><td class="k">${esc(info.originOf?.(m.handle) ?? "")}</td></tr>`).join("\n")}</table>` : `<p class="mut">none (skein-host add --mailbox)</p>`}` : ""}</body></html>`;
 }
 
 /**

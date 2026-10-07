@@ -37,10 +37,10 @@ export const CHAT_APP: PinnedApp = {
   rev: process.env.SKEIN_CHAT_REV ?? "e01eb737b234f4abdfb2704bb3cc0d6747b8a01f", dir: process.env.SKEIN_CHAT_DIR,
 };
 
-/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4); #143: routes, filters and roles ({user: [call, register, profile]}), reads are filter answers, root from the grants head (0.4.0). */
+/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4); #143: routes, filters and roles ({user: [call, register, profile]}), reads are filter answers, root from the grants head (0.4.0); #131: a handle is registered from a skein — /register takes `skein`, the manager's `holds`, no instance made, no adopt (0.5.0, branch handle-needs-skein: untagged until merge). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
-  rev: process.env.SKEIN_ONBOARD_REV ?? "189b7c2df3041c4914dcf189ade4c8ca241a9b5f", dir: process.env.SKEIN_ONBOARD_DIR,
+  rev: process.env.SKEIN_ONBOARD_REV ?? "2f9d56a751338315b1280d5f820c74517537c396", dir: process.env.SKEIN_ONBOARD_DIR,
 };
 
 /** shruggr/skein-git (#91): the git app — `git.clone {url, hash}` into the store, the app record answered; #126: its fetch is the `fetch` intention (0.1.1, skein-sdk 0.7.1); 0.1.2: the manifest checked by every rule of src/host/manifest.ts (an overlay may list no topics, #120; boxes relative to the app, #128); 0.1.3: reads[] in the record, /lookup a read (#135); 0.2.0: routes, filters and roles, the record checked by every rule of #143's checkManifest. */
@@ -49,10 +49,10 @@ export const GIT_APP: PinnedApp = {
   rev: process.env.SKEIN_GIT_REV ?? "01e804adcd86bfbad0139667ac362949c067d4e3", dir: process.env.SKEIN_GIT_DIR,
 };
 
-/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.2: bundles on a skein with no address-book roles, #126; 0.6.3: the catalog pins the current releases, git 0.1.2 among them; 0.7.3: the page in the skein brand — header and wallet chip, skein cards, the handle/Register card, the logged-out landing page; 0.7.6: Register over the wallet's session, #135; 0.7.7: the page a read, reads[], #135; 0.9.0: routes, filters and roles — the read route `get`, the Routes view, the roles/grants editor, no owner rows, #143). */
+/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.2: bundles on a skein with no address-book roles, #126; 0.6.3: the catalog pins the current releases, git 0.1.2 among them; 0.7.3: the page in the skein brand — header and wallet chip, skein cards, the handle/Register card, the logged-out landing page; 0.7.6: Register over the wallet's session, #135; 0.7.7: the page a read, reads[], #135; 0.9.0: routes, filters and roles — the read route `get`, the Routes view, the roles/grants editor, no owner rows, #143; 0.10.0: Register a handle from a skein's Overview, none on the host page, #131 — branch handle-needs-skein, untagged until merge). */
 export const SITE_APP: PinnedApp = {
   name: "site", repo: "https://github.com/shruggr/skein-site",
-  rev: process.env.SKEIN_SITE_REV ?? "b41f5d514cbddb69218852f6b6a661c3fafa6c96", dir: process.env.SKEIN_SITE_DIR,
+  rev: process.env.SKEIN_SITE_REV ?? "ce6ded8619b515c617ec0e10b83786360c5c3dfc", dir: process.env.SKEIN_SITE_DIR,
 };
 
 /** A checkout of the app: its env directory, else the pinned commit, fetched once. */

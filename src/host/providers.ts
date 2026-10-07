@@ -87,11 +87,14 @@
 //                     image, no claim, another key's claim, a refused claim
 //              start {handle}   → {handle, started: true, url}: published and started
 //              stop {handle}    → {handle, stopped: true}: unpublished and stopped
-//              create {handle, owner, image: "mailbox", domain?} (#113): a mailbox
-//                     instance for `owner` (the front door and the messagebox,
-//                     keeping its mail), published at once; the same owner and
-//                     handle again: the same answer (it exists). `domain` (both
-//                     images): the handle's domain, recorded with the row
+//              `domain` (create's): the handle's domain, recorded with the row
+//              holds {skein, key: bytes(33), role?, name?} (#131) → {handle, identity:
+//                     bytes(33), url, holds, taken?}: the skein — a published instance
+//                     here, by its handle or its identity key (hex) — and whether `key`
+//                     holds `role` (default root) there (its head `grants`, #143);
+//                     `taken`: `name` is another instance's handle here. What a
+//                     registration asks before it certifies a handle whose
+//                     messagebox is that skein. No such skein: {error}
 //              (`list` later.) It signs no claim (#127): it forwards the owner's,
 //              as signed
 //   certifier  the host's BRC-169 certifier (#100, #113): the host skein's alone,

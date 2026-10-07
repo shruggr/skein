@@ -55,17 +55,15 @@
 #   host over its control socket. An instance owned by another key (an
 #   owner.identity that is not owner-dev.identity) refuses them: that owner
 #   sends from its own wallet.
-#   7. the mailboxes of step 2, which the host skein's onboarding app did not
-#      make, adopted (`skein-host import-handles` prints the owner's request
-#      for each), recorded and certified so they resolve. POST
-#      /@host/onboard/call creates a skein for any wallet with a session,
-#      through the instance manager; POST /account/register (signed over
-#      `register <name>@<domain>`) a mailbox; the app answers BRC-169.
+#   7. the host skein's onboarding app: POST /@host/onboard/call creates a
+#      skein for any wallet with a session, through the instance manager;
+#      POST /account/register (signed over `register <name>@<domain>`,
+#      naming the skein that hosts the handle, #131) certifies a handle whose
+#      messagebox is that skein; the app answers BRC-169. The mailboxes of
+#      step 2 are the dev agents' (#40), never a handle's: no handle resolves
+#      to them.
 #
-# Nothing is registered, and nothing registers itself: the mailbox rows of
-# step 2 are what a registration (register.ts, POST /account/register) would
-# make — that is for identities whose keys this machine does not know (the
-# front end's Register) — and an identity outside the host reaches an agent's
+# Nothing is registered, and nothing registers itself: an identity outside the host reaches an agent's
 # answers only once the admin puts its key and mailbox URL in that agent's
 # address book (`skein peers add <key> <url> --instance …`). The owner's
 # mailbox URL goes to ~/.skein/mailbox.url (the client's). The inference peer
@@ -180,11 +178,7 @@ for a in "${agents[@]}"; do
 done
 echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer knows them ($skein/infer-peers.json)"
 
-# 7. The mailboxes the host skein's onboarding app did not make: adopted by the owner's requests import-handles prints.
+# 7. The host skein's onboarding app (a handle is registered from a skein, #131: nothing to adopt).
 if [ -n "$hostskein" ]; then
-  host import-handles 2> /dev/null | while read -r line; do
-    body="${line#*--body \'}"; body="${body%\'}"
-    ( set -a; . "$skein/owner-wallet.env"; set +a; HOME="$skein/owner-home" 1sat authfetch POST "$(origin "$hostskein")/onboard/call" --body "$body" ) > /dev/null || echo "adopting failed: $body" >&2
-  done
   echo "the host skein: @$hostskein, the onboarding app at $(origin "$hostskein")/onboard/call; handles @${SKEIN_HANDLE_DOMAIN:-localhost}"
 fi

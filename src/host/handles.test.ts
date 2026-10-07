@@ -5,7 +5,8 @@
 // the host skein's onboarding app as the host's BRC-169 server, end to end:
 // the manifest (§5.1: the certifier key from its address book, the host's
 // name, note and icon from its config, the endpoints on the host's origin),
-// a resolution (§5.2) of a registered handle checked as a resolver checks it,
+// a resolution (§5.2) of a handle registered from a skein (#131: its
+// messagebox the skein's origin) checked as a resolver checks it,
 // §5.3's errors; the holder's signed profile kept by the app (POST
 // /account/profile) and served with resolve and search (§5.6).
 
@@ -15,6 +16,7 @@ import { existsSync } from "node:fs";
 import { outpointToBytes } from "@1sat/templates";
 import { decodeProfile, encodeProfile } from "@1sat/utils";
 import { AuthFetch, Certificate, MasterCertificate, PrivateKey, ProtoWallet, Utils } from "@bsv/sdk";
+import { signClaim } from "../client/raw.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { certify, HANDLE_CERTIFICATE_TYPE, issueHandleCertificate, issueSubjectCertificate, NO_REVOCATION_OUTPOINT } from "./handles.ts";
 import { KERNEL_BIN } from "./kernel.ts";
@@ -105,10 +107,13 @@ test("handles: the certifier provider's issue (#113) — both copies under the s
 test("handles: the host skein serves BRC-169 (#113) — the manifest (the certifier key, the host's name from the app's config), a registered handle's resolution as a resolver checks it, §5.3's errors; the holder's profile kept by the app, served with resolve and search", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built", timeout: 180_000 }, async (t) => {
   const h = await testHost(t);
   await h.hostSkein({ name: "Test host", note: "handles for the tests", icon: "https://example.test/icon.png" });
+  // #131: a handle is registered from a skein: each key's own skein first (claimed by it: root), named in the registration.
   const register = async (key: PrivateKey, username: string) => {
+    const skein = `${username}-skein`;
+    await h.router.createInstance(skein, key.toPublicKey().toString(), { claim: await signClaim(ephemeralWallet(key)) });
     const { signature } = await new ProtoWallet(key).createSignature({ protocolID: [2, "skein register"], keyID: username, counterparty: "anyone", data: Utils.toArray(`register ${username}@localhost`, "utf8") });
     // #135: a registration is a signed request, over the registrant's session with the host's origin.
-    const r = await new AuthFetch(ephemeralWallet(key)).fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature) }) });
+    const r = await new AuthFetch(ephemeralWallet(key)).fetch(`${h.base}/account/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, identityKey: key.toPublicKey().toString(), signature: Utils.toHex(signature), skein }) });
     assert.equal(r.status, 200, await r.clone().text());
   };
   const daveKey = PrivateKey.fromRandom(), dave = daveKey.toPublicKey().toString();
@@ -129,7 +134,7 @@ test("handles: the host skein serves BRC-169 (#113) — the manifest (the certif
     assert.equal(r.status, 200);
     const a = await r.json() as Record<string, unknown> & { certificate: Certificate };
     assert.equal(a.certificate.subject, a.identityKey);
-    assert.deepEqual({ ...a, certificate: undefined }, { metanetHandles: "1.0", handle: "dave", domain: "localhost", identityKey: dave, certificate: undefined, messagebox: h.origin("dave"), ttl: 300, revoked: false });
+    assert.deepEqual({ ...a, certificate: undefined }, { metanetHandles: "1.0", handle: "dave", domain: "localhost", identityKey: dave, certificate: undefined, messagebox: h.origin("dave-skein"), ttl: 300, revoked: false });
     const c = a.certificate;
     assert.equal(c.type, HANDLE_CERTIFICATE_TYPE);
     assert.equal(c.certifier, manifest.metanet.trust.publicKey);

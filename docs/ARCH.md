@@ -202,9 +202,12 @@ resolve program keeps what a BRC-169 lookup finds under its own name
 the messagebox's delivery thread, which reads that record. Nothing registers
 itself. A key in neither is "no route": the delivery fails.
 
-**Mailbox instances.** An identity outside the host (a person's wallet, the
-inference peer, a browser tab) has its mail kept by an instance of its own
-with only the front door and the messagebox.
+**Handles and mailboxes.** A handle is registered from a skein (#131): its
+messagebox is the hosting skein's origin, and that skein's messagebox keeps
+its holder's mail; there is no mailbox-only instance for a handle. A dev
+host's agents deliver to the dev owner's and the inference peer's
+mailboxes (`skein-host add --mailbox`, #40): instances with only the front
+door and the messagebox, never a handle's.
 
 ## The host
 
@@ -380,8 +383,11 @@ message is answered with a signed message:
   owner's admin rows is the row enabled, which publishes the hostname: no
   request can reach the claim row first. `url` is the instance's origin
   (`SKEIN_INSTANCE_ORIGIN`, default `http://<handle>.localhost:<port>`).
-  Image `mailbox` (#113): a mailbox instance for `owner` (its owner in its
-  genesis, no claim), published at once — what a registration asks for.
+  No other image (#131: no mailbox-only instance).
+- `holds {skein, key, role?, name?}` → `{handle, identity, url, holds,
+  taken?}` (#131): whether `key` holds `role` (default root) on a published
+  skein here, named by handle or identity (its head `grants`); `taken` when
+  `name` is another instance's handle. What a registration asks.
 - `start {handle}` → `{handle, started: true, url}`; `stop {handle}` →
   `{handle, stopped: true}`: published and started, or unpublished and
   stopped. Not the host skein itself.
@@ -407,15 +413,16 @@ management page calls it (shruggr/skein-site, #92: docs/APPS.md §3 "The
 management page"), served by the host skein itself.
 
 The same app is the host's **BRC-169 server and registrar** (#113,
-skein-onboard 0.2.0): a registration (`POST /account/register` at the
-host's origin, signed over `register <name>@<domain>`) is a thread that
-asks the manager for a mailbox instance (`create`, image `mailbox`) and the
-certifier for the certificate (`issue`), records the certificate under
+#131, skein-onboard 0.5.0): a registration (`POST /account/register` at the
+host's origin, signed over `register <name>@<domain>`, naming the skein
+that hosts the handle) is a thread that asks the manager whether the key
+holds root on that skein (`holds`) and the certifier for the certificate
+(`issue`), its messagebox the skein's origin — no instance is made — records the certificate under
 `onboard/handles/<handle>` (each issue a new serial: the hash of its
 issuance record; `prev` the trail) and answers the holder's copy;
 resolve, search, the manifest and the paymail PKI read those records. The
 handle domain is its `config.onboard.domain`, the one setting. The message
-sequence and the records: docs/MESSAGES.md "Mailbox instances" and
+sequence and the records: docs/MESSAGES.md "Handles" and
 "BRC-169 is discovery".
 
 ## The browser host

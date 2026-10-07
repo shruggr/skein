@@ -72,10 +72,10 @@ let port = 0;
 // The router comes back on the same port: an agent's genesis names its owner's mailbox by URL.
 const listen = async (r: Router) => { await r.listen(port); port = r.port; base = `http://127.0.0.1:${port}`; };
 await listen(router);
-// The owner's and the inference peer's mailboxes: mailbox instances, by the instance manager's create (#113: image
-// `mailbox`, what a registration through the host skein asks for; this host has no host skein).
-const mb = async (id: string, name: string) => (await router.createInstance(name, id, { image: "mailbox" })).url === router.originOf(name);
-check(await mb(ownerId, "david"), "the owner's mailbox instance (the manager's create, image mailbox)");
+// The owner's and the inference peer's mailboxes: the dev agents' mailboxes (#40, `skein-host add --mailbox`:
+// Router.addMailbox; never a handle's, #131).
+const mb = async (id: string, name: string) => (await router.addMailbox(name, id)).url === router.originOf(name);
+check(await mb(ownerId, "david"), "the owner's mailbox instance (Router.addMailbox, as skein-host add --mailbox)");
 check(await mb(inferId, "infer"), "the inference peer's mailbox instance");
 await router.start();
 const zig = db.get("zigtest")!.identity!;

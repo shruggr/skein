@@ -513,34 +513,27 @@ step has an http import). The messagebox program record's own `description`
 part of the record and so of its CID, and is left until the messagebox is
 re-pinned for another reason.
 
-## Mailbox instances
+## Handles
 
-A mailbox instance is a **wallet's** messagebox, never a skein's (#126 step
-4): a skein receives mail only at its own front door (or over libp2p), where
-it verifies the sender itself; a messagebox someone else keeps can only hand
-on what was sent to it, which the receiving skein could not verify. There is
-no mailbox pull path into a skein: the browser page reads its identity's
-mailbox with its wallet and shows what is there, and if the user wants their
-instance to act on something, the user sends the instance a message of
-their own, on their own session with it.
+A handle is registered **from a skein** (#131, David 2026-10-06: "There is
+no more mailbox only skein. You have to have a skein to have a mailbox.
+Handle is registered from within the skein after you have spun it up …
+when you register, you have to point it to which skein you want to host
+it."). You create a skein first (`onboard.create`, the page's Create; its
+claim makes your key root, #127, #143); then you register a handle that
+names it. Registering makes no instance: the handle's **messagebox is the
+hosting skein's origin**, and its mail is kept by that skein's messagebox
+(for its root, in the boxes its routes take). The certificate's subject is
+the registrant's own key (BRC-169 §4.1), not the skein's. The host issues it
+(the host skein's onboarding app through the certifier, #113).
 
-An identity outside the host — David's wallet, the inference peer, a browser
-tab — gets its mail kept by a **mailbox instance**: an instance with only the
-front door and the messagebox, whose dispatch rows send `:ack` and every
-message from anyone in any box (`*`) to the messagebox, for its owner. Its
-sessions are records like any instance's (#68). It has an identity of its own (its signer's key;
-the BRC-104 counterparty), and keeps the owner's mail as the owner's.
+A skein receives mail only at its own front door (or over libp2p), where it
+verifies the sender itself (#126 step 4); there is no mailbox pull path into
+a skein.
 
-Every mailbox instance is made by the instance manager's `create` with image
-`mailbox` (#113, `Router.createInstance`; "The providers", below): the row
-`kind: mailbox`, its owner and domain, the store booted with the owner in its
-genesis (no claim), published at once. The same owner and handle again
-answers for the row that is there; a key with another mailbox here is
-refused. Two callers:
-
-- **A registration** (#103, #113), the user's path. The host's own origin
-  carries it into the host skein, where the onboarding app
-  (shruggr/skein-onboard ≥ 0.2.0) takes it. The contract, exactly:
+**The registration** (#103, #113, #131), the user's path. The host's own
+origin carries it into the host skein, where the onboarding app
+(shruggr/skein-onboard ≥ 0.5.0) takes it. The contract, exactly:
 
   1. `GET <host>/.well-known/skein-host` → `{origin, domain}`: the router's
      origin and the **handle domain** — the onboarding app's
@@ -556,33 +549,47 @@ refused. Two callers:
   3. `POST <origin>/account/register` over the wallet's BRC-104 session
      with the host's origin (#135: a registration is a write, so a signed
      request; the stock AuthFetch, its handshake at `<origin>/.well-known/auth`
-     the host skein's), body JSON `{username, identityKey,
-     signature}`: the registrant is the session's identity — no session
-     401, an `identityKey` that is not the session's 403 (skein-onboard
-     ≥ 0.3.3); `username` a host name label (a-z, 0-9, `-`, 1 to 63, not
-     starting or ending with `-`), `identityKey` the key (hex, 33 bytes),
-     `signature` hex DER. The router appends it to the host skein as a
-     request entry (route `/onboard/register`); nothing in the router
-     checks it.
-  4. The answer, when the app's thread has asked the instance manager for
-     the mailbox and the certifier for the certificate and recorded both:
-     `200 {handle, domain, identityKey, messagebox: <the mailbox's origin>,
-     certificate, keyringForSubject}` — the handle certificate for the key's
-     wallet to keep (`acquireCertificate`, `acquisitionProtocol: "direct"`,
-     `keyringRevealer: "certifier"`; "BRC-169 is discovery", below).
-     Refusals are `{error}`: 400 not JSON, not the three fields, not a
-     label; 401 the signature does not verify for that key over that text;
-     409 the name is reserved (`id`, `host`), is another key's (a handle
-     here or an instance's), or the key holds another handle here (one key,
-     one handle); 500 the thread failed.
+     the host skein's), body JSON `{username, identityKey, signature,
+     skein}`: the registrant is the session's identity — no session 401, an
+     `identityKey` that is not the session's 403; `username` a host name
+     label (a-z, 0-9, `-`, 1 to 63, not starting or ending with `-`),
+     `identityKey` the key (hex, 33 bytes), `signature` hex DER, `skein` the
+     skein that hosts the handle: its handle on this host, or its identity
+     key (hex). The session signs the whole body, so `skein` is the
+     registrant's choice. The router appends it to the host skein as a
+     request entry (route `/onboard/register`); nothing in the router checks
+     it.
+  4. The app's thread asks the instance manager `holds {skein, key:
+     <identityKey>, role: "root", name: <username>}` ("The providers",
+     below): the manager finds the skein (a published instance on this
+     host, by handle or identity) and reads its kernel's head `grants`
+     (#143).
+  5. The answer, once the key holds root there and the certifier has
+     signed: `200 {handle, domain, identityKey, messagebox: <the skein's
+     origin>, certificate, keyringForSubject}` — the handle certificate for
+     the key's wallet to keep (`acquireCertificate`, `acquisitionProtocol:
+     "direct"`, `keyringRevealer: "certifier"`; "BRC-169 is discovery",
+     below). The app's records (`onboard/handles/<handle>`) carry the
+     hosting skein's identity (`skein`) and its origin (`messagebox`).
+     Refusals are `{error}`: 400 not JSON, not the four fields, not a label,
+     no `skein`; 401 the signature does not verify for that key over that
+     text; 403 the key holds no root on that skein; 404 no such skein on
+     this host; 409 the name is reserved (`id`, `host`), is another key's
+     handle, is another instance's handle here, or the key holds another
+     handle here (one key, one handle); 500 the thread failed.
 
-  **The same key and name again** registers nothing new: the mailbox stands,
-  and a new certificate is issued under a **new serial number** (each issue
-  has its own: the hash of its issuance record), so a wallet that removed the
-  earlier one (`relinquishCertificate`, which the toolbox keeps as a deleted
-  row unique on type, certifier and serial) can acquire it again. The earlier
+  **The same key and name again** — naming the same skein or another the
+  key holds root on — issues a new certificate under a **new serial
+  number** (each issue has its own: the hash of its issuance record), its
+  messagebox the skein named: a handle moves to another of its holder's
+  skeins this way, and a wallet that removed the earlier certificate
+  (`relinquishCertificate`, which the toolbox keeps as a deleted row unique
+  on type, certifier and serial) can acquire it again. The earlier
   certificate stays in the host skein's records, the trail revocation will
   use.
+
+  `onboard.create` refuses a handle registered here (409): a skein may not
+  take a registered handle's name.
 
   **The profile** (#104) goes to the same app: `POST <origin>/account/profile`,
   body JSON `{handle, record: <base64 of the DAG-CBOR profile bytes>,
@@ -592,22 +599,20 @@ refused. Two callers:
   profile"], keyID: "1", counterparty: "anyone", data: <the bytes>})` →
   `200 {handle, profile, displayName?, avatarURL?}`; 401 another key's
   signature, 400 another domain or shape, 404 no such handle. The app keeps
-  it (`onboard/profiles/<handle>`); resolve and search serve it. (Before
-  #113 the page wrote it to the mailbox instance's head `profile`; the host
-  reads that no more.)
-- **The operator**, out of band: `skein-host add <handle> --mailbox --owner
-  <key> [--domain d]` calls the same `createInstance` through a router of
-  its own — for a host with no host skein (a dev host, `up.sh`'s `david` and
-  `infer`). Such a mailbox has no record in the onboarding app, so it is not
-  certified and does not resolve until it is adopted: `skein-host
-  import-handles` sends `{fn: "onboard.adopt", args: {handle, owner}}` to
-  `/onboard/call` as the host skein's owner for each mailbox row the app has
-  no record of (registrations made before #113 too); the app records and
-  certifies it at its domain as a registration would. `skein-host mailboxes`
-  lists them.
+  it (`onboard/profiles/<handle>`); resolve and search serve it.
 
-The host's resolve endpoint answers a mailbox instance's handle with its
-owner's key and the instance's origin.
+The host's resolve endpoint answers a handle with its holder's key and the
+hosting skein's origin as the messagebox.
+
+**The dev agents' mailboxes** (#40) are not handles: `skein-host add
+<handle> --mailbox --owner <key> [--domain d]` (Router.addMailbox, through
+a router of its own) makes an instance with only the front door and the
+messagebox, whose dispatch rows send `:ack` and every message from anyone
+in any box (`*`) to the messagebox, for its owner — the dev owner's and the
+inference peer's on a dev host (`up.sh`'s `david` and `infer`), where the
+code-genesis agents deliver their answers. No registration, manager message
+or certificate reaches them, and no handle resolves to them. `skein-host
+mailboxes` lists them.
 
 ## Outbound: emit, the address book and the providers
 
@@ -864,7 +869,8 @@ message routes by `replyTo` to the thread awaiting it.
 | | `send` | `{stream, body: bytes}` | `{}` |
 | | `close` | `{stream}` | `{}` |
 | `status` | — | takes no messages (an error answer) | it speaks first: each status of a transaction the instance holds, box `chain/status` (#65, #128, below) |
-| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?, claim?: {message, body: bytes}}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, `claim` (required: `owner`'s own signed claim, naming no recipient, #127) forwarded into it as its first entry and taken before its hostname is published, then started (#90, below); image `mailbox` (#113) — a mailbox instance for `owner`, published at once, the same owner and handle again the same answer ("Mailbox instances", above). `domain`: the handle's domain, recorded with the row (default `localhost`) |
+| `manager` | `create` | `{handle, owner: bytes(33), image?, domain?, claim?: {message, body: bytes}}` | `{handle, identity: bytes(33), url}`: image `default` (or none) — a new instance from the default image, `claim` (required: `owner`'s own signed claim, naming no recipient, #127) forwarded into it as its first entry and taken before its hostname is published, then started (#90, below); no other image (#131: no mailbox-only instance). `domain`: the handle's domain, recorded with the row (default `localhost`) |
+| | `holds` | `{skein, key: bytes(33), role?, name?}` | `{handle, identity: bytes(33), url, holds, taken?}`: the skein — a published instance here, named by its handle or its identity key (hex) — and whether `key` holds `role` (default `root`) there, from its kernel's head `grants` (#143); `taken: true` when `name` is another instance's handle here. A registration asks it (#131, "Handles", above). No such skein: `{error}` |
 | | `start` | `{handle}` | `{handle, started: true, url}`: published and started |
 | | `stop` | `{handle}` | `{handle, stopped: true}`: unpublished and stopped |
 | `certifier` | `issue` | `{handle, domain, subject: bytes(33), serialNumber, issuance?}` | `{certificate, holder: {certificate, keyringForSubject}, serialNumber, issuance?}`: the handle certificate for handle@domain → subject under that serial, signed by the certifier key — the resolver's copy and the holder's (#113; "BRC-169 is discovery", below). Records nothing |
@@ -1113,13 +1119,13 @@ step 1   authfetch(<url>, {POST /sendMessage, content-type application/cbor, BRC
   when the server answers 401; the request signed and the answer checked
   through the signer; the exchange a recorded call on the step. `server` is
   the identity that answered the handshake — the recipient's own, or a
-  mailbox instance's for a mailbox kept for someone. Sending never tells
+  messagebox's for a mailbox kept for someone. Sending never tells
   the peer who we are beyond the session (no claim, no registration, #40).
 - **The session is the proof** (#126 step 4): the recipient's front door
   verifies the BRC-104 request and keeps the record with `sender` the
-  session's identity; nothing in the message is signed. A mailbox instance
-  keeping mail for a wallet keeps it for that wallet to read; it is never
-  forwarded into a skein ("Mailbox instances", above).
+  session's identity; nothing in the message is signed. A mailbox kept for a
+  wallet keeps it for that wallet to read; it is never forwarded into
+  another skein ("Handles", above).
 - **Failure.** `transient: …` (no answer, 5xx, 408, 425, 429) is tried again
   `defaults.sendRetryMs` later (default 30 000; a `deadline`) up to
   `defaults.sendAttempts` attempts in all (default 3); anything else, or
@@ -1170,7 +1176,7 @@ appended as a request entry, the app's route handler answering:
 | `GET /.well-known/metanet-handles/search` | `/onboard/search` |
 | `GET /bsvalias/id/<handle>[@<domain>]` | `/onboard/bsvalias/id/…` (a prefix row) |
 | `POST /.well-known/auth` | `/.well-known/auth` (the BRC-103 handshake: the host skein's session, #135) |
-| `POST /account/register` | `/onboard/register` ("Mailbox instances", above; signed, #135) |
+| `POST /account/register` | `/onboard/register` ("Handles", above; signed, #135) |
 | `POST /account/profile` | `/onboard/profile` |
 
 A host with no host skein answers them 404. The app's configuration

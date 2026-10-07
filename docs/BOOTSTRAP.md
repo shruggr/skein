@@ -22,7 +22,7 @@ gets the **default system in code** through the same writer
 (`genesis.ts codeSystem`). That is the kernel's pinned programs,
 `STOCK_DISPATCH`, `STOCK_HTTP` and `STOCK_READS` (#77). The host's
 hydration of an empty store calls `boot` with this source. A **mailbox
-instance** (#40; #113: the instance manager's `create` with image `mailbox`, which a registration asks for and `skein-host add <h> --mailbox --owner <key>` calls) is code genesis
+instance** (#40: the dev agents' mailbox, `skein-host add <h> --mailbox --owner <key>`; never a handle's — #131: a handle is registered from a skein, its messagebox that skein's origin) is code genesis
 too, with only the kernel's `frontdoor` and `messagebox` programs,
 `MAILBOX_DISPATCH` (`:ack` → messagebox, every message from anyone in any
 box (`*`) → messagebox), the default http rows and reads, and no peers or
@@ -321,7 +321,7 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   static app (shruggr/skein-static) is archived.
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
   where the instance delivers what it sends its owner. Unset, the host's
-  (`SKEIN_OWNER_MESSAGEBOX`, else the owner's mailbox instance on this host)
+  (`SKEIN_OWNER_MESSAGEBOX`, else the owner's dev mailbox on this host, `add --mailbox`)
   fills it. It is the only peer a genesis names: the address book
   (head `peers`, one of the kernel's tables) is written by the kernel's
   `peers` operation on the owner's messages (`skein peers`, or the owner's wallet) only — no

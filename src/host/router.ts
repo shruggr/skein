@@ -21,7 +21,7 @@
 //   GET  /.well-known/metanet-handles/resolve    → /onboard/resolve         BRC-169 §5.2
 //   GET  /.well-known/metanet-handles/search     → /onboard/search          BRC-169 §5.6
 //   POST /.well-known/auth                       → /.well-known/auth        the BRC-103 handshake (#135: a registration is signed)
-//   POST /account/register                       → /onboard/register        a mailbox instance and its certificate (signed)
+//   POST /account/register                       → /onboard/register        a handle for a skein here, its certificate (signed; #131)
 //   POST /account/profile                        → /onboard/profile         a handle holder's signed profile
 //   GET  /bsvalias/id/<handle>[@<domain>]        → /onboard/bsvalias/id/…   the paymail PKI, from the same records
 //   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
@@ -67,8 +67,8 @@
 // instance's own (p2p.ts); the instance manager (#90) creates, starts and
 // stops instances for the host skein alone (host.db `host_settings`:
 // `skein-host init` made it; createInstance claims a new instance before
-// its row is enabled, which publishes its hostname; image `mailbox`, #113, a
-// mailbox instance for a registration); the certifier (#113) signs handle
+// its row is enabled, which publishes its hostname; #131: it answers whether a
+// key holds a role on a skein, for a registration); the certifier (#113) signs handle
 // certificates for the host skein alone. Each genesis it writes names the providers' keys
 // in its address book (`addressBook`). A kernel's broadcast events go to the
 // broadcaster (#65).
@@ -156,7 +156,7 @@ export interface RouterOptions {
   idleMs?: number;
   /** How long a synchronous client waits on its request's thread (#66) before 503 + Retry-After (ms); default SKEIN_ANSWER_WAIT_MS, else two minutes. */
   answerWaitMs?: number;
-  /** Where a new mailbox instance's store goes: <home>/instances/<handle>/runtime.db. */
+  /** Where a new instance's store goes: <home>/instances/<handle>/runtime.db. */
   home?: string;
   /** An instance's origin, `{handle}` and `{port}` filled in; default http://{handle}.localhost:{port}. */
   instanceOrigin?: string;
@@ -852,10 +852,15 @@ export class Router {
 
   /** Whether `owner` holds root on the instance (#143: the head `grants`): claimed by that key. */
   private async claimedBy(l: Loaded, owner: string): Promise<boolean> {
+    return await this.holdsRole(l, owner, "root");
+  }
+
+  /** Whether `key` (hex) holds `role` (its full name: root, <app>.<role>) on the instance: its kernel's head `grants` (#143). */
+  private async holdsRole(l: Loaded, key: string, role: string): Promise<boolean> {
     const root = await l.kernel.call("head", "grants") as CID | null;
     if (!root) return false;
     const g = await l.kernel.store.get(root).catch(() => undefined) as { roles?: Record<string, unknown[]> } | undefined;
-    return (g?.roles?.root ?? []).some((k) => k instanceof Uint8Array && Buffer.from(k).toString("hex") === owner);
+    return (g?.roles?.[role] ?? []).some((k) => k instanceof Uint8Array && Buffer.from(k).toString("hex") === key);
   }
 
   /**
@@ -878,22 +883,15 @@ export class Router {
    * the host skein (host.db). `domain`: the handle's domain, recorded with
    * the row (default `localhost`). A refusal throws (a bad or taken handle, a
    * bad key, another image, a claim not `owner`'s or refused: the row is left
-   * disabled, its store kept for a look).
-   *
-   * Image `mailbox` (#113): a mailbox instance for `owner` — the front door
-   * and the messagebox, its owner in its genesis (no claim) — published at
-   * once (`publish`). The same owner and handle again: the same answer (it
-   * exists, enabled again if it was not, at `domain` if given); a key with
-   * another mailbox here is refused. One creation path: the manager's `create` (the onboarding app's
-   * registrations) and `skein-host add --mailbox` both come here.
+   * disabled, its store kept for a look). No image `mailbox` (#131): a
+   * handle is registered from a skein, and its messagebox is that skein's.
    */
   async createInstance(handle: string, owner: string, o: { image?: string; host?: boolean; publish?: boolean; domain?: string; claim?: SignedClaim | unknown; needsClaim?: boolean; appConfig?: Genesis2Config["appConfig"] } = {}): Promise<{ handle: string; identity: string; url: string }> {
     if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
     if (this.reserved(handle) && !(o.host && handle === "host")) throw new Error(`handle ${handle} is reserved`);
     if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
-    if (o.image !== undefined && o.image !== "default" && o.image !== "mailbox") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image and mailbox instances`);
+    if (o.image !== undefined && o.image !== "default") throw new Error(`image ${JSON.stringify(o.image)}: this host has the default image (#131: no mailbox-only instance; a handle is registered from a skein)`);
     if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
-    if (o.image === "mailbox") return await this.createMailbox(handle, owner, o);
     if (o.host && (o.claim !== undefined || o.needsClaim)) throw new Error("the host skein is born owned (#142): no claim");
     const claim = o.claim !== undefined ? claimOf(o.claim) : undefined;
     if (!claim && o.needsClaim) claimOf(undefined);
@@ -933,12 +931,21 @@ export class Router {
     }
   }
 
-  /** createInstance's image `mailbox` (#113). */
-  private async createMailbox(handle: string, owner: string, o: { publish?: boolean; domain?: string }): Promise<{ handle: string; identity: string; url: string }> {
+  /**
+   * `skein-host add <handle> --mailbox --owner <key>` (#40): the dev agents' mailbox for an
+   * identity outside the host (the owner's, the inference peer's) — the front door and the
+   * messagebox, its owner in its genesis — published at once. Not a handle's: no registration,
+   * no manager message and no certificate reach it (#131). The same owner and handle again: the
+   * same answer; a key with another mailbox here is refused.
+   */
+  async addMailbox(handle: string, owner: string, o: { publish?: boolean; domain?: string } = {}): Promise<{ handle: string; identity: string; url: string }> {
+    if (!HANDLE.test(handle)) throw new Error(`handle ${JSON.stringify(handle)}: lower-case letters, digits and "-", at most 63, as a hostname label`);
+    if (this.reserved(handle)) throw new Error(`handle ${handle} is reserved`);
+    if (!KEY.test(owner)) throw new Error("owner: not an identity key (33 bytes)");
+    if (o.domain !== undefined && !DOMAIN.test(o.domain)) throw new Error(`domain ${JSON.stringify(o.domain)}: a host name, lower case`);
     const had = this.o.db.get(handle);
     if (had) {
       if (had.kind !== "mailbox" || had.owner !== owner) throw new Error(`handle ${handle} is taken`);
-      // The handle's domain is the asker's (a row registered before #113 took the request's host name).
       if (o.domain && had.domain !== o.domain) this.o.db.add(handle, { domain: o.domain });
       if (o.publish !== false && had.status !== "enabled") this.o.db.setStatus(handle, "enabled");
       const identity = had.identity ?? await rootIdentity(await this.o.walletFor(had));
@@ -958,8 +965,8 @@ export class Router {
 
   /**
    * The instance manager's work (#90; providers.ts `manager`): a message from
-   * the host skein in box `create`, `start` or `stop` → the answer body. A
-   * refusal throws (the provider answers {error}).
+   * the host skein in box `create`, `holds` (#131), `start` or `stop` → the
+   * answer body. A refusal throws (the provider answers {error}).
    */
   private async manage(box: string, b: Record<string, unknown>): Promise<Record<string, unknown>> {
     const handle = typeof b.handle === "string" ? b.handle : "";
@@ -971,7 +978,8 @@ export class Router {
       const c = await this.createInstance(handle, owner, { image: (b.image as string | null | undefined) ?? undefined, ...(typeof b.domain === "string" ? { domain: b.domain } : {}), ...(b.claim != null ? { claim: b.claim } : {}), needsClaim: true });
       return { handle: c.handle, identity: keyBytes(c.identity), url: c.url };
     }
-    if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, start and stop: not ${box}`);
+    if (box === "holds") return await this.holds(b);
+    if (box !== "start" && box !== "stop") throw new Error(`the instance manager takes create, holds, start and stop: not ${box}`);
     const row = this.o.db.get(handle);
     if (!row) throw new Error(`no instance ${handle}`);
     if (row.handle === this.o.db.hostSkein()?.handle) throw new Error(`${handle} is the host skein: it is not started or stopped by a message from itself`);
@@ -988,6 +996,27 @@ export class Router {
     if (l) { this.loaded.delete(handle); await l.kernel.stop(); }
     this.say("router", `${handle}: stopped by the instance manager`);
     return { handle, stopped: true };
+  }
+
+  /**
+   * The manager's `holds {skein, key, role?, name?}` (#131: a registration asks it): the skein —
+   * a published instance here, named by its handle or its identity key (hex), not a mailbox row —
+   * and whether `key` (33 bytes or hex) holds `role` (default root) there (#143: its kernel's
+   * head `grants`): `{handle, identity, url, holds}`, and `taken: true` when `name` (the handle
+   * being registered) is another instance's handle on this host. No such skein here: a refusal.
+   */
+  private async holds(b: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const skein = typeof b.skein === "string" ? b.skein.trim().toLowerCase() : "";
+    const key = b.key instanceof Uint8Array ? Buffer.from(b.key).toString("hex") : typeof b.key === "string" ? b.key : "";
+    const role = typeof b.role === "string" && b.role ? b.role : "root";
+    const name = typeof b.name === "string" ? b.name : "";
+    if (!skein) throw new Error("skein: a skein's handle or identity key (text)");
+    if (!KEY.test(key)) throw new Error("key: not an identity key (33 bytes)");
+    const row = KEY.test(skein) ? this.o.db.list().find((r) => r.identity === skein && r.kind !== "mailbox") : this.o.db.get(skein);
+    if (!row || row.kind === "mailbox" || row.status !== "enabled" || this.unpublished.has(row.handle)) throw new Error(`no skein ${skein} on this host`);
+    const l = await this.hydrate(row.handle);
+    const taken = !!name && name !== row.handle && !!this.o.db.get(name);
+    return { handle: row.handle, identity: keyBytes(l.identity), url: this.originOf(row.handle), holds: await this.holdsRole(l, key, role), ...(taken ? { taken: true } : {}) };
   }
 
   /** What this host brings to a new instance's genesis (boot.ts): the owner and its messagebox, the inference peer, their names, the host's defaults. */

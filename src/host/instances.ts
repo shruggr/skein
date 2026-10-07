@@ -1,14 +1,15 @@
 // The host's management database (#23): which instances this host runs, one
 // row each, in $SKEIN_HOME/host.db. Host-side state, outside every instance's
 // graph: nothing in src/runtime reads it. Rows get here by hand (`skein-host
-// add`), by the instance manager (`create`, #90), or by registration; `skein-host
+// add`) or by the instance manager (`create`, #90); `skein-host
 // run` (the router, router.ts) serves every enabled row.
 //
-// #40: a row is an agent (its own identity) or a **mailbox instance** — an
-// instance whose system is only the front door and the messagebox, keeping
-// mail for an identity outside the host (`owner`: a user's wallet, the
-// inference peer). There is no messagebox host: every identity's mailbox is
-// an instance at its own origin. Beside the rows, the **fuel ledger**: what
+// #40: a row is an agent (its own identity) or a **mailbox instance** — the
+// dev agents' mailbox (`skein-host add --mailbox`): an instance whose system
+// is only the front door and the messagebox, keeping mail for an identity
+// outside the host (`owner`: the dev owner's wallet, the inference peer).
+// Never a handle's (#131): a handle is registered from a skein, and its
+// messagebox is that skein's origin. Beside the rows, the **fuel ledger**: what
 // each caller's calls (#40: the front door's reads, which the log never sees)
 // cost, per instance and op. And the broadcaster's three (#58, #65, arc.ts):
 // the last event id taken from Arcade's stream, the statuses already routed,
@@ -130,7 +131,7 @@ CREATE TABLE IF NOT EXISTS billing_payments (
  * A handle: one hostname label (lower-case letters, digits and "-", at most
  * 63, no "-" at either end), so `<handle>.<domain>` is the instance's origin.
  * The one grammar for every row (H22): `add`, the instance manager's
- * `create`, a mailbox instance.
+ * `create`, `add --mailbox`.
  */
 export const HANDLE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 

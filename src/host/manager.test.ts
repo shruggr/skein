@@ -9,9 +9,10 @@
 // refused and nothing is published; a second `create` of the handle is refused (an answer); a
 // message from any other instance is not acted on and not answered; `stop`
 // unpublishes, `start` publishes again. #113: `create` records the domain it
-// is given; image `mailbox` makes a mailbox instance (what a registration
-// asks for), the same owner and handle again the same answer. (kernel-zig/
-// equiv/host.ts runs the whole flow through the onboarding app.)
+// is given. #131: no image `mailbox`; `holds {skein, key, role}` answers
+// whether a key holds a role on a published skein here, named by handle or
+// identity (what a registration asks). (kernel-zig/equiv/host.ts runs the
+// whole flow through the onboarding app.)
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -114,27 +115,44 @@ test("the instance manager: create (the owner's claim forwarded before published
   a = await send("host", "create", { handle: "carol", owner: "nope" });
   assert.match(String(a[0]?.body.error), /owner: not an identity key/);
   a = await send("host", "create", { handle: "carol", owner: client, image: "other" });
-  assert.match(String(a[0]?.body.error), /the default image and mailbox instances/);
+  assert.match(String(a[0]?.body.error), /the default image \(#131/);
   assert.equal(h.db.get("carol"), undefined);
   a = await send("host", "create", { handle: "carol", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "Not A Domain" });
   assert.match(String(a[0]?.body.error), /domain .*a host name/);
 
-  // #113: the domain asked is the row's; image `mailbox` is a mailbox instance for the owner, published at once.
+  // #113: the domain asked is the row's.
   a = await send("host", "create", { handle: "dora", owner: Uint8Array.from(Buffer.from(client, "hex")), domain: "skein.test", claim: await signClaim(ephemeralWallet(clientKey)) });
   assert.equal(h.db.get("dora")!.domain, "skein.test");
-  const mailer = PrivateKey.fromRandom().toPublicKey().toString();
-  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox", domain: "skein.test" });
-  assert.deepEqual([a[0]!.body.handle, a[0]!.body.url, hex(a[0]!.body.identity)], ["mel", h.origin("mel"), h.keyOf("mel").toPublicKey().toString()]);
-  const mel = h.db.get("mel")!;
-  assert.deepEqual([mel.kind, mel.owner, mel.domain, mel.status], ["mailbox", mailer, "skein.test", "enabled"]);
-  const mg = await (await h.router.hydrate("mel")).kernel.genesis() as { root?: unknown[] };
-  assert.deepEqual(mg.root?.map((x) => hex(x)), [mailer], "its genesis names its root (no claim)");
-  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
-  assert.equal(a[0]!.body.handle, "mel", "the same owner and handle again: the same answer");
-  a = await send("host", "create", { handle: "mel2", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
-  assert.match(String(a[0]?.body.error), /has a mailbox instance here already: mel/);
-  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(client, "hex")), image: "mailbox" });
-  assert.match(String(a[0]?.body.error), /handle mel is taken/);
+  // #131: no mailbox-only instance; a handle is registered from a skein.
+  a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(client, "hex")), image: "mailbox", claim: await signClaim(ephemeralWallet(clientKey)) });
+  assert.match(String(a[0]?.body.error), /the default image \(#131/);
+  assert.equal(h.db.get("mel"), undefined);
+
+  // #131: holds — whether a key holds a role on a published skein here, by its handle or its identity.
+  const bytes = (x: string) => Uint8Array.from(Buffer.from(x, "hex"));
+  a = await send("host", "holds", { skein: "alice", key: bytes(client), role: "root" });
+  assert.deepEqual([a[0]!.body.handle, a[0]!.body.url, hex(a[0]!.body.identity), a[0]!.body.holds], ["alice", h.origin("alice"), alice.identity, true]);
+  a = await send("host", "holds", { skein: alice.identity!, key: bytes(client) });
+  assert.deepEqual([a[0]!.body.handle, a[0]!.body.holds], ["alice", true], "by identity; the role root by default");
+  a = await send("host", "holds", { skein: "alice", key: bytes(PrivateKey.fromRandom().toPublicKey().toString()), role: "root" });
+  assert.equal(a[0]!.body.holds, false, "another key holds no root there");
+  a = await send("host", "holds", { skein: "alice", key: bytes(client), role: "site.editor" });
+  assert.equal(a[0]!.body.holds, false, "nor a role no one was granted");
+  a = await send("host", "holds", { skein: "alice", key: bytes(client), name: "zed" });
+  assert.equal(a[0]!.body.taken, undefined, "a name no instance has");
+  a = await send("host", "holds", { skein: "alice", key: bytes(client), name: "dora" });
+  assert.equal(a[0]!.body.taken, true, "a name that is another instance's handle here");
+  a = await send("host", "holds", { skein: "alice", key: bytes(client), name: "alice" });
+  assert.equal(a[0]!.body.taken, undefined, "the hosting skein's own handle");
+  a = await send("host", "holds", { skein: "nobody", key: bytes(client) });
+  assert.match(String(a[0]?.body.error), /no skein nobody on this host/);
+  a = await send("host", "holds", { skein: "eve", key: bytes(client) });
+  assert.match(String(a[0]?.body.error), /no skein eve on this host/, "an unpublished instance is no skein to host a handle");
+  h.mailbox("mel", client);
+  a = await send("host", "holds", { skein: "mel", key: bytes(client) });
+  assert.match(String(a[0]?.body.error), /no skein mel on this host/, "the dev agents' mailbox is no skein");
+  a = await send("host", "holds", { skein: "alice", key: "nope" });
+  assert.match(String(a[0]?.body.error), /key: not an identity key/);
 
   // Another instance (its own key, from its own handle) is not acted on, and not answered.
   h.instance("other");
