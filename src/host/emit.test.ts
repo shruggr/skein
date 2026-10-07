@@ -42,7 +42,7 @@ test("deadline: an event on the step, kept by the host's waker across a restart,
   await fs.mkdir(join(dir, "bin"), { recursive: true });
   await fs.mkdir(join(dir, "etc"));
   await fs.writeFile(join(dir, "bin/cron-demo.wasm"), readFileSync(DEMO_WASM));
-  await fs.writeFile(join(dir, "etc/subscriptions.json"), JSON.stringify([{ box: "tick", handler: "cron-demo" }]));
+  await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([{ address: "tick", program: "cron-demo" }]));
   const db = new HostDb(join(home, "host.db"));
   t.after(() => db.close());
   const signer = new Signer(PrivateKey.fromRandom());

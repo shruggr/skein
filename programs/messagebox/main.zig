@@ -15,11 +15,15 @@
 //!                        no session: #126 step 4), so both sides know it by
 //!                        one CID. A message carrying a `signature` is refused
 //!                        (the session is the proof). Nothing is written if it is
-//!                        refused. Accepted when a subscription takes it —
-//!                        (sender, box) for this instance's own boxes, or a
-//!                        reply to a message this instance sent that sender;
-//!                        a subscription to this program for its owner's (a
-//!                        mailbox exists only where one is subscribed)
+//!                        refused. Accepted when a route takes it — its box's
+//!                        route for this instance's own boxes (#143: by the
+//!                        box alone; the kernel's gate judges the sender when
+//!                        it routes it), or a reply to a message this instance
+//!                        sent that sender; for another identity, a route of
+//!                        the box to this program and the recipient a root
+//!                        holder of this instance (#143: a mailbox instance
+//!                        keeps mail for its root; a mailbox exists only where
+//!                        one is routed)
 //!   listMessages         a read of the caller's mailbox: nothing is written
 //!                        (CBOR: each with `message`, its mail record as kept)
 //!   acknowledgeMessage   one entry moving the reader's pointer (an `ack`
@@ -147,23 +151,27 @@ fn selfKey(in: Value) []const u8 {
     return Value.bytesOf(s.get("identity")) orelse "";
 }
 
-fn ownerKey(in: Value) []const u8 {
-    return Value.bytesOf(in.get("owner")) orelse "";
+/// Whether `key` holds root on this instance (#143: the head `grants`, the kernel's; reads are open).
+fn isRoot(a: Allocator, key: []const u8) !bool {
+    const root = (try sk.head(a, "grants")) orelse return false;
+    const g = try sk.get(a, root);
+    const roles = g.get("roles") orelse return false;
+    if (roles != .map) return false;
+    const list = roles.get("root") orelse return false;
+    if (list != .array) return false;
+    for (list.array) |k| if (eql(u8, Value.bytesOf(k) orelse "", key)) return true;
+    return false;
 }
 
-/// The first `mailbox` dispatch row for (sender, box), as the kernel routes (#77, dispatch.zig forMail):
-/// its program's CID, or null for a kernel row (an admin box: the message is taken, by the kernel).
-fn route(in: Value, sender: []const u8, box: []const u8) ?[]const u8 {
+/// The first `mailbox` route for the box, as the kernel routes (#77, #143: dispatch.zig forMail, by the
+/// box alone): its program's CID, or "" for a kernel route (an admin box: the message is the kernel's).
+fn route(in: Value, box: []const u8) ?[]const u8 {
     const rs = in.get("dispatch") orelse return null;
     if (rs != .array) return null;
     for (rs.array) |r| {
         if (!eql(u8, Value.str(r.get("transport")) orelse "", "mailbox")) continue;
         const addr = Value.str(r.get("address")) orelse continue;
         if (!eql(u8, addr, "*") and !eql(u8, addr, box)) continue;
-        const s = r.get("sender") orelse continue;
-        if (Value.str(s)) |t| {
-            if (!eql(u8, t, "*")) continue;
-        } else if (!eql(u8, Value.bytesOf(s) orelse "", sender)) continue;
         return Value.cidOf(r.get("program")) orelse "";
     }
     return null;
@@ -206,11 +214,11 @@ fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
     const mine = eql(u8, recipient, me);
     if (mine) {
         const reply = isReplyTo(a, value, sender) catch false;
-        if (route(in, sender, box) == null and !reply) return failure(a, rb.cbor, 403, "ERR_NOT_SUBSCRIBED", "This instance takes no messages from you in that box.");
+        if (route(in, box) == null and !reply) return failure(a, rb.cbor, 403, "ERR_NOT_SUBSCRIBED", "This instance takes no messages in that box.");
     } else {
         const keeper = sk.program(in, "messagebox") orelse "";
-        const h = route(in, sender, box) orelse "";
-        if (!eql(u8, recipient, ownerKey(in)) or !eql(u8, h, keeper)) return failure(a, rb.cbor, 403, "ERR_ACCOUNT_REQUIRED", "No mailbox for that recipient here.");
+        const h = route(in, box) orelse "";
+        if (!try isRoot(a, recipient) or !eql(u8, h, keeper)) return failure(a, rb.cbor, 403, "ERR_ACCOUNT_REQUIRED", "No mailbox for that recipient here.");
     }
 
     var rec = cbor.MapBuilder.init(a);

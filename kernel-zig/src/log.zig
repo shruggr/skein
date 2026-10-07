@@ -1,5 +1,5 @@
-// The input log and the record shapes the scheduler checks, in format 8
-// (#77: the kernel's four tables; format 7, #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
+// The input log and the record shapes the scheduler checks, in format 9
+// (#143: routes, filters, roles; #77: the kernel's four tables; format 7, #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
 // unsigned, identity keys as 33-byte byte strings in every record). Skein is
 // a state process: every package a transport carries in is an entry,
 // appended as received, and the instance's middleware (the front door) is
@@ -8,13 +8,14 @@
 // entry (format 7, #69): a deadline and a sleep are answered by the waker
 // provider's signed message.
 //
-//   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport (+ door | refused)}
-//   door     (#121) a request's admission: what the door established before the entry was written —
-//            {verified?: <the middleware's answer: who the package is from>, filter?: <the row's
-//            filter>, beefs?: [<pointer record CID>]} — the request record then the package as the
-//            door handed it back (a filter's rewrite: door.zig, beef.zig)
-//   refused  (#121) a refusal at the door: {stage: "middleware" | "filter", reason, status, code?};
-//            the entry is written and nothing runs (the request record as far as the door got)
+//   entry    {kind: "log", prev, n, time, genesis | mail | event+box | request+transport (+ door)}
+//   door     (#121, #143) a request's admission: what the door established before the entry was
+//            written — {principal?: bytes(33) (who the filters, or the transport, say it is from),
+//            verified?: {caller, theirs, requestId} (kernel.brc104's: the session the answer is
+//            signed on), filters?: [<the route's filters that ran>], beefs?: [<pointer record CID>],
+//            blocks?: [<CID a filter stored>], bodies?: [{of, is}]} — the request record then the
+//            package as the door handed it back (a filter's rewrite: door.zig, beef.zig). A request
+//            a filter rejects or answers, or the gate refuses, writes no entry (#143)
 //   request  a package as a transport carried it in (#68), unverified: the
 //            host verifies nothing. `transport` names the middleware stepped
 //            on it (the genesis's front door for "http", "libp2p" and
@@ -58,31 +59,35 @@
 //   event    a record from the host's wiring, self-validating (#29, #65: a
 //            header from a feed; a proof — a transaction's merkle path — from
 //            the broadcaster's Arcade session), routed by its `subject` or by box
-//   genesis  {kind: "genesis", identity: bytes, owner?: bytes, handle, domain, programs,
-//             dispatch: [<row>], scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},
+//   genesis  {kind: "genesis", identity: bytes, root?: [bytes], handle, domain, programs,
+//             dispatch: [<route>], roles?: {<role>: ["<program>.<fn>"]},
+//             scopes?: {<program name>: [<head name | prefix/>]}, peers?: {role: bytes},
 //             defaults?, names?: [{identityKey: bytes, handle, domain}], collect?, tree?,
-//             reads?: [{caller?: bytes, op}],
 //             addressBook?: [{key: bytes, transport, address, handle?, domain?}]}
-//            `dispatch` (#77, format 8): the seed of the dispatch table (dispatch.zig: the rows
-//            that route — boxes, HTTP paths, libp2p topics and protocols — and the admin rows
+//            `dispatch` (#77; #143, format 9): the seed of the route table (dispatch.zig: the routes
+//            — boxes, events, HTTP paths, libp2p topics and protocols — and the admin routes
 //            whose program is the kernel), written as the chain's first updates when the
-//            genesis is processed. `scopes`: the heads a genesis-wired program (one with no
+//            genesis is processed. `root` (#143): the initial root holders, written into the
+//            head `grants` when the genesis is processed (grants.zig); none: an image, claimed
+//            by its first claim. `roles` (#143): what gates the genesis's own programs'
+//            functions (the explorer: {root: ["frontdoor.explore"]}). No `owner` (#143: the
+//            owner is root), no `reads` (#143: a read is a route). `scopes`: the heads a genesis-wired program (one with no
 //            app record) may advance, by the program's name — an exact head name, or a prefix
 //            ending in `/` (an app's program writes `<app>/…` by its record's `app`). A genesis
 //            naming `subscriptions` or `routes` (format 7) is refused.
 //            `tree` (issue #4): the system tree the instance booted from (a git
 //            tree, its objects pre-filled by the loader); processing the genesis
-//            sets the head `main` to it. `reads`: the front door's (#40).
+//            sets the head `main` to it.
 //            `heads` (#141): {<head name>: <record CID>} — an image's installed apps (`<app>/app`,
-//            the app record) and the `reads` head; processing the genesis advances each, after
+//            the app record); processing the genesis advances each, after
 //            the dispatch rows (the records pre-filled by the loader, as the tree's objects are).
 //            `addressBook` (#70): the address book's seed (the host's providers,
 //            the owner's mailbox), written into the head `peers` when the
 //            genesis is processed.
-//            No `owner` (#89): an image. The default image is one genesis
-//            for everyone; its dispatch rows carry a `claim` row to the
-//            kernel, and the owner comes with the claim (scheduler.zig
-//            kernelOp, "claim"; the head `claim` keeps what was claimed).
+//            No `root` (#89, #143): an image. The default image is one genesis
+//            for everyone; its routes carry a `claim` route to the kernel,
+//            and root comes with the claim (scheduler.zig claim: root granted
+//            to the claimant; the head `claim` keeps what was claimed).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -232,18 +237,15 @@ pub fn isLogEntry(e: Value) bool {
         if (box.len == 0) return false;
     } else if (e.get("box") != null) return false;
     if (e.get("mail")) |m| if (m != .cid) return false;
-    // A transport goes with a request, and only with it (#68); so does the door's outcome (#121):
-    // `door` on an admission, `refused` on a refusal, never both.
+    // A transport goes with a request, and only with it (#68); so does the door's outcome (#121).
+    // #143: no `refused` — a request the door turns away writes no entry.
+    if (e.get("refused") != null) return false;
     if (e.get("request")) |r| {
         if (r != .cid) return false;
         const t = Value.str(e.get("transport")) orelse return false;
         if (t.len == 0) return false;
         if (e.get("door")) |d| if (d != .map) return false;
-        if (e.get("refused")) |x| {
-            if (x != .map or Value.str(x.get("stage")) == null or Value.str(x.get("reason")) == null) return false;
-            if (e.get("door") != null) return false;
-        }
-    } else if (e.get("transport") != null or e.get("door") != null or e.get("refused") != null) return false;
+    } else if (e.get("transport") != null or e.get("door") != null) return false;
     return true;
 }
 
@@ -363,8 +365,20 @@ pub fn isGenesis(x: ?Value) bool {
     if (g != .map) return false;
     if (!std.mem.eql(u8, Value.str(g.get("kind")) orelse return false, "genesis")) return false;
     if (!secp.isKey(Value.bytesOf(g.get("identity")) orelse return false)) return false;
-    // #89: an image names no owner (the claim brings it); a genesis that names one names a key.
-    if (g.get("owner")) |o| if (!secp.isKey(Value.bytesOf(o) orelse return false)) return false;
+    // #143 (format 9): no owner — root holders, keys; an image names none (the claim brings root).
+    if (g.get("owner") != null) return false;
+    if (g.get("root")) |r| {
+        if (r != .array) return false;
+        for (r.array) |k| if (!secp.isKey(Value.bytesOf(k) orelse return false)) return false;
+    }
+    // #143: what gates the genesis's own programs' functions: {<role>: ["<program>.<fn>"]}.
+    if (g.get("roles")) |rs| {
+        if (rs != .map) return false;
+        for (rs.map) |e| {
+            if (e.value != .array) return false;
+            for (e.value.array) |f| if (Value.str(f) == null) return false;
+        }
+    }
     if (g.get("host") != null) return false; // format 1
     // #62's attest key went with the recorded http/libp2p calls (#67, format 6).
     if (g.get("attest") != null) return false;
@@ -421,17 +435,11 @@ pub fn isGenesis(x: ?Value) bool {
         if (!isCidMap(hs)) return false;
         for (hs.map) |e| {
             if (e.key.len == 0 or std.mem.indexOfAny(u8, e.key, " \t\n\r\x0b\x0c\x00") != null) return false;
-            for ([_][]const u8{ "main", "claim", "billing" }) |k| if (std.mem.eql(u8, e.key, k)) return false;
+            for ([_][]const u8{ "main", "claim", "billing", "grants" }) |k| if (std.mem.eql(u8, e.key, k)) return false;
         }
     }
-    // #40: the front door's reads [{caller?, op}].
-    if (g.get("reads")) |rs| {
-        if (rs != .array) return false;
-        for (rs.array) |r| {
-            if (r != .map or Value.str(r.get("op")) == null) return false;
-            if (r.get("caller")) |c| if (!secp.isKey(Value.bytesOf(c) orelse return false)) return false;
-        }
-    }
+    // #143: no reads table (a read is a route: filters only).
+    if (g.get("reads") != null) return false;
     return true;
 }
 

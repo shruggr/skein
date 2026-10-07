@@ -1,82 +1,85 @@
-// The dispatch table (#77): one of the kernel's four tables, and the one that
-// routes. It replaces the subscriptions chain, the genesis's `routes` and the
-// front door's `routes` head (format 8): a route, a box and a libp2p topic or
-// protocol differ only in where the address comes from. (An app's libp2p
-// subscription, #119, is not a row: subscriptions.zig; a row at its topic wins.)
+// The route table (#77, #143): one of the kernel's tables, the one that routes.
+// Routing only (David Case, 2026-10-08: "permissions and routing might be two
+// entirely different things"): a route says where a package goes and which
+// filters it passes on the way, never who may send it. Who may run a
+// function is the grants' (grants.zig: roles, the gate).
 //
-//   row   {transport: "mailbox" | "http" | "libp2p" | "local",
-//          address: text,          mailbox: a box name ("*": any box — a genesis-only catch-all,
+//   route {transport: "mailbox" | "event" | "http" | "libp2p" | "local",
+//          address: text,          mailbox/event: a box ("*": any box — a genesis-only catch-all,
 //                                  a mailbox instance's); http: a path; libp2p: a topic, or
-//                                  "/<protocol>"; local: a provider's name
+//                                  "/<protocol>"; local: a provider's name (no route fires)
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
-//                                  then the longest prefix); a libp2p row is exact (#119)
-//          sender: "*" | "event" | "session" | bytes(33),
-//                                  "*": anyone (an open route; an event's box too); "event": events
-//                                  only (#79: the host's wiring — a feed's header, a broadcaster's
-//                                  proof, a route's admit — never a message); "session": an HTTP
-//                                  route that needs a BRC-103/104 session, any identity; a key:
-//                                  that identity — a message's sender, the session's, a libp2p
-//                                  peer's. There is no built-in owner (#115, #126): the owner is
-//                                  the key on the admin rows (the claim writes them with its
-//                                  sender's key)
-//          program: <cid> | "kernel",
+//                                  then the longest prefix); a libp2p route is exact (#119)
+//          filters?: [text],       what runs on the package before anything is recorded, in
+//                                  order (door.zig): "kernel.brc104", "kernel.beef", or
+//                                  "<app>.<filter>" — a function the app's record lists under
+//                                  `filters`. http, libp2p and mailbox routes; an event has none
+//          program?: <cid> | "kernel",
 //                                  the handler (a program record in the store), or the kernel
-//                                  itself: an admin operation (`fn`: objects | head | dispatch | peers),
-//                                  the claim (#89: an image's one row, from anyone), or the host's
-//                                  tick (#130: the host row — sender the host's key, `x` and `rates`
-//                                  its settings, billing.zig)
-//          fn?: text,              http/libp2p: the handler's function; kernel: the operation
-//          filter?: "beef",        #121: what the kernel's door runs on the package before its entry is
-//                                  written (scheduler.zig door, door.zig): a setting like any other
-//          …}                      a handler's own settings, carried to it as `match` (static's
-//                                  `root`, `index`; the install's `app`; a `read` op, a genesis
-//                                  before #115's: checked against its `reads` in `takes`)
+//                                  itself: an admin operation (`fn`: objects | head | dispatch |
+//                                  peers | grant), the claim (#89, #143: grants root), or the
+//                                  host's tick (#130: the host row — `host` the host's key, `x`
+//                                  and `rates` its settings, billing.zig). Absent: a READ route
+//                                  (http only): its filters answer, nothing is logged
+//          fn?: text,              the handler's function; kernel: the operation
+//          app?: text,             the app that installed it: its write scope, and the roles its
+//                                  record declares for `fn` (grants.zig gate)
+//          …}                      a handler's own settings, carried to it as `match` (a file
+//                                  handler's `root`, `index`)
+//
+// `event` is a transport (#143): the host's wiring into a box (a feed's header,
+// a broadcaster's proof, a route's admit) — never a message; a `mailbox` route
+// takes messages only. There is no `sender` (#143): a route admits whatever its
+// filters let through, and the gate decides who may run its function.
 //
 // The table is one chain per instance: origin {kind: "dispatch"}, one update
 // per change {op: "add" | "remove", row, thread?, input, at}; the rows are the
-// updates folded in order. A row's key is (transport, address, prefix,
-// sender): `add` replaces the row with that key in place (nothing written when
-// it is the same row), else appends; `remove` deletes it (nothing written when
-// there is none). First match wins, in table order, for every transport
-// (#115: `match` below — the one walk; the front door is handed the row and
-// only verifies who the request is from). The genesis's `dispatch`
-// is written as the chain's first updates (no `thread`); afterwards only the
-// kernel's `dispatch` operation changes it — on a message in an admin box from
-// the owner or a delegate (scheduler.zig kernelOp). No program import reaches
-// it.
+// updates folded in order. A route's key is (transport, address, prefix):
+// `add` replaces the route with that key in place (nothing written when it is
+// the same), else appends; `remove` deletes it (nothing written when there is
+// none). The genesis's `dispatch` is written as the chain's first updates (no
+// `thread`); afterwards only the kernel's `dispatch` operation changes it — on
+// a message from root (scheduler.zig kernelOp). No program import reaches it.
 const std = @import("std");
 const cbor = @import("cbor");
 const json = @import("json.zig");
-const secp = @import("secp");
 const heads = @import("heads.zig");
 const billing = @import("billing.zig");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
-pub const transports = [_][]const u8{ "mailbox", "http", "libp2p", "local" };
-/// The kernel's admin operations, one per table (#77).
-pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers" };
-/// What a kernel row may name (#89): the admin operations, the claim —
-/// an image's wildcard row, taken once: the claimed owner's admin rows
-/// written and the claim row removed (scheduler.zig kernelOp) — and (#130)
-/// the host's tick: the host row, the owner's grant of a host and its rates
+pub const transports = [_][]const u8{ "mailbox", "event", "http", "libp2p", "local" };
+/// The kernel's admin operations (#77, #143: and `grant`), each gated by root.
+pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers", "grant" };
+/// What a kernel route may name (#89): the admin operations, the claim — an
+/// image's route, taken once: root granted to its sender and the claim route
+/// removed (scheduler.zig claim) — and (#130) the host's tick: the host row
 /// (billing.zig).
 pub const kernel_ops = admin_ops ++ [_][]const u8{ "claim", billing.OP };
 
-pub const Sender = union(enum) { any, event, session, key: []const u8 };
+/// The kernel's own filters (door.zig): `kernel.<name>`.
+pub const kernel_filters = [_][]const u8{ "kernel.brc104", "kernel.beef" };
 
 pub const Row = struct {
     transport: []const u8,
     address: []const u8,
     prefix: bool,
-    sender: Sender,
-    /// The handler's program record, or null: the kernel itself (`op`).
+    /// The handler's program record; null for a kernel route (`op`) and for a read route.
     program: ?[]const u8,
-    /// The kernel operation, when `program` is null.
+    /// The kernel operation, when the route's program is "kernel".
     op: ?[]const u8,
     func: ?[]const u8,
-    /// The row as stored (every field, the handler's settings included).
+    /// The app that installed it (null: the genesis's, or root's own).
+    app: ?[]const u8,
+    /// The filters, in order, as stored (each a text value; an empty list when it names none).
+    filters: []const Value,
+    /// The route as stored (every field, the handler's settings included).
     value: Value,
+
+    /// A read route (#143): filters only, no handler — its last filter answers.
+    pub fn isRead(r: Row) bool {
+        return r.program == null and r.op == null;
+    }
 };
 
 pub fn isTransport(t: []const u8) bool {
@@ -94,10 +97,23 @@ pub fn isAdminOp(op: []const u8) bool {
     return false;
 }
 
-/// Whether the table has an admin row (a kernel row for objects, head, dispatch or peers): the instance is owned (#89).
-pub fn hasAdminRow(rows: []const Row) bool {
-    for (rows) |r| if (r.op) |op| if (isAdminOp(op)) return true;
-    return false;
+fn isNamePart(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-')) return false;
+    return true;
+}
+
+/// Whether `s` names a filter: `kernel.<name>` (one of the kernel's), or `<app>.<filter>`.
+pub fn isFilterRef(s: []const u8) bool {
+    const dot = std.mem.lastIndexOfScalar(u8, s, '.') orelse return false;
+    const app = s[0..dot];
+    const name = s[dot + 1 ..];
+    if (!isNamePart(name) or app.len == 0 or heads.hasSpaceOrNul(app) or std.mem.indexOfScalar(u8, app, '/') != null) return false;
+    if (std.mem.eql(u8, app, "kernel")) {
+        for (kernel_filters) |k| if (std.mem.eql(u8, k, s)) return true;
+        return false;
+    }
+    return true;
 }
 
 fn originValue(a: std.mem.Allocator) !Value {
@@ -119,81 +135,92 @@ pub fn isBox(s: []const u8) bool {
     return s.len > 0 and !heads.hasSpaceOrNul(s);
 }
 
-fn senderOf(v: ?Value) ?Sender {
-    const x = v orelse return null;
-    if (Value.str(x)) |s| {
-        if (std.mem.eql(u8, s, "*")) return .any;
-        if (std.mem.eql(u8, s, "event")) return .event;
-        if (std.mem.eql(u8, s, "session")) return .session;
-        return null;
-    }
-    if (Value.bytesOf(x)) |b| if (secp.isKey(b)) return .{ .key = b };
-    return null;
-}
-
-/// Why `v` is not a dispatch row (JSON.stringify quoting), or null if it is one.
+/// Why `v` is not a route (JSON.stringify quoting), or null if it is one.
 /// The program record's presence in the store is the kernel's check at the
 /// operation (a genesis names records the loader put).
 pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
-    if (v != .map) return try a.dupe(u8, "a row is a map {transport, address, sender, program, fn?, …}");
-    const t = Value.str(v.get("transport")) orelse return try a.dupe(u8, "transport: want mailbox, http, libp2p or local");
-    if (!isTransport(t)) return try std.fmt.allocPrint(a, "transport {s}: want mailbox, http, libp2p or local", .{try json.quoted(a, t)});
+    if (v != .map) return try a.dupe(u8, "a route is a map {transport, address, prefix?, filters?, program?, fn?, …}");
+    const t = Value.str(v.get("transport")) orelse return try a.dupe(u8, "transport: want mailbox, event, http, libp2p or local");
+    if (!isTransport(t)) return try std.fmt.allocPrint(a, "transport {s}: want mailbox, event, http, libp2p or local", .{try json.quoted(a, t)});
+    if (v.get("sender") != null) return try a.dupe(u8, "sender: a route has none (#143: routing only — who may run a function is the grants')");
     const addr = Value.str(v.get("address")) orelse return try a.dupe(u8, "address: want text (a box, a path, a topic or /protocol, a provider's name)");
     if (!isBox(addr)) return try std.fmt.allocPrint(a, "address {s}: empty, or has a space or NUL", .{try json.quoted(a, addr)});
     if (v.get("prefix")) |p| {
         if (p != .bool and p != .null) return try a.dupe(u8, "prefix: true or absent");
-        if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http row has one");
+        if (p == .bool and p.bool and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "prefix: only an http route has one");
     }
-    const sender = senderOf(v.get("sender")) orelse return try a.dupe(u8, "sender: want \"*\", \"event\" (mailbox), \"session\" (http) or an identity key (33 bytes)");
-    if (sender == .session and !std.mem.eql(u8, t, "http")) return try a.dupe(u8, "sender \"session\": only an http row (a BRC-103/104 session)");
-    if (sender == .event and !std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "sender \"event\": only a mailbox row (a box events are admitted into)");
-    const prog = v.get("program") orelse return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
+    var n_filters: usize = 0;
+    if (v.get("filters")) |fs| if (fs != .null) {
+        if (fs != .array) return try a.dupe(u8, "filters: a list of filter names (\"kernel.brc104\", \"kernel.beef\", \"<app>.<filter>\")");
+        for (fs.array) |f| {
+            const name = Value.str(f) orelse return try a.dupe(u8, "filters: each is a filter's name");
+            if (!isFilterRef(name)) return try std.fmt.allocPrint(a, "filters: {s} is not kernel.brc104, kernel.beef or <app>.<filter>", .{try json.quoted(a, name)});
+        }
+        n_filters = fs.array.len;
+        if (n_filters > 0 and (std.mem.eql(u8, t, "event") or std.mem.eql(u8, t, "local"))) return try std.fmt.allocPrint(a, "filters: an {s} route has none (only http, libp2p and mailbox routes filter)", .{t});
+    };
+    if (v.get("filter") != null) return try a.dupe(u8, "filter: gone (#143): name `filters`, a list (\"kernel.beef\")");
+    if (v.get("app")) |x| if (x != .null and Value.str(x) == null) return try a.dupe(u8, "app: want text");
+    if (v.get("fn")) |f| if (f != .string and f != .null) return try a.dupe(u8, "fn: want text");
+    const prog = v.get("program") orelse {
+        // A read route (#143): filters only; its last filter answers.
+        if (!std.mem.eql(u8, t, "http")) return try a.dupe(u8, "program: only an http route may have none (a read route: its filters answer)");
+        if (n_filters == 0) return try a.dupe(u8, "a read route (no program) names its filters: the last one answers");
+        if (v.get("fn") != null) return try a.dupe(u8, "fn: a read route has no handler");
+        return null;
+    };
     if (Value.str(prog)) |s| {
         if (!std.mem.eql(u8, s, "kernel")) return try std.fmt.allocPrint(a, "program {s}: want a program record's CID, or \"kernel\"", .{try json.quoted(a, s)});
-        const op = Value.str(v.get("fn")) orelse return try a.dupe(u8, "fn: a kernel row names its operation (objects, head, dispatch, peers, claim or tick)");
-        if (!isKernelOp(op)) return try std.fmt.allocPrint(a, "fn {s}: a kernel row's operation is objects, head, dispatch, peers, claim or tick", .{try json.quoted(a, op)});
-        if (!std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "a kernel row is a mailbox row (an admin box)");
-        // #130: the host row — its sender the host's key, its settings X and the rates.
+        const op = Value.str(v.get("fn")) orelse return try a.dupe(u8, "fn: a kernel route names its operation (objects, head, dispatch, peers, grant, claim or tick)");
+        if (!isKernelOp(op)) return try std.fmt.allocPrint(a, "fn {s}: a kernel route's operation is objects, head, dispatch, peers, grant, claim or tick", .{try json.quoted(a, op)});
+        if (!std.mem.eql(u8, t, "mailbox")) return try a.dupe(u8, "a kernel route is a mailbox route (an admin box)");
+        if (n_filters > 0) return try a.dupe(u8, "filters: a kernel route has none (its operation checks the message itself)");
+        // #130: the host row — `host` the host's key, its settings X and the rates.
         if (std.mem.eql(u8, op, billing.OP)) if (try billing.rowProblem(a, v)) |bad| return bad;
     } else if (prog != .cid) return try a.dupe(u8, "program: want a program record's CID, or \"kernel\"");
-    if (v.get("fn")) |f| if (f != .string and f != .null) return try a.dupe(u8, "fn: want text");
     return null;
 }
 
-/// The row `v` describes (null if it is not one: `problem`).
+/// The route `v` describes (null if it is not one: `problem`). The filter list is borrowed from `v`
+/// when it is a list of text (a malformed one a log holds reads as none).
 pub fn rowOf(v: Value) ?Row {
     if (v != .map) return null;
     const t = Value.str(v.get("transport")) orelse return null;
     const addr = Value.str(v.get("address")) orelse return null;
-    const sender = senderOf(v.get("sender")) orelse return null;
-    const prog = v.get("program") orelse return null;
-    const is_kernel = Value.str(prog) != null;
-    if (!is_kernel and prog != .cid) return null;
+    if (v.get("sender") != null) return null;
+    var is_kernel = false;
+    var program: ?[]const u8 = null;
+    if (v.get("program")) |prog| {
+        if (Value.str(prog)) |s| {
+            if (!std.mem.eql(u8, s, "kernel")) return null;
+            is_kernel = true;
+        } else if (prog == .cid) program = prog.cid else return null;
+    }
     const p = v.get("prefix");
     return .{
         .transport = t,
         .address = addr,
         .prefix = p != null and p.? == .bool and p.?.bool,
-        .sender = sender,
-        .program = if (is_kernel) null else prog.cid,
+        .program = program,
         .op = if (is_kernel) Value.str(v.get("fn")) else null,
         .func = Value.str(v.get("fn")),
+        .app = Value.str(v.get("app")),
+        .filters = filtersOf(v),
         .value = v,
     };
 }
 
-fn senderEq(x: Sender, y: Sender) bool {
-    return switch (x) {
-        .any => y == .any,
-        .event => y == .event,
-        .session => y == .session,
-        .key => |k| y == .key and std.mem.eql(u8, k, y.key),
-    };
+/// The route's filter names, as stored (an empty list when it names none, or one that is not all text).
+fn filtersOf(v: Value) []const Value {
+    const fs = v.get("filters") orelse return &.{};
+    if (fs != .array) return &.{};
+    for (fs.array) |f| if (f != .string) return &.{};
+    return fs.array;
 }
 
-/// The same key: (transport, address, prefix, sender).
+/// The same key: (transport, address, prefix).
 pub fn sameKey(x: Row, y: Row) bool {
-    return std.mem.eql(u8, x.transport, y.transport) and std.mem.eql(u8, x.address, y.address) and x.prefix == y.prefix and senderEq(x.sender, y.sender);
+    return std.mem.eql(u8, x.transport, y.transport) and std.mem.eql(u8, x.address, y.address) and x.prefix == y.prefix;
 }
 
 fn sameRow(a: std.mem.Allocator, x: Row, y: Row) bool {
@@ -202,7 +229,7 @@ fn sameRow(a: std.mem.Allocator, x: Row, y: Row) bool {
     return std.mem.eql(u8, bx, by);
 }
 
-/// The rows after `updates` (each {op, row, …}), in table order.
+/// The routes after `updates` (each {op, row, …}), in table order.
 pub fn fold(a: std.mem.Allocator, updates: []const Value) ![]Row {
     var out = std.array_list.Managed(Row).init(a);
     for (updates) |u| {
@@ -222,7 +249,7 @@ pub fn fold(a: std.mem.Allocator, updates: []const Value) ![]Row {
     return out.items;
 }
 
-/// The rows now; null if the chain was never opened (no genesis processed).
+/// The routes now; null if the chain was never opened (no genesis processed).
 pub fn current(a: std.mem.Allocator, s: Store) !?[]Row {
     const o = try origin(a);
     const ups = (try s.chainUpdates(a, o)) orelse return null;
@@ -231,7 +258,7 @@ pub fn current(a: std.mem.Allocator, s: Store) !?[]Row {
     return try fold(a, vals);
 }
 
-/// The rows as a dag-cbor array (a program's input, the serve frame).
+/// The routes as a dag-cbor array (a program's input, the serve frame).
 pub fn valueOf(a: std.mem.Allocator, rows: []const Row) !Value {
     const out = try a.alloc(Value, rows.len);
     for (rows, out) |r, *o| o.* = r.value;
@@ -241,7 +268,7 @@ pub fn valueOf(a: std.mem.Allocator, rows: []const Row) !Value {
 pub const By = struct { thread: ?[]const u8, input: []const u8, at: i64 };
 
 /// Apply a change; the update written, or null when it changes nothing. `v`
-/// is the row (for a remove, its key fields suffice).
+/// is the route (for a remove, its key fields suffice).
 pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, v: Value, by: By) !?[]u8 {
     const now = (try current(a, s)) orelse &.{};
     const r = rowOf(v) orelse return error.BadRow;
@@ -264,180 +291,56 @@ pub fn apply(a: std.mem.Allocator, s: Store, op: []const u8, v: Value, by: By) !
     return try s.chainAppend(a, o, m.value());
 }
 
-// ---------------------------------------------------------------- the match (#115)
+// ---------------------------------------------------------------- the match
 //
-// One walk for every transport: the first row, in table order, whose
-// transport and address take the package and whose sender rule takes who it
-// is from. What it is from is what the package claims — a message's sender, an
-// HTTP request's `x-bsv-auth-identity-key`, a libp2p peer's key — and the
-// front door verifies that claim before the row's handler runs (BRC-104's
-// session and signature; GossipSub's signature): it is handed the row, never
-// the table.
+// One rule for every transport: the route whose transport and address take
+// the package. A box route's address is the box, or `*` (the first in table
+// order); an http path's exact route first, then the longest prefix; a libp2p
+// topic or `/<protocol>` exactly. No key takes part: who it is from is the
+// filters' to establish and the gate's to judge.
 
-/// Who a package is from, as the match sees it.
-pub const Who = struct {
-    /// The sender's identity: a message's sender, the identity an HTTP request claims (its session's, verified by
-    /// the front door before the handler runs), a libp2p peer's key; null: none (an HTTP request with no session).
-    key: ?[]const u8 = null,
-    /// An event (the host's wiring): no sender; only a `*` or an `event` row takes it.
-    event: bool = false,
-    /// The genesis's `reads` (a log written before #115): a row with a `read` op takes only a sender
-    /// they allow ([{caller?, op}]; the scheduler writes an `{owner: true}` read's caller as the
-    /// genesis's owner key, legacyReads).
-    reads: ?Value = null,
-};
-
-/// Whether `r`'s sender rule takes `w`.
-pub fn takes(r: Row, w: Who) bool {
-    const ok = switch (r.sender) {
-        .any => return true,
-        .event => w.event,
-        .session => !w.event and w.key != null and std.mem.eql(u8, r.transport, "http"),
-        .key => |k| !w.event and w.key != null and std.mem.eql(u8, k, w.key.?),
-    };
-    if (!ok) return false;
-    if (std.mem.eql(u8, r.transport, "http")) if (Value.str(r.value.get("read"))) |op| return mayRead(w, op);
-    return true;
+/// A message's route: the first `mailbox` route whose address is the box (or any box).
+pub fn forMail(rows: []const Row, box: []const u8) ?Row {
+    for (rows) |r| if (std.mem.eql(u8, r.transport, "mailbox") and (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box))) return r;
+    return null;
 }
 
-/// A legacy read permission (the genesis's `reads`, before #115: [{caller?, op}], an `{owner: true}` one already the owner's key).
-fn mayRead(w: Who, op: []const u8) bool {
-    const rs = w.reads orelse return false;
-    if (rs != .array) return false;
-    const caller = w.key orelse return false;
-    for (rs.array) |r| {
-        const o = Value.str(r.get("op")) orelse "";
-        if (!std.mem.eql(u8, o, op) and !std.mem.eql(u8, o, "*")) continue;
-        const who = Value.bytesOf(r.get("caller")) orelse return true;
-        if (std.mem.eql(u8, who, caller)) return true;
-    }
-    return false;
-}
-
-/// Which addresses a walk takes.
-const Address = union(enum) {
-    /// a mailbox box: the row's address, or a `*` row
-    box: []const u8,
-    /// exactly this address, no prefix row (an http path, a libp2p topic or protocol)
-    exact: []const u8,
-    /// a prefix row of this length that `path` starts with
-    prefix: struct { path: []const u8, len: usize },
-};
-
-fn addressed(r: Row, at: Address) bool {
-    return switch (at) {
-        .box => |b| std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, b),
-        .exact => |x| !r.prefix and std.mem.eql(u8, r.address, x),
-        .prefix => |p| r.prefix and r.address.len == p.len and std.mem.startsWith(u8, p.path, r.address),
-    };
-}
-
-/// What a walk found: the row, and whether any row of the transport had the address (for an HTTP refusal).
-const Walk = struct { row: ?Row = null, addressed: bool = false };
-
-/// The walk: the first row in table order of `transport` at `at` whose sender rule takes `w`.
-fn first(rows: []const Row, transport: []const u8, at: Address, w: Who) Walk {
-    var out: Walk = .{};
-    for (rows) |r| {
-        if (!std.mem.eql(u8, r.transport, transport) or !addressed(r, at)) continue;
-        out.addressed = true;
-        if (takes(r, w)) {
-            out.row = r;
-            return out;
-        }
-    }
-    return out;
-}
-
-/// A message's row: the first `mailbox` row whose address is the box (or any
-/// box) and whose sender takes `sender` (anyone, or that key; a `session` or
-/// an `event` sender takes no message).
-pub fn forMail(rows: []const Row, sender: []const u8, box: []const u8) ?Row {
-    return first(rows, "mailbox", .{ .box = box }, .{ .key = sender }).row;
-}
-
-/// An event's row: the first `mailbox` row from `event` or anyone whose address is the box (or any box).
+/// An event's route (#143: events are their own transport): the first `event` route whose address is the box (or any box).
 pub fn forEvent(rows: []const Row, box: []const u8) ?Row {
-    return first(rows, "mailbox", .{ .box = box }, .{ .event = true }).row;
+    for (rows) |r| if (std.mem.eql(u8, r.transport, "event") and (std.mem.eql(u8, r.address, "*") or std.mem.eql(u8, r.address, box))) return r;
+    return null;
 }
 
-/// Why no `http` row takes a request: no row at its path (404), a row there
-/// that needs a session and the request has none (401: the client shakes
-/// hands), or rows there and none takes its identity (403).
-pub const Refusal = enum {
-    path,
-    session,
-    sender,
-    pub fn text(r: Refusal) []const u8 {
-        return @tagName(r);
+/// A request's `http` route: the exact path first, then the longest prefix that the path starts with.
+pub fn forHttp(rows: []const Row, path: []const u8) ?Row {
+    for (rows) |r| if (std.mem.eql(u8, r.transport, "http") and !r.prefix and std.mem.eql(u8, r.address, path)) return r;
+    var best: ?Row = null;
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.transport, "http") or !r.prefix or !std.mem.startsWith(u8, path, r.address)) continue;
+        if (best == null or r.address.len > best.?.address.len) best = r;
     }
-};
-
-pub const HttpMatch = union(enum) { row: Row, refused: Refusal };
-
-/// The match for an http path: exact rows first, then prefix rows, longest
-/// first; within each, the first in table order whose sender rule takes `w`.
-fn exactThenPrefix(rows: []const Row, transport: []const u8, path: []const u8, w: Who) Walk {
-    const ex = first(rows, transport, .{ .exact = path }, w);
-    if (ex.row != null) return ex;
-    var any = ex.addressed;
-    // The prefix lengths that take `path`, longest first.
-    var below: usize = std.math.maxInt(usize);
-    while (true) {
-        var len: ?usize = null;
-        for (rows) |r| {
-            if (!r.prefix or !std.mem.eql(u8, r.transport, transport) or r.address.len >= below) continue;
-            if (!std.mem.startsWith(u8, path, r.address)) continue;
-            if (len == null or r.address.len > len.?) len = r.address.len;
-        }
-        const l = len orelse break;
-        const p = first(rows, transport, .{ .prefix = .{ .path = path, .len = l } }, w);
-        if (p.row != null) return p;
-        any = any or p.addressed;
-        below = l;
-    }
-    return .{ .addressed = any };
+    return best;
 }
 
-/// A request's `http` row: exact paths first, then prefixes, longest first;
-/// within each, first in table order whose sender rule takes `w`.
-pub fn forHttp(rows: []const Row, path: []const u8, w: Who) HttpMatch {
-    const m = exactThenPrefix(rows, "http", path, w);
-    if (m.row) |r| return .{ .row = r };
-    if (!m.addressed) return .{ .refused = .path };
-    return .{ .refused = if (w.key == null) .session else .sender };
+/// A libp2p package's route: the `libp2p` route at the topic or `/<protocol>` exactly. A topic no
+/// route is at may be delivered by an app's subscription instead (#119: subscriptions.zig; the
+/// scheduler's matchOf) — a route at the topic wins over a subscription.
+pub fn forLibp2p(rows: []const Row, name: []const u8) ?Row {
+    for (rows) |r| if (std.mem.eql(u8, r.transport, "libp2p") and !r.prefix and std.mem.eql(u8, r.address, name)) return r;
+    return null;
 }
 
-/// A libp2p package's row: the first `libp2p` row in table order whose
-/// address is the topic or `/<protocol>` exactly and whose sender rule takes
-/// the peer's key. A topic no row is at may be delivered by an app's
-/// subscription instead (#119: subscriptions.zig; the scheduler's matchOf) —
-/// a row at the topic wins over a subscription.
-pub fn forLibp2p(rows: []const Row, name: []const u8, w: Who) ?Row {
-    return first(rows, "libp2p", .{ .exact = name }, w).row;
-}
-
-/// Whether any `libp2p` row is at `name` (whatever its sender rule): the rows have the topic, and a
-/// subscription to it delivers nothing (#119: the row wins).
-pub fn libp2pAt(rows: []const Row, name: []const u8) bool {
-    for (rows) |r| if (std.mem.eql(u8, r.transport, "libp2p") and !r.prefix and std.mem.eql(u8, r.address, name)) return true;
-    return false;
-}
-
-test "fold: add replaces by key, remove deletes, first match wins" {
+test "fold: add replaces by key, remove deletes; a sender is no route's" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const k1 = [_]u8{2} ++ [_]u8{1} ** 32;
-    const k2 = [_]u8{3} ++ [_]u8{2} ** 32;
     const cid1 = try @import("cid").parse(a, "bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
-    const row = struct {
-        fn f(al: std.mem.Allocator, t: []const u8, addr: []const u8, sender: Value, prog: Value, func: ?[]const u8) !Value {
+    const route = struct {
+        fn f(al: std.mem.Allocator, t: []const u8, addr: []const u8, prog: ?Value, func: ?[]const u8) !Value {
             var m = cbor.MapBuilder.init(al);
             try m.put("transport", cbor.string(t));
             try m.put("address", cbor.string(addr));
-            try m.put("sender", sender);
-            try m.put("program", prog);
+            if (prog) |p| try m.put("program", p);
             if (func) |x| try m.put("fn", cbor.string(x));
             return m.value();
         }
@@ -450,62 +353,86 @@ test "fold: add replaces by key, remove deletes, first match wins" {
             return m.value();
         }
     }.f;
-    const r1 = try row(a, "mailbox", "run", .{ .bytes = &k1 }, cbor.cidv(cid1), null);
-    const r2 = try row(a, "mailbox", "run", cbor.string("*"), cbor.string("kernel"), "objects");
+    const r1 = try route(a, "mailbox", "run", cbor.cidv(cid1), null);
+    const r2 = try route(a, "mailbox", "objects", cbor.string("kernel"), "objects");
     try std.testing.expect((try problem(a, r1)) == null);
     try std.testing.expect((try problem(a, r2)) == null);
-    try std.testing.expect((try problem(a, try row(a, "http", "/x", cbor.string("session"), cbor.string("kernel"), "objects"))) != null);
-    try std.testing.expect((try problem(a, try row(a, "mailbox", "x", cbor.string("session"), cbor.cidv(cid1), null))) != null);
-    const r1b = try row(a, "mailbox", "run", .{ .bytes = &k1 }, cbor.cidv(cid1), "later");
+    // A sender is no route's (#143).
+    var with_sender = cbor.MapBuilder.init(a);
+    for (r1.map) |e| try with_sender.put(e.key, e.value);
+    try with_sender.put("sender", cbor.string("*"));
+    try std.testing.expect((try problem(a, with_sender.value())) != null);
+    try std.testing.expect(rowOf(with_sender.value()) == null);
+    // A kernel route is a mailbox route.
+    try std.testing.expect((try problem(a, try route(a, "http", "/x", cbor.string("kernel"), "objects"))) != null);
+    const r1b = try route(a, "mailbox", "run", cbor.cidv(cid1), "later");
     const rows = try fold(a, &.{ try up(a, "add", r1), try up(a, "add", r2), try up(a, "add", r1b), try up(a, "remove", r2), try up(a, "remove", r2) });
     try std.testing.expectEqual(@as(usize, 1), rows.len);
     try std.testing.expectEqualStrings("later", rows[0].func.?);
-    try std.testing.expect(forMail(rows, &k1, "run") != null);
-    try std.testing.expect(forMail(rows, &k2, "run") == null);
+    try std.testing.expect(forMail(rows, "run") != null);
     try std.testing.expect(forEvent(rows, "run") == null);
-    // #79: an `event` row takes events, never a message.
-    const r3 = try row(a, "mailbox", "chain", cbor.string("event"), cbor.cidv(cid1), null);
+    // An event route takes events, never a message (#143: events are a transport).
+    const r3 = try route(a, "event", "chain", cbor.cidv(cid1), null);
     try std.testing.expect((try problem(a, r3)) == null);
-    try std.testing.expect((try problem(a, try row(a, "http", "/x", cbor.string("event"), cbor.cidv(cid1), null))) != null);
     const rows3 = try fold(a, &.{try up(a, "add", r3)});
     try std.testing.expect(forEvent(rows3, "chain") != null);
-    try std.testing.expect(forMail(rows3, &k1, "chain") == null);
-    const rows2 = try fold(a, &.{ try up(a, "add", r2), try up(a, "add", r1) });
-    try std.testing.expect(forMail(rows2, &k2, "run").?.program == null);
-    try std.testing.expectEqualStrings("objects", forEvent(rows2, "run").?.op.?);
+    try std.testing.expect(forMail(rows3, "chain") == null);
 }
 
-test "prefix: an http row only (#119: a libp2p row, a topic or a /protocol, is exact; so is a mailbox row)" {
+test "routes: filters, read routes, prefixes; an http path exact first, then the longest prefix" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const cid1 = try @import("cid").parse(a, "bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
-    const row = struct {
-        fn f(al: std.mem.Allocator, t: []const u8, addr: []const u8, prog: []const u8, prefix: bool) !Value {
+    const route = struct {
+        fn f(al: std.mem.Allocator, t: []const u8, addr: []const u8, prefix: bool, filters: []const []const u8, prog: ?[]const u8, id: []const u8) !Value {
             var m = cbor.MapBuilder.init(al);
             try m.put("transport", cbor.string(t));
             try m.put("address", cbor.string(addr));
             if (prefix) try m.put("prefix", .{ .bool = true });
-            try m.put("sender", cbor.string("*"));
-            try m.put("program", cbor.cidv(prog));
+            if (filters.len > 0) {
+                const fs = try al.alloc(Value, filters.len);
+                for (filters, fs) |x, *o| o.* = cbor.string(x);
+                try m.put("filters", .{ .array = fs });
+            }
+            if (prog) |p| {
+                try m.put("program", cbor.cidv(p));
+                try m.put("fn", cbor.string("h"));
+            }
+            try m.put("id", cbor.string(id));
             return m.value();
         }
     }.f;
-    try std.testing.expect((try problem(a, try row(a, "http", "/x", cid1, true))) == null);
-    try std.testing.expect((try problem(a, try row(a, "libp2p", "tm_", cid1, true))) != null);
-    try std.testing.expect((try problem(a, try row(a, "libp2p", "/proto", cid1, true))) != null);
-    try std.testing.expect((try problem(a, try row(a, "mailbox", "run", cid1, true))) != null);
-    var up = cbor.MapBuilder.init(a);
-    try up.put("op", cbor.string("add"));
-    try up.put("row", try row(a, "libp2p", "tm_ab", cid1, false));
-    // A prefix row a log holds from before (b2e1ced) takes nothing now.
-    var old = cbor.MapBuilder.init(a);
-    try old.put("op", cbor.string("add"));
-    try old.put("row", try row(a, "libp2p", "tx_", cid1, true));
-    const rows = try fold(a, &.{ up.value(), old.value() });
-    try std.testing.expect(forLibp2p(rows, "tm_ab", .{}) != null);
-    try std.testing.expect(forLibp2p(rows, "tm_abc", .{}) == null);
-    try std.testing.expect(forLibp2p(rows, "tx_00ff", .{}) == null);
-    try std.testing.expect(libp2pAt(rows, "tm_ab"));
-    try std.testing.expect(!libp2pAt(rows, "tx_00ff"));
+    const up = struct {
+        fn f(al: std.mem.Allocator, r: Value) !Value {
+            var m = cbor.MapBuilder.init(al);
+            try m.put("op", cbor.string("add"));
+            try m.put("row", r);
+            return m.value();
+        }
+    }.f;
+    const read = try route(a, "http", "/site/", true, &.{"site.get"}, null, "read");
+    try std.testing.expect((try problem(a, read)) == null);
+    try std.testing.expect(rowOf(read).?.isRead());
+    // A read route names its filters; only http routes may have no handler.
+    try std.testing.expect((try problem(a, try route(a, "http", "/x", false, &.{}, null, "x"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "mailbox", "x", false, &.{"site.get"}, null, "x"))) != null);
+    // Filters: the kernel's two, or <app>.<filter>; none on an event route.
+    try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{ "kernel.brc104", "kernel.beef", "amm.quote" }, cid1, "y"))) == null);
+    try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{"kernel.nope"}, cid1, "y"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "http", "/y", false, &.{"nodot"}, cid1, "y"))) != null);
+    try std.testing.expect((try problem(a, try route(a, "event", "chain", false, &.{"kernel.beef"}, cid1, "y"))) != null);
+    // A prefix is an http route's only.
+    try std.testing.expect((try problem(a, try route(a, "libp2p", "tm_", true, &.{}, cid1, "p"))) != null);
+    const exact = try route(a, "http", "/site/x", false, &.{"kernel.brc104"}, cid1, "exact");
+    const longer = try route(a, "http", "/site/deep/", true, &.{}, cid1, "longer");
+    const topic = try route(a, "libp2p", "tm_ab", false, &.{"kernel.beef"}, cid1, "topic");
+    const rows = try fold(a, &.{ try up(a, read), try up(a, exact), try up(a, longer), try up(a, topic) });
+    try std.testing.expectEqualStrings("exact", Value.str(forHttp(rows, "/site/x").?.value.get("id")).?);
+    try std.testing.expectEqualStrings("read", Value.str(forHttp(rows, "/site/y").?.value.get("id")).?);
+    try std.testing.expectEqualStrings("longer", Value.str(forHttp(rows, "/site/deep/z").?.value.get("id")).?);
+    try std.testing.expect(forHttp(rows, "/other") == null);
+    try std.testing.expectEqual(@as(usize, 1), forLibp2p(rows, "tm_ab").?.filters.len);
+    try std.testing.expect(forLibp2p(rows, "tm_abc") == null);
+    try std.testing.expectEqualStrings("kernel.brc104", forHttp(rows, "/site/x").?.filters[0].string);
 }

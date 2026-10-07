@@ -8,20 +8,23 @@ form before #77 gone; and by #83: the shell and the chat loop are apps,
 shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
 by #91: deploy by hash, the git app cloning in the VM, §3; and by #92: the
 management page, §3; and by #125: the management site an app, §3; and by
-#141: chain, git and site installed at birth in the default image, §3). Status of each
+#141: chain, git and site installed at birth in the default image, §3; and
+by #143: routes, filters and roles — §2 rewritten). Status of each
 part is marked (Built, #…) or (Spec.) in the text, and in §7's table. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
 
-Vocabulary: an **instance** is one skein (its log, its four tables, its
-store); the kernel's **four tables** are objects (blocks by CID), heads
-(name → root, with an owner), the dispatch table and the address book
-(docs/VM.md "The dispatch table"); a **head** is a named root (`main` is
-the shell's file system; an app's are `<app>/…`); a **box** is a message
-destination inside the instance, routed by the dispatch table; the
-**owner** is the identity whose admin rows every genesis carries (the
-kernel's own operations `objects`, `head`, `dispatch`, `peers`). The host
-is transports + providers + store + signer; it routes nothing.
+Vocabulary: an **instance** is one skein (its log, its tables, its store);
+the kernel's **tables** are objects (blocks by CID), heads (name → root),
+the **route table** (the dispatch chain), the address book and the
+**grants** (the head `grants`: roles → keys) (docs/VM.md "The dispatch
+table"); a **head** is a named root (`main` is the shell's file system; an
+app's are `<app>/…`); a **box** is a message destination inside the
+instance, routed by the route table; a **filter** is a function run on a
+request before anything is recorded; a **role** is a name that gates
+functions; **root** is the role that passes every check (its holders: the
+genesis's `root`, or the claimant of an image). There is no owner (#143).
+The host is transports + providers + store + signer; it routes nothing.
 
 ## 1. An app is a tree under its own name
 
@@ -59,94 +62,193 @@ private is encrypted. (Built: heads, `head`/`advance`/`get` — docs/VM.md
 ## 2. The manifest — `etc/app.json`
 
 dag-json. At install it becomes the root record of `<app>/app` (`kind:
-"app"`), so "what does this head provide" is one read. (Built, #72, #77:
-the checks are src/host/manifest.ts, the record is written by
+"app"`), so "what does this head provide" is one read. (Built, #72, #77,
+#143: the checks are src/host/manifest.ts, the record is written by
 src/host/install.ts.)
+
+David Case (2026-10-08): "permissions and routing might be two entirely
+different things." A manifest says three things apart: **where requests
+go** (`routes`), **what runs on a request before anything is recorded**
+(`filters`, and each route's list of them), and **who may run a function**
+(`roles`). No route names a sender.
 
 ```json
 {
   "kind": "app",
   "name": "amm",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "programs": {
     "overlay":   "bin/overlay.cid",
-    "topic":     "bin/amm-topic.wasm",
-    "lookup":    "bin/amm-lookup.wasm",
-    "p2p":       "bin/amm-p2p.wasm",
-    "validator": "bin/amm-validator.wasm"
+    "validator": "bin/amm-validator.wasm",
+    "p2p":       "bin/amm-p2p.wasm"
   },
-  "config": {
-    "overlay": {
-      "topics":  {"tm_amm_1": "topic"},
-      "lookups": {"ls_amm_1": {"program": "lookup", "topics": ["tm_amm_1"]}},
-      "gossip":  {"tm_amm_1": true}
-    },
-    "amm": {"feeBps": 30, "tokens": ["1"]}
+  "filters": {
+    "quote": "validator.quote",
+    "page":  "p2p.serve"
   },
-  "provides": [
-    {
-      "interface": "amm.pool/1",
-      "functions": {
-        "quote":  {"writes": false, "args": {"token": "string", "in": "int"},  "answer": {"out": "int", "fee": "int"}},
-        "config": {"writes": true,  "args": {"feeBps?": "int", "tokens?": ["string"]}, "answer": {"feeBps": "int", "tokens": ["string"]}}
-      }
-    }
+  "roles": {
+    "admin": ["config", "pause"],
+    "user":  ["swap"]
+  },
+  "routes": [
+    {"address": "",            "handler": "validator.message"},
+    {"transport": "event", "address": "", "handler": "validator"},
+    {"transport": "http",  "address": "/call",  "filters": ["kernel.brc104"], "handler": "validator.call"},
+    {"transport": "http",  "address": "/swap",  "filters": ["kernel.brc104", "kernel.beef"], "handler": "validator.swap"},
+    {"transport": "http",  "address": "/config", "filters": ["kernel.brc104"], "handler": "validator.config"},
+    {"transport": "http",  "address": "/quote", "filters": ["quote"]},
+    {"transport": "http",  "address": "/", "prefix": true, "filters": ["page"], "root": "www"},
+    {"transport": "libp2p", "address": "amm-proofs", "handler": "p2p.proof"}
   ],
+  "config":   {"amm": {"feeBps": 30}},
+  "provides": [{"interface": "amm.pool/1", "functions": {"quote": {"writes": false}, "swap": {"writes": true}}}],
   "requires": ["chain/1"],
-  "dispatch": [
-    {"address": "amm", "sender": "*",     "program": "validator"},
-    {"address": "amm", "sender": "$cron", "program": "validator"},
-    {"transport": "http",   "address": "/call",             "sender": "session", "program": "validator", "fn": "call"},
-    {"transport": "libp2p", "address": "amm-proofs",        "sender": "*",       "program": "p2p",       "fn": "proof"},
-    {"transport": "libp2p", "address": "/amm-validator/1/swap", "sender": "*",   "program": "validator", "fn": "swap"}
-  ],
-  "reads": [
-    {"address": "/",     "prefix": true, "program": "p2p", "fn": "serve", "root": "www", "index": "index.html"},
-    {"address": "/quote",                "program": "validator", "fn": "quote"}
-  ],
-  "start": {"body": {"kind": "amm-p2p-start"}},
-  "stop":  {"body": {"kind": "amm-p2p-stop"}},
-  "description": "An AMM: its own overlay (one topic manager, one lookup service), a validator, and a market UI."
+  "start": {"body": {"kind": "amm-start"}},
+  "description": "An AMM: a validator, a market page."
 }
+```
+
+### Routes
+
+A route is a transport, an address, an ordered list of filters and a
+handler. It is routing only: where a request goes and what it passes on the
+way.
+
+```json
+{"transport": "http", "address": "/swap", "filters": ["kernel.brc104", "kernel.beef"], "handler": "validator.swap"}
 ```
 
 | field | meaning |
 |---|---|
-| `name` | the app's name: its box (§4), and the prefix of every head it writes (`<name>/app` its root). Unique on the instance: the name is the app's identity |
+| `transport` | `mailbox` (the default: a message in a box), `event` (the host's wiring into a box — a feed's header, a broadcaster's proof, what a libp2p route admits; never a message), `http`, `libp2p` |
+| `address` | a box **relative to the app** for `mailbox` and `event` (#128: `""` or the app's name is the app's box `<name>`, `"x"` the box `<name>/x`; an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes); for `http` a path **relative to `/<name>/`** (`"/swap"` is `/amm/swap`, `"/"` is `/amm/`; a `.`/`..` segment, an encoded dot or slash, a backslash, a NUL, a query or a URL is refused); for `libp2p` a pubsub topic or `/<protocol>`, exact — global, not namespaced |
+| `prefix` | `true`: the http address is a prefix (the exact path first, then the longest prefix) |
+| `filters` | the filters run on the request, in order, before anything is recorded (below): `"kernel.brc104"`, `"kernel.beef"`, one of this app's (`"quote"`: a name its `filters` declares) or another app's (`"<app>.<filter>"`). None on an `event` route |
+| `handler` | `"<role>.<fn>"`: a function of one of `programs` (the stored route names the role's program record and `fn`); for an app with one program, `"<fn>"`; a `mailbox` or `event` route may name just `"<role>"` (the program stepped, no function named — nothing can gate it). **No handler: a read route** (http only): its filters answer, the last one; nothing is logged |
+| anything else | the handler's (or the filters') own settings, carried as `match` (`root`, `index`) |
+
+Who may send is not a route's business: an `http` route lists only what it
+names — possibly no filter at all, open to anyone signed or not; a `libp2p`
+route starts with the transport's own check (the GossipSub signature: the
+publisher's key is the principal); a `mailbox` route's principal is the
+message's sender (its carrier proved it). The same key (transport, address
+as served, prefix) twice is refused. An app's routes are under its own
+addresses — boxes under `<app>`, http under `/<app>/` — and root may add
+routes of its own anywhere (no `app`: an app's upgrade or uninstall leaves
+them; the site at `/` is one, below).
+
+A read route — the page, a lookup, a resolver:
+
+```json
+{"transport": "http", "address": "/", "prefix": true, "filters": ["page"], "root": "www"}
+```
+
+### Filters
+
+David Case: a filter is "an unlogged handler for a request that determines
+how it gets handled within the system." It runs before anything is
+recorded, with the request and the current state only, in the kernel's
+deterministic profile (the clock is the entry's time, randomness seeded by
+the request, no network, no writes: a call's imports; the blocks it puts are
+kept only if it passes them). It answers one of:
+
+```json
+{"reject": {"status": 403, "code": "ERR_X", "reason": "why"}}
+{"answer": {"status": 200, "type": "application/json", "headers": {}, "body": "<bytes>"}}
+{"pass":   {"request": {"…": "the package, rewritten"}, "principal": "<33 bytes>", "blocks": ["<cid it put>"]}}
+```
+
+`reject` and `answer` end the request: the transport answers with them
+(signed on the request's session when it is signed) and **nothing is
+logged**. `pass` hands the request on to the next filter, or to the handler:
+optionally rewritten (a package of the same kind), optionally with a
+**principal** (who it is from, a 33-byte key), optionally with blocks it
+stored, which the entry then references (as `kernel.beef`'s pointer
+records). A filter writes no heads.
+
+An app declares the functions any route may list as filters — its own as
+`"<filter>"`, any other app's as `"<app>.<filter>"` ("it really is just a
+library at that point"):
+
+```json
+"filters": {"quote": "validator.quote", "page": "p2p.serve", "check": "validator"}
+```
+
+Each value is a handler: `"<role>.<fn>"`, `"<fn>"` (an app with one
+program), or `"<role>"` (its function named as the filter: `check` above
+calls `validator`'s `check`). The filter is called as a kernel call, `fn`
+the function, its argument (dag-cbor):
+
+```
+{transport, request: <the package as it stands>, match: <the route>, principal?, caller?,
+ method, path, route, query, headers, body, contentType}        (the last line: http only — the route
+                                                                  handler contract's fields)
+```
+
+The kernel's own filters:
+
+| filter | runs on | does | yields |
+|---|---|---|---|
+| `kernel.brc104` | http | the BRC-104 request check: the session (the front door's table, `frontdoor/sessions`, by the request's `yourNonce`; not past `defaults.sessionTtlMs`) and the signature over the request (SimplifiedFetchTransport's payload), through the signer. No x-bsv-auth-* headers, an unknown or expired session, a bad signature: reject 401 (a stock client shakes hands again); a malformed one: 400 | **principal**: the client's key; the session the answer is signed on |
+| `kernel.beef` | any byte string in the package that starts with a BEEF pattern | decoded; every BUMP checked against the chain app's headers (`chain/state`); each transaction stored once as its `bitcoin-tx` block, each BUMP and its merkle nodes; the bytes replaced by the pointer record (docs/VM.md "The door"). A BUMP that does not check, or no chain state: reject 400. No BEEF at all and no principal from an earlier filter: reject 400 "nothing to validate" (#135: signed or validated) | **blocks**: the pointer records (`door.beefs`) |
+
+`kernel.brc104` then `kernel.beef`: signed, and validated if it carries a
+BEEF. `kernel.beef` alone: anyone, if the payload validates (an overlay's
+`/submit`). No filter: anyone (a route whose handler judges for itself).
+(The BRC-169 envelope filter is to come.)
+
+### Roles
+
+A role is a name that gates functions. The standard roles are `root` —
+Unix semantics: it passes every check, any function, any route, any grant;
+several keys may hold it — and `user`: any principal at all (a request that
+came through an identity filter). An app's own roles are declared in its
+manifest, each listing the functions it gates, and are granted as
+`<app>.<role>`:
+
+```json
+"roles": {"admin": ["config", "pause"], "user": ["swap"], "root": ["wipe"]}
+```
+
+The **gate** is the dispatcher's: the route matched, its filters run; if the
+handler's function is gated by a role, the principal the filters yielded
+must hold one of those roles — root passes anything, `user` passes any
+principal, no principal fails closed (401), the wrong one 403 — and only
+then does the handler run as the logged step. A function no role lists is
+open to whatever the route's filters let through. "An individual key is a
+role with one holder": a function only one key may call is a role granted
+to that key.
+
+A **grant** maps a role to keys. The grants are kernel state, the head
+`grants` (`{kind: "grants", roles: {<role>: [<key>…]}}`), changed only by
+the kernel's admin operation `grant` — `{op: "add" | "remove", role,
+principal}` in box `grant`, from root (v1: only root grants). The genesis's
+`root` names the first root holders; an image has none, and its claim
+grants root to the claimant. **The install grants nothing**: "the person
+who's doing the deploying is root and doesn't need to grant themselves
+anything."
+
+### The other fields
+
+| field | meaning |
+|---|---|
+| `name` | the app's name: its box (§4), the prefix of its paths and of every head it writes (`<name>/app` its root), and of its roles (`<name>.<role>`). Unique on the instance. Not a stock box, head, program or role (`objects`, `head`, `dispatch`, `peers`, `grant`, `grants`, `root`, `user`, `kernel`, `frontdoor`, `messagebox`, …) |
 | `version` | semver; shown by the site, compared by `requires` |
-| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a module the instance already holds; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), a bare name: a program the instance already has by that name in its genesis, or a map `{code: "shell", modules, support?}`: a shell program whose modules are files of the tree (§6b, "A shell program"; #83); `dispatch[].program` and `config` refer to these names. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it, and a program finds its app (its head `<name>/app`, the app record) from its own record (#72, #77, built) |
-| `config` | per-program configuration the programs read from the manifest at the head's root (the overlay engine reads `config.overlay`: its topics and lookup services, §6; the app's own program reads `config.<name>`). Replaces genesis `defaults` for apps. Changing it is a new manifest and a head advance (owner), or a `writes: true` function the app offers (§4) |
-| `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: the function may put records, move heads, emit; false: it reads only — logged like every request, but a site may call it freely, a pruner may drop its entries, and a validator flags a read-only function that writes), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map` (any map), `any`, an array `[shape]`, a nested map `{key: shape}`; a `?` suffix on a key = optional: absent or null; a key the shape does not name is refused). `writes` is required |
+| `programs` | the app's programs by role name, relative to the tree (`bin/*.wasm`, or `bin/*.cid` for a module the instance already holds; `bin/<x>.json` beside it gives the program record's `{inputs, services, description}`), a bare name: a program the instance already has by that name in its genesis, or a map `{code: "shell", modules, support?}`: a shell program whose modules are files of the tree (§6b; #83). Handlers and filters name these roles. The program record the install writes for each carries `app: <name>` — the kernel's write-scope rule reads it |
+| `config` | per-program configuration the programs read from the app record (the overlay engine reads `config.overlay`, §6; the app's own program `config.<name>`). Changing it is a new manifest and a head advance (root), or a `writes: true` function the app offers (§4) |
+| `provides[]` | interfaces this app implements: `interface` is `<name>/<major>`; `functions` maps each function to `writes` (true: it may put records, move heads, emit; false: it reads only), `args` and `answer` shapes (dag-json schema: `string`, `int`, `bytes`, `cid`, `ms`, `bool`, `map`, `any`, `[shape]`, `{key: shape}`; a `?` suffix on a key = optional). `writes` is required |
 | `requires[]` | interfaces this app calls on others, bound by name at install (§3 step 0) |
-| `dispatch[]` | **the rows it asks for** (#77): each `{transport?, address, prefix?, sender, program, fn?, …settings}` in the kernel's row shape (docs/VM.md "The dispatch table"). `transport` defaults to `mailbox`: the address is a box **relative to the app** (#128), as an http path is — `""` or the app's own name is the app's box `<name>` (its public face, §4), any other address `x` the box `<name>/x` (`"run"` in the shell app is the box `shell/run`; `"status"` in the chain app is `chain/status`); an empty, `.` or `..` segment, whitespace or a control character is refused, as is a box over 128 bytes resolved: no row names a box outside the app's. An `http` row's address is a path **relative to `/<name>/`** (a leading `/` too: `"/submit"` is `/amm/submit`, `"/"` is `/amm/`; `prefix: true` for a prefix; `fn` the handler's function; the rest the handler's own settings, carried to it as `match`). `filter: "beef"` (#121) is the door's filter on the package before it is logged (every BUMP checked against the chain state; a payload that does not check is a refusal entry); on an open http row it is also what admits an unsigned request (#135: a request is admitted signed or validated — the payload proves itself, no sender key). A `libp2p` row's address is a pubsub topic or `/<protocol>`, exact — global, not namespaced; sender `*` (a topic the app takes at run time is not a row: its program emits a subscription, `subscribe {topic, program, fn}`, #119, docs/MESSAGES.md "libp2p (#51)"). `sender` says who the row admits: `"*"` anyone (over http: any key with a session, or — #135, signed or validated — no key at all when the row's `filter` validates the payload), `"event"` (mailbox only, #79) events and never a message (the host's wiring, a route's admits: a box that takes events need not be open), `"session"` (http only) any BRC-103/104 session (over http the sender is only who may reach the row: a signed request is verified and answered signed on every row, `"*"` included; docs/MESSAGES.md "The instance as an HTTP server"), `"$owner"` the owner (tooling, #126: the sender of the instance's `dispatch` admin row — the kernel has no built-in owner), `"$self"` (#79) the instance's own identity — its other programs, by the host's loopback (docs/VM.md "emit"), `"$cron"`/`"$status"`/`"$<provider>"` the key the instance's address book reaches at `local` <provider> (tooling, #126: no roles), or an identity key in hex. The install resolves each and sends it to the kernel's `dispatch` operation with `app: <name>` (§3). The same key (transport, address, prefix, sender) twice is refused. `optional: true` (only on a row from a `$<provider>`, #78): the install leaves the row out, with a note in the prompt, when the instance's address book has no such provider — as a genesis leaves out a row from a provider its host has not; it never reaches the kernel |
-| `reads[]` | **its reads** (#135, the second door; docs/MESSAGES.md "The front door: two doors"): each `{address, prefix?, program, fn, …settings}` — the shape of an http row **without a sender** (and with no `transport`): `address` a path relative to `/<name>/` under the same rules as an http row's (`prefix: true` for a prefix; the rest the function's own settings, carried to it as `match`), `program` a role, `fn` its function. The host serves a request at that path by a `call` of that function over the current state — the http-shaped request (the route handler contract, docs/MESSAGES.md "Route handlers"), any method, signed or not (a signed one answered signed on its session) — with no entry and nothing logged; a function that writes fails inside the call. What a page serves, what a lookup answers, what resolves: the view/pure functions. Everything that stays an http row in `dispatch[]` is a message route and takes a signed request (or, at an open row whose `filter` validates the payload, a plain one: #135). **A read and an http row never share a path** (address and prefix): refused here, and at install against the instance's rows and the other reads. The install writes them into the instance's reads head (§3); an overlay's `/lookup` is derived into `reads` from `config.overlay` (§6) |
-| `start` | optional: a message the owner sends into the app's box as the **last install message**, after the rows, so a program whose first act is to schedule something (a heartbeat tick from `$cron`) actually runs; nothing else starts an app. Sending it again is the restart after a reconfiguration (a new manifest + head advance): an install over an installed version sends it again. It needs a row admitting the owner to the app's box (`"$owner"` or `"*"`). (#76, built) |
-| `stop` | optional: a message the owner sends into the app's box at uninstall, before its rows are removed, so the app can cancel what it scheduled. (#76, built) |
+| `start` | optional: a message root sends into the app's box (a `mailbox` route at it) as the last install message; sending it again is the restart. (#76) |
+| `stop` | optional: a message root sends into the app's box at uninstall, before its routes are removed. (#76) |
 
-**http rows and reads are namespaced under `/<app>/`, enforced.** Every path an app
-asks for lives under its own prefix: the AMM's rows are `/amm/submit`,
-`/amm/lookup`, `/amm/…`; the manifest's address is relative to that prefix
-and the install refuses anything else — a `.` or `..` segment, an encoded
-dot or slash (`%2e`, `%2f`), a backslash, a NUL, a query, a URL. No
-top-level grants exist for apps. The protocol endpoints are unaffected:
-BRC-22's `/submit` and BRC-24's `/lookup` are relative to the overlay's
-**base URL**, which BRC-23's advertisement carries (a host base URL, not a
-bare domain), so an overlay app advertises `https://<handle>.<host>/amm`
-(the host's name is the skein's, one subdomain per handle; on a host
-without wildcard DNS the router also serves `/@<handle>/amm` on its
-origin) and standard clients call `${baseUrl}/submit`
-(`POST https://alice.skein.nexus/amm/submit`). The root belongs to skein's
-boundary programs (the messagebox rows, the BRC-103 well-known path), which
-are not apps. libp2p topic names are global by nature and are not
-namespaced. Boxes follow the same rule: an app's box is its name.
+**Gone** (#143): `dispatch` (now `routes`), `reads` (a read is a route with
+filters and no handler), `sender` and every `$owner`/`$self`/`$<provider>`
+placeholder, `optional`, a route's `filter` (now `filters`, a list); the form
+before #77 (`handler`, `boxes`, `heads`) since #79. Each is refused by name.
 
-**The app declares; it never installs.** Every row and read is a request the owner
-approves (§3): the install prompt is the rows and reads read aloud. A manifest asking
-for a row the owner did not approve is refused at install.
-
-**The form before #77** (`handler`, `boxes`, `routes`, `heads`) is refused
-(#79): skein-overlay 0.9.2, skein-shell 0.1.1, skein-chat 0.1.0 and
-skein-site 0.7.3 are in this shape (skein-static, archived by #125, was). There are no grants: an app writes only `<name>/…`.
+**The app declares; it never installs.** Every route is a request root
+approves (§3): the install prompt is the routes, filters and roles read
+aloud.
 
 **The app record** — the root of `<name>/app`, written by the install
 (built):
@@ -154,32 +256,39 @@ skein-site 0.7.3 are in this shape (skein-static, archived by #125, was). There 
 ```
 {kind: "app", name, version,
  programs: {<role>: <program record CID>},       the manifest's paths resolved
- config?, provides, requires,
- dispatch: [<row as the manifest wrote it: relative addresses, roles>],   with what config.overlay derives (§6)
- reads: [<read as the manifest wrote it: relative addresses, roles>],     #135; with the derived /lookup (§6)
- start?, stop?, description?,
+ routes: [<route as the manifest wrote it: relative addresses, handlers, filters as written,
+          `transport` filled in>],               with what config.overlay derives (§6)
+ filters?: {<filter>: <handler>},                with the overlay's derived `lookup` (§6)
+ roles?: {<role>: [<fn>…]},
+ config?, provides, requires, start?, stop?, description?,
  tree: <the app's git tree CID>,                  etc/app.json as shipped, bin/, www/, …
  state?: <the app's own state record>}            the handler's (§1); kept across installs
 ```
 
+The kernel reads `filters` (to run `<app>.<filter>`) and `roles` (to gate
+the app's routes' functions) from this record. Each route the install
+sends is the kernel's shape: `{transport, address: <as served>, prefix?,
+filters?: [<in full: an own filter as "<app>.<filter>">], program?: <the
+handler's role's program record>, fn?, app, …settings}` — a read route has
+no `program`.
+
 So "list apps, read their manifests" is one read per `*/app` head:
 `head("<name>/app")`, `get` — a root of `kind: "app"` is an installed app.
-The tree is still there for what the app serves or reads (`tree`).
 
-The same `provides` contract is what a WASI 0.2 component's WIT gives the
-compiler; the manifest is the graph's copy of it, so a head is defined by
-what it provides and one app can replace another behind the same
-interface. (Spec.)
-
-## 3. Install: owner messages to the kernel's admin boxes
+## 3. Install: root's messages to the kernel's admin boxes
 
 Each is a message at one of the kernel's admin boxes — the kernel's own
 operation on one of its tables, no program stepped (docs/VM.md "The
-dispatch table"). A management site is the permission prompt: it reads the
-manifest, shows what the app asks for, and has the owner's wallet sign the
-messages — one click sends them all; steps are fine. Building the messages
-is a library; signing them is the owner's key's (#124: the same messages
-from any BRC-100 wallet). The reference client is `skein install
+dispatch table"), gated by root (#143: every admin operation is root's).
+An install writes objects, a head and routes, and **no key** (#143: "the
+person who's doing the deploying is root and doesn't need to grant
+themselves anything"); who else may run the app's functions is root's
+`grant`, separately. (Read "the owner" below as root: #143 renamed it, and
+it is a role now — several keys may hold it.) A management site is the
+permission prompt: it reads the manifest, shows what the app asks for, and
+has root's wallet sign the messages — one click sends them all; steps are
+fine. Building the messages is a library; signing them is root's key's
+(#124: the same messages from any BRC-100 wallet). The reference client is `skein install
 <catalog-name | url#commit | dir> (--instance <handle> | <origin>)
 [--config <file.json>] [--dry-run]` (src/client/admin-cli.ts over
 src/client/admin.ts and src/host/plan.ts; built, #72/#76/#77/#124/#142): it
@@ -195,14 +304,14 @@ session with the instance's origin. `--dry-run` prints the messages
 0. **Check.** The manifest (§2). Every `requires` interface is provided by
    some installed app (each `*/app` head's root record, `kind: "app"`, its
    `provides`). The name is free (no `<name>/app` head, or one whose root is
-   this app's earlier record). No row takes a key the genesis's rows or
-   another app's have. Every `$<provider>` sender is in the instance's
-   address book at `local` <name> (tooling, #126: no roles). No read
-   shares a path with an http row (the genesis's, another app's, this
-   app's) or another app's or the owner's read (#135). Then the prompt: the head, each row (`row <transport> <address> from <who> → <role>.<fn>`),
-   each read (`read <address>[*] → <role>.<fn> (anyone, by a call: nothing logged)`),
-   `start`/`stop`, `requires`/`provides`, what an overlay publishes (for
-   information), and the messages to be sent. Nothing is sent unless the
+   this app's earlier record). No route takes a key the genesis's routes,
+   root's own or another app's have. Another app's filter a route lists is
+   one that app's installed record declares (#143). Then the prompt: the
+   head, each route (`route <transport> <address>[ prefix] [<filters>] →
+   <role>.<fn> | (a read: its filters answer, nothing logged)`), each
+   filter it declares, each role and what it gates, `start`/`stop`,
+   `requires`/`provides`, what an overlay publishes (for information), and
+   the messages to be sent. Nothing is sent unless the
    owner sends it: the page's "Approve and send", or `skein install`
    without `--dry-run`.
 1. **`objects`** — the records. Body (dag-cbor, ≤ 1 MiB per message):
@@ -216,22 +325,14 @@ session with the instance's origin. `--dry-run` prints the messages
    last. Records the instance has are not sent. No bundle names a `root`:
    an app never becomes `main`.
 2. **`head`** — `{name: "<app>/app", tree: <the app record's CID>}`. The
-   head's root is the app record, which links the tree; its owner is the
-   app. When the app's reads change the instance's reads (#135), a second
-   `head`: `{name: "reads", tree: <the reads record>}` — the record
-   `{kind: "reads", reads: [{address: <the path as served>, prefix?, program:
-   <the role's program record>, fn, app: "<name>", …settings}]}` with the
-   other apps' and the owner's reads kept (sent in step 1's `objects`). An
-   upgrade replaces the app's reads; an uninstall takes them out the same
-   way (after its rows are removed). The owner's own reads (no `app`) are
-   `skein reads add|remove` (the site at `/`).
-3. **`dispatch`** — one per row: `{op: "add", row: {transport, address,
-   prefix?, sender, program: <the role's program record>, fn?, …settings,
-   app: "<name>"}}`, the sender resolved (`"*"`, `"event"`, `"session"`, the
-   owner's key, the instance's own key for `$self`, a provider's key, a key)
-   and an http address under `/<name>/`.
-   The kernel adds it to its table (replacing the row with the same key).
-   (Built, #77.)
+   head's root is the app record, which links the tree; its name's app is
+   the app. (#143: there is no reads head — a read is a route.)
+3. **`dispatch`** — one per route: `{op: "add", row: {transport, address:
+   <as served>, prefix?, filters?: [<in full>], program?: <the handler's
+   role's program record>, fn?, …settings, app: "<name>"}}` — no sender
+   (#143); a read route has no program. The kernel adds it to its table
+   (replacing the route with the same key).
+   (Built, #77, #143.)
 4. **`start`** (if the manifest has one) — the owner sends the declared body
    into the app's box. The app's handler runs its first step: scheduling
    ticks with `$cron`, announcing itself, whatever it declared. (Built, #76.)
@@ -284,19 +385,17 @@ site is an app, shruggr/skein-site (name `site`): one function serving
 its own tree's `www` (the head `site/app`'s record, its `tree`, through
 skein-sdk's `files`) as one read (#135), `/site/*`; the page is the installer
 (there is no installer program). The default image installs it at birth
-(#141, docs/BOOTSTRAP.md "The default image"), with the owner's read at
-`/`: a new skein answers its page at its root. **The root is the owner's**: an app's paths are under
-its name, and the owner may add a read of their own to the site's
-function, `{address: "/", prefix: true, program: <the site's program
-record>, fn: "get", root: "www"}` in the reads head — `skein reads add
---prefix --fn get --settings '{"root":"www"}' / site.site <where>` (a
-handler `<app>.<role>` is that installed app's program) — to serve the page
-at `/` (and its `manifest.json`, the wallet's grouped request, at the
-origin's `/manifest.json`). A manifest has no field for it: the install
-shows the app's own reads only, and the site's README says how. The read
-carries no `app`, so the site's upgrade or uninstall leaves it (`skein
-reads remove` with the same arguments takes it out); as a prefix at `/` it
-takes every path no exact row or read, or longer prefix, takes. Connected to the owner's wallet, it reads the
+(#141, docs/BOOTSTRAP.md "The default image"), with root's read route at
+`/`: a new skein answers its page at its root. **The path `/` is root's**:
+an app's paths are under its name, and root may add a route of its own —
+the read route `{transport: "http", address: "/", prefix: true, filters:
+["site.get"], root: "www"}` (#143: the site's filter `get`, which its
+manifest declares) — to serve the page at `/` (and its `manifest.json`,
+the wallet's grouped request, at the origin's `/manifest.json`). A
+manifest has no field for it: the install shows the app's own routes only,
+and the site's README says how. The route carries no `app`, so the site's
+upgrade or uninstall leaves it; as a prefix at `/` it takes every path no
+exact route, or longer prefix, takes. Connected to the owner's wallet, it reads the
 skein through its explorer (`/explore`, the owner's message route, docs/MESSAGES.md),
 which gives it what the plan needs: the heads (the reads head among them), the genesis, the claim, the
 address book, the dispatch table (the chain `{kind: "dispatch"}`) and any
@@ -307,11 +406,9 @@ session. The page and the client `skein` are two ways to the same
 messages: none of it is the host's (#124).
 
 - **The git app is there.** The default image installs it at birth (#141)
-  without its one row — box `git` from the owner: an image has no owner.
-  After the claim the owner adds it: installing git again (`skein install
-  images/default/apps/git <where>`, or the page) sends the head, unchanged,
-  and that row. The host skein (#142) is born with it: its genesis names the
-  operator's key, so its apps' `$owner` rows are written at birth.
+  with its route — box `git`, its `call` gated by root (#143: what `$owner`
+  was is a role now) — so after the claim root may use it at once. The host
+  skein (#142) is born with it and with the operator's key as root.
 - **Every other app by hash.** The page sends `{fn: "git.clone", args: {url,
   hash}}` to box `git` and reads the answer from the thread that message
   launched: `/explore/edges/<message>?rel=launched-by` names it,
@@ -344,29 +441,24 @@ messages: none of it is the host's (#124).
   the page's protocols and its basket, and declares the counterparty
   protocols (one prompt per new skein or certifier).
 
-Who can install is whoever the kernel's admin rows admit to `objects`,
-`head` and `dispatch`: the owner, by every genesis that names one; a
-delegate, by a row the owner added. An untrusted app cannot tie itself to
-anything — the worst it can do is ask.
+Who can install is root (#143): every admin operation (`objects`, `head`,
+`dispatch`, `peers`, `grant`) is gated by root, and root's holders are the
+genesis's `root` and whoever root grants it to. An untrusted app cannot tie
+itself to anything — the worst it can do is ask.
 
-**Install after the claim** (#89). A skein started from the default image
-(docs/BOOTSTRAP.md "The default image") has no owner and no admin rows
-until it is claimed: an install into it is refused (`$owner` cannot
-resolve, and no row admits the messages). The claim — the owner's own
-message in box `claim`, its sender the owner (#127: `skein claim <where>`;
-or, for a hosted registration, signed by the owner's wallet
+**Install after the claim** (#89, #143). A skein started from the default
+image (docs/BOOTSTRAP.md "The default image") has no root until it is
+claimed: an install into it is refused (the gate: no one holds root). The
+claim — the claimant's own message in box `claim` (#127: `skein claim
+<where>`; or, for a hosted registration, signed by the claimant's wallet
 before the instance existed and forwarded by the host's instance manager) —
-writes the owner's admin rows; from then on the
-owner installs exactly as above — the shell app, the chat app, whatever the
-catalog offers. `$owner` in a manifest resolves to the claimed key (the head
-`claim`, read by the install). The apps the image installed at birth (#141:
-chain, git, site) are there already, as installed apps, without their rows
-from `$owner` (an image has none): the owner adds those by installing the
-app again, which sends only what the table lacks.
+grants root to its sender; from then on root installs exactly as above. The
+apps the image installed at birth (#141: chain, git, site) are there
+already, with their routes.
 
 **Reconfiguration** is the same messages again. Installing an app that is
 installed (its `<name>/app` head's root is an app record) is the upgrade:
-the new app record keeps `state`; rows the old record had and the new one
+the new app record keeps `state`; routes the old record had and the new one
 does not are removed (removes first), rows the table already holds as asked
 are not sent again; `start` is sent again (the restart). Change or revoke a
 single row with a `dispatch` message (`skein dispatch`). All in the log. Deploy-by-message
@@ -411,21 +503,20 @@ The same function is reachable three ways with one definition:
 
 - **A message** to the box, as above (any transport the sender has: a
   peer's mailbox, libp2p, a local provider). Asynchronous: the answer is a
-  message. Who may send is the dispatch table (the manifest's rows).
-- **An HTTP row** `{"transport": "http", "address": "/call", "sender":
-  "session", "program": <role>, "fn": "call"}` (served at `/<app>/call`):
+  message. Who may run it is the gate's (#143: the route's function, its
+  roles, the sender's grants).
+- **An HTTP route** `{"transport": "http", "address": "/call", "filters":
+  ["kernel.brc104"], "handler": "<role>.call"}` (served at `/<app>/call`):
   the request body is `{fn, args}` (JSON, or dag-cbor as
   `application/cbor`), POST; the route handler turns it into the same
   call, and the client gets `{fn, result}` (200) or `{fn, error}` (400
   `bad-request`/`bad-args`, 403 `not-admitted`, 404 `unknown-fn`, 409
   `read-only`, 500 `failed`) on the connection, signed on the session, when
   the request's thread finishes (docs/MESSAGES.md "Route handlers", "A
-  synchronous client waits on the thread"). Synchronous. The caller (the
-  BRC-104 session's key) must be admitted to the app's box as a message
-  from it would be: a row for (caller, `<app>`) or (anyone, `<app>`); an
-  unsigned request (#135: only on an open row whose `filter` validates the
-  payload) has no caller, so only a box open to anyone admits it (a signed
-  one has its caller, on any row).
+  synchronous client waits on the thread"). Synchronous. The caller is the
+  principal kernel.brc104 yielded; the route's function `call` is gated as
+  any is (#143: `roles`), and the app's helper may check `args.fn` against
+  the caller itself.
 - **In-VM**: another program calls `call(<app program>, "<interface>.<function>", args)`
   (dag-cbor) and gets the result, or the call's error (docs/VM.md `call`).
   The callee's writes are in its own scope (its heads), not the caller's.
@@ -456,32 +547,40 @@ the request's step. Its route handler launches a thread and answers
 `{wait: true}`; the client waits on that thread (docs/MESSAGES.md, "A
 synchronous client waits on the thread"), and the handler is called again
 with `resolved`. The onboarding app (shruggr/skein-onboard, #90) is the
-example: its own `/onboard/call` (sender `session`) takes `{fn:
+example: its own `/onboard/call` (behind `kernel.brc104`) takes `{fn:
 "onboard.create", args}` in the same shape, launches a thread that asks the
 instance manager, and answers `{fn, result | error}` from that thread's
 result.
 
 ## 5. Security model, in one place
 
-- **Only authenticated messages change anything.** Every package is
-  appended and its sender verified inside (docs/MESSAGES.md): a BRC-104
-  session to the front door, libp2p, or a host provider's or a claim's own
-  signature (#126 step 4: a message carries no signature of its sender); a
-  message routes only where the dispatch table says its sender may go.
-- **The admin operations are the kernel's.** `objects`, `head`, `dispatch`
-  and `peers` are kernel operations on admin messages from the owner (every
-  genesis) or a delegate (a row the owner added) — no program, elevated or
-  otherwise. Every program emits as the instance, and no default row
-  admits the instance's own key to an admin box (#87), so a program's
-  admin message finds no row: recorded, nothing runs. Granting another identity the right to install or reconfigure
-  is a `dispatch` row by the owner — explicit, logged.
+- **Routing and permission are apart** (#143). A route says where a request
+  goes and which filters it passes, never who sent it. Who may run a
+  function is the gate's: the roles that gate it (the app's `roles`; the
+  standard `root` and `user`), the principal the route's filters yielded,
+  and the grants (the head `grants`). Root passes every check. No principal
+  fails closed at a gated function.
+- **What a skein decides from is logged.** Filters run before anything is
+  recorded, over the request and the state as it stands, in the
+  deterministic profile; what they reject or answer writes nothing; what
+  they pass is the entry (with its principal and the blocks they stored),
+  and the handler runs as its logged step. Every other requirement —
+  signing, the host's boundaries — is product policy layered on top: a
+  route that names `kernel.brc104` takes signed requests only.
+- **The admin operations are the kernel's.** `objects`, `head`, `dispatch`,
+  `peers` and `grant` are kernel operations on admin messages, gated by
+  root — no program, elevated or otherwise. Every program emits as the
+  instance, and the instance's own key holds no role unless root grants it
+  one (#87): a program's admin message is gated away — recorded, nothing
+  runs. Granting another key the right to install or reconfigure is a
+  `grant` of root by root — explicit, logged.
 - **An app writes only heads under its own name.** That is the whole
   write-scope rule, enforced by the kernel: `advance` is allowed when the
   head's name is `<app>/…` for the stepping program's app (its record's
   `app`). Two apps cannot write each other's heads; they read each other's
   freely, by CID. A genesis-wired program writes only what its genesis
   `scopes` name. No exceptions (#79). The scope comes only from a record
-  the owner installed — a genesis program, a dispatch row's program, or one
+  root installed — a genesis program, a dispatch row's program, or one
   listed in the app record at `<app>/app` (K1): a record a program puts
   itself, claiming another app (`app: "chain"`) or a genesis-wired name,
   runs when launched or called and writes no head (docs/VM.md "Heads").
@@ -491,7 +590,8 @@ result.
 - **The shell cannot reach app heads.** A shell tool that needs an app's
   data asks the app (a call), or a later shell feature mounts heads as
   directories (the shell app's `mount`, shruggr/skein-shell#1) — a shell concern, not an app's.
-- **A manifest is a request.** Rows are granted by the owner at install;
+- **A manifest is a request.** Routes are approved by root at install, and
+  the install grants no key;
   http addresses are confined to `/<app>/`; a function marked `writes:
   false` that writes through the SDK's helper is refused (`read-only`,
   §4) and, written around it, a bug the log shows.
@@ -559,20 +659,23 @@ one overlay app per instance.
 
 **The wiring is derived from `config.overlay`, and shown** (src/host/manifest.ts
 `overlayWiring`; the engine is the role `overlay`). The install expands
-it into the concrete rows the owner approves, all to the role `overlay`,
-marked "(derived: config.overlay)" in the prompt:
+it into the concrete routes root approves, all to the role `overlay`,
+marked "(derived: config.overlay)" in the prompt (#143):
 
-- the app's own box `<app>` from `event` (what its libp2p routes admit: a
-  gossiped submission, a peer's admit) and from `$self` (its own watch);
-- the http row `/<app>/submit` (`filter: "beef"`, #121; a message route,
-  #135: a signed request, or a plain one whose BEEF validates — open, behind
-  the filter, so the stock TopicBroadcaster's POST is admitted, with no
-  sender key) and the **read** `/<app>/lookup` (#135: BRC-24's
-  POST, served by a call — anyone, signed or not, nothing logged; derived
-  into `reads`, "(derived: config.overlay)" too). The app's base URL is
-  what it advertises;
-- libp2p rows `<topic>` (raw submissions, fn `submit`, `filter: "beef"`), `<topic>-admit`
-  (fn `peerAdmit`) and `<topic>-proof` (fn `peerProof`) per topic (#74).
+- the app's own box `<app>` twice: an `event` route (what its libp2p routes
+  admit: a gossiped submission, a peer's admit) and a `mailbox` route (its
+  own watch, by the host's loopback — #143: no `$self`; the engine judges
+  the sender);
+- the http route `/<app>/submit` (`filters: ["kernel.beef"]`, #121, #135:
+  a plain request whose BEEF validates, so the stock TopicBroadcaster's POST
+  is admitted) and the **read route** `/<app>/lookup` (`filters:
+  ["<app>.lookup"]`, BRC-24's POST answered by the engine's `lookup` as a
+  filter — anyone, signed or not, nothing logged; the filter `lookup` →
+  `overlay.lookup` derived into the record's `filters` unless the manifest
+  declares its own). The app's base URL is what it advertises;
+- libp2p routes `<topic>` (raw submissions, `overlay.submit`, `filters:
+  ["kernel.beef"]`), `<topic>-admit` (`overlay.peerAdmit`) and
+  `<topic>-proof` (`overlay.peerProof`) per topic (#74).
 
 No `chain`, `chain/status` or `submit` box (the chain app's, and the app's own
 box), no grants. The engine's three boxes (skein-overlay 0.7.7, #128; 0.9.2 current):
@@ -640,6 +743,10 @@ does not offer it.
 
 ## 6a. Worked example: the chain module (#78)
 
+(#143: the manifest below is the chain app's as it stood before routes,
+filters and roles; its #143 form is its own repository's — and the default
+image's copy, `images/default/apps/chain/etc/app.json`.)
+
 The chain state — headers, transactions, proofs, spends, settlement,
 broadcasts — is global to an instance and has one writer, the app
 [shruggr/skein-chain](https://github.com/shruggr/skein-chain) (its
@@ -703,6 +810,9 @@ rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
 under its default scope). kernel-zig/equiv/chain.ts does both.
 
 ## 6b. Worked example: the shell app and the chat app (#83)
+
+(#143: "from `$owner`" below is a function gated by root in the apps' own
+#143 manifests.)
 
 A skein has no userland of its own: the genesis wires the boundary
 programs (front door, messagebox, resolve) and nothing else. The shell and
@@ -782,8 +892,9 @@ bounded at 64 MiB).
 | heads with owners; `head`/`advance`/`get`; the write scope by name; the kernel's `objects`, `head`, `dispatch`, `peers` operations | built (#77) |
 | the dispatch table (routes, boxes, libp2p topics as rows); route handler contract; synchronous answer on thread completion | built (#68/#66, #77; #115: the kernel matches every transport, kernel-zig/src/dispatch.zig, and the front door verifies). The `/<app>/` prefix of an app's http rows is checked by the install client (src/host/manifest.ts), not by the kernel's `dispatch` operation |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `<app>/ls_<service>`; the contract as a Zig module | built (#50, #79: skein-overlay 0.3.0) |
-| manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
-| install client (manifest → objects + head + dispatch + start, the prompt); `skein install <catalog-name|url#commit|dir>` / `uninstall`, signed in the client with the operator's key, sent over the host's control socket or one BRC-104 session (a repository cloned in the VM by the git app); `--dry-run`; `start`/`stop`, row senders | built (#72, #76, #77, #124, #142) |
+| manifest schema (`programs`, `routes`, `filters`, `roles`, `config`, `provides`/`requires`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; `dispatch`, `reads`, senders refused | built (#72, #77, #79, #143: src/host/manifest.ts, install.ts; the SDK's `app`; the forms before #77 and #143 refused) |
+| the kernel's door: a route's filters before anything is recorded (`kernel.brc104`, `kernel.beef`, an app's own in the deterministic profile); reject and answer write nothing; read routes; the gate (root, `user`, app roles) and the grants head with the `grant` operation; `genesis.root`; the claim grants root | built (#143: kernel-zig/src/dispatch.zig, door.zig, grants.zig, scheduler.zig `door`) |
+| install client (manifest → objects + head + dispatch + start, the prompt; no key, #143); `skein install <catalog-name|url#commit|dir>` / `uninstall`, signed in the client with the operator's key, sent over the host's control socket or one BRC-104 session (a repository cloned in the VM by the git app); `--dry-run`; `start`/`stop` | built (#72, #76, #77, #124, #142, #143) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
 | the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; chain, git and site installed at birth in the default image (#141) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
 | the owner's own http row to an app's handler (`skein dispatch --http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125: src/client/admin.ts `planDispatch`) |

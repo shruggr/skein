@@ -5,8 +5,11 @@
 // The terms are the owner's (#130 decided 1): the **host row**, a kernel row
 // the owner writes with an ordinary `dispatch` admin message —
 //
-//   {transport: "mailbox", address: <a box, "billing" by convention>, sender: <the host's key>,
+//   {transport: "mailbox", address: <a box, "billing" by convention>, host: <the host's key>,
 //    program: "kernel", fn: "tick", x: <sats>, rates?: {fuel, storage, served, fetch, authfetch, publish}}
+//
+// (#143: a route has no sender; the host's key is the row's own setting, `host`, and a tick from
+// any other key is refused.)
 //
 // — the first such row in table order is the host's; with none, nothing is
 // billed and nothing here runs. `x` is the block the instance prepays at a
@@ -71,13 +74,13 @@ fn uint(v: ?Value) ?u64 {
     return @intCast(i);
 }
 
-/// Why a row whose `fn` is `tick` is not a host row (null: it is one): its sender
+/// Why a row whose `fn` is `tick` is not a host row (null: it is one): its `host`
 /// is the host's key, `x` a whole number of sats ≥ 1, `rates` (if any) a map of
 /// whole numbers ≥ 0 by the names above.
 pub fn rowProblem(a: std.mem.Allocator, v: Value) !?[]u8 {
-    const s = v.get("sender") orelse return try a.dupe(u8, "a host row's sender is the host's key");
-    const k = Value.bytesOf(s) orelse return try a.dupe(u8, "a host row's sender is the host's key (33 bytes), not a symbol");
-    if (!secp.isKey(k)) return try a.dupe(u8, "a host row's sender is the host's key (33 bytes)");
+    const s = v.get("host") orelse return try a.dupe(u8, "a host row names `host`: the host's key");
+    const k = Value.bytesOf(s) orelse return try a.dupe(u8, "a host row's `host` is the host's key (33 bytes)");
+    if (!secp.isKey(k)) return try a.dupe(u8, "a host row's `host` is the host's key (33 bytes)");
     const x = uint(v.get("x")) orelse return try a.dupe(u8, "a host row names x: the sats the instance prepays at a time (a whole number ≥ 1)");
     if (x == 0) return try a.dupe(u8, "x: at least 1 sat");
     if (v.get("rates")) |r| if (r != .null) {
@@ -104,10 +107,7 @@ pub fn isHostRow(r: dispatch.Row) bool {
 pub fn termsOf(rows: []const dispatch.Row) ?Terms {
     for (rows) |r| {
         if (!isHostRow(r)) continue;
-        const key = switch (r.sender) {
-            .key => |k| k,
-            else => return null,
-        };
+        const key = Value.bytesOf(r.value.get("host")) orelse return null;
         var t = Terms{ .host = key, .x = uint(r.value.get("x")) orelse return null, .rates = .{}, .address = r.address };
         if (r.value.get("rates")) |rv| if (rv == .map) inline for (@typeInfo(Rates).@"struct".fields) |f| {
             if (uint(rv.get(f.name))) |n| @field(t.rates, f.name) = n;
@@ -269,7 +269,7 @@ test "billing: the host row — the first tick row's terms; its settings checked
             var m = cbor.MapBuilder.init(al);
             try m.put("transport", cbor.string("mailbox"));
             try m.put("address", cbor.string("billing"));
-            try m.put("sender", .{ .bytes = key });
+            try m.put("host", .{ .bytes = key });
             try m.put("program", cbor.string("kernel"));
             try m.put("fn", cbor.string(OP));
             if (x) |n| try m.put("x", cbor.int(n));
@@ -290,7 +290,7 @@ test "billing: the host row — the first tick row's terms; its settings checked
     try std.testing.expect((try rowProblem(a, try row(a, &k1, 5, bad.value()))) != null);
     try std.testing.expect((try dispatch.problem(a, try row(a, &k1, 5, bad.value()))) != null);
     var star = cbor.MapBuilder.init(a);
-    for ((try row(a, &k1, 5, null)).map) |e| try star.put(e.key, if (std.mem.eql(u8, e.key, "sender")) cbor.string("*") else e.value);
+    for ((try row(a, &k1, 5, null)).map) |e| try star.put(e.key, if (std.mem.eql(u8, e.key, "host")) cbor.string("*") else e.value);
     try std.testing.expect((try dispatch.problem(a, star.value())) != null);
 
     var up1 = cbor.MapBuilder.init(a);
@@ -298,7 +298,10 @@ test "billing: the host row — the first tick row's terms; its settings checked
     try up1.put("row", good);
     var up2 = cbor.MapBuilder.init(a);
     try up2.put("op", cbor.string("add"));
-    try up2.put("row", try row(a, &k2, 9, null));
+    // #143: routes are keyed by (transport, address, prefix): a second host row is at another box.
+    var second = cbor.MapBuilder.init(a);
+    for ((try row(a, &k2, 9, null)).map) |e| try second.put(e.key, if (std.mem.eql(u8, e.key, "address")) cbor.string("billing2") else e.value);
+    try up2.put("row", second.value());
     const rows = try dispatch.fold(a, &.{ up1.value(), up2.value() });
     const t = termsOf(rows).?;
     try std.testing.expectEqualSlices(u8, &k1, t.host);

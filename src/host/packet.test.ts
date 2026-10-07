@@ -28,7 +28,7 @@ async function fixture(t: { after(f: () => unknown): void }) {
   await fs.writeFile(join(dir, "skills/deep/x.sh"), "#!/bin/sh\necho x\n", { mode: 0o755 });
   await fs.symlink("SOUL.md", join(dir, "link"));
   await fs.writeFile(join(dir, "bin/probe.cid"), `${rawCid(MODULE)}\n`);
-  await fs.writeFile(join(dir, "etc/subscriptions.json"), JSON.stringify([{ sender: "$owner", box: "run", handler: "probe" }]));
+  await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([{ address: "run", program: "probe" }]));
   const src = await dirSource(dir);
   await src.objects.putBlock(rawCid(MODULE), MODULE); // the module bin/probe.cid names
   return src;

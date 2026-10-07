@@ -118,11 +118,11 @@ const whole = (n: unknown): number | undefined => typeof n === "number" && Numbe
 /** The host row's terms: the host's key (hex), X, the rates, the box ticks go to. */
 export interface Terms { host: string; x: number; rates: Rates; address: string }
 
-/** The host row (billing.zig termsOf): the first kernel row whose fn is `tick`, in table order. */
+/** The host row (billing.zig termsOf): the first kernel route whose fn is `tick`, in table order; #143: the host's key its `host` setting. */
 export function termsOf(rows: DispatchRow[]): Terms | undefined {
   for (const r of rows) {
     if (r.program !== "kernel" || r.fn !== TICK_OP) continue;
-    const host = hexOf(r.sender);
+    const host = hexOf(r.host);
     const x = whole(r.x);
     if (!host || !x) return undefined;
     const rates = Object.fromEntries(RATE_NAMES.map((n) => [n, 0])) as Rates;

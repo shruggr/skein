@@ -192,19 +192,16 @@ test("arc: with a router — no broadcast route; a host with no Arcade drops a b
   none.providers.deliver("x", { message: { kind: "broadcast", tx: txCid("ab".repeat(32)) } as never, body: new Uint8Array(), transport: "event", address: "broadcast" });
   assert.ok(lines.some((l) => l === "[x] broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"));
 
-  // A row from the status provider is written `$status` (the host's key); on a host with none it is left out.
+  // #143: a box's route names no sender — the status provider's box is a route like any other, on any host.
   const me = PrivateKey.fromRandom().toPublicKey().toString();
   const handler = txCid("cd".repeat(32));
-  const subs = [{ sender: "$status", box: "status", handler: "wallet" }];
+  const specs = [{ address: "status", program: "wallet" }];
   const programs = { wallet: handler };
-  const withArc = resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me), owner }, programs, subs);
-  const boxRows = (s: { dispatch: Array<{ transport: string; address: string; sender: unknown; program: unknown }> }) => s.dispatch.filter((r) => r.transport === "mailbox" && r.program !== "kernel").map((r) => [Buffer.from(r.sender as Uint8Array).toString("hex"), r.address]);
-  assert.deepEqual(boxRows(withArc), [[router.providers.key("status"), "status"]]);
-  const warned: string[] = [];
-  const without = resolveSystem({ ...none.genesisConfig({ handle: "w", domain: "localhost" }, me), owner, warn: (l) => warned.push(l) }, programs, subs);
-  assert.deepEqual(boxRows(without), []);
-  assert.deepEqual(warned, ["a dispatch row from $status is left out: this host has no such provider"]);
-  assert.throws(() => resolveSystem({ identity: me, owner, handle: "w", domain: "localhost" }, programs, [], { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
+  const boxRows = (s: { dispatch: Array<{ transport: string; address: string; program?: unknown }> }) => s.dispatch.filter((r) => r.transport === "mailbox" && r.program !== "kernel").map((r) => r.address);
+  assert.deepEqual(boxRows(resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me), root: [owner] }, programs, {}, undefined, specs)), ["status"]);
+  assert.deepEqual(boxRows(resolveSystem({ ...none.genesisConfig({ handle: "w", domain: "localhost" }, me), root: [owner] }, programs, {}, undefined, specs)), ["status"]);
+  assert.throws(() => resolveSystem({ ...router.genesisConfig({ handle: "w", domain: "localhost" }, me) }, programs, {}, undefined, [{ address: "status", sender: "$status", program: "wallet" }]), /`sender` is gone \(#143/);
+  assert.throws(() => resolveSystem({ identity: me, root: [owner], handle: "w", domain: "localhost" }, programs, { jobs: [] } as never), /`jobs` are gone \(#69\)/, "etc/config.json's jobs are refused");
 });
 
 test("arc: every instance holding the transaction gets each status — a proof as an event, the rest as the status provider's messages; the broadcaster, a sweep, then only the running; a redelivery writes nothing", async (t) => {

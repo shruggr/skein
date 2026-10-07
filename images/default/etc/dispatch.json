@@ -1,11 +1,91 @@
 [
-  { "address": "claim", "sender": "*", "program": "kernel", "fn": "claim" },
-  { "address": ":ack", "program": "messagebox" },
-  { "transport": "http", "address": "/sendMessage", "sender": "session", "program": "messagebox", "fn": "sendMessage" },
-  { "transport": "http", "address": "/listMessages", "sender": "session", "program": "messagebox", "fn": "listMessages" },
-  { "transport": "http", "address": "/acknowledgeMessage", "sender": "session", "program": "messagebox", "fn": "acknowledgeMessage" },
-  { "transport": "http", "address": "/messagebox/sendMessage", "sender": "session", "program": "messagebox", "fn": "sendMessage" },
-  { "transport": "http", "address": "/messagebox/listMessages", "sender": "session", "program": "messagebox", "fn": "listMessages" },
-  { "transport": "http", "address": "/messagebox/acknowledgeMessage", "sender": "session", "program": "messagebox", "fn": "acknowledgeMessage" },
-  { "transport": "http", "address": "/wallet/fund", "sender": "session", "program": "wallet", "fn": "fund", "filter": "beef" }
+  {
+    "address": "claim",
+    "program": "kernel",
+    "fn": "claim"
+  },
+  {
+    "transport": "event",
+    "address": ":ack",
+    "program": "messagebox"
+  },
+  {
+    "transport": "http",
+    "address": "/.well-known/auth",
+    "program": "frontdoor",
+    "fn": "handshake"
+  },
+  {
+    "transport": "http",
+    "address": "/sendMessage",
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "messagebox",
+    "fn": "sendMessage"
+  },
+  {
+    "transport": "http",
+    "address": "/listMessages",
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "messagebox",
+    "fn": "listMessages"
+  },
+  {
+    "transport": "http",
+    "address": "/acknowledgeMessage",
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "messagebox",
+    "fn": "acknowledgeMessage"
+  },
+  {
+    "transport": "http",
+    "address": "/messagebox/sendMessage",
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "messagebox",
+    "fn": "sendMessage"
+  },
+  {
+    "transport": "http",
+    "address": "/messagebox/listMessages",
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "messagebox",
+    "fn": "listMessages"
+  },
+  {
+    "transport": "http",
+    "address": "/messagebox/acknowledgeMessage",
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "messagebox",
+    "fn": "acknowledgeMessage"
+  },
+  {
+    "transport": "http",
+    "address": "/explore",
+    "prefix": true,
+    "filters": [
+      "kernel.brc104"
+    ],
+    "program": "frontdoor",
+    "fn": "explore"
+  },
+  {
+    "transport": "http",
+    "address": "/wallet/fund",
+    "filters": [
+      "kernel.beef"
+    ],
+    "program": "wallet",
+    "fn": "fund"
+  }
 ]

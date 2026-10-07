@@ -122,12 +122,12 @@ test("libp2p across two routers: publish → validate → admit (re-verifiable),
     return { db, r };
   };
   const A = mk("alpha", `/ip4/127.0.0.1/tcp/${pa}`, `/ip4/127.0.0.1/tcp/${pb}/p2p/${idB}`, {
-    subscriptions: [{ box: "p2p", sender: ownerId, handler: DEMO_CID }],
+    subscriptions: [{ box: "p2p", handler: DEMO_CID }],
     libp2p: { topics: [TOPIC] },
   });
   const B = mk("beta", `/ip4/127.0.0.1/tcp/${pb}`, `/ip4/127.0.0.1/tcp/${pa}/p2p/${idA}`, {
     libp2p: { topics: [TOPIC], protocols: { [PROTOCOL]: { program: DEMO_CID.toString(), fn: "stream" } } },
-    routes: [{ path: `libp2p:${TOPIC}`, program: DEMO_CID.toString(), fn: "topic" }],
+    dispatch: [{ transport: "libp2p", address: TOPIC, program: DEMO_CID.toString(), fn: "topic" }],
   });
   let stopped = false;
   const stop = async () => { if (stopped) return; stopped = true; await Promise.all([A.r.stop(), B.r.stop()]); A.db.close(); B.db.close(); };

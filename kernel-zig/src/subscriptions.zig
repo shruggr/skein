@@ -2,6 +2,8 @@
 // app's installed program emits
 //
 //   subscribe   {event: "subscribe", topic, program: <role>, fn, filter?}
+//               (`filter`: a filter's name for the delivery route's `filters` — "kernel.beef",
+//               "<app>.<filter>"; the bare "beef" the SDK writes is the kernel's, #143)
 //   unsubscribe {event: "unsubscribe", topic}
 //
 // and the kernel records each as an event on the step's update ({kind:
@@ -31,7 +33,13 @@ const std = @import("std");
 const cbor = @import("cbor");
 const heads = @import("heads.zig");
 const json = @import("json.zig");
-const doorm = @import("door.zig");
+const dispatch = @import("dispatch.zig");
+
+/// A subscription's filter as a route names it (#143): the SDK's bare "beef" is the kernel's own.
+pub fn filterRef(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "beef")) return "kernel.beef";
+    return if (dispatch.isFilterRef(name)) name else null;
+}
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
@@ -117,7 +125,7 @@ pub fn problem(a: std.mem.Allocator, kind: Kind, m: Value, app: ?[]const u8, pro
     if (func.len == 0) return try a.dupe(u8, "emit: subscribe names the function delivered to (`fn`, text, not empty)");
     if (m.get("filter")) |f| if (f != .null) {
         const fname = Value.str(f) orelse return try a.dupe(u8, "emit: subscribe: `filter` is a filter's name");
-        if (!doorm.isFilter(fname)) return try std.fmt.allocPrint(a, "emit: subscribe: filter {s}: this kernel has no such filter", .{try json.quoted(a, fname)});
+        if (filterRef(fname) == null) return try std.fmt.allocPrint(a, "emit: subscribe: filter {s}: not kernel.beef, kernel.brc104 or <app>.<filter>", .{try json.quoted(a, fname)});
     };
     return null;
 }
@@ -371,8 +379,8 @@ pub fn programsOf(a: std.mem.Allocator, s: Store, app: []const u8) !?Value {
 }
 
 /// The dispatch row a subscription stands for, handed to the front door as `match` (the scheduler's
-/// matchOf): {transport: "libp2p", address: topic, sender: "*", program: <the role's CID, now>, fn,
-/// app, filter?} — an installed row's shape. Null when the app's record no longer names the role (an
+/// matchOf): {transport: "libp2p", address: topic, program: <the role's CID, now>, fn, app,
+/// filters?: [<filter>]} — an installed route's shape. Null when the app's record no longer names the role (an
 /// uninstall): nothing delivers.
 pub fn rowValue(a: std.mem.Allocator, s: Store, sub: Sub) !?Value {
     const ps = (try programsOf(a, s, sub.app)) orelse return null;
@@ -381,11 +389,10 @@ pub fn rowValue(a: std.mem.Allocator, s: Store, sub: Sub) !?Value {
     var m = cbor.MapBuilder.init(a);
     try m.put("transport", cbor.string("libp2p"));
     try m.put("address", cbor.string(sub.topic));
-    try m.put("sender", cbor.string("*"));
     try m.put("program", cbor.cidv(c));
     try m.put("fn", cbor.string(sub.func));
     try m.put("app", cbor.string(sub.app));
-    if (sub.filter) |f| try m.put("filter", cbor.string(f));
+    if (sub.filter) |f| if (filterRef(f)) |ref| try m.put("filters", .{ .array = try a.dupe(Value, &.{cbor.string(ref)}) });
     return m.value();
 }
 

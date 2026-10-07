@@ -32,9 +32,10 @@ test("kernel call: a function over the state, no entry and no writes, fuel repor
   await k.putBlock(mod, wasm);
   const probe = await k.store.put({ kind: "program", name: "probe", code: { wasm: mod }, inputs: {}, services: [], description: "the call probe" } as never) as CID;
   await writeGenesis(k, {
-    identity, owner: identity, handle: "probe", domain: "localhost",
+    identity, root: [identity], handle: "probe", domain: "localhost",
     defaults: { callFuelLimit: "5000000" },
-    subscriptions: [{ box: "probe", handler: probe }],
+    // #143: events are their own transport — the probe's box takes them by an `event` route.
+    dispatch: [{ transport: "event", address: "probe", program: probe.toString() }],
     // #77: a genesis-wired program writes only the heads its genesis scopes name.
     scopes: { probe: ["probe"] },
   });

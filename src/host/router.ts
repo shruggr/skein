@@ -120,9 +120,9 @@ import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
 import { historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
-import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
+import { admit2, keyBytes, keyHex, type AddressSeed, type DispatchSpec, type Genesis2Config, type Libp2pSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
-import { Kernel } from "./kernel.ts";
+import { DoorAnswered, Kernel } from "./kernel.ts";
 import { foldLiveness, livenessEvent, livenessOf, type Live } from "./liveness.ts";
 import { beaconEvent, beaconsOf, DEFAULT_LISTEN, foldBeacons, foldSubscriptions, libp2pConfig, P2PHost, subscribedTopics, subscriptionEvent, subscriptionsOf, type Beacon, type InboundAnswer, type InboundCall, type P2PHostConfig, type Subscription } from "./p2p.ts";
 import { peerIdFromMultihash } from "@libp2p/peer-id";
@@ -144,8 +144,8 @@ export interface RouterOptions {
   ownerHandle?: Named;
   inferHandle?: Named;
   fuelPerStep?: string;
-  /** A new genesis's extra seed rows — boxes (a sender in hex, `$owner`, or a provider's `$<name>`: `$status`, `$cron`, …) and routes — and defaults (over DEFAULTS), e.g. the wallet's (#29). */
-  genesis?: { subscriptions?: Array<{ sender?: string; box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; routes?: PathRowSpec[] };
+  /** A new genesis's extra routes — boxes (a box and its handler) and routes of any transport (#143: no sender) — and defaults (over DEFAULTS), e.g. the wallet's (#29). */
+  genesis?: { subscriptions?: Array<{ box: string; handler: CID }>; defaults?: Record<string, string>; feeds?: FeedSpec[]; libp2p?: Libp2pSpec; dispatch?: DispatchSpec[] };
   /** The router-held feeds' limits (feeds.ts); the backoff is the broadcaster's subscription's too. */
   feeds?: { maxQueue?: number; backoff?: { min: number; max: number } };
   /** The host's headers feed (#102, SKEIN_HEADERS_URL): an SSE stream of block headers every enabled instance whose dispatch table takes events in box `chain` is subscribed to. */
@@ -297,8 +297,8 @@ export async function fetchHttp(req: HttpRequest): Promise<HttpResponse> {
  * fail, since nothing else tells it where his mailbox is. Undefined if it names one.
  */
 export function noOwnerMessagebox(genesis: Record<string, unknown> | null | undefined): string | undefined {
-  // An image (#89) names no owner: the claim brings the owner's messagebox (into the address book).
-  if (genesis && genesis.owner === undefined) return undefined;
+  // An image (#89, #143) names no root: the claim brings the claimant's messagebox (into the address book).
+  if (genesis && genesis.root === undefined) return undefined;
   const d = genesis?.defaults as Record<string, unknown> | undefined;
   if (typeof d?.ownerMessagebox === "string" && d.ownerMessagebox) return undefined;
   return "WARNING: its genesis names no owner messagebox (defaults.ownerMessagebox): nothing it sends the owner (its answers) can be delivered. " +
@@ -628,10 +628,10 @@ export class Router {
     let message: unknown;
     try { message = dagCbor.decode(messageBytes); } catch { throw new Error("the message is not dag-cbor"); }
     if (!message || typeof message !== "object" || Array.isArray(message) || !(message as { signature?: unknown }).signature) throw new Error("not a signed message (a mail record with its signature)");
+    // #143: turned away at the door (a filter, the transport's check) writes no entry: DoorAnswered, thrown.
     const entry = await this.appendLocal(handle, { kind: "message", message, body });
     const l = await this.hydrate(handle);
     const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
-    if (a.state === "refused") throw new Error(`refused at the door (${a.refused.stage}): ${a.refused.reason}`);
     if (a.state === "errored") throw new Error(`the front door failed: ${a.error}`);
     if (a.state !== "finished") throw new Error(`not judged in time (${a.state}); entry ${entry}`);
     const v = dagCbor.decode(a.answer) as { verdict?: string; reason?: string };
@@ -666,16 +666,20 @@ export class Router {
     const record = call.topic !== undefined
       ? { kind: "p2p", topic: call.topic, from: call.from, seqno: call.seqno ?? new Uint8Array(), signature: call.signature ?? new Uint8Array(), body: call.body }
       : { kind: "p2p-frame", protocol: call.protocol ?? "", from: call.from, body: call.body };
-    const entry = await appendRequest(l.kernel, "libp2p", record, this.now());
+    let entry: CID;
+    try {
+      entry = await appendRequest(l.kernel, "libp2p", record, this.now());
+    } catch (e) {
+      if (!(e instanceof DoorAnswered)) throw e;
+      // #121, #143: turned away at the door (nothing written). A bad signature or a bad BEEF is the sender's fault
+      // (reject: GossipSub penalises the forwarder); what this instance cannot judge (no chain state, a failing check) is ignore.
+      const reason = e.answer.reason ?? "turned away";
+      const verdict = e.answer.status < 500 && !/no chain state/.test(reason) ? "reject" : "ignore";
+      this.say(handle, `${source} from ${from}: ${verdict} (turned away at the door: ${reason})`);
+      return { verdict, reason };
+    }
     const a = await l.kernel.answer(entry, this.o.answerWaitMs ?? ANSWER_WAIT_MS);
     this.settle(l);
-    if (a.state === "refused") {
-      // #121: refused at the door. A bad signature or a bad BEEF is the sender's fault (reject: GossipSub
-      // penalises the forwarder); what this instance cannot judge (no chain state, a failing middleware) is ignore.
-      const verdict = (a.refused.status ?? 400) < 500 && !/no chain state/.test(a.refused.reason) ? "reject" : "ignore";
-      this.say(handle, `${source} from ${from}: ${verdict} (refused at the door, ${a.refused.stage}: ${a.refused.reason})`);
-      return { verdict, reason: a.refused.reason };
-    }
     if (a.state !== "finished") {
       const why = a.state === "errored" ? `the front door failed: ${a.error}` : `not answered in time (${a.state})`;
       this.say(handle, `${source} from ${from}: ${why}`);
@@ -778,10 +782,10 @@ export class Router {
   }
 
   /**
-   * Whether a stopped instance's dispatch table routes an entry in `box` —
-   * an event (no sender), or (given) a message from `sender` (hex): the
-   * kernel's rule (#77, dispatch.zig forMail/forEvent). Read from its store
-   * file, read-only, with no kernel.
+   * Whether a stopped instance's route table routes an entry in `box` — an event, or (given a
+   * sender) a message: the kernel's rule (#77, #143: dispatch.zig forMail/forEvent, by the box
+   * alone; who may run the function is the gate's, when it is routed). Read from its store file,
+   * read-only, with no kernel.
    */
   async subscribes(handle: string, box: string, sender?: string): Promise<boolean> {
     const row = this.o.db.get(handle);
@@ -789,7 +793,7 @@ export class Router {
     const s = openStoreFile(row.store, { readOnly: true });
     try {
       const rows = await currentDispatch(s);
-      return !!rows?.some((r) => sender !== undefined ? takesMail(r, sender, box) : takesEvent(r, box));
+      return !!rows?.some((r) => sender !== undefined ? takesMail(r, box) : takesEvent(r, box));
     } finally { s.close(); }
   }
 
@@ -806,7 +810,7 @@ export class Router {
     if ((o.owner || o.appConfig) && !o.image) throw new Error("an owner and app config at birth are an image's (#142)");
     const identity = await rootIdentity(await this.o.walletFor(row));
     // #142: an image booted with its owner named (the host skein): the owner's rows and its apps' `$owner` rows at birth, no claim row.
-    const c = src.kind === "checkpoint" ? { identity, owner: this.o.owner ?? identity, handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { owner: o.owner } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
+    const c: Genesis2Config = src.kind === "checkpoint" ? { identity, root: [this.o.owner ?? identity], handle: row.handle, domain: row.domain } : o.image ? { ...this.imageConfig(row, identity, { manager: o.manager }), ...(o.owner ? { root: [o.owner] } : {}), ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : this.genesisConfig(row, identity, src.kind === "code");
     const b = await bootStore({ db: row.store, handle: row.handle, domain: row.domain, command: this.o.kernel?.command, env: this.o.kernel?.env, log: (l) => this.say(handle, l) }, src, c, this.now());
     this.o.db.add(row.handle, { identity, ...(b.tree ? { tree: b.tree.toString() } : {}) });
     return b;
@@ -852,10 +856,12 @@ export class Router {
     };
   }
 
-  /** Whether `owner` holds the instance's admin rows (its `dispatch` row): claimed by that key. */
+  /** Whether `owner` holds root on the instance (#143: the head `grants`): claimed by that key. */
   private async claimedBy(l: Loaded, owner: string): Promise<boolean> {
-    const rows = (await l.kernel.dispatch()).rows;
-    return rows.some((r) => r.program === "kernel" && r.fn === "dispatch" && r.sender instanceof Uint8Array && Buffer.from(r.sender).toString("hex") === owner);
+    const root = await l.kernel.call("head", "grants") as CID | null;
+    if (!root) return false;
+    const g = await l.kernel.store.get(root).catch(() => undefined) as { roles?: Record<string, unknown[]> } | undefined;
+    return (g?.roles?.root ?? []).some((k) => k instanceof Uint8Array && Buffer.from(k).toString("hex") === owner);
   }
 
   /**
@@ -905,13 +911,20 @@ export class Router {
     this.unpublished.add(handle);
     try {
       await this.image.ready; // #132: born with the chain as the host holds it
-      // #142: the host skein from the host image (images/host over images/default), its genesis naming `owner`
-      // (the operator's key): the owner's admin rows and the apps' `$owner` rows at birth, `appConfig` merged.
+      // #142, #143: the host skein from the host image (images/host over images/default), its genesis's `root` the
+      // operator's key, `appConfig` merged.
       await this.bootRow(handle, await this.image.source({ host: o.host }), { image: true, manager: o.host, ...(o.host ? { owner, ...(o.appConfig ? { appConfig: o.appConfig } : {}) } : {}) });
       const l = await this.hydrate(handle);
       if (claim) {
-        // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner.
-        const entry = await this.appendLocal(handle, { kind: "message", message: claim.message, body: claim.body });
+        // #127: the owner's own message, forwarded as signed; the host signs nothing for the owner. #143: one the door
+        // turns away (its signature does not hold) writes no entry.
+        let entry: CID;
+        try {
+          entry = await this.appendLocal(handle, { kind: "message", message: claim.message, body: claim.body });
+        } catch (e) {
+          if (e instanceof DoorAnswered) throw new Error(`the claim message was refused at the door (${e.answer.reason ?? e.answer.status}); ${handle} is left disabled`);
+          throw e;
+        }
         await this.queues.get(handle);
         await l.kernel.idle();
         if (!(await this.claimedBy(l, owner))) throw new Error(`the claim ${entry} was refused (its log says why); ${handle} is left disabled`);
@@ -987,7 +1000,7 @@ export class Router {
   genesisConfig(row: Pick<InstanceRow, "handle" | "domain"> & Partial<Pick<InstanceRow, "kind" | "owner">>, identity: string, code = true): Genesis2Config {
     if (row.kind === "mailbox") {
       if (!row.owner) throw new Error(`${row.handle}: a mailbox instance names its owner`);
-      return { identity, owner: row.owner, handle: row.handle, domain: row.domain, mailbox: true };
+      return { identity, root: [row.owner], handle: row.handle, domain: row.domain, mailbox: true };
     }
     if (!this.o.owner) throw new Error("an empty store needs the owner's identity key (SKEIN_OWNER) for its genesis");
     const genesisDefaults = this.o.genesis?.defaults;
@@ -997,17 +1010,17 @@ export class Router {
     if (!code) {
       // A system tree: its config wins; the host fills what it leaves unset. SKEIN_FUEL_PER_STEP stays an explicit (dev) override.
       return {
-        identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
+        identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
         feeds: this.o.genesis?.feeds, defaults: genesisDefaults, overrides: this.o.fuelPerStep ? { fuelPerStep: this.o.fuelPerStep } : undefined, warn, ...facts,
       };
     }
     return {
-      identity, owner: this.o.owner, handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
+      identity, root: [this.o.owner], handle: row.handle, domain: row.domain, infer: this.o.infer, ownerHandle: this.o.ownerHandle, inferHandle: this.o.inferHandle,
       // Code genesis takes DEFAULTS under the host's.
       defaults: Object.keys(hostDefaults).length ? { ...DEFAULTS, ...hostDefaults } : undefined,
       subscriptions: this.o.genesis?.subscriptions,
       feeds: this.o.genesis?.feeds,
-      libp2p: this.o.genesis?.libp2p, extraRoutes: this.o.genesis?.routes,
+      libp2p: this.o.genesis?.libp2p, dispatch: this.o.genesis?.dispatch,
       ...facts,
     };
   }

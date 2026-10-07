@@ -50,11 +50,13 @@ test("skein peers: add / remove as the owner's messages to the `peers` box, over
   assert.equal(await skein("remove", bob, "--instance", "alpha"), 0, err.join("\n"));
   await until("bob removed", async () => (await list("alpha")).length === 0 ? true : undefined);
 
-  // Another key's messages are refused on the session: no admin row admits it.
+  // Another key's message: delivered (#143: the messagebox takes a message for any routed box), and the kernel's
+  // gate refuses it — `peers` is root's: recorded, nothing runs.
   const stranger = join(h.home, "stranger.key");
   writeFileSync(stranger, `${PrivateKey.fromRandom().toHex()}\n`);
-  assert.equal(await adminMain("peers", ["add", bob, "https://x.example", origin], { ...env, vars: { ...env.vars, SKEIN_OPERATOR_KEY: stranger } }), 1);
-  assert.match(err.at(-1)!, /403/);
+  assert.equal(await adminMain("peers", ["add", bob, "https://x.example", origin], { ...env, vars: { ...env.vars, SKEIN_OPERATOR_KEY: stranger } }), 0, err.join("\n"));
+  await h.router.settled();
+  assert.equal((await list("alpha")).length, 0, "the gate: a stranger's peers message changes nothing");
 
   // Wrong shapes, unknown rows, a mailbox instance, a key that is not one.
   const bad = async (...argv: string[]) => await adminMain("peers", [...argv, "--instance", "alpha"], env);

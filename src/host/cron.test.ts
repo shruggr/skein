@@ -137,9 +137,9 @@ test("cron: the schedules kept in host.db and taken up at a start — an every o
 });
 
 /**
- * A system tree: cron-demo for the owner's `schedule` box and (sender-less)
- * the `tick` box; the messagebox (its routes, so the owner can send, and the
- * mailbox transport's delivery) and resolve (the owner's `peers` box).
+ * A system tree: cron-demo for the `schedule` and `tick` boxes; the
+ * messagebox (its routes, so the owner can send, and the mailbox transport's
+ * delivery) and resolve.
  */
 async function cronTree(t: { after(f: () => unknown): void }) {
   const dir = await fs.mkdtemp(join(tmpdir(), "skein-cron-tree-"));
@@ -148,9 +148,10 @@ async function cronTree(t: { after(f: () => unknown): void }) {
   await fs.mkdir(join(dir, "etc"));
   await fs.writeFile(join(dir, "bin/cron-demo.wasm"), readFileSync(DEMO_WASM));
   for (const p of ["messagebox", "resolve"]) await fs.writeFile(join(dir, `bin/${p}.wasm`), readFileSync(join(ROOT, `wasm/${p}.wasm`)));
-  await fs.writeFile(join(dir, "etc/subscriptions.json"), JSON.stringify([
-    { sender: "$owner", box: "schedule", handler: "cron-demo" }, { box: "tick", handler: "cron-demo" },
-    { sender: "$owner", box: "peers", handler: "resolve" }, { box: ":ack", handler: "messagebox" },
+  // #143: routes, no senders (the owner's `peers` is the kernel's admin route, root's).
+  await fs.writeFile(join(dir, "etc/dispatch.json"), JSON.stringify([
+    { address: "schedule", program: "cron-demo" }, { address: "tick", program: "cron-demo" },
+    { transport: "event", address: ":ack", program: "messagebox" },
   ]));
   return dir;
 }

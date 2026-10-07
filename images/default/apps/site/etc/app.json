@@ -30,14 +30,19 @@
     }
   ],
   "requires": [],
-  "reads": [
+  "description": "The management site of a skein (shruggr/skein#92, #125): the page under /site/, served from this app's own tree (www/) by its one read (shruggr/skein#135: a call — anyone, signed or not, nothing logged). The owner may also add a read putting it at the instance's root (README).",
+  "filters": {
+    "get": "site.get"
+  },
+  "routes": [
     {
+      "transport": "http",
       "address": "/",
       "prefix": true,
-      "program": "site",
-      "fn": "get",
+      "filters": [
+        "get"
+      ],
       "root": "www"
     }
-  ],
-  "description": "The management site of a skein (shruggr/skein#92, #125): the page under /site/, served from this app's own tree (www/) by its one read (shruggr/skein#135: a call — anyone, signed or not, nothing logged). The owner may also add a read putting it at the instance's root (README)."
+  ]
 }

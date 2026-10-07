@@ -140,7 +140,7 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 8, issue #77: the kernel's four tables, one dispatch table): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 9, issue #143: routes, filters, roles): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));
@@ -291,6 +291,7 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     // K24: the genesis entry only, as the log's first (scheduler.zig appendGenesis); the rest is `admit`'s.
     if (eq(u8, op, "append")) return switch (try r.appendGenesis(a, v)) {
         .ok => |c| reply(a, cbor.cidv(c), null, null),
+        .answered => reply(a, null, "append: the genesis is not a request", null),
         .rejected => |x| reply(a, null, x.message, x.reason.text()),
         .invalid => |m| reply(a, null, m, null),
     };
@@ -320,6 +321,12 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
         // Not processed here: skein_drain runs the step loop (the shim acknowledges first, once it is durable).
         return switch (res) {
             .ok => |c| reply(a, cbor.cidv(c), null, null),
+            // #143: the door turned it away or answered it — nothing written: {answered: {…}}.
+            .answered => |x| blk: {
+                var m = cbor.MapBuilder.init(a);
+                try m.put("answered", try x.value(a));
+                break :blk reply(a, m.value(), null, null);
+            },
             .rejected => |x| reply(a, null, x.message, x.reason.text()),
             .invalid => |m| reply(a, null, m, null),
         };
@@ -352,15 +359,10 @@ fn handleOp(a: std.mem.Allocator, op: []const u8, v: Value) !i32 {
     if (eq(u8, op, "answer")) {
         // #66, #126 step 4: the answer of the thread a request entry launched, as it stands after
         // the drain (serve's `answer` without the wait: nothing runs between calls) — the page's
-        // own requests to its instance, on its BRC-104 session. <entry> → {state: "refused",
-        // refused} | {state: "pending"} | {thread, state, answer?: bytes, error?}.
+        // own requests to its instance, on its BRC-104 session. <entry> → {state: "pending"} |
+        // {thread, state, answer?: bytes, error?}.
         const entry = Value.cidOf(v) orelse return error.BadRequest;
         var m = cbor.MapBuilder.init(a);
-        if (try s.get(a, entry)) |e| if (e.get("refused")) |x| {
-            try m.put("state", cbor.string("refused"));
-            try m.put("refused", x);
-            return reply(a, m.value(), null, null);
-        };
         const t = (try r.requestThread(a, entry)) orelse {
             try m.put("state", cbor.string("pending"));
             return reply(a, m.value(), null, null);

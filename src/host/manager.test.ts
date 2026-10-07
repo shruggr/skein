@@ -47,9 +47,12 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.equal(h.db.hostSkein()?.handle, "host");
   assert.equal(h.db.get("host")!.status, "enabled");
   const hostRows = ((await (await h.router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>);
-  assert.deepEqual(hostRows.filter((r) => r.program === "kernel").map((r) => `${r.address}<-${hex(r.sender)}`), ["objects", "head", "dispatch", "peers"].map((op) => `${op}<-${h.ownerId}`), "the operator's admin rows at birth, no claim row");
-  assert.ok(hostRows.some((r) => r.address === "/explore" && hex(r.sender) === h.ownerId), "the operator's explorer row");
-  assert.ok(hostRows.some((r) => r.app === "git" && r.address === "git" && hex(r.sender) === h.ownerId), "git's $owner row holds the operator's key");
+  assert.deepEqual(hostRows.filter((r) => r.program === "kernel").map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant"], "the admin routes at birth, no claim route");
+  const hk = (await h.router.hydrate("host")).kernel;
+  const grants = await hk.store.get(await hk.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
+  assert.deepEqual(grants.roles.root!.map((k) => hex(k)), [h.ownerId], "#143: the operator is root, from the genesis");
+  assert.ok(hostRows.some((r) => r.address === "/explore" && r.fn === "explore"), "the explorer route (root's)");
+  assert.ok(hostRows.some((r) => r.app === "git" && r.address === "git"), "git's route");
   assert.ok(hostRows.some((r) => r.app === "onboard"), "the onboarding app installed at birth");
   const roles = async (handle: string) => (((await (await h.router.hydrate(handle)).kernel.genesis()) as { addressBook?: Array<{ address?: string }> }).addressBook ?? []).map((e) => e.address);
   assert.ok((await roles("host")).includes("manager"), "the host skein's address book names the instance manager");
@@ -80,7 +83,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.match(String(a[0]?.body.error), /the claim .* was refused/, "a claim whose body is not the one it signs is refused at the front door");
   assert.equal(h.db.get("eve")!.status, "disabled", "and the instance is left unpublished");
   const eveRows = ((await (await h.router.hydrate("eve")).kernel.dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.program === "kernel");
-  assert.deepEqual(eveRows.map((r) => `${r.address}<-${hex(r.sender)}`), ["claim<-*"], "unclaimed: the claim row stands");
+  assert.deepEqual(eveRows.map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant", "claim"], "unclaimed: the claim route stands");
 
   a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
   assert.equal(a.length, 1, "one answer");
@@ -91,7 +94,9 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.equal(alice.status, "enabled", "published");
   const k = (await h.router.hydrate("alice")).kernel;
   const rows = (await k.dispatch()).rows as Array<Record<string, unknown>>;
-  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => `${r.address}<-${hex(r.sender)}`), ["objects", "head", "dispatch", "peers"].map((o) => `${o}<-${client}`), "claimed by the client's own message: its admin rows; the claim row gone");
+  assert.deepEqual(rows.filter((r) => r.program === "kernel").map((r) => r.address), ["objects", "head", "dispatch", "peers", "grant"], "claimed: the claim route gone");
+  const ag = await k.store.get(await k.call("head", "grants") as never) as unknown as { roles: Record<string, Uint8Array[]> };
+  assert.deepEqual(ag.roles.root!.map((x) => hex(x)), [client], "#143: the claim granted root to the client's own key");
   const first: Array<Record<string, unknown>> = [];
   const s = openStoreFile(alice.store, { readOnly: true });
   try { for await (const { entry } of s.log.entries(1)) { first.push(entry as Record<string, unknown>); break; } } finally { s.close(); }
@@ -99,7 +104,7 @@ test("the instance manager: create (the owner's claim forwarded before published
   const fwd = await (await h.router.hydrate("alice")).kernel.store.get((first[0] as { request: CID }).request) as { message?: { sender?: unknown; recipient?: unknown; box?: string } };
   assert.ok(fwd.message?.box === "claim" && hex(fwd.message.sender) === client && fwd.message.recipient === undefined, "the forwarded message is the client's own, naming no recipient (#127)");
   assert.ok(!(await roles("alice")).includes("manager"), "the child's address book has no instance manager");
-  // #125: an image serves nothing at `/`; the explorer row (the claim's, the owner's key) answers, wanting a session.
+  // #125: an image serves nothing at `/` of its own; the explorer route (kernel.brc104, root's) answers, wanting a session.
   assert.equal((await fetch(`${h.base}/@alice/explore`)).status, 401, "it answers at its origin");
 
   a = await send("host", "create", { handle: "alice", owner: Uint8Array.from(Buffer.from(client, "hex")), claim });
@@ -122,8 +127,8 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.deepEqual([a[0]!.body.handle, a[0]!.body.url, hex(a[0]!.body.identity)], ["mel", h.origin("mel"), h.keyOf("mel").toPublicKey().toString()]);
   const mel = h.db.get("mel")!;
   assert.deepEqual([mel.kind, mel.owner, mel.domain, mel.status], ["mailbox", mailer, "skein.test", "enabled"]);
-  const mg = await (await h.router.hydrate("mel")).kernel.genesis() as { owner?: unknown };
-  assert.equal(hex(mg.owner), mailer, "its genesis names the owner (no claim)");
+  const mg = await (await h.router.hydrate("mel")).kernel.genesis() as { root?: unknown[] };
+  assert.deepEqual(mg.root?.map((x) => hex(x)), [mailer], "its genesis names its root (no claim)");
   a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });
   assert.equal(a[0]!.body.handle, "mel", "the same owner and handle again: the same answer");
   a = await send("host", "create", { handle: "mel2", owner: Uint8Array.from(Buffer.from(mailer, "hex")), image: "mailbox" });

@@ -9,6 +9,10 @@
 //!   advance   advance head "probe" to a put record {kind: "probe", arg}: fails in a kernel call
 //!   spin      loops until the fuel runs out
 //!   nest      arg = the probe's own CID: calls itself with fn "echo" and "nested", stdout = its answer
+//!   whoami    a route handler: {status: 200, type, body: the input's first `caller`}
+//!   deny      a filter (#143): {reject: {reason: "no", status: 418}}
+//!   page      a filter (#143): {answer: {status: 200, type: "text/plain", body: "page"}}
+//!   pass      a filter (#143): {pass: {}}
 //!   fail      exits 1 with "probe: asked to fail"
 //! As a step (input kind "step", a subscription's handler): calls itself
 //! (the program CID in args.event's record `probe`) with fn "advance", so the
@@ -153,6 +157,15 @@ pub fn main() u8 {
         r.appendSlice("application/octet-stream") catch fail("oom");
         r.appendSlice(&.{ 0x66, 's', 't', 'a', 't', 'u', 's', 0x18, 200 }) catch fail("oom");
         out.writeStreamingAll(io(), r.items) catch {};
+    } else if (std.mem.eql(u8, func, "deny")) {
+        // A filter (#143) that rejects: {reject: {reason: "no", status: 418}}.
+        out.writeStreamingAll(io(), "\xa1\x66reject\xa2\x66reason\x62no\x66status\x19\x01\xa2") catch {};
+    } else if (std.mem.eql(u8, func, "page")) {
+        // A filter (#143) that answers: {answer: {body: h'page', status: 200, type: "text/plain"}}.
+        out.writeStreamingAll(io(), "\xa1\x66answer\xa3\x64body\x44page\x66status\x18\xc8\x64type\x6atext/plain") catch {};
+    } else if (std.mem.eql(u8, func, "pass")) {
+        // A filter (#143) that passes the request on as it is: {pass: {}}.
+        out.writeStreamingAll(io(), "\xa1\x64pass\xa0") catch {};
     } else if (std.mem.eql(u8, func, "fail")) {
         std.Io.File.stderr().writeStreamingAll(io(), "probe: asked to fail\n") catch {};
         return 1;

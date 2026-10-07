@@ -13,7 +13,6 @@
         "build.zig",
         "build.zig.zon",
         "explore.zig",
-        "gate.zig",
         "libp2p.zig",
         "main.zig",
         "sessions.zig",

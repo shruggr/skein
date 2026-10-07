@@ -96,8 +96,13 @@ pub const STATE_KIND = "skein-state";
 /// sender, program, fn?}) replaces the subscriptions chain, the genesis's `routes` and the head `routes`; the
 /// genesis carries `dispatch` and `scopes`, no `subscriptions` or `routes`; a head update carries `owner`; the
 /// admin operations (objects, head, dispatch, peers) are the kernel's, on a message at a kernel row — no
-/// handler program, no `subscribe` import; a program advances only heads in its write scope.
-pub const FORMAT: i64 = 8;
+/// handler program, no `subscribe` import; a program advances only heads in its write scope;
+/// 9 = routes, filters, roles (#143): a route has no `sender` (its key is (transport, address, prefix)), names
+/// `filters` run before anything is recorded (a rejection or an answer writes no entry: no `refused` entries),
+/// and may have no handler (a read route); events are their own transport; the head `grants` (roles → keys)
+/// gates functions; the genesis names `root` (no `owner`, no `reads`) and `roles`; the claim grants root; the
+/// steps' and calls' input has no `owner`. A store in format 8 is refused: no migration (re-genesis).
+pub const FORMAT: i64 = 9;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).

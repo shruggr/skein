@@ -22,7 +22,7 @@ import { InferPeer } from "../peers/infer.ts";
 import { headTree, MAIN } from "../runtime/heads.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
-import { currentDispatch, senderText } from "../runtime/dispatch.ts";
+import { currentDispatch } from "../runtime/dispatch.ts";
 import { readFile, readTree, walk } from "../runtime/tree.ts";
 import { CHAT_APP, sendPlan, viewOf } from "../testapps.ts";
 import { collect, iso, T0 } from "../testkit.ts";
@@ -241,11 +241,14 @@ test("skein dispatch --instance: a message to box `dispatch` as the owner, over 
   const peer = PrivateKey.fromRandom().toPublicKey().toString();
   const last = async () => (await currentDispatch(s))!.at(-1)!;
 
-  assert.equal(await plan("add", "--sender", peer, "register", "resolve"), 0, e.err.join("\n"));
-  await until("the new row", async () => senderText((await last()).sender) === peer ? true : undefined);
+  // #143: a route has no sender — `--sender` is refused; the route is the box's alone.
+  assert.equal(await plan("add", "--sender", peer, "register", "resolve"), 1);
+  assert.match(e.err.at(-1)!, /--sender: gone \(#143\)/);
+  assert.equal(await plan("add", "register", "resolve"), 0, e.err.join("\n"));
+  await until("the new row", async () => (await last()).address === "register" ? true : undefined);
   const row = await last();
-  assert.deepEqual([row.transport, row.address, senderText(row.sender), String(row.program)], ["mailbox", "register", peer, String(resolve)]);
-  assert.equal(await plan("remove", "--sender", peer, "register", String(resolve)), 0);
+  assert.deepEqual([row.transport, row.address, String(row.program)], ["mailbox", "register", String(resolve)]);
+  assert.equal(await plan("remove", "register", String(resolve)), 0);
   await until("the row removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
   assert.deepEqual(await currentDispatch(s), before, "removed: the rows as they were");
   assert.ok((await collect(s.log.entries(0)))[0]!.cid.equals(genesis), "the same genesis");

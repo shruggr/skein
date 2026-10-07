@@ -49,6 +49,7 @@ import { KernelWorker } from "../../kernel-zig/web/client.js";
 import { RawBox } from "../../src/client/raw.ts";
 import { admit2, keyBytes, writeGenesis } from "../../src/host/genesis.ts";
 import type { Kernel } from "../../src/host/kernel.ts";
+import { DoorAnswered, doorAnswer } from "../../src/host/door-answer.ts";
 import { encode } from "../../src/runtime/cid.ts";
 import { DEFAULTS } from "../../src/runtime/log.ts";
 import { NotFound, Rejected } from "../../src/runtime/store.ts";
@@ -132,11 +133,15 @@ export class WebKernel {
     const frame: Record<string, unknown> = { entry };
     if (records.body) frame.body = records.body;
     if (records.request) frame.request = records.request;
-    return WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply) as CID;
+    const r = WebKernel.unwrap(dagCbor.decode(await this.kw.call("admit", dagCbor.encode(frame))) as Reply);
+    // #143: what the door turned away or answered writes no entry.
+    const answered = (r as { answered?: Record<string, unknown> } | null)?.answered;
+    if (answered && typeof answered === "object") throw new DoorAnswered(doorAnswer(answered));
+    return r as CID;
   }
   async drain(): Promise<void> { await this.kw.call("drain"); }
   /** The answer of the thread a request entry launched, as it stands after the drain (#66: kernel-zig/src/web.zig `answer`). */
-  async answer(entry: CID): Promise<{ state: string; thread?: CID; answer?: Uint8Array; error?: string; refused?: { status?: number; code?: string; reason?: string } }> {
+  async answer(entry: CID): Promise<{ state: string; thread?: CID; answer?: Uint8Array; error?: string }> {
     return await this.call("answer", entry) as { state: string; thread?: CID; answer?: Uint8Array; error?: string };
   }
   async start(): Promise<void> { WebKernel.unwrap(dagCbor.decode(await this.kw.call("start")) as Reply); }
@@ -208,7 +213,7 @@ export class BrowserHost {
     this.box = new RawBox(this.o.wallet, this.mailbox);
     if (!(await this.kernel.store.log.tip())) {
       const e = await writeGenesis(this.kernel as unknown as Kernel, {
-        identity: this.identity, owner: this.identity, handle: this.o.handle, domain: this.domain,
+        identity: this.identity, root: [this.identity], handle: this.o.handle, domain: this.domain,
         infer: this.o.infer, inferHandle: this.o.inferHandle, ownerHandle: { handle: this.o.handle, domain: this.domain },
         defaults: this.o.defaults ? { ...DEFAULTS, ...this.o.defaults } : undefined,
         ownerMessagebox: this.mailbox, resolveOrigin: this.origin,
@@ -357,13 +362,21 @@ export class BrowserHost {
     const headers: Record<string, string> = {};
     req.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
     const record = { kind: "http", method: req.method, path: url.pathname, route: url.pathname, query: url.search, headers, body };
-    const a = await this.serial(async () => {
-      const e = await admit2(this.kernel as unknown as Kernel, { request: encode(record).cid, transport: "http" } as never, { request: record }, now());
-      await this.kernel.drain();
-      return await this.kernel.answer(e);
-    });
     const json = (status: number, code: string, description: string) => new Response(JSON.stringify({ status: "error", code, description }), { status, headers: { "content-type": "application/json" } });
-    if (a.state === "refused") return json(a.refused?.status ?? 400, a.refused?.code ?? "ERR_REFUSED", a.refused?.reason ?? "refused");
+    let a: Awaited<ReturnType<WebKernel["answer"]>>;
+    try {
+      a = await this.serial(async () => {
+        const e = await admit2(this.kernel as unknown as Kernel, { request: encode(record).cid, transport: "http" } as never, { request: record }, now());
+        await this.kernel.drain();
+        return await this.kernel.answer(e);
+      });
+    } catch (e) {
+      // #143: turned away or answered at the door, nothing written — answered plain here (phase 2: signed, as the node host's).
+      if (!(e instanceof DoorAnswered)) throw e;
+      const d = e.answer;
+      if (d.kind === "answer") return new Response(d.body?.length ? d.body as BodyInit : null, { status: d.status, headers: { ...(d.headers ?? {}), "content-type": d.type ?? "application/json" } });
+      return json(d.status, d.code ?? "ERR_REFUSED", d.reason ?? "refused");
+    }
     if (a.state === "errored") return json(500, "ERR_FRONT_DOOR", a.error ?? "errored");
     if (a.state !== "finished" || !a.answer) return json(503, "ERR_UNAVAILABLE", `not answered (its thread is ${a.state})`);
     const r = dagCbor.decode(a.answer) as { status?: number; headers?: Record<string, string>; body?: Uint8Array };

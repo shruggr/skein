@@ -48,51 +48,66 @@
     }
   ],
   "requires": [],
-  "dispatch": [
+  "description": "The onboarding app (shruggr/skein#90, #113), installed in the host skein. POST /onboard/call {fn: \"onboard.create\", args: {handle, image?, claim}} over any BRC-104 session asks the host's instance manager for a skein, passing the caller's own signed claim {message, body} (a message in box claim naming no recipient, shruggr/skein#127), which the manager forwards into it as its first entry: the signer owns it; POST /onboard/register {username, identityKey, signature} (over a BRC-104 session; signed over \"register <username>@<domain>\") asks it for a mailbox instance for the key. Each handle is certified through the host's certifier and recorded under onboard/handles/<handle>, and the app serves BRC-169 from those records — reads (shruggr/skein#135: served by a call, anyone, signed or not, nothing logged): /onboard/manifest.json, /onboard/resolve, /onboard/search, the paymail PKI at /onboard/bsvalias/id/ — with the holders' signed profiles (POST /onboard/profile, a signed request: it writes). onboard.adopt (the host skein's owner) records and certifies a mailbox instance made before. config.onboard.domain is the host's one handle domain.",
+  "filters": {
+    "resolve": "onboard.resolve",
+    "search": "onboard.search",
+    "manifest": "onboard.manifest",
+    "paymail": "onboard.paymail"
+  },
+  "routes": [
     {
       "transport": "http",
       "address": "/call",
-      "sender": "session",
-      "program": "onboard",
-      "fn": "call"
+      "filters": [
+        "kernel.brc104"
+      ],
+      "handler": "onboard.call"
     },
     {
       "transport": "http",
       "address": "/register",
-      "sender": "session",
-      "program": "onboard",
-      "fn": "register"
+      "filters": [
+        "kernel.brc104"
+      ],
+      "handler": "onboard.register"
     },
     {
       "transport": "http",
       "address": "/profile",
-      "sender": "*",
-      "program": "onboard",
-      "fn": "profile"
-    }
-  ],
-  "reads": [
+      "filters": [
+        "kernel.brc104"
+      ],
+      "handler": "onboard.profile"
+    },
     {
+      "transport": "http",
       "address": "/resolve",
-      "program": "onboard",
-      "fn": "resolve"
+      "filters": [
+        "resolve"
+      ]
     },
     {
+      "transport": "http",
       "address": "/search",
-      "program": "onboard",
-      "fn": "search"
+      "filters": [
+        "search"
+      ]
     },
     {
+      "transport": "http",
       "address": "/manifest.json",
-      "program": "onboard",
-      "fn": "manifest"
+      "filters": [
+        "manifest"
+      ]
     },
     {
+      "transport": "http",
       "address": "/bsvalias/id/",
       "prefix": true,
-      "program": "onboard",
-      "fn": "paymail"
+      "filters": [
+        "paymail"
+      ]
     }
-  ],
-  "description": "The onboarding app (shruggr/skein#90, #113), installed in the host skein. POST /onboard/call {fn: \"onboard.create\", args: {handle, image?, claim}} over any BRC-104 session asks the host's instance manager for a skein, passing the caller's own signed claim {message, body} (a message in box claim naming no recipient, shruggr/skein#127), which the manager forwards into it as its first entry: the signer owns it; POST /onboard/register {username, identityKey, signature} (over a BRC-104 session; signed over \"register <username>@<domain>\") asks it for a mailbox instance for the key. Each handle is certified through the host's certifier and recorded under onboard/handles/<handle>, and the app serves BRC-169 from those records \u2014 reads (shruggr/skein#135: served by a call, anyone, signed or not, nothing logged): /onboard/manifest.json, /onboard/resolve, /onboard/search, the paymail PKI at /onboard/bsvalias/id/ \u2014 with the holders' signed profiles (POST /onboard/profile, a signed request: it writes). onboard.adopt (the host skein's owner) records and certifies a mailbox instance made before. config.onboard.domain is the host's one handle domain."
+  ]
 }

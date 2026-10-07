@@ -472,13 +472,13 @@ async function initCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
 }
 
 /**
- * `skein-host grant <key> [--apps] [--instance <handle>] [--dry-run]` (#142): the key's admin rows (the
- * kernel's four operations and the explorer row) in the host skein (or `handle`), and with --apps every
- * installed app's `$owner` rows from it — the operator's messages (src/client/admin.ts planGrant), signed
- * with its key and handed to the running host over its control socket.
+ * `skein-host grant <key> [--role <role>] [--remove] [--instance <handle>] [--dry-run]` (#142, #143): the
+ * kernel's `grant` operation — root (or `<app>.<role>`) to the key — in the host skein (or `handle`): the
+ * operator's message (src/client/admin.ts planGrant), signed with its key and handed to the running host
+ * over its control socket.
  */
 async function grantCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
-  const { values: v, positionals: [key, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { apps: { type: "boolean" }, instance: { type: "string" }, "dry-run": { type: "boolean" } } });
+  const { values: v, positionals: [key, ...more] } = parseArgs({ args: rest, allowPositionals: true, options: { role: { type: "string" }, remove: { type: "boolean" }, instance: { type: "string" }, "dry-run": { type: "boolean" } } });
   if (!key || more.length) { env.err(USAGE); return 2; }
   const handle = v.instance ?? db.hostSkein()?.handle;
   if (!handle) { env.err("skein-host grant: no host skein yet (skein-host run)"); return 1; }
@@ -488,11 +488,11 @@ async function grantCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   let t: import("../client/target.ts").Target | undefined;
   try {
     t = localTarget(env.vars, handle, keyWallet(operatorKey(env.vars).key));
-    const p = await planGrant(await t.view(), key, { apps: v.apps });
+    const p = await planGrant(await t.view(), key, { ...(v.role ? { role: v.role } : {}), ...(v.remove ? { remove: true } : {}) });
     for (const l of p.prompt) env.out(l);
     if (v["dry-run"]) { for (const m of p.messages) env.out(messageJson(p.recipient, m)); return 0; }
     for (const m of p.messages) await t.send(m.box, m.body);
-    env.out(`${handle}: ${p.messages.length} row${p.messages.length === 1 ? "" : "s"} granted to ${short(key)}`);
+    env.out(`${handle}: ${p.messages.length ? `${v.role ?? "root"} ${v.remove ? "revoked from" : "granted to"}` : "nothing to change for"} ${short(key)}`);
     return 0;
   } catch (e) {
     env.err(`skein-host grant: ${(e as Error).message}`);

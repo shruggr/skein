@@ -1,9 +1,10 @@
 //! The explorer's read route (#40): the instance's log, threads, heads and
 //! records as JSON, answered from the committed state the call sees (the
 //! kernel's index maps, kernel-zig index.zig, walked as Merkle search trees
-//! through `get`). A route handler: code genesis and the default image put it
-//! at the prefix `/explore` with `read: "explore"`, so only a caller the reads
-//! table allows (the owner) gets an answer, and nothing it does is written.
+//! through `get`). A route handler: every genesis puts it at the prefix
+//! `/explore` behind `kernel.brc104`, the function gated by root (#143: the
+//! genesis's `roles: {root: ["frontdoor.explore"]}`), so only root gets an
+//! answer, and nothing it does is written.
 //! The management site's explorer pages (shruggr/skein-site, #92) read it.
 //!
 //!   GET /explore                       {state, log, cursor, heads: {name: cid}}

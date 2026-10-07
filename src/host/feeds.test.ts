@@ -60,14 +60,14 @@ test("feeds: chaintracks' JSON (Arcade's tip stream, #102) — the 80 bytes from
 test("feeds: declared in a system's etc/config.json, carried by its genesis; the session default", async () => {
   const { resolveSystem, genesisRecord } = await import("./genesis.ts");
   const k = "02" + "11".repeat(32);
-  const c = { identity: k, owner: k, handle: "w", domain: "localhost" };
+  const c = { identity: k, root: [k], handle: "w", domain: "localhost" };
   const feeds = [{ kind: "headers" as const, url: "http://ct.test/sse" }];
-  const g = genesisRecord(c, resolveSystem(c, {}, [], { feeds }));
+  const g = genesisRecord(c, resolveSystem(c, {}, { feeds }));
   assert.deepEqual(feedsOf(g), feeds);
   assert.equal((g.defaults as Record<string, string>).sessionTtlMs, "86400000");
-  assert.throws(() => resolveSystem(c, {}, [], { feeds: [{ kind: "headers" } as never] }), /a feed is/);
-  assert.throws(() => resolveSystem(c, {}, [], { feeds: [{ kind: "arc-callback", token: "t" } as never] }), /arc-callback feed is gone/);
-  assert.equal(genesisRecord(c, resolveSystem(c, {}, [])).feeds, undefined);
+  assert.throws(() => resolveSystem(c, {}, { feeds: [{ kind: "headers" } as never] }), /a feed is/);
+  assert.throws(() => resolveSystem(c, {}, { feeds: [{ kind: "arc-callback", token: "t" } as never] }), /arc-callback feed is gone/);
+  assert.equal(genesisRecord(c, resolveSystem(c, {})).feeds, undefined);
 });
 
 test("feeds: an SSE header feed fanned out to its subscribers, resumed after a drop, bounded", async (t) => {

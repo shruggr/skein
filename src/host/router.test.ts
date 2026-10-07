@@ -170,13 +170,14 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   await until("the host's own connection", () => conns[0]);
   assert.equal(conns.length, 1, "one connection: the host's own, no instance's");
 
-  // A row taking box `chain` from anyone (events included, as the chain app's `event` row does), added to `a`: `a` is subscribed, live.
+  // An event route at box `chain` (as the chain app's), added to `a`: `a` is subscribed, live.
   const programs = Object.keys(((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, unknown> }).programs);
   const handler = programs.includes("resolve") ? "resolve" : programs[0]!;
   const gp = ((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, CID> }).programs;
   const id = h.db.get("a")!.identity!;
   // #124: the owner's dispatch message (`skein dispatch`), POSTed to a's /sendMessage on the owner's session.
-  const sendRow = (op: "add" | "remove") => sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "a", planDispatch(id, { op, box: "chain", handler }, gp));
+  // #143: events are their own transport — an `event` route at box `chain`.
+  const sendRow = (op: "add" | "remove") => sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "a", { prompt: [], recipient: id, messages: [{ box: "dispatch", body: { op, row: { transport: "event", address: "chain", program: gp[handler]! } } }] });
   await sendRow("add");
   await until("a subscribed", async () => { await h.router.settled(); return h.router.feeds.hosts("a") || undefined; });
   assert.deepEqual(subscribed(), ["a"]);

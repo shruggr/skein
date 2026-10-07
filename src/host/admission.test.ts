@@ -19,7 +19,7 @@ import { ephemeralWallet } from "../wallet.ts";
 import { now as clockNow } from "./clock.ts";
 import { appendRequest } from "./frontdoor.ts";
 import { admit2, keyBytes, writeGenesis } from "./genesis.ts";
-import { Kernel, KERNEL_BIN } from "./kernel.ts";
+import { DoorAnswered, Kernel, KERNEL_BIN } from "./kernel.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL } from "./providers.ts";
 
 async function kernel(t: { after(f: () => unknown): void }) {
@@ -38,7 +38,7 @@ test("append: the genesis entry only, as the log's first; every other entry is a
   // Before any genesis: an event entry through `append` is refused (it would skip admit's checks).
   await assert.rejects(k.store.log.append(await nextEntry(k.store, { event, box: "notes" } as never, clockNow()) as never), /append: only the genesis entry is appended/);
   assert.ok(!(await k.store.log.tip()), "nothing written");
-  await writeGenesis(k, { identity, owner, handle: "adm", domain: "localhost" });
+  await writeGenesis(k, { identity, root: [owner], handle: "adm", domain: "localhost" });
   await k.start();
   await k.idle();
   const tip = await k.store.log.tip();
@@ -51,7 +51,7 @@ test("append: the genesis entry only, as the log's first; every other entry is a
 
 test("admit: no mail entry from the host (K2); the signed message as a `local` request is verified by the front door and routed", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const { k, identity, owner, ownerKey } = await kernel(t);
-  await writeGenesis(k, { identity, owner, handle: "adm", domain: "localhost" });
+  await writeGenesis(k, { identity, root: [owner], handle: "adm", domain: "localhost" });
   await k.start();
   await k.idle();
   const tree = await k.store.put({ kind: "note", text: "the owner's" } as never);
@@ -61,21 +61,18 @@ test("admit: no mail entry from the host (K2); the signed message as a `local` r
   // The host's word: a mail entry naming an unsigned record is refused at admission.
   const mail = await k.store.put(unsigned as never);
   await assert.rejects(admit2(k, { mail } as never, { body: bodyBytes }), /admit: a message is not admitted as a mail entry/);
-  // A forged signature, as a local request: admitted (the package as received), refused by the front door.
-  await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: new Uint8Array(70) }, body: bodyBytes });
+  // A forged signature, as a local request: turned away at the door by the transport's check (#143: no entry).
+  await assert.rejects(appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: new Uint8Array(70) }, body: bodyBytes }), DoorAnswered);
   await k.idle();
   assert.equal(await k.call("head", "notes/x"), null, "a message whose signature does not verify runs nothing");
-  // Signed by the owner: the front door checks it and routes it to the owner's `head` row.
+  // Signed by root: the front door checks it, and the gate passes it to the kernel's `head` route (root's).
   const { signature } = await ephemeralWallet(ownerKey).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
   await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
   await k.idle();
   assert.ok(((await k.call("head", "notes/x")) as CID | null)?.equals(tree), "the owner's signed message moved the head");
   // #126 step 4: unsigned, from anyone but the instance itself to itself, is not a `local` package.
   await assert.rejects(appendRequest(k, "local", { kind: "message", message: unsigned, body: bodyBytes }), /admit: a request record in its transport's shape/);
-  // The loopback's shape (the instance to itself), unsigned, but no record the instance emitted: the door refuses it.
+  // The loopback's shape (the instance to itself), unsigned, but no record the instance emitted: the door turns it away.
   const self = { ...unsigned, sender: keyBytes(identity) };
-  const e = await appendRequest(k, "local", { kind: "message", message: self, body: bodyBytes });
-  await k.idle();
-  const refused = (await k.store.get(e) as unknown as { refused?: { reason?: string } }).refused;
-  assert.match(String(refused?.reason), /not a message this instance emitted/, "an unsigned loopback is admitted only as the instance's own emit");
+  await assert.rejects(appendRequest(k, "local", { kind: "message", message: self, body: bodyBytes }), (e: unknown) => e instanceof DoorAnswered && /not a message this instance emitted/.test(e.answer.reason ?? ""), "an unsigned loopback is admitted only as the instance's own emit");
 });

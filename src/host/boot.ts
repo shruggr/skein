@@ -4,15 +4,16 @@
 //   bin/<name>.wasm   a handler program's module (WASI), or
 //   bin/<name>.cid    the CID (raw, bafkrei…) of a module the source or the kernel holds
 //   bin/<name>.json   optional: the program record's {inputs, services, description}
-//   etc/config.json   optional: {defaults, peers, names, collect, feeds} (keys hex or $owner/$infer; feeds: feeds.ts)
-//   etc/dispatch.json        [{transport?, address, prefix?, sender?, program, fn?, …}] (#77: the dispatch rows; genesis.ts DispatchSpec)
-//   etc/subscriptions.json   [{sender?, box, handler}] (the form before #77, still read: a mailbox row each)
+//   etc/config.json   optional: {defaults, peers, names, collect, feeds, roles} (keys hex, $self, $infer or a provider's $<name>; feeds: feeds.ts)
+//   etc/dispatch.json [{transport?, address, prefix?, filters?, program?, fn?, …}] (#77, #143: the routes; genesis.ts DispatchSpec)
+//   etc/apps.json     optional (#141): {install: [<app tree>], routes?: [<root's own route>]}
 //   … anything else: the instance's files (SOUL.md, skills/ …)
+//   (etc/subscriptions.json, etc/routes.json, etc/reads.json — the forms before #77 and #115 — are refused, #143)
 //
 // The loader **pre-fills the store** with the tree's objects (git-raw blobs
 // and trees, each hash-checked by the kernel's `putblock`; modules as raw
 // blocks), puts a program record per bin/ module, and writes the genesis from
-// the tree's config and subscriptions, naming the tree — the kernel sets
+// the tree's config and routes, naming the tree — the kernel sets
 // `main` to it when it processes the genesis. That is the state an authorised
 // `objects` + `head` pair would have produced, written directly, and a
 // function of the log (a replay copies the tree and gets the same state).
@@ -38,8 +39,8 @@ import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
-import { appRecordIn, mergeConfig, planInstall, planOwnerRead, READS_HEAD, readStoredApp, type InstanceView, type ReadEntry, type ViewStore } from "./plan.ts";
-import { CLAIM_ROW, codeSystem, keyBytes, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type PathRowSpec, type BoxRowSpec, type System } from "./genesis.ts";
+import { mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
+import { CLAIM_ROW, codeSystem, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
 export const DAG_CBOR = 0x71;
@@ -49,10 +50,9 @@ export { programRecord, RAW, rawCid, wasmKind };
 export const BIN = "bin";
 export const CONFIG = "etc/config.json";
 export const DISPATCH = "etc/dispatch.json";
-export const SUBSCRIPTIONS = "etc/subscriptions.json";
-export const ROUTES = "etc/routes.json";
-export const READS = "etc/reads.json";
-/** #141: the apps an image installs at birth, and the owner's reads (ImageApps). */
+/** The forms before #77 and #115, refused (#143: they spoke of senders). */
+export const GONE = ["etc/subscriptions.json", "etc/routes.json", "etc/reads.json"];
+/** #141: the apps an image installs at birth, and root's own routes (ImageApps). */
 export const APPS = "etc/apps.json";
 
 /** Blocks by CID, from wherever a source keeps them. */
@@ -98,27 +98,22 @@ export interface SystemTree {
   /** Modules named by bin/<name>.wasm (with their bytes) or bin/<name>.cid (bytes if the source has them). */
   modules: Array<{ cid: CID; bytes?: Uint8Array; name: string }>;
   config: ConfigSpec;
-  /** etc/dispatch.json (#77): the dispatch rows; etc/subscriptions.json, the form before it (mailbox rows). One of them is required. */
-  dispatch?: DispatchSpec[];
-  subscriptions?: BoxRowSpec[];
-  /** etc/routes.json (#40, the form before #77: http and libp2p rows), else the stock http rows; etc/reads.json, else the stock reads. */
-  routes?: PathRowSpec[];
-  reads?: ReadSpec[];
+  /** etc/dispatch.json (#77, #143): the routes. Required. */
+  dispatch: DispatchSpec[];
   /** etc/apps.json (#141): the apps installed at birth, and each one's tree (path → tree CID). */
   apps?: ImageApps;
   appTrees?: Record<string, CID>;
 }
 
 /**
- * etc/apps.json (#141): what an image installs at birth — `install`, the apps' trees in the image
- * (`apps/<name>`), in order; `reads`, the owner's own reads (#135), each `program` a role of an installed
- * app as `<app>.<role>` (the site at `/`: {address: "/", prefix: true, program: "site.site", fn: "get",
- * root: "www"}). The genesis carries what installing them as messages would have written: the
- * records (pre-filled), the rows (with `app`) and the heads `<app>/app` and `reads` (plan.ts
- * planInstall, planOwnerRead) — but no row from `$owner` in an image: it has no owner, and the owner
- * adds those after the claim.
+ * etc/apps.json (#141, #143): what an image installs at birth — `install`, the apps' trees in the
+ * image (`apps/<name>`), in order; `routes`, root's own routes (no app: an app's upgrade or
+ * uninstall leaves them), as the kernel takes them — the site at `/`: the read route
+ * {transport: "http", address: "/", prefix: true, filters: ["site.get"], root: "www"}. The genesis
+ * carries what installing them as messages would have written: the records (pre-filled), the
+ * routes (with `app`) and the heads `<app>/app` (plan.ts planInstall, planRootRoute).
  */
-export interface ImageApps { install: string[]; reads?: Array<{ address: string; prefix?: boolean; program: string; fn: string; [setting: string]: unknown }> }
+export interface ImageApps { install: string[]; routes?: DispatchSpec[] }
 
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {
   const b = await objects.get(cid);
@@ -195,31 +190,22 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
     const meta = json<{ inputs?: unknown; services?: string[]; description?: string }>(`${BIN}/${name}.json`) ?? {};
     programs.push({ name, module, record: programRecord(name, module, meta) });
   }
+  for (const g of GONE) if (at(g)) throw new Error(`${g}: the form before #77/#115 is gone (#143: it spoke of senders) — name routes in ${DISPATCH}`);
   const dispatch = json<DispatchSpec[]>(DISPATCH);
-  if (dispatch !== undefined && !Array.isArray(dispatch)) throw new Error(`${DISPATCH}: not a list`);
-  const subscriptions = json<BoxRowSpec[]>(SUBSCRIPTIONS);
-  if (subscriptions !== undefined && !Array.isArray(subscriptions)) throw new Error(`${SUBSCRIPTIONS}: not a list`);
-  if (dispatch === undefined && subscriptions === undefined) throw new Error(`${DISPATCH}: missing (a system tree names its dispatch rows; ${SUBSCRIPTIONS} is the form before #77)`);
-  for (const s of subscriptions ?? []) {
-    if (!s || typeof s.box !== "string" || !s.box || typeof s.handler !== "string" || (s.sender !== undefined && typeof s.sender !== "string")) {
-      throw new Error(`${SUBSCRIPTIONS}: bad entry ${JSON.stringify(s)} (want {sender?, box, handler})`);
-    }
-  }
+  if (dispatch === undefined) throw new Error(`${DISPATCH}: missing (a system tree names its routes)`);
+  if (!Array.isArray(dispatch)) throw new Error(`${DISPATCH}: not a list`);
   const config = json<ConfigSpec>(CONFIG) ?? {};
   if (config.defaults && Object.values(config.defaults).some((v) => typeof v !== "string")) throw new Error(`${CONFIG}: every default is a string`);
-  const routes = json<PathRowSpec[]>(ROUTES);
-  if (routes !== undefined && !Array.isArray(routes)) throw new Error(`${ROUTES}: not a list`);
-  const reads = json<ReadSpec[]>(READS);
-  if (reads !== undefined && !Array.isArray(reads)) throw new Error(`${READS}: not a list`);
   const apps = json<ImageApps>(APPS);
-  if (apps !== undefined && (!apps || !Array.isArray(apps.install) || apps.install.some((x) => typeof x !== "string") || (apps.reads !== undefined && !Array.isArray(apps.reads)))) throw new Error(`${APPS}: want {install: [<path of an app's tree>], reads?: [{address, prefix?, program: <app>.<role>, fn, …settings}]}`);
+  if (apps !== undefined && (!apps || !Array.isArray(apps.install) || apps.install.some((x) => typeof x !== "string") || (apps.routes !== undefined && !Array.isArray(apps.routes)))) throw new Error(`${APPS}: want {install: [<path of an app's tree>], routes?: [<root's own route>]}`);
+  if ((apps as { reads?: unknown } | undefined)?.reads !== undefined) throw new Error(`${APPS}: reads: gone (#143) — root's own read is a route in \`routes\` (filters only)`);
   const appTrees: Record<string, CID> = {};
   for (const path of apps?.install ?? []) {
     const e = at(path);
     if (!e || e.mode !== "40000") throw new Error(`${APPS}: ${path} is not a directory of the tree`);
     appTrees[path] = e.cid;
   }
-  return { ...(apps ? { apps, appTrees } : {}), root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, ...(dispatch ? { dispatch } : {}), ...(subscriptions ? { subscriptions } : {}), ...(routes ? { routes } : {}), ...(reads ? { reads } : {}) };
+  return { ...(apps ? { apps, appTrees } : {}), root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, dispatch };
 }
 
 // ---------------------------------------------------------------- the loader
@@ -263,18 +249,15 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   // The front door is the kernel's when the tree brings none; every handler comes from bin/
   const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
-  let s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
+  // A tree that names no http route takes the stock ones (the handshake, the messagebox's, the explorer), as a tree
+  // with no etc/routes.json did before #143; each is dropped when the tree lacks its program.
+  const specs = t.dispatch.some((r) => r.transport === "http") ? t.dispatch : [...t.dispatch, ...STOCK_HTTP];
+  let s: System = resolveSystem(c, programs, t.config, t.root, specs);
   const isClaim = (r: DispatchRow) => r.program === "kernel" && r.fn === "claim";
-  // An image (#89): no owner, so it must be claimable — its rows carry the claim row.
-  if (!c.owner && !s.dispatch.some(isClaim)) throw new Error(`an image (a genesis with no owner) needs a claim row in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
-  // An image booted with its owner named (#142: the host skein): born as a claim would leave it — the owner's admin
-  // rows (above), the owner's explorer row (the front door's `explore` at /explore and below), no claim row.
-  if (c.owner && s.dispatch.some(isClaim)) {
-    const explorer: DispatchRow[] = programs.frontdoor && !s.dispatch.some((r) => r.transport === "http" && r.address === "/explore")
-      ? [{ transport: "http", address: "/explore", prefix: true, sender: keyBytes(c.owner), program: programs.frontdoor, fn: "explore" }]
-      : [];
-    s = { ...s, dispatch: [...s.dispatch.filter((r) => !isClaim(r)), ...explorer] };
-  }
+  // An image (#89, #143): no root, so it must be claimable — its routes carry the claim route.
+  if (!c.root?.length && !s.dispatch.some(isClaim)) throw new Error(`an image (a genesis with no root) needs a claim route in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
+  // An image booted with root named (#142: the host skein): born as a claim would leave it — no claim route.
+  if (c.root?.length && s.dispatch.some(isClaim)) s = { ...s, dispatch: s.dispatch.filter((r) => !isClaim(r)) };
   let apps: Booted["apps"];
   if (t.apps) {
     const born = await installAtBirth(k, src.objects, t, s, c);
@@ -288,11 +271,11 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
 
 /**
  * #141: the apps an image installs at birth (etc/apps.json), planned as an install by messages
- * would be (plan.ts: readStoredApp over the app's tree in the image, planInstall, planOwnerRead)
- * against the instance as its genesis will stand — the same records, rows and heads, the rows from
- * `$owner` left out when the genesis names no owner (and holding the owner's key when it names one,
- * #142). An app's config given at creation (`appConfig`) is merged over its manifest's, as an
- * install's `--config` is. Their records are put into the store; the rows and heads go into the genesis.
+ * would be (plan.ts: readStoredApp over the app's tree in the image, planInstall) against the
+ * instance as its genesis will stand — the same records, routes and heads — and root's own routes
+ * (planRootRoute). An app's config given at creation (`appConfig`) is merged over its manifest's,
+ * as an install's `--config` is. Their records are put into the store; the routes and heads go
+ * into the genesis.
  */
 export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, objects: Objects, t: SystemTree, s: System, c: Genesis2Config): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
   const local = new MemBlocks();
@@ -308,7 +291,7 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, o
     putBlock: async (cid: CID, b: Uint8Array) => { local.map.set(cid.toString(), { cid, bytes: b }); },
   } as unknown as ViewStore;
   const view: InstanceView = {
-    store, owner: c.owner ?? "", identity: c.identity, programs: s.programs,
+    store, identity: c.identity, programs: s.programs,
     addressBook: (c.addressBook ?? []).map((e) => ({ key: Buffer.from(e.key).toString("hex"), transport: e.transport, address: e.address, ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })),
     heads: [], dispatch: [...s.dispatch],
   };
@@ -316,40 +299,25 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, o
   const heads = new Map<string, CID>();
   let put = 0;
   const put1 = async (r: { cid: CID; bytes: Uint8Array }) => { if (!(await k.hasBlock(r.cid))) { await k.putBlock(r.cid, r.bytes); put++; } };
-  const take = async (records: Array<{ cid: CID; bytes: Uint8Array }>, hs: Array<{ name: string; tree: CID }>) => {
-    // A `reads` record each step replaces is put once, the last (a block nothing names would not replay).
-    const reads = hs.find((h) => h.name === READS_HEAD)?.tree;
-    for (const r of records) {
-      local.map.set(r.cid.toString(), r);
-      if (!reads?.equals(r.cid)) await put1(r);
-    }
-    for (const h of hs) {
-      heads.set(h.name, h.tree);
-      view.heads = [...view.heads.filter((x) => x.name !== h.name), { name: h.name, root: h.tree }];
-    }
-  };
   const apps: Array<{ name: string; version: string; notes: string[] }> = [];
   for (const path of t.apps!.install) {
     const app = await readStoredApp(store, t.appTrees![path]!);
     // #142: an app's config at birth (the host skein's onboard: its domain, origin, name and note from host.env), merged as `--config` is.
     const config = c.appConfig?.[app.checked.manifest.name];
     if (config) app.checked.manifest.config = mergeConfig(app.checked.manifest.config, config);
-    const p = await planInstall(app, view, { modules: objects, image: !c.owner });
-    await take(p.records, p.heads);
+    const p = await planInstall(app, view, { modules: objects });
+    for (const r of p.records) { local.map.set(r.cid.toString(), r); await put1(r); }
+    for (const h of p.heads) {
+      heads.set(h.name, h.tree);
+      view.heads = [...view.heads.filter((x) => x.name !== h.name), { name: h.name, root: h.tree }];
+    }
     for (const r of p.rows) { rows.push(r.row); view.dispatch.push(r.row); }
     apps.push({ name: p.app, version: p.version, notes: p.notes });
   }
-  for (const r of t.apps!.reads ?? []) {
-    const [name, role] = r.program.split(".");
-    const rec = name && role ? await appRecordIn(view, name) : undefined;
-    const program = rec?.record.programs[role!];
-    if (!program) throw new Error(`${APPS}: read ${r.address}: ${r.program} is not <app>.<role> of an app installed here`);
-    const { prefix, ...rest } = r;
-    const p = await planOwnerRead(view, "add", { ...rest, ...(prefix ? { prefix: true as const } : {}), program } as ReadEntry);
-    await take(p.records, [p.head]);
+  for (const r of rowsOf(t.apps!.routes ?? [], s.programs)) {
+    const p = await planRootRoute(view, "add", r);
+    for (const x of p.rows) { rows.push(x.row); view.dispatch.push(x.row); }
   }
-  const reads = heads.get(READS_HEAD);
-  if (reads) await put1(local.map.get(reads.toString())!);
   return { rows, heads: Object.fromEntries(heads), put, apps };
 }
 
@@ -366,12 +334,10 @@ export async function stockSystemFiles(k: Kernel): Promise<Record<string, string
     files[`${BIN}/${name}.json`] = `${JSON.stringify({ inputs: r.inputs, services: r.services, description: r.description }, null, 2)}\n`;
   }
   const { DEFAULTS } = await import("../runtime/log.ts");
-  const { STOCK_DISPATCH, STOCK_HTTP, STOCK_READS, STOCK_SCOPES } = await import("./genesis.ts");
-  files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"], scopes: STOCK_SCOPES }, null, 2)}\n`;
-  // The stock rows (#77): the admin rows and the boxes, then the HTTP rows as dispatch specs.
-  const http = STOCK_HTTP.map(({ path, prefix, program, fn, auth, read, root, index }) => ({ transport: "http", address: path ?? prefix, ...(prefix !== undefined ? { prefix: true } : {}), sender: auth === "none" ? "*" : "session", program, fn, ...(read ? { read } : {}), ...(root ? { root } : {}), ...(index ? { index } : {}) }));
-  files[DISPATCH] = `${JSON.stringify([...STOCK_DISPATCH, ...http], null, 2)}\n`;
-  files[READS] = `${JSON.stringify(STOCK_READS, null, 2)}\n`;
+  const { STOCK_DISPATCH, STOCK_ROLES, STOCK_SCOPES } = await import("./genesis.ts");
+  files[CONFIG] = `${JSON.stringify({ defaults: DEFAULTS, collect: ["completions"], scopes: STOCK_SCOPES, roles: STOCK_ROLES }, null, 2)}\n`;
+  // The stock routes (#77, #143): the boxes, the events and the HTTP routes (the admin routes are every genesis's).
+  files[DISPATCH] = `${JSON.stringify(STOCK_DISPATCH, null, 2)}\n`;
   return files;
 }
 
@@ -428,7 +394,7 @@ export function wasmDirObjects(dir: string): Objects {
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
 /** The repo's pinned modules (wasm/): what a system tree's `bin/*.cid` names. */
 export const WASM_DIR = join(ROOT, "wasm");
-/** The default image (#89): a user skein's — no owner in it, a claim row. */
+/** The default image (#89): a user skein's — no root in it, a claim route. */
 export const DEFAULT_IMAGE = join(ROOT, "images/default");
 /** The host image's own part (#142): merged over the default image (mergeImages), the host skein's image. */
 export const HOST_IMAGE = join(ROOT, "images/host");
@@ -436,7 +402,7 @@ export const HOST_IMAGE = join(ROOT, "images/host");
 /**
  * Two image trees merged (#142: images are starting trees that merge): every path of `over` added to
  * `base`. A directory in both is merged; a file in both must be the same blob — except `etc/apps.json`,
- * whose `install` and `reads` lists are joined (an app in both is refused). Any other path in both is a
+ * whose `install` and `routes` lists are joined (an app in both is refused). Any other path in both is a
  * collision, refused with its path. The installer's own checks (boxes, heads, paths) run when the merged
  * image's apps are installed at birth (installAtBirth). The new trees and the merged apps.json go into
  * `out`; every other object stays where it was.
@@ -459,8 +425,8 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
         const x = JSON.parse(await blob(had.cid, path)) as ImageApps, y = JSON.parse(await blob(e.cid, path)) as ImageApps;
         const both = (x.install ?? []).filter((p) => (y.install ?? []).includes(p));
         if (both.length) throw new Error(`${APPS}: ${both.join(", ")} installed by both images`);
-        const reads = [...(x.reads ?? []), ...(y.reads ?? [])];
-        const h = hashBlob(new TextEncoder().encode(`${JSON.stringify({ install: [...(x.install ?? []), ...(y.install ?? [])], ...(reads.length ? { reads } : {}) }, null, 2)}\n`));
+        const routes = [...(x.routes ?? []), ...(y.routes ?? [])];
+        const h = hashBlob(new TextEncoder().encode(`${JSON.stringify({ install: [...(x.install ?? []), ...(y.install ?? [])], ...(routes.length ? { routes } : {}) }, null, 2)}\n`));
         await out.putBlock(h.cid, h.object);
         entries.set(e.name, { ...e, cid: h.cid });
         continue;

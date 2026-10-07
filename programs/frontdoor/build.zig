@@ -2,7 +2,6 @@
 // (skein-sdk: its dag-cbor, CIDs and the `skein` imports).
 //
 //   zig build        → zig-out/bin/frontdoor.wasm (scripts/build-programs.sh copies it to wasm/)
-//   zig build test   → the gate's unit tests (gate.zig), native
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -25,8 +24,4 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(exe);
-
-    // The gate (gate.zig): std only, tested on the build machine.
-    const gt = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("gate.zig"), .target = b.graph.host }) });
-    b.step("test", "the gate's unit tests").dependOn(&b.addRunArtifact(gt).step);
 }

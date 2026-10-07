@@ -151,173 +151,136 @@ writes the same chain. A name never moved has no chain.
   on the last `objects` bundle, and the kernel's `objects` operation advances
   `main` to it.
 
-### The dispatch table, and the kernel's four tables (#77, format 8)
+### The route table, the grants, and the kernel's tables (#77, #143, format 9)
 
-The kernel is the machine, four tables and the `wallet` (signer) import.
+The kernel is the machine, its tables and the `wallet` (signer) import.
 The tables are **objects** (the store: blocks by CID, global, unowned),
-**heads** (name → root, with its owner, above), the **dispatch table** and
-the **address book** (`peers`, docs/MESSAGES.md). No program import reaches
-a table: a step's writes are its `put`/`keep` records and the heads in its
-scope; everything else is an **admin operation the kernel itself performs**
-on a message at an admin box from the owner or a delegate — no program is
-stepped, no elevated scope exists. The host (transports + providers + store
-+ signer) routes nothing: the dispatch table does.
+**heads** (name → root, above), the **route table** (the dispatch chain),
+the **address book** (`peers`, docs/MESSAGES.md) and the **grants** (the
+head `grants`, #143). No program import reaches a table: a step's writes are
+its `put`/`keep` records and the heads in its scope; everything else is an
+**admin operation the kernel itself performs** on a message at an admin box,
+gated by root — no program is stepped, no elevated scope exists. The host
+(transports + providers + store + signer) routes nothing: the route table
+does.
 
-The dispatch table is one chain per instance: origin `{kind: "dispatch"}`,
+David Case (2026-10-08): "permissions and routing might be two entirely
+different things." A route says where a package goes and which filters it
+passes; who may run a function is the gate's (grants.zig). The kernel's one
+invariant: what a skein decides from is logged and replayable — everything
+else (signing requirements, host boundaries) is policy layered on top.
+
+**The route table** is one chain per instance: origin `{kind: "dispatch"}`,
 one update per change `{op: "add" | "remove", row, thread?, input, at}`,
-the rows the updates folded in order (`kernel-zig/src/dispatch.zig`;
+the routes the updates folded in order (`kernel-zig/src/dispatch.zig`;
 `src/runtime/dispatch.ts` reads it and matches with the same rules, both
-checked against `kernel-zig/test/dispatch-cases.json`). A row:
+checked against `kernel-zig/test/dispatch-cases.json`). A route:
 
 ```
-{transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?,
- filter?: "beef", …settings}
+{transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
+ filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"],
+ program?: <program record CID> | "kernel", fn?, app?, …settings}
 ```
 
-A route, a box and a libp2p topic or protocol differ only in where
-the address comes from: a `mailbox` row's address is a box (`*`: any box, a
-mailbox instance's catch-all); an `http` row's a path (`prefix: true` for a
-prefix; exact paths match first, then the longest prefix); a `libp2p` row's
-a pubsub topic, or `/<protocol>` for a stream protocol. `sender` is who the
-row admits: `*` anyone (an open route; it takes events too; over http a
-signed request on it is still verified and answered signed, docs/MESSAGES.md
-"The instance as an HTTP server"), `event`
-(mailbox only, #79) events and never a message — the host's wiring into a
-box (a feed's header, the broadcaster's proof, a route's admit), so a box
-that takes events need not be open; a key that identity (a message's
-sender, the BRC-104 session's, a libp2p peer's; the instance's own key
-admits its own programs' messages, below "emit"), `session` (http only)
-any identity with a session. **Every other sender is a key** (#121): the
-owner's rows name the owner's key — the genesis's, or, for an image, the
-key the claim brings (the claim writes the explorer row with it). #115's
-`owner` symbol (the instance's owner as the kernel sees it at the request)
-is gone: nothing writes it, and a row a log already holds with it is still
-read that way, so such a log replays. A row is the permission: who may read the explorer is the
-explorer row's sender (there is no reads table since #115). `program` is
-the handler, or the string `kernel`: an admin row, `fn` its operation (or the
-claim, or the host's `tick`: #130, "Billing" below).
-`filter` (#121) names what the kernel's door runs on the package's content
-before the entry is written ("The door", below, "Requests"): `beef`. The
-rest is the handler's own (a file handler's `root` and `index`, #125; the install's
-`app`), carried to it as `match`. A row's key is (transport, address,
-prefix, sender): `add` replaces the row with that key in place, else
-appends; `remove` deletes it. Replay writes the same chain.
+A route's key is (transport, address, prefix): `add` replaces the route
+with that key in place, else appends; `remove` deletes it. The match is by
+address alone: a `mailbox` route's address is a box (`*`: any box), and it
+takes messages; an `event` route's a box, and it takes events (the host's
+wiring: a feed's header, the broadcaster's proof, what a libp2p route
+admits) — never a message; an `http` route's a path (the exact path first,
+then the longest prefix); a `libp2p` route's a pubsub topic or
+`/<protocol>`, exactly (a topic no route is at goes to the app that
+subscribed it, #119). `program` is the handler, or `kernel`: an admin route,
+`fn` its operation (or the claim, or the host's tick: #130 — the host's key
+is the route's `host` setting, a tick from any other key refused). **No
+program: a read route** (http only): its filters answer, nothing is logged.
+`app` is the app that installed it: its roles gate the route's `fn`. The
+rest is the handler's own (a file handler's `root`), carried as `match`.
+There is no `sender` (#143): a route that names one is refused.
 
-**The kernel matches every transport** (#115, `dispatch.zig` `first`, one
-walk): **first match wins**, in table order, among the rows of the
-package's transport at its address whose sender rule takes who it is from;
-a reply routes before any row (docs/MESSAGES.md).
+**The door** (`scheduler.zig` `door`, below "The door"): a request is
+matched to its route; the transport's own check runs where it has one (a
+libp2p topic message's GossipSub signature — the publisher's key the
+principal; a carried message's signature — its sender the principal); the
+route's **filters** run in order, before anything is recorded, over the
+request and the state as it stands — each passes the package on (rewritten,
+with a **principal**, with blocks it stored), rejects it, or answers it;
+then the **gate**. A rejection, an answer (a read route's) and the gate's
+refusal write no entry: the transport answers at once (`admit` answers
+`{answered: {kind, status, …}}`). What passes is the entry, `door:
+{principal?, verified?, filters?, beefs?, blocks?, bodies?}`, and the
+handler runs as the request's logged step. An app's filter is the function
+its app record lists under `filters`, run as a kernel call in the
+**deterministic profile**: the clock is the entry's time (and fuel), the
+randomness is seeded by the request record, nothing pending in its input,
+no network, no writes (a call's imports); the blocks it put are kept only
+if its `pass` names them.
 
-- `mailbox`: a message (from its sender) or an event (no sender: a `*` or
-  `event` row) in a box; the row's address is the box or `*`.
-- `http`: the path the request names (`route`), exact rows first, then
-  prefix rows, longest first; who it is from is the identity it claims
-  (`x-bsv-auth-identity-key`), none without one. With no row, the kernel
-  says why: no row at the path (404), a row there needs a session and none
-  is claimed (401), none there takes the claimed identity (403). A
-  restrictive row does not shadow a less specific one: the request falls
-  through to the next row that takes it.
-- `libp2p`: the topic or `/<protocol>`, exactly, from the peer's key (its peer ID); a topic no row
-  is at goes to the app that subscribed it (#119, "emit" below), and a row at the topic wins.
-- `local`: no row fires today: a provider's answer is a message, routed by
-  its `mailbox` row (to review).
+**The gate** (`grants.zig`): the roles that gate the handler's function —
+an admin operation's is `root` (the claim and the tick check their message
+themselves); an app's route's, the roles its app record declares for `fn`
+(`roles: {<role>: [<fn>…]}`, an app role named `<app>.<role>`); a genesis
+route's, the genesis's `roles` for `<program>.<fn>` (the explorer:
+`{root: ["frontdoor.explore"]}`). `root` passes anything; `user` passes any
+principal; an app role passes its holders; no principal fails closed. A
+message's principal is its sender (a carried message's: what the door
+established); an event has none. A function no role gates is open to what
+the route's filters let through.
 
-For a request the kernel hands the front door the row it matched (step
-input `match`, or `refused`), never the table. Since #121 the sender is
-verified **at the door**, before the entry is written ("Requests", below):
-the BRC-104 session and signature of the identity the kernel matched on
-for a row whose sender is not `*` (the claimed key must be the session's),
-a topic message's GossipSub signature, a `local` message's own signature (a
-provider's answer, a forwarded claim) or, for the loopback, its record in
-the store — the transport's middleware's fn `verify`, called by the kernel. The front
-door's step then answers the handshake (a request like any other: its step
-writes the session) and runs the row's handler, trusting what the door
-recorded (`door.verified`). Matching on the claim and then verifying it is
-the same as verifying and then matching: the handler runs only when the
-claim held. (A genesis written before #115 carries the front
-door's `reads` and pins a front door that matched for itself; its request
-steps still get `dispatch` and `reads`, and a row's `read` op is checked
-against those reads in the kernel's match.)
+**The grants** are the head `grants`, the kernel's own (no `head` message
+and no program's `advance` reaches it): `{kind: "grants", roles: {<role>:
+[<key> …]}}`, keys in byte order. The genesis's `root` writes the first
+root holders; the claim grants root to its claimant; the admin operation
+`grant` adds or removes one (root only, v1). Replay performs them again.
 
-- **The genesis carries the seed.** Every genesis that names an owner gets
-  the owner's four admin rows first — `{mailbox, objects | head | dispatch |
-  peers, $owner, kernel}` — then its own `dispatch` (src/host/genesis.ts; the default seed: the
-  reserved box the host admits into, `:ack` → the messagebox, and the
-  default HTTP rows — no `run`, no `chat`: those are the shell app's and
-  the chat app's rows, #83; a mailbox
-  instance's: `:ack` and `*` → the messagebox), written as the chain's first
-  updates when the genesis entry is processed (no `thread`). A genesis
-  naming `subscriptions` or `routes` is refused. Sessions are state, but no
-  table: the front door keeps them under its own head `frontdoor/sessions`
-  (#68, MESSAGES.md). No `register` box: registration is application wiring
-  (an application's own etc/dispatch.json, BOOTSTRAP.md). An **image**
-  (#89: the default image, BOOTSTRAP.md) names no owner and has no admin
-  rows: its one kernel row is the claim row, `{mailbox, claim, *, kernel,
-  claim}`.
+- **The genesis carries the seed.** Every genesis gets the admin routes
+  first — `{mailbox, objects | head | dispatch | peers | grant, kernel}` —
+  then its own `dispatch` (src/host/genesis.ts; the default seed: `:ack` →
+  the messagebox as an event route, the handshake route
+  `/.well-known/auth` → the front door's `handshake`, the messagebox's http
+  routes behind `kernel.brc104`, and the explorer `/explore` behind
+  `kernel.brc104`, gated by root; a mailbox instance's: those and `*` → the
+  messagebox), written as the chain's first updates when the genesis entry
+  is processed (no `thread`), and its `root` into the grants. An **image**
+  (#89: the default image, BOOTSTRAP.md) names no root: its routes carry
+  the claim route, `{mailbox, claim, kernel, claim}`.
 - **The admin operations**, one per table, taken by the kernel on a message
-  at a row whose program is `kernel` (validated whole, then written under
-  the entry; a refusal is a log line and nothing written; replay performs
-  them again from the message):
+  at a route whose program is `kernel`, root's (validated whole, then
+  written under the entry; a refusal is a log line and nothing written;
+  replay performs them again from the message):
   - `objects` — `{records: [{cid, bytes}], root?}`: each block stored under
     its CID (hash-checked); `root` becomes `main` if there is none.
   - `head` — `{name, tree}`: the head advanced to a record in the store
-    (owner = the name's app).
-  - `dispatch` — `{op: "add" | "remove", row}`: the table changed (a program
-    row's record and module must be in the store).
+    (not `billing` or `grants`: the kernel's own).
+  - `dispatch` — `{op: "add" | "remove", row}`: the table changed (a
+    program route's record and module must be in the store).
   - `peers` — `{op: "add", key, transport?, address? | url?, handle?,
     domain?}` | `{op: "remove", key}`: the address book (`source` "admin").
-    An entry is a key, a transport and an address (#126: no roles; a `role`
-    an older client sends is not kept).
-  - `claim` (#89, #127) — `{messagebox?, handle?, domain?}`, at an image's
-    claim row (from anyone). **The owner is the message's sender** — the
-    verified signer — never a key in the body (a body's `owner` is not
-    read); a sender that is not an identity key is refused. In one step the
-    sender's four admin rows are added, and (#121) the explorer row with the
-    sender's key (`{http, /explore, prefix, <owner>, <the genesis's front
-    door>, explore}`; #126: there is no `owner` sender symbol any more —
-    every sender is a key), the claim row is removed, the head `claim` points at
-    `{owner: <the sender>, messagebox?, handle?, domain?}` (what was
-    claimed), and with a `messagebox` the owner's address-book entry is
-    written (`source` "claim"). Refused when the genesis names an owner or
-    the table has an admin row; a second claim finds no row. The instance's
-    owner — the step and call input `owner` — is the genesis's, else the key
-    the head `claim` names (none before the claim). Two ways it arrives:
-    the owner's own message to the instance (a bare image: whoever sends the
-    claim first owns it — `skein claim`); or a claim
-    the owner signed **before the instance existed**, naming no recipient —
-    the one message that may name none (the mail record without
-    `recipient`, signed by its sender — one of the few messages that sign
-    themselves (#126 step 4: no session of the instance's carries it) —
-    BRC-169's `[2, "metanet handles envelope"]`, key `send`, counterparty
-    anyone, so the sender's key alone checks it) — which the host's instance manager forwards into
-    a new instance as its first entry, a `local` request (`create`, #90,
-    MESSAGES.md). The host signs nothing for the owner.
-  `skein head`, `bin/skein import` (objects), `skein dispatch add|remove
-  [--sender key] <box> <handler>` send them, and `skein
-  install|uninstall|dispatch|peers|deploy|claim` builds them for any BRC-100
-  wallet to send (#124). No reply. **No program reaches a kernel
-  table** (#87): every program emits as the instance, and no default row
-  admits the instance's own key to an admin box, so a program's message to
-  one (`peers`, say) finds no row — recorded, nothing runs. The resolve
-  program keeps what it finds under its own name (`resolve/peers`); the
-  address book changes only on the owner's messages (or a key the owner
-  added as a sender on the `peers` row).
-- **A row is the permission.** Who may administer is whoever an admin row
-  admits: the genesis writes the owner's; delegating is the owner adding a
-  row with the same operation and another sender, through `dispatch` —
-  signed and logged like any entry. A message at an admin box from anyone
-  else matches no row: recorded, nothing runs.
-- **Registering a program** is a row to its CID. Its record (and module)
-  must be in the store first: `objects` delivers them. There is no
-  `subscribe` import (skein-sdk 0.3.0).
-- Nothing polls for messages (#40): a message arrives at the instance's front
-  door (a `sendMessage` request, appended as an entry, #68) and the front
-  door's step routes it; a row added at runtime takes messages from the
-  next one.
-- A store whose log predates the table has none, so nothing would route:
-  the runtime refuses to start it ("before format 8"). It needs a new
-  genesis (no migration).
+  - `grant` (#143) — `{op: "add" | "remove", role, principal}`: `root` or
+    `<app>.<role>` to (or from) a key (`user` is any principal: never
+    granted).
+  - `claim` (#89, #127, #143) — `{messagebox?, handle?, domain?}`, at an
+    image's claim route (open: from anyone). The claimant is the message's
+    sender — the verified signer — never a key in the body. In one step:
+    root granted to the sender, the claim route removed, the head `claim` →
+    `{claimant: <the sender>, messagebox?, handle?, domain?}`, and with a
+    `messagebox` the claimant's address-book entry (`source` "claim").
+    Refused when root is held already (a second claim finds no route
+    anyway). Two ways it arrives: the claimant's own message to the
+    instance (`skein claim`), or a claim signed **before the instance
+    existed**, naming no recipient (BRC-169's `[2, "metanet handles
+    envelope"]`, key `send`, counterparty anyone), which the host's
+    instance manager forwards into a new instance as its first entry, a
+    `local` request (`create`, #90, MESSAGES.md). The host signs nothing
+    for the claimant.
+  No reply. **No program reaches a kernel table** (#87): every program
+  emits as the instance, and the instance's key holds no role unless root
+  grants it one, so a program's admin message is gated away — recorded,
+  nothing runs.
+- **Registering a program** is a route to its CID. Its record (and module)
+  must be in the store first: `objects` delivers them.
+- A store whose log predates format 9 is refused at start ("before format
+  9"): it needs a new genesis (no migration).
 
 ## Programs and execution
 
@@ -687,9 +650,11 @@ function over the current state and return a value. It writes nothing.
 - **The ABI** is the program's ordinary entry (`_start`, or `wasi:cli/run`
   for a component), so it is the same for preview1 modules and components.
   `input()` returns `{kind: "call", fn, arg: bytes, caller?, now, self:
-  {handle, domain, identity}, owner, programs, peers, defaults, names,
-  reads, dispatch: [<row>], pending: [entry CIDs
+  {handle, domain, identity}, programs, peers, defaults, names,
+  dispatch: [<route>], pending: [entry CIDs
   admitted and not yet processed], state: <the committed state record>}`
+  (#143: no `owner`, no `reads`; a filter's call has `filter: true` and no
+  `pending`)
   (an in-VM call from a step adds `step: {thread, step, entry, at}`);
   the program dispatches on `fn` and writes its result to stdout. A non-zero
   exit is the error, with the last line of stderr as its message. The
@@ -719,21 +684,17 @@ function over the current state and return a value. It writes nothing.
   record claims. A step sees its own head moves: a
   head a callee advanced reads back as moved in the rest of the step. Calls
   nest to depth 8; an answer is at most 64 MiB.
-- **What calls are for** (#68, #135). Not messages: every message is an
-  entry and the front door is stepped on it ("Requests", below). A kernel
-  call is a **read** — the second door (#135; docs/MESSAGES.md "The front
-  door: two doors"): an HTTP request at a path the instance's reads name
-  (the head `reads`, written by app installs from their `reads[]` and by
-  the owner) is served by a call of the front door's fn `read` with the
-  request as received and the read as `match`; the front door verifies it
-  when it is signed, calls the read's function (an in-VM call: the callee
-  reads only, so a function that writes fails inside it) and signs the
-  answer on the session. No entry, nothing logged; the fuel goes to the
-  host's meter. A call also answers a route that is a read of live state
-  after its request's thread (the explorer: fn `read` with the entry's
-  request), a door refusal of a signed request (fn `refusal`), and later
-  the broadcaster's questions of an instance (#65). From a step, an in-VM
-  call is how the front door calls a route handler.
+- **What calls are for** (#68, #135, #143). Not messages: every message is
+  an entry and the front door is stepped on it ("Requests", below). A
+  kernel call is a **read**: an app's filter runs as one at the door (#143,
+  in the deterministic profile) — a read route's last filter answers the
+  request, nothing logged, the fuel on the host's meter; the front door's fn
+  `respond` signs what the door answered without an entry (a rejection, an
+  answer, the gate's refusal) on the request's session; and a route that is
+  a read of live state is answered after its request's thread (the
+  explorer: fn `read` with the entry's request), and later the
+  broadcaster's questions of an instance (#65). From a step, an in-VM call
+  is how the front door calls a route handler.
 - **The write cache.** The blocks a step puts before its update commits —
   the records a handler builds and reads back through `get` (a submission
   framed with off-chain values, which the door does not take as a BEEF,
@@ -743,40 +704,33 @@ function over the current state and return a value. It writes nothing.
   same cache, dropped with the call. When a cache flushes, and what it may
   forget that nothing reaches, is the store's policy (retention).
 
-### The door: read-only, before anything is logged (#121)
+### The door: filters, before anything is logged (#121, #143)
 
 A request's entry is written only after the **door** has run, in the
-kernel's admission path (`scheduler.zig` `door`, `door.zig`), reading and
-writing nothing but blocks:
+kernel's admission path (`scheduler.zig` `door`, `door.zig`), reading the
+state and writing nothing but blocks:
 
-1. **The row.** The kernel matches the package's dispatch row (#115).
-2. **The sender.** The transport's middleware verifies who the package is
-   from: a kernel call of its fn `verify` with the package (the genesis's
-   `middleware` per transport — the front door: BRC-104 for http on a row
-   that is not open, GossipSub's signature for a libp2p topic message, the
-   message signature for a `local` package). It answers `{ok: true,
-   verified?}` — `{caller, theirs, requestId}` for http, `{key}` for libp2p —
-   or `{refused: {status, code?, reason}}`. A handshake is a request like
-   any other: the door passes it and its step writes the session.
-3. **The filter.** The row's `filter` setting names what the door runs on
-   the package's content. For a `local` package (a message the host carried
-   in) the row is the message's own: its `mailbox` row on (sender, box),
-   none for a reply.
-4. **The outcome is logged either way.** The admission: the entry names the
-   package as the door hands it back and carries `door: {verified?,
-   filter?, beefs?: [<pointer record>], bodies?: [{of, is}]}`. Or a
-   refusal: `refused: {stage: "middleware" | "filter", reason, status,
-   code?}` beside the package as far as the door got — a stored entry, as
-   every refused request is, and **nothing runs** (no thread; a waiting
-   client gets the refusal at once: `status`, and `{status: "error", code,
-   description: reason}`; a libp2p message is `reject`, `ignore` when the
-   instance cannot judge it). Only then does the row's program run, as
-   the request's thread, trusting `door.verified` (an entry written before
-   the door has none, and its step verifies as before). A row with no
-   `filter` logs the package as received.
-
-A middleware with no fn `verify` (a front door pinned before #121) gets
-the package as received: no `door`, no filter, and its step verifies.
+1. **The route.** The kernel matches the package's route (by its address
+   alone: dispatch.zig). An http request no route is at: 404, no entry.
+2. **The transport's own check**, where the transport has one (#143:
+   inherent to it): a libp2p topic message's GossipSub signature (the
+   middleware's fn `verify`; the publisher's key the principal), a `local`
+   package's message signature or the loopback's record in the store (its
+   sender the principal). http has none: its route names what it needs.
+3. **The filters**, in the route's order (below; docs/APPS.md §2): each
+   passes the package on — rewritten, with a principal, with blocks it
+   stored — or rejects it, or answers it. For a `local` package the filters
+   are its box's route's, over the message's body.
+4. **The gate** (grants.zig): the handler's function's roles against the
+   principal. A read route has no handler: its filters answered it.
+5. **The outcome.** A rejection, an answer, the gate's refusal: **no entry**
+   — the transport answers at once (an http request signed on its session
+   when it is signed, the front door's fn `respond`; a libp2p message
+   `reject`, `ignore` when the instance cannot judge it). Else the
+   admission: the entry names the package as the filters handed it back and
+   carries `door: {principal?, verified?, filters?, beefs?, blocks?,
+   bodies?: [{of, is}]}`, and the route's program runs as the request's
+   thread, trusting what the door recorded.
 
 **The door is lossless for anything a signature covers.** What a filter
 rewrites must be reconstructible to the exact bytes, so a reader of the log
@@ -790,7 +744,19 @@ the record names. Decryption of a body encrypted to the instance is **not**
 a door job: it stays a recorded signer call inside the step, so the
 ciphertext and its signature stay in the log.
 
-**The `beef` filter** — the one way a BEEF enters a skein, whatever the
+**`kernel.brc104`** (#143) — the BRC-104 request check: the request's
+session in the front door's table (`frontdoor/sessions`, by its
+`yourNonce`; not past `defaults.sessionTtlMs` from its handshake, at the
+entry's time), its identity the session's, its signature over
+SimplifiedFetchTransport's request payload under `[2, "auth message
+signature"]`, key `"<nonce> <ours>"`, counterparty the client, through the
+signer. It passes with the principal the client's key (and `door.verified =
+{caller, theirs, requestId}`: the session the answer is signed on); a
+request with no x-bsv-auth-* headers, an unknown or expired session, a bad
+signature is rejected 401 (the stock client shakes hands again), a
+malformed one 400.
+
+**`kernel.beef`** — the one way a BEEF enters a skein, whatever the
 route (an overlay's `/submit`, a payment in a mailbox, a Metanet delivery,
 gossip, the chain app's own `ingest`). It walks the package's byte-string
 values (an http body, a libp2p message's body, a carried message's body
@@ -822,8 +788,10 @@ txid + vout, BRC-62/96/95/158). For each:
           block: <bitcoin-block CID: the header checked> | null, proves: [<tx index>]}]}
 ```
 
-A refusal still stores what decoded (the entry names the pointer record:
-the bytes are reconstructible), but no merkle nodes. The encoder — the
+A rejection still stores what decoded (#143: no entry names it — the
+blocks are content-addressed and harmless), but no merkle nodes. With no
+BEEF in the package and no principal from a filter before it, `kernel.beef`
+rejects: "nothing to validate" (#135: signed or validated). The encoder — the
 exact wire bytes from the record and its blocks — is `beef.zig` `encode`
 in the kernel, skein-sdk's `chain.record.beefOf` for programs (the chain
 app's `ingest`, the overlay's gossip), `src/runtime/beef.ts` on the
@@ -831,13 +799,10 @@ host's side.
 
 ### Requests: the front door stepped on the package (#68, #66)
 
-Every message a transport carries in is an entry (#135: an HTTP request is
-admitted when it is signed, or validated — unsigned at an open row whose
-`filter` validates the payload, its admission with no sender key; a read is
-a call, above, and any other unsigned request at a message route is the
-host's 401, no entry) — since #121 as the door
-hands it back: `{kind: "log", …, request: <record>, transport, door? |
-refused?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
+Every package a transport carries in that the door admits is an entry
+(#143: what its route's filters reject or answer, or the gate refuses, is
+none) — as the door hands it back: `{kind: "log", …, request: <record>,
+transport, door?}` (docs/MESSAGES.md, "The log"). Processing it launches the transport's middleware — the genesis's
 `middleware[transport]`, else its front door for `http`, `libp2p` and
 `local` (#70: a provider's signed answer or a forwarded claim, its
 signature checked; the loopback, this instance's own emit, its record in the store;

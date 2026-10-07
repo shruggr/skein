@@ -1,7 +1,9 @@
-// The install's plan (#72, #77, #91; docs/APPS.md §3): what installing or
-// uninstalling an app sends, as the owner, to the kernel's admin boxes, read
-// from a view of the instance — its heads, dispatch table, address book,
-// genesis programs, and its store by CID. No node APIs: the node client
+// The install's plan (#72, #77, #91, #143; docs/APPS.md §3): what installing or
+// uninstalling an app sends, as root, to the kernel's admin boxes — objects,
+// the head, the routes; no key (#143: "the person who's doing the deploying is
+// root and doesn't need to grant themselves anything") — read from a view of
+// the instance: its heads, route table, address book, genesis programs, and
+// its store by CID. No node APIs: the node client
 // (install.ts and src/client/admin.ts: `skein install`, #124, a store file's or the explorer's view) and the management
 // site (shruggr/skein-site, #92: a view over the instance's explorer reads, in
 // a browser) plan with the same code. install.ts's header has the steps.
@@ -10,14 +12,14 @@ import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { chunk, type Rec } from "../client/bundle.ts";
 import { encode, parse as parseCid } from "../runtime/cid.ts";
-import { rowKey as kernelRowKey, senderText, type DispatchRow } from "../runtime/dispatch.ts";
+import { rowKey as kernelRowKey, type DispatchRow } from "../runtime/dispatch.ts";
 import { programRecord, RAW, rawCid, wasmKind } from "../runtime/programs.ts";
 import { readBlob, readTree } from "../runtime/tree.ts";
 import type { Store } from "../runtime/store.ts";
 // Types only (erased): boot.ts and deploy.ts are node code.
 import type { Objects } from "./boot.ts";
 import type { AddressEntry } from "./deploy.ts";
-import { appPath, checkManifest, missingInterfaces, pathKey, rowAddress, rowKey, type Checked, type Derived, type Provide, type ReadIn, type Row, type ShellSource } from "./manifest.ts";
+import { checkManifest, filterRef, handlerOf, missingInterfaces, rowAddress, routeKey, type Checked, type Derived, type Provide, type Route, type ShellSource } from "./manifest.ts";
 
 const textOf = (b: Uint8Array) => new TextDecoder().decode(b);
 
@@ -72,14 +74,13 @@ export async function readStoredApp(store: Pick<Store, "bytes" | "has" | "putBlo
 /** What the install reads of the instance (its store, read only). */
 export interface InstanceView {
   store: ViewStore;
-  /** The genesis owner and the instance's identity (hex), and programs (name → program record). */
-  owner: string;
+  /** The instance's identity (hex), and programs (name → program record). */
   identity: string;
   programs: Record<string, CID>;
   addressBook: AddressEntry[];
   /** Every head and its root (the store's index). */
   heads: Array<{ name: string; root: CID }>;
-  /** The dispatch table now (#77): a row with `app` was installed by that app; without, it is the genesis's. */
+  /** The route table now (#77): a route with `app` was installed by that app; without, it is the genesis's or root's own. */
   dispatch: DispatchRow[];
 }
 
@@ -93,68 +94,6 @@ export async function appRecordIn(view: Pick<InstanceView, "store" | "heads">, n
   const r = await view.store.get(root).catch(() => undefined) as AppRecord | undefined;
   return r && r.kind === "app" ? { cid: root, record: r } : undefined;
 }
-
-// ---------------------------------------------------------------- the reads (#135: the second door)
-
-/**
- * The head the instance's reads are under (#135): its root a record {kind: "reads", reads:
- * [<read>]}, each read {address: <the path as served>, prefix?: true, program: <program record
- * CID>, fn, app?: <the app that asked for it; absent: the owner's own>, …settings}. Written by the
- * owner (the kernel's `objects` and `head` operations, as an install writes `<app>/app`): an install
- * puts its app's reads in (an upgrade replaces them, an uninstall takes them out); `skein reads`
- * adds or removes the owner's own (the site at `/`). The host reads it to serve reads by `call`
- * (frontdoor.ts serveHttp). State, so replay-derived as the dispatch table is.
- */
-export const READS_HEAD = "reads";
-
-/** One read as the reads head holds it (resolved: the path as served, the program a CID). */
-export interface ReadEntry { address: string; prefix?: true; program: CID; fn: string; app?: string; [setting: string]: unknown }
-export interface ReadsRecord { kind: "reads"; reads: ReadEntry[] }
-
-/** A read's key: its path as served, `*` for a prefix (an http row with the same address and prefix shares it). */
-export const readEntryKey = (r: { address: string; prefix?: boolean }): string => pathKey(r.address, r.prefix);
-
-/** The reads the view's head `reads` holds ([] when none). */
-export async function readsIn(view: Pick<InstanceView, "store" | "heads">): Promise<ReadEntry[]> {
-  const root = view.heads.find((h) => h.name === READS_HEAD)?.root;
-  if (!root) return [];
-  const r = await view.store.get(root).catch(() => undefined) as Partial<ReadsRecord> | undefined;
-  return r?.kind === "reads" && Array.isArray(r.reads) ? r.reads : [];
-}
-
-/** The reads an app record asks for, resolved (the path as served under /<app>/, the role's program record, `app`). */
-export function readsOf(record: AppRecord): ReadEntry[] {
-  return (record.reads ?? []).map((r: ReadIn) => {
-    const { address, prefix, program, fn, ...settings } = r;
-    const cid = record.programs[program];
-    if (!cid) throw new Error(`read ${appPath(record.name, address)}: no program for role ${program}`);
-    return { ...settings, address: appPath(record.name, address), ...(prefix ? { prefix: true as const } : {}), program: cid, fn, app: record.name };
-  });
-}
-
-/** The reads record for `reads`, encoded. */
-export function readsRecord(reads: ReadEntry[]): { cid: CID; bytes: Uint8Array } {
-  const b = encode({ kind: "reads", reads } as never);
-  return { cid: b.cid, bytes: b.bytes };
-}
-
-/**
- * Why `reads` cannot stand beside the dispatch table `rows` (#135: a read and an http row never share a
- * path) and the other reads `others`: the first clash, as a line, or undefined.
- */
-export function readClash(reads: ReadEntry[], rows: DispatchRow[], others: ReadEntry[]): string | undefined {
-  for (const r of reads) {
-    const k = readEntryKey(r);
-    const o = others.find((x) => readEntryKey(x) === k);
-    if (o) return `read ${k}: ${o.app ? `app ${o.app}` : "the owner"} has it`;
-    const row = rows.find((x) => x.transport === "http" && pathKey(x.address, x.prefix) === k);
-    if (row) return `read ${k}: an http row is at that path (${(row as { app?: string }).app ? `app ${String((row as { app?: string }).app)}` : "the genesis or the owner"}'s): a path is a read or a message route, not both`;
-  }
-  return undefined;
-}
-
-/** A read as one line of the prompt: `<address>[*] → <role or program>.<fn>[ (<settings>)]`. */
-const showRead = (r: { address: string; prefix?: boolean; fn: string; program: unknown }, role?: string) => `${r.address}${r.prefix ? "*" : ""} → ${role ?? String(r.program)}.${r.fn}${showSettings(r)}`;
 
 /** The app record (a head's root): the manifest as installed. */
 export type AppRecord = Omit<Checked["manifest"], "programs"> & { programs: Record<string, CID>; tree: CID; state?: CID };
@@ -172,8 +111,8 @@ export function mergeConfig(base: Record<string, unknown> | undefined, over: Rec
 }
 
 
-/** A dispatch change the install sends: the row as the kernel takes it (sender resolved, program a CID, address as served, `app`), and how to show it. */
-export interface RowOp { op: "add" | "remove"; row: DispatchRow & { app: string }; label: string; role?: string }
+/** A route change the install sends: the route as the kernel takes it (filters named in full, program a CID, address as served, `app`), and the role it runs. */
+export interface RowOp { op: "add" | "remove"; row: DispatchRow & { app?: string }; role?: string }
 export interface HeadOp { name: string; tree: CID }
 
 /** What an install sends, in order, and what it shows. */
@@ -194,72 +133,53 @@ export interface Plan {
   publishes: string[];
   /** What `config.overlay` added (APPS.md §6). */
   derived: Derived;
-  /** #135: the app's reads as the reads head will hold them. */
-  reads: ReadEntry[];
   notes: string[];
 }
 
-/** The address book's entry for the host service `name` (`local`, <name>), if any. */
-const serviceOf = (view: InstanceView, name: string) => view.addressBook.find((x) => x.transport === "local" && x.address === name);
-
-/** A sender as the manifest writes it → what the kernel's row carries, and how to show it. */
-function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"]; label: string } {
-  if (s === "*") return { sender: "*", label: "anyone" };
-  if (s === "session") return { sender: "session", label: "a session" };
-  if (s === "event") return { sender: "event", label: "events" };
-  if (s === "$owner") {
-    if (!view.owner) throw new Error("sender $owner: the instance has no owner yet (an image not claimed, #89, #127: the owner's own claim, skein claim)");
-    return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
-  }
-  if (s === "$self") return { sender: keyBytes(view.identity), label: `the instance itself (${view.identity.slice(0, 10)}…)` };
-  if (s.startsWith("$")) {
-    // Tooling (#126): `$<name>` names the key the instance's address book reaches on its host at `local` <name> (a host service: `$cron`, `$status`).
-    const e = serviceOf(view, s.slice(1));
-    if (!e) throw new Error(`sender ${s}: the instance's address book has no ${s.slice(1)} service on its host (an entry \`local\` ${s.slice(1)})`);
-    return { sender: keyBytes(e.key), label: `${s} (${e.key.slice(0, 10)}…)` };
-  }
-  return { sender: keyBytes(s), label: `${s.slice(0, 10)}…` };
-}
-
 /**
- * The rows an app record asks for, resolved against the instance (as the kernel takes them). A row
- * marked `optional: true` whose sender is a `$<provider>` the instance's address book lacks is left
- * out (#78: the chain app's `status` row on a host with no status provider), as a genesis leaves out
- * a row from a provider its host has not; `skipped` says which. `optional` never reaches the kernel.
+ * The routes an app record asks for, resolved against the instance (#143): each as the kernel
+ * takes it — the address as served, the filters named in full (an own filter `<app>.<name>`, the
+ * kernel's and another app's as written), the handler's role's program record and its `fn`, and
+ * `app`; a read route (no handler) has no program. Another app's filter must be one that app's
+ * installed record declares.
  */
-export function wiring(record: AppRecord, view: InstanceView, skipped: string[] = [], o: { image?: boolean } = {}): RowOp[] {
+export async function wiring(record: AppRecord, view: InstanceView): Promise<RowOp[]> {
   const out: RowOp[] = [];
-  for (const r of record.dispatch as Row[]) {
-    const { transport, address, prefix, sender, program, fn, optional, ...settings } = r;
-    const cid = record.programs[program];
-    if (!cid) throw new Error(`row ${rowKey(record.name, r)}: no program for role ${program}`);
-    if (optional === true && sender.startsWith("$") && sender !== "$owner" && sender !== "$self" && !serviceOf(view, sender.slice(1))) {
-      skipped.push(`${transport} ${rowAddress(record.name, r)} from ${sender}: no ${sender.slice(1)} provider in the address book (optional; left out)`);
-      continue;
+  const roles = Object.keys(record.programs);
+  for (const r of record.routes as Route[]) {
+    const { transport, address, prefix, filters, handler, ...settings } = r;
+    const full = (filters ?? []).map((f) => filterRef(record.name, f));
+    for (const f of full) {
+      const dot = f.lastIndexOf(".");
+      const app = f.slice(0, dot), name = f.slice(dot + 1);
+      if (app === "kernel" || app === record.name) continue;
+      const other = await appRecordIn(view, app);
+      if (!other) throw new Error(`route ${routeKey(record.name, r)}: filter ${f}: no app ${app} is installed`);
+      if (!other.record.filters || !(name in other.record.filters)) throw new Error(`route ${routeKey(record.name, r)}: filter ${f}: app ${app} declares no filter ${name}`);
     }
-    // #141: an image's install leaves out the rows from `$owner` — an image has no owner; the owner adds them after the claim (a table edit, `skein dispatch add`).
-    if (o.image && sender === "$owner") {
-      skipped.push(`${transport} ${rowAddress(record.name, r)} from $owner: an image has no owner (left out; the owner adds it after the claim)`);
-      continue;
-    }
-    const who = senderOf(sender, view);
-    const row: DispatchRow & { app: string } = { ...settings, transport, address: rowAddress(record.name, r), ...(prefix ? { prefix: true } : {}), sender: who.sender, program: cid, ...(fn ? { fn } : {}), app: record.name };
-    out.push({ op: "add", row, label: who.label, role: program });
+    const base = { ...settings, transport, address: rowAddress(record.name, r), ...(prefix ? { prefix: true } : {}), ...(full.length ? { filters: full } : {}) };
+    if (handler === undefined) { out.push({ op: "add", row: { ...base, app: record.name } as DispatchRow & { app: string } }); continue; }
+    const h = handlerOf(handler, roles);
+    const cid = h && record.programs[h.role];
+    if (!h || !cid) throw new Error(`route ${routeKey(record.name, r)}: handler ${handler}: no program for it`);
+    out.push({ op: "add", row: { ...base, program: cid, ...(h.fn ? { fn: h.fn } : {}), app: record.name } as DispatchRow & { app: string }, role: h.role });
   }
   return out;
 }
 
-/** A row's key as the kernel's table knows it (the resolved row). */
+/** A route's key as the kernel's table knows it (the resolved route). */
 const keyOf = (r: DispatchRow) => kernelRowKey(r);
-/** The fields of a row that are not its settings (its key, its program, `fn`; `optional` and `app` the install's). */
-const ROW_CORE = new Set(["transport", "address", "prefix", "sender", "program", "fn", "optional", "app"]);
-/** A row's settings as the prompt shows them (` (filter beef, read …)`), or "": every field the row carries to the kernel beyond its key, program and fn. */
+/** The fields of a route that are not its settings (its key, filters, program, `fn`; `app` the install's). */
+const ROW_CORE = new Set(["transport", "address", "prefix", "filters", "program", "fn", "handler", "app"]);
+/** A route's settings as the prompt shows them (` (root www)`), or "". */
 const showSettings = (r: object): string => {
   const s = Object.entries(r).filter(([k, v]) => !ROW_CORE.has(k) && v !== undefined).map(([k, v]) => `${k} ${typeof v === "string" ? v : JSON.stringify(v)}`);
   return s.length ? ` (${s.join(", ")})` : "";
 };
-/** A row as one line of the prompt: `<transport> <address>[*] from <who> → <role>[.<fn>][ (<settings>)]`. */
-const showRow = (r: RowOp) => `${r.row.transport} ${r.row.address}${r.row.prefix ? "*" : ""} from ${r.label} → ${r.role ?? String(r.row.program)}${r.row.fn ? `.${r.row.fn}` : ""}${showSettings(r.row)}`;
+/** A route's filters as the prompt shows them: ` [kernel.brc104, amm.quote]`, or "". */
+const showFilters = (fs: unknown): string => Array.isArray(fs) && fs.length ? ` [${fs.join(", ")}]` : "";
+/** A route as one line of the prompt: `<transport> <address>[ prefix] [<filters>] → <role>[.<fn>] | (a read: its filters answer)[ (<settings>)]`. */
+const showRow = (r: RowOp) => `${r.row.transport} ${r.row.address}${r.row.prefix ? " prefix" : ""}${showFilters(r.row.filters)} → ${r.row.program === undefined ? "(a read: its filters answer)" : `${r.role ?? String(r.row.program)}${r.row.fn ? `.${r.row.fn}` : ""}`}${showSettings(r.row)}`;
 
 /** The program records of the tree's programs, the modules to send, and the role → record map. */
 async function programsOf(t: AppTree, view: InstanceView, extra: Objects): Promise<{ programs: Record<string, CID>; records: Rec[] }> {
@@ -342,9 +262,9 @@ export function shellProgram(read: ReadFile, role: string, src: ShellSource, app
 
 /**
  * Plan the install of `t` into the instance `view` reads: every check (APPS.md §3 step 0), then what to send.
- * `image` (#141): the install an image carries at birth (boot.ts) — the same plan, its rows from `$owner` left out.
+ * An image's install at birth (#141, boot.ts) is the same plan: its routes go into the genesis.
  */
-export async function planInstall(t: AppTree, view: InstanceView, o: { modules: Objects; image?: boolean }): Promise<Plan> {
+export async function planInstall(t: AppTree, view: InstanceView, o: { modules: Objects }): Promise<Plan> {
   const m = t.checked.manifest;
   const notes: string[] = [];
   // requires: every interface is provided by some installed app (each app head's root record).
@@ -368,37 +288,20 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   if (before?.record.state) record.state = before.record.state;
   const app = encode(record as never);
 
-  const skipped: string[] = [];
-  const want = wiring(record, view, skipped, { image: o.image });
-  for (const s of skipped) notes.push(`row ${s}`);
-  // No row may take a key the genesis or another app has.
+  const want = await wiring(record, view);
+  // No route may take a key the genesis, root or another app has.
   const taken = new Map<string, string>();
-  for (const r of view.dispatch) if ((r as { app?: string }).app !== m.name) taken.set(keyOf(r), (r as { app?: string }).app ? `app ${String((r as { app?: string }).app)}` : "the genesis");
+  for (const r of view.dispatch) if (r.app !== m.name) taken.set(keyOf(r), r.app ? `app ${r.app}` : "the genesis (or root's own)");
   for (const r of want) {
     const who = taken.get(keyOf(r.row));
-    if (who) throw new Error(`row ${keyOf(r.row)}: ${who} has it`);
+    if (who) throw new Error(`route ${keyOf(r.row)}: ${who} has it`);
   }
   // An earlier version: what it had and this one has not is removed.
   const rows = [...want];
   if (before) {
     const keep = new Set(want.map((r) => keyOf(r.row)));
-    for (const r of view.dispatch) if ((r as { app?: string }).app === m.name && !keep.has(keyOf(r))) rows.push({ op: "remove", row: r as DispatchRow & { app: string }, label: senderText(r.sender) });
+    for (const r of view.dispatch) if (r.app === m.name && !keep.has(keyOf(r))) rows.push({ op: "remove", row: r });
   }
-  // #135: the app's reads, in the reads head beside the others' — never at an http row's path.
-  const reads = readsOf(record);
-  const current = await readsIn(view);
-  const others = current.filter((r) => r.app !== m.name);
-  const tableAfter = [...view.dispatch.filter((r) => (r as { app?: string }).app !== m.name), ...want.map((r) => r.row)];
-  const clash = readClash(reads, tableAfter, others);
-  if (clash) throw new Error(clash);
-  for (const r of want) {
-    const o = r.row.transport === "http" ? others.find((x) => readEntryKey(x) === pathKey(r.row.address, r.row.prefix)) : undefined;
-    if (o) throw new Error(`row http ${pathKey(r.row.address, r.row.prefix)}: ${o.app ? `app ${o.app}` : "the owner"} has a read at that path: a path is a read or a message route, not both`);
-  }
-  const nextReads = [...others, ...reads];
-  const readsRec = readsRecord(nextReads);
-  const readsRoot = view.heads.find((h) => h.name === READS_HEAD)?.root;
-  const readsMove = readsRoot ? !readsRoot.equals(readsRec.cid) : reads.length > 0;
   // Only what changes: a row the instance has as asked is not sent again.
   const have = new Map(view.dispatch.map((r) => [keyOf(r), r]));
   const sendRows = rows.filter((r) => {
@@ -412,19 +315,19 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   const trees = t.records.filter((r) => textOf(r.bytes.subarray(0, 5)) === "tree ");
   const blobs = t.records.filter((r) => textOf(r.bytes.subarray(0, 5)) !== "tree ");
   // blobs, then trees (children before parents: the root last), modules and program records, the app record.
-  const ordered = [...blobs, ...trees.filter((r) => !r.cid.equals(t.root)), ...t.records.filter((r) => r.cid.equals(t.root)), ...progRecords, { cid: app.cid, bytes: app.bytes }, ...(readsMove ? [readsRec] : [])];
+  const ordered = [...blobs, ...trees.filter((r) => !r.cid.equals(t.root)), ...t.records.filter((r) => r.cid.equals(t.root)), ...progRecords, { cid: app.cid, bytes: app.bytes }];
   for (const r of ordered) {
     const k = r.cid.toString();
     if (seen.has(k)) continue;
     seen.add(k);
     if (!(await view.store.has(r.cid))) all.push(r);
   }
-  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }, ...(readsMove ? [{ name: READS_HEAD, tree: readsRec.cid }] : [])];
+  const heads: HeadOp[] = [{ name: appHead(m.name), tree: app.cid }];
   const publishes = gossipOf(m.config);
   return {
     app: m.name, version: m.version, record, recordCid: app.cid, records: all, heads,
     rows: sendRows, ...(m.start ? { start: m.start.body } : {}),
-    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, publishes, derived: t.checked.derived, reads, notes,
+    ...(before ? { upgrade: before.record.version } : {}), requires: m.requires, publishes, derived: t.checked.derived, notes,
   };
 }
 
@@ -437,23 +340,23 @@ function gossipOf(config: Record<string, unknown> | undefined): string[] {
   return Object.keys(ov.topics).filter((t) => ov.gossip?.[t] !== false).flatMap((t) => [t, `${t}-admit`, `${t}-proof`]);
 }
 
-/** The permission prompt: what the app asks for (APPS.md §3) — its rows read aloud. */
+/** The permission prompt: what the app asks for (APPS.md §3) — its routes, filters and roles read aloud. */
 export function describe(p: Plan, record = p.record): string[] {
   const out: string[] = [];
   out.push(`${p.upgrade ? "upgrade" : "install"} ${p.app} ${p.version}${p.upgrade ? ` (installed: ${p.upgrade})` : ""}${record.description ? ` — ${record.description}` : ""}`);
-  const d = p.derived ?? { rows: [] };
+  const d = p.derived ?? { routes: [] };
   const from = (yes: boolean) => (yes ? " (derived: config.overlay)" : "");
-  for (const h of p.heads) out.push(h.name === READS_HEAD ? `  head      ${h.name} → the instance's reads with this app's (${h.tree})` : `  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})`);
-  const keyed = (r: Row) => rowKey(record.name, r);
-  for (const r of record.dispatch) {
-    const who = r.sender === "*" ? "anyone" : r.sender;
-    out.push(`  row       ${r.transport} ${rowAddress(record.name, r)}${r.prefix ? "*" : ""} from ${who} → ${r.program}${r.fn ? `.${r.fn}` : ""}${showSettings(r)}${from(d.rows.includes(keyed(r)))}`);
+  for (const h of p.heads) out.push(`  head      ${h.name} → the app record ${p.recordCid} (tree ${record.tree})`);
+  for (const r of record.routes) {
+    const k = routeKey(record.name, r);
+    out.push(`  route     ${r.transport} ${rowAddress(record.name, r)}${r.prefix ? " prefix" : ""}${showFilters((r.filters ?? []).map((f) => filterRef(record.name, f)))} → ${r.handler ?? "(a read: its filters answer, nothing logged)"}${showSettings(r)}${from(d.routes.includes(k))}`);
   }
-  for (const r of record.reads ?? []) out.push(`  read      ${showRead({ ...r, address: appPath(record.name, r.address) }, r.program)} (anyone, by a call: nothing logged)${from(!!d.reads?.includes(`${appPath(record.name, r.address)}${r.prefix ? "*" : ""}`))}`);
+  for (const [f, h] of Object.entries(record.filters ?? {})) out.push(`  filter    ${record.name}.${f} → ${h} (any route may list it; runs before anything is recorded)`);
+  for (const [role, fns] of Object.entries(record.roles ?? {})) out.push(`  role      ${role === "root" || role === "user" ? role : `${record.name}.${role}`} gates ${fns.join(", ")}`);
   if (record.start) out.push(`  start     ${JSON.stringify(record.start.body)} into ${p.app}`);
   if (record.stop) out.push(`  stop      ${JSON.stringify(record.stop.body)} (at uninstall)`);
   if (p.requires.length) out.push(`  requires  ${p.requires.join(", ")}`);
-  for (const pr of record.provides) out.push(`  provides  ${pr.interface}: ${Object.entries(pr.functions).map(([f, d]) => `${f}${d.writes ? "" : " (read)"}`).join(", ")}`);
+  for (const pr of record.provides) out.push(`  provides  ${pr.interface}: ${Object.entries(pr.functions).map(([f, x]) => `${f}${x.writes ? "" : " (read)"}`).join(", ")}`);
   if (p.publishes.length) out.push(`  publishes ${p.publishes.join(", ")} (for information: emitting needs no grant)`);
   for (const n of p.notes) out.push(`  note      ${n}`);
   out.push(`  messages  objects ×${Math.max(1, [...chunk(p.records)].length)} (${p.records.length} records) · head ×${p.heads.length} · dispatch ×${p.rows.length}${p.start ? " · start" : ""}`);
@@ -461,7 +364,7 @@ export function describe(p: Plan, record = p.record): string[] {
   return out;
 }
 
-/** Send a plan as the owner: `send(box, body)` is the owner's message to the instance. */
+/** Send a plan as root: `send(box, body)` is root's message to the instance. */
 export async function sendInstall(p: Plan, send: (box: string, body: Uint8Array) => Promise<unknown>): Promise<{ messages: number }> {
   let n = 0;
   const go = async (box: string, body: Uint8Array) => { await send(box, body); n++; };
@@ -473,24 +376,20 @@ export async function sendInstall(p: Plan, send: (box: string, body: Uint8Array)
   return { messages: n };
 }
 
-const keyBytes = (hex: string) => Uint8Array.from(hex.match(/../g) ?? [], (h) => parseInt(h, 16));
 /** The kernel's `dispatch` operation's body: an add carries the whole row; a remove its key fields suffice (the row is sent as held). */
 const rowBody = (r: RowOp) => ({ op: r.op, row: r.row });
 
 // ---------------------------------------------------------------- uninstall
 
-export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[]; /** #135: the reads head without the app's, when it had any. */ reads?: { cid: CID; bytes: Uint8Array; removed: ReadEntry[] } }
+export interface UninstallPlan { app: string; record: AppRecord; stop?: Record<string, unknown>; rows: RowOp[] }
 
-/** What uninstalling `name` sends: `stop`, then its rows removed (every row the table holds with `app: name`), then its reads (#135). The app's heads are left. */
+/** What uninstalling `name` sends: `stop`, then its routes removed (every route the table holds with `app: name`). The app's heads are left. */
 export async function planUninstall(name: string, view: InstanceView): Promise<UninstallPlan> {
   const a = await appRecordIn(view, name);
   if (!a) throw new Error(`${name}: no app installed under that head`);
-  const current = await readsIn(view);
-  const removed = current.filter((r) => r.app === name);
   return {
     app: name, record: a.record, ...(a.record.stop ? { stop: a.record.stop.body } : {}),
-    rows: view.dispatch.filter((r) => (r as { app?: string }).app === name).map((r) => ({ op: "remove" as const, row: r as DispatchRow & { app: string }, label: senderText(r.sender) })),
-    ...(removed.length ? { reads: { ...readsRecord(current.filter((r) => r.app !== name)), removed } } : {}),
+    rows: view.dispatch.filter((r) => r.app === name).map((r) => ({ op: "remove" as const, row: r })),
   };
 }
 
@@ -499,36 +398,33 @@ export async function sendUninstall(p: UninstallPlan, send: (box: string, body: 
   const go = async (box: string, body: Uint8Array) => { await send(box, body); n++; };
   if (p.stop) await go(p.app, dagCbor.encode(p.stop));
   for (const r of p.rows) await go("dispatch", dagCbor.encode(rowBody(r)));
-  if (p.reads) {
-    for (const b of chunk([{ cid: p.reads.cid, bytes: p.reads.bytes }])) await go("objects", b);
-    await go("head", dagCbor.encode({ name: READS_HEAD, tree: p.reads.cid }));
-  }
   return { messages: n };
 }
 
-// ---------------------------------------------------------------- the owner's own reads (#135)
+// ---------------------------------------------------------------- root's own routes (#143)
 
 /**
- * The owner's own read (#135; `skein reads`): added to (or removed from) the reads head —
- * `objects` (the new reads record) and `head reads`. No `app`: an app's upgrade or uninstall leaves
- * it. The site at the instance's root is one: {address: "/", prefix: true, program: <the site's
- * program>, fn: "get", root: "www"}. Refused at an http row's path or another read's.
+ * Root's own route (#143; `skein dispatch`): one `dispatch` add or remove of a route with no `app`
+ * — an app's upgrade or uninstall leaves it. The site at the instance's root is one: a read route
+ * {transport: "http", address: "/", prefix: true, filters: ["site.get"], root: "www"} (the site's
+ * filter answering every path no longer route takes). Refused at a key another route has; a filter
+ * of an app must be one its installed record declares.
  */
-export async function planOwnerRead(view: InstanceView, op: "add" | "remove", read: ReadEntry): Promise<{ prompt: string[]; records: Rec[]; head: HeadOp }> {
-  const current = await readsIn(view);
-  const k = readEntryKey(read);
-  const mine = (r: ReadEntry) => !r.app && readEntryKey(r) === k;
-  let next: ReadEntry[];
+export async function planRootRoute(view: InstanceView, op: "add" | "remove", row: DispatchRow): Promise<{ prompt: string[]; rows: RowOp[] }> {
+  const k = keyOf(row);
+  const held = view.dispatch.find((r) => keyOf(r) === k);
   if (op === "add") {
-    const clash = readClash([read], view.dispatch, current.filter((r) => !mine(r)));
-    if (clash) throw new Error(clash);
-    const { app: _app, ...own } = read;
-    void _app;
-    next = [...current.filter((r) => !mine(r)), own as ReadEntry];
-  } else {
-    if (!current.some(mine)) throw new Error(`read ${k}: the owner has no read there`);
-    next = current.filter((r) => !mine(r));
-  }
-  const rec = readsRecord(next);
-  return { prompt: [`reads ${op} ${showRead(read)} (the owner's: anyone, by a call — nothing logged)`, `  messages  objects ×1 · head ${READS_HEAD}`], records: [rec], head: { name: READS_HEAD, tree: rec.cid } };
+    if (held && held.app) throw new Error(`route ${k}: app ${held.app} has it`);
+    for (const f of row.filters ?? []) {
+      const dot = f.lastIndexOf(".");
+      const app = f.slice(0, dot), name = f.slice(dot + 1);
+      if (app === "kernel") continue;
+      const rec = await appRecordIn(view, app);
+      if (!rec?.record.filters || !(name in rec.record.filters)) throw new Error(`route ${k}: filter ${f}: no installed app ${app} declares it`);
+    }
+  } else if (!held || held.app) throw new Error(`route ${k}: root has no route there`);
+  const { app: _app, ...own } = row;
+  void _app;
+  const r: RowOp = { op, row: own as DispatchRow };
+  return { prompt: [`dispatch ${op} ${showRow(r)} (root's own: no app)`], rows: [r] };
 }

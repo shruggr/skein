@@ -28,6 +28,7 @@ test {
     _ = @import("door_test.zig");
     _ = @import("authfetch.zig");
     _ = @import("billing.zig");
+    _ = @import("grants.zig");
 }
 
 fn fixtures(a: std.mem.Allocator) !std.json.Value {
@@ -193,17 +194,12 @@ fn caseValue(a: std.mem.Allocator, f: std.json.Value, j: std.json.Value) !cbor.V
     };
 }
 
-fn caseKey(a: std.mem.Allocator, f: std.json.Value, name: ?std.json.Value) !?[]const u8 {
-    const n = name orelse return null;
-    return try unhex(a, f.object.get("keys").?.object.get(n.string).?.string);
-}
-
 fn idOf(r: ?dispatch.Row) ?[]const u8 {
     const x = r orelse return null;
     return cbor.Value.str(x.value.get("id"));
 }
 
-test "the dispatch table: fold and match, the cases dispatch.ts is checked against (test/dispatch-cases.json)" {
+test "the route table: fold and match, the cases dispatch.ts is checked against (test/dispatch-cases.json)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -221,36 +217,26 @@ test "the dispatch table: fold and match, the cases dispatch.ts is checked again
             return e;
         };
         for (want_fold, rows) |w, r| try std.testing.expectEqualStrings(w.string, idOf(r).?);
-        const reads: ?cbor.Value = if (t.object.get("reads")) |r| try caseValue(a, f, r) else null;
         for (t.object.get("cases").?.array.items, 0..) |c, i| {
             const kind = c.object.get("kind").?.string;
             const want = c.object.get("want").?;
-            const who: dispatch.Who = if (c.object.get("who")) |w| .{
-                .key = try caseKey(a, f, w.object.get("key")),
-                .reads = reads,
-            } else .{};
-            var got: ?[]const u8 = null;
-            var refused: ?[]const u8 = null;
-            if (std.mem.eql(u8, kind, "mail")) {
-                got = idOf(dispatch.forMail(rows, (try caseKey(a, f, c.object.get("sender"))).?, c.object.get("box").?.string));
-            } else if (std.mem.eql(u8, kind, "event")) {
-                got = idOf(dispatch.forEvent(rows, c.object.get("box").?.string));
-            } else if (std.mem.eql(u8, kind, "http")) {
-                switch (dispatch.forHttp(rows, c.object.get("path").?.string, who)) {
-                    .row => |r| got = idOf(r),
-                    .refused => |why| refused = why.text(),
-                }
-            } else if (std.mem.eql(u8, kind, "libp2p")) {
-                got = idOf(dispatch.forLibp2p(rows, c.object.get("name").?.string, who));
-            } else return error.BadFixture;
+            const got: ?[]const u8 = if (std.mem.eql(u8, kind, "mail"))
+                idOf(dispatch.forMail(rows, c.object.get("box").?.string))
+            else if (std.mem.eql(u8, kind, "event"))
+                idOf(dispatch.forEvent(rows, c.object.get("box").?.string))
+            else if (std.mem.eql(u8, kind, "http"))
+                idOf(dispatch.forHttp(rows, c.object.get("path").?.string))
+            else if (std.mem.eql(u8, kind, "libp2p"))
+                idOf(dispatch.forLibp2p(rows, c.object.get("name").?.string))
+            else
+                return error.BadFixture;
             const ok = switch (want) {
-                .null => got == null and refused == null,
+                .null => got == null,
                 .string => |s| got != null and std.mem.eql(u8, got.?, s),
-                .object => |o| refused != null and std.mem.eql(u8, refused.?, o.get("refused").?.string),
                 else => false,
             };
             if (!ok) {
-                std.debug.print("{s}: case {d} ({s}): got {?s} refused {?s}\n", .{ name, i, kind, got, refused });
+                std.debug.print("{s}: case {d} ({s}): got {?s}\n", .{ name, i, kind, got });
                 return error.TestUnexpectedResult;
             }
         }

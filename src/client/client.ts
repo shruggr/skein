@@ -25,7 +25,7 @@ export const BOX = { objects: "objects", run: "shell/run", head: "head", dispatc
 export const INBOX = [BOX.results, BOX.chat] as const;
 
 /** A dispatch table change for a mailbox row: (sender — anyone when absent, else an identity key in hex —, box) → handler. */
-export interface DispatchArgs { op: "add" | "remove"; sender?: string; box: string; handler: string }
+export interface DispatchArgs { op: "add" | "remove"; /** gone (#143): refused */ sender?: string; box: string; handler: string; fn?: string }
 
 /**
  * A handler: a program record's CID, or the name of one in `programs` (an
@@ -42,17 +42,14 @@ export function handlerCid(s: string, programs: Record<string, CID> = {}): CID {
 }
 
 /**
- * The kernel's `dispatch` operation's body (box `dispatch`, from the owner):
- * {op, row} with row a mailbox row {transport, address: box, sender: "*" or
- * the key's 33 bytes, program}; a handler named from `programs` (handlerCid).
+ * The kernel's `dispatch` operation's body (box `dispatch`, from root):
+ * {op, row} with row a mailbox route {transport, address: box, program, fn?};
+ * a handler named from `programs` (handlerCid). No sender (#143: a route has
+ * none — roles gate functions, granted by root).
  */
 export function dispatchBody(a: DispatchArgs, programs: Record<string, CID> = {}): { op: "add" | "remove"; row: Record<string, unknown> } {
-  return { op: a.op, row: { transport: "mailbox", address: a.box, sender: a.sender ? senderKey(a.sender) : "*", program: handlerCid(a.handler, programs) } };
-}
-
-export function senderKey(hex: string): Uint8Array {
-  if (!/^0[23][0-9a-f]{64}$/i.test(hex)) throw new Error(`sender ${JSON.stringify(hex)}: not an identity key (33 bytes, hex)`);
-  return new Uint8Array(Buffer.from(hex, "hex"));
+  if (a.sender !== undefined) throw new Error("sender: gone (#143) — a route has no sender; gate the function with a role and grant it (skein grant)");
+  return { op: a.op, row: { transport: "mailbox", address: a.box, program: handlerCid(a.handler, programs), ...(a.fn ? { fn: a.fn } : {}) } };
 }
 
 /** A directory as git objects held in memory: [root, records]. `opts.ignore` as scan's. */

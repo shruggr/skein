@@ -11,7 +11,9 @@ implementation: the same log gives the same entries, records, CIDs, derived
 state and fuel on every replay, and the equivalence suite checks that Zig
 against Zig.
 
-The kernel at log format 8: one dispatch table routes (rows for boxes, HTTP
+The kernel at log format 9 (#143: routes without senders, filters before
+anything is recorded, roles and the grants head, root instead of an
+owner — "Format 9" below). Format 8: one dispatch table routes (rows for boxes, HTTP
 paths, libp2p topics and protocols), and the kernel matches every
 transport's packages against it, first match wins (#115, `dispatch.zig`:
 the front door is handed the matched row and only verifies who the package
@@ -636,6 +638,25 @@ re-runs it), and a step reads its own pending head moves. Depth at most 8,
 output at most 64 MiB. `test/call/probe.wasm`
 (`test/call/probe.zig`) is the probe `src/host/call.test.ts` drives. The
 docs: `docs/VM.md`, "Calls".
+
+### Format 9 (issue #143)
+
+Routes, filters, roles. A route has no `sender`: its key is (transport,
+address, prefix), it names `filters` (`kernel.brc104`, `kernel.beef`,
+`<app>.<filter>`) run by the door before anything is recorded, and an http
+route with no `program` is a read route (its filters answer). Events are
+their own transport (`event`). A filter's rejection or answer, and the
+gate's refusal, write no entry (`admit` answers `{answered: {…}}`; there are
+no `refused` entries). The head `grants` ({kind: "grants", roles: {<role>:
+[<key>…]}}) is the kernel's: the genesis's `root`, the claim (root to the
+claimant) and the admin operation `grant` write it; the gate (grants.zig)
+checks the principal the filters yielded against the roles that gate the
+handler's function — `root` passes anything, `user` any principal, an app
+role (`<app>.<role>`, declared in its app record's `roles`) its holders; no
+principal fails closed. The genesis names `root` (no `owner`, no `reads`)
+and `roles` (the genesis programs' gating, `{root: ["frontdoor.explore"]}`);
+the steps' and calls' input has no `owner`. A store in format 8 is refused
+(re-genesis; no migration). docs/VM.md "The route table".
 
 ### Format 8 (issue #77)
 

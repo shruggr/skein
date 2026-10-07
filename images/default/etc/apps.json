@@ -1,6 +1,18 @@
 {
-  "install": ["apps/chain", "apps/git", "apps/site"],
-  "reads": [
-    { "address": "/", "prefix": true, "program": "site.site", "fn": "get", "root": "www" }
+  "install": [
+    "apps/chain",
+    "apps/git",
+    "apps/site"
+  ],
+  "routes": [
+    {
+      "transport": "http",
+      "address": "/",
+      "prefix": true,
+      "filters": [
+        "site.get"
+      ],
+      "root": "www"
+    }
   ]
 }

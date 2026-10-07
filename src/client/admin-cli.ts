@@ -149,13 +149,13 @@ export async function adminMain(cmd: string, argv: string[], env: AdminEnv): Pro
         return await deliver(planDispatch(await s.identity(), { op, sender: v.sender, box: box!, handler, ...(v.http ? { http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } } : {}) }, programs), s, env);
       }
       case "reads": {
-        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
-        const { args: [op, path, handler, ...more], origin } = splitOrigin(positionals, 3);
-        if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
+        // #143: a read is a route with filters only — `<app>.<filter>` answers it (phase 2 reworks this command).
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, prefix: { type: "boolean" }, settings: { type: "string" } } });
+        const { args: [op, path, filter, ...more], origin } = splitOrigin(positionals, 3);
+        if (!filter || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
         const settings = v.settings !== undefined ? json("skein reads --settings", v.settings) : undefined;
         s = await sessionOf(v, origin, env);
-        const programs = await handlerPrograms(s, handler);
-        return await deliver(await planReads(await s.view(), { op, path: path!, handler, http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } }, programs), s, env);
+        return await deliver(await planReads(await s.view(), { op, path: path!, filter, prefix: !!v.prefix, ...(settings ? { settings } : {}) }), s, env);
       }
       case "peers": {
         const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, transport: { type: "string" }, handle: { type: "string" } } });
@@ -273,10 +273,9 @@ async function install(spec: string, s: Session, config: Record<string, unknown>
       env.out(`catalog: ${e.name}${e.version ? ` ${e.version}` : ""} = ${url}#${hash}`);
     } else throw new Error(`${spec}: a catalog name, <url>#<40-hex commit>, or a directory`);
     if (!s.target) throw new Error("--store reads a store file: it cannot ask the instance's git app to clone (give a directory, or --instance / an origin)");
-    // The git app takes `git.clone` from its owner's row (box git): a key with none would wait for nothing.
-    const me = identityOf(operatorKey(env.vars).key);
-    if (!view.dispatch.some((r) => r.transport === "mailbox" && r.address === "git" && (r.sender === "*" || hexOf(r.sender) === me))) {
-      throw new Error(`the instance's git app takes git.clone only from its owner's row, and ${me.slice(0, 10)}… has none in box git${view.heads.some((h) => h.name === appHead("git")) ? " (the owner adds it: skein install images/default/apps/git, from the owner's key)" : " (no git app installed)"}`);
+    // #143: the git app's box is a route; its function is gated by root (git's roles) — the gate judges the sender.
+    if (!view.dispatch.some((r) => r.transport === "mailbox" && r.address === "git")) {
+      throw new Error(`the instance has no route to box git${view.heads.some((h) => h.name === appHead("git")) ? "" : " (no git app installed)"}`);
     }
     const t0 = Date.now();
     const id = await s.target.send("git", { fn: "git.clone", args: { url, hash } });

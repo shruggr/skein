@@ -43,9 +43,10 @@ test("billing: the host's config — off, dev defaults, the environment over the
 
 test("billing: the host row's terms — the first tick row; the mismatch with what the host supports", () => {
   const host = key(11), other = key(12);
-  const row = (k: string | Uint8Array, x: unknown, rates?: unknown) => ({ transport: "mailbox" as const, address: "billing", sender: typeof k === "string" ? Uint8Array.from(Buffer.from(k, "hex")) : k, program: "kernel" as const, fn: "tick", x, ...(rates ? { rates } : {}) });
+  // #143: the host's key is the route's `host` setting (a route has no sender).
+  const row = (k: string | Uint8Array, x: unknown, rates?: unknown) => ({ transport: "mailbox" as const, address: "billing", host: typeof k === "string" ? Uint8Array.from(Buffer.from(k, "hex")) : k, program: "kernel" as const, fn: "tick", x, ...(rates ? { rates } : {}) });
   assert.equal(termsOf([]), undefined);
-  assert.equal(termsOf([{ transport: "mailbox", address: "dispatch", sender: "*", program: "kernel", fn: "dispatch" }]), undefined);
+  assert.equal(termsOf([{ transport: "mailbox", address: "dispatch", program: "kernel", fn: "dispatch" }]), undefined);
   const t = termsOf([row(host, 300, { fuel: 2, publish: 9 }), row(other, 1)])!;
   assert.equal(t.host, host);
   assert.equal(t.x, 300);
@@ -69,7 +70,7 @@ test("billing: the kernel's state as the host reads it; allocation, the host's a
   assert.equal(stateOf({ ...rec, kind: "other" }), undefined);
   assert.equal(stateOf({ ...rec, asleep: "no" }), undefined);
   assert.equal(priceHost({ fuel: 2, storage: 0, served: 3, fetch: 0, authfetch: 0, publish: 0 }, 1_000_000_000, 1_000_000), 5n * NSAT, "two sats of read fuel and three of bytes served (billing.zig priceHost)");
-  const terms = termsOf([{ transport: "mailbox", address: "billing", sender: Uint8Array.from(Buffer.from(host, "hex")), program: "kernel", fn: "tick", x: 5 }])!;
+  const terms = termsOf([{ transport: "mailbox", address: "billing", host: Uint8Array.from(Buffer.from(host, "hex")), program: "kernel", fn: "tick", x: 5 }])!;
   assert.equal(closedBy(undefined, "u"), undefined, "no view: open");
   assert.equal(closedBy({}, "u"), undefined, "no host row: open (not billed)");
   assert.equal(closedBy({ terms, state: s }, "u"), undefined);
@@ -138,7 +139,7 @@ test("billing: the control socket's reclaim; the owner's plan for the host row",
   assert.equal(m.box, "dispatch");
   const row = (m.body as { op: string; row: Record<string, unknown> }).row;
   assert.deepEqual([row.transport, row.address, row.program, row.fn, row.x, row.rates], ["mailbox", "billing", "kernel", "tick", 300, { fuel: 2 }]);
-  assert.equal(Buffer.from(row.sender as Uint8Array).toString("hex"), host);
+  assert.equal(Buffer.from(row.host as Uint8Array).toString("hex"), host, "#143: the host's key is the route's `host` setting");
   assert.equal((planHost(me, "remove", { key: host, x: 1 }).messages[0]!.body as { row: { x?: number } }).row.x, undefined, "a removal names the row's key only");
   assert.throws(() => planHost(me, "add", { key: "nope", x: 1 }), /not the host's key/);
   assert.throws(() => planHost(me, "add", { key: host, x: 0 }), /x:/);
@@ -180,7 +181,8 @@ test("billing: the meter and the gate with the real kernel — no wallet to pay 
   const self = Uint8Array.from(Buffer.from(a, "hex"));
   const bodyBytes = dagCbor.encode({ hello: 1 });
   const loop = { kind: "mail", op: "put", sender: self, recipient: self, box: "nobody", body: encode({ hello: 1 }).cid, nonce: new Uint8Array(16) };
-  assert.ok(await h.router.appendLocal("a", { kind: "message", message: loop, body: bodyBytes }), "the loopback passes the gate");
+  // The loopback passes the host's gate; the kernel's door then turns this one away (#143: no entry) — it is no message the instance emitted.
+  await assert.rejects(h.router.appendLocal("a", { kind: "message", message: loop, body: bodyBytes }), /turned away at the door: 400 not signed, and not a message this instance emitted/, "the loopback passes the host's gate");
   // Frozen: what it used asleep is not metered.
   await h.router.settled();
   assert.equal((await state("a"))!.tally, asleep.tally, "the tally is frozen while asleep");
@@ -203,5 +205,5 @@ test("billing: the meter and the gate with the real kernel — no wallet to pay 
   await h.router.appendLocal("b", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: dagCbor.encode(tick) });
   await h.router.settled();
   assert.equal(await state("b"), undefined, "no host row: a tick runs nothing");
-  assert.ok(lines("b").some((l) => /in billing from .*: no dispatch row; recorded, nothing runs/.test(l)));
+  assert.ok(lines("b").some((l) => /in billing from .*: no route; recorded, nothing runs/.test(l)));
 });

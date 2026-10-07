@@ -1,7 +1,8 @@
-// Installing an app (#72, #76, #77, #79; docs/APPS.md §3): the owner's client. An
+// Installing an app (#72, #76, #77, #79, #143; docs/APPS.md §3): root's client. An
 // app is a tree (a directory or a git repository) with etc/app.json;
-// installing it into an instance is owner-signed messages to the kernel's
-// admin boxes — the kernel's own operations on its four tables — nothing else:
+// installing it into an instance is root-signed messages to the kernel's
+// admin boxes — the kernel's own operations on its tables — nothing else, and
+// no key (#143: the deployer is root, and grants itself nothing):
 //
 //   1. objects    the tree's git objects, the modules its bin/*.wasm carry (a
 //                 shell program's modules and support files too, #83), a program
@@ -10,31 +11,33 @@
 //                 becomes `main`)
 //   2. head       {name: "<app>/app", tree: <the app record>}: the app's root head, under its
 //                 own name (owner = the app).
-//   3. dispatch   one per row the manifest asks for (#77): {op: "add", row: {transport, address,
-//                 prefix?, sender, program: <the role's program record>, fn?, …settings, app}} —
-//                 the sender "*" (anyone), "event" (events only), "session", "$owner" → the
-//                 owner's key, "$self" → the instance's own (#79: its other apps), "$<provider>"
-//                 → the key the instance's address book gives that role, a hex key itself; a
-//                 box under the app's (#128: "" or `<app>` → `<app>`, "x" → `<app>/x`), an
-//                 http address under /<app>/, a libp2p topic or protocol as written.
+//   3. dispatch   one per route the manifest asks for (#77, #143): {op: "add", row: {transport,
+//                 address, prefix?, filters?, program?: <the handler's role's program record>,
+//                 fn?, …settings, app}} — a box under the app's (#128: "" or `<app>` → `<app>`,
+//                 "x" → `<app>/x`), an http address under /<app>/, a libp2p topic or protocol as
+//                 written; the filters named in full (an own filter `<app>.<name>`); a read
+//                 route (no handler) with no program.
 //   4. start      the manifest's `start.body`, into the app's box
 //
 // The **app record** is the head's root: the manifest as installed, so "what
 // does this head provide" is one read (`head("<app>/app")`, `get`):
 //
 //   {kind: "app", name, version, programs: {<role>: <program record CID>},
-//    config?, provides, requires, dispatch: [<row as the manifest wrote it: relative addresses, roles>],
-//    start?, stop?, description?, tree: <the app's git tree>, state?: <the app's own state>}
+//    routes: [<route as the manifest wrote it: relative addresses, handlers, filters as written>],
+//    filters?: {<filter>: <handler>}, roles?: {<role>: [<fn>…]},
+//    config?, provides, requires, start?, stop?, description?, tree: <the app's git tree>,
+//    state?: <the app's own state>}
 //
 // `state` is the app's: its handler advances the head to the record with
 // `state` replaced (the SDK's app.Call.setState). An install over an earlier
-// version carries `state` over, removes the rows the earlier record had and
+// version carries `state` over, removes the routes the earlier record had and
 // the new one does not, and sends `start` again (the restart). Uninstall:
-// `stop`, then every row removed; the heads are left.
+// `stop`, then every route removed; the heads are left.
 //
 // **Write scope** (#77, #79): an app's programs write only heads under
-// `<app>/` (the kernel's rule, by the program record's `app`). There are no
-// grants, no alias head, no form before #77.
+// `<app>/` (the kernel's rule, by the program record's `app`). No alias head,
+// no form before #77. Who may run an app's functions is its `roles`' and
+// root's grants (#143), never the install's.
 //
 // **Two paths to the tree** (#91; docs/APPS.md §3). This client reads it from
 // a directory or clones a repository itself (`readApp`, `fetchApp`:
@@ -52,7 +55,7 @@ import { join, resolve } from "node:path";
 import type { CID } from "multiformats/cid";
 import { hashDir } from "../client/client.ts";
 import { defaultIgnore } from "../dev/scan.ts";
-import { currentDispatch, senderBytes } from "../runtime/dispatch.ts";
+import { currentDispatch } from "../runtime/dispatch.ts";
 import { headTree } from "../runtime/heads.ts";
 import type { IndexStore } from "../runtime/index-store.ts";
 import type { Store } from "../runtime/store.ts";
@@ -114,30 +117,20 @@ export async function instanceView(store: Store): Promise<InstanceView> {
   const heads = typeof (store as Partial<IndexStore>).heads === "function" ? (store as IndexStore).heads() : [];
   return {
     store,
-    owner: await ownerOf(store),
     identity: g.identity instanceof Uint8Array ? Buffer.from(g.identity).toString("hex") : String(g.identity),
     programs: (g.programs ?? {}) as Record<string, CID>,
     addressBook: await addressBook(store),
     heads,
-    // The reader shows a 33-byte sender as hex; the kernel's rows carry bytes (a remove sends the row back).
-    dispatch: ((await currentDispatch(store)) ?? []).map((r) => ({ ...r, sender: senderBytes(r.sender) })),
+    dispatch: (await currentDispatch(store)) ?? [],
   };
 }
 
-/**
- * The instance's owner (hex) as tooling resolves `$owner` (#126: there is no
- * built-in owner in the kernel — the owner is the key on the admin rows): the
- * sender of the kernel's `dispatch` admin row (the claim writes the admin rows
- * with its sender's key; a genesis that names its owner seeds them with it),
- * else "" (an image not claimed yet: nobody may install into it). With
- * delegates (another `dispatch` row), the first row's sender: the genesis's or
- * the claim's.
- */
-export async function ownerOf(store: Store): Promise<string> {
-  const rows = (await currentDispatch(store)) ?? [];
-  const r = rows.find((x) => x.program === "kernel" && x.fn === "dispatch" && x.transport === "mailbox");
-  const k = r ? senderBytes(r.sender) : undefined;
-  return k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" && /^0[23][0-9a-f]{64}$/.test(k) ? k : "";
+/** The root holders (hex) as the head `grants` names them (#143; none: an unclaimed image). */
+export async function rootOf(store: Store): Promise<string[]> {
+  const root = await headTree(store, "grants");
+  if (!root) return [];
+  const g = await store.get(root).catch(() => undefined) as { kind?: string; roles?: Record<string, Uint8Array[]> } | undefined;
+  return g?.kind === "grants" ? (g.roles?.root ?? []).map((k) => Buffer.from(k).toString("hex")) : [];
 }
 
 /** The app record a head's root is, if it is one. */

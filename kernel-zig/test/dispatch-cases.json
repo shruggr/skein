@@ -1,212 +1,415 @@
 {
-  "about": "The dispatch table's fold and match (#115), as cases both kernel-zig/src/dispatch.zig (src/tests.zig) and src/runtime/dispatch.ts (dispatch.test.ts) are checked against. A string \"$<name>\" is the key `keys.<name>` (33 bytes), \"$cid\" the CID `cid`, \"$bytes32\" 32 bytes (no key). Each row carries an `id` (a handler setting: no part of its key); `fold` is the ids of the rows after the updates, in table order; a case's `want` is the id of the row matched, null for none, or {refused} for an http request no row takes.",
+  "about": "The route table's fold and match (#115, #143), as cases both kernel-zig/src/dispatch.zig (src/tests.zig) and src/runtime/dispatch.ts (dispatch.test.ts) are checked against. A string \"$<name>\" is the key `keys.<name>` (33 bytes), \"$cid\" the CID `cid`. Each route carries an `id` (a handler setting: no part of its key); `fold` is the ids of the routes after the updates, in table order; a case's `want` is the id of the route matched, null for none. No key takes part in a match (#143: routing only).",
   "keys": {
     "A": "021111111111111111111111111111111111111111111111111111111111111111",
-    "B": "032222222222222222222222222222222222222222222222222222222222222222",
-    "C": "034444444444444444444444444444444444444444444444444444444444444444",
-    "O": "023333333333333333333333333333333333333333333333333333333333333333"
+    "B": "032222222222222222222222222222222222222222222222222222222222222222"
   },
   "cid": "bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy",
   "tables": [
     {
-      "name": "mailbox: forMail and forEvent; the fold drops what the kernel's rowOf does",
+      "name": "mailbox and event: a box's route by its address only; events are their own transport (#143); the fold drops what the kernel's rowOf does (a sender, a bad program, no address, no op)",
       "updates": [
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "$A", "program": "$cid", "id": "m1" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "*", "program": "kernel", "fn": "objects", "id": "m2" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "chain", "sender": "event", "program": "$cid", "id": "m3" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "*", "sender": "$B", "program": "$cid", "id": "m4" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "nobody", "program": "$cid", "id": "x1" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "$A", "program": 5, "id": "x2" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "$bytes32", "program": "$cid", "id": "x3" } },
-        { "op": "add", "row": { "transport": "mailbox", "sender": "*", "program": "$cid", "id": "x4" } },
-        { "row": { "transport": "mailbox", "address": "run", "sender": "*", "program": "$cid", "id": "x5" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "$A", "program": "$cid", "fn": "later", "id": "m1b" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "x", "sender": "session", "program": "$cid", "id": "m5" } },
-        { "op": "remove", "row": { "transport": "mailbox", "address": "run", "sender": "*", "program": "kernel", "fn": "objects" } },
-        { "op": "remove", "row": { "transport": "mailbox", "address": "run", "sender": "*", "program": "kernel", "fn": "objects" } },
-        { "op": "remove", "row": { "transport": "mailbox", "address": "nothing", "sender": "*", "program": "$cid" } }
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "run",
+            "id": "m1",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "objects",
+            "program": "kernel",
+            "fn": "objects",
+            "id": "m2"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "event",
+            "address": "chain",
+            "id": "e1",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "*",
+            "id": "m4",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "run2",
+            "sender": "*",
+            "program": "$cid",
+            "id": "x1"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "run3",
+            "program": 5,
+            "id": "x2"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "program": "$cid",
+            "id": "x4"
+          }
+        },
+        {
+          "row": {
+            "transport": "mailbox",
+            "address": "run4",
+            "id": "x5",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "run",
+            "fn": "later",
+            "id": "m1b",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "remove",
+          "row": {
+            "transport": "mailbox",
+            "address": "objects",
+            "program": "kernel",
+            "fn": "objects"
+          }
+        },
+        {
+          "op": "remove",
+          "row": {
+            "transport": "mailbox",
+            "address": "objects",
+            "program": "kernel",
+            "fn": "objects"
+          }
+        },
+        {
+          "op": "remove",
+          "row": {
+            "transport": "mailbox",
+            "address": "nothing",
+            "program": "$cid"
+          }
+        }
       ],
-      "fold": ["m1b", "m3", "m4", "m5"],
+      "fold": [
+        "m1b",
+        "e1",
+        "m4"
+      ],
       "cases": [
-        { "kind": "mail", "sender": "A", "box": "run", "want": "m1b" },
-        { "kind": "mail", "sender": "B", "box": "run", "want": "m4" },
-        { "kind": "mail", "sender": "O", "box": "run", "want": null },
-        { "kind": "mail", "sender": "A", "box": "chain", "want": null },
-        { "kind": "mail", "sender": "B", "box": "chain", "want": "m4" },
-        { "kind": "mail", "sender": "A", "box": "x", "want": null },
-        { "kind": "event", "box": "chain", "want": "m3" },
-        { "kind": "event", "box": "run", "want": null },
-        { "kind": "event", "box": "x", "want": null }
+        {
+          "kind": "mail",
+          "box": "run",
+          "want": "m1b"
+        },
+        {
+          "kind": "mail",
+          "box": "chain",
+          "want": "m4"
+        },
+        {
+          "kind": "mail",
+          "box": "other",
+          "want": "m4"
+        },
+        {
+          "kind": "event",
+          "box": "chain",
+          "want": "e1"
+        },
+        {
+          "kind": "event",
+          "box": "run",
+          "want": null
+        }
       ]
     },
     {
-      "name": "mailbox: first match wins in table order; an open row and an event row",
+      "name": "mailbox: the first route in table order whose address is the box or *",
       "updates": [
-        { "op": "add", "row": { "transport": "mailbox", "address": "*", "sender": "*", "program": "$cid", "id": "any" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "run", "sender": "$A", "program": "$cid", "id": "a" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "feed", "sender": "event", "program": "$cid", "id": "feed" } }
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "*",
+            "id": "any",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "run",
+            "id": "a",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "event",
+            "address": "*",
+            "id": "feeds",
+            "program": "$cid"
+          }
+        }
       ],
-      "fold": ["any", "a", "feed"],
+      "fold": [
+        "any",
+        "a",
+        "feeds"
+      ],
       "cases": [
-        { "kind": "mail", "sender": "A", "box": "run", "want": "any" },
-        { "kind": "event", "box": "feed", "want": "any" },
-        { "kind": "event", "box": "other", "want": "any" }
+        {
+          "kind": "mail",
+          "box": "run",
+          "want": "any"
+        },
+        {
+          "kind": "event",
+          "box": "feed",
+          "want": "feeds"
+        }
       ]
     },
     {
-      "name": "http: exact before prefix, longest prefix first, the sender rule within each; a row's key separates \"/x*\" from the prefix \"/x\"",
+      "name": "http: the exact path first, then the longest prefix; a read route (filters only) matches as any other; the key is (transport, address, prefix)",
       "updates": [
-        { "op": "add", "row": { "transport": "http", "address": "/explore", "prefix": true, "sender": "$O", "program": "$cid", "fn": "explore", "id": "h1" } },
-        { "op": "add", "row": { "transport": "http", "address": "/", "prefix": true, "sender": "*", "program": "$cid", "fn": "get", "id": "h2" } },
-        { "op": "add", "row": { "transport": "http", "address": "/sendMessage", "sender": "session", "program": "$cid", "id": "h3" } },
-        { "op": "add", "row": { "transport": "http", "address": "/a/b", "prefix": true, "sender": "$A", "program": "$cid", "id": "h4" } },
-        { "op": "add", "row": { "transport": "http", "address": "/a", "prefix": true, "sender": "session", "program": "$cid", "id": "h5" } },
-        { "op": "add", "row": { "transport": "http", "address": "/a/b/c", "sender": "$A", "program": "$cid", "id": "h6" } },
-        { "op": "add", "row": { "transport": "http", "address": "/k", "sender": "$A", "program": "$cid", "id": "h7" } },
-        { "op": "add", "row": { "transport": "http", "address": "/k", "sender": "$B", "program": "$cid", "id": "h8" } },
-        { "op": "add", "row": { "transport": "http", "address": "/a/b", "prefix": true, "sender": "$B", "program": "$cid", "id": "h9" } },
-        { "op": "add", "row": { "transport": "http", "address": "/x*", "sender": "*", "program": "$cid", "id": "h10" } },
-        { "op": "add", "row": { "transport": "http", "address": "/x", "prefix": true, "sender": "*", "program": "$cid", "id": "h11" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "/k", "sender": "*", "program": "$cid", "id": "h12" } }
+        {
+          "op": "add",
+          "row": {
+            "transport": "http",
+            "address": "/x",
+            "prefix": true,
+            "filters": [
+              "kernel.brc104"
+            ],
+            "fn": "h",
+            "id": "px",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "http",
+            "address": "/x/y",
+            "fn": "h",
+            "id": "exact",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "http",
+            "address": "/x/deep/",
+            "prefix": true,
+            "fn": "h",
+            "id": "deep",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "http",
+            "address": "/site/",
+            "prefix": true,
+            "filters": [
+              "site.get"
+            ],
+            "id": "read"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "http",
+            "address": "/x",
+            "fn": "h",
+            "id": "x",
+            "program": "$cid"
+          }
+        }
       ],
-      "fold": ["h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h11", "h12"],
+      "fold": [
+        "px",
+        "exact",
+        "deep",
+        "read",
+        "x"
+      ],
       "cases": [
-        { "kind": "http", "path": "/sendMessage", "who": {}, "want": "h2" },
-        { "kind": "http", "path": "/sendMessage", "who": { "key": "A" }, "want": "h3" },
-        { "kind": "http", "path": "/explore/log", "who": { "key": "O" }, "want": "h1" },
-        { "kind": "http", "path": "/explore", "who": { "key": "O" }, "want": "h1" },
-        { "kind": "http", "path": "/explore/log", "who": { "key": "A" }, "want": "h2" },
-        { "kind": "http", "path": "/a/b/c", "who": { "key": "A" }, "want": "h6" },
-        { "kind": "http", "path": "/a/b/c", "who": { "key": "B" }, "want": "h9" },
-        { "kind": "http", "path": "/a/b/c", "who": { "key": "O" }, "want": "h5" },
-        { "kind": "http", "path": "/a/b/c", "who": {}, "want": "h2" },
-        { "kind": "http", "path": "/a/b/d", "who": { "key": "A" }, "want": "h4" },
-        { "kind": "http", "path": "/a/b/d", "who": { "key": "B" }, "want": "h9" },
-        { "kind": "http", "path": "/k", "who": { "key": "A" }, "want": "h7" },
-        { "kind": "http", "path": "/k", "who": { "key": "B" }, "want": "h8" },
-        { "kind": "http", "path": "/k", "who": { "key": "O" }, "want": "h2" },
-        { "kind": "http", "path": "/x*", "who": {}, "want": "h10" },
-        { "kind": "http", "path": "/xyz", "who": {}, "want": "h11" },
-        { "kind": "http", "path": "/x", "who": {}, "want": "h11" },
-        { "kind": "mail", "sender": "A", "box": "/k", "want": "h12" },
-        { "kind": "libp2p", "name": "/k", "who": { "key": "A" }, "want": null }
+        {
+          "kind": "http",
+          "path": "/x",
+          "want": "x"
+        },
+        {
+          "kind": "http",
+          "path": "/x/y",
+          "want": "exact"
+        },
+        {
+          "kind": "http",
+          "path": "/x/z",
+          "want": "px"
+        },
+        {
+          "kind": "http",
+          "path": "/x/deep/q",
+          "want": "deep"
+        },
+        {
+          "kind": "http",
+          "path": "/site/index.html",
+          "want": "read"
+        },
+        {
+          "kind": "http",
+          "path": "/nothing",
+          "want": null
+        }
       ]
     },
     {
-      "name": "http: why no row takes a request",
+      "name": "libp2p: a topic or /protocol exactly; a prefix route a log holds is no route",
       "updates": [
-        { "op": "add", "row": { "transport": "http", "address": "/only", "sender": "session", "program": "$cid", "id": "r1" } },
-        { "op": "add", "row": { "transport": "http", "address": "/k", "sender": "$A", "program": "$cid", "id": "r2" } },
-        { "op": "add", "row": { "transport": "http", "address": "/p", "prefix": true, "sender": "$O", "program": "$cid", "id": "r3" } },
-        { "op": "add", "row": { "transport": "http", "address": "/open", "sender": "*", "program": "$cid", "id": "r4" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "/none", "sender": "*", "program": "$cid", "id": "r5" } }
+        {
+          "op": "add",
+          "row": {
+            "transport": "libp2p",
+            "address": "tm_ab",
+            "fn": "h",
+            "filters": [
+              "kernel.beef"
+            ],
+            "id": "topic",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "libp2p",
+            "address": "/proto/1",
+            "fn": "h",
+            "id": "proto",
+            "program": "$cid"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "libp2p",
+            "address": "tx_",
+            "prefix": true,
+            "fn": "h",
+            "id": "old",
+            "program": "$cid"
+          }
+        }
       ],
-      "fold": ["r1", "r2", "r3", "r4", "r5"],
+      "fold": [
+        "topic",
+        "proto",
+        "old"
+      ],
       "cases": [
-        { "kind": "http", "path": "/none", "who": {}, "want": { "refused": "path" } },
-        { "kind": "http", "path": "/none", "who": { "key": "A" }, "want": { "refused": "path" } },
-        { "kind": "http", "path": "/only", "who": {}, "want": { "refused": "session" } },
-        { "kind": "http", "path": "/only", "who": { "key": "B" }, "want": "r1" },
-        { "kind": "http", "path": "/only/x", "who": { "key": "B" }, "want": { "refused": "path" } },
-        { "kind": "http", "path": "/k", "who": { "key": "B" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/k", "who": {}, "want": { "refused": "session" } },
-        { "kind": "http", "path": "/p/x", "who": { "key": "A" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/p/x", "who": { "key": "O" }, "want": "r3" },
-        { "kind": "http", "path": "/open", "who": {}, "want": "r4" },
-        { "kind": "http", "path": "/open", "who": { "key": "A" }, "want": "r4" }
+        {
+          "kind": "libp2p",
+          "name": "tm_ab",
+          "want": "topic"
+        },
+        {
+          "kind": "libp2p",
+          "name": "tm_abc",
+          "want": null
+        },
+        {
+          "kind": "libp2p",
+          "name": "/proto/1",
+          "want": "proto"
+        },
+        {
+          "kind": "libp2p",
+          "name": "tx_00ff",
+          "want": null
+        }
       ]
     },
     {
-      "name": "http: a row's `read` op against the genesis's reads (a log before #115)",
-      "reads": [
-        { "op": "explore", "caller": "$O" },
-        { "op": "other", "caller": "$A" },
-        { "op": "any" },
-        { "op": "*", "caller": "$C" }
-      ],
+      "name": "mailbox: the host row (#130) is a kernel route like an admin route; its key is `host`, a setting",
       "updates": [
-        { "op": "add", "row": { "transport": "http", "address": "/explore", "prefix": true, "sender": "session", "program": "$cid", "read": "explore", "id": "l1" } },
-        { "op": "add", "row": { "transport": "http", "address": "/other", "sender": "session", "program": "$cid", "read": "other", "id": "l2" } },
-        { "op": "add", "row": { "transport": "http", "address": "/free", "sender": "*", "program": "$cid", "read": "other", "id": "l3" } },
-        { "op": "add", "row": { "transport": "http", "address": "/anyone", "sender": "session", "program": "$cid", "read": "any", "id": "l4" } },
-        { "op": "add", "row": { "transport": "http", "address": "/nobody", "sender": "session", "program": "$cid", "read": "missing", "id": "l5" } }
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "billing",
+            "program": "kernel",
+            "fn": "tick",
+            "host": "$A",
+            "x": 500,
+            "id": "host"
+          }
+        },
+        {
+          "op": "add",
+          "row": {
+            "transport": "mailbox",
+            "address": "billing2",
+            "program": "kernel",
+            "fn": "tick",
+            "host": "$B",
+            "x": 9,
+            "id": "second"
+          }
+        }
       ],
-      "fold": ["l1", "l2", "l3", "l4", "l5"],
-      "cases": [
-        { "kind": "http", "path": "/explore/x", "who": { "key": "O" }, "want": "l1" },
-        { "kind": "http", "path": "/explore/x", "who": { "key": "A" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/explore/x", "who": { "key": "C" }, "want": "l1" },
-        { "kind": "http", "path": "/other", "who": { "key": "A" }, "want": "l2" },
-        { "kind": "http", "path": "/other", "who": { "key": "B" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/free", "who": {}, "want": "l3" },
-        { "kind": "http", "path": "/anyone", "who": { "key": "B" }, "want": "l4" },
-        { "kind": "http", "path": "/nobody", "who": { "key": "A" }, "want": { "refused": "sender" } },
-        { "kind": "http", "path": "/nobody", "who": { "key": "C" }, "want": "l5" }
-      ]
-    },
-    {
-      "name": "http: a row's `read` with no reads in the genesis takes nobody",
-      "updates": [
-        { "op": "add", "row": { "transport": "http", "address": "/explore", "prefix": true, "sender": "session", "program": "$cid", "read": "explore", "id": "n1" } }
+      "fold": [
+        "host",
+        "second"
       ],
-      "fold": ["n1"],
       "cases": [
-        { "kind": "http", "path": "/explore/x", "who": { "key": "O" }, "want": { "refused": "sender" } }
-      ]
-    },
-    {
-      "name": "libp2p: topic or /protocol, first in table order whose sender takes the peer's key",
-      "updates": [
-        { "op": "add", "row": { "transport": "libp2p", "address": "topic-a", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "p1" } },
-        { "op": "add", "row": { "transport": "libp2p", "address": "/proto/1", "sender": "$A", "program": "$cid", "fn": "libp2p", "id": "p2" } },
-        { "op": "add", "row": { "transport": "libp2p", "address": "/proto/1", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "p3" } },
-        { "op": "add", "row": { "transport": "libp2p", "address": "topic-b", "sender": "session", "program": "$cid", "id": "p4" } },
-        { "op": "add", "row": { "transport": "http", "address": "topic-c", "sender": "*", "program": "$cid", "id": "p5" } }
-      ],
-      "fold": ["p1", "p2", "p3", "p4", "p5"],
-      "cases": [
-        { "kind": "libp2p", "name": "topic-a", "who": { "key": "B" }, "want": "p1" },
-        { "kind": "libp2p", "name": "topic-a", "who": {}, "want": "p1" },
-        { "kind": "libp2p", "name": "/proto/1", "who": { "key": "A" }, "want": "p2" },
-        { "kind": "libp2p", "name": "/proto/1", "who": { "key": "B" }, "want": "p3" },
-        { "kind": "libp2p", "name": "topic-b", "who": { "key": "A" }, "want": null },
-        { "kind": "libp2p", "name": "topic-c", "who": {}, "want": null },
-        { "kind": "libp2p", "name": "topic-", "who": {}, "want": null }
-      ]
-    },
-    {
-      "name": "libp2p: rows are exact (#119): a prefix row a log holds takes nothing; an exact row at the topic does; a /protocol is exact",
-      "updates": [
-        { "op": "add", "row": { "transport": "libp2p", "address": "tm_", "prefix": true, "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t1" } },
-        { "op": "add", "row": { "transport": "libp2p", "address": "tm_abc", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t2" } },
-        { "op": "add", "row": { "transport": "libp2p", "address": "tm_", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t4" } },
-        { "op": "add", "row": { "transport": "libp2p", "address": "/p", "sender": "*", "program": "$cid", "fn": "libp2p", "id": "t5" } },
-        { "op": "add", "row": { "transport": "http", "address": "/p", "prefix": true, "sender": "*", "program": "$cid", "id": "t6" } }
-      ],
-      "fold": ["t1", "t2", "t4", "t5", "t6"],
-      "cases": [
-        { "kind": "libp2p", "name": "tm_0123", "who": { "key": "B" }, "want": null },
-        { "kind": "libp2p", "name": "tm_abc", "who": {}, "want": "t2" },
-        { "kind": "libp2p", "name": "tm_", "who": {}, "want": "t4" },
-        { "kind": "libp2p", "name": "tm", "who": {}, "want": null },
-        { "kind": "libp2p", "name": "/p", "who": {}, "want": "t5" },
-        { "kind": "libp2p", "name": "/pq", "who": {}, "want": null },
-        { "kind": "http", "path": "/pq", "who": {}, "want": "t6" }
-      ]
-    },
-    {
-      "name": "mailbox: the host row (#130) is a kernel row like an admin row: a message from the host's key in its box matches it; a second tick row matches its own key's (which one is the host is the kernel's: the first, billing.zig termsOf)",
-      "updates": [
-        { "op": "add", "row": { "transport": "mailbox", "address": "billing", "sender": "$A", "program": "kernel", "fn": "tick", "x": 1000, "rates": { "fuel": 1, "storage": 2 }, "id": "h1" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "billing", "sender": "$B", "program": "kernel", "fn": "tick", "x": 5, "id": "h2" } },
-        { "op": "add", "row": { "transport": "mailbox", "address": "billing", "sender": "$A", "program": "kernel", "fn": "tick", "x": 2000, "rates": { "fuel": 1, "storage": 2 }, "id": "h1b" } }
-      ],
-      "fold": ["h1b", "h2"],
-      "cases": [
-        { "kind": "mail", "sender": "A", "box": "billing", "want": "h1b" },
-        { "kind": "mail", "sender": "B", "box": "billing", "want": "h2" },
-        { "kind": "mail", "sender": "C", "box": "billing", "want": null },
-        { "kind": "event", "box": "billing", "want": null }
+        {
+          "kind": "mail",
+          "box": "billing",
+          "want": "host"
+        },
+        {
+          "kind": "mail",
+          "box": "billing2",
+          "want": "second"
+        }
       ]
     }
   ]

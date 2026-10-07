@@ -1,41 +1,49 @@
-// The door's filters (#121): what a dispatch row's `filter` setting names,
-// run by the kernel on a request's package at admission, after the
-// transport's middleware has verified the sender and the kernel has matched
-// the row, and before the entry is written (scheduler.zig `door`). A filter
-// reads the package; what it writes is blocks (content-addressed, once) and
-// the package it hands back, which the entry then names instead of the one
-// received. It is lossless for anything a signature covers: what it rewrites
-// is reconstructible to the exact bytes (beef.zig `encode`).
+// The kernel's own filters (#121, #143): what a route's `filters` may name as
+// `kernel.<name>`, run by the kernel in the door on a request's package before
+// anything is recorded (scheduler.zig `door`, which runs a route's filters in
+// order and an app's own — `<app>.<filter>` — as calls in the deterministic
+// profile). A filter reads the package and the state as it stands; what it
+// writes is blocks (content-addressed, once) and the package it hands back,
+// which the entry then names instead of the one received. It is lossless for
+// anything a signature covers: what it rewrites is reconstructible to the
+// exact bytes (beef.zig `encode`).
 //
-// One filter today, `beef`: every byte string in the package (an http body,
-// a libp2p message's body; walked through maps and arrays) that starts with
-// a BEEF pattern (beef.zig `patterns`) is decoded; every BUMP is checked
-// against the headers in the chain app's state (the head `chain/state`, read
-// only); each transaction is stored as its `bitcoin-tx` block, each BUMP as
-// the raw block of its bytes and the merkle nodes it reveals; and the bytes
-// are replaced by a link to the pointer record (beef.zig). A BUMP that does
-// not check is a refusal: the entry is still written — a refusal entry,
-// naming the package with its BEEF replaced as far as it decoded — and
-// nothing runs. A transaction no BUMP proves enters as unproven (SPV and
-// status are the chain app's).
+//   kernel.brc104   the BRC-104 request check (http): the request's session
+//                   (the front door's table, the head `frontdoor/sessions`,
+//                   found by its `yourNonce`, not expired) and its signature
+//                   over the request, through the signer — passed on with the
+//                   PRINCIPAL the client's key; a request with no x-bsv-auth-*
+//                   headers, or one that does not check, is rejected (401: the
+//                   stock client shakes hands again; 400 for a malformed one).
+//   kernel.beef     every byte string in the package (an http body, a libp2p
+//                   message's body; walked through maps and arrays) that starts
+//                   with a BEEF pattern (beef.zig `patterns`) is decoded; every
+//                   BUMP is checked against the headers in the chain app's state
+//                   (the head `chain/state`, read only); each transaction is
+//                   stored as its `bitcoin-tx` block, each BUMP as the raw block
+//                   of its bytes and the merkle nodes it reveals; and the bytes
+//                   are replaced by a link to the pointer record (beef.zig). A
+//                   BUMP that does not check is a rejection (400), as is a
+//                   package with no BEEF in it when no filter before it yielded
+//                   a principal (#135: signed or validated — "nothing to
+//                   validate"). A transaction no BUMP proves enters as unproven
+//                   (SPV and status are the chain app's).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
 const mst = @import("mst");
 const beef = @import("beef.zig");
+const authfetch = @import("authfetch.zig");
+const signer = @import("signer.zig");
+const secp = @import("secp");
 const Store = @import("store.zig").Store;
 const Value = cbor.Value;
 
 /// The head the chain app keeps its state under (shruggr/skein-chain; skein-sdk `chain.state`).
 pub const CHAIN_STATE = "chain/state";
 
-/// The filters a row may name.
-pub const filters = [_][]const u8{"beef"};
-
-pub fn isFilter(name: []const u8) bool {
-    for (filters) |f| if (std.mem.eql(u8, f, name)) return true;
-    return false;
-}
+pub const BRC104 = "kernel.brc104";
+pub const BEEF = "kernel.beef";
 
 /// The chain app's headers, read only: {kind: "chain-state", maps: {headers: <MST root>}}, the map
 /// height (u32 big-endian) → the header (a bitcoin-block link) on its best chain.
@@ -166,15 +174,14 @@ const Walk = struct {
     }
 };
 
-/// The refusal an admission comes to when nothing admits the sender (#135: signed or validated):
-/// an unsigned request (no `verified` sender) on a row whose filter validated nothing — the
-/// package held no BEEF to check, so the filter proved nothing and the request is neither signed
-/// nor validated. A signed request is admitted by its signature whatever the filter found; a
-/// filter's own refusal stands as it is.
+/// The rejection `kernel.beef` comes to when nothing admits the request (#135: signed or
+/// validated): no filter before it yielded a principal, and the package held no BEEF to check —
+/// the filter proved nothing, so the request is neither signed nor validated. With a principal it
+/// passes whatever it found; its own refusal stands as it is.
 pub const NOTHING_VALIDATED = "nothing to validate";
 
-pub fn nothingValidated(signed: bool, x: Filtered) ?[]const u8 {
-    if (signed or x.refused != null or x.beefs.len > 0) return null;
+pub fn nothingValidated(principal: bool, x: Filtered) ?[]const u8 {
+    if (principal or x.refused != null or x.beefs.len > 0) return null;
     return NOTHING_VALIDATED;
 }
 
@@ -215,4 +222,116 @@ pub fn restore(a: std.mem.Allocator, s: Store, v: Value, beefs: []const []const 
         },
         else => return v,
     }
+}
+
+// ---------------------------------------------------------------- kernel.brc104 (#143)
+
+/// A filter's rejection: the status the transport answers with, a code, why.
+pub const Reject = struct { status: i64, code: ?[]const u8 = null, reason: []const u8 };
+
+/// The front door's session table (programs/frontdoor/sessions.zig, written on the handshake),
+/// read only: {kind: "sessions", buckets: [<bucket> × 16]}, a bucket {sessions: [{nonce, peer,
+/// peerNonce, created}]}, a session in bucket sha256(nonce)[0] mod 16.
+pub const SESSIONS = "frontdoor/sessions";
+const BUCKETS = 16;
+
+pub const Session = struct { peer: []const u8, ours: []const u8, theirs: []const u8, created: i128 };
+
+/// The session whose nonce (ours) is `nonce`, or null.
+pub fn sessionOf(a: std.mem.Allocator, s: Store, nonce: []const u8) !?Session {
+    const root = (try s.headTree(a, SESSIONS)) orelse return null;
+    const r = s.getOpt(a, root) orelse return null;
+    const bs = r.get("buckets") orelse return null;
+    if (bs != .array or bs.array.len != BUCKETS) return null;
+    var h: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(nonce, &h, .{});
+    const bc = Value.cidOf(bs.array[h[0] % BUCKETS]) orelse return null;
+    const b = s.getOpt(a, bc) orelse return null;
+    const ss = b.get("sessions") orelse return null;
+    if (ss != .array) return null;
+    for (ss.array) |x| {
+        const ours = Value.str(x.get("nonce")) orelse continue;
+        if (!std.mem.eql(u8, ours, nonce)) continue;
+        return .{
+            .ours = ours,
+            .peer = Value.bytesOf(x.get("peer")) orelse return null,
+            .theirs = Value.str(x.get("peerNonce")) orelse return null,
+            .created = Value.intOf(x.get("created")) orelse 0,
+        };
+    }
+    return null;
+}
+
+/// The signer, as the door asks it (not recorded: the door's outcome is what the log keeps).
+pub const Signer = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]u8,
+};
+
+/// What `kernel.brc104` came to: passed on with the client's key (and the session's nonce and
+/// the request id, which the front door signs the answer with), or a rejection.
+pub const Brc104 = union(enum) {
+    pass: struct { caller: []const u8, theirs: []const u8, request_id: []const u8 },
+    reject: Reject,
+};
+
+fn headerOf(headers: ?Value, name: []const u8) ?[]const u8 {
+    const hs = headers orelse return null;
+    if (hs != .map) return null;
+    for (hs.map) |e| if (std.ascii.eqlIgnoreCase(e.key, name)) return Value.str(e.value);
+    return null;
+}
+
+/// Whether a request carries BRC-104 headers (x-bsv-auth-*): a general message.
+pub fn signedRequest(req: Value) bool {
+    const hs = req.get("headers") orelse return false;
+    if (hs != .map) return false;
+    for (hs.map) |e| if (std.ascii.startsWithIgnoreCase(e.key, "x-bsv-auth-")) return true;
+    return false;
+}
+
+const UNAUTHORIZED: Reject = .{ .status = 401, .code = "UNAUTHORIZED", .reason = "Mutual-authentication failed!" };
+const MALFORMED: Reject = .{ .status = 400, .code = "ERR_AUTH_MALFORMED", .reason = "The authentication request is malformed." };
+
+fn failed(reason: []const u8) Brc104 {
+    return .{ .reject = .{ .status = 401, .code = "ERR_AUTH_FAILED", .reason = reason } };
+}
+
+/// kernel.brc104: the request's BRC-104 general message checked — its session (by `yourNonce`, not
+/// past `ttl` ms from its handshake at `now`, the entry's time), its identity the session's, and
+/// its signature over the request (SimplifiedFetchTransport's payload) under [2, "auth message
+/// signature"], key "<nonce> <ours>", counterparty the client, through the signer.
+pub fn brc104(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, now: i64, ttl: i64) !Brc104 {
+    if (!signedRequest(req)) return .{ .reject = UNAUTHORIZED };
+    const hs = req.get("headers");
+    const need = struct {
+        fn f(h: ?Value, name: []const u8) ?[]const u8 {
+            const v = headerOf(h, name) orelse return null;
+            return if (v.len == 0) null else v;
+        }
+    }.f;
+    const key_hex = need(hs, "x-bsv-auth-identity-key") orelse return .{ .reject = MALFORMED };
+    const nonce = need(hs, "x-bsv-auth-nonce") orelse return .{ .reject = MALFORMED };
+    const your = need(hs, "x-bsv-auth-your-nonce") orelse return .{ .reject = MALFORMED };
+    const sig_hex = need(hs, "x-bsv-auth-signature") orelse return .{ .reject = MALFORMED };
+    const request_id = need(hs, "x-bsv-auth-request-id") orelse return .{ .reject = UNAUTHORIZED };
+    _ = need(hs, "x-bsv-auth-version") orelse return .{ .reject = MALFORMED };
+    if (key_hex.len != 66 or sig_hex.len % 2 != 0) return .{ .reject = MALFORMED };
+    const peer = try a.alloc(u8, 33);
+    _ = std.fmt.hexToBytes(peer, key_hex) catch return .{ .reject = MALFORMED };
+    if (!secp.isKey(peer)) return .{ .reject = MALFORMED };
+    const sig = try a.alloc(u8, sig_hex.len / 2);
+    _ = std.fmt.hexToBytes(sig, sig_hex) catch return .{ .reject = MALFORMED };
+    const b64 = std.base64.standard.Decoder;
+    const rid = try a.alloc(u8, b64.calcSizeForSlice(request_id) catch return .{ .reject = MALFORMED });
+    b64.decode(rid, request_id) catch return .{ .reject = MALFORMED };
+    const sess = (try sessionOf(a, s, your)) orelse return failed("Session not found for nonce (expired or unknown)");
+    if (sess.created + ttl < now) return failed("Session expired");
+    if (!std.mem.eql(u8, sess.peer, peer)) return failed("general identity does not match the authenticated session.");
+    const payload = try authfetch.requestPayload(a, rid, Value.str(req.get("method")) orelse "GET", Value.str(req.get("path")) orelse "/", Value.str(req.get("query")) orelse "", try authfetch.headerList(a, hs), Value.bytesOf(req.get("body")) orelse "");
+    const key_id = try std.fmt.allocPrint(a, "{s} {s}", .{ nonce, sess.ours });
+    const sg = w orelse return failed("this host has no signer to check the signature with");
+    const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, key_id, .{ .other = peer }, payload, sig)) catch return failed("Invalid signature in generalMessage");
+    if (res.len == 0 or res[0] != 0) return failed("Invalid signature in generalMessage");
+    return .{ .pass = .{ .caller = peer, .theirs = sess.theirs, .request_id = request_id } };
 }

@@ -53,18 +53,25 @@ test("message: any change breaks the signature", async () => {
 
 test("dispatch row: the kernel's rule (dispatch.zig problem)", () => {
   const key = new Uint8Array(Buffer.from(PrivateKey.fromRandom().toPublicKey().toString(), "hex"));
-  assert.ok(isDispatchRow({ transport: "mailbox", address: "run", sender: key, program: wasm }));
-  assert.ok(isDispatchRow({ transport: "mailbox", address: "*", sender: "*", program: wasm }));
-  assert.ok(isDispatchRow({ transport: "mailbox", address: "objects", sender: key, program: "kernel", fn: "objects" }));
-  assert.ok(isDispatchRow({ transport: "http", address: "/api/", prefix: true, sender: "session", program: wasm, fn: "get" }));
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: Buffer.from(key).toString("hex"), program: wasm }), "a key is bytes, not hex");
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: "session", program: wasm }), "session: http only");
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", prefix: true, sender: "*", program: wasm }), "prefix: http only");
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "objects", sender: "*", program: "kernel", fn: "reboot" }), "no such kernel operation");
-  assert.ok(!isDispatchRow({ transport: "http", address: "/x", sender: "*", program: "kernel", fn: "objects" }), "a kernel row is a mailbox row");
-  assert.ok(!isDispatchRow({ transport: "smtp", address: "run", sender: "*", program: wasm }));
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "", sender: "*", program: wasm }));
-  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: "*", program: "run-handler" }), "a program is a CID");
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "run", program: wasm }));
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "*", program: wasm }));
+  assert.ok(isDispatchRow({ transport: "event", address: "chain", program: wasm }));
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "objects", program: "kernel", fn: "objects" }));
+  assert.ok(isDispatchRow({ transport: "mailbox", address: "grant", program: "kernel", fn: "grant" }));
+  assert.ok(isDispatchRow({ transport: "http", address: "/api/", prefix: true, filters: ["kernel.brc104"], program: wasm, fn: "get" }));
+  assert.ok(isDispatchRow({ transport: "http", address: "/site/", prefix: true, filters: ["site.get"] }), "a read route: filters only");
+  assert.ok(!isDispatchRow({ transport: "http", address: "/site/", prefix: true }), "a read route names its filters");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "x", filters: ["site.get"] }), "only an http route may have no handler");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: key, program: wasm }), "#143: no sender");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", sender: "*", program: wasm }), "#143: no sender");
+  assert.ok(!isDispatchRow({ transport: "event", address: "chain", filters: ["kernel.beef"], program: wasm }), "an event route has no filters");
+  assert.ok(!isDispatchRow({ transport: "http", address: "/x", filters: ["kernel.nope"], program: wasm, fn: "x" }), "no such kernel filter");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", prefix: true, program: wasm }), "prefix: http only");
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "objects", program: "kernel", fn: "reboot" }), "no such kernel operation");
+  assert.ok(!isDispatchRow({ transport: "http", address: "/x", program: "kernel", fn: "objects" }), "a kernel route is a mailbox route");
+  assert.ok(!isDispatchRow({ transport: "smtp", address: "run", program: wasm }));
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "", program: wasm }));
+  assert.ok(!isDispatchRow({ transport: "mailbox", address: "run", program: "run-handler" }), "a program is a CID");
 });
 
 test("program and genesis: validated", () => {
@@ -74,11 +81,13 @@ test("program and genesis: validated", () => {
   assert.throws(() => program({ name: "x", code: { ts: "", wasm } as never, inputs: {}, services: [], description: "" }), TypeError);
   assert.throws(() => program({ name: "", code: { ts: "" }, inputs: {}, services: [], description: "" }), TypeError);
   const id = PrivateKey.fromRandom().toPublicKey().toString();
-  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", owner: id, programs: { w: wasm }, dispatch: [{ transport: "mailbox", address: "run", sender: "*", program: wasm }], scopes: { w: ["main", "notes/"] } };
+  const g: Genesis = { kind: "genesis", identity: id, handle: "skein", domain: "localhost", root: [id], programs: { w: wasm }, dispatch: [{ transport: "mailbox", address: "run", program: wasm }], scopes: { w: ["main", "notes/"] } };
   assert.ok(isGenesis(g));
   assert.ok(isGenesis({ ...g, host: id }), "format 1's host is still read");
   assert.ok(!isGenesis({ ...g, identity: "nope" }));
-  assert.ok(!isGenesis({ ...g, dispatch: [{ transport: "mailbox", address: "run", sender: "*", program: "x" }] }), "a bad row is refused");
+  assert.ok(!isGenesis({ ...g, dispatch: [{ transport: "mailbox", address: "run", program: "x" }] }), "a bad row is refused");
+  assert.ok(!isGenesis({ ...g, owner: id } as never), "#143: no owner (root holders instead)");
+  assert.ok(isGenesis({ ...g, roles: { root: ["frontdoor.explore"] } }));
   assert.ok(!isGenesis({ ...g, dispatch: undefined }), "the dispatch seed is required");
   assert.ok(!isGenesis({ ...g, scopes: { w: [""] } }));
 });

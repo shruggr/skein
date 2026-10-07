@@ -22,7 +22,7 @@ const env = await sealCbor(ephemeralWallet(a), { recipient: { identityKey: b.toP
 const signed = cborSignedPart(env);
 const cid = CID.parse("bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
 const programs = { frontdoor: cid, messagebox: cid, resolve: cid };
-const g = genesis2({ identity: a.toPublicKey().toString(), owner: b.toPublicKey().toString(), handle: "x", domain: "localhost", infer: b.toPublicKey().toString() }, programs);
+const g = genesis2({ identity: a.toPublicKey().toString(), root: [b.toPublicKey().toString()], handle: "x", domain: "localhost", infer: b.toPublicKey().toString() }, programs);
 const entry2 = { kind: "log", prev: null, n: 0, time: [1, 2], genesis: cid };
 const out = {
   envelope: { signed: hex(dagCbor.encode(signed)), full: hex(dagCbor.encode(env)), body: hex(body), ok: true },

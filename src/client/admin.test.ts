@@ -29,30 +29,31 @@ test("messageJson: the /sendMessage JSON body; its body read as DAG-JSON is the 
   assert.deepEqual(dagCbor.encode(back), dagCbor.encode(body));
 });
 
-test("planDispatch / planPeers: the kernel's bodies (sender and key as bytes)", () => {
-  const p = planDispatch(KEY, { op: "add", sender: KEY, box: "register", handler: String(encode({ kind: "program" } as never).cid) });
-  const row = (p.messages[0]!.body as { row: { sender: Uint8Array; transport: string } }).row;
+test("planDispatch / planPeers: the kernel's bodies (a route with no sender, #143; a key as bytes)", () => {
+  const p = planDispatch(KEY, { op: "add", box: "register", handler: String(encode({ kind: "program" } as never).cid) });
+  const row = (p.messages[0]!.body as { row: { sender?: unknown; transport: string; address: string } }).row;
   assert.equal(p.messages[0]!.box, "dispatch");
-  assert.deepEqual([row.transport, Buffer.from(row.sender).toString("hex")], ["mailbox", KEY]);
+  assert.deepEqual([row.transport, row.address, row.sender], ["mailbox", "register", undefined]);
+  assert.throws(() => planDispatch(KEY, { op: "add", sender: KEY, box: "register", handler: String(encode({ kind: "program" } as never).cid) }), /--sender: gone \(#143\)/);
   const q = planPeers(KEY, [{ op: "add", key: KEY, transport: "mailbox", address: "https://x.example", handle: "bob", domain: "example.com" }, { op: "remove", key: KEY }]);
   assert.deepEqual(q.messages.map((m) => (m.body as { op: string }).op), ["add", "remove"]);
   assert.ok((q.messages[1]!.body as { key: unknown }).key instanceof Uint8Array);
   assert.throws(() => planPeers(KEY, [{ op: "remove", key: "02ab" }]), /not an identity key/);
 });
 
-test("planDispatch --http (#125): the owner's http row (prefix, fn, the handler's settings; no app); refusals", () => {
+test("planDispatch --http (#125, #143): root's own http route (prefix, filters, fn, the handler's settings; no app, no sender); refusals", () => {
   const prog = encode({ kind: "program" } as never).cid;
   const p = planDispatch(KEY, { op: "add", box: "/", handler: "site.site", http: { prefix: true, fn: "get", settings: { root: "www" } } }, { "site.site": prog });
   const row = (p.messages[0]!.body as { row: Record<string, unknown> }).row;
-  assert.deepEqual({ ...row, program: String(row.program) }, { transport: "http", address: "/", prefix: true, sender: "*", program: String(prog), fn: "get", root: "www" });
-  assert.equal(p.prompt[0], `dispatch add http /* from anyone → site.site.get (${prog}) (root www)`);
-  const s = planDispatch(KEY, { op: "add", box: "/x", sender: "session", handler: String(prog), http: { fn: "get" } });
-  assert.deepEqual([(s.messages[0]!.body as { row: { sender: unknown; prefix?: unknown } }).row.sender, (s.messages[0]!.body as { row: { prefix?: unknown } }).row.prefix], ["session", undefined]);
+  assert.deepEqual({ ...row, program: String(row.program) }, { transport: "http", address: "/", prefix: true, program: String(prog), fn: "get", root: "www" });
+  assert.equal(p.prompt[0], `dispatch add http / prefix → site.site.get (${prog}) (root www)`);
+  const s = planDispatch(KEY, { op: "add", box: "/x", handler: String(prog), http: { fn: "get", filters: ["kernel.brc104"] } });
+  assert.deepEqual([(s.messages[0]!.body as { row: { filters?: unknown; prefix?: unknown } }).row.filters, (s.messages[0]!.body as { row: { prefix?: unknown } }).row.prefix], [["kernel.brc104"], undefined]);
   assert.throws(() => planDispatch(KEY, { op: "add", box: "x", handler: String(prog), http: { fn: "get" } }), /a path/);
   assert.throws(() => planDispatch(KEY, { op: "add", box: "/a/../b", handler: String(prog), http: { fn: "get" } }), /a path/);
   assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "" } }), /--fn/);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "get", settings: { app: "site" } } }), /the row's own/);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "x", sender: "session", handler: String(prog) }), /an http row's/);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "get", settings: { app: "site" } } }), /the route's own/);
+  assert.throws(() => planDispatch(KEY, { op: "add", box: "x", sender: "session", handler: String(prog) }), /--sender: gone/);
 });
 
 test("host.env (#142): every SKEIN_* line, quotes and comments stripped, the environment wins; the operator's key made once, 0600", async (t) => {

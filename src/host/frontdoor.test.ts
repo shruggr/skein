@@ -1,15 +1,16 @@
-// The front door (#68, #66) at the kernel, no router: every request is
-// appended as received and the front door is stepped on it, as the request's
-// own thread; the answer is read off that thread once it has come to rest.
-// The stock AuthFetch shakes hands with the instance — the handshake is a
-// request like any other, and its session is a record (head `frontdoor/sessions`) —
-// its signed requests verify inside the VM and the answers verify at the
-// client. A refusal (401, 404) of a signed request is recorded and changes
-// nothing else; an unsigned request is no entry (#135: the second door is
-// for reads; a row is a message route) — but at an open row whose filter
-// validates the payload (`beef`): admitted with no sender key, answered
-// plain (#135: signed or validated). A poll costs an entry. Sessions survive a new kernel process; an expired one is a
-// 401 and the stock client shakes hands again by itself.
+// The front door (#68, #66, #143) at the kernel, no router: every request goes
+// to the kernel's door — its route matched, the route's filters run, the gate
+// checked. What passes is one entry and a thread (the front door stepped on
+// it); what a filter rejects or answers, or the gate refuses, writes nothing
+// and is answered at once (signed on the request's session when it is
+// signed: the front door's fn "respond"). The stock AuthFetch shakes hands
+// with the instance — the handshake is a route of its own, and its session a
+// record (head `frontdoor/sessions`) that kernel.brc104 reads. kernel.beef
+// admits an unsigned request only when it validates (#135: signed or
+// validated). An app's filters answer, reject or pass; roles gate functions,
+// root passes everything, and root's grants change who else may. Sessions
+// survive a new kernel process; an expired one is a 401 and the stock client
+// shakes hands again by itself.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -24,18 +25,18 @@ import { encode } from "../runtime/cid.ts";
 import { msStamp } from "../runtime/syscalls.ts";
 import { ephemeralWallet } from "../wallet.ts";
 import { rawCid } from "./boot.ts";
-import { appendRequest, frontDoorFetch, routeOf, type FrontAnswer } from "./frontdoor.ts";
+import { appendRequest, frontDoorFetch, type FrontAnswer } from "./frontdoor.ts";
 import { keyBytes, writeGenesis } from "./genesis.ts";
 import { Kernel, KERNEL_BIN } from "./kernel.ts";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL } from "./providers.ts";
 
 const PROBE = new URL("../../kernel-zig/test/call/probe.wasm", import.meta.url);
 
-test("front door: every request is an entry and a thread; the handshake writes the session as a record; refusals are recorded and change nothing else; sessions survive a restart; an expired one is a 401 the stock client recovers from", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+test("front door (#143): the route's filters before anything is recorded — kernel.brc104, kernel.beef, an app's own; the gate (root, an app role, a grant and its revoke); what is turned away or answered writes nothing; sessions survive a restart; an expired one is a 401 the stock client recovers from", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
   const home = await fs.mkdtemp(join(tmpdir(), "skein-front-"));
   t.after(() => fs.rm(home, { recursive: true, force: true }));
-  const key = PrivateKey.fromRandom(), clientKey = PrivateKey.fromRandom();
-  const identity = key.toPublicKey().toString(), client = clientKey.toPublicKey().toString();
+  const key = PrivateKey.fromRandom(), clientKey = PrivateKey.fromRandom(), strangerKey = PrivateKey.fromRandom();
+  const identity = key.toPublicKey().toString(), client = clientKey.toPublicKey().toString(), strangerId = strangerKey.toPublicKey().toString();
   const db = join(home, "runtime.db");
   const open = () => new Kernel({ db, handle: "alpha", domain: "localhost", wallet: ephemeralWallet(key), env: { SKEIN_HOME: home } });
   let k = open();
@@ -43,11 +44,18 @@ test("front door: every request is an entry and a thread; the handshake writes t
   const wasm = readFileSync(PROBE);
   await k.putBlock(rawCid(wasm), wasm);
   const probe = await k.store.put({ kind: "program", name: "probe", code: { wasm: rawCid(wasm) }, inputs: {}, services: [], description: "the call probe" } as never) as CID;
+  const p = probe.toString();
   await writeGenesis(k, {
-    identity, owner: client, handle: "alpha", domain: "localhost",
-    routes: [{ path: "/whoami", program: probe.toString(), fn: "whoami" }, { path: "/open", program: probe.toString(), fn: "whoami", auth: "none" }],
-    // #135: an open row behind the door's `beef` filter (no chain app here: every BEEF is refused at the door).
-    dispatch: [{ transport: "http", address: "/beef", sender: "*", program: probe.toString(), fn: "whoami", filter: "beef" }, { transport: "http", address: "/mine", sender: client, program: probe.toString(), fn: "whoami" }],
+    // #143: the client is root.
+    identity, root: [client], handle: "alpha", domain: "localhost",
+    dispatch: [
+      { transport: "http", address: "/whoami", filters: ["kernel.brc104"], program: p, fn: "whoami" },
+      // No filters: open to whatever comes, signed or not; the handler gets no caller.
+      { transport: "http", address: "/open", program: p, fn: "whoami" },
+      // #135: an open route behind kernel.beef (no chain app here at first: every BEEF is rejected).
+      { transport: "http", address: "/beef", filters: ["kernel.beef"], program: p, fn: "whoami" },
+      { transport: "http", address: "/beef-signed", filters: ["kernel.brc104", "kernel.beef"], program: p, fn: "whoami" },
+    ],
   });
   await k.start();
   await k.idle();
@@ -61,16 +69,28 @@ test("front door: every request is an entry and a thread; the handshake writes t
   const answers: FrontAnswer[] = [];
   const door: typeof fetch = (input, init) => frontDoorFetch(k, { now, onAnswer: (a) => answers.push(a) })(input, init);
   const af = new AuthFetch(ephemeralWallet(clientKey), undefined, undefined, undefined, {}, door);
+  const stranger = new AuthFetch(ephemeralWallet(strangerKey), undefined, undefined, undefined, {}, door);
+  const hexOf = async (r: Response) => Buffer.from(await r.arrayBuffer()).toString("hex");
   const whoami = async () => {
     const r = await af.fetch("http://alpha.test/whoami", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
     assert.equal(r.status, 200, await r.clone().text());
-    return Buffer.from(await r.arrayBuffer()).toString("hex");
+    return await hexOf(r);
   };
   const statuses = () => answers.map((a) => a.status);
+  const signed = (x: FrontAnswer) => !!x.headers["x-bsv-auth-signature"] && x.headers["x-bsv-auth-your-nonce"] !== undefined;
+  const plain = (x: FrontAnswer) => !Object.keys(x.headers).some((h) => h.startsWith("x-bsv-auth-"));
+  /** A message from root (the client) to an admin box: a signed `local` request, routed by the kernel. */
+  const admin = async (box: string, body: unknown) => {
+    const bodyBytes = dagCbor.encode(body);
+    const unsigned = { kind: "mail", op: "put", sender: keyBytes(client), recipient: keyBytes(identity), box, body: encode(dagCbor.decode(bodyBytes)).cid, nonce: Uint8Array.from(Buffer.from(PrivateKey.fromRandom().toHex().slice(0, 32), "hex")) };
+    const { signature } = await ephemeralWallet(clientKey).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
+    await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
+    await k.idle();
+  };
 
   const n0 = await entries();
   assert.equal(await sessions(), null, "no session yet");
-  assert.equal(await whoami(), client, "the handler sees the authenticated caller; the client verified the signed answer");
+  assert.equal(await whoami(), client, "kernel.brc104's principal is the handler's caller; the client verified the signed answer");
   await k.idle();
   assert.deepEqual(statuses(), [200, 200], "the handshake, the request");
   assert.equal(await entries(), n0 + 2, "the handshake and the request: one entry each");
@@ -81,7 +101,6 @@ test("front door: every request is an entry and a thread; the handshake writes t
   const held = (await Promise.all(root.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: Array<{ peer: Uint8Array; nonce: string; peerNonce: string; created: number }> }).sessions))).flat();
   assert.equal(held.length, 1, "one session");
   assert.equal(Buffer.from(held[0]!.peer).toString("hex"), client);
-  assert.ok(held[0]!.nonce.length > 0 && held[0]!.peerNonce.length > 0 && held[0]!.created > 0);
   // Each request's answer is on the last update of the thread it launched: the front door on the request.
   for (const a of answers) {
     assert.ok(a.entry && a.thread, "the entry and its thread");
@@ -89,127 +108,155 @@ test("front door: every request is an entry and a thread; the handshake writes t
     assert.deepEqual([o.kind, o.args.transport, o.input.toString()], ["thread", "http", a.entry!.toString()]);
   }
   const last = answers.at(-1)!;
-  const e = await k.store.get(last.entry!) as { request?: CID; transport?: string };
+  const e = await k.store.get(last.entry!) as { request?: CID; transport?: string; door?: { principal?: Uint8Array; filters?: string[]; verified?: unknown } };
   assert.equal(e.transport, "http");
+  assert.equal(Buffer.from(e.door!.principal!).toString("hex"), client, "the door's principal: kernel.brc104's");
+  assert.deepEqual(e.door!.filters, ["kernel.brc104"], "the filters that ran");
   const req = await k.store.get(e.request!) as { kind: string; method: string; route: string; headers: Record<string, string> };
   assert.deepEqual([req.kind, req.method, req.route], ["http", "POST", "/whoami"], "the request as received");
-  assert.ok(req.headers["x-bsv-auth-signature"], "its BRC-104 headers too: the host verified nothing");
 
-  // #135, two doors: an unsigned request never reaches the kernel's door — a 401 at a message route
-  // (any row, an open one `*` included: sign it), a 404 at nothing; answered by the host, no entry.
+  // Turned away at the door: nothing written. An unsigned request at a kernel.brc104 route: 401; a path no
+  // route is at: 404 — plain for an unsigned request.
   answers.length = 0;
   const n1 = await entries();
   assert.equal((await door("http://alpha.test/whoami", { method: "POST" })).status, 401);
-  assert.equal((await door("http://alpha.test/open", { method: "POST" })).status, 401, "an open row (`*`) is a message route too: an unsigned request is 401");
   assert.equal((await door("http://alpha.test/nowhere", { method: "POST" })).status, 404);
   await k.idle();
-  assert.equal(await entries(), n1, "an unsigned request is no entry");
-  assert.equal((await sessions())!.toString(), s1.toString(), "a refusal moves nothing");
-  assert.ok(answers.every((a) => !a.thread && !a.entry), "answered by the host: no entry, no thread");
-
-  // 2026-10-07: a signed request is verified and answered signed on its session whatever the row's
-  // sender — an open row (`*`) included; the row's sender is who may reach it, not how the wire is answered.
-  const signed = (x: FrontAnswer) => !!x.headers["x-bsv-auth-signature"] && x.headers["x-bsv-auth-your-nonce"] !== undefined;
+  assert.equal(await entries(), n1, "turned away: no entry");
+  assert.ok(answers.every((a) => !a.thread && !a.entry && plain(a)), "no entry, no thread, answered plain");
+  // A route with no filters takes an unsigned request: admitted, the handler with no caller key.
+  answers.length = 0;
+  const openPlain = await door("http://alpha.test/open", { method: "GET" });
+  assert.equal(openPlain.status, 200);
+  const ob = Buffer.from(await openPlain.arrayBuffer());
+  assert.ok(ob.byteLength !== 33 && ob[0] === 0x01, `no principal: the probe's first caller is the in-VM call's own (a CID), never a key (${ob.toString("hex")})`);
+  assert.ok(answers.at(-1)!.entry && plain(answers.at(-1)!), "an entry, answered plain");
+  // Signed at a route that names no identity filter: answered signed (the session verified for the answer
+  // alone), the handler with no caller — #143: the principal is what the route's filters yield.
   answers.length = 0;
   const openSigned = await af.fetch("http://alpha.test/open", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(openSigned.status, 200);
-  assert.equal(Buffer.from(await openSigned.arrayBuffer()).toString("hex"), client, "a signed request on an open row: the handler sees the verified caller");
-  assert.ok(signed(answers.at(-1)!), "a signed request on an open row: its answer signed on the session (AuthFetch verified it)");
-  const openGet = await af.fetch("http://alpha.test/open", { method: "GET" });
-  assert.equal(openGet.status, 200);
-  assert.equal(Buffer.from(await openGet.arrayBuffer()).toString("hex"), client);
-  assert.ok(signed(answers.at(-1)!), "a signed GET on an open row: answered signed");
+  assert.notEqual(await hexOf(openSigned), client, "no identity filter: no caller");
+  assert.ok(signed(answers.at(-1)!), "a signed request: its answer signed on its session (AuthFetch verified it)");
+  // A signed request no route is at: its 404, signed (the front door's fn "respond"), no entry.
+  answers.length = 0;
   const nowhere = await af.fetch("http://alpha.test/nowhere", { method: "GET" });
   assert.equal(nowhere.status, 404);
-  assert.ok(signed(answers.at(-1)!), "a signed request no row is at: its 404 signed");
-  answers.length = 0;
-  const plainGet = await door("http://alpha.test/open", { method: "GET" });
-  assert.equal(plainGet.status, 401, "#135: an unsigned GET of an open row: 401 (a read is a read, declared as one; a row is a message route)");
-  assert.ok(!Object.keys(answers.at(-1)!.headers).some((h) => h.startsWith("x-bsv-auth-")), "answered plain");
+  assert.ok(signed(answers.at(-1)!) && !answers.at(-1)!.entry, "a signed 404: signed, nothing written");
 
-  // #135: a door refusal (no thread ran) of a signed request is answered signed on its session too:
-  // the host asks the front door (fn "refusal") with the request as received. A BEEF the filter
-  // decodes is replaced in the record the entry names, so the signature verifies over the bytes sent.
+  // kernel.beef: no chain state to check a BUMP against — rejected, nothing written; signed, the rejection
+  // signed; unsigned, plain.
   const beef = new Beef();
   beef.mergeRawTx(new Transaction(1, [], [{ lockingScript: new P2PKH().lock(clientKey.toPublicKey().toHash()), satoshis: 1 }], 0).toBinary());
+  const beefBody = () => ({ method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
   answers.length = 0;
-  const refusedSigned = await af.fetch("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
-  assert.equal(refusedSigned.status, 400, "the filter refused the BEEF (no chain state to check it against)");
-  assert.match(await refusedSigned.text(), /no chain state/, "the refusal's reason, in the body AuthFetch verified");
-  assert.ok(signed(answers.at(-1)!) && !answers.at(-1)!.thread, "a door refusal (no thread) of a signed request: answered signed on its session");
-  const refusedRecord = await k.store.get((await k.store.get(answers.at(-1)!.entry!) as { request: CID }).request) as unknown as { body: unknown };
-  assert.ok(!(refusedRecord.body instanceof Uint8Array), "the record the refusal entry names has its BEEF replaced (the host signed over the bytes as received)");
-  // #135, signed or validated: the same request unsigned reaches the door's filter (an open row whose
-  // filter validates the payload) — refused there, answered plain.
-  const plain = (x: FrontAnswer) => !Object.keys(x.headers).some((h) => h.startsWith("x-bsv-auth-"));
+  const rejectedSigned = await af.fetch("http://alpha.test/beef-signed", beefBody());
+  assert.equal(rejectedSigned.status, 400);
+  assert.match(await rejectedSigned.text(), /no chain state/, "the rejection's reason, in the body AuthFetch verified");
+  assert.ok(signed(answers.at(-1)!) && !answers.at(-1)!.entry, "rejected at the door: signed on its session, nothing written");
   answers.length = 0;
-  const refusedPlain = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
-  assert.equal(refusedPlain.status, 400, "#135: unsigned at an open row behind `filter: beef`: through the door, the filter's refusal");
-  assert.match(await refusedPlain.text(), /no chain state/);
-  assert.ok(plain(answers.at(-1)!) && answers.at(-1)!.entry && !answers.at(-1)!.thread, "a refusal entry, no thread, answered plain");
+  const rejectedPlain = await door("http://alpha.test/beef", beefBody());
+  assert.equal(rejectedPlain.status, 400);
+  assert.match(await rejectedPlain.text(), /no chain state/);
+  assert.ok(plain(answers.at(-1)!) && !answers.at(-1)!.entry, "unsigned: plain, nothing written");
 
-  // A chain state for the filter to check against (the owner's `head` message: no headers, so a BEEF with
-  // no BUMP passes as unproven, the chain app's to judge).
-  {
-    const state = await k.store.put({ kind: "chain-state", network: "main", maps: { headers: null } } as never);
-    const bodyBytes = dagCbor.encode({ name: "chain/state", tree: state });
-    const unsigned = { kind: "mail", op: "put", sender: keyBytes(client), recipient: keyBytes(identity), box: "head", body: encode(dagCbor.decode(bodyBytes)).cid, nonce: new Uint8Array(16) };
-    const { signature } = await ephemeralWallet(clientKey).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
-    await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
-    await k.idle();
-    assert.ok(((await k.call("head", "chain/state")) as CID | null)?.equals(state), "the chain state is set");
-  }
-  // A good BEEF unsigned: validated at the door, the handler's plain answer (no caller); the admission
-  // carries no sender key (`door` names the filter and the BEEF's pointer record, no `verified`).
+  // A chain state for kernel.beef to check against: root's `head` message (no headers, so a BEEF with no
+  // BUMP passes as unproven, the chain app's to judge).
+  const state = await k.store.put({ kind: "chain-state", network: "main", maps: { headers: null } } as never);
+  await admin("head", { name: "chain/state", tree: state });
+  assert.ok(((await k.call("head", "chain/state")) as CID | null)?.equals(state), "root's head message moved the head (the gate: root)");
+  // A good BEEF unsigned: validated, admitted — the door names the filter and the BEEF's pointer record, no principal.
   answers.length = 0;
-  const validated = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
+  const validated = await door("http://alpha.test/beef", beefBody());
   assert.equal(validated.status, 200, await validated.clone().text());
-  // The probe answers the first `caller` its scan finds: with none in the request, the in-VM call's own (a program CID), never a key.
-  const vb = Buffer.from(await validated.arrayBuffer());
-  assert.ok(vb.byteLength !== 33 && vb[0] === 0x01, `the handler got no caller key (${vb.toString("hex")})`);
   assert.ok(plain(answers.at(-1)!) && answers.at(-1)!.thread, "a thread ran; answered plain");
-  const admitted = await k.store.get(answers.at(-1)!.entry!) as { door?: { verified?: unknown; filter?: string; beefs?: CID[] }; refused?: unknown };
-  assert.ok(!admitted.refused && admitted.door?.filter === "beef" && admitted.door.beefs?.length === 1 && admitted.door.verified == null, `the admission: the filter, the BEEF's pointer record, no sender key (${JSON.stringify(Object.keys(admitted.door ?? {}))})`);
-  // A bad BEEF unsigned (a BEEF pattern that does not decode): the filter's refusal, plain 400.
+  const admitted = await k.store.get(answers.at(-1)!.entry!) as { door?: { principal?: unknown; filters?: string[]; beefs?: CID[] } };
+  assert.ok(admitted.door?.filters?.[0] === "kernel.beef" && admitted.door.beefs?.length === 1 && admitted.door.principal == null, `the admission: the filter, the BEEF's pointer record, no principal (${JSON.stringify(Object.keys(admitted.door ?? {}))})`);
+  // A bad BEEF (a BEEF pattern that does not decode): rejected, plain 400, nothing written.
   answers.length = 0;
-  const bad = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()).subarray(0, 12) });
+  const bad = await door("http://alpha.test/beef", { ...beefBody(), body: Uint8Array.from(beef.toBinary()).subarray(0, 12) });
   assert.equal(bad.status, 400);
   assert.match(await bad.text(), /does not decode/);
-  assert.ok(plain(answers.at(-1)!) && !answers.at(-1)!.thread, "refused at the door, answered plain");
-  // The same good BEEF signed: verified, the handler sees the caller, the answer signed.
-  answers.length = 0;
-  const validatedSigned = await af.fetch("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: Uint8Array.from(beef.toBinary()) });
-  assert.equal(validatedSigned.status, 200);
-  assert.equal(Buffer.from(await validatedSigned.arrayBuffer()).toString("hex"), client, "a signed request at the same row: the verified caller");
-  assert.ok(signed(answers.at(-1)!), "answered signed on its session");
-  // #135, signed or validated: a JSON body with no BEEF, unsigned — the filter found nothing to validate,
-  // so nothing admits it: the door's refusal (stage "filter"), plain 400, no thread, the handler never ran.
+  assert.ok(plain(answers.at(-1)!) && !answers.at(-1)!.entry);
+  // #135, signed or validated: unsigned and no BEEF — nothing to validate, nothing written.
   answers.length = 0;
   const nothing = await door("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hello: "world" }) });
   assert.equal(nothing.status, 400);
   assert.match(await nothing.text(), /nothing to validate/);
-  assert.ok(plain(answers.at(-1)!) && answers.at(-1)!.entry && !answers.at(-1)!.thread, "a refusal entry, no thread, answered plain");
-  const nothingEntry = await k.store.get(answers.at(-1)!.entry!) as { refused?: { stage?: string; reason?: string; status?: number } };
-  assert.deepEqual([nothingEntry.refused?.stage, nothingEntry.refused?.reason, nothingEntry.refused?.status], ["filter", "nothing to validate", 400]);
-  // The same signed: the signature admits it; the handler runs and sees the caller.
+  assert.ok(!answers.at(-1)!.entry);
+  // Behind kernel.brc104 then kernel.beef: a signed request with no BEEF passes (the principal admits it); the caller is the client.
   answers.length = 0;
-  const nothingSigned = await af.fetch("http://alpha.test/beef", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hello: "world" }) });
-  assert.equal(nothingSigned.status, 200);
-  assert.equal(Buffer.from(await nothingSigned.arrayBuffer()).toString("hex"), client, "signed, no BEEF: the verified caller");
-  assert.ok(signed(answers.at(-1)!) && answers.at(-1)!.thread, "a thread ran; answered signed");
-  // 403: a stranger's signed request to a row for another key: verified, its 403 signed.
-  const stranger = new AuthFetch(ephemeralWallet(PrivateKey.fromRandom()), undefined, undefined, undefined, {}, door);
+  const signedNothing = await af.fetch("http://alpha.test/beef-signed", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ hello: "world" }) });
+  assert.equal(signedNothing.status, 200);
+  assert.equal(await hexOf(signedNothing), client);
+  assert.ok(signed(answers.at(-1)!) && answers.at(-1)!.thread);
+
+  // An app (#143): its record lists its filters and roles; root installs it with `objects`/`head` and its routes.
+  const app = await k.store.put({
+    kind: "app", name: "probe", version: "0.1.0", programs: { probe }, provides: [], requires: [], routes: [], tree: state,
+    filters: { page: "probe.page", deny: "probe.deny", pass: "probe.pass" }, roles: { admin: ["whoami"] },
+  } as never) as CID;
+  await admin("head", { name: "probe/app", tree: app });
+  const route = (r: Record<string, unknown>) => admin("dispatch", { op: "add", row: { transport: "http", ...r, app: "probe" } });
+  await route({ address: "/probe/page", filters: ["probe.page"] }); // a read route: filters only
+  await route({ address: "/probe/deny", filters: ["probe.deny"], program: probe, fn: "whoami" });
+  await route({ address: "/probe/gated", filters: ["kernel.brc104", "probe.pass"], program: probe, fn: "whoami" });
+  const rows = (await k.dispatch()).rows.filter((r) => r.app === "probe").map((r) => r.address);
+  assert.deepEqual(rows, ["/probe/page", "/probe/deny", "/probe/gated"], "root's dispatch messages: the routes");
+
+  // A read route: its filter answers, nothing written.
   answers.length = 0;
-  const forbidden = await stranger.fetch("http://alpha.test/mine", { method: "GET" });
+  const n2 = await entries();
+  const page = await door("http://alpha.test/probe/page", { method: "GET" });
+  assert.equal(page.status, 200);
+  assert.equal(await page.text(), "page");
+  assert.equal(page.headers.get("content-type"), "text/plain");
+  // An app's filter rejects: its status and reason, nothing written — signed when the request is.
+  const denied = await af.fetch("http://alpha.test/probe/deny", { method: "GET" });
+  assert.equal(denied.status, 418);
+  assert.match(await denied.text(), /"no"/);
+  assert.ok(signed(answers.at(-1)!));
+  await k.idle();
+  assert.equal(await entries(), n2, "a read and a rejection: no entry");
+
+  // The gate: `whoami` of the probe app is gated by its role `admin` (probe.admin). Root passes; a stranger
+  // does not (403, signed, nothing written); granted, it does; revoked, it does not.
+  answers.length = 0;
+  const asRoot = await af.fetch("http://alpha.test/probe/gated", { method: "GET" });
+  assert.equal(asRoot.status, 200);
+  assert.equal(await hexOf(asRoot), client, "root passes every gate; an app's `pass` keeps the principal");
+  const n3 = await entries();
+  const forbidden = await stranger.fetch("http://alpha.test/probe/gated", { method: "GET" });
   assert.equal(forbidden.status, 403);
-  assert.ok(signed(answers.at(-1)!), "a signed request no row takes for its key: its 403 signed");
+  assert.ok(signed(answers.at(-1)!), "the gate's 403: signed on the stranger's session");
+  await k.idle();
+  assert.equal(await entries(), n3 + 1, "the stranger's handshake is an entry; its refused request is none");
+  assert.equal((await door("http://alpha.test/probe/gated", { method: "GET" })).status, 401, "no principal: kernel.brc104 turns it away first");
+  await admin("grant", { op: "add", role: "probe.admin", principal: keyBytes(strangerId) });
+  const grants = await k.store.get(await k.call("head", "grants") as CID) as unknown as { kind: string; roles: Record<string, Uint8Array[]> };
+  assert.deepEqual(Object.fromEntries(Object.entries(grants.roles).map(([r, ks]) => [r, ks.map((x) => Buffer.from(x).toString("hex"))])), { root: [client], "probe.admin": [strangerId] }, "the grants head: root and the app role");
+  const granted = await stranger.fetch("http://alpha.test/probe/gated", { method: "GET" });
+  assert.equal(granted.status, 200);
+  assert.equal(await hexOf(granted), strangerId);
+  await admin("grant", { op: "remove", role: "probe.admin", principal: keyBytes(strangerId) });
+  assert.equal((await stranger.fetch("http://alpha.test/probe/gated", { method: "GET" })).status, 403, "revoked");
+  // A stranger's admin message: the gate (root) — recorded, nothing runs.
+  const before = await k.call("head", "grants") as CID;
+  {
+    const bodyBytes = dagCbor.encode({ op: "add", role: "root", principal: keyBytes(strangerId) });
+    const unsigned = { kind: "mail", op: "put", sender: keyBytes(strangerId), recipient: keyBytes(identity), box: "grant", body: encode(dagCbor.decode(bodyBytes)).cid, nonce: new Uint8Array(16) };
+    const { signature } = await ephemeralWallet(strangerKey).createSignature({ protocolID: MESSAGE_PROTOCOL, keyID: MESSAGE_KEY_ID, counterparty: "anyone", data: [...dagCbor.encode(unsigned)] });
+    await appendRequest(k, "local", { kind: "message", message: { ...unsigned, signature: Uint8Array.from(signature) }, body: bodyBytes });
+    await k.idle();
+  }
+  assert.ok((await k.call("head", "grants") as CID).equals(before), "only root grants");
 
   // Polls: an entry each (an access log), and the session table unchanged.
-  const s2 = (await sessions())!; // the stranger's handshake added one
-  const n2 = await entries();
-  for (let i = 0; i < 20; i++) await whoami();
+  const s2 = (await sessions())!;
+  const n4 = await entries();
+  for (let i = 0; i < 10; i++) await whoami();
   await k.idle();
-  assert.equal(await entries(), n2 + 20, "20 polls: 20 entries");
+  assert.equal(await entries(), n4 + 10, "10 polls: 10 entries");
   assert.equal((await sessions())!.toString(), s2.toString(), "polls add no session");
 
   // Sessions are state: a new kernel process keeps them; the same client's next request is served at once.
@@ -226,26 +273,9 @@ test("front door: every request is an entry and a thread; the handshake writes t
   answers.length = 0;
   assert.equal(await whoami(), client);
   assert.deepEqual(statuses(), [401, 200, 200], "an expired session: 401, the handshake, the request again");
-  assert.ok(answers[0]!.thread === undefined && !Object.keys(answers[0]!.headers).some((h) => h.startsWith("x-bsv-auth-")), "#135: the expired session's 401 is a door refusal answered plain — no session to sign on; the stock client takes it as stale and shakes hands");
+  assert.ok(!answers[0]!.entry && plain(answers[0]!), "the expired session's 401: turned away at the door, answered plain (no session to sign on)");
   await k.idle();
   const root2 = await k.store.get((await sessions())!) as unknown as { buckets: CID[] };
   const held2 = (await Promise.all(root2.buckets.map(async (b) => (await k.store.get(b) as unknown as { sessions: unknown[] }).sessions))).flat();
-  assert.equal(held2.length, 1, "the handshake dropped the expired session");
-});
-
-test("two doors (#135): a path goes to a read or a row as the table matches — exact first, then the longest prefix", () => {
-  const read = (address: string, prefix?: true) => ({ address, ...(prefix ? { prefix } : {}), program: "p" as never, fn: "get" });
-  const row = (address: string, prefix?: true) => ({ transport: "http" as const, address, ...(prefix ? { prefix } : {}), sender: "*" as const, program: "p" as never, fn: "f" });
-  const reads = [read("/", true), read("/site/", true), read("/onboard/resolve"), read("/amm/", true)];
-  const rows = [row("/sendMessage"), row("/amm/call"), row("/explore", true), { ...row("/x"), transport: "mailbox" as const }];
-  const to = (p: string) => { const r = routeOf(reads, rows as never, p); return !r ? "none" : "read" in r ? `read ${r.read.address}` : `row ${r.row.address}`; };
-  assert.equal(to("/sendMessage"), "row /sendMessage", "an exact row over the root read");
-  assert.equal(to("/amm/call"), "row /amm/call", "an exact row over a prefix read");
-  assert.equal(to("/amm/index.html"), "read /amm/");
-  assert.equal(to("/explore/log"), "row /explore", "a longer prefix row over the root read");
-  assert.equal(to("/onboard/resolve"), "read /onboard/resolve");
-  assert.equal(to("/site/app.js"), "read /site/");
-  assert.equal(to("/anything"), "read /");
-  assert.equal(routeOf([], rows as never, "/x"), undefined, "a mailbox row is no http path");
-  assert.equal(routeOf([], rows as never, "/nowhere"), undefined);
+  assert.equal(held2.length, 1, "the handshake dropped the expired sessions");
 });

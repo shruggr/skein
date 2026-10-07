@@ -1,7 +1,7 @@
-// The owner's admin messages (#124, #142): building them is a library — installing an app, removing it,
-// a dispatch row, a read, an address-book entry, the host row, a directory into `main`, a grant — each a
-// few messages from the owner to the kernel's admin boxes (docs/MESSAGES.md "The dispatch table and the
-// kernel's operations": objects, head, dispatch, peers) and the app's own box (start/stop). The
+// Root's admin messages (#124, #142, #143): building them is a library — installing an app, removing it,
+// a route, a read route, an address-book entry, the host row, a directory into `main`, a grant — each a
+// few messages from root to the kernel's admin boxes (docs/MESSAGES.md "The dispatch table and the
+// kernel's operations": objects, head, dispatch, peers, grant) and the app's own box (start/stop). The
 // management page builds the same messages with the same code (src/host/plan.ts) and sends them with the
 // browser's wallet. The client `skein` (admin-cli.ts) signs them with the operator's key and delivers them
 // (target.ts): over the host's control socket on the host machine, else on one BRC-104 session.
@@ -15,14 +15,13 @@ import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
 import type { CID } from "multiformats/cid";
 import { type Rec } from "./bundle.ts";
-import { dispatchBody, handlerCid, hashDir, recordBundles, senderKey } from "./client.ts";
+import { dispatchBody, handlerCid, hashDir, recordBundles } from "./client.ts";
 import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
 import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
-import { appHead, describe, mergeConfig, planInstall, planOwnerRead, planUninstall, sendInstall, sendUninstall, wiring, type AppRecord, type AppTree, type InstanceView, type ReadEntry } from "../host/plan.ts";
+import { appHead, describe, mergeConfig, planInstall, planRootRoute, planUninstall, sendInstall, sendUninstall, type AppRecord, type AppTree, type InstanceView } from "../host/plan.ts";
 import { lookup, readBlob } from "../runtime/tree.ts";
-import { rowKey as kernelRowKey } from "../runtime/dispatch.ts";
-import { chunk } from "./bundle.ts";
+
 import type { Objects } from "../host/boot.ts";
 
 /** One admin message: the box and the body (a record value: what the kernel's operation takes). */
@@ -59,86 +58,82 @@ export async function planInstallApp(tree: AppTree, view: InstanceView, o: { con
   return { prompt: describe(plan), recipient: view.identity, messages, app: plan.app, version: plan.version, recordCid: plan.recordCid, record: plan.record };
 }
 
-/** Uninstall: the app's `stop`, then every row the table holds for it removed; its heads are left. */
+/** Uninstall: the app's `stop`, then every route the table holds for it removed; its heads are left. */
 export async function planUninstallApp(name: string, view: InstanceView): Promise<AdminPlan> {
   const p = await planUninstall(name, view);
   const messages = await collect((send) => sendUninstall(p, send));
-  const prompt = [`uninstall ${name} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length} · head ${name}/app left`, ...p.rows.map((r) => `    dispatch remove ${r.row.transport} ${r.row.address}${r.row.prefix ? "*" : ""} from ${r.label}`)];
+  const prompt = [`uninstall ${name} ${p.record.version}${p.stop ? ` · stop ${JSON.stringify(p.stop)}` : ""} · dispatch remove ×${p.rows.length} · head ${name}/app left`, ...p.rows.map((r) => `    dispatch remove ${r.row.transport} ${r.row.address}${r.row.prefix ? " prefix" : ""}`)];
   return { prompt, recipient: view.identity, messages };
 }
 
-/** An http row's own parts (#125): `prefix`, the handler's `fn`, and its settings (a file server's `root`, `index`), carried to it as `match`. */
-export interface HttpRowArgs { prefix?: boolean; fn: string; settings?: Record<string, unknown> }
+/** An http route's own parts (#125, #143): `prefix`, its `filters`, the handler's `fn`, and its settings (a file server's `root`, `index`), carried to it as `match`. */
+export interface HttpRowArgs { prefix?: boolean; fn: string; filters?: string[]; settings?: Record<string, unknown> }
 
-/** The fields of a row that are not a handler's settings. */
-const ROW_FIELDS = ["transport", "address", "prefix", "sender", "program", "fn", "app", "optional"];
+/** The fields of a route that are not a handler's settings. */
+const ROW_FIELDS = ["transport", "address", "prefix", "filters", "sender", "program", "fn", "app", "optional"];
 
 /**
- * One row of the dispatch table (#77): a mailbox row `{op, row: {transport: "mailbox", address: box,
- * sender, program}}`, or with `http` an http row `{transport: "http", address: <path>, prefix?, sender,
- * program, fn, …settings}` (#125: the owner's own row, such as the site at `/`: no `app`, so an app's
+ * One route of the route table (#77, #143): a mailbox route `{op, row: {transport: "mailbox", address:
+ * box, program}}`, or with `http` an http route `{transport: "http", address: <path>, prefix?, filters?,
+ * program, fn, …settings}` (#125: root's own route, such as the site at `/`: no `app`, so an app's
  * upgrade or uninstall leaves it). The handler is a program record CID or a name the instance's genesis
- * gives (`programs`); the sender anyone when absent, `session` (http only), or an identity key in hex.
+ * gives (`programs`). No sender (#143).
  */
 export function planDispatch(recipient: string, a: { op: "add" | "remove"; sender?: string; box: string; handler: string; http?: HttpRowArgs }, programs: Record<string, CID> = {}): AdminPlan {
+  if (a.sender !== undefined) throw new Error("--sender: gone (#143) — a route has no sender; gate the function with a role and grant it");
   if (!a.http) {
-    if (a.sender === "session") throw new Error("sender session: an http row's (--http)");
     const body = dispatchBody(a, programs);
-    return { prompt: [`dispatch ${a.op} mailbox ${a.box} from ${a.sender ?? "anyone"} → ${a.handler} (${String(body.row.program)})`], recipient, messages: [{ box: "dispatch", body }] };
+    return { prompt: [`dispatch ${a.op} mailbox ${a.box} → ${a.handler} (${String(body.row.program)})`], recipient, messages: [{ box: "dispatch", body }] };
   }
   const h = a.http;
   if (!a.box.startsWith("/") || /[\\\0?#]/.test(a.box) || a.box.split("/").some((x) => x === "." || x === "..")) throw new Error(`http address ${JSON.stringify(a.box)}: a path (from /, no ".", "..", query or fragment)`);
-  if (!h.fn) throw new Error("an http row names its handler's function (--fn)");
+  if (!h.fn) throw new Error("an http route names its handler's function (--fn)");
   const settings = h.settings ?? {};
   const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
-  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the row's own, not a setting`);
+  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the route's own, not a setting`);
   const program = handlerCid(a.handler, programs);
-  const sender = a.sender === undefined ? "*" : a.sender === "session" ? "session" : senderKey(a.sender);
-  const row = { ...settings, transport: "http", address: a.box, ...(h.prefix ? { prefix: true } : {}), sender, program, fn: h.fn };
+  const row = { ...settings, transport: "http", address: a.box, ...(h.prefix ? { prefix: true } : {}), ...(h.filters?.length ? { filters: h.filters } : {}), program, fn: h.fn };
   const shown = Object.entries(settings).map(([k, v]) => `${k} ${typeof v === "string" ? v : JSON.stringify(v)}`).join(", ");
   return {
-    prompt: [`dispatch ${a.op} http ${a.box}${h.prefix ? "*" : ""} from ${a.sender ?? "anyone"} → ${a.handler}.${h.fn} (${String(program)})${shown ? ` (${shown})` : ""}`],
+    prompt: [`dispatch ${a.op} http ${a.box}${h.prefix ? " prefix" : ""}${h.filters?.length ? ` [${h.filters.join(", ")}]` : ""} → ${a.handler}.${h.fn} (${String(program)})${shown ? ` (${shown})` : ""}`],
     recipient, messages: [{ box: "dispatch", body: { op: a.op, row } }],
   };
 }
 
 /**
- * The owner's own read (#135): one path served by a `call` of a program's function, for anyone,
- * signed or not — added to (removed from) the reads head: `objects` (the reads record) and `head
- * reads`. E.g. the site at the root: `skein reads add --prefix --fn get --settings
- * '{"root":"www"}' / site.site --origin <url>`. The handler as for a dispatch row (a program record
- * CID, a genesis program, or <app>.<role>, resolved by the caller into `programs`).
+ * Root's own read route (#135, #143): one path answered by a filter — `<app>.<filter>`, a function an
+ * installed app declares under `filters` — for anyone, signed or not, nothing logged: one `dispatch`
+ * message adding (removing) the route {transport: "http", address, prefix?, filters: [<filter>],
+ * …settings}. E.g. the site at the root: the filter `site.get`, `--prefix`, settings {"root": "www"}.
  */
-export async function planReads(view: InstanceView, a: { op: "add" | "remove"; path: string; handler: string; http: HttpRowArgs }, programs: Record<string, CID> = {}): Promise<AdminPlan> {
+export async function planReads(view: InstanceView, a: { op: "add" | "remove"; path: string; filter: string; prefix?: boolean; settings?: Record<string, unknown> }): Promise<AdminPlan> {
   if (!a.path.startsWith("/") || /[\\\0?#]/.test(a.path) || a.path.split("/").some((x) => x === "." || x === "..")) throw new Error(`read ${JSON.stringify(a.path)}: a path (from /, no ".", "..", query or fragment)`);
-  if (!a.http.fn) throw new Error("a read names its function (--fn)");
-  const settings = a.http.settings ?? {};
+  const settings = a.settings ?? {};
   const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
-  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the read's own, not a setting`);
-  const read: ReadEntry = { ...settings, address: a.path, ...(a.http.prefix ? { prefix: true as const } : {}), program: handlerCid(a.handler, programs), fn: a.http.fn };
-  const p = await planOwnerRead(view, a.op, read);
-  const messages: AdminMessage[] = [...chunk(p.records)].map((b) => ({ box: "objects", body: dagCbor.decode(b) }));
-  messages.push({ box: "head", body: { name: p.head.name, tree: p.head.tree } });
-  return { prompt: p.prompt, recipient: view.identity, messages };
+  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the route's own, not a setting`);
+  const row = { ...settings, transport: "http", address: a.path, ...(a.prefix ? { prefix: true } : {}), filters: [a.filter] } as DispatchRow;
+  const p = await planRootRoute(view, a.op, row);
+  return { prompt: p.prompt, recipient: view.identity, messages: p.rows.map((r) => ({ box: "dispatch", body: { op: r.op, row: r.row } })) };
 }
 
 /**
- * The claim (#89, #127): one message in box `claim` to an image whose claim
- * row admits anyone — its sender (the wallet that sends it) is the owner;
- * the body carries only the owner's mailbox entry, if any.
+ * The claim (#89, #127, #143): one message in box `claim` to an image (its claim route takes anyone) —
+ * its sender (the wallet that sends it) is granted root; the body carries only the claimant's
+ * mailbox entry, if any.
  */
 export function planClaim(recipient: string, o: { messagebox?: string; handle?: string; domain?: string } = {}): AdminPlan {
   const body = { ...(o.messagebox ? { messagebox: o.messagebox } : {}), ...(o.handle ? { handle: o.handle, ...(o.domain ? { domain: o.domain } : {}) } : {}) };
-  return { prompt: [`claim ${recipient}: its owner becomes the key that sends this${o.messagebox ? ` · messagebox ${o.messagebox}` : ""}${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, messages: [{ box: "claim", body }] };
+  return { prompt: [`claim ${recipient}: root to the key that sends this${o.messagebox ? ` · messagebox ${o.messagebox}` : ""}${o.handle ? ` (@${o.handle}${o.domain ? `@${o.domain}` : ""})` : ""}`], recipient, messages: [{ box: "claim", body }] };
 }
 
 /** The host's terms as it publishes them (/.well-known/skein-host `billing`, #130). */
 export interface HostTerms { key: string; x: number; rates?: Record<string, number> }
 
 /**
- * The host row (#130): the owner's grant of a host and its rates — one `dispatch` message adding (or
- * removing) the kernel row {mailbox, billing, sender: <the host's key>, kernel, tick, x, rates}. The
- * first such row is the host's; the kernel bills by it, the host ticks it. Removing it ends billing.
+ * The host row (#130): root's choice of a host and its rates — one `dispatch` message adding (or
+ * removing) the kernel route {mailbox, billing, host: <the host's key>, kernel, tick, x, rates} (#143:
+ * the host's key a setting, no sender). The first such route is the host's; the kernel bills by it,
+ * the host ticks it. Removing it ends billing.
  */
 export function planHost(recipient: string, op: "add" | "remove", t: HostTerms): AdminPlan {
   if (!isKey(t.key)) throw new Error(`${t.key}: not the host's key (hex)`);
@@ -147,7 +142,7 @@ export function planHost(recipient: string, op: "add" | "remove", t: HostTerms):
     if (!Number.isSafeInteger(v) || v < 0) throw new Error(`rates.${k}: a whole number of sats`);
     return [k, v];
   }));
-  const row = { transport: "mailbox", address: "billing", sender: keyBytes(t.key), program: "kernel", fn: "tick", ...(op === "add" ? { x: t.x, ...(Object.keys(rates).length ? { rates } : {}) } : {}) };
+  const row = { transport: "mailbox", address: "billing", host: keyBytes(t.key), program: "kernel", fn: "tick", ...(op === "add" ? { x: t.x, ...(Object.keys(rates).length ? { rates } : {}) } : {}) };
   const shown = Object.entries(rates).map(([k, v]) => `${k} ${v}`).join(", ");
   return {
     prompt: [op === "add" ? `host ${t.key}: bills this skein — x ${t.x} sats a block${shown ? `, rates ${shown}` : ""} (#130: the skein pays it from its own wallet, ahead)` : `host ${t.key}: removed (nothing is billed)`],
@@ -196,14 +191,14 @@ export async function planDeploy(dir: string, target: InstanceView | { identity:
 // ---------------------------------------------------------------- the instance, read through its explorer
 
 /**
- * A read of the instance's explorer (`/explore…`; the owner's, #121): the answer DAG-JSON decoded, undefined
+ * A read of the instance's explorer (`/explore…`; root's, #121, #143): the answer DAG-JSON decoded, undefined
  * for a 404 — the client's on its BRC-104 session (target.ts remoteTarget).
  */
 export type ExplorerRead = (path: string) => Promise<unknown>;
 
 /**
  * The instance as the install plan reads it (plan.ts InstanceView), from its explorer: heads, the genesis
- * (identity, programs, owner), the claim, the address book, the dispatch table, and the store by CID —
+ * (identity, programs), the address book, the route table, and the store by CID —
  * what the management page's view reads (shruggr/skein-site www/app.js `Skein.view`).
  */
 export async function explorerView(read: ExplorerRead): Promise<InstanceView> {
@@ -218,8 +213,7 @@ export async function explorerView(read: ExplorerRead): Promise<InstanceView> {
   const heads = Object.entries(top.heads ?? {}).map(([name, root]) => ({ name, root }));
   const head = (name: string) => heads.find((x) => x.name === name)?.root;
   const first = (await read("/log?before=1&limit=1") as { entries?: Array<{ record?: { genesis?: CID } }> } | undefined)?.entries?.[0]?.record;
-  const genesis = (first?.genesis ? await record(first.genesis) : {}) as { identity?: unknown; programs?: Record<string, CID>; owner?: unknown };
-  const claim = head("claim") ? await record(head("claim")!) as { owner?: unknown } | undefined : undefined;
+  const genesis = (first?.genesis ? await record(first.genesis) : {}) as { identity?: unknown; programs?: Record<string, CID> };
   const hex = (k: unknown) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : typeof k === "string" ? k : "");
   const book: AddressEntry[] = [];
   if (head("peers")) {
@@ -239,40 +233,24 @@ export async function explorerView(read: ExplorerRead): Promise<InstanceView> {
   return {
     store, heads, dispatch, addressBook: book,
     identity: hex(genesis.identity), programs: genesis.programs ?? {},
-    owner: genesis.owner !== undefined ? hex(genesis.owner) : hex(claim?.owner),
   };
 }
 
-/** The kernel's admin operations (genesis.ts ADMIN_OPS): the four rows a grant adds. */
-const ADMIN_OPS = ["objects", "head", "dispatch", "peers"] as const;
-
 /**
- * A grant (#142, `skein-host grant`): `key`'s admin rows — the kernel's four operations from `key`, and
- * the explorer row (the front door's `explore` at /explore and below, as a claim writes it) — and with
- * `apps`, every installed app's rows whose manifest sender is `$owner`, from `key` (each with its `app`).
- * Rows the table has already are not sent again. Sent by an owner (its admin rows).
+ * A grant (#142, #143; `skein-host grant`): the kernel's `grant` operation — `role` (root by default,
+ * or an app's `<app>.<role>`) to `key`, or with `remove` from it. One message to box `grant`, sent by
+ * root. Nothing is sent when the grants already say so.
  */
-export async function planGrant(view: InstanceView, key: string, o: { apps?: boolean } = {}): Promise<AdminPlan> {
+export async function planGrant(view: InstanceView, key: string, o: { role?: string; remove?: boolean } = {}): Promise<AdminPlan> {
   if (!isKey(key)) throw new Error(`${key}: not an identity key (hex)`);
-  const k = keyBytes(key);
-  const rows: Array<{ row: DispatchRow; label: string }> = ADMIN_OPS.map((op) => ({ row: { transport: "mailbox", address: op, sender: k, program: "kernel", fn: op } as DispatchRow, label: `admin ${op}` }));
-  const fd = view.programs.frontdoor;
-  if (fd) rows.push({ row: { transport: "http", address: "/explore", prefix: true, sender: k, program: fd, fn: "explore" } as DispatchRow, label: "the explorer (/explore*)" });
-  if (o.apps) {
-    for (const h of view.heads) {
-      if (!h.name.endsWith("/app")) continue;
-      const rec = await view.store.get(h.root).catch(() => undefined) as AppRecord | undefined;
-      if (rec?.kind !== "app" || h.name !== appHead(rec.name)) continue;
-      const mine = { ...rec, dispatch: rec.dispatch.filter((r) => r.sender === "$owner") };
-      for (const r of wiring(mine, { ...view, owner: key })) rows.push({ row: r.row, label: `${rec.name}: ${r.row.transport} ${r.row.address}` });
-    }
-  }
-  const have = new Set(view.dispatch.map((r) => kernelRowKey(r)));
-  const send = rows.filter((r) => !have.has(kernelRowKey(r.row)));
-  return {
-    prompt: [`grant ${key}: ${send.length ? send.map((r) => r.label).join(", ") : "every row already there"}${rows.length > send.length ? ` (${rows.length - send.length} already there)` : ""}`],
-    recipient: view.identity, messages: send.map((r) => ({ box: "dispatch", body: { op: "add", row: r.row } })),
-  };
+  const role = o.role ?? "root";
+  if (role !== "root" && !/^[a-z0-9][a-z0-9._-]*\.[a-z0-9][a-z0-9_-]*$/.test(role)) throw new Error(`${role}: a role is root or <app>.<role> (user is any principal: never granted)`);
+  const op = o.remove ? "remove" : "add";
+  const root = view.heads.find((h) => h.name === "grants")?.root;
+  const g = root ? await view.store.get(root).catch(() => undefined) as { roles?: Record<string, unknown[]> } | undefined : undefined;
+  const holds = (g?.roles?.[role] ?? []).some((k) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : String(k)) === key);
+  if (holds === (op === "add")) return { prompt: [`grant ${op} ${role} ${key}: the grants say so already`], recipient: view.identity, messages: [] };
+  return { prompt: [`grant ${op} ${role} ${key}`], recipient: view.identity, messages: [{ box: "grant", body: { op, role, principal: keyBytes(key) } }] };
 }
 
 /** One app the management page offers (the site's www/catalog.json): a repository and a commit. */

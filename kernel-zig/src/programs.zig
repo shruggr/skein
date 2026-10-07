@@ -22,9 +22,9 @@ pub const modules = [_]Module{
     // The wallet's state inside the VM (issue #29): installed, not in a genesis by default.
     .{ .name = "wallet", .cid = "bafkreigycl2vprpy5g34uv42hp7wggrnjme4zdzwfbvy3b3bz7wvxwpzme" },
     // The messagebox's records in the instance (issue #33): Zig, wasm32-wasi (programs/messagebox).
-    .{ .name = "messagebox", .cid = "bafkreiaxxv65l3aqhbdvx5dqqfhvrlzzhelntpo72nmwc2ezmqvbb45rd4" },
-    // The front door (#40): the instance as an HTTP server — BRC-103/104, routes, handlers (programs/frontdoor).
-    .{ .name = "frontdoor", .cid = "bafkreiadvp6gjrlltkpsj4r773nnckoxiabfjtoy7d5ty6ja3klkrtfelu" },
+    .{ .name = "messagebox", .cid = "bafkreifbr44kbggt6g5nsownbdhticimoz47kqxzzyoyrcvvsmqd36yvq4" },
+    // The front door (#40, #143): the instance as an HTTP server — the handshake, the handlers, signed answers (programs/frontdoor).
+    .{ .name = "frontdoor", .cid = "bafkreicakz7f6hjd6jh2ldecvaw3duqib2fsziuco7mebmuicugtxdf5zq" },
     // BRC-169 resolve (#40, #87): its records under `resolve/…`, never the address book; `register` claims only where an application wires them (programs/resolve).
     .{ .name = "resolve", .cid = "bafkreifaksuagkwqclhbja7nkuwnxmlkfpv2lsqr2zvbod76qvia2mfdmq" },
 };
@@ -61,7 +61,7 @@ const Handler = struct { name: []const u8, services: []const []const u8, descrip
 const handlers = [_]Handler{
     .{ .name = "messagebox", .services = &.{}, .inputs = &call_inputs, .description = "The BRC-33 messagebox (#40): the front door's sendMessage (one `mail` entry), listMessages (a read), acknowledgeMessage (an `ack` event); stepped, keeps the mail a subscription routes to it (head `mailbox`); called from a step, `send` delivers over http (recorded) on a BRC-104 session with the peer." },
     .{ .name = "resolve", .services = &.{}, .description = "BRC-169 discovery (#40, #70): launched with {handle, domain, key?}, the lookup is a thread (each GET an emit to the fetch provider) that keeps the handle's record under its own head (`resolve/peers`, #87) and finishes with the record's CID; the messagebox's delivery reads it for a key the address book does not name. A `register` box, where an application wires one, takes a claim {handle, domain} and records it if it resolves to the sender. The address book is written only by the kernel's `peers` operation, on an owner-signed message (#77, #87)." },
-    .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door (#68): the instance's middleware, stepped on every request a transport carries in (http: BRC-103/104 against its session records, head frontdoor/sessions; libp2p: the GossipSub signature; local: a provider's signed message), routed by the kernel's dispatch rows for its transport, the handler an in-VM call, the answer signed on the session. Called (fn read) for a route whose answer is a read of live state." },
+    .{ .name = "frontdoor", .services = &.{}, .inputs = &.{}, .description = "The front door (#68, #143): the instance's middleware, stepped on every request the kernel's door admitted (its route matched, the route's filters run, the gate passed): the BRC-103 handshake (sessions under head frontdoor/sessions, which kernel.brc104 reads), the route's handler an in-VM call with the door's principal as its caller, the answer signed on the request's session. Called: verify (libp2p's and a carried message's own check), read (a route whose answer is a read of live state), respond (what the door answered without an entry, signed)." },
 };
 
 /// The program names a genesis lists (PROGRAMS), in order.
