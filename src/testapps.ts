@@ -37,7 +37,7 @@ export const CHAT_APP: PinnedApp = {
   rev: process.env.SKEIN_CHAT_REV ?? "a9491ee30668aeee5a44745403dadf7355825a51", dir: process.env.SKEIN_CHAT_DIR,
 };
 
-/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4). */
+/** shruggr/skein-onboard (#90, #113): the onboarding app, installed in the host skein: onboard.create, registration, BRC-169; #127: onboard.create takes the caller's signed claim (0.3.0); #126: the manager and the certifier by peerAt (0.3.2, skein-sdk 0.7.1); #135: /register takes a session, the registrant its identity (0.3.3); resolve, search, the manifest and the paymail PKI are reads, reads[] (0.3.4); #143: routes, filters and roles ({user: [call, register, profile]}), reads are filter answers, root from the grants head (0.4.0). */
 export const ONBOARD_APP: PinnedApp = {
   name: "onboard", repo: "https://github.com/shruggr/skein-onboard",
   rev: process.env.SKEIN_ONBOARD_REV ?? "189b7c2df3041c4914dcf189ade4c8ca241a9b5f", dir: process.env.SKEIN_ONBOARD_DIR,
@@ -49,7 +49,7 @@ export const GIT_APP: PinnedApp = {
   rev: process.env.SKEIN_GIT_REV ?? "37267301fb4f3f079e69b82ad0cecc2e5ae7b3e9", dir: process.env.SKEIN_GIT_DIR,
 };
 
-/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.2: bundles on a skein with no address-book roles, #126; 0.6.3: the catalog pins the current releases, git 0.1.2 among them; 0.7.3: the page in the skein brand — header and wallet chip, skein cards, the handle/Register card, the logged-out landing page; 0.7.6: Register over the wallet's session, #135; 0.7.7: the page a read, reads[], #135). */
+/** shruggr/skein-site (#125): the management site as an app — its page at /site/, served from its own tree's www (0.6.2: bundles on a skein with no address-book roles, #126; 0.6.3: the catalog pins the current releases, git 0.1.2 among them; 0.7.3: the page in the skein brand — header and wallet chip, skein cards, the handle/Register card, the logged-out landing page; 0.7.6: Register over the wallet's session, #135; 0.7.7: the page a read, reads[], #135; 0.9.0: routes, filters and roles — the read route `get`, the Routes view, the roles/grants editor, no owner rows, #143). */
 export const SITE_APP: PinnedApp = {
   name: "site", repo: "https://github.com/shruggr/skein-site",
   rev: process.env.SKEIN_SITE_REV ?? "b41f5d514cbddb69218852f6b6a661c3fafa6c96", dir: process.env.SKEIN_SITE_DIR,

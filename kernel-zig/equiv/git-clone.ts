@@ -95,10 +95,10 @@ writeFileSync(join(ovRepo, "etc/app.json"), JSON.stringify({
   kind: "app", name: "ov-dyn", version: "0.1.0",
   programs: { overlay: "bin/app-demo.wasm" },
   config: { overlay: { lookups: { ls_dyn: { program: "overlay" } } } },
-  dispatch: [
-    { address: "register", sender: "$owner", program: "overlay" },
-    { address: "submit", sender: "*", program: "overlay", filter: "beef" },
-    { address: "", sender: "event", program: "overlay" },
+  routes: [
+    { address: "register", handler: "overlay" },
+    { address: "submit", filters: ["kernel.beef"], handler: "overlay" },
+    { transport: "event", address: "", handler: "overlay" },
   ],
 }, null, 2));
 const ovGit = (...args: string[]) => {
@@ -115,7 +115,7 @@ const hashOv = ovGit("rev-parse", "HEAD");
 const twoRepo = join(repos, "app-two");
 mkdirSync(join(twoRepo, "etc"), { recursive: true });
 cpSync(join(demoDir, "bin"), join(twoRepo, "bin"), { recursive: true });
-writeFileSync(join(twoRepo, "etc/app.json"), JSON.stringify({ kind: "app", name: "app-two", version: "0.1.0", programs: { two: "bin/app-demo.wasm" }, dispatch: [{ address: "", sender: "$owner", program: "two" }] }, null, 2));
+writeFileSync(join(twoRepo, "etc/app.json"), JSON.stringify({ kind: "app", name: "app-two", version: "0.1.0", programs: { two: "bin/app-demo.wasm" }, routes: [{ address: "", handler: "two" }] }, null, 2));
 const twoGit = (...args: string[]) => {
   const r = spawnSync("git", args, { cwd: twoRepo, env: gitEnv, encoding: "utf8" });
   if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);

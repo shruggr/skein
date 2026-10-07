@@ -219,7 +219,7 @@ const mailboxes: string[] = [];
   made.push("gen-run");
 }
 
-// ---------------------------------------------------------------- heads and the dispatch table (#77: kernel operations)
+// ---------------------------------------------------------------- heads and the route table (#77: kernel operations; #143)
 {
   const h = await host();
   const i = await h.add("gen-subs");
@@ -232,16 +232,17 @@ const mailboxes: string[] = [];
   // The chat app's loop (#83): its app record's, at the head chat/app — the row below wires it to a box of its own, `ask`.
   const k = h.router.loaded.get("gen-subs")!.kernel;
   const handler = (await k.store.get(await k.call("head", "chat/app") as CID) as unknown as { programs: Record<string, CID> }).programs.loop;
-  await h.send(i, "chat", { text: "hello?" }, sw, sid);
-  // The kernel's `dispatch` operation (#77): a row's sender is bytes; the same row again changes nothing; a hex sender is refused.
-  const row = { transport: "mailbox", address: "ask", sender: Uint8Array.from(Buffer.from(sid, "hex")), program: handler };
+  await h.send(i, "chat", { text: "hello?" }, sw, sid).catch(() => {}); // a stranger: the chat app's roles decide (#143)
+  // The kernel's `dispatch` operation (#77, #143: a route, no sender): the same route again changes nothing; a route naming a sender is refused.
+  const row = { transport: "mailbox", address: "ask", program: handler };
   await h.send(i, "dispatch", { op: "add", row });
   await h.send(i, "dispatch", { op: "add", row }); // no change
-  await h.send(i, "dispatch", { op: "add", row: { ...row, sender: sid } }); // refused: the sender is not a key
+  await h.send(i, "dispatch", { op: "add", row: { ...row, address: "ask2", sender: sid } }); // refused: a route has no sender (#143)
   h.later(1);
-  await h.send(i, "ask", { text: "what is here?", tree: root }, sw, sid); // the loop; no inference peer here: it answers so, and the answer has nowhere to go (no peer record)
+  await h.send(i, "ask", { text: "what is here?", tree: root }, sw, sid).catch(() => {}); // the gate decides (#143); either way an entry or a door answer, replayed exactly
+  await h.send(i, "ask", { text: "what is here?", tree: root }); // root: the loop; no inference peer here: it answers so, and the answer has nowhere to go (no peer record)
   await h.send(i, "dispatch", { op: "remove", row });
-  await h.send(i, "ask", { text: "again" }, sw, sid).catch(() => {}); // no row: refused, nothing written
+  await h.send(i, "ask", { text: "again" }, sw, sid).catch(() => {}); // no route: refused, nothing written
   await h.send(i, "dispatch", { op: "bogus", row });
   await h.send(i, "head", { name: "work", tree: root });
   await h.send(i, "head", { name: "bad name", tree: root });
