@@ -5,8 +5,7 @@
 //   `skein-host init --owner <you>` creates the host skein from the default
 //   image, which you claim from your wallet (#127: `skein plan claim`, the
 //   sender owning it); the default
-//   image (no site, no static, #125: the explorer route for its owner and the
-//   git app's tree under apps/git); you install the onboarding app and the
+//   image (#141: chain, git and site installed at birth); you install the onboarding app and the
 //   management site (shruggr/skein-site, an app: its page at /site/) into it
 //   as the owner's messages (`skein plan install`, #124), and send the site's
 //   optional root read (`skein plan reads add … / site.site`, #135).
@@ -28,9 +27,9 @@
 //      identity, url, handle) written into your wallet; the page opens alice's
 //      view (alice serves no page: she is managed from the host's);
 //   2. alice's apps, from the host's page talking to alice: her apps read from her
-//      explorer (yours: you own her); install the git app from the tree her
-//      image carries (objects for its module and records, head, dispatch,
-//      start — the prompt shown first); then install app-demo by hash from a
+//      explorer (yours: you own her) — chain, git and site, installed at birth
+//      (#141); git's owner row added by installing git again as the owner
+//      (`skein-host install`, the image has no owner); then install app-demo by hash from a
 //      local repository served by `git http-backend`: one message to box git,
 //      the git app's answer {tree, app} read from its thread, the manifest
 //      read out of the stored tree, the record rebuilt in the page (the same
@@ -90,6 +89,8 @@ import { decodeProfile } from "@1sat/utils";
 import { outpointFromBytes, outpointToBytes } from "@1sat/templates";
 import { ephemeralWallet } from "../../src/wallet.ts";
 import { chromium, playwright } from "./browser.ts";
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** The profile signature (#104): [1, "metanet handles profile"], key ID "1", counterparty anyone. */
 const PROFILE_PROTOCOL: [1, string] = [1, "metanet handles profile"];
@@ -345,7 +346,7 @@ try {
   stores.push(alice!.store);
   check(page.url().startsWith(`${sitePage}?key=`) && page.url().endsWith(`#/s/${aliceId}`), `the page stays the host's, on alice's view (#125: she serves no page) (${page.url().replace(/key=[0-9a-f]+/, "key=…")})`);
   const aliceRoot = await fetch(`${base}/@alice/`);
-  check(aliceRoot.status === 404, `alice serves nothing at / (#125: no site in the image): ${aliceRoot.status}`);
+  check(aliceRoot.status === 200 && (await aliceRoot.text()).includes('src="app.js"'), `alice serves the site at / (#141: installed at birth, the owner's read at /): ${aliceRoot.status}`);
   const locators = await page.evaluate(async () => {
     const w = (window as unknown as { site: { wallet: { listOutputs(a: unknown): Promise<{ outputs: Array<{ outpoint: string; lockingScript: string }> }> } } }).site.wallet;
     return (await w.listOutputs({ basket: "skein-locators", include: "locking scripts" })).outputs;
@@ -358,16 +359,16 @@ try {
   const aliceRows = ((await (await router.hydrate("alice")).kernel.dispatch()).rows as Array<Record<string, unknown>>);
   check(aliceRows.some((x) => x.program === "kernel" && hex(x.sender) === you), "alice is claimed for your key");
 
-  // ------------------------------------------------ 2. alice's apps: the git app from her image, then app-demo by hash
-  await page.waitForSelector("#apps", { timeout: 60_000 });
-  check((await page.locator("#apps").innerText()).includes("No apps installed"), "alice's page reads her heads through her explorer: no apps yet");
-  await page.click("tr[data-catalog=git] button");
-  await prompted();
-  const gitPlan = await page.locator("#plan").innerText();
-  check(/install git 0\.1\.3/.test(gitPlan) && /row +mailbox git from \$owner → git/.test(gitPlan) && /objects ×1/.test(gitPlan), `the prompt for the git app (from alice's image, apps/git): ${gitPlan.split("\n").filter((l) => /install|row|messages/.test(l)).join(" | ")}`);
-  await page.click("#approve");
-  await page.waitForSelector("tr[data-app=git]", { timeout: 120_000 });
-  check(true, "the git app installed from the page (objects, head, dispatch, start, signed by your wallet)");
+  // ------------------------------------------------ 2. alice's apps: chain, git and site from her image (#141); git's owner row; then app-demo by hash
+  await page.waitForSelector("tr[data-app=git]", { timeout: 60_000 });
+  const apps = await page.locator("#apps").innerText();
+  check(["chain", "git", "site"].every((n) => apps.includes(n)), `alice's page reads her heads through her explorer: chain, git and site installed at birth (${apps.replace(/\s+/g, " ").slice(0, 120)})`);
+  // The image has no owner, so git's one row (box git, from the owner) is not there: the owner adds it — git installed
+  // again over the image's apps/git sends the head (unchanged) and that row.
+  r = await cli(["install", join(repoRoot, "images/default/apps/git"), "--instance", "alice"], { wallet: ephemeralWallet(youKey), id: you });
+  await router.settled();
+  const gitRow = ((await (await router.hydrate("alice")).kernel.dispatch()).rows as Array<Record<string, unknown>>).find((x) => x.address === "git" && x.app === "git");
+  check(r.code === 0 && !!gitRow && hex(gitRow.sender) === you, `the owner's git row added after the claim (git installed again): exit ${r.code} ${r.err.join(" ")}`);
 
   await page.fill("#install-url input[name=url]", repoUrl);
   await page.fill("#install-url input[name=hash]", hashA);

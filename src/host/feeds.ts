@@ -257,7 +257,10 @@ export class SseStream {
 // ---------------------------------------------------------------- the header feeds
 
 interface Sse { stream: SseStream; subscribers: Map<string, string> }
-interface Queue { items: Array<{ box: string; event: Record<string, unknown> }>; running: boolean; dropped: number }
+interface Queue { items: Array<{ box: string; event: Record<string, unknown> }>; running: boolean; dropped: number; /** #141: a backfill is being read: items queue, none is admitted. */ held?: boolean }
+
+/** Headers per backfill event (#141): the chain app takes a run, `{kind: "header", raws}`, parents first. */
+export const BACKFILL_RUN = 2016;
 
 export class Feeds {
   readonly o: FeedsOptions;
@@ -279,11 +282,37 @@ export class Feeds {
     this.subscribe(handle);
   }
 
-  /** The host's own feed (#102) for `handle`: subscribed to it (`spec`), or not (undefined); a genesis's feeds are kept. */
-  host(handle: string, spec: FeedSpec | undefined): void {
-    if (this.stopped) return;
+  /**
+   * The host's own feed (#102) for `handle`: subscribed to it (`spec`), or not (undefined); a genesis's feeds are kept.
+   * `backfill` (#141): on subscribing, the headers the instance lacks up to the host's tip — read after the
+   * subscription is in place; until they are queued, the live items wait behind them (held), and a live header
+   * the backfill carries too is dropped. Admitted first, in runs of BACKFILL_RUN, then the live stream.
+   */
+  host(handle: string, spec: FeedSpec | undefined, backfill?: () => Promise<Uint8Array[]>): Promise<void> {
+    if (this.stopped) return Promise.resolve();
     if (spec) this.hosted.set(handle, spec); else this.hosted.delete(handle);
+    if (!spec || !backfill) { this.subscribe(handle); return Promise.resolve(); }
+    const q = this.queue(handle);
+    q.held = true;
     this.subscribe(handle);
+    return backfill().then((raws) => {
+      if (!raws.length) return;
+      const have = new Set(raws.map((r) => Buffer.from(r).toString("hex")));
+      q.items = q.items.filter((x) => !(x.event.kind === "header" && x.event.raw instanceof Uint8Array && have.has(Buffer.from(x.event.raw).toString("hex"))));
+      const runs: Queue["items"] = [];
+      for (let i = 0; i < raws.length; i += BACKFILL_RUN) runs.push({ box: spec.box ?? DEFAULT_BOX, event: { kind: "header", raws: raws.slice(i, i + BACKFILL_RUN) } });
+      q.items.unshift(...runs);
+      this.say(handle, `feed: ${raws.length} header${raws.length === 1 ? "" : "s"} it lacks pushed first (the backfill), then the live stream`);
+    }).catch((e) => this.say(handle, `feed: the backfill not read: ${(e as Error).message}`)).finally(() => {
+      q.held = false;
+      if (!q.running && q.items.length) void this.drain(handle, q);
+    });
+  }
+
+  private queue(handle: string): Queue {
+    let q = this.queues.get(handle);
+    if (!q) this.queues.set(handle, (q = { items: [], running: false, dropped: 0 }));
+    return q;
   }
 
   /**
@@ -342,8 +371,7 @@ export class Feeds {
 
   /** Queue an event for `handle` (bounded), and drain the queue serially. */
   push(handle: string, box: string, event: Record<string, unknown>): void {
-    let q = this.queues.get(handle);
-    if (!q) this.queues.set(handle, (q = { items: [], running: false, dropped: 0 }));
+    const q = this.queue(handle);
     q.items.push({ box, event });
     const max = this.o.maxQueue ?? 1000;
     if (q.items.length > max) {
@@ -352,7 +380,7 @@ export class Feeds {
       q.dropped += n;
       this.say(handle, `feed: queue full (${max}): dropped the ${n} oldest (${q.dropped} so far)`);
     }
-    if (!q.running) void this.drain(handle, q);
+    if (!q.running && !q.held) void this.drain(handle, q);
   }
 
   /** How many items wait for `handle` (tests). */
@@ -361,7 +389,7 @@ export class Feeds {
   private async drain(handle: string, q: Queue): Promise<void> {
     q.running = true;
     try {
-      while (q.items.length && !this.stopped) {
+      while (q.items.length && !this.stopped && !q.held) {
         const { box, event } = q.items.shift()!;
         try { await this.o.admit(handle, box, event); } catch (e) { this.say(handle, `feed: ${String(event.kind)} not admitted: ${(e as Error).message}`); }
       }

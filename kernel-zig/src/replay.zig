@@ -93,6 +93,9 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
     };
     // The system tree the genesis booted from (issue #4): pre-filled, not carried by any entry.
     if (Value.cidOf(g.get("tree"))) |t| try copyTree(a, src, dst, t);
+    // #141: the records the genesis's heads name (an image's installed apps), pre-filled too: each
+    // record and every record it links (program records); git trees and raw modules as above.
+    if (g.get("heads")) |hs| if (hs == .map) for (hs.map) |h| if (Value.cidOf(h.value)) |c| try copyRecords(a, src, dst, c);
     for (try src.logFrom(a, 0)) |c| {
         const e = (try src.get(a, c)) orelse return error.NotFound;
         if (!logm.isLogEntry(e)) {
@@ -161,6 +164,25 @@ fn copyLinked(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @impor
 }
 
 /// A git tree and everything under it (blobs, subtrees, gitlinked records the source holds).
+/// A dag-cbor record and every record it links, as the source holds them (git trees by copyTree; raw blocks are copied whole before).
+fn copyRecords(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, c: []const u8) anyerror!void {
+    const codec = cidm.codecOf(c);
+    if (codec == cidm.GIT_RAW) return copyTree(a, src, dst, c);
+    if (codec != cidm.DAG_CBOR or try dst.has(c)) return;
+    const b = (try src.bytes(a, c)) orelse return error.NotFound;
+    try dst.putBlock(c, b);
+    try copyLinks(a, src, dst, cbor.decode(a, b) catch return);
+}
+
+fn copyLinks(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, v: Value) anyerror!void {
+    switch (v) {
+        .cid => |c| try copyRecords(a, src, dst, c),
+        .array => |xs| for (xs) |x| try copyLinks(a, src, dst, x),
+        .map => |es| for (es) |e| try copyLinks(a, src, dst, e.value),
+        else => {},
+    }
+}
+
 fn copyTree(a: std.mem.Allocator, src: @import("store.zig").Store, dst: @import("store.zig").Store, t: []const u8) !void {
     if (try dst.has(t)) return;
     const b = (try src.bytes(a, t)) orelse return error.NotFound;

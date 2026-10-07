@@ -118,7 +118,7 @@ import { openStoreFile } from "../runtime/index-store.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
-import { historyOf, ImageChain } from "./image-chain.ts";
+import { historyOf, ImageChain, skeinTip } from "./image-chain.ts";
 import { ANSWER_WAIT_MS, appendRequest, frontDoor, headerMap, serveHttp, unavailable, type FrontAnswer } from "./frontdoor.ts";
 import { admit2, keyBytes, keyHex, type AddressSeed, type Genesis2Config, type Libp2pSpec, type PathRowSpec } from "./genesis.ts";
 import { HANDLE, type HostDb, type InstanceRow } from "./instances.ts";
@@ -1154,7 +1154,16 @@ export class Router {
     if (!url) return;
     const want = this.o.db.get(handle)?.status === "enabled" && rows.some((r) => r.address === DEFAULT_BOX && takesEvent(r, DEFAULT_BOX));
     if (want === this.feeds.hosts(handle)) return;
-    this.feeds.host(handle, want ? { kind: "headers", url, box: DEFAULT_BOX } : undefined);
+    // #141: on subscribing, the headers it lacks first — from its tip (its chain state's, else its image's) to the host's.
+    const backfill = async () => {
+      const row = this.o.db.get(handle);
+      if (!row || !existsSync(row.store)) return [];
+      const s = openStoreFile(row.store, { readOnly: true });
+      let tip: Awaited<ReturnType<typeof skeinTip>>;
+      try { tip = await skeinTip(s); } finally { s.close(); }
+      return await this.image.after(tip);
+    };
+    void this.feeds.host(handle, want ? { kind: "headers", url, box: DEFAULT_BOX } : undefined, want ? backfill : undefined);
     this.say("router", `${handle}: ${want ? "subscribed to" : "unsubscribed from"} the host's headers feed ${url}`);
   }
 

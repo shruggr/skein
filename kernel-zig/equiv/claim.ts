@@ -2,8 +2,9 @@
 //
 //   an instance booted from the default image (images/default) — its genesis
 //   names no owner and has no admin rows, only the claim row (box `claim`,
-//   from anyone, to the kernel); it serves nothing at `/`, `/site/` or
-//   `/manifest.json` (#125: no site and no static in the image), it has no
+//   from anyone, to the kernel); it serves the management site at `/`,
+//   `/site/` and `/manifest.json` (#141: chain, git and site installed at
+//   birth, the owner's read at `/`), it has no
 //   explorer row (#121: every sender is a key, and the claim brings the
 //   owner's), and it takes no owner's message in an admin box.
 //
@@ -98,8 +99,9 @@ try {
   check((await kernelRows()).join(",") === "claim<-*", `the only kernel row is the claim row, from anyone: ${(await kernelRows()).join(", ")}`);
   for (const path of ["/", "/site/", "/site/app.js", "/manifest.json"]) {
     const r = await fetch(`${h.base}/@inst${path}`);
-    check(r.status === 404, `GET ${path}: 404, nothing served there (#125: no site and no static in the image): ${r.status}`);
+    check(r.status === 200, `GET ${path}: 200, the site installed at birth serves it (#141: its read under /site/, the owner's read at /): ${r.status}`);
   }
+  check(["chain/app", "git/app", "site/app", "reads"].every((n) => g.heads && (g.heads as Record<string, unknown>)[n]), `#141: the genesis names the heads chain/app, git/app, site/app and reads (${Object.keys((g.heads as object) ?? {}).join(", ")})`);
   const unread = await fetch(`${h.base}/@inst/explore`);
   check(unread.status === 404, `before the claim there is no explorer row (#121: the claim writes it with the owner's key): ${unread.status}`);
   check(!(await rows()).some((x) => x.sender === "owner"), "#121: no row names the `owner` symbol");

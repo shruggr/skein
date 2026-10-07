@@ -1,0 +1,6 @@
+{
+  "install": ["apps/chain", "apps/git", "apps/site"],
+  "reads": [
+    { "address": "/", "prefix": true, "program": "site.site", "fn": "get", "root": "www" }
+  ]
+}

@@ -780,6 +780,16 @@ pub const Runtime = struct {
                 _ = try heads.advanceHead(a, rt.store, "main", tree, .{ .thread = null, .input = entry, .at = at });
                 rt.say("#{d} genesis: main → {s} (system tree)", .{ n, short(a, tree) });
             }
+            // #141: an image's installed apps — `<app>/app` (the app record) and `reads` — their records pre-filled by the loader.
+            if (g.get("heads")) |hs| for (hs.map) |h| {
+                const root = Value.cidOf(h.value).?;
+                if (!(try rt.store.has(root))) {
+                    last_error = try std.fmt.allocPrint(rt.life.allocator(), "#{d}: the genesis head {s}'s record {s} is not in the store", .{ n, h.key, fmtCid(a, root) });
+                    return error.NotFound;
+                }
+                _ = try heads.advanceHead(a, rt.store, h.key, root, .{ .thread = null, .input = entry, .at = at });
+                rt.say("#{d} genesis: {s} → {s}", .{ n, h.key, short(a, root) });
+            };
             // #70: the address book's seed (the host's providers, the owner's mailbox).
             try addressbook.seed(a, rt.store, g, .{ .thread = null, .input = entry, .at = at });
             if (Value.bytesOf(g.get("owner"))) |o| {

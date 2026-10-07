@@ -9,7 +9,8 @@
 //             defaults, names?: [{identityKey: bytes(33), handle, domain}], collect, tree?,
 //             feeds?: [{kind: "headers", url, box?}]  (#58: statuses come from the host's broadcaster, arc.ts),
 //             libp2p?: {topics: [string], protocols: [string], listen?: [multiaddr]},
-//             addressBook?: [{key: bytes(33), transport, address, handle?, domain?}]}
+//             addressBook?: [{key: bytes(33), transport, address, handle?, domain?}],
+//             heads?: {<head name>: <record CID>}}  (#141: an image's installed apps, `<app>/app` and `reads`)
 //   row      {transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
 //             sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?, filter?: "beef", …settings}
 //            (`dispatch`, #77: the seed of the kernel's dispatch table, docs/MESSAGES.md "The dispatch
@@ -298,6 +299,8 @@ export interface System {
   feeds?: FeedSpec[];
   /** libp2p (#51): what the host's libp2p node does for the instance. */
   libp2p?: { topics: string[]; protocols: string[]; listen?: string[] };
+  /** #141: heads the genesis sets (an image's installed apps: `<app>/app`, `reads`), name → record CID. */
+  heads?: Record<string, CID>;
 }
 
 /** A system's libp2p, checked: the genesis's `libp2p` and the routes its protocols add (those the tree lacks). */
@@ -568,7 +571,7 @@ export function genesisRecord(c: Pick<Genesis2Config, "identity" | "owner" | "ha
     ...(c.addressBook?.length ? { addressBook: c.addressBook.map((e) => ({ key: e.key, transport: e.transport, address: e.address, ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })) } : {}),
     programs: s.programs, dispatch: s.dispatch, ...(Object.keys(s.scopes).length ? { scopes: s.scopes } : {}), ...(s.peers ? { peers: s.peers } : {}),
     defaults: s.defaults, names: s.names, collect: s.collect, ...(s.tree ? { tree: s.tree } : {}), ...(s.feeds ? { feeds: s.feeds } : {}),
-    ...(s.libp2p ? { libp2p: s.libp2p } : {}),
+    ...(s.libp2p ? { libp2p: s.libp2p } : {}), ...(s.heads && Object.keys(s.heads).length ? { heads: s.heads } : {}),
   };
 }
 

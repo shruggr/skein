@@ -156,3 +156,25 @@ test("image chain: none held → the static image as before", async (t) => {
   const stat = await dirSource(join(import.meta.dirname, "../../images/default"));
   assert.ok(src.kind === "tree" && src.root.equals(stat.root));
 });
+
+test("#141: the backfill — a skein whose tip lags the image's gets the headers it lacks, in order; one at the tip none", async (t) => {
+  const db = new HostDb(join(tmp(t), "host.db"));
+  t.after(() => db.close());
+  const held = chain(30);
+  const ic = new ImageChain({ db });
+  assert.equal(await ic.put(0, held), true);
+  const at = (h: number) => ({ height: h, hash: Buffer.from(sha256d(held[h]!)).reverse().toString("hex") });
+  const lag = await ic.after(at(20));
+  assert.deepEqual(lag.map((r) => Buffer.from(r).toString("hex")), held.slice(21).map((r) => r.toString("hex")), "21 … 30, in order");
+  assert.deepEqual(await ic.after(at(30)), [], "at the tip: none");
+  assert.deepEqual(await ic.after({ height: 40, hash: "00" }), [], "past the image's tip: none");
+  assert.deepEqual(await ic.after(undefined), [], "no tip (no chain part): none");
+  const fork = await ic.after({ height: 20, hash: "ab".repeat(32) });
+  assert.equal(Buffer.from(fork[0]!).toString("hex"), held[14]!.toString("hex"), "a tip the image does not hold there: from a little below it");
+  // A header the image takes before the backfill is read is in it (the reads run in turn with the writes).
+  const next = mine(sha256d(held.at(-1)!), 99);
+  const write = ic.headers([next]);
+  const after = ic.after(at(29));
+  await write;
+  assert.deepEqual((await after).map((r) => Buffer.from(r).toString("hex")), [held[30]!.toString("hex"), next.toString("hex")]);
+});

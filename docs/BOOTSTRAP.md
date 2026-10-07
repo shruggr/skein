@@ -42,24 +42,54 @@ outpoint later. A new skein starts from it and is then claimed.
 ```
 images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
-  bin/*.json                              the program records' inputs and descriptions
-  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; no explorer row (#121: the claim
-                                          writes it with the owner's key); nothing at `/` (#125)
+  bin/wallet.cid, bin/*.json              the wallet (#116, #130) and the program records' inputs and descriptions
+  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows; the wallet's funding row;
+                                          no explorer row (#121: the claim writes it with the owner's key)
+  etc/apps.json                           the apps installed at birth (#141) and the owner's read at `/`
   etc/routes.json                         empty
   etc/config.json                         {collect: []}
-  apps/git/                               the git app: shruggr/skein-git v0.1.2's tree, copied, not wired
+  apps/chain/, apps/git/, apps/site/      shruggr/skein-chain v0.4.0, skein-git v0.1.3, skein-site v0.7.7: each the tag's git tree
   chain/headers/<first>, chain/tip        the chain part (#132): not in the repo — the host adds it (below)
 ```
 
-It has the four tables and the programs needed to be reachable and to
-install more: the front door and the messagebox. It serves no page (#125):
-the management site is an app (shruggr/skein-site, its page at `/site/`),
-which the host's own skein carries, installed by the host's owner; you
-manage your skeins from that page, which talks to each one directly.
-Nothing else is installed — no site, no git app, no wallet, no chain app, no
-shell, no chat: the owner installs those afterwards, from a management
-page. The front door and the messagebox are wired by the genesis (no app
-records), as any system tree wires its programs.
+It has the four tables, the programs needed to be reachable (the front
+door, the messagebox) and to pay its host (the wallet), wired by the
+genesis with no app records; and **three apps installed at birth** (#141):
+
+- **chain** — the chain app, so the chain data the image carries and the
+  app that reads it arrive together: its first step loads `chain/headers`
+  into `chain/state`, and the host's headers feed is attached from the
+  skein's creation (below, "The image's chain part").
+- **git** — the app every other app is installed through (by hash, docs/APPS.md §3).
+- **site** — the management page, under `/site/` (its own read) and at `/`
+  (the owner's read, `{address: "/", prefix: true, program: <site's
+  program>, fn: "get", root: "www"}`): a new skein answers its page at its root.
+
+They are installed **as apps**: each has its app record under `<app>/app`,
+its rows (each with `app`) and its reads in the `reads` head, exactly what
+installing it by messages writes — so the owner upgrades or uninstalls
+them like any other app, and an app's state stays its own. `etc/apps.json`
+names them:
+
+```json
+{ "install": ["apps/chain", "apps/git", "apps/site"],
+  "reads": [{ "address": "/", "prefix": true, "program": "site.site", "fn": "get", "root": "www" }] }
+```
+
+The loader (`boot`, src/host/boot.ts `installAtBirth`) plans each with
+src/host/plan.ts — `readStoredApp` over the app's tree in the image,
+`planInstall` against the instance as its genesis will stand,
+`planOwnerRead` for the read — puts the records into the store, appends the
+rows to the genesis's `dispatch`, and names the heads in the genesis's
+`heads` (`{"chain/app": <record>, "git/app": …, "site/app": …, "reads":
+…}`), which the kernel advances when it processes the genesis, after the
+dispatch rows (as `tree` sets `main`). The CIDs are an install's. One
+difference: **no row whose manifest sender is `$owner`** — an image has no
+owner, and such a row is a table edit by whoever holds a `dispatch` row,
+not install configuration. Here that is chain's `chain` row from the owner
+(an owner's own ingest) and git's only row (the owner's `git.clone`).
+After the claim the owner adds them: installing the app again (`skein plan
+install <its tree>`) sends the head, unchanged, and just those rows.
 
 - **The explorer** is not a row of the image (#121: every sender is a key,
   and an image has no owner's key yet). The claim writes it — `/explore`
@@ -67,13 +97,6 @@ records), as any system tree wires its programs.
   beside the owner's admin rows. Before the claim there is no explorer
   (404). (An image written before #121 carried the row with #115's `owner`
   symbol; the kernel still reads it, and its claim adds no second row.)
-- **The git app's tree** is in the image (`apps/git`), so its blocks are in
-  every such store; it is not wired. The management page installs it from
-  there as the owner: the plan over that subtree (`readStoredApp` +
-  `planInstall`) sends `objects` with what the store lacks (the module as a
-  raw block, the program and app records), then `head`, the `dispatch` row
-  and `start`. Every other app is then deployed by hash through it.
-
 ### The image's chain part (#132)
 
 **The image carries the whole header chain**, and grows with every header
@@ -115,16 +138,31 @@ bytes (`src/host/image-chain.ts`):
   `chain` tree in `host_settings` (`image`, `image_chain`). The static part
   is scanned from the repo as before.
 
-**A skein is born with the chain up to the current tip**: the instance
-manager's `create` (and `skein-host init`, `skein-host add <h> --image
-default`) boots from the image as it stands — after the first fill at
-start — so its tree, and its store, carry `chain/headers`. The chain app
-(shruggr/skein-chain 0.4.0), installed later, loads them into its empty
-`chain/state` at its first step (it reads `main`, the genesis's tree; its
-docs/CHAIN.md, "Born with the chain"); from the skein's creation on, the
-feed pushes the tip per header as before. Replay: the image tree is the
-genesis's, so the chain app loads the same; nothing new is in the log. An
-instance made before #132 has no `chain/` in its tree and starts empty.
+**A skein is born with the chain up to the current tip, and the chain app
+to read it** (#141): the instance manager's `create` (and `skein-host
+init`, `skein-host add <h> --image default`) boots from the image as it
+stands — after the first fill at start — so its tree, and its store, carry
+`chain/headers`, and its table the chain app's event row. The chain app
+(shruggr/skein-chain 0.4.0) loads them into its empty `chain/state` at its
+first step (it reads `main`, the genesis's tree; its docs/CHAIN.md, "Born
+with the chain"). Replay: the image tree is the genesis's, so the chain app
+loads the same; nothing new is in the log.
+
+**The feed from the first second** (#141). The host subscribes a skein to
+its headers feed while its table has a row taking events in box `chain`
+(#102) — with the chain app in the image, from its creation (`create`
+subscribes it as it enables it; an instance added offline, at its first
+load). On subscribing (and on every resubscription: a host restart, a skein
+enabled again) the host first pushes the headers the skein lacks — from its
+tip (its `chain/state`'s last header, else its tree's `chain/tip`) to the
+host's, read from the image's chain part in turn with its writes, in runs of
+2016 (`{kind: "header", raws}`) — and the live stream after them: a live
+header that arrives meanwhile waits behind them, and one they carry is not
+pushed twice (feeds.ts `host`, image-chain.ts `after`, `skeinTip`). A tip
+the image does not hold at its height (a fork) is pushed from six below it.
+Still push-only: the skein asks for nothing. An instance made before #132
+has no `chain/` in its tree and no chain state: nothing is pushed before the
+live stream.
 
 Costs on mainnet (about 970 000 headers, 2026-10): the chain part is
 78 MB of header blocks in host.db; filling it from a local chaintracks
@@ -567,11 +605,23 @@ boot is written, and the process exits 0.
   holds every header from genesis (no feed replay); `add --image default`
   boots from the same image; replayed.
 - `src/host/boot.test.ts` also resolves the default image: no owner, no
-  admin rows, the claim row its one kernel row, the explorer route with the
-  read rule `{op: "explore", owner: true}`, nothing at `/`, `/site` or
-  `/manifest.json` (#125); `$owner` in an image refused.
+  admin rows, the claim row its one kernel row, no explorer row, no http
+  row at `/`, `/site` or `/manifest.json`; `$owner` in an image refused; and
+  (#141) its apps at birth: the records of chain, git and site in the
+  store, their rows with `app` (chain's event and `$self` rows; no row from
+  `$owner`), the heads `chain/app`, `git/app`, `site/app` and `reads` (the
+  site's `/site/` read and the owner's `/`), chain's app record and rows the
+  same CIDs as `skein plan install` over the same tree into a claimed
+  instance, but for the owner's row.
+- `src/host/image-chain.test.ts` and `src/host/feeds.test.ts` (#141): the
+  backfill — a skein whose tip lags the image's gets the headers it lacks,
+  in order; one at the tip, past it or with no tip none; a forked tip from
+  six below it; a header the image takes before the read is in it; on
+  subscribing, live headers wait behind the backfill (pushed as runs), one
+  it carries not pushed twice.
 - `kernel-zig/equiv/claim.ts` (in `run.sh`): an instance from the default
-  image serves nothing at `/` (#125), answers nobody's explorer read and
+  image serves the site at `/`, `/site/` and `/manifest.json` and its
+  genesis names the heads of its apps (#141), answers nobody's explorer read and
   refuses the owner's admin messages; the owner's own claim (`skein plan
   claim`, sent to `/sendMessage`; a key in its body not read) writes the
   sender's admin rows, removes the claim row, sets the head `claim` and the
@@ -604,7 +654,8 @@ boot is written, and the process exits 0.
 - `kernel-zig/equiv/site.ts` (in `run.sh`, #92): the management site in
   headless Chrome on a host skein (#125: installed there as an app, with the
   owner's root read) — create from the page, the locator in the
-  wallet's basket, the new skein managed from the host's page, the git app installed from the image's `apps/git`,
+  wallet's basket, the new skein managed from the host's page (chain, git and site there from birth, #141; git's
+  owner row added by installing git again as the owner),
   app-demo deployed by hash from the page, the explorer, the host skein's
   children; replayed.
 - `src/host/http.test.ts`: the fetch provider's network (`fetchHttp`): a

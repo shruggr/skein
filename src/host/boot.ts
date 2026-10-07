@@ -36,6 +36,9 @@ import type { Stamp } from "../runtime/syscalls.ts";
 import { GIT_RAW, parseTree, type Entry, type TreeBlocks } from "../runtime/tree.ts";
 import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
+import * as dagCbor from "@ipld/dag-cbor";
+import type { DispatchRow } from "../runtime/dispatch.ts";
+import { appRecordIn, planInstall, planOwnerRead, READS_HEAD, readStoredApp, type InstanceView, type ReadEntry, type ViewStore } from "./plan.ts";
 import { CLAIM_ROW, codeSystem, resolveSystem, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type ReadSpec, type PathRowSpec, type BoxRowSpec, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
@@ -49,6 +52,8 @@ export const DISPATCH = "etc/dispatch.json";
 export const SUBSCRIPTIONS = "etc/subscriptions.json";
 export const ROUTES = "etc/routes.json";
 export const READS = "etc/reads.json";
+/** #141: the apps an image installs at birth, and the owner's reads (ImageApps). */
+export const APPS = "etc/apps.json";
 
 /** Blocks by CID, from wherever a source keeps them. */
 export interface Objects {
@@ -99,7 +104,21 @@ export interface SystemTree {
   /** etc/routes.json (#40, the form before #77: http and libp2p rows), else the stock http rows; etc/reads.json, else the stock reads. */
   routes?: PathRowSpec[];
   reads?: ReadSpec[];
+  /** etc/apps.json (#141): the apps installed at birth, and each one's tree (path → tree CID). */
+  apps?: ImageApps;
+  appTrees?: Record<string, CID>;
 }
+
+/**
+ * etc/apps.json (#141): what an image installs at birth — `install`, the apps' trees in the image
+ * (`apps/<name>`), in order; `reads`, the owner's own reads (#135), each `program` a role of an installed
+ * app as `<app>.<role>` (the site at `/`: {address: "/", prefix: true, program: "site.site", fn: "get",
+ * root: "www"}). The genesis carries what installing them as messages would have written: the
+ * records (pre-filled), the rows (with `app`) and the heads `<app>/app` and `reads` (plan.ts
+ * planInstall, planOwnerRead) — but no row from `$owner` in an image: it has no owner, and the owner
+ * adds those after the claim.
+ */
+export interface ImageApps { install: string[]; reads?: Array<{ address: string; prefix?: boolean; program: string; fn: string; [setting: string]: unknown }> }
 
 const need = async (objects: Objects, cid: CID, what: string): Promise<Uint8Array> => {
   const b = await objects.get(cid);
@@ -192,7 +211,15 @@ export async function readSystemTree(objects: Objects, root: CID): Promise<Syste
   if (routes !== undefined && !Array.isArray(routes)) throw new Error(`${ROUTES}: not a list`);
   const reads = json<ReadSpec[]>(READS);
   if (reads !== undefined && !Array.isArray(reads)) throw new Error(`${READS}: not a list`);
-  return { root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, ...(dispatch ? { dispatch } : {}), ...(subscriptions ? { subscriptions } : {}), ...(routes ? { routes } : {}), ...(reads ? { reads } : {}) };
+  const apps = json<ImageApps>(APPS);
+  if (apps !== undefined && (!apps || !Array.isArray(apps.install) || apps.install.some((x) => typeof x !== "string") || (apps.reads !== undefined && !Array.isArray(apps.reads)))) throw new Error(`${APPS}: want {install: [<path of an app's tree>], reads?: [{address, prefix?, program: <app>.<role>, fn, …settings}]}`);
+  const appTrees: Record<string, CID> = {};
+  for (const path of apps?.install ?? []) {
+    const e = at(path);
+    if (!e || e.mode !== "40000") throw new Error(`${APPS}: ${path} is not a directory of the tree`);
+    appTrees[path] = e.cid;
+  }
+  return { ...(apps ? { apps, appTrees } : {}), root, objects: all.map(({ cid, bytes }) => ({ cid, bytes })), programs, modules, config, ...(dispatch ? { dispatch } : {}), ...(subscriptions ? { subscriptions } : {}), ...(routes ? { routes } : {}), ...(reads ? { reads } : {}) };
 }
 
 // ---------------------------------------------------------------- the loader
@@ -205,7 +232,7 @@ export type BootSource =
   /** A checkpoint (#30): the state record and every block it reaches, verified; restored, not replayed. */
   | { kind: "checkpoint"; state: CID; blocks: Array<{ cid: CID; bytes: Uint8Array }> };
 
-export interface Booted { entry?: CID; tree?: CID; state?: CID; objects: number; programs: string[] }
+export interface Booted { entry?: CID; tree?: CID; state?: CID; objects: number; programs: string[]; /** #141: the apps the image installed at birth. */ apps?: Array<{ name: string; version: string; notes: string[] }> }
 
 /**
  * Boot an empty store through its kernel: pre-fill and write the genesis (a
@@ -236,11 +263,81 @@ export async function boot(k: Kernel, src: BootSource, c: Genesis2Config, time: 
   // The front door is the kernel's when the tree brings none; every handler comes from bin/
   const programs: Record<string, CID> = { ...(kernelPrograms.frontdoor ? { frontdoor: kernelPrograms.frontdoor } : {}) };
   for (const p of t.programs) programs[p.name] = await k.store.put(p.record as never);
-  const s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
+  let s: System = resolveSystem(c, programs, t.subscriptions ?? [], t.config, t.root, t.routes, t.reads, t.dispatch);
   // An image (#89): no owner, so it must be claimable — its rows carry the claim row.
   if (!c.owner && !s.dispatch.some((r) => r.program === "kernel" && r.fn === "claim")) throw new Error(`an image (a genesis with no owner) needs a claim row in ${DISPATCH}: ${JSON.stringify(CLAIM_ROW)}`);
+  let apps: Booted["apps"];
+  if (t.apps) {
+    const born = await installAtBirth(k, src.objects, t, s, c);
+    s = { ...s, dispatch: [...s.dispatch, ...born.rows], heads: born.heads };
+    n += born.put;
+    apps = born.apps;
+  }
   const entry = await writeSystemGenesis(k, c, s, time);
-  return { entry, tree: t.root, objects: n, programs: Object.keys(programs) };
+  return { entry, tree: t.root, objects: n, programs: Object.keys(programs), ...(apps ? { apps } : {}) };
+}
+
+/**
+ * #141: the apps an image installs at birth (etc/apps.json), planned as an install by messages
+ * would be (plan.ts: readStoredApp over the app's tree in the image, planInstall, planOwnerRead)
+ * against the instance as its genesis will stand — the same records, rows and heads, the rows from
+ * `$owner` left out when the genesis names no owner. Their records are put into the store; the
+ * rows and heads go into the genesis.
+ */
+export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, objects: Objects, t: SystemTree, s: System, c: Genesis2Config): Promise<{ rows: DispatchRow[]; heads: Record<string, CID>; put: number; apps: Array<{ name: string; version: string; notes: string[] }> }> {
+  const local = new MemBlocks();
+  const bytes = async (cid: CID): Promise<Uint8Array> => {
+    const b = local.map.get(cid.toString())?.bytes ?? await objects.get(cid);
+    if (!b) throw new Error(`not found: ${cid}`);
+    return b;
+  };
+  const store: ViewStore = {
+    bytes,
+    has: async (cid: CID) => local.map.has(cid.toString()) || await k.hasBlock(cid),
+    get: async (cid: CID) => dagCbor.decode(await bytes(cid)),
+    putBlock: async (cid: CID, b: Uint8Array) => { local.map.set(cid.toString(), { cid, bytes: b }); },
+  } as unknown as ViewStore;
+  const view: InstanceView = {
+    store, owner: c.owner ?? "", identity: c.identity, programs: s.programs,
+    addressBook: (c.addressBook ?? []).map((e) => ({ key: Buffer.from(e.key).toString("hex"), transport: e.transport, address: e.address, ...(e.handle ? { handle: e.handle } : {}), ...(e.domain ? { domain: e.domain } : {}) })),
+    heads: [], dispatch: [...s.dispatch],
+  };
+  const rows: DispatchRow[] = [];
+  const heads = new Map<string, CID>();
+  let put = 0;
+  const put1 = async (r: { cid: CID; bytes: Uint8Array }) => { if (!(await k.hasBlock(r.cid))) { await k.putBlock(r.cid, r.bytes); put++; } };
+  const take = async (records: Array<{ cid: CID; bytes: Uint8Array }>, hs: Array<{ name: string; tree: CID }>) => {
+    // A `reads` record each step replaces is put once, the last (a block nothing names would not replay).
+    const reads = hs.find((h) => h.name === READS_HEAD)?.tree;
+    for (const r of records) {
+      local.map.set(r.cid.toString(), r);
+      if (!reads?.equals(r.cid)) await put1(r);
+    }
+    for (const h of hs) {
+      heads.set(h.name, h.tree);
+      view.heads = [...view.heads.filter((x) => x.name !== h.name), { name: h.name, root: h.tree }];
+    }
+  };
+  const apps: Array<{ name: string; version: string; notes: string[] }> = [];
+  for (const path of t.apps!.install) {
+    const app = await readStoredApp(store, t.appTrees![path]!);
+    const p = await planInstall(app, view, { modules: objects, image: !c.owner });
+    await take(p.records, p.heads);
+    for (const r of p.rows) { rows.push(r.row); view.dispatch.push(r.row); }
+    apps.push({ name: p.app, version: p.version, notes: p.notes });
+  }
+  for (const r of t.apps!.reads ?? []) {
+    const [name, role] = r.program.split(".");
+    const rec = name && role ? await appRecordIn(view, name) : undefined;
+    const program = rec?.record.programs[role!];
+    if (!program) throw new Error(`${APPS}: read ${r.address}: ${r.program} is not <app>.<role> of an app installed here`);
+    const { prefix, ...rest } = r;
+    const p = await planOwnerRead(view, "add", { ...rest, ...(prefix ? { prefix: true as const } : {}), program } as ReadEntry);
+    await take(p.records, [p.head]);
+  }
+  const reads = heads.get(READS_HEAD);
+  if (reads) await put1(local.map.get(reads.toString())!);
+  return { rows, heads: Object.fromEntries(heads), put, apps };
 }
 
 /** The program records' CIDs a tree's bin/ yields (as `boot` puts them), without a kernel. */

@@ -36,7 +36,10 @@
 import { createHash } from "node:crypto";
 import type { CID } from "multiformats/cid";
 import { CID as Cid } from "multiformats/cid";
-import { hashBlob, hashTree, parseTree, type Entry } from "../runtime/tree.ts";
+import * as dagCbor from "@ipld/dag-cbor";
+import { headTree } from "../runtime/heads.ts";
+import type { Store } from "../runtime/store.ts";
+import { hashBlob, hashTree, parseTree, readBlob, readTree, type Entry } from "../runtime/tree.ts";
 import { anyOf, DEFAULT_IMAGE, dirSource, WASM_DIR, wasmDirObjects, type BootSource, type Objects } from "./boot.ts";
 import type { HostDb } from "./instances.ts";
 
@@ -306,9 +309,59 @@ export class ImageChain {
     if (tip && tip.height !== start) this.say(`the image's chain: ${start < 0 ? "built from genesis" : `from ${start}`} to ${tip.height} (${tip.hash}) in ${Date.now() - t0} ms`);
   }
 
+  /**
+   * #141: the headers a skein whose tip is `tip` lacks, from the image's chain, in order — what the
+   * host pushes it on (re)subscribing, before the live stream. From the header after its tip when
+   * the image holds that tip; a tip the image does not hold at its height (a fork) from a little
+   * below it; none when the skein is at or past the image's tip, or has no tip (no chain part).
+   * Run in turn with the chain part's writes: every header the feed brought before this call is in.
+   */
+  after(tip: { height: number; hash: string } | undefined): Promise<Uint8Array[]> {
+    return this.serial(() => {
+      const top = this.height();
+      if (!tip || tip.height >= top) return [];
+      const from = display(sha256d(this.at(tip.height))) === tip.hash ? tip.height + 1 : Math.max(0, tip.height - 6);
+      const out: Uint8Array[] = [];
+      for (let h = from; h <= top; h++) out.push(new Uint8Array(this.at(h)));
+      return out;
+    });
+  }
+
   /** Start: the first sync, which creations wait for (`ready`). */
   start(): Promise<void> {
     this.ready = this.sync().catch((e) => this.say(`the image's chain not synced: ${(e as Error).message}`));
     return this.ready;
   }
+}
+
+/**
+ * #141: a skein's chain tip as its store holds it: the chain app's state (the head `chain/state`,
+ * {kind: "chain-state", maps: {headers}} — the MST height (u32 big-endian) → header, skein-sdk
+ * chain.zig; its last key is the tip), else the chain part of the tree it was born from (`main`'s
+ * `chain/tip`, image.zig's format), else none.
+ */
+export async function skeinTip(store: Store): Promise<{ height: number; hash: string } | undefined> {
+  const state = await headTree(store, "chain/state");
+  if (state) {
+    const v = await store.get(state).catch(() => undefined) as { kind?: string; maps?: { headers?: CID | null } } | undefined;
+    let node = v?.kind === "chain-state" ? v.maps?.headers ?? undefined : undefined;
+    let last: [Uint8Array, unknown, CID | null] | undefined;
+    while (node) {
+      const [, es] = dagCbor.decode(await store.bytes(node)) as [CID | null, Array<[Uint8Array, unknown, CID | null]>];
+      if (!es.length) break;
+      last = es[es.length - 1]!;
+      node = last[2] ?? undefined;
+    }
+    if (last) {
+      const raw = await store.bytes(last[1] as CID);
+      return { height: Buffer.from(last[0]).readUInt32BE(0), hash: display(sha256d(raw)) };
+    }
+  }
+  const main = await headTree(store, "main");
+  if (!main) return undefined;
+  const chain = (await readTree(store, main).catch(() => [] as Entry[])).find((e) => e.name === "chain" && e.mode === "40000");
+  const tip = chain && (await readTree(store, chain.cid)).find((e) => e.name === "tip");
+  if (!tip) return undefined;
+  const t = JSON.parse(Buffer.from(await readBlob(store, tip.cid)).toString("utf8")) as { height?: unknown; hash?: unknown };
+  return typeof t.height === "number" && typeof t.hash === "string" ? { height: t.height, hash: t.hash } : undefined;
 }
