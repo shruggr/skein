@@ -109,11 +109,11 @@ As README "Run a skein locally", with the headers feed set for the host:
 ```
 bin/skein-host add ov1 --image default
 SKEIN_HEADERS_URL=<an SSE stream of headers> bin/skein-host run
-bin/skein plan claim --recipient <ov1's identity> --out claim && bin/skein send http://ov1.localhost:8100 claim   # #127: your wallet's claim; you own ov1
+bin/skein claim --instance ov1                        # #127: the claim, signed with the operator's key; you own ov1
 ```
 
 ```
-ov1: booted from the image baf4bcfb6esis6uqhtc6xoi4gtyvydibg24bfqva · 54 objects pre-filled · programs frontdoor, messagebox · … · no owner: claim it from your wallet (skein plan claim, skein send)
+ov1: booted from the image baf4bcfb6esis6uqhtc6xoi4gtyvydibg24bfqva · 54 objects pre-filled · programs frontdoor, messagebox · … · no owner: claim it from your wallet (skein claim)
 skein-host: router at http://127.0.0.1:8100 · an instance at http://<handle>.localhost:8100 (or /@<handle>)
 skein-host: no Arcade (SKEIN_ARC_URL): a broadcast event is dropped; a new genesis names no status provider
 ```
@@ -123,13 +123,12 @@ The feed reaches an instance once the chain app is installed in it
 
 ### The owner's wallet
 
-Installing is the owner's messages (#124): `skein plan install` builds
-them and the owner's BRC-100 wallet sends them to the instance's
-`/sendMessage` (`skein send`, which runs `1sat authfetch`; any wallet with a
-BRC-104 client does the same). The plan reads the instance through its
-explorer with the same wallet (`--origin <the instance's origin>`), or, on
-the host's machine, its store file (`--store
-~/.skein/instances/<handle>/runtime.db`).
+Installing is the owner's messages (#124, #142): `skein install` builds
+them, signs them with the operator's key (`SKEIN_OPERATOR_KEY`, default
+`~/.skein/operator.key`) and sends them — on the host's machine over its
+control socket (`--instance <handle>`), elsewhere on one BRC-104 session
+with the instance's origin. A repository is cloned by hash in the skein by
+its git app; nothing of the app's tree crosses from the client.
 
 ### The chain app, then the overlay
 
@@ -139,8 +138,8 @@ and its install into an instance without it is refused (`requires chain/1:
 no installed app provides it`).
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --origin http://ov1.localhost:8100 --config '{"chain": {"network": "regtest"}}' --out chain
-bin/skein send http://ov1.localhost:8100 chain
+echo '{"chain": {"network": "regtest"}}' > chain.json
+bin/skein install https://github.com/shruggr/skein-chain#61b03c6bca1fee141a72be974eb211eeae06c0db --instance ov1 --config chain.json
 ```
 
 ```
@@ -152,17 +151,16 @@ install chain 0.3.0 — The chain module …
   row       mailbox status from $status → chain
   provides  chain/1: ingest, status (read), proof (read)
   note      row mailbox status from $status: no status provider in the address book (optional; left out)
-chain: prompt.txt and 6 messages to <ov1's key>
+ov1 (this host): 6 messages sent
 ```
 
 `--config` is merged over the manifest's `config`; on mainnet leave it out
 (`config.chain.network` defaults to the genesis's `walletNetwork`, else
-`main`). The prompt is also `chain/prompt.txt`; nothing is sent until
-`skein send`.
+`main`). `--dry-run` prints the prompt and the messages and sends
+nothing.
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-overlay#d5df94e8a7f875314e385f7d053aea835de53f6f --origin http://ov1.localhost:8100 --out overlay
-bin/skein send http://ov1.localhost:8100 overlay
+bin/skein install https://github.com/shruggr/skein-overlay#d5df94e8a7f875314e385f7d053aea835de53f6f --instance ov1
 ```
 
 ```
@@ -320,10 +318,7 @@ management page (`https://<handle>.skein.nexus/`: an app by repository URL
 and commit id), or from any machine with your wallet:
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-chain#e8d21021182ae02c673e2a2809cea5e1988bd47a --origin https://<handle>.skein.nexus --out chain
-bin/skein send https://<handle>.skein.nexus chain
-bin/skein plan install https://github.com/shruggr/skein-overlay#6851cc79e6a52b0f398b238e526e7ca02ac45d1c --origin https://<handle>.skein.nexus --out overlay
-bin/skein send https://<handle>.skein.nexus overlay
+SKEIN_OPERATOR_KEY=<your key file> bin/skein install https://github.com/shruggr/skein-overlay#6851cc79e6a52b0f398b238e526e7ca02ac45d1c https://<handle>.skein.nexus
 ```
 
 Then, from anywhere:

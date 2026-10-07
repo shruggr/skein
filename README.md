@@ -39,12 +39,15 @@ global by CID; a call to another app hands back CIDs, not data.
 
 ## Run a skein locally
 
-Needs Node 26, Zig 0.16.0 through `mise`, and, for anything sent as the
-owner, a BRC-100 wallet with a BRC-104 client: the owner's admin messages
+Needs Node 26 and Zig 0.16.0 through `mise`. The owner's admin messages
 (installing an app, a dispatch row, the address book, a directory into
-`main`) are built by `bin/skein plan` and sent by any such wallet to the
-instance's `/sendMessage` — from a shell, the 1sat CLI's `1sat authfetch`
-(`bin/skein send` runs it; #124). The `bin/skein` client's other commands
+`main`) are `bin/skein install|uninstall|dispatch|reads|peers|host|claim|deploy`:
+the client signs them in its own process with the operator's key
+(`SKEIN_OPERATOR_KEY`, default `~/.skein/operator.key`, which `skein-host
+run` makes) and sends them — over the host's control socket on the host
+machine (`--instance <handle>`), else on one BRC-104 session with the
+instance's origin (#142). A browser wallet sends the same messages from the
+management page. The `bin/skein` client's other commands
 use a wallet reachable over HTTP (default `http://127.0.0.1:3322`; the dev
 setup runs `1sat serve wallet-api`, `scripts/host/wallets.sh`).
 
@@ -71,19 +74,18 @@ npm install
 (cd kernel-zig && mise exec -- zig build --release)   # kernel-zig/zig-out/bin/skein-kernel; fetches skein-sdk by URL+hash
 bin/skein-host add martha --image default            # an instance from the default image: identity derived from ~/.skein/master.key, no owner yet
 bin/skein-host run                                    # the host on :8100; martha at http://martha.localhost:8100 or /@martha
-bin/skein plan claim --recipient <martha's identity> --out claim   # the claim, as your wallet will send it
-bin/skein send http://martha.localhost:8100 claim     # sent by your wallet: you, its sender, own martha; the claim row goes
+bin/skein claim --instance martha                     # the claim, signed with ~/.skein/operator.key: you, its sender, own martha; the claim row goes
 ```
 
 The default image (`images/default`, docs/BOOTSTRAP.md) is the same for
-everyone: the front door, the messagebox, the git app's tree (not
-installed), and one row to the kernel, `claim`, from anyone: the first
-claim's sender owns it (#127), so claim it first thing. It serves nothing
-at `/` (#125): the management site is an app (shruggr/skein-site, its page
-at `/site/`), which the host's own skein carries and from which you manage
-yours. The host holds no owner's key and sends no claim; `skein plan
-claim --messagebox <url>` names where the instance reaches its owner. A
-second claim is refused.
+every user skein: the front door, the messagebox, the wallet, the chain, git
+and site apps installed at birth (#141), and one row to the kernel,
+`claim`, from anyone: the first claim's sender owns it (#127), so claim it
+first thing. The host signs no user's claim; `skein claim --messagebox
+<url>` names where the instance reaches its owner. A second claim is
+refused. After the claim, the owner's rows into the apps installed at
+birth: `bin/skein install images/default/apps/git --instance martha` (the
+same for `apps/chain`), or the page.
 
 A plain `skein-host add martha` (no `--image`) is code genesis, with the
 owner in it: `SKEIN_OWNER`, else `~/.skein/owner.identity` (the owner
@@ -102,8 +104,8 @@ wallet's identity key, one line of hex). The tests and the dev stack use it.
   host's certifier (a child of `master.key`, never in an instance) sign each
   handle certificate under a serial of its own, records every issue, and
   answers resolve, search and the manifest from those records. The handle
-  domain, the host's name, note and icon are the app's config
-  (`skein plan install … --config '{"onboard": {"domain": "…"}}'`).
+  domain, the host's name and note are the app's config, written at the
+  host skein's birth from the host's settings (below).
   Revocation is not implemented (the host has no wallet): the certificate's
   revocation outpoint is BRC-52's disabled sentinel.
 - Code genesis (no `--image`) is written at its first start: the owner, the
@@ -128,19 +130,39 @@ skein**: the operator's instance, where the host keeps what is state or
 conversation (docs/ARCH.md, "The host skein").
 
 ```
-bin/skein-host init --owner <your key hex>                                               # the host skein: the default image, for you to claim
-bin/skein-host run                                                                       # the host on :8100; the host skein at http://host.localhost:8100
-bin/skein plan claim --recipient <its identity> --out claim && bin/skein send http://host.localhost:8100 claim   # claim it first: your wallet's message, you own it
-bin/skein plan install https://github.com/shruggr/skein-onboard#v0.3.4 --origin http://host.localhost:8100 \
-  --config '{"onboard": {"domain": "<the handle domain>"}}' --out plan                   # the onboarding app: the messages, read by your wallet
-bin/skein send http://host.localhost:8100 plan                                            # sent by your wallet (1sat authfetch), as you (the owner)
+# ~/.skein/host.env — the host's settings: every SKEIN_* line; the environment wins
+SKEIN_ROUTER_ORIGIN=https://id.example.com
+SKEIN_INSTANCE_ORIGIN=https://{handle}.example.com
+SKEIN_HANDLE_DOMAIN=example.com
+SKEIN_HOST_NAME="Example host"
+SKEIN_HTTP=fetch
 ```
 
-- `init` creates the host skein once (handle `host`, or `--handle`), from
-  the default image, for `--owner` (default `SKEIN_OWNER`) to claim from a
-  wallet (#127: its claim row admits anyone until then). Its address book alone names the **instance
-  manager**, the host's provider that creates, starts and stops instances;
-  the manager acts for no one else.
+```
+bin/skein-host run        # the first run: operator.key, master.key, host.db and the host skein; then the host
+```
+
+- `run` reads `$SKEIN_HOME/host.env` (every `SKEIN_*` line; the environment
+  wins). On its first run it makes the operator's key
+  (`SKEIN_OPERATOR_KEY`, default `$SKEIN_HOME/operator.key`; a file you put
+  there is used instead: hex or WIF, mode 0600) and the **host skein**
+  (handle `host`) from the host image — the default image with the
+  onboarding app (shruggr/skein-onboard) — its genesis naming the
+  operator's key as its owner: its admin rows, its explorer row and its
+  apps' owner rows are there at birth, with no claim. The onboarding app's
+  config comes from the settings (`domain` from `SKEIN_HANDLE_DOMAIN`, else
+  the domain of `SKEIN_ROUTER_ORIGIN`; `origin`; `name` from
+  `SKEIN_HOST_NAME`; `note` from `SKEIN_HOST_NOTE`). It prints the host
+  skein's identity and URL, then serves. Later runs start what exists; a
+  changed host.env does not reach into the host skein (`skein install
+  images/host/apps/onboard --instance host --config <file.json>` changes the
+  app's config). `skein-host init` is the first run's part alone. Its
+  address book alone names the **instance manager**, the host's provider
+  that creates, starts and stops instances; the manager acts for no one
+  else.
+- `skein-host grant <your wallet's identity key> --apps` gives a browser
+  wallet the host skein's admin rows and its apps' owner rows (signed with
+  the operator's key), so the management page manages the host skein too.
 - With the onboarding app installed, anyone with a wallet gets a skein: a
   BRC-104 session to the host skein and `POST /onboard/call {"fn":
   "onboard.create", "args": {"handle": "alice", "claim": …}}`, `claim` the
@@ -177,7 +199,7 @@ bin/skein send http://host.localhost:8100 plan                                  
   it with the handle when it is resolved or found; the page shows it as
   signed by the handle's key. "Find a handle" searches the host by handle
   or name.
-- `scripts/host/up.sh` does all three for the dev stack.
+- `scripts/host/up.sh` brings up the dev stack.
 - Block headers for the chain app: run the host with
   `SKEIN_HEADERS_URL=http://127.0.0.1:8083/chaintracks/v2/tip/stream`
   (Arcade's chaintracks); every instance with the chain app installed is
@@ -194,8 +216,8 @@ inside the VM; the host holds the connection until the request's thread
 comes to rest, and the answer is signed on the session.
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-shell#v0.1.1 --origin http://martha.localhost:8100 --out shell && bin/skein send http://martha.localhost:8100 shell   # the shell app: box shell/run
-bin/skein plan install https://github.com/shruggr/skein-chat#v0.1.0 --origin http://martha.localhost:8100 --out chat && bin/skein send http://martha.localhost:8100 chat      # the chat app: box chat
+bin/skein install shell --instance martha       # the shell app (from martha's catalog, cloned by her git app): box shell/run
+bin/skein install chat --instance martha        # the chat app: box chat
 bin/skein whoami
 bin/skein import ~/some/dir                      # tree objects into the kernel's objects operation; prints the tree CID
 bin/skein run --tree <cid> -- 'ls | head -3'     # box shell/run (the shell app: the shell over a tree)
@@ -227,28 +249,24 @@ The wire contract is docs/MESSAGES.md.
 ## Install an app
 
 ```
-bin/skein plan install https://github.com/shruggr/skein-chain#<commit> --origin http://martha.localhost:8100 --out plan   # plan/prompt.txt: the rows it asks for
-bin/skein send http://martha.localhost:8100 plan                                                                       # your wallet sends plan/001-….json, … in order
-bin/skein plan uninstall static --origin http://martha.localhost:8100 --out plan && bin/skein send http://martha.localhost:8100 plan
+bin/skein install <name> --instance martha                         # a name from martha's catalog (her site's www/catalog.json)
+bin/skein install https://github.com/<owner>/<repo>#<commit> http://martha.localhost:8100   # any repository and commit, at an origin
+bin/skein install <name> --instance martha --dry-run               # the prompt and the messages, nothing sent
+bin/skein uninstall <app> --instance martha
 ```
 
-The plan reads the manifest aloud (its dispatch rows) into `prompt.txt`,
-and writes the owner's messages as `/sendMessage` JSON bodies:
-`objects` (the tree and program records), `head` (`<app>/app` → the app
-record), one `dispatch` per row, and the app's `start` message. Installing
-again is the upgrade. Any BRC-100 wallet sends them; the 1sat CLI by hand:
-`for f in plan/[0-9]*.json; do 1sat authfetch POST <origin>/sendMessage
---body @"$f" || break; done`. docs/APPS.md §3, scripts/host/README.md
-("The owner's messages").
-
-`skein plan install` clones the repository on your machine (a coding-session tool).
-**Deploy by hash** is the other path, the one a page uses: with the git app
-([shruggr/skein-git](https://github.com/shruggr/skein-git)) installed, the
-owner sends `{fn: "git.clone", args: {url, hash}}` to box `git`; the app
-fetches that one commit through the host's fetch provider, checks it against
-the hash, keeps its tree in the store and answers `{tree, app}` (the app
-record, built in the VM). The owner then sends `head`, the `dispatch` rows
-and `start` — no `objects`: the blocks are already there.
+`install` prints the prompt — what the app asks for (its head, its rows,
+its reads, its start) — and sends the owner's messages. A repository is
+installed **by hash**: one message to the skein's git app, `{fn:
+"git.clone", args: {url, hash}}`; the app fetches that one commit through
+the host's fetch provider (the host runs with `SKEIN_HTTP=fetch`), checks it
+against the hash, keeps its tree in the store and answers `{tree, app}`
+(the app record, built in the VM). The client plans from the stored tree and
+sends `head` (`<app>/app` → the app record), one `dispatch` per row, and the
+app's `start` — no `objects`: the blocks are already there. Installing
+again is the upgrade. A directory (`skein install <dir>`) is read on your
+machine and the objects the skein lacks are sent. The management page does
+the same from your wallet. docs/APPS.md §3.
 
 ## Build an app
 

@@ -192,7 +192,7 @@ transport and an address (#126: no roles; nothing finds a service by one).
 The genesis seeds it (the
 host's providers at `local` <name>, the owner's mailbox); after
 that it changes only through the kernel's `peers` operation, on a message
-signed by the owner (`skein plan peers`, sent by the owner's wallet) or by a key the owner added as a
+signed by the owner (`skein peers`, or the owner's wallet) or by a key the owner added as a
 sender on the `peers` row. No program writes it: every program emits as the
 instance, and no row admits the instance's own key to an admin box. The
 resolve program keeps what a BRC-169 lookup finds under its own name
@@ -345,11 +345,11 @@ The node host (`skein-host run`, `src/host/router.ts` and its neighbours):
 ### The host skein (#90)
 
 The host runs one instance of its own: the **host skein**, the operator's.
-`skein-host init --owner <key>` creates it (handle `host` by default) from
-the default image, a bare image the operator then claims from a wallet
-(#127: `skein plan claim`, `skein send`; its claim row admits anyone until
-then, so the operator does it first), and host.db
-records which row it is (`skein-host list` shows it as kind `host`). It is
+`skein-host run` creates it on its first run (handle `host`) from the host
+image — the default image with the onboarding app — owned at birth by the
+operator's key (`$SKEIN_HOME/operator.key`, #142: the genesis names it, so
+its admin rows and its apps' owner rows are there with no claim), and
+host.db records which row it is (`skein-host list` shows it as kind `host`). It is
 an ordinary instance under the same transports, with one difference: its
 address book, and no other, has entries for the **instance manager** and
 the **certifier** (#113). What about the host is state or conversation

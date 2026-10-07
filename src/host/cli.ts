@@ -31,8 +31,8 @@
 // genesis names no owner and carries the claim row (`default`: the repo's
 // images/default, the default image; an outpoint is refused until the ORDFS
 // app exists). Its claim row admits anyone: the first claim's sender owns it
-// (#127) — the owner claims it from a wallet (`skein plan claim --recipient
-// <its identity> --out claim`, then `skein send <its origin> claim`); the host
+// (#127) — the owner claims it (`skein claim --instance <handle>` or
+// `skein claim <its origin>`, or a wallet's own claim message); the host
 // holds no owner's key and sends no claim.
 // `run` (#142) is the one command a host needs. Its settings are $SKEIN_HOME/host.env (every `SKEIN_*`
 // line; the environment wins: hostenv.ts) — they configure the commands, and through `run` how the host
@@ -131,7 +131,7 @@ import { homeOf as homeOfVars, identityOf, operatorKey, withHostEnv } from "./ho
 import { hostArcConfig } from "./arc.ts";
 import { hostP2PConfig, peerIdOf } from "./p2p.ts";
 import { addressBook } from "./deploy.ts";
-import { hostDomain, Router, type RouterOptions } from "./router.ts";
+import { fetchHttp, hostDomain, Router, type RouterOptions } from "./router.ts";
 import { billingConfig, DEV_BILLING, NSAT } from "./billing.ts";
 import { HostDb, knowsColumn, knowsOf, type InstanceRow, type RowFields } from "./instances.ts";
 import { deployedIdentity, hostPage, parseIdentity, roster, rosterFor, serveRoster, type HostRow, type IdentityFields } from "./roster.ts";
@@ -224,7 +224,7 @@ export async function main(argv: string[], given: Env): Promise<number> {
             // `default`: the default image as this host holds it (#132: with its chain part, image-chain.ts).
             const src = v.image === "default" ? await router.image.source() : await bootSourceOf(v.image !== undefined ? { boot: v.image, from: v.from } : v, r);
             const b = await router.bootRow(handle, src, { image: v.image !== undefined });
-            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it from your wallet (skein plan claim, skein send)" : ""}`);
+            env.out(b.state ? `${handle}: restored checkpoint ${b.state} (${b.objects} blocks)` : `${handle}: booted from ${v.image !== undefined ? "the image " : ""}${b.tree} · ${b.objects} objects pre-filled · programs ${b.programs.join(", ")} · genesis ${b.entry}${v.image !== undefined ? " · no owner: claim it (skein claim --instance ${handle})" : ""}`);
           } catch (e) {
             env.err(`skein-host add ${handle}: ${(e as Error).message}`);
             return 1;
@@ -345,7 +345,7 @@ export function originOf(vars: Env["vars"], handle: string): string {
   return (vars.SKEIN_INSTANCE_ORIGIN || "http://{handle}.localhost:{port}").replace("{handle}", handle).replace("{port}", vars.SKEIN_ROUTER_PORT || "8100");
 }
 
-/** `skein-host peers <handle> list`: the instance's address book, read from its store (#124: writing it is the owner's `peers` messages, `skein plan peers`). */
+/** `skein-host peers <handle> list`: the instance's address book, read from its store (#124: writing it is the owner's `peers` messages, `skein peers`). */
 async function peersCmd(db: HostDb, rest: string[], env: Env): Promise<number> {
   const [handle, op, ...more] = rest;
   if (!handle || more.length || op !== "list") { env.err(USAGE); return 2; }
@@ -657,6 +657,9 @@ function routerOptions(db: HostDb, env: Env): RouterOptions {
     fuelPerStep: v.SKEIN_FUEL_PER_STEP, idleMs: v.SKEIN_IDLE_MS !== undefined ? Number(v.SKEIN_IDLE_MS) : undefined, home,
     origin: v.SKEIN_ROUTER_ORIGIN, instanceOrigin: v.SKEIN_INSTANCE_ORIGIN, ownerMessagebox: v.SKEIN_OWNER_MESSAGEBOX, port: Number(v.SKEIN_ROUTER_PORT ?? 8100),
     kernel: { command: v.SKEIN_KERNEL_BIN, env: { SKEIN_HOME: home } },
+    // #142: settings host.env may give (the environment's are read where they are used, too).
+    ...(v.SKEIN_HTTP === "fetch" ? { http: fetchHttp } : {}),
+    ...(Number(v.SKEIN_ANSWER_WAIT_MS) > 0 ? { answerWaitMs: Number(v.SKEIN_ANSWER_WAIT_MS) } : {}),
     libp2p: hostP2PConfig(v, home),
     headersFeed: v.SKEIN_HEADERS_URL || undefined,
     arc: hostArcConfig(v, home),

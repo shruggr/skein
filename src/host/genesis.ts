@@ -168,7 +168,7 @@ export const KERNEL_OPS = [...ADMIN_OPS, "claim", "tick"] as const;
  * The claim row (#89): an image's one wildcard row to the kernel. A message
  * in box `claim`, from anyone: its sender is the owner (#127) — in one step
  * the kernel writes the sender's four admin rows and removes this row (a
- * second claim finds no row). The owner's own message (`skein plan claim`),
+ * second claim finds no row). The owner's own message (`skein claim`),
  * or a claim the owner signed before the instance existed, which the host's
  * instance manager forwards as its first entry before the hostname is
  * published (Router.createInstance).

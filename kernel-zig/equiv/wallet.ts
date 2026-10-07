@@ -237,7 +237,7 @@ try {
   // The chain app, installed into both instances (#78, #79).
   const spec = process.env.SKEIN_CHAIN_DIR ?? cloneChain();
   for (const inst of ["wallettest", "payee"]) {
-    // #124: the owner's messages (`skein plan install`), sent to the instance's /sendMessage.
+    // #124: the owner's messages (`skein install`), sent to the instance's /sendMessage.
     const { code, err } = await ownerCli({ home: h.home, port: h.router.port!, owner, settled: () => h.router.settled() }, ["install", spec, "--instance", inst]);
     if (code !== 0) throw new Error(`install skein-chain into ${inst}: ${err.join(" ")}`);
   }

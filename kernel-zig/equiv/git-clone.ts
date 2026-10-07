@@ -14,7 +14,7 @@
 //      app} in the owner's mailbox. It moved no head;
 //   2. the manifest is read out of the stored tree by CID; the install
 //      client's planInstall over that tree rebuilds the record — the same CID
-//      as the answer, and as `skein plan install` of the checkout would write
+//      as the answer, and as `skein install` of the checkout would write
 //      — with nothing to send but `head`, `dispatch` and `start`; sent, the
 //      app runs (its start's cron tick, a {fn, args} call answered);
 //   3. a hash the server does not hold (not-found), a server that answers
@@ -229,7 +229,7 @@ try {
   check(plan.recordCid.equals(app), `planInstall over the stored tree rebuilds the git app's record: the same CID (${plan.recordCid} = ${app})`);
   check(plan.records.length === 0, `nothing to send by objects: the git app put every block (${plan.records.length} records)`);
   const fromDir = await planInstall(checkoutA, iv, { modules: wasmDirObjects(join(here, "../../wasm")) });
-  check(fromDir.recordCid.equals(app) && stored.root.equals(fromDir.record.tree), "and skein plan install of the checkout would write the same record (the client's path, #124)");
+  check(fromDir.recordCid.equals(app) && stored.root.equals(fromDir.record.tree), "and skein install of the checkout would write the same record (the client's path, #124)");
   const rec = await kk.store.get(app) as { kind?: string; tree?: CID; programs?: Record<string, CID> };
   const prog = rec.programs?.demo ? await kk.store.get(rec.programs.demo) as { app?: string; code?: { wasm?: CID } } : undefined;
   check(rec.kind === "app" && !!rec.tree?.equals(tree) && prog?.app === "app-demo" && !!prog.code?.wasm && await view.has(prog.code.wasm), "the app record links the tree and a program record for bin/app-demo.wasm, its module a block of the store");

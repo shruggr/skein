@@ -1486,7 +1486,7 @@ export class Router {
   async dispatch(req: RouterRequest): Promise<RouterResponse> {
     const url = new URL(req.url);
     if (req.method === "GET" && url.pathname === "/.well-known/skein-host") {
-      // #130: the terms this host bills by — what an owner grants as the host row (`skein plan host`).
+      // #130: the terms this host bills by — what an owner grants as the host row (`skein host`).
       const b = this.o.billing;
       const billing = b ? { key: this.providers.key("billing"), x: b.x, rates: b.rates, allowance: b.allowance, tickMs: b.tickMs, graceMs: b.graceMs, fund: `${this.origin()}${FUND_PREFIX}{handle}` } : undefined;
       return json(200, { origin: this.origin(), domain: await this.handleDomain(), ...(billing ? { billing } : {}) });

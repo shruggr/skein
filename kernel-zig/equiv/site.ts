@@ -230,7 +230,7 @@ const lines: string[] = [];
 const out = (l: string) => { lines.push(l); if (verbose) process.stdout.write(`  | ${l}\n`); };
 const cli = async (args: string[], who?: { wallet: WalletInterface; id: string }) => {
   const o: string[] = [], e: string[] = [];
-  // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent by who's wallet to /sendMessage.
+  // #124: install/uninstall are the owner's messages, planned and sent on who's session.
   if (who && (args[0] === "install" || args[0] === "uninstall")) {
     const r = await ownerCli({ home, port, owner: who.wallet, settled: () => host!.router.settled() }, args);
     for (const l of [...r.out, ...r.err]) out(l);

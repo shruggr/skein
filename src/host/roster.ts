@@ -10,7 +10,7 @@
 // from the default image serves its management page there, #92).
 //
 // Each agent's own roster (#27) is a file, ROSTER.md (`skein-host roster --for`
-// prints it; the owner deploys it with the directory: `skein plan deploy
+// prints it; the owner deploys it with the directory: `skein deploy
 // --only …,ROSTER.md`), which the loop appends to the system prompt: the colleagues the row
 // `knows` (host.db), each with its address — `- @kurt@localhost — Kurt: …`.
 

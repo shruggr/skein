@@ -20,10 +20,14 @@
 #      hydration and names the owner's messagebox (`defaults.ownerMessagebox`,
 #      the router's default: the owner's mailbox instance) — an agent genesised
 #      earlier can never deliver its answers to him (it needs a new store).
-#   2b. the host skein (#90): `skein-host init --owner <the owner's key>` — the
-#      operator's own instance (handle `host`), from the default image,
-#      for the owner to claim (step 7, #127), the instance manager in its address book. Once:
-#      run again, it only says which instance it is
+#   2b. the host skein (#90, #142): `skein-host init` — the operator's own
+#      instance (handle `host`), from the host image (the default image with
+#      the onboarding app), owned at birth by the operator's key
+#      (SKEIN_OPERATOR_KEY: here the dev owner's, ~/.skein/owner-dev.key,
+#      written from owner-wallet.env), the onboarding app's config from the
+#      settings (SKEIN_HANDLE_DOMAIN, default localhost; the router's
+#      origin), the instance manager in its address book. Once: run again, it
+#      only says which instance it is
 #   3. the router, if nothing listens on :8100 (it hydrates every enabled row:
 #      the agents' geneses happen here, the owner's mailbox already there).
 #      Its broadcaster (#58) is the host's Arcade: SKEIN_ARC_URL and
@@ -43,35 +47,31 @@
 #      which bin/skein-infer reads.
 #   6. the apps (#83): a genesis has no shell and no chat loop, so every enabled
 #      agent gets the shell app and the chat app (as the owner, at the tags
-#      SKEIN_SHELL_APP / SKEIN_CHAT_APP name). Installing what an instance has
+#      SKEIN_SHELL_APP / SKEIN_CHAT_APP name: <url>#<tag>, checked out under
+#      ~/.skein/apps/ — an agent has no git app). Installing what an instance has
 #      sends only the head again.
-#   Steps 5–7 are the owner's messages (#124): `skein plan … --store <the
-#   instance's store>` builds them, `skein send <origin> <dir>` delivers them
-#   with the dev owner's wallet (`1sat authfetch`, HOME ~/.skein/owner-home,
-#   key ~/.skein/owner-wallet.env). An instance owned by another key (an
+#   Steps 5–6 are the owner's messages (#124, #142): `bin/skein … --instance
+#   <h>` signs them with the dev owner's key and hands them to the running
+#   host over its control socket. An instance owned by another key (an
 #   owner.identity that is not owner-dev.identity) refuses them: that owner
 #   sends from its own wallet.
-#   7. the onboarding app (#90, #113) into the host skein (SKEIN_ONBOARD_APP,
-#      default shruggr/skein-onboard#v0.3.4; first the owner's claim of the
-#      host skein, #127, a no-op once claimed), its config the handle domain
-#      (SKEIN_HANDLE_DOMAIN, default localhost) and the router's origin:
-#      POST /@host/onboard/call creates a skein for any wallet with a session,
+#   7. the mailboxes of step 2, which the host skein's onboarding app did not
+#      make, adopted (`skein-host import-handles` prints the owner's request
+#      for each), recorded and certified so they resolve. POST
+#      /@host/onboard/call creates a skein for any wallet with a session,
 #      through the instance manager; POST /account/register (signed over
-#      `register <name>@<domain>`) a mailbox; it answers BRC-169. Then the
-#      mailboxes of step 2, which the app did not make, adopted (`skein-host
-#      import-handles` prints the owner's request for each), recorded and
-#      certified so they resolve.
+#      `register <name>@<domain>`) a mailbox; the app answers BRC-169.
 #
 # Nothing is registered, and nothing registers itself: the mailbox rows of
 # step 2 are what a registration (register.ts, POST /account/register) would
 # make — that is for identities whose keys this machine does not know (the
 # front end's Register) — and an identity outside the host reaches an agent's
 # answers only once the admin puts its key and mailbox URL in that agent's
-# address book (`skein plan peers add <key> <url> --store …`, sent). The owner's
+# address book (`skein peers add <key> <url> --instance …`). The owner's
 # mailbox URL goes to ~/.skein/mailbox.url (the client's). The inference peer
 # itself is bin/skein-infer (SKEIN_MAILBOX_URL=http://127.0.0.1:8100/@infer).
 # Agents are rows: `skein-host add <handle>` (identity derived), then the
-# owner deploys its directory (`skein plan deploy <dir>`, `skein send`); run
+# owner deploys its directory (`skein deploy <dir> --instance <handle>`); run
 # this again after adding one (its address book, and everyone else's). See
 # README.md.
 set -euo pipefail
@@ -84,24 +84,30 @@ mkdir -p "$skein/logs"
 host() { "$root/bin/skein-host" "$@"; }
 # An instance's origin, as the router publishes it (SKEIN_INSTANCE_ORIGIN).
 origin() { local t="${SKEIN_INSTANCE_ORIGIN:-http://{handle\}.localhost:{port\}}"; t="${t//\{handle\}/$1}"; echo "${t//\{port\}/$port}"; }
-# The owner's messages (#124): `owner_send <handle> <skein plan args…>` plans them from the instance's store
-# and sends them with the dev owner's wallet (1sat authfetch) to the instance's origin.
+# The owner's messages (#124, #142): `owner_send <handle> <skein args…>` — signed by bin/skein with the dev
+# owner's key (SKEIN_OPERATOR_KEY), handed to the running host over its control socket.
 owner_send() {
-  local h=$1 store dir rc=0; shift
-  store="$(host list | awk -F'\t' -v h="$h" '{ split($1, a, "@") } a[1] == h { print $7; exit }')"
-  dir="$(mktemp -d "${TMPDIR:-/tmp}/skein-plan-XXXXXX")"
-  "$root/bin/skein" plan "$@" --store "$store" --out "$dir" > /dev/null || rc=$?
-  if [ $rc -eq 0 ] && ls "$dir"/[0-9]*.json > /dev/null 2>&1; then
-    ( set -a; . "$skein/owner-wallet.env"; set +a; HOME="$skein/owner-home" "$root/bin/skein" send "$(origin "$h")" "$dir" ) > /dev/null || rc=$?
-  fi
-  rm -rf "$dir"
-  return $rc
+  local h=$1; shift
+  "$root/bin/skein" "$@" --instance "$h" > /dev/null
+}
+# An agent from code genesis has no git app to clone with: `checkout <url#rev>` checks the app out here, once,
+# under ~/.skein/apps/, and `skein install <dir>` sends what the agent lacks.
+checkout() {
+  local url="${1%%#*}" rev="${1#*#}" dir
+  dir="$skein/apps/$(basename "$url")-$rev"
+  [ -f "$dir/etc/app.json" ] || git clone -q --depth 1 --branch "$rev" "$url" "$dir"
+  echo "$dir"
 }
 
 # 1. The client wallets.
 "$here/wallets.sh" owner infer
 owner="$(cat "$skein/owner.identity")"
 infer="$(cat "$skein/infer.identity")"
+# The operator's key (#142): the dev owner's, from its wallet's env file, so the dev owner owns the host skein.
+if [ ! -f "$skein/owner-dev.key" ]; then
+  ( umask 077; sed -n 's/^PRIVATE_KEY_WIF=//p' "$skein/owner-wallet.env" > "$skein/owner-dev.key" )
+fi
+export SKEIN_OPERATOR_KEY="${SKEIN_OPERATOR_KEY:-$skein/owner-dev.key}"
 
 # 2. The mailbox instances, before any agent is genesised. `mailbox <handle>
 # <key>` prints the handle of key's mailbox instance: the one it has, else a
@@ -119,9 +125,9 @@ echo "mailbox instances: the owner ${owner:0:8}… at @$mine, infer ${infer:0:8}
 echo "http://127.0.0.1:$port/@$mine" > "$skein/mailbox.url"
 [ -f "$skein/infer.json" ] || printf '%s\n' '{ "ripper": { "baseUrl": "http://100.100.177.87:8001/v1", "apiKey": "vllm" } }' > "$skein/infer.json"
 
-# 2b. The host skein (#90): once; claimed for the owner (its mailbox instance above in the claim).
+# 2b. The host skein (#90, #142): once; owned by the operator's key at birth, the onboarding app installed.
 [ -x "$root/kernel-zig/zig-out/bin/skein-kernel" ] || (cd "$root/kernel-zig" && mise exec -- zig build --release)
-host init --owner "$owner"
+host init
 hostskein="$(host list | awk -F'\t' '$2 == "host" { sub(/@.*/, "", $1); print $1; exit }')"
 
 # 3. The router: a new agent's genesis names the owner's mailbox instance (its default).
@@ -169,19 +175,13 @@ done
 for a in "${agents[@]}"; do
   h="${a%%$'\t'*}"
   for app in "${SKEIN_SHELL_APP:-https://github.com/shruggr/skein-shell#v0.1.0}" "${SKEIN_CHAT_APP:-https://github.com/shruggr/skein-chat#v0.1.0}"; do
-    owner_send "$h" install "$app" || echo "install $app into $h failed (above)" >&2
+    owner_send "$h" install "$(checkout "$app")" || echo "install $app into $h failed (above)" >&2
   done
 done
 echo "address books: ${#agents[@]} agent(s) know the owner and infer; infer knows them ($skein/infer-peers.json)"
 
-# 7. The onboarding app (#90) into the host skein.
+# 7. The mailboxes the host skein's onboarding app did not make: adopted by the owner's requests import-handles prints.
 if [ -n "$hostskein" ]; then
-  onboard="${SKEIN_ONBOARD_APP:-https://github.com/shruggr/skein-onboard#v0.3.4}"
-  # #127: the host skein is a bare image until the owner's own claim (its sender owns it); claimed already: refused, nothing changes.
-  owner_send "$hostskein" claim 2> /dev/null || true
-  config="{\"onboard\": {\"domain\": \"${SKEIN_HANDLE_DOMAIN:-localhost}\", \"origin\": \"${SKEIN_ROUTER_ORIGIN:-http://127.0.0.1:$port}\"}}"
-  owner_send "$hostskein" install "$onboard" --config "$config" || echo "install $onboard into $hostskein failed (above)" >&2
-  # The mailboxes the app did not make: adopted by the owner's requests import-handles prints.
   host import-handles 2> /dev/null | while read -r line; do
     body="${line#*--body \'}"; body="${body%\'}"
     ( set -a; . "$skein/owner-wallet.env"; set +a; HOME="$skein/owner-home" 1sat authfetch POST "$(origin "$hostskein")/onboard/call" --body "$body" ) > /dev/null || echo "adopting failed: $body" >&2

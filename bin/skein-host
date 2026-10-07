@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # skein-host (src/host/cli.ts): the host's management database ($SKEIN_HOME/host.db)
 # and `run`, the host: one `skein-kernel serve` process per enabled row. For `run`
-# (owner and messagebox; `add --boot/--packet` and `event`, which may write a genesis
-# through a router of their own: owner and infer; `init`: the operator, the host skein's owner) it fills
-# the environment from what scripts/host/up.sh wrote under $SKEIN_HOME, unless already set:
+# (owner and messagebox; `add --boot/--packet`, `event` and `init`, which may write a genesis
+# through a router of their own: owner and infer — a code genesis's) it fills the environment
+# from what scripts/host/up.sh wrote under $SKEIN_HOME, unless already set:
 #   SKEIN_OWNER ← owner.identity   SKEIN_INFER ← infer.identity
+# Every other setting is $SKEIN_HOME/host.env (src/host/hostenv.ts); the host skein's owner is the
+# operator's key, $SKEIN_OPERATOR_KEY (default $SKEIN_HOME/operator.key; #142).
 # Each instance's pinned wasm modules are installed into its store at start.
 set -euo pipefail
 root="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"

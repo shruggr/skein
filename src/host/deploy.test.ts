@@ -1,10 +1,10 @@
 // Deployment via `objects` (#23) and the front end's roster (#24), with the
 // real Zig kernel behind a router (testhost.ts): the owner's messages for a
-// filtered directory (#124: `skein plan deploy`, src/client/admin.ts),
+// filtered directory (#124: `skein deploy`, src/client/admin.ts),
 // delivered to the instance's /sendMessage on the owner's session; the first
 // root sets main, a changed directory moves it through `head`, an unchanged
 // one sends nothing; the loop's next new conversation reads the new SOUL.md.
-// A dispatch row the same way (`skein plan dispatch`). The roster reads
+// A dispatch row the same way (`skein dispatch`). The roster reads
 // IDENTITY.md from the deployed tree (`main`).
 
 import { test } from "node:test";
@@ -118,7 +118,7 @@ async function setup(t: { after(fn: () => unknown): void }, handles: string[]) {
     };
   };
   const host = { home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() };
-  /** `skein plan deploy <dir> --store <its store>`, sent: the plan. */
+  /** `skein deploy <dir> --store <its store>`, sent: the plan. */
   const deploy = async (handle: string, dir: string, only?: string[]) => {
     await h.router.hydrate(handle);
     await h.router.settled();
@@ -165,7 +165,7 @@ test("onlyIgnore: named files and everything under a named directory, directorie
   assert.ok(!onlyIgnore(d, ["*"])("src/index.ts"));
 });
 
-test("skein plan deploy: the filtered tree through `objects` as the owner sets main; the same directory again sends nothing; an edited SOUL.md moves main and the next new conversation reads it", { skip }, async (t) => {
+test("skein deploy: the filtered tree through `objects` as the owner sets main; the same directory again sends nothing; an edited SOUL.md moves main and the next new conversation reads it", { skip }, async (t) => {
   const { h, peer, requests, owner, store, deploy } = await setup(t, ["martha"]);
   const s = await store("martha");
   const dir = await agentDir(t);

@@ -5,7 +5,7 @@
 //   terms     its key (a child of the master secret: provider key `billing`) and what it supports
 //             — X, the rates, its free allowance per skein, its tick interval, its grace — published
 //             at /.well-known/skein-host (`billing`). The owner grants them as the host row, a kernel
-//             row of the skein's dispatch table (`skein plan host`): no row, nothing is billed, the
+//             row of the skein's dispatch table (`skein host`): no row, nothing is billed, the
 //             skein is served as before; a row naming another key or lower rates (or X) than this
 //             host's: it stops serving (the gate).
 //   meter     what never reaches the log: the fuel of the read calls it makes (the explorer's reads,

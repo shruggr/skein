@@ -28,7 +28,7 @@ import type { Objects } from "../host/boot.ts";
 /** One admin message: the box and the body (a record value: what the kernel's operation takes). */
 export interface AdminMessage { box: string; body: unknown }
 
-/** What `skein plan` writes: the prompt (what the messages do, as the page shows it), the recipient, the messages in order. */
+/** What the admin commands build: the prompt (what the messages do, as the page shows it), the recipient, the messages in order. */
 export interface AdminPlan { prompt: string[]; recipient: string; messages: AdminMessage[] }
 
 const isKey = (s: string) => /^0[23][0-9a-f]{64}$/.test(s);
@@ -105,7 +105,7 @@ export function planDispatch(recipient: string, a: { op: "add" | "remove"; sende
 /**
  * The owner's own read (#135): one path served by a `call` of a program's function, for anyone,
  * signed or not — added to (removed from) the reads head: `objects` (the reads record) and `head
- * reads`. E.g. the site at the root: `skein plan reads add --prefix --fn get --settings
+ * reads`. E.g. the site at the root: `skein reads add --prefix --fn get --settings
  * '{"root":"www"}' / site.site --origin <url>`. The handler as for a dispatch row (a program record
  * CID, a genesis program, or <app>.<role>, resolved by the caller into `programs`).
  */

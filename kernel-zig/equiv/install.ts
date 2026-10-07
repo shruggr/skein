@@ -68,7 +68,7 @@ try {
   const out: string[] = [], err: string[] = [];
   const cli = async (...args: string[]) => {
     out.length = 0; err.length = 0;
-    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
     const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, args) : undefined;
     if (o) { out.push(...o.out); err.push(...o.err); }
     const code = o ? o.code : await main(args, {
@@ -95,7 +95,7 @@ try {
   check(code === 0 && out.some((l) => l.includes("read      /site/* → site.get (root www) (anyone, by a call: nothing logged)")) && !out.some((l) => l.startsWith("  row ")), `the prompt shows the site's read under /site/, and no row (${code}: ${out.filter((l) => /^ {2}(row|read) /.test(l)).join(" | ")})`);
   check((await record("site/app")) === undefined, "a dry run sends nothing");
   code = await cli("install", siteSpec, "--instance", "inst");
-  check(code === 0, `skein plan install skein-site, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
+  check(code === 0, `skein install skein-site, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
   const st = await record("site/app");
   check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.7.7" && (await record("site")) === undefined, `the head site/app is the app record (0.7.7), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
   const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
@@ -112,7 +112,7 @@ try {
 
   // ------------------------------------------------ app-demo: start, ticks, calls
   code = await cli("install", demoDir, "--instance", "inst");
-  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo/tick from $cron → demo")), `skein plan install app-demo: exit ${code} ${err.join(" ")}`);
+  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo/tick from $cron → demo")), `skein install app-demo: exit ${code} ${err.join(" ")}`);
   const state = async () => {
     const rec = await record("app-demo/app");
     return rec?.state ? await (await k()).store.get(rec.state as CID) as { count: number; ticks: number } : undefined;
@@ -223,7 +223,7 @@ try {
 
   // ------------------------------------------------ uninstall
   code = await cli("uninstall", "app-demo", "--instance", "inst");
-  check(code === 0 && out[0]?.includes("dispatch remove ×3"), `skein plan uninstall app-demo: ${code} ${out[0]} ${err.join(" ")}`);
+  check(code === 0 && out[0]?.includes("dispatch remove ×3"), `skein uninstall app-demo: ${code} ${out[0]} ${err.join(" ")}`);
   const stopped = await until("the stop", async () => { await h.router.settled(); return h.lines.some((l) => /cron: beat stopped$/.test(l)) || undefined; }, 10_000).catch(() => false);
   check(stopped, "the stop message reached app-demo before its rows went: the cron provider stopped beat");
   c = await call({ fn: "demo.counter.get" });
@@ -260,7 +260,7 @@ try {
   check(!!ownerRead && ownerRead.app === undefined && ownerRead.prefix === true && ownerRead.root === "www", "the root read is the owner's (no app)");
   code = await cli("uninstall", "site", "--instance", "inst");
   r = await get("/site/");
-  check(code === 0 && r.status === 404 && !r.body.includes('src="app.js"'), `skein plan uninstall site: its read is gone — /site/ falls to the root read, which has no www/site/ (${code}, GET /site/ ${r.status})`);
+  check(code === 0 && r.status === 404 && !r.body.includes('src="app.js"'), `skein uninstall site: its read is gone — /site/ falls to the root read, which has no www/site/ (${code}, GET /site/ ${r.status})`);
   check((await appReads("site")).length === 0 && (await appRows("app-demo")).length === 0, "no app reads or rows left");
   r = await get("/");
   check(r.status === 200, `the owner's root read is the owner's: the uninstall leaves it (GET / ${r.status})`);

@@ -153,7 +153,7 @@ test("#141: the default image installs chain, git and site at birth — the reco
     ["/site/", true, "get", "www", "site", site.programs.site.toString()],
     ["/", true, "get", "www", undefined, site.programs.site.toString()],
   ]);
-  // The same app record as `skein plan install <dir>` over a claimed instance: same CID; its rows are these plus the owner's.
+  // The same app record as `skein install <dir>` over a claimed instance: same CID; its rows are these plus the owner's.
   const owner = key();
   const claimed = { store: { has: async () => false, get: async () => { throw new Error("none"); }, bytes: async () => { throw new Error("none"); }, putBlock: async () => {} } as never, owner, identity, programs: sys.programs, addressBook: [], heads: [], dispatch: [...sys.dispatch] };
   const viaMessages = await planInstall(await readApp(join(image, "apps/chain")), claimed, { modules: src });

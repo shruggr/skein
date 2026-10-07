@@ -178,18 +178,19 @@ operation on one of its tables, no program stepped (docs/VM.md "The
 dispatch table"). A management site is the permission prompt: it reads the
 manifest, shows what the app asks for, and has the owner's wallet sign the
 messages — one click sends them all; steps are fine. Building the messages
-is a library; sending them is the owner's wallet's job (#124: the same
-messages from any BRC-100 wallet). The reference client is `skein plan
-install <repo-url#commit | dir> (--origin <url> | --store <runtime.db>)
-[--config json] --out <dir>` (src/client/admin.ts over src/host/plan.ts;
-built, #72/#76/#77/#124): it writes the prompt (`prompt.txt`, the lines
-below) and one `/sendMessage` JSON body per message (`001-objects.json`,
-`002-head.json`, …: `{"message": {"recipient": <the instance's key>,
-"messageBox": <box>, "body": <DAG-JSON>}}`), which the owner's wallet POSTs
-in order to the instance's `/sendMessage` on a BRC-104 session — `skein
-send <origin> <dir>`, or by hand `for f in <dir>/[0-9]*.json; do 1sat
-authfetch POST <origin>/sendMessage --body @"$f" || break; done`
-(docs/BOOTSTRAP.md "Installing an app").
+is a library; signing them is the owner's key's (#124: the same messages
+from any BRC-100 wallet). The reference client is `skein install
+<catalog-name | url#commit | dir> (--instance <handle> | <origin>)
+[--config <file.json>] [--dry-run]` (src/client/admin-cli.ts over
+src/client/admin.ts and src/host/plan.ts; built, #72/#76/#77/#124/#142): it
+prints the prompt (the lines below), signs each message in its own process
+with the operator's key (`SKEIN_OPERATOR_KEY`, default
+`$SKEIN_HOME/operator.key`) and sends them in order — on the host machine
+over the host's control socket (`--instance`), anywhere else on one BRC-104
+session with the instance's origin. `--dry-run` prints the messages
+(`{"message": {"recipient": <the instance's key>, "messageBox": <box>,
+"body": <DAG-JSON>}}`, one a line) and sends nothing (docs/BOOTSTRAP.md
+"Installing an app").
 
 0. **Check.** The manifest (§2). Every `requires` interface is provided by
    some installed app (each `*/app` head's root record, `kind: "app"`, its
@@ -202,8 +203,8 @@ authfetch POST <origin>/sendMessage --body @"$f" || break; done`
    each read (`read <address>[*] → <role>.<fn> (anyone, by a call: nothing logged)`),
    `start`/`stop`, `requires`/`provides`, what an overlay publishes (for
    information), and the messages to be sent. Nothing is sent unless the
-   owner sends it: the page's "Approve and send", or `skein send` /
-   the owner's own wallet with the plan's files.
+   owner sends it: the page's "Approve and send", or `skein install`
+   without `--dry-run`.
 1. **`objects`** — the records. Body (dag-cbor, ≤ 1 MiB per message):
    ```
    {records: [{cid, bytes}]}
@@ -223,7 +224,7 @@ authfetch POST <origin>/sendMessage --body @"$f" || break; done`
    other apps' and the owner's reads kept (sent in step 1's `objects`). An
    upgrade replaces the app's reads; an uninstall takes them out the same
    way (after its rows are removed). The owner's own reads (no `app`) are
-   `skein plan reads add|remove` (the site at `/`).
+   `skein reads add|remove` (the site at `/`).
 3. **`dispatch`** — one per row: `{op: "add", row: {transport, address,
    prefix?, sender, program: <the role's program record>, fn?, …settings,
    app: "<name>"}}`, the sender resolved (`"*"`, `"event"`, `"session"`, the
@@ -238,11 +239,13 @@ authfetch POST <origin>/sendMessage --body @"$f" || break; done`
 **Two paths to the tree** (#91). Step 1 is how the tree reaches the
 instance, and there are two ways:
 
-- **The client clones on its machine.** `skein plan install <repo-url#commit
-  | dir>` clones the repository (or reads the directory) on the machine it
-  runs on and plans everything the instance lacks as `objects`; the owner's
-  wallet sends it. A coding-session tool, not the user's path.
-- **The git app clones in the VM, by hash** (built, #91). With
+- **A directory on the client's machine.** `skein install <dir>` reads it
+  and sends what the instance lacks as `objects` (≤ 1 MiB a message; a
+  larger record, a module, alone in its own). For a tree the instance holds
+  already (an image's app) that is nothing: the head and the rows.
+- **The git app clones in the VM, by hash** (built, #91; the client's path
+  for a repository, #142: `skein install <url>#<commit>` or a name from the
+  instance's catalog). With
   [shruggr/skein-git](https://github.com/shruggr/skein-git) installed (name
   `git`, box `git` from `$owner`, interface `git/1`), a page needs two
   owner-signed steps and no `objects`:
@@ -285,29 +288,30 @@ skein-sdk's `files`) as one read (#135), `/site/*`; the page is the installer
 `/`: a new skein answers its page at its root. **The root is the owner's**: an app's paths are under
 its name, and the owner may add a read of their own to the site's
 function, `{address: "/", prefix: true, program: <the site's program
-record>, fn: "get", root: "www"}` in the reads head — `skein plan reads add
+record>, fn: "get", root: "www"}` in the reads head — `skein reads add
 --prefix --fn get --settings '{"root":"www"}' / site.site <where>` (a
 handler `<app>.<role>` is that installed app's program) — to serve the page
 at `/` (and its `manifest.json`, the wallet's grouped request, at the
 origin's `/manifest.json`). A manifest has no field for it: the install
 shows the app's own reads only, and the site's README says how. The read
-carries no `app`, so the site's upgrade or uninstall leaves it (`skein plan
+carries no `app`, so the site's upgrade or uninstall leaves it (`skein
 reads remove` with the same arguments takes it out); as a prefix at `/` it
 takes every path no exact row or read, or longer prefix, takes. Connected to the owner's wallet, it reads the
 skein through its explorer (`/explore`, the owner's message route, docs/MESSAGES.md),
 which gives it what the plan needs: the heads (the reads head among them), the genesis, the claim, the
 address book, the dispatch table (the chain `{kind: "dispatch"}`) and any
-record by CID. It plans with the same code as `skein plan`
+record by CID. It plans with the same code as `skein install`
 (src/host/plan.ts, bundled into the site) and shows the plan as the prompt;
 on approval it sends the messages, signed by the wallet on a BRC-104
-session. The page, `skein plan` + `skein send`, and a raw `1sat authfetch`
-loop are three ways to the same messages: none of it is the host's (#124).
+session. The page and the client `skein` are two ways to the same
+messages: none of it is the host's (#124).
 
 - **The git app is there.** The default image installs it at birth (#141)
   without its one row — box `git` from the owner: an image has no owner.
-  After the claim the owner adds it: installing git again (`skein plan
-  install` over its tree, the image's `apps/git`) sends the head, unchanged,
-  and that row.
+  After the claim the owner adds it: installing git again (`skein install
+  images/default/apps/git <where>`, or the page) sends the head, unchanged,
+  and that row. The host skein (#142) is born with it: its genesis names the
+  operator's key, so its apps' `$owner` rows are written at birth.
 - **Every other app by hash.** The page sends `{fn: "git.clone", args: {url,
   hash}}` to box `git` and reads the answer from the thread that message
   launched: `/explore/edges/<message>?rel=launched-by` names it,
@@ -349,8 +353,8 @@ anything — the worst it can do is ask.
 (docs/BOOTSTRAP.md "The default image") has no owner and no admin rows
 until it is claimed: an install into it is refused (`$owner` cannot
 resolve, and no row admits the messages). The claim — the owner's own
-message in box `claim`, its sender the owner (#127: `skein plan claim`, then
-`skein send`; or, for a hosted registration, signed by the owner's wallet
+message in box `claim`, its sender the owner (#127: `skein claim <where>`;
+or, for a hosted registration, signed by the owner's wallet
 before the instance existed and forwarded by the host's instance manager) —
 writes the owner's admin rows; from then on the
 owner installs exactly as above — the shell app, the chat app, whatever the
@@ -365,10 +369,10 @@ installed (its `<name>/app` head's root is an app record) is the upgrade:
 the new app record keeps `state`; rows the old record had and the new one
 does not are removed (removes first), rows the table already holds as asked
 are not sent again; `start` is sent again (the restart). Change or revoke a
-single row with a `dispatch` message (`skein plan dispatch`). All in the log. Deploy-by-message
+single row with a `dispatch` message (`skein dispatch`). All in the log. Deploy-by-message
 with a payment (#11) is the same `objects` message with a toll.
 
-**Uninstall** (`skein plan uninstall <app>`, sent by the owner's wallet; built):
+**Uninstall** (`skein uninstall <app> <where>`, or the page; built):
 the `stop` message if declared, into the app's box while its rows still
 stand; then a `dispatch` remove for every row the table holds with `app:
 <name>`. The heads are left (prunable), the app record and state with them.
@@ -693,8 +697,8 @@ more: one program, two rows, one interface.
   they keep their own records under their own names and read
   `chain/state` by CID.
 
-Installed: `skein plan install https://github.com/shruggr/skein-chain#<commit>
---origin <the instance's origin> --out plan`, then `skein send <origin> plan`; at boot: `bin/chain.wasm` in the system tree and its
+Installed: `skein install https://github.com/shruggr/skein-chain#<commit>
+<the instance's origin>` (the default image installs it at birth, #141); at boot: `bin/chain.wasm` in the system tree and its
 rows in `etc/dispatch.json` (its program, named `chain`, writes `chain/…`
 under its default scope). kernel-zig/equiv/chain.ts does both.
 
@@ -717,7 +721,7 @@ diff, cmp, jq, which, grep, tree, awk, sed, git, qjs as `node`, python as
 **The chat app** ([shruggr/skein-chat](https://github.com/shruggr/skein-chat),
 name `chat`, heads `chat/…`) is the turn loop: box `chat` from `$owner`
 and from anyone (another agent's `message`; remove that row with
-a `dispatch` message, `skein plan dispatch remove`, to take chats from the owner only). Interface `chat/1`.
+a `dispatch` message, `skein dispatch remove`, to take chats from the owner only). Interface `chat/1`.
 It requires nothing: a `bash` tool call runs the shell app's shell when the
 instance has it — the loop reads the app record at the head `shell/app`
 and launches its `programs.shell` as a thread, as `run` does — and
@@ -779,10 +783,10 @@ bounded at 64 MiB).
 | the dispatch table (routes, boxes, libp2p topics as rows); route handler contract; synchronous answer on thread completion | built (#68/#66, #77; #115: the kernel matches every transport, kernel-zig/src/dispatch.zig, and the front door verifies). The `/<app>/` prefix of an app's http rows is checked by the install client (src/host/manifest.ts), not by the kernel's `dispatch` operation |
 | topic contract (`identify`); lookup contract (hooks + `lookup`); lookup state under `<app>/ls_<service>`; the contract as a Zig module | built (#50, #79: skein-overlay 0.3.0) |
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
-| install client (manifest → objects + head + dispatch + start, the prompt); `skein plan install <repo#commit|dir>` / `uninstall` writing the owner's `/sendMessage` bodies, `skein send` (any BRC-100 wallet: `1sat authfetch`); `start`/`stop`, row senders | built (#72, #76, #77, #124) |
+| install client (manifest → objects + head + dispatch + start, the prompt); `skein install <catalog-name|url#commit|dir>` / `uninstall`, signed in the client with the operator's key, sent over the host's control socket or one BRC-104 session (a repository cloned in the VM by the git app); `--dry-run`; `start`/`stop`, row senders | built (#72, #76, #77, #124, #142) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
 | the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; chain, git and site installed at birth in the default image (#141) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
-| the owner's own http row to an app's handler (`skein plan dispatch --http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125: src/client/admin.ts `planDispatch`) |
+| the owner's own http row to an app's handler (`skein dispatch --http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125: src/client/admin.ts `planDispatch`) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |

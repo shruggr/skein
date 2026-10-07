@@ -175,7 +175,7 @@ test("router: the host's headers feed (#102) reaches only the instances whose di
   const handler = programs.includes("resolve") ? "resolve" : programs[0]!;
   const gp = ((await (await h.router.hydrate("a")).kernel.genesis()) as { programs: Record<string, CID> }).programs;
   const id = h.db.get("a")!.identity!;
-  // #124: the owner's dispatch message (`skein plan dispatch`), POSTed to a's /sendMessage on the owner's session.
+  // #124: the owner's dispatch message (`skein dispatch`), POSTed to a's /sendMessage on the owner's session.
   const sendRow = (op: "add" | "remove") => sendPlan({ port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, "a", planDispatch(id, { op, box: "chain", handler }, gp));
   await sendRow("add");
   await until("a subscribed", async () => { await h.router.settled(); return h.router.feeds.hosts("a") || undefined; });

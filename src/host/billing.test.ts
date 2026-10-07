@@ -1,6 +1,6 @@
 // Billing (#130): the host's side (billing.ts) unit by unit — its config, the host row's terms and
 // the mismatch, the kernel's state record as the host reads it, the gate's reason, the period's log
-// record, host.db's bookkeeping (asleep since, the grace, payments), the owner's plan (`skein plan
+// record, host.db's bookkeeping (asleep since, the grace, payments), the owner's plan (`skein
 // host`) — and, with the real Zig kernel, the meter and the gate on an instance with no wallet: its
 // host row starts billing at the host's first tick; a tick from another key is refused; consumed ≥
 // allocation with nothing to pay with is asleep, and then the host forwards nothing but a payment

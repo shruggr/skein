@@ -146,7 +146,7 @@ export class RawBox {
   /**
    * A BRC-33 request with a JSON body on the session (`path` under the box URL, e.g. "/sendMessage"):
    * what any BRC-100 wallet's BRC-104 client sends (`1sat authfetch POST <origin>/sendMessage --body @file`,
-   * the owner's admin messages `skein plan` writes, src/client/admin.ts). The status and the answer's text.
+   * the owner's admin messages as JSON, src/client/admin.ts messageJson). The status and the answer's text.
    */
   async postJson(path: string, json: string): Promise<{ status: number; text: string }> {
     await this.ensurePeer(this.wallet, this.originator);

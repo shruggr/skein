@@ -83,7 +83,7 @@ const out = (l: string) => { lines.push(l); if (process.env.VERBOSE) process.std
 /** `skein-host <args>` as `who` (the owner's wallet for install/deploy), with SKEIN_OWNER = who's key. */
 const cli = async (args: string[], who?: { wallet: WalletInterface; id: string }) => {
   const o: string[] = [], e: string[] = [];
-  // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent by who's wallet to /sendMessage.
+  // #124: install/uninstall are the owner's messages, planned and sent on who's session.
   if (who && (args[0] === "install" || args[0] === "uninstall")) {
     const r = await ownerCli({ home, port, owner: who.wallet, settled: () => host!.router.settled() }, args);
     for (const l of [...r.out, ...r.err]) out(l);

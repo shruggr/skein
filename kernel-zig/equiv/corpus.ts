@@ -5,7 +5,7 @@
 // log), delivery over http from
 // the VM, wakes by the waker), on a script clock. The shell and the chat loop
 // are apps (#83): each instance that runs them has the shell app and/or the
-// chat app installed first by the owner's messages (`skein plan install`, #124; src/testapps.ts: their
+// chat app installed first by the owner's messages (`skein install`, #124; src/testapps.ts: their
 // pinned commits, or $SKEIN_SHELL_DIR / $SKEIN_CHAT_DIR) — the installs are in
 // the corpus too. It exercises the shell
 // under run-handler (writes, cwd, failures, sleeps and their wakes), the
@@ -122,7 +122,7 @@ async function host(o: { defaults?: Record<string, string>; infer?: PrivateKey }
     db, router, clock, owner, ownerKey, ownerId, add, mailbox, base,
     /** Let every kernel finish what it was given. */
     settle: () => router.settled(),
-    /** Install apps into an agent as the owner (#83), by the owner's messages (`skein plan install`, #124). */
+    /** Install apps into an agent as the owner (#83), by the owner's messages (`skein install`, #124). */
     install: (name: string, apps: PinnedApp[]) => installApps({ home, port: router.port, owner, settled: () => router.settled() }, name, apps),
     later(sec: number) { const [s0, ns] = clock.now(); clock.set([s0 + sec, ns + 1000]); },
     /** Advance the clock and let the waker admit what is due. */

@@ -106,7 +106,7 @@
 //              the host skein's onboarding app records the issue
 //   billing    (#130) the host's billing key: it takes no messages and is in no address
 //              book; it signs the host's ticks to the instances whose host row names it
-//              (billing.ts) — the key an owner grants (`skein plan host`)
+//              (billing.ts) — the key an owner grants (`skein host`)
 //
 // How this host obtains the providers' keys is its own business (signer.ts:
 // children of its master secret); the instance knows them from its address

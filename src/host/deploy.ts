@@ -1,6 +1,6 @@
 // A directory into an instance (#23) and its address book (#40, #70): the
 // pieces the owner's messages are built from (#124: src/client/admin.ts
-// planDeploy, planPeers; `skein plan deploy|peers`). A deploy is the
+// planDeploy, planPeers; `skein deploy|peers`). A deploy is the
 // directory's git objects in ≤ 1 MiB bundles to the instance's `objects` box,
 // the root tree on the last — the kernel sets `main` from it when there is
 // none — then `head {name: "main", tree}` when `main` is another tree. Which

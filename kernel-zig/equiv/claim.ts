@@ -84,7 +84,7 @@ try {
   const kernelRows = async (handle = "inst") => (await rows(handle)).filter((r) => r.program === "kernel").map((r) => `${r.address}<-${r.sender instanceof Uint8Array ? hex(r.sender).slice(0, 8) : r.sender}`);
   const cli = async (...args: string[]) => {
     const out: string[] = [], err: string[] = [];
-    // #124: install/uninstall are the owner's messages, planned (`skein plan`) and sent to /sendMessage (src/testapps.ts ownerCli).
+    // #124: install/uninstall are the owner's messages, planned and sent on the owner's session (src/testapps.ts ownerCli).
     const o = args[0] === "install" || args[0] === "uninstall" ? await ownerCli({ home: h.home, port: h.router.port!, owner: h.owner, settled: () => h.router.settled() }, args) : undefined;
     if (o) { out.push(...o.out); err.push(...o.err); }
     const code = o ? o.code : await main(args, {
@@ -154,7 +154,7 @@ try {
 
   // ------------------------------------------------ the owner installs an app
   let r = await cli("install", demoDir, "--instance", "inst");
-  check(r.code === 0, `skein plan install app-demo into the claimed image: exit ${r.code} ${r.err.join(" ")}`);
+  check(r.code === 0, `skein install app-demo into the claimed image: exit ${r.code} ${r.err.join(" ")}`);
   const app = await (await k()).call("head", "app-demo/app") as CID | null;
   check(!!app, "the head app-demo/app is the app record");
   const call = async (body: unknown) => {

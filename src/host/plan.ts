@@ -2,7 +2,7 @@
 // uninstalling an app sends, as the owner, to the kernel's admin boxes, read
 // from a view of the instance — its heads, dispatch table, address book,
 // genesis programs, and its store by CID. No node APIs: the node client
-// (install.ts and src/client/admin.ts: `skein plan install`, #124, a store file's or the explorer's view) and the management
+// (install.ts and src/client/admin.ts: `skein install`, #124, a store file's or the explorer's view) and the management
 // site (shruggr/skein-site, #92: a view over the instance's explorer reads, in
 // a browser) plan with the same code. install.ts's header has the steps.
 
@@ -101,7 +101,7 @@ export async function appRecordIn(view: Pick<InstanceView, "store" | "heads">, n
  * [<read>]}, each read {address: <the path as served>, prefix?: true, program: <program record
  * CID>, fn, app?: <the app that asked for it; absent: the owner's own>, …settings}. Written by the
  * owner (the kernel's `objects` and `head` operations, as an install writes `<app>/app`): an install
- * puts its app's reads in (an upgrade replaces them, an uninstall takes them out); `skein plan reads`
+ * puts its app's reads in (an upgrade replaces them, an uninstall takes them out); `skein reads`
  * adds or removes the owner's own (the site at `/`). The host reads it to serve reads by `call`
  * (frontdoor.ts serveHttp). State, so replay-derived as the dispatch table is.
  */
@@ -208,7 +208,7 @@ function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"
   if (s === "session") return { sender: "session", label: "a session" };
   if (s === "event") return { sender: "event", label: "events" };
   if (s === "$owner") {
-    if (!view.owner) throw new Error("sender $owner: the instance has no owner yet (an image not claimed, #89, #127: the owner's own claim, skein plan claim)");
+    if (!view.owner) throw new Error("sender $owner: the instance has no owner yet (an image not claimed, #89, #127: the owner's own claim, skein claim)");
     return { sender: keyBytes(view.owner), label: `the owner (${view.owner.slice(0, 10)}…)` };
   }
   if (s === "$self") return { sender: keyBytes(view.identity), label: `the instance itself (${view.identity.slice(0, 10)}…)` };
@@ -237,7 +237,7 @@ export function wiring(record: AppRecord, view: InstanceView, skipped: string[] 
       skipped.push(`${transport} ${rowAddress(record.name, r)} from ${sender}: no ${sender.slice(1)} provider in the address book (optional; left out)`);
       continue;
     }
-    // #141: an image's install leaves out the rows from `$owner` — an image has no owner; the owner adds them after the claim (a table edit, `skein plan dispatch add`).
+    // #141: an image's install leaves out the rows from `$owner` — an image has no owner; the owner adds them after the claim (a table edit, `skein dispatch add`).
     if (o.image && sender === "$owner") {
       skipped.push(`${transport} ${rowAddress(record.name, r)} from $owner: an image has no owner (left out; the owner adds it after the claim)`);
       continue;
@@ -509,7 +509,7 @@ export async function sendUninstall(p: UninstallPlan, send: (box: string, body: 
 // ---------------------------------------------------------------- the owner's own reads (#135)
 
 /**
- * The owner's own read (#135; `skein plan reads`): added to (or removed from) the reads head —
+ * The owner's own read (#135; `skein reads`): added to (or removed from) the reads head —
  * `objects` (the new reads record) and `head reads`. No `app`: an app's upgrade or uninstall leaves
  * it. The site at the instance's root is one: {address: "/", prefix: true, program: <the site's
  * program>, fn: "get", root: "www"}. Refused at an http row's path or another read's.
