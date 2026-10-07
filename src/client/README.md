@@ -23,7 +23,7 @@ skein head <name> <cid>                              # the kernel's head operati
 skein inbox [--wait] [--timeout s] [--no-ack] [--json]
 skein chat "<text>" [--tree <cid>] [--model ripper/qwen38] [--new] [--wait] [--timeout s]
 skein talk [--tree <cid>] [--model m] [--new] [--timeout s]
-skein install|uninstall|dispatch|reads|peers|host|claim|deploy … (--instance <h> | <origin>) [--dry-run]
+skein install|uninstall|routes|grant|peers|host|claim|deploy … (--instance <h> | <origin>) [--dry-run]
                                                      # the owner's admin messages, signed here with the operator's key
 ```
 

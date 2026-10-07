@@ -41,7 +41,7 @@ global by CID; a call to another app hands back CIDs, not data.
 
 Needs Node 26 and Zig 0.16.0 through `mise`. The owner's admin messages
 (installing an app, a dispatch row, the address book, a directory into
-`main`) are `bin/skein install|uninstall|dispatch|reads|peers|host|claim|deploy`:
+`main`) are `bin/skein install|uninstall|routes|grant|peers|host|claim|deploy`:
 the client signs them in its own process with the operator's key
 (`SKEIN_OPERATOR_KEY`, default `~/.skein/operator.key`, which `skein-host
 run` makes) and sends them — over the host's control socket on the host

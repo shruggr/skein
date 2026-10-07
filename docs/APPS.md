@@ -461,7 +461,7 @@ installed (its `<name>/app` head's root is an app record) is the upgrade:
 the new app record keeps `state`; routes the old record had and the new one
 does not are removed (removes first), rows the table already holds as asked
 are not sent again; `start` is sent again (the restart). Change or revoke a
-single row with a `dispatch` message (`skein dispatch`). All in the log. Deploy-by-message
+single route with a `dispatch` message (`skein routes`). All in the log. Deploy-by-message
 with a payment (#11) is the same `objects` message with a toll.
 
 **Uninstall** (`skein uninstall <app> <where>`, or the page; built):
@@ -829,9 +829,8 @@ diff, cmp, jq, which, grep, tree, awk, sed, git, qjs as `node`, python as
 `shell/1`.
 
 **The chat app** ([shruggr/skein-chat](https://github.com/shruggr/skein-chat),
-name `chat`, heads `chat/…`) is the turn loop: box `chat` from `$owner`
-and from anyone (another agent's `message`; remove that row with
-a `dispatch` message, `skein dispatch remove`, to take chats from the owner only). Interface `chat/1`.
+name `chat`, heads `chat/…`) is the turn loop: box `chat`
+(who may chat: the app's roles and the grants, #143). Interface `chat/1`.
 It requires nothing: a `bash` tool call runs the shell app's shell when the
 instance has it — the loop reads the app record at the head `shell/app`
 and launches its `programs.shell` as a thread, as `run` does — and
@@ -897,7 +896,7 @@ bounded at 64 MiB).
 | install client (manifest → objects + head + dispatch + start, the prompt; no key, #143); `skein install <catalog-name|url#commit|dir>` / `uninstall`, signed in the client with the operator's key, sent over the host's control socket or one BRC-104 session (a repository cloned in the VM by the git app); `--dry-run`; `start`/`stop` | built (#72, #76, #77, #124, #142, #143) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
 | the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; chain, git and site installed at birth in the default image (#141) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
-| the owner's own http row to an app's handler (`skein dispatch --http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125: src/client/admin.ts `planDispatch`) |
+| root's own http route to an app's handler (`skein routes add --transport http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125, #143: src/client/admin.ts `planRoute`) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |
 | one box per app, `{fn, args}` dispatch, answer message; SDK dispatch helper; the `/call` row | built (#72: skein-sdk `app`; 0.3.0 reads `<app>/app`) |

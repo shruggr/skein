@@ -85,7 +85,7 @@ test("parseCli", () => {
   assert.deepEqual(parseCli(["run", "--", "ls"]), { cmd: "run", line: "ls" }, "no --tree: the instance's `main`");
   assert.deepEqual(parseCli(["head", "main", "baf"]), { cmd: "head", name: "main", tree: "baf" });
   assert.throws(() => parseCli(["head", "baf"]), /<name> <tree-cid>/);
-  // #142: `skein dispatch` is the operator's admin command (admin-cli.ts), not this client's.
+  // #142: `skein routes` is the operator's admin command (admin-cli.ts), not this client's.
   assert.throws(() => parseCli(["dispatch", "add", "chat", "loop"]), /unknown command/);
   assert.throws(() => parseCli(["run", "--tree", "x", "--env", "NOEQ", "--", "ls"]), /K=V/);
   assert.throws(() => parseCli(["import"]), /one <dir>/);

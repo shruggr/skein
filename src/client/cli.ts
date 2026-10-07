@@ -11,7 +11,7 @@
 //   skein inbox [--wait] [--timeout <s>] [--no-ack] [--json]
 //   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <s>]
 //   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <s>]
-//   skein install|uninstall|dispatch|reads|peers|host|claim|deploy …   the operator's admin messages,
+//   skein install|uninstall|routes|grant|peers|host|claim|deploy …   the operator's admin messages,
 //                                              signed here with the operator's key and sent (#142: src/client/admin-cli.ts)
 
 import { parseArgs } from "node:util";
@@ -38,7 +38,7 @@ export const USAGE = `usage:
   skein inbox [--wait] [--timeout <seconds>] [--no-ack] [--json]
   skein chat "<text>" [--tree <cid>] [--model <m>] [--new] [--wait] [--timeout <seconds>]
   skein talk [--tree <cid>] [--model <m>] [--new] [--timeout <seconds>]
-  skein install|uninstall|dispatch|reads|peers|host|claim|deploy …   the operator's admin messages, signed with its key
+  skein install|uninstall|routes|grant|peers|host|claim|deploy …   the operator's admin messages, signed with its key
                                                         and sent (skein install --help)`;
 
 export const DEFAULT_TIMEOUT = 120;

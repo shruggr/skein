@@ -404,7 +404,7 @@ export async function sendUninstall(p: UninstallPlan, send: (box: string, body: 
 // ---------------------------------------------------------------- root's own routes (#143)
 
 /**
- * Root's own route (#143; `skein dispatch`): one `dispatch` add or remove of a route with no `app`
+ * Root's own route (#143; `skein routes`): one `dispatch` add or remove of a route with no `app`
  * — an app's upgrade or uninstall leaves it. The site at the instance's root is one: a read route
  * {transport: "http", address: "/", prefix: true, filters: ["site.get"], root: "www"} (the site's
  * filter answering every path no longer route takes). Refused at a key another route has; a filter

@@ -4,7 +4,7 @@
 // delivered to the instance's /sendMessage on the owner's session; the first
 // root sets main, a changed directory moves it through `head`, an unchanged
 // one sends nothing; the loop's next new conversation reads the new SOUL.md.
-// A dispatch row the same way (`skein dispatch`). The roster reads
+// A dispatch row the same way (`skein routes`). The roster reads
 // IDENTITY.md from the deployed tree (`main`).
 
 import { test } from "node:test";
