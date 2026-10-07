@@ -74,6 +74,17 @@ pub fn verifySignatureFrame(a: std.mem.Allocator, protocol: []const u8, key_id: 
     return f.toOwnedSlice();
 }
 
+/// decrypt (call 12) at security level 2 (#144: kernel.brc169 opens a BRC-78 message; the answer
+/// frame is 0 ‖ the plaintext).
+pub fn decryptFrame(a: std.mem.Allocator, protocol: []const u8, key_id: []const u8, cp: Counterparty, ciphertext: []const u8) ![]u8 {
+    var f = std.array_list.Managed(u8).init(a);
+    try keyParams(a, &f, 12, protocol, key_id, cp);
+    try varint(a, &f, ciphertext.len);
+    try f.appendSlice(ciphertext);
+    try f.append(0); // seekPermission: false
+    return f.toOwnedSlice();
+}
+
 /// createSignature (call 15) at security level 2 over `data` (the signer hashes it with sha256).
 pub fn createSignatureFrame(a: std.mem.Allocator, protocol: []const u8, key_id: []const u8, cp: Counterparty, data: []const u8) ![]u8 {
     var f = std.array_list.Managed(u8).init(a);

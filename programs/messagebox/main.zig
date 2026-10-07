@@ -15,7 +15,12 @@
 //!                        no session: #126 step 4), so both sides know it by
 //!                        one CID. A message carrying a `signature` is refused
 //!                        (the session is the proof). Nothing is written if it is
-//!                        refused. Accepted when a route takes it — its box's
+//!                        refused. A BRC-169 envelope the door opened
+//!                        (kernel.brc169, #144: the request names its stored
+//!                        signed part, `envelope`) is kept as {…, sender (the
+//!                        envelope's), body: <the plaintext, a byte string>,
+//!                        envelope: <the signed part>}, no session.
+//!                        Accepted when a route takes it — its box's
 //!                        route for this instance's own boxes (#143: by the
 //!                        box alone; the kernel's gate judges the sender when
 //!                        it routes it), or a reply to a message this instance
@@ -189,10 +194,19 @@ fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
     const recipient = keyOf(a, m.get("recipient")) orelse return failure(a, rb.cbor, 400, "ERR_INVALID_RECIPIENT_KEY", "Invalid recipient key.");
     const sender = Value.bytesOf(arg.get("caller")) orelse return failure(a, rb.cbor, 401, "ERR_AUTH_REQUIRED", "sendMessage needs an authenticated sender");
 
+    // #144: a BRC-169 envelope the door opened (kernel.brc169): the request names the signed part it
+    // stored (`envelope`), the message body is the plaintext — kept as it is, a byte string — and the
+    // caller is the envelope's sender.
+    const envelope: ?[]const u8 = blk: {
+        const rc = Value.cidOf(arg.get("request")) orelse break :blk null;
+        const req = try sk.getOpt(a, rc) orelse break :blk null;
+        break :blk Value.cidOf(req.get("envelope"));
+    };
+
     // The body as dag-cbor: the bytes of a BRC-231 request (canonical), or a JSON body read as DAG-JSON.
     const mb = m.get("body") orelse return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.");
     var json = false;
-    const value: Value = if (rb.cbor) blk: {
+    const value: Value = if (envelope != null) .{ .bytes = Value.bytesOf(mb) orelse return failure(a, rb.cbor, 400, "ERR_INVALID_MESSAGE_BODY", "Invalid message body.") } else if (rb.cbor) blk: {
         const b = Value.bytesOf(mb) orelse return failure(a, true, 400, "ERR_INVALID_MESSAGE_BODY", "A BRC-231 body is dag-cbor bytes.");
         const v = cbor.decode(a, b) catch return failure(a, true, 400, "ERR_INVALID_MESSAGE_BODY", "The body is not dag-cbor.");
         const blk2 = try cbor.block(a, v);
@@ -229,7 +243,10 @@ fn sendMessage(a: Allocator, in: Value, arg: Value) !Resp {
     try rec.put("box", cbor.string(box));
     try rec.put("body", cbor.cidv(blk.cid));
     if (m.get("signature")) |x| if (x != .null) return failure(a, rb.cbor, 400, "ERR_SIGNED_MESSAGE", "A message carries no signature: the session proves who sends it.");
-    if (rb.cbor and Value.bytesOf(m.get("nonce")) != null) {
+    if (envelope) |env| {
+        // #144: the envelope's signed part proves who sent it (the door checked it); the record names it.
+        try rec.put("envelope", cbor.cidv(env));
+    } else if (rb.cbor and Value.bytesOf(m.get("nonce")) != null) {
         // #70, #126 step 4: another instance's emit, delivered on its own session — kept as the
         // record it emitted ({…, subject?, nonce}: the emit's own nonce, no session), so both
         // sides know the message by one CID. The session proves who sent it (`sender` is the

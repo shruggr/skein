@@ -11,7 +11,7 @@
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
 //                                  then the longest prefix); a libp2p route is exact (#119)
 //          filters?: [text],       what runs on the package before anything is recorded, in
-//                                  order (door.zig): "kernel.brc104", "kernel.beef", or
+//                                  order (door.zig): "kernel.brc104", "kernel.beef", "kernel.brc169", or
 //                                  "<app>.<filter>" — a function the app's record lists under
 //                                  `filters`. http, libp2p and mailbox routes; an event has none
 //          program?: <cid> | "kernel",
@@ -58,7 +58,7 @@ pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers", "gr
 pub const kernel_ops = admin_ops ++ [_][]const u8{ "claim", billing.OP };
 
 /// The kernel's own filters (door.zig): `kernel.<name>`.
-pub const kernel_filters = [_][]const u8{ "kernel.brc104", "kernel.beef" };
+pub const kernel_filters = [_][]const u8{ "kernel.brc104", "kernel.beef", "kernel.brc169" };
 
 pub const Row = struct {
     transport: []const u8,
@@ -151,10 +151,10 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     }
     var n_filters: usize = 0;
     if (v.get("filters")) |fs| if (fs != .null) {
-        if (fs != .array) return try a.dupe(u8, "filters: a list of filter names (\"kernel.brc104\", \"kernel.beef\", \"<app>.<filter>\")");
+        if (fs != .array) return try a.dupe(u8, "filters: a list of filter names (\"kernel.brc104\", \"kernel.beef\", \"kernel.brc169\", \"<app>.<filter>\")");
         for (fs.array) |f| {
             const name = Value.str(f) orelse return try a.dupe(u8, "filters: each is a filter's name");
-            if (!isFilterRef(name)) return try std.fmt.allocPrint(a, "filters: {s} is not kernel.brc104, kernel.beef or <app>.<filter>", .{try json.quoted(a, name)});
+            if (!isFilterRef(name)) return try std.fmt.allocPrint(a, "filters: {s} is not kernel.brc104, kernel.beef, kernel.brc169 or <app>.<filter>", .{try json.quoted(a, name)});
         }
         n_filters = fs.array.len;
         if (n_filters > 0 and (std.mem.eql(u8, t, "event") or std.mem.eql(u8, t, "local"))) return try std.fmt.allocPrint(a, "filters: an {s} route has none (only http, libp2p and mailbox routes filter)", .{t});

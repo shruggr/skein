@@ -43,7 +43,8 @@ outpoint later. A new skein starts from it and is then claimed.
 images/default/
   bin/frontdoor.cid, bin/messagebox.cid   the kernel's pinned modules, by CID (scripts/pin-programs.sh keeps them current)
   bin/wallet.cid, bin/*.json              the wallet (#116, #130) and the program records' inputs and descriptions
-  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows (no route to the wallet);
+  etc/dispatch.json                       the claim row; the messagebox's `:ack` box and BRC-33 http rows (`sendMessage` behind
+                                          `kernel.brc169`: BRC-169 mail); `metanet_inbox` → the wallet's `internalize` (funding);
                                           no explorer row (#121: the claim writes it with the owner's key)
   etc/apps.json                           the apps installed at birth (#141) and the owner's read at `/`
   etc/routes.json                         empty
@@ -306,7 +307,8 @@ forms before #77 and #115, are refused: they spoke of senders, #143.)
   are the handshake (`/.well-known/auth` → the front door's `handshake`),
   the BRC-33 messagebox — `sendMessage`, `listMessages`,
   `acknowledgeMessage` at the root and under `/messagebox` (program
-  `messagebox`, behind `kernel.brc104`) — and the explorer, prefix
+  `messagebox`, behind `kernel.brc104`; the default image's `sendMessage`
+  behind `kernel.brc169`: BRC-169 mail) — and the explorer, prefix
   `/explore` (program `frontdoor`, fn `explore`, behind `kernel.brc104`,
   gated by root: `etc/config.json`'s `roles` add to the stock
   `{root: ["frontdoor.explore"]}`).

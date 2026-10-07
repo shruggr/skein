@@ -19,8 +19,13 @@
 //   - awake: an owner's `head` message for `billing` and a forged tick are
 //     not taken; a tick charges storage and the host's amounts;
 //   - asleep: a request is 402, a tick is not sent, the owner's messages are
-//     held at the gate — her `internalize` too: nothing wakes her (a BRC-169
-//     delivery message to her mailbox is the coming path);
+//     held at the gate — her `internalize` too;
+//   - funded by mail (#144): a payer (any key) sends her a BRC-169 envelope
+//     (src/envelope-cbor.ts sealCbor) by a plain `sendMessage` into
+//     `metanet_inbox`, its plaintext a BRC-232 transaction delivery — the only
+//     request the host lets through to her; the door opens it, the wallet
+//     internalizes it, the pay step pays: she wakes. The same envelope again is
+//     refused (a replay);
 //   - bob: no host row — nothing billed, no billing head, served as before; an
 //     app (programs/test/app-demo) emitting `payment` is refused;
 //   - both stores replay to themselves exactly (equiv/replays.ts), the store
@@ -46,6 +51,7 @@ import { encode } from "../../src/runtime/cid.ts";
 import { openStoreFile } from "../../src/runtime/index-store.ts";
 import { installApp, ownerCli, sendPlan, viewOf } from "../../src/testapps.ts";
 import { stateOf, type BillingConfig } from "../../src/host/billing.ts";
+import { sealCbor } from "../../src/envelope-cbor.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
@@ -119,19 +125,47 @@ const coin = new Transaction();
 coin.addInput({ sourceTXID: "11".repeat(32), sourceOutputIndex: 0, unlockingScript: UnlockingScript.fromHex("51"), sequence: 0xffffffff });
 coin.addOutput({ lockingScript: new P2PKH().lock(ownerKey.toPublicKey().toHash()), satoshis: 20_000 });
 coin.addOutput({ lockingScript: new P2PKH().lock(ownerKey.toPublicKey().toHash()), satoshis: 20_000 });
+// #144: a payer who is nobody to her — anyone may pay a skein.
+const payerKey = new PrivateKey("3333", 16);
+const payerId = payerKey.toPublicKey().toString();
+coin.addOutput({ lockingScript: new P2PKH().lock(payerKey.toPublicKey().toHash()), satoshis: 20_000 });
 const coinTxid = coin.id("hex");
 coin.merklePath = new MerklePath(101, [[{ offset: 0, hash: coinTxid, txid: true }]]);
 
 /** A BRC-29 payment from the owner to `to` (its identity), spending the coin's output `vout`: the Atomic BEEF and its internalizeAction outputs. */
-async function funding(to: string, vout: number, sats: number, tag: string) {
+async function funding(to: string, vout: number, sats: number, tag: string, payer = ownerKey) {
   const prefix = Buffer.from(`${tag}-prefix`).toString("base64"), suffix = Buffer.from(`${tag}-suffix`).toString("base64");
-  const key = new KeyDeriver(ownerKey).derivePublicKey([2, "3241645161d8"], `${prefix} ${suffix}`, to, false);
+  const key = new KeyDeriver(payer).derivePublicKey([2, "3241645161d8"], `${prefix} ${suffix}`, to, false);
   const tx = new Transaction();
-  tx.addInput({ sourceTransaction: coin, sourceOutputIndex: vout, unlockingScriptTemplate: new P2PKH().unlock(ownerKey), sequence: 0xffffffff });
+  tx.addInput({ sourceTransaction: coin, sourceOutputIndex: vout, unlockingScriptTemplate: new P2PKH().unlock(payer), sequence: 0xffffffff });
   tx.addOutput({ lockingScript: new P2PKH().lock(key.toHash()), satoshis: sats });
   await tx.sign();
-  const outputs = [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: prefix, derivationSuffix: suffix, senderIdentityKey: ownerId } }];
-  return { beef: new Uint8Array(tx.toAtomicBEEF()), outputs, txid: tx.id("hex") };
+  const outputs = [{ outputIndex: 0, protocol: "wallet payment", paymentRemittance: { derivationPrefix: prefix, derivationSuffix: suffix, senderIdentityKey: payer.toPublicKey().toString() } }];
+  return { beef: new Uint8Array(tx.toAtomicBEEF()), plainBeef: new Uint8Array(tx.toBEEF()), outputs, txid: tx.id("hex"), prefix, suffix };
+}
+
+/**
+ * #144: `f` as a BRC-169 delivery message from `payer` to `handle` (identity `to`, at `domain`): a
+ * BRC-232 transaction delivery (a MIME entity of its content type, its DAG-CBOR body {memo, txid,
+ * beef, outputs}) sealed in a §7.3 envelope (sealCbor), carried by a plain BRC-231 `sendMessage` —
+ * no session — into `metanet_inbox`. The status and the request's body (to send again).
+ */
+async function deliveryMessage(handle: string, to: string, domain: string, f: Awaited<ReturnType<typeof funding>>, payer: PrivateKey): Promise<Uint8Array> {
+  const delivery = dagCbor.encode({
+    memo: "funding by mail", txid: Uint8Array.from(Buffer.from(f.txid, "hex")), beef: f.plainBeef,
+    outputs: [{ outputIndex: 0, protocol: "wallet payment", derivationPrefix: f.prefix, derivationSuffix: f.suffix, senderIdentityKey: Uint8Array.from(Buffer.from(payer.toPublicKey().toString(), "hex")) }],
+  });
+  const entity = Buffer.concat([Buffer.from("Content-Type: application/vnd.metanet.transaction+cbor\r\n\r\n"), Buffer.from(delivery)]);
+  const env = await sealCbor(new ProtoWallet(payer), { recipient: { identityKey: to, handle, domain }, body: Uint8Array.from(entity) });
+  return dagCbor.encode({ message: { recipient: Uint8Array.from(Buffer.from(to, "hex")), messageBox: "metanet_inbox", body: dagCbor.encode(env) } });
+}
+async function postMail(handle: string, body: Uint8Array): Promise<{ status: number; body: unknown }> {
+  const r = await fetch(`${h.base}/@${handle}/sendMessage`, { method: "POST", headers: { "content-type": "application/cbor" }, body: Buffer.from(body) });
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  await h.router.settled();
+  let parsed: unknown;
+  try { parsed = dagCbor.decode(bytes); } catch { try { parsed = JSON.parse(Buffer.from(bytes).toString()); } catch { parsed = Buffer.from(bytes).toString(); } }
+  return { status: r.status, body: parsed };
 }
 /** Root funds `handle` (identity `to`) by the wallet's `internalize` message: the status of its delivery. */
 async function internalizeBy(handle: string, to: string, f: { beef: Uint8Array; outputs: unknown[] }): Promise<number> {
@@ -153,8 +187,12 @@ try {
   const bob = (await h.router.createInstance("bob", ownerId, { claim: await signClaim(owner) as SignedClaim })).identity;
   aliceDb = h.db.get("alice")!.store;
   bobDb = h.db.get("bob")!.store;
-  const g = await (await h.router.hydrate("alice")).kernel.genesis() as { programs: Record<string, CID>; dispatch: Array<{ address: string; fn?: string; filter?: string }> };
-  report.image = { wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund") };
+  const g = await (await h.router.hydrate("alice")).kernel.genesis() as { domain: string; programs: Record<string, CID>; dispatch: Array<{ address: string; fn?: string; filters?: string[]; program?: CID }> };
+  report.image = {
+    wallet: !!g.programs.wallet, fundRow: g.dispatch.some((r) => r.address === "/wallet/fund"),
+    mail: g.dispatch.find((r) => r.address === "/sendMessage")?.filters?.join(",") ?? null,
+    inbox: g.dispatch.some((r) => r.address === "metanet_inbox" && r.fn === "internalize" && r.program?.equals(g.programs.wallet!)),
+  };
 
   // The chain app in both (the door's `beef` filter and the wallet's SPV read its headers).
   const chainDir = process.env.SKEIN_CHAIN_DIR ?? (() => {
@@ -273,11 +311,25 @@ try {
   report.gate = { status: gate.status, code: (await gate.json() as { code: string }).code, tick: await h.router.billingTick("alice") === undefined, reclaimable: h.db.reclaimable(Date.now() + 10, BILLING.graceMs).some((r) => r.instance === "alice") };
   const frozen = (await billingOf("alice"))!.tally;
 
-  // The owner too is held at the gate: an admin message is 402, and so is root's `internalize` — nothing wakes her (the BRC-169 delivery message to her mailbox is the coming path).
+  // The owner too is held at the gate: an admin message is 402, and so is root's `internalize`.
   const held = await sendPlan({ port: h.router.port!, owner, settled: () => h.router.settled() }, "alice", planHost(alice, "add", { key: hostTerms.billing!.key, x: BILLING.x, rates: BILLING.rates })).then(() => 200, (e: Error) => /402/.test(e.message) ? 402 : 0);
   const f2 = await funding(alice, 1, 900, "two");
   report.ownerHeld = [held, await internalizeBy("alice", alice, f2)];
   report.stillAsleep = { asleep: (await billingOf("alice"))!.asleep, frozen: (await billingOf("alice"))!.tally === frozen, closed: h.router.closed("alice") !== undefined };
+
+  // #144: funded by mail. A payer who is nobody to her sends a BRC-169 delivery message to her own mailbox — the
+  // only request the host lets through to a closed skein; the door opens it, the wallet internalizes it, she wakes.
+  const f3 = await funding(alice, 2, 2_000, "three", payerKey);
+  const mail = await deliveryMessage("alice", alice, g.domain, f3, payerKey);
+  const delivered = await postMail("alice", mail);
+  const woke = await until("awake again", async () => { await h.router.settled(); const b = await billingOf("alice"); return b && !b.asleep && h.router.closed("alice") === undefined ? b : undefined; }, 60_000).catch(() => undefined);
+  const aliceLines = h.lines.filter((l) => l.startsWith("[alice]"));
+  report.byMail = {
+    status: delivered.status, from: aliceLines.some((l) => new RegExp(`in metanet_inbox from ${payerId.slice(-8)}`).test(l) && /→ wallet/.test(l)),
+    woke: !!woke, paid: woke ? woke.payments > (asleep.payments) : false, broadcast: atArcade(f3.txid), open: (await poke("alice")) !== 402,
+  };
+  // The same envelope again: a replay, refused at the door (409), nothing recorded.
+  report.replay = (await postMail("alice", mail)).status;
 
   // bob: no host row — not billed, served as before; an app emitting `payment` is refused.
   for (let i = 0; i < 5; i++) await poke("bob");
@@ -301,7 +353,7 @@ await arcade.close();
 const eq = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
 check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` : ""}`);
 check(report.published === true, "the host publishes its terms at /.well-known/skein-host (its billing key, X, the rates)");
-check(eq(report.image, { wallet: true, fundRow: false }), `the default image carries the wallet, and no funding route (${JSON.stringify(report.image)})`);
+check(eq(report.image, { wallet: true, fundRow: false, mail: "kernel.brc169", inbox: true }), `the default image carries the wallet, no host funding door; its mail route takes BRC-169 (kernel.brc169) and metanet_inbox goes to the wallet's internalize (${JSON.stringify(report.image)})`);
 check(eq(report.beforeTerms, { billing: true, open: true }), "no host row: no billing state, the host forwards as usual");
 check(eq(report.funded, [200, true]), `root's route to the wallet, then its \`internalize\` message: the funding internalized, the chain app broadcasts it (${JSON.stringify(report.funded)})`);
 const st = (report.started ?? {}) as Record<string, unknown>;
@@ -317,7 +369,9 @@ check(dr.asleep === true && dr.overspent === true && dr.paidSum === true && dr.p
 check(eq(report.hostDb, { asleepSince: true }), "the host records when it went asleep (the grace counts from it)");
 check(eq(report.gate, { status: 402, code: "ERR_PAYMENT_REQUIRED", tick: true, reclaimable: true }), `asleep: a request is 402, no tick is sent, past the grace it is reclaimable (nothing deleted) (${JSON.stringify(report.gate)})`);
 check(eq(report.ownerHeld, [402, 402]), `asleep, the owner's messages are held at the gate too, root's \`internalize\` among them: 402 (${JSON.stringify(report.ownerHeld)})`);
-check(eq(report.stillAsleep, { asleep: true, frozen: true, closed: true }), `nothing wakes her: still asleep, the tally frozen (${JSON.stringify(report.stillAsleep)})`);
+check(eq(report.stillAsleep, { asleep: true, frozen: true, closed: true }), `root's messages do not wake her: still asleep, the tally frozen (${JSON.stringify(report.stillAsleep)})`);
+check(eq(report.byMail, { status: 200, from: true, woke: true, paid: true, broadcast: true, open: true }), `a BRC-169 delivery message from anyone, by a plain sendMessage into metanet_inbox, passes the gate: the wallet internalizes it, the pay step pays, she wakes (${JSON.stringify(report.byMail)})`);
+check(report.replay === 409, `the same envelope again is a replay: refused at the door (${JSON.stringify(report.replay)})`);
 check(report.headRefused === true, "the owner's `head` message for `billing` is refused: the kernel's own");
 check(eq(report.tick, { counted: true, logCid: true, kind: "host-log", lines: true, tallied: true }), `a tick: storage and the host's amounts on the tally, the period's log record kept, its CID the tick's (${JSON.stringify(report.tick)})`);
 check(eq(report.strangerTick, { refused: true, unchanged: true }), `a tick from a key that is not the host row's (the first tick row) is refused (${JSON.stringify(report.strangerTick)})`);

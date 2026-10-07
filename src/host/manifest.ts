@@ -122,7 +122,7 @@ const FILTER = /^[A-Za-z0-9_-]+$/;
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const INTERFACE = /^[a-z0-9][a-z0-9._-]*\/\d+$/;
 const TYPES = ["string", "int", "ms", "bytes", "cid", "bool", "map", "any"];
-const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef"];
+const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef", "kernel.brc169"];
 
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 

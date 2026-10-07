@@ -123,7 +123,7 @@ import { peerIdFromMultihash } from "@libp2p/peer-id";
 import { MESSAGE_KEY_ID, MESSAGE_PROTOCOL, Providers, tooLarge, type HttpRequest, type HttpResponse, type MailRecord, type ProviderName } from "./providers.ts";
 import { closeControl, listenControl } from "./control.ts";
 import { certify, RESOLVE_PATH, SEARCH_PATH } from "./handles.ts";
-import { allocation, BILLING_HEAD, closedBy, mismatch, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
+import { allocation, BILLING_HEAD, closedBy, fundingRequest, mismatch, Period, periodRecord, priceHost, stateOf, termsOf, tickBody, type BillingConfig, type BillingView } from "./billing.ts";
 import * as Digest from "multiformats/hashes/digest";
 
 type Named = { handle: string; domain: string };
@@ -1263,6 +1263,13 @@ export class Router {
     return closedBy(this.views.get(handle));
   }
 
+  /** Whether a request to a closed instance is its funding route (#144, billing.ts fundingRequest): its table read now. */
+  private async funding(l: Loaded, route: string, req: RouterRequest): Promise<boolean> {
+    if (req.method !== "POST") return false;
+    const wallet = (l.genesis.programs as Record<string, CID> | undefined)?.wallet;
+    return fundingRequest((await l.kernel.dispatch()).rows, wallet, { method: req.method, route, headers: req.headers, body: req.body });
+  }
+
   /** A billed instance as this host last read it (#130). */
   billingView(handle: string): BillingView | undefined { return this.views.get(handle); }
 
@@ -1526,9 +1533,9 @@ export class Router {
     if (this.stopped) return unavailable("the host is shutting down");
     let l: Loaded;
     try { l = await this.hydrate(handle); } catch (e) { return json(503, { status: "error", code: "ERR_UNAVAILABLE", description: (e as Error).message }); }
-    // #130: asleep, or terms this host does not serve: nothing is forwarded.
+    // #130: asleep, or terms this host does not serve: nothing is forwarded — but its funding route (#144).
     const closed = this.closed(handle);
-    if (closed) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
+    if (closed && !(await this.funding(l, route, req))) return json(402, { status: "error", code: "ERR_PAYMENT_REQUIRED", description: closed });
     // #135: two doors — a read by a call, a signed request through the door (serveHttp).
     const a: FrontAnswer = await serveHttp(l.kernel, { method: req.method, path: url.pathname, route, query: url.search, headers: req.headers, body: req.body }, { now: this.now(), waitMs: this.o.answerWaitMs, stop: this.stopping });
     this.settle(l);

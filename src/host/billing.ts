@@ -20,13 +20,16 @@
 //   the gate  asleep (the kernel's billing state says so: consumed ≥ allocation and nothing paid) or
 //             the terms not this host's: nothing is forwarded to the instance — a request is 402,
 //             a libp2p message ignored, a provider's answer, a feed's event dropped — but its own
-//             messages to itself (the loopback: its wallet's ingest at the chain app). No tick is sent;
-//             the tally is frozen in the kernel.
+//             messages to itself (the loopback: its wallet's ingest at the chain app) and its
+//             funding route (#144, fundingRequest): a BRC-169 envelope by `sendMessage` into the box
+//             whose route is the wallet's `internalize`. No tick is sent; the tally is frozen in the
+//             kernel.
 //   grace     when it went asleep is in host.db; past the grace the host may reclaim it
 //             (`skein-host reclaim`): disabled, its row and store removed. Nothing does it on its own.
 //
 // Amounts: X, the allowance and payments in satoshis; the tally in nanosatoshis (a bigint here).
 
+import * as dagCbor from "@ipld/dag-cbor";
 import type { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import type { DispatchRow } from "../runtime/dispatch.ts";
@@ -192,4 +195,27 @@ export function closedBy(v: BillingView | undefined): string | undefined {
   if (v.mismatch) return `this host does not serve these terms: ${v.mismatch}`;
   if (v.state?.asleep && v.state.host === v.terms.host) return `asleep: its allocation is consumed and its wallet paid nothing`;
   return undefined;
+}
+
+/**
+ * Whether a request is a closed skein's funding route (#144), the one request the gate forwards to
+ * it: a POST at an http route of its table whose filters name kernel.brc169, carrying a BRC-33
+ * `sendMessage` in BRC-231's form (application/cbor) whose message body is a BRC-169 §7.3 envelope
+ * (`metanetHandles` "1.0") and whose box is routed (a mailbox route) to its wallet's `internalize`.
+ * The envelope is not opened here: the kernel's door checks it (and the wallet takes only a
+ * transaction delivery from it).
+ */
+export function fundingRequest(rows: DispatchRow[], wallet: CID | undefined, req: { method: string; route: string; headers: Record<string, string>; body: Uint8Array }): boolean {
+  if (req.method !== "POST" || !wallet) return false;
+  if (!rows.some((r) => r.transport === "http" && r.address === req.route && r.prefix !== true && r.filters?.includes("kernel.brc169"))) return false;
+  const ct = Object.entries(req.headers).find(([k]) => k.toLowerCase() === "content-type")?.[1] ?? "";
+  if (ct.split(";")[0]!.trim().toLowerCase() !== "application/cbor") return false;
+  let box: unknown, env: unknown;
+  try {
+    const m = (dagCbor.decode(req.body) as { message?: { messageBox?: unknown; body?: unknown } }).message;
+    box = m?.messageBox;
+    env = m?.body instanceof Uint8Array ? dagCbor.decode(m.body) : undefined;
+  } catch { return false; }
+  if (typeof box !== "string" || (env as { metanetHandles?: unknown } | undefined)?.metanetHandles !== "1.0") return false;
+  return rows.some((r) => r.transport === "mailbox" && r.address === box && r.fn === "internalize" && r.program !== "kernel" && r.program !== undefined && r.program.equals(wallet));
 }

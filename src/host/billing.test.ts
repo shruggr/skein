@@ -18,7 +18,7 @@ import type { CID } from "multiformats/cid";
 import { planHost } from "../client/admin.ts";
 import { encode } from "../runtime/cid.ts";
 import { sendPlan } from "../testapps.ts";
-import { billingConfig, closedBy, DEV_BILLING, mismatch, NSAT, Period, periodRecord, priceHost, stateOf, termsOf, type BillingConfig } from "./billing.ts";
+import { billingConfig, closedBy, DEV_BILLING, fundingRequest, mismatch, NSAT, Period, periodRecord, priceHost, stateOf, termsOf, type BillingConfig } from "./billing.ts";
 import { controlRequest, listenControl } from "./control.ts";
 import { HostDb } from "./instances.ts";
 import { KERNEL_BIN } from "./kernel.ts";
@@ -77,6 +77,29 @@ test("billing: the kernel's state as the host reads it; allocation, the host's a
   assert.match(closedBy({ terms, state: { ...s, asleep: true } })!, /^asleep: /);
   assert.match(closedBy({ terms, mismatch: "x 1 is below this host's 5" })!, /does not serve these terms/);
   assert.equal(closedBy({ terms, state: { ...s, host: key(12), asleep: true } }), undefined, "another host's state is not this host's to gate on");
+});
+
+test("billing: the closed skein's funding route (#144) — a BRC-169 envelope by sendMessage into the box routed to the wallet's internalize, and nothing else", () => {
+  const wallet = encode({ kind: "program", name: "wallet" }).cid;
+  const other = encode({ kind: "program", name: "other" }).cid;
+  const rows = [
+    { transport: "http" as const, address: "/sendMessage", filters: ["kernel.brc169"], program: other, fn: "sendMessage" },
+    { transport: "http" as const, address: "/listMessages", filters: ["kernel.brc104"], program: other, fn: "listMessages" },
+    { transport: "mailbox" as const, address: "metanet_inbox", program: wallet, fn: "internalize" },
+    { transport: "mailbox" as const, address: "chat", program: other },
+  ];
+  const envelope = dagCbor.encode({ metanetHandles: "1.0", recipient: { handle: "a", domain: "x" }, sender: { identityKey: new Uint8Array(33) }, created: "now", content: new Uint8Array(1), signature: new Uint8Array(1) });
+  const send = (box: string, body: Uint8Array = envelope) => dagCbor.encode({ message: { recipient: new Uint8Array(33), messageBox: box, body } });
+  const req = (o: Partial<{ method: string; route: string; ct: string; body: Uint8Array }> = {}) => ({ method: o.method ?? "POST", route: o.route ?? "/sendMessage", headers: { "Content-Type": o.ct ?? "application/cbor" }, body: o.body ?? send("metanet_inbox") });
+  assert.equal(fundingRequest(rows, wallet, req()), true);
+  assert.equal(fundingRequest(rows, wallet, req({ method: "GET" })), false, "a POST");
+  assert.equal(fundingRequest(rows, wallet, req({ route: "/listMessages" })), false, "a route that names kernel.brc169");
+  assert.equal(fundingRequest(rows, wallet, req({ ct: "application/json" })), false, "BRC-231's form");
+  assert.equal(fundingRequest(rows, wallet, req({ body: send("chat") })), false, "a box routed elsewhere");
+  assert.equal(fundingRequest(rows, wallet, req({ body: send("metanet_inbox", dagCbor.encode({ hello: 1 })) })), false, "an envelope");
+  assert.equal(fundingRequest(rows, wallet, req({ body: new Uint8Array([1, 2, 3]) })), false, "dag-cbor");
+  assert.equal(fundingRequest(rows, other, req()), false, "the box's route is the genesis wallet's");
+  assert.equal(fundingRequest(rows, undefined, req()), false, "no wallet, no funding route");
 });
 
 test("billing: the period's log record — what the tick commits to (its CID)", () => {
@@ -178,6 +201,10 @@ test("billing: the meter and the gate with the real kernel — no wallet to pay 
   assert.equal(r.status, 402);
   assert.equal((await r.json() as { code: string }).code, "ERR_PAYMENT_REQUIRED");
   await assert.rejects(h.router.cronEvent("a", "anything", {}), /not forwarded \(#130\)/);
+  // #144: a BRC-169 envelope is let through only to a funding route — a code genesis has no wallet, so none.
+  const env = dagCbor.encode({ metanetHandles: "1.0", recipient: { handle: "a", domain: "localhost" }, sender: { identityKey: new Uint8Array(33) }, created: "now", content: new Uint8Array(1), signature: new Uint8Array(1) });
+  const mail = await fetch(`${h.base}/@a/sendMessage`, { method: "POST", headers: { "content-type": "application/cbor" }, body: Buffer.from(dagCbor.encode({ message: { recipient: Uint8Array.from(Buffer.from(a, "hex")), messageBox: "metanet_inbox", body: env } })) });
+  assert.equal(mail.status, 402, "no funding route: held at the gate");
   const self = Uint8Array.from(Buffer.from(a, "hex"));
   const bodyBytes = dagCbor.encode({ hello: 1 });
   const loop = { kind: "mail", op: "put", sender: self, recipient: self, box: "nobody", body: encode({ hello: 1 }).cid, nonce: new Uint8Array(16) };

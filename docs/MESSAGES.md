@@ -11,10 +11,11 @@ state, nothing admitted, nothing logged ("The front door: two doors",
 below). There
 is **one way out**: a step `emit`s a message to a key the address book
 names, or an event, and ends waiting, and the answer is an entry. **A skein
-receives mail only where it verifies the sender itself** (#126 step 4): a
-BRC-104 session to its own front door (`/sendMessage`, which another
-instance reaches with `authfetch`), or libp2p — the delivery session is the
-sender's proof, and a mail record carries no signature of its sender.
+receives mail only where it verifies the sender itself** (#126 step 4,
+#144): a BRC-169 envelope at its own front door (`/sendMessage`: the
+envelope's signature is the sender's proof, whoever carries it), a BRC-104
+session to its own front door (`/sendMessage` without an envelope, which
+another instance reaches with `authfetch`), or libp2p.
 Anything inside a body that must mean something on its own signs itself (a
 claim, a payment). A remote messagebox is a wallet's, never a skein's.
 **Intentions** (#126) are events the runtime answers as it is wired — a
@@ -179,7 +180,8 @@ are apart. Every HTTP request goes to the kernel's door
    `["kernel.beef"]` validated (an overlay's `/submit`: the stock
    TopicBroadcaster's plain POST is admitted, with no sender key);
    `["kernel.brc104", "kernel.beef"]` signed, and validated if it carries a
-   BEEF; none — anyone.
+   BEEF; `["kernel.brc169"]` BRC-169 mail (below, "The messagebox"); none —
+   anyone.
 3. **The gate.** The roles that gate the route's function (the app
    record's `roles`; the genesis's: the explorer is root's) against the
    principal: root passes anything, `user` any principal, an app role its
@@ -200,7 +202,8 @@ are apart. Every HTTP request goes to the kernel's door
 | path (examples) | route |
 |---|---|
 | `/site/*`, root's `/`, `/onboard/resolve`, `/onboard/search`, `/onboard/manifest.json`, `/onboard/bsvalias/id/*`, `/<overlay>/lookup`, `/<overlay>/listTopicManagers` … | read routes: filters only, anyone, nothing logged |
-| `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/amm/call`, `/explore*` | `kernel.brc104`: signed |
+| `/sendMessage` (the default image) | `kernel.brc169`: a BRC-169 envelope, signed by its sender; any other message signed on a session |
+| `/listMessages`, `/acknowledgeMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/amm/call`, `/explore*` | `kernel.brc104`: signed |
 | `/<overlay>/submit` | `kernel.beef`: validated |
 
 ```
@@ -402,7 +405,7 @@ request  http:   {kind: "http", method, path, route, query, headers: {name: valu
          local:  {kind: "message", message: <a mail record>, body: bytes}       signed, or the loopback (below)
 mail     {kind: "mail", op: "put", sender: bytes(33), recipient: bytes(33), box, body: <cid>, subject?: <cid>,
           json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce}
-          | nonce?: bytes(16), signature?: bytes}
+          | nonce?: bytes(16), signature?: bytes | envelope?: <cid>}
 ```
 
 Entries are unsigned (#9): the sender signed its request, `prev` fixes the
@@ -424,7 +427,9 @@ store in an older format is refused for running (`kernel-zig/src/log.zig`
 has the shapes).
 
 - **A message is its mail record.** Its sender is proven by the transport
-  that carried it (#126 step 4), never by a signature inside the record. A
+  that carried it (#126 step 4), or by its BRC-169 envelope (#144:
+  `envelope`, the envelope's signed part, which the door checked and
+  stored; the body is the plaintext). A
   client's message: `sender` is the session's identity, `session` the
   BRC-104 signed request (the payload that carried the body, its signature
   and nonces), `json` set when the client sent JSON (so the answer to it goes
@@ -482,11 +487,13 @@ bytes); the answer is in the form asked.
 
 - **sendMessage** → one message to admit (`admit`): the mail record
   (`sender` the caller) and its body, which the kernel routes after the
-  front door's step — the client's form (`session`, `json?`), or, for a
+  front door's step — a BRC-169 envelope the door opened (#144, below:
+  `envelope` the signed part, the body the plaintext as a byte string, the
+  sender the envelope's), the client's form (`session`, `json?`), or, for a
   BRC-231 message that names `nonce` (and `subject?`), another instance's
   emit delivered on its own session, kept as the record it emitted (#126
-  step 4). A message carrying a `signature` is refused (400): the session is
-  the proof. Accepted when something takes it: for this instance's
+  step 4). A message carrying a `signature` is refused (400): the session or
+  the envelope is the proof. Accepted when something takes it: for this instance's
   own boxes, a dispatch row on `(sender, box)` — the kernel's own, or a
   program's — or a reply to a message this instance sent that sender; for
   the identity it keeps a mailbox for (its owner), a row whose program is
@@ -507,11 +514,38 @@ the queue. **A mailbox exists only where a row to the messagebox
 exists**: a message no row sends the messagebox is refused (`403`).
 
 Delivery out is the messagebox's delivery thread, which `emit`s (#70: no
-step has an http import). The messagebox program record's own `description`
-(kernel-zig/src/programs.zig, images/default/bin/messagebox.json) still says
-"`send` delivers over http (recorded)", from before #70: the description is
-part of the record and so of its CID, and is left until the messagebox is
-re-pinned for another reason.
+step has an http import).
+
+### Mail is BRC-169 (#144)
+
+Mail to a skein is a BRC-169 envelope delivered to its own messagebox:
+BRC-33 `sendMessage` at the skein's origin (the `messagebox` its handle
+resolves to), in BRC-231's form —
+
+```
+POST /sendMessage   Content-Type: application/cbor
+{message: {recipient: bytes(33) <the skein's key>, messageBox, body: <the §7.3 envelope, dag-cbor bytes>}}
+```
+
+— checked by the route's filter, `kernel.brc169` (docs/APPS.md §2): one
+signature (the sender's, over the envelope without `content` and
+`signature`, checked with the sender's key alone), no handshake, any
+courier; the recipient is this skein (its key, and the genesis's handle
+and domain — the `+tag` is not part of it); `content` (BRC-78) is
+decrypted through the skein's signer and must hash to `contentHash`,
+which this skein requires; an envelope whose signed part the skein holds
+already is a replay (409: the envelope has no nonce, its signed part's CID
+is its identity). The message is kept as a mail record from the envelope's
+sender in `messageBox` (BRC-33's box; `recipient.tag` stays in the signed
+part, as metadata), naming the signed part (`envelope`), its body the
+plaintext (a MIME entity, kept as a byte string). It is routed like any
+message: the box's route, the gate on the sender. `quoteId` and `payment`
+(§8's toll) are not read. A `sendMessage` whose body is no envelope is
+checked as BRC-33 has it (`kernel.brc104`: the session's key).
+
+The one box the default image routes is `metanet_inbox`, to the wallet's
+`internalize`: funding by a BRC-169 delivery message (docs/WALLET.md
+"Funding").
 
 ## Mailbox instances
 
@@ -1538,7 +1572,14 @@ scripts/host/README.md "Billing" the host's):
 | the host row | the owner → the skein, box `dispatch` (`skein host`) | `{op: "add", row: {transport: "mailbox", address: "billing", sender: <host key>, program: "kernel", fn: "tick", x, rates?}}` |
 | a tick | the host's billing key → the skein, the host row's box, a signed `local` message | `{kind: "tick", at, allowance, fuel, served, log?: <cid of the host's period record>}` |
 | a payment | the skein's pay step → its host, the event `payment` (no recipient: the host is the payee) | `{kind: "event", event: "payment", txid: <bitcoin-tx CID>, tx: <Atomic BEEF>, outputIndex, amount, to: <host key>, remittance: {derivationPrefix, derivationSuffix, senderIdentityKey}, checkpoint: <state record CID>}` |
-| a funding | root → the skein, box `wallet` (root's own route to the wallet) | `{op: "internalize", tx, outputs, description}` (docs/WALLET.md); a BRC-169 delivery message to the skein's mailbox is the coming path |
+| a funding | anyone → the skein: a BRC-169 envelope by `sendMessage` into `metanet_inbox` (#144), routed to the wallet's `internalize` | the plaintext a BRC-232 transaction delivery: `Content-Type: application/vnd.metanet.transaction+cbor`, DAG-CBOR `{memo?, txid, beef, outputs: [{outputIndex, protocol: "wallet payment", derivationPrefix, derivationSuffix, senderIdentityKey}]}` (docs/WALLET.md "Funding"); root may also send the wallet's `internalize` message on a route of its own |
+
+A skein its host has closed (asleep, or terms the host does not serve) is
+sent nothing — a request is 402 — but its funding route: a POST at a route
+of its table whose filters name `kernel.brc169`, a BRC-231 `sendMessage`
+whose body is an envelope and whose box is routed to the genesis wallet's
+`internalize` (src/host/billing.ts `fundingRequest`). The host does not
+open the envelope; the door does. The pay step after it wakes the skein.
 
 The payment's transaction has two outputs before any change: the host's
 (P2PKH to the BRC-29 key `[2, "3241645161d8"]`, key ID `"<prefix>
@@ -1764,23 +1805,17 @@ sent):
 `log`, `thinking` and `error` are sent, not kept: the turns hold the same
 facts.
 
-## Why no envelope
+## Mail and the session
 
-The first design wrapped every message in a BRC-169 envelope: signed metadata,
-a content hash, BRC-78 encryption to the recipient, relayed through a shared
-messagebox. With the recipient's own front door at the other end of a
-BRC-104 session, none of that carries weight: the session proves the sender,
-TLS (or localhost) keeps the wire private, and the recipient is the host. The
-mail record keeps the signed request, so the proof outlives the session and
-verifies from the log with the instance's key alone. Replay needs the log
-and nothing else. (#70 brought back one part of it — an emitted message
-signed itself, BRC-169's way — and #126 step 4 took it out again: a skein
-receives mail only where it verifies the sender itself, a BRC-104 session
-to its own front door or libp2p, and a messagebox someone else keeps is a
-wallet's, read by that wallet. What still signs itself is what no session of
-the recipient's carries: a claim, a host provider's answer, and anything
-inside a body that must mean something on its own. Still no encryption and
-no shared relay.)
+Mail to a skein is BRC-169 (above, "Mail is BRC-169"): the envelope's
+signature is the proof, whoever carries it, and the recipient decrypts
+what the courier could not read. A message on a BRC-104 session to the
+skein's own front door (another instance's emit through `authfetch`, a
+client's own message) is proven by the session instead: the mail record
+keeps the signed request, so the proof outlives the session and verifies
+from the log with the instance's key alone. What signs itself besides is
+what no session of the recipient's carries: a claim, a host provider's
+answer, and anything inside a body that must mean something on its own.
 
 ## Bodies
 

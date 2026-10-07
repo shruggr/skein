@@ -759,7 +759,28 @@ pub const Runtime = struct {
     /// else the rejection or the answer, and nothing is written.
     fn filter(rt: *Runtime, a: std.mem.Allocator, name: []const u8, transport: []const u8, r: dispatch.Row, ch: *Chain, at: i64) !?Answered {
         try ch.ran.append(cbor.string(name));
-        if (std.mem.eql(u8, name, doorm.BRC104)) {
+        if (std.mem.eql(u8, name, doorm.BRC169)) {
+            // #144: BRC-169 mail — an envelope proves its sender; a body that is none gets BRC-33's own check (BRC-104).
+            if (!std.mem.eql(u8, transport, "http")) return reject(500, "ERR_FILTER", "kernel.brc169 checks an http request");
+            const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
+            const g = rt.genesis.?;
+            const me: doorm.Self = .{ .identity = rt.identity(), .handle = Value.str(g.get("handle")) orelse "", .domain = Value.str(g.get("domain")) orelse "" };
+            switch (try doorm.brc169(a, rt.store, w, ch.request, me)) {
+                .not_envelope => {},
+                .reject => |x| {
+                    rt.say("door: a BRC-169 envelope turned away: {s}", .{x.reason});
+                    return .{ .kind = "reject", .status = x.status, .code = x.code, .reason = x.reason, .fuel = ch.fuel };
+                },
+                .pass => |p| {
+                    ch.principal = p.principal;
+                    ch.request = p.request;
+                    if (!(try rt.store.has(p.signed_cid))) try rt.store.putBlock(p.signed_cid, p.signed_bytes);
+                    try ch.blocks.append(cbor.cidv(p.signed_cid));
+                    return null;
+                },
+            }
+        }
+        if (std.mem.eql(u8, name, doorm.BRC104) or std.mem.eql(u8, name, doorm.BRC169)) {
             if (!std.mem.eql(u8, transport, "http")) return reject(500, "ERR_FILTER", "kernel.brc104 checks an http request");
             const w: ?doorm.Signer = if (rt.peers.wallet) |f| .{ .ctx = rt.peers.ctx, .call = f } else null;
             switch (try doorm.brc104(a, rt.store, w, ch.request, at, rt.sessionTtl())) {

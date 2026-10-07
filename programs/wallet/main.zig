@@ -41,6 +41,11 @@
 //!   {op: "signAction", reference}                BRC-100 signAction for a draft (signAndProcess: false)
 //!   {op: "list", basket?, includeSpent?}        our outputs in a basket (default "default")
 //!
+//! A route's function (#144): fn `internalize` on the route of the box BRC-169 deliveries come
+//! in (`metanet_inbox`): the message must be a BRC-169 envelope's (its record names the signed
+//! part, `envelope`) and its plaintext a BRC-232 transaction delivery (deliveryOf); its `wallet
+//! payment` outputs are internalized. No other operation is reached that way.
+//!
 //! Billing (#130), one more:
 //!   args {pay: {to, x, checkpoint}}   the kernel's pay step — a thread the kernel launches itself
 //!                                     when the allocation is consumed (its origin's launchedBy is
@@ -706,7 +711,14 @@ fn run(a: std.mem.Allocator) !void {
         body = p;
     } else if (args.getCid("body")) |bc| {
         body = try s.getValue(a, bc);
-        op = body.getText("op") orelse return error.BadBody;
+        if (args.getText("fn")) |f| {
+            // #144: the route names the function. `internalize`: a BRC-169 delivery message — nothing else.
+            if (!eql(u8, f, "internalize")) {
+                std.log.err("fn {s}: the wallet's route function is `internalize` (a BRC-169 delivery message)", .{f});
+                return error.BadInput;
+            }
+            op = "delivery";
+        } else op = body.getText("op") orelse return error.BadBody;
     } else return error.BadInput;
 
     const net_name = if (step.get("defaults")) |d| d.getText("walletNetwork") orelse "main" else "main";
@@ -764,6 +776,26 @@ fn run(a: std.mem.Allocator) !void {
             .{ .key = "outputs", .value = .{ .uint = res.outputs } },
         });
         to_ingest = tx.bytes;
+    } else if (eql(u8, op, "delivery")) {
+        // #144: funding by a BRC-169 delivery message (BRC-232): the message the door opened (its
+        // record names the envelope's signed part), its plaintext a MIME entity of the transaction
+        // content type, whose DAG-CBOR body names the transaction, its BEEF and the outputs to take.
+        const mc = args.getCid("message") orelse return error.BadInput;
+        const msg = try s.getValue(a, mc);
+        if (msg.getCid("envelope") == null) {
+            std.log.err("internalize: the message is no BRC-169 envelope's (its record names no `envelope`)", .{});
+            return error.NotADelivery;
+        }
+        if (body != .bytes) return error.BadBody;
+        const d = try deliveryOf(a, body.bytes);
+        const res = try wal.internalize(d.beef, d.specs, d.memo orelse "BRC-169 delivery", &.{});
+        try out.appendSlice(a, &.{
+            .{ .key = "txid", .value = .{ .text = try a.dupe(u8, &w.header.toHex(res.txid)) } },
+            .{ .key = "status", .value = .{ .text = @tagName(res.status) } },
+            .{ .key = "outputs", .value = .{ .uint = res.outputs } },
+            .{ .key = "message", .value = .{ .cid = mc } },
+        });
+        to_ingest = d.beef;
     } else if (eql(u8, op, "createAction") or eql(u8, op, "signAction")) {
         var ws = w.builder.WireSigner{ .ctx = &VmSigner.dummy, .call = VmSigner.call };
         const created = if (eql(u8, op, "createAction")) blk: {
@@ -914,6 +946,66 @@ fn run(a: std.mem.Allocator) !void {
     var line = try hexAlloc(a, res_cid);
     line = try std.mem.concat(a, u8, &.{ line, "\n" });
     try std.Io.File.stdout().writeStreamingAll(io(), line);
+}
+
+// ---------------------------------------------------------------- a BRC-169 delivery (#144)
+
+/// BRC-232's content type: a DAG-CBOR transaction-delivery body.
+const TRANSACTION_CBOR = "application/vnd.metanet.transaction+cbor";
+
+const Delivery = struct { beef: []const u8, specs: []const w.wallet.InternalizeOutput, memo: ?[]const u8 };
+
+/// A delivery message's plaintext — an RFC 2045 MIME entity (a header block, CRLF CRLF, the body;
+/// `Content-Type` required) of BRC-232's type, its body {memo?, txid: bytes(32), beef, outputs:
+/// [{outputIndex, protocol: "wallet payment", derivationPrefix, derivationSuffix,
+/// senderIdentityKey: bytes(33)}]} — as internalizeAction's arguments: the BEEF made Atomic for
+/// `txid` (its transactions as they came), each entry a BRC-29 payment remittance. A `basket
+/// insertion` entry is refused: which basket a skein files it in is not decided.
+fn deliveryOf(a: std.mem.Allocator, plain: []const u8) !Delivery {
+    const end = std.mem.indexOf(u8, plain, "\r\n\r\n") orelse return error.NotATransactionDelivery;
+    var media: ?[]const u8 = null;
+    var lines = std.mem.splitSequence(u8, plain[0..end], "\r\n");
+    while (lines.next()) |line| {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+        if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "content-type")) continue;
+        const v = std.mem.trim(u8, line[colon + 1 ..], " \t");
+        media = std.mem.trim(u8, v[0 .. std.mem.indexOfScalar(u8, v, ';') orelse v.len], " \t");
+    }
+    const m = media orelse return error.NotATransactionDelivery;
+    if (!std.ascii.eqlIgnoreCase(m, TRANSACTION_CBOR)) {
+        std.log.err("internalize: content type {s}, not {s}", .{ m, TRANSACTION_CBOR });
+        return error.NotATransactionDelivery;
+    }
+    const d = try cbor.decode(a, plain[end + 4 ..]);
+    const txid_b = d.getBytes("txid") orelse return error.BadBody;
+    if (txid_b.len != 32) return error.BadBody;
+    // BRC-232's txid is in display order (as its hex is written); the BEEF's are internal.
+    var txid: [32]u8 = txid_b[0..32].*;
+    std.mem.reverse(u8, &txid);
+    var b = w.beef.parse(a, d.getBytes("beef") orelse return error.BadBody) catch return error.InvalidBeef;
+    if (b.find(txid) == null) {
+        std.log.err("internalize: the BEEF does not hold {s}", .{w.header.toHex(txid)});
+        return error.InvalidBeef;
+    }
+    b.atomic = txid;
+    b.vout = null;
+    const outs = d.getArray("outputs") orelse return error.BadBody;
+    const specs = try a.alloc(w.wallet.InternalizeOutput, outs.len);
+    for (outs, specs) |o, *spec| {
+        const protocol = o.getText("protocol") orelse return error.BadBody;
+        if (!eql(u8, protocol, "wallet payment")) {
+            std.log.err("internalize: a `{s}` output: only `wallet payment` is taken from a delivery", .{protocol});
+            return error.BadOutputSpec;
+        }
+        const sender = o.getBytes("senderIdentityKey") orelse return error.BadBody;
+        if (sender.len != 33) return error.BadBody;
+        spec.* = .{ .output_index = @intCast(o.getUint("outputIndex") orelse return error.BadBody), .payment = .{
+            .derivation_prefix = o.getText("derivationPrefix") orelse return error.BadBody,
+            .derivation_suffix = o.getText("derivationSuffix") orelse return error.BadBody,
+            .sender_identity_key = sender[0..33].*,
+        } };
+    }
+    return .{ .beef = try w.beef.serialize(a, b), .specs = specs, .memo = d.getText("memo") };
 }
 
 // ---------------------------------------------------------------- billing (#130)

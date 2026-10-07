@@ -299,11 +299,11 @@ program's that launches or calls it (as before #130) — the chain app's
 answers to them, and the kernel's pay step (#130: a thread the kernel
 launched under the entry it processes; docs/VM.md "Billing"). Only the pay
 step is the kernel's alone: a thread another program launched with `pay`
-is refused. Since #130 (and #116) the default image carries the wallet,
-with no route to it: root funds a skein by the `internalize` message below,
-on a route of its own to the wallet (`skein routes add wallet wallet
-<where>`: box `wallet`, the genesis program `wallet`). A BRC-169 delivery message to the skein's own mailbox is the
-coming path for a payment from anyone else.
+is refused. Since #130 (and #116) the default image carries the wallet.
+Its one route there is the funding route (below); root may add a route of
+its own to the wallet's operations (`skein routes add wallet wallet
+<where>`: box `wallet`, the genesis program `wallet`) and send them as
+messages.
 
 | body (owner) | does → result |
 |---|---|
@@ -324,6 +324,40 @@ Any result may carry `refs` (the transactions it names, rel `mentions`).
 payment", paymentRemittance: {derivationPrefix, derivationSuffix,
 senderIdentityKey}}` or `{outputIndex, protocol: "basket insertion",
 insertionRemittance: {basket, customInstructions?, tags?}}`.
+
+## Funding: a BRC-169 delivery message
+
+A skein is funded by mail: a BRC-169 envelope (§7.3) to the skein's own
+handle, delivered by BRC-33 `sendMessage` (BRC-231's dag-cbor form) at its
+origin, into the box `metanet_inbox`, whose plaintext is a BRC-232
+transaction delivery — a MIME entity `Content-Type:
+application/vnd.metanet.transaction+cbor`, its body DAG-CBOR
+
+```
+{memo?, txid: bytes(32), beef: <BEEF>, outputs: [{outputIndex, protocol: "wallet payment",
+ derivationPrefix, derivationSuffix, senderIdentityKey: bytes(33)}]}
+```
+
+1. The door: the route `/sendMessage` names `kernel.brc169` (docs/APPS.md
+   §2): the envelope's signature is its sender's (that key is the
+   principal), the recipient is this skein, the content is decrypted and
+   checked against `contentHash`, a replay is refused. No session is needed:
+   a courier may carry it.
+2. The messagebox keeps it as a mail record in `metanet_inbox` from the
+   envelope's sender, naming the signed part (`envelope`), its body the
+   plaintext.
+3. The box's route is the wallet's function `internalize` (the image's
+   `etc/dispatch.json`: `{address: "metanet_inbox", program: "wallet", fn:
+   "internalize"}`). Reached that way the wallet takes only this: a message
+   whose record names an envelope, a BRC-232 entity; its BEEF made Atomic for
+   `txid`, each `wallet payment` entry as `paymentRemittance`, internalized
+   and ingested as above. A `basket insertion` entry is refused. Nothing
+   else of the wallet is reachable from that route.
+
+Anyone may pay a skein: the envelope's signature is the identity a
+payment needs, and no role gates `internalize`. A skein its host has closed
+(asleep, docs/MESSAGES.md "Billing") still gets this one request: the host
+lets it through, and the pay step after it wakes the skein.
 
 Config (genesis `defaults`, strings): `walletNetwork` (`main` \| `test` \|
 `regtest`, until there is a chain state) and `walletFeeRate` (sat/kB).

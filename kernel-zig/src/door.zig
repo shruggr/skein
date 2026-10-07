@@ -28,6 +28,17 @@
 //                   a principal (#135: signed or validated — "nothing to
 //                   validate"). A transaction no BUMP proves enters as unproven
 //                   (SPV and status are the chain app's).
+//   kernel.brc169   mail (http): a BRC-33 `sendMessage` in the BRC-231 form whose
+//                   message body is a BRC-169 §7.3 envelope — its sender's signature
+//                   over the signed part checked with the sender's key alone, the
+//                   recipient this skein (handle and domain, the BRC-33 recipient,
+//                   the BRC-78 recipient), `content` decrypted through the signer
+//                   and checked against `contentHash`, an envelope the skein holds
+//                   already refused (its signed part's CID) — passed on with the
+//                   PRINCIPAL the sender's key, the message body the plaintext,
+//                   and the signed part stored and linked (`envelope`). A request
+//                   whose body is no envelope gets the kernel.brc104 check instead
+//                   (BRC-33's own: the session's key is the sender).
 const std = @import("std");
 const cbor = @import("cbor");
 const cidm = @import("cid");
@@ -44,6 +55,7 @@ pub const CHAIN_STATE = "chain/state";
 
 pub const BRC104 = "kernel.brc104";
 pub const BEEF = "kernel.beef";
+pub const BRC169 = "kernel.brc169";
 
 /// The chain app's headers, read only: {kind: "chain-state", maps: {headers: <MST root>}}, the map
 /// height (u32 big-endian) → the header (a bitcoin-block link) on its best chain.
@@ -345,4 +357,104 @@ pub fn brc104(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, now: i64, 
     const res = sg.call(sg.ctx, a, try signer.verifySignatureFrame(a, authfetch.AUTH_PROTOCOL, key_id, .{ .other = peer }, payload, sig)) catch return failed("Invalid signature in generalMessage");
     if (res.len == 0 or res[0] != 0) return failed("Invalid signature in generalMessage");
     return .{ .pass = .{ .caller = peer, .theirs = sess.theirs, .request_id = request_id } };
+}
+
+// ---------------------------------------------------------------- kernel.brc169
+
+/// BRC-169 §7.2 item 3: the signing protocol and key ID of an envelope (counterparty anyone).
+pub const ENVELOPE_PROTOCOL = "metanet handles envelope";
+pub const ENVELOPE_KEY_ID = "send";
+/// BRC-78: the portable encrypted message's protocol (security level 2) and version bytes.
+pub const MESSAGE_ENCRYPTION = "message encryption";
+pub const BRC78_VERSION = [4]u8{ 0x42, 0x42, 0x10, 0x33 };
+
+/// Who this skein is, as an envelope must name it: its identity key, and the handle and domain of
+/// its genesis.
+pub const Self = struct { identity: []const u8, handle: []const u8, domain: []const u8 };
+
+/// What `kernel.brc169` came to: passed on (the sender's key, the request rewritten, the signed
+/// part's block), a rejection, or no envelope in the body (the BRC-104 check stands).
+pub const Brc169 = union(enum) {
+    pass: struct { principal: []const u8, request: Value, signed_cid: []const u8, signed_bytes: []const u8 },
+    reject: Reject,
+    not_envelope,
+};
+
+fn bad(status: i64, code: []const u8, reason: []const u8) Brc169 {
+    return .{ .reject = .{ .status = status, .code = code, .reason = reason } };
+}
+
+/// The BRC-231 `sendMessage` request in a body, and the §7.3 envelope its message carries; null
+/// when the body is not that (no envelope: the BRC-104 check judges it).
+fn envelopeOf(a: std.mem.Allocator, req: Value) ?struct { request: Value, message: Value, envelope: Value } {
+    const ct = headerOf(req.get("headers"), "content-type") orelse return null;
+    const media = std.mem.trim(u8, ct[0 .. std.mem.indexOfScalar(u8, ct, ';') orelse ct.len], " ");
+    if (!std.ascii.eqlIgnoreCase(media, "application/cbor")) return null;
+    const body = Value.bytesOf(req.get("body")) orelse return null;
+    const r = cbor.decode(a, body) catch return null;
+    if (r != .map) return null;
+    const m = r.get("message") orelse return null;
+    if (m != .map) return null;
+    const eb = Value.bytesOf(m.get("body")) orelse return null;
+    const e = cbor.decode(a, eb) catch return null;
+    if (e != .map) return null;
+    if (!std.mem.eql(u8, Value.str(e.get("metanetHandles")) orelse "", "1.0")) return null;
+    return .{ .request = r, .message = m, .envelope = e };
+}
+
+/// kernel.brc169 (#144): a BRC-169 envelope delivered to this skein by BRC-33 `sendMessage`
+/// (BRC-231's dag-cbor form): the envelope checked and opened (above, the file's head).
+pub fn brc169(a: std.mem.Allocator, s: Store, w: ?Signer, req: Value, me: Self) !Brc169 {
+    const got = envelopeOf(a, req) orelse return .not_envelope;
+    const e = got.envelope;
+    // BRC-33: the recipient and the box.
+    const to = Value.bytesOf(got.message.get("recipient")) orelse return bad(400, "ERR_INVALID_RECIPIENT_KEY", "Invalid recipient key.");
+    if (!std.mem.eql(u8, to, me.identity)) return bad(403, "ERR_RECIPIENT", "the message is for another identity than this skein's");
+    const box = Value.str(got.message.get("messageBox")) orelse "";
+    if (box.len == 0 or box[0] == ':') return bad(400, "ERR_INVALID_MESSAGEBOX", "Invalid message box.");
+    // BRC-169 §7.3: the shape.
+    const sender_m = e.get("sender") orelse return bad(400, "ERR_ENVELOPE", "the envelope names no sender");
+    const sender = Value.bytesOf(sender_m.get("identityKey")) orelse return bad(400, "ERR_ENVELOPE", "the envelope's sender.identityKey is not 33 bytes");
+    if (sender.len != 33 or !secp.isKey(sender)) return bad(400, "ERR_ENVELOPE", "the envelope's sender.identityKey is not a key");
+    const rcpt = e.get("recipient") orelse return bad(400, "ERR_ENVELOPE", "the envelope names no recipient");
+    const handle = Value.str(rcpt.get("handle")) orelse return bad(400, "ERR_ENVELOPE", "the envelope's recipient has no handle");
+    const domain = Value.str(rcpt.get("domain")) orelse return bad(400, "ERR_ENVELOPE", "the envelope's recipient has no domain");
+    if (Value.str(e.get("created")) == null) return bad(400, "ERR_ENVELOPE", "the envelope has no created time");
+    const content = Value.bytesOf(e.get("content")) orelse return bad(400, "ERR_ENVELOPE", "the envelope's content is not bytes");
+    const sig = Value.bytesOf(e.get("signature")) orelse return bad(400, "ERR_ENVELOPE", "the envelope's signature is not bytes");
+    // §7.2 item 2: a recipient may require contentHash — this one does (the plaintext it keeps is bound to the signature by it).
+    const hash = Value.bytesOf(e.get("contentHash")) orelse return bad(400, "ERR_CONTENT_HASH", "the envelope has no contentHash (this skein requires one)");
+    if (hash.len != 32) return bad(400, "ERR_CONTENT_HASH", "the envelope's contentHash is not 32 bytes");
+    // The recipient is this skein (§3.1: the tag is not part of it).
+    if (!std.ascii.eqlIgnoreCase(handle, me.handle) or !std.ascii.eqlIgnoreCase(domain, me.domain)) return bad(403, "ERR_RECIPIENT", "the envelope is addressed to another handle than this skein's");
+    // §7.2 item 3: the signature over the dag-cbor of the envelope without content and signature,
+    // by the sender's key under [2, "metanet handles envelope"], key "send", counterparty anyone.
+    const pre = try cbor.encode(a, try cbor.without(a, try cbor.without(a, e, "content"), "signature"));
+    if (!secp.verifyAnyoneKey(sender, 2, ENVELOPE_PROTOCOL, ENVELOPE_KEY_ID, pre, sig)) return bad(401, "ERR_ENVELOPE_SIGNATURE", "the envelope's signature does not verify against its sender's key");
+    // Replays dropped by the signed part's CID (the envelope has no nonce).
+    const signed = try cbor.block(a, try cbor.without(a, e, "content"));
+    if (try s.has(signed.cid)) return bad(409, "ERR_DUPLICATE", "this skein holds that envelope already");
+    // BRC-78: version ‖ sender (33) ‖ recipient (33) ‖ key ID (32) ‖ ciphertext.
+    if (content.len < 4 + 33 + 33 + 32 + 1 or !std.mem.eql(u8, content[0..4], &BRC78_VERSION)) return bad(400, "ERR_CONTENT", "the content is not a BRC-78 message (version 42421033)");
+    if (!std.mem.eql(u8, content[4..37], sender)) return bad(400, "ERR_CONTENT", "the content's sender is not the envelope's");
+    if (!std.mem.eql(u8, content[37..70], me.identity)) return bad(403, "ERR_RECIPIENT", "the content is encrypted to another identity than this skein's");
+    const enc = std.base64.standard.Encoder;
+    const key_id = try a.alloc(u8, enc.calcSize(32));
+    _ = enc.encode(key_id, content[70..102]);
+    const sg = w orelse return bad(500, "ERR_SIGNER", "this host has no signer to open the content with");
+    const ans = sg.call(sg.ctx, a, try signer.decryptFrame(a, MESSAGE_ENCRYPTION, key_id, .{ .other = sender }, content[102..])) catch return bad(400, "ERR_CONTENT", "the content does not decrypt");
+    if (ans.len == 0 or ans[0] != 0) return bad(400, "ERR_CONTENT", "the content does not decrypt");
+    const plain = ans[1..];
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(plain, &digest, .{});
+    if (!std.mem.eql(u8, &digest, hash)) return bad(400, "ERR_CONTENT_HASH", "the content does not hash to the envelope's contentHash");
+    // The package handed on: the same request, its message's body the plaintext, the signed part linked.
+    var msg = cbor.MapBuilder.init(a);
+    for (got.message.map) |x| try msg.put(x.key, if (std.mem.eql(u8, x.key, "body")) Value{ .bytes = plain } else x.value);
+    var r = cbor.MapBuilder.init(a);
+    for (got.request.map) |x| try r.put(x.key, if (std.mem.eql(u8, x.key, "message")) msg.value() else x.value);
+    var q = cbor.MapBuilder.init(a);
+    for (req.map) |x| if (!std.mem.eql(u8, x.key, "envelope")) try q.put(x.key, if (std.mem.eql(u8, x.key, "body")) Value{ .bytes = try cbor.encode(a, r.value()) } else x.value);
+    try q.put("envelope", cbor.cidv(signed.cid));
+    return .{ .pass = .{ .principal = sender, .request = q.value(), .signed_cid = signed.cid, .signed_bytes = signed.bytes } };
 }

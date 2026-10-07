@@ -36,7 +36,10 @@
 //   mail     {kind: "mail", op: "put", sender: bytes, recipient: bytes, box, body: <cid>, subject?: <cid>,
 //             (#127: a claim, box `claim`, may name no recipient — signed before the instance it
 //             claims existed and forwarded into it by the host)
-//             json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce} | nonce?: bytes, signature?: bytes}
+//             json?: true, session?: {payload: bytes, signature: bytes, nonce, yourNonce} | nonce?: bytes, signature?: bytes
+//             | envelope?: <cid>}
+//            (#144: `envelope` — a BRC-169 envelope's signed part, the door's
+//            kernel.brc169 checked and stored it; the body is the plaintext)
 //            a message (#40, #70): its CID is the message's id — what a
 //            reply's `replyTo` names. Its sender is proven by the transport
 //            that carried it (#126 step 4): `session`, the BRC-104 signed
@@ -334,6 +337,11 @@ pub fn isMail(x: ?Value) bool {
     }
     if (m.get("signature")) |s| if (s != .bytes) return false;
     if (m.get("nonce")) |s| if (s != .bytes) return false;
+    // #144: a BRC-169 envelope's message — its signed part (the door checked it) is its proof.
+    if (m.get("envelope")) |e| {
+        if (e != .cid) return false;
+        if (m.get("session") != null or m.get("signature") != null or m.get("nonce") != null) return false;
+    }
     return true;
 }
 

@@ -179,3 +179,138 @@ test "door: an unsigned request whose filter found nothing to validate is refuse
     const validated: door.Filtered = .{ .value = pkg.value(), .beefs = one };
     try std.testing.expect(door.nothingValidated(false, validated) == null);
 }
+
+// ---------------------------------------------------------------- kernel.brc169 (#144)
+
+// A BRC-169 §7.3 envelope from key 7 to key 9 (@alice+fund@skein.test), signed with @bsv/sdk's
+// ProtoWallet ([2, "metanet handles envelope"], "send", anyone), carried in a BRC-231 sendMessage to
+// box metanet_inbox; its content a BRC-78 frame over an opaque ciphertext the test signer "opens"
+// to the plaintext below (the decryption itself is the signer's).
+const SENDER = "025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc";
+const RECIPIENT = "03acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe";
+const REQUEST = "a1676d657373616765a364626f647959019da86673656e646572a16b6964656e746974794b65795821025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc67636f6e74656e74586e42421033025cbdf0646e5db4eaa398f365f2ea7a0e3d419b7e0330e39ce92bddedcac4f9bc03acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe05050505050505050505050505050505050505050505050505050505050505050102030405060708676372656174656474323032362d31302d30385430303a30303a30305a677061796d656e74f669726563697069656e74a3637461676466756e6466646f6d61696e6a736b65696e2e746573746668616e646c6565616c696365697369676e617475726558473045022100ec20ac45e163009e93d9f5535cfbf7a714cf668f24d64913ba2919c29f98cc2202204ff5fa67c1e72a0aa40668384c895c21bbd4e3328ecedfd85d931f384a84304f6b636f6e74656e7448617368582084f6f4254fce7e279b9eb709c42b749e0eddb8d161511a6fb45ac09a0cb87d706e6d6574616e657448616e646c657363312e3069726563697069656e74582103acd484e2f0c7f65309ad178a9f559abde09796974c57e714c35f110dfc27ccbe6a6d657373616765426f786d6d6574616e65745f696e626f78";
+const PLAIN = "Content-Type: text/plain\r\n\r\nhello skein";
+
+/// The test's signer: a decrypt frame (call 12) under [2, "message encryption"], counterparty the
+/// sender, over the fixture's ciphertext, answered 0 ‖ `plain`; anything else fails.
+const Opener = struct {
+    plain: []const u8,
+    sender: []const u8,
+    asked: usize = 0,
+    fn call(ctx: *anyopaque, a: std.mem.Allocator, frame: []const u8) anyerror![]u8 {
+        const o: *Opener = @ptrCast(@alignCast(ctx));
+        o.asked += 1;
+        const key_id = "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=";
+        const want = try @import("signer.zig").decryptFrame(a, door.MESSAGE_ENCRYPTION, key_id, .{ .other = o.sender }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+        if (!std.mem.eql(u8, frame, want)) return error.UnexpectedFrame;
+        return std.mem.concat(a, u8, &.{ &.{0}, o.plain });
+    }
+};
+
+fn httpRequest(a: std.mem.Allocator, body: []const u8, ct: []const u8) !Value {
+    var h = cbor.MapBuilder.init(a);
+    try h.put("content-type", cbor.string(ct));
+    var m = cbor.MapBuilder.init(a);
+    try m.put("kind", cbor.string("http"));
+    try m.put("method", cbor.string("POST"));
+    try m.put("path", cbor.string("/sendMessage"));
+    try m.put("route", cbor.string("/sendMessage"));
+    try m.put("query", cbor.string(""));
+    try m.put("headers", h.value());
+    try m.put("body", .{ .bytes = body });
+    return m.value();
+}
+
+/// The fixture's request with one member of the envelope replaced (a change the signature covers).
+fn tampered(a: std.mem.Allocator, key: []const u8, v: Value) ![]u8 {
+    const r = try cbor.decode(a, try unhex(a, REQUEST));
+    const m = r.get("message").?;
+    const e = try cbor.decode(a, Value.bytesOf(m.get("body")).?);
+    var e2 = cbor.MapBuilder.init(a);
+    for (e.map) |x| try e2.put(x.key, if (std.mem.eql(u8, x.key, key)) v else x.value);
+    var m2 = cbor.MapBuilder.init(a);
+    for (m.map) |x| try m2.put(x.key, if (std.mem.eql(u8, x.key, "body")) Value{ .bytes = try cbor.encode(a, e2.value()) } else x.value);
+    var r2 = cbor.MapBuilder.init(a);
+    try r2.put("message", m2.value());
+    return cbor.encode(a, r2.value());
+}
+
+test "door: kernel.brc169 opens a BRC-169 envelope to this skein — principal the sender, the plaintext handed on, replays refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ss = try SqliteStore.open(std.testing.allocator, std.testing.io, ":memory:");
+    defer ss.close();
+    const s = ss.store();
+    const sender = try unhex(a, SENDER);
+    const me: door.Self = .{ .identity = try unhex(a, RECIPIENT), .handle = "alice", .domain = "skein.test" };
+    var op = Opener{ .plain = PLAIN, .sender = sender };
+    const sg: door.Signer = .{ .ctx = &op, .call = Opener.call };
+    const req = try httpRequest(a, try unhex(a, REQUEST), "application/cbor");
+
+    const got = try door.brc169(a, s, sg, req, me);
+    try std.testing.expect(got == .pass);
+    const p = got.pass;
+    try std.testing.expectEqualSlices(u8, sender, p.principal);
+    // The package handed on: the same http request, its message body the plaintext, the signed part linked.
+    try std.testing.expectEqualStrings("http", Value.str(p.request.get("kind")).?);
+    try std.testing.expectEqualSlices(u8, p.signed_cid, Value.cidOf(p.request.get("envelope")).?);
+    const body = try cbor.decode(a, Value.bytesOf(p.request.get("body")).?);
+    const msg = body.get("message").?;
+    try std.testing.expectEqualStrings(PLAIN, Value.bytesOf(msg.get("body")).?);
+    try std.testing.expectEqualStrings("metanet_inbox", Value.str(msg.get("messageBox")).?);
+    // The signed part: the envelope without its content (the signature kept).
+    const signed = try cbor.decode(a, p.signed_bytes);
+    try std.testing.expect(signed.get("content") == null);
+    try std.testing.expect(signed.get("signature") != null);
+    try std.testing.expectEqualStrings("fund", Value.str(signed.get("recipient").?.get("tag")).?);
+
+    // Held (the door stores it on a pass): the same envelope again is a replay.
+    try s.putBlock(p.signed_cid, p.signed_bytes);
+    const again = try door.brc169(a, s, sg, req, me);
+    try std.testing.expectEqual(@as(i64, 409), again.reject.status);
+}
+
+test "door: kernel.brc169 refuses a bad signature, another recipient, a contentHash that does not match; no envelope is BRC-104's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ss = try SqliteStore.open(std.testing.allocator, std.testing.io, ":memory:");
+    defer ss.close();
+    const s = ss.store();
+    const sender = try unhex(a, SENDER);
+    const me: door.Self = .{ .identity = try unhex(a, RECIPIENT), .handle = "alice", .domain = "skein.test" };
+    var op = Opener{ .plain = PLAIN, .sender = sender };
+    const sg: door.Signer = .{ .ctx = &op, .call = Opener.call };
+
+    // A member the signature covers, changed: 401.
+    const forged = try door.brc169(a, s, sg, try httpRequest(a, try tampered(a, "created", cbor.string("2026-10-09T00:00:00Z")), "application/cbor"), me);
+    try std.testing.expectEqual(@as(i64, 401), forged.reject.status);
+    try std.testing.expectEqualStrings("ERR_ENVELOPE_SIGNATURE", forged.reject.code.?);
+    // Another skein's handle, or another identity: 403, nothing decrypted.
+    const asked = op.asked;
+    const bob = try door.brc169(a, s, sg, try httpRequest(a, try unhex(a, REQUEST), "application/cbor"), .{ .identity = me.identity, .handle = "bob", .domain = "skein.test" });
+    try std.testing.expectEqual(@as(i64, 403), bob.reject.status);
+    const other = try door.brc169(a, s, sg, try httpRequest(a, try unhex(a, REQUEST), "application/cbor"), .{ .identity = sender, .handle = "alice", .domain = "skein.test" });
+    try std.testing.expectEqual(@as(i64, 403), other.reject.status);
+    try std.testing.expectEqual(asked, op.asked);
+    // The content opens to something else than what the sender hashed: 400.
+    var liar = Opener{ .plain = "Content-Type: text/plain\r\n\r\nsomething else", .sender = sender };
+    const mismatched = try door.brc169(a, s, .{ .ctx = &liar, .call = Opener.call }, try httpRequest(a, try unhex(a, REQUEST), "application/cbor"), me);
+    try std.testing.expectEqualStrings("ERR_CONTENT_HASH", mismatched.reject.code.?);
+    // No contentHash: this skein requires one.
+    const unhashed = try door.brc169(a, s, sg, try httpRequest(a, try tampered(a, "contentHash", .null), "application/cbor"), me);
+    try std.testing.expectEqualStrings("ERR_CONTENT_HASH", unhashed.reject.code.?);
+    // No envelope (JSON, or a dag-cbor body that is none): the BRC-104 check stands.
+    try std.testing.expect(try door.brc169(a, s, sg, try httpRequest(a, "{\"message\":{}}", "application/json"), me) == .not_envelope);
+    var plain = cbor.MapBuilder.init(a);
+    var pm = cbor.MapBuilder.init(a);
+    try pm.put("recipient", .{ .bytes = me.identity });
+    try pm.put("messageBox", cbor.string("chat"));
+    try pm.put("body", .{ .bytes = try cbor.encode(a, cbor.string("hi")) });
+    try plain.put("message", pm.value());
+    try std.testing.expect(try door.brc169(a, s, sg, try httpRequest(a, try cbor.encode(a, plain.value()), "application/cbor"), me) == .not_envelope);
+    // Nothing was stored by any of it.
+    const signed = try cbor.block(a, try cbor.without(a, try cbor.decode(a, Value.bytesOf((try cbor.decode(a, try unhex(a, REQUEST))).get("message").?.get("body")).?), "content"));
+    try std.testing.expect(!(try s.has(signed.cid)));
+}

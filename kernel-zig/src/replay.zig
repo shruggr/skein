@@ -112,6 +112,10 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
         };
         // #121: what the door put for a request, beside it.
         if (Value.cidOf(e.get("request"))) |rc| if (src.getOpt(a, rc)) |req| try copyDoor(a, src, dst, req);
+        // #143, #144: the blocks a filter put (an app's filter's; kernel.brc169's signed part), beside it.
+        if (e.get("door")) |d| if (d.get("blocks")) |bs| if (bs == .array) for (bs.array) |b| if (Value.cidOf(b)) |bc| {
+            if (try src.bytes(a, bc)) |x| try dst.putBlock(bc, x);
+        };
         switch (try dst.logAppend(a, e)) {
             .ok => |got| if (!std.mem.eql(u8, got, c)) return error.CopiedToDifferentCid,
             .rejected => |r| {

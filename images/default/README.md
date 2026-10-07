@@ -18,10 +18,15 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
   `WALLET`: a skein made from the image pays its host from it (docs/VM.md
   "Billing").
 - `etc/dispatch.json` (#143: routes, no senders): the claim route, `:ack`
-  (an event route), the handshake route, the messagebox's http routes and
-  the explorer behind `kernel.brc104` (the explorer gated by root: every
-  genesis's `roles`). No route to the wallet: root funds the skein by the
-  wallet's `internalize` message on a route of its own (docs/WALLET.md).
+  (an event route), the handshake route, the messagebox's http routes —
+  `sendMessage` behind `kernel.brc169` (BRC-169 mail: an envelope proves its
+  sender; any other message is BRC-104's), `listMessages` and
+  `acknowledgeMessage` behind `kernel.brc104` — the explorer behind
+  `kernel.brc104` (gated by root: every genesis's `roles`), and the funding
+  route: the box `metanet_inbox` → the wallet's `internalize`, which takes a
+  BRC-169 delivery message (BRC-232) and nothing else (docs/WALLET.md
+  "Funding"). Anyone may pay; a closed skein's host lets that one request
+  through (docs/MESSAGES.md "Billing").
 - `etc/apps.json` (#141, #143): the apps installed at birth — `apps/chain`,
   `apps/git`, `apps/site`, in that order — and root's own route `/`
   (prefix): the read route `{filters: ["site.get"], root: "www"}`. The

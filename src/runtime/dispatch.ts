@@ -11,7 +11,7 @@
 // route with that key in place, else appends; `remove` deletes it.
 //
 //   route  {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true (http only),
-//           filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"], program?: <cid> | "kernel", fn?, app?,
+//           filters?: ["kernel.brc104" | "kernel.beef" | "kernel.brc169" | "<app>.<filter>"], program?: <cid> | "kernel", fn?, app?,
 //           …settings}
 //
 //   No program: a read route (http only) — its filters answer, nothing is logged. `event` (#143): events
@@ -40,7 +40,7 @@ export type DispatchUpdate = { op: Op; row: DispatchRow; origin: CID; prev: CID;
 const ORIGIN: DispatchOrigin = { kind: "dispatch" };
 
 /** The kernel's own filters (kernel-zig door.zig). */
-export const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef"] as const;
+export const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef", "kernel.brc169"] as const;
 
 /** The chain's origin: the same CID in every store. */
 export const dispatchOrigin = (): CID => encode(ORIGIN).cid;

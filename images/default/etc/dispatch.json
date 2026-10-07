@@ -10,6 +10,11 @@
     "program": "messagebox"
   },
   {
+    "address": "metanet_inbox",
+    "program": "wallet",
+    "fn": "internalize"
+  },
+  {
     "transport": "http",
     "address": "/.well-known/auth",
     "program": "frontdoor",
@@ -19,7 +24,7 @@
     "transport": "http",
     "address": "/sendMessage",
     "filters": [
-      "kernel.brc104"
+      "kernel.brc169"
     ],
     "program": "messagebox",
     "fn": "sendMessage"
@@ -46,7 +51,7 @@
     "transport": "http",
     "address": "/messagebox/sendMessage",
     "filters": [
-      "kernel.brc104"
+      "kernel.brc169"
     ],
     "program": "messagebox",
     "fn": "sendMessage"
