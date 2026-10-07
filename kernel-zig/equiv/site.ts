@@ -27,8 +27,7 @@
 //      view (alice serves no page: she is managed from the host's);
 //   2. alice's apps, from the host's page talking to alice: her apps read from her
 //      explorer (yours: you own her) — chain, git and site, installed at birth
-//      (#141); git's owner row added by installing git again as the owner
-//      (`skein-host install`, the image has no owner); then install app-demo by hash from a
+//      (#141; #143: their routes came with the image, root's by the claim); then install app-demo by hash from a
 //      local repository served by `git http-backend`: one message to box git,
 //      the git app's answer {tree, app} read from its thread, the manifest
 //      read out of the stored tree, the record rebuilt in the page (the same
@@ -77,6 +76,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EncryptedMessage, Hash, MasterCertificate, MerklePath, P2PKH, PrivateKey, PublicKey, ProtoWallet, Script, Transaction, Utils, type WalletInterface } from "@bsv/sdk";
 import * as dagCbor from "@ipld/dag-cbor";
+import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { main, runHost, type Env } from "../../src/host/cli.ts";
 import { HostDb } from "../../src/host/instances.ts";
@@ -258,7 +258,13 @@ try {
   stores.push(db.get("host")!.store);
   host = await runHost(db, { vars, out, err: out });
   const router = host.router;
-  check(((await (await router.hydrate("host")).kernel.dispatch()).rows as Array<Record<string, unknown>>).some((x) => x.program === "kernel" && x.address === "objects" && hex(x.sender) === you), "the host skein's admin rows are yours from its genesis (#142: no claim)");
+  /** A skein's root holders (hex), the head `grants` (#143). */
+  const rootsOf = async (handle: string) => {
+    const kk = (await router.hydrate(handle)).kernel;
+    const c = await kk.call("head", "grants") as CID | null;
+    return c ? (((await kk.store.get(c)) as { roles?: Record<string, Uint8Array[]> }).roles?.root ?? []).map(hex) : [];
+  };
+  check((await rootsOf("host")).includes(you), "the host skein's root is your key from its genesis (#142, #143: no claim)");
   // The onboarding app, installed at birth (domain and origin from the settings, the name from host.env); #104: no
   // avatarURL (nothing fetched from a public ORDFS gateway) — a config the settings do not carry, so the owner
   // installs the same tree again with it (`skein install <dir> --config`, over the host's control socket).
@@ -267,7 +273,7 @@ try {
   const io: string[] = [];
   const ic = await adminMain("install", [join(repoRoot, "images/host/apps/onboard"), "--instance", "host", "--config", cfg], { vars: { ...vars, SKEIN_OPERATOR_KEY: join(home, "operator.key") }, out: (l) => { io.push(l); out(l); }, err: (l) => { io.push(l); out(l); } });
   await router.settled();
-  check(ic === 0 && io.some((l) => l.startsWith("installed onboard 0.3.4 into host")), `the onboarding app's config, installed again by the owner (skein install … --config): exit ${ic} ${io.filter((l) => /sent|install|skein/.test(l)).join(" | ")}`);
+  check(ic === 0 && io.some((l) => l.startsWith("installed onboard 0.4.0 into host")), `the onboarding app's config, installed again by the owner (skein install … --config): exit ${ic} ${io.filter((l) => /sent|install|skein/.test(l)).join(" | ")}`);
   // #125: the management site, installed at birth with its root read (#141); a site checkout ($SKEIN_SITE_DIR) over it.
   if (SITE_APP.dir) {
     r = await cli(["install", appCheckout(SITE_APP), "--instance", "host"], { wallet: ephemeralWallet(youKey), id: you });
@@ -356,26 +362,20 @@ try {
   check(fields.length === 1 && fields[0]![0]!.toString("hex") === aliceId && fields[0]![1]!.toString() === `${base}/@alice` && fields[0]![2]!.toString() === "alice",
     `the locator token is in your wallet's basket skein-locators: a PushDrop of [identity, url, handle] (${fields.map((f) => f.map((x) => x.length).join("/")).join(" ")})`);
   check(broadcasts.length === 1, `the locator's transaction was broadcast through the wallet's services (${broadcasts.length})`);
-  const aliceRows = ((await (await router.hydrate("alice")).kernel.dispatch()).rows as Array<Record<string, unknown>>);
-  check(aliceRows.some((x) => x.program === "kernel" && hex(x.sender) === you), "alice is claimed for your key");
+  check((await rootsOf("alice")).join(",") === you, "alice is claimed for your key: root (#143)");
 
-  // ------------------------------------------------ 2. alice's apps: chain, git and site from her image (#141); git's owner row; then app-demo by hash
+  // ------------------------------------------------ 2. alice's apps: chain, git and site from her image (#141); then app-demo by hash
   await page.waitForSelector("tr[data-app=git]", { timeout: 60_000 });
   const apps = await page.locator("#apps").innerText();
   check(["chain", "git", "site"].every((n) => apps.includes(n)), `alice's page reads her heads through her explorer: chain, git and site installed at birth (${apps.replace(/\s+/g, " ").slice(0, 120)})`);
-  // The image has no owner, so git's one row (box git, from the owner) is not there: the owner adds it — git installed
-  // again over the image's apps/git sends the head (unchanged) and that row.
-  r = await cli(["install", join(repoRoot, "images/default/apps/git"), "--instance", "alice"], { wallet: ephemeralWallet(youKey), id: you });
-  await router.settled();
-  const gitRow = ((await (await router.hydrate("alice")).kernel.dispatch()).rows as Array<Record<string, unknown>>).find((x) => x.address === "git" && x.app === "git");
-  check(r.code === 0 && !!gitRow && hex(gitRow.sender) === you, `the owner's git row added after the claim (git installed again): exit ${r.code} ${r.err.join(" ")}`);
+  // #143: nothing to add after the claim — git's route came with the image, its `call` root's, and the claim granted root.
 
   await page.fill("#install-url input[name=url]", repoUrl);
   await page.fill("#install-url input[name=hash]", hashA);
   await page.click("#install-url button[type=submit]");
   await prompted();
   const demoPlan = await page.locator("#plan").innerText();
-  check(/install app-demo 0\.1\.0/.test(demoPlan) && /row +mailbox app-demo from anyone → demo/.test(demoPlan) && /objects ×1 \(0 records\)/.test(demoPlan) && /dispatch ×3/.test(demoPlan),
+  check(/install app-demo 0\.1\.0/.test(demoPlan) && /route +mailbox app-demo → demo/.test(demoPlan) && /objects ×1 \(0 records\)/.test(demoPlan) && /dispatch ×3/.test(demoPlan),
     `deploy by hash from the page: the git app cloned it, the record rebuilt in the page matches, nothing to send by objects (${demoPlan.split("\n").filter((l) => /install|messages/.test(l)).join(" | ")})`);
   await page.click("#approve");
   await page.waitForSelector("tr[data-app=app-demo]", { timeout: 120_000 });
@@ -393,9 +393,9 @@ try {
   await page.waitForFunction(() => /genesis/.test(document.getElementById("log")?.innerText ?? ""), null, { timeout: 60_000 });
   const first = await page.locator("#log").innerText();
   check(/^1\s.*request \(local\)/m.test(first) && /^0\s.*genesis/m.test(first), `and its first entries: 0 the genesis, 1 the claim (a local request) (${first.replace(/\s+/g, " ").slice(0, 160)})`);
-  await page.goto(`${sitePage}${search}#/s/${aliceId}/dispatch`);
-  await page.waitForSelector("#dispatch", { timeout: 60_000 });
-  check((await page.locator("#dispatch").innerText()).includes("/app-demo/call"), "and her dispatch table, with app-demo's rows");
+  await page.goto(`${sitePage}${search}#/s/${aliceId}/routes`);
+  await page.waitForSelector("#routes", { timeout: 60_000 });
+  check((await page.locator("#routes").innerText()).includes("/app-demo/call"), "and her route table, with app-demo's routes");
   const stranger = PrivateKey.fromRandom();
   const refused = await new RawBox(ephemeralWallet(stranger), `${base}/@alice`).af.fetch(`${base}/@alice/explore`, { method: "GET" });
   check(refused.status === 403, `another key's read of alice's explorer is refused (${refused.status}): the explorer is the owner's`);

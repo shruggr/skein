@@ -131,7 +131,7 @@ test("#141, #143: the default image installs chain, git and site at birth — th
   const kept = new Map<string, Uint8Array>();
   const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
   const born = await installAtBirth(target, src, s, sys, c);
-  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.4.0", "git 0.1.3", "site 0.7.7"]);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.4.0", "git 0.1.3", "site 0.9.0"]);
   assert.deepEqual(Object.keys(born.heads).sort(), ["chain/app", "git/app", "site/app"], "#143: no reads head");
   const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
   for (const n of ["chain", "git", "site"]) assert.equal(get(born.heads[`${n}/app`]!).kind, "app", `${n}/app is its app record, in the store`);

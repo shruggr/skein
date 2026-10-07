@@ -2,12 +2,12 @@
 // module, the static app gone) end to end, through the management site's
 // handler: shruggr/skein-site (src/testapps.ts SITE_APP, or $SKEIN_SITE_DIR)
 // with test files added to its tree, installed as the owner's messages (#124)
-// into an instance on a router. The app's one read (#135, `reads[]`) is
-// `/site/*` (its `/`, namespaced by the install); the owner adds two reads of
-// its own to the same function (`skein reads add`: the reads head):
+// into an instance on a router. The app's one read route (#143) is
+// `/site/*` (its `/`, namespaced by the install); root adds two read routes
+// of its own to the same filter (`skein routes add --filters site.get`):
 // `/favicon.ico` exact (a file root) and `/` exact (a directory root: its
-// index). The function serves the app's own tree (the head site/app's
-// record, its `tree`), under the read's root (`www`), by a call.
+// index). The filter serves the app's own tree (the head site/app's
+// record, its `tree`), under the route's root (`www`), nothing logged.
 //
 // Through the router, at the instance's own origin: the index for the prefix
 // and for a directory, nested files with their content types, a directory
@@ -31,7 +31,7 @@ import { fileURLToPath } from "node:url";
 import { CID } from "multiformats/cid";
 import * as Digest from "multiformats/hashes/digest";
 import { AuthFetch } from "@bsv/sdk";
-import { planReads } from "../../src/client/admin.ts";
+import { planRoute } from "../../src/client/admin.ts";
 import { appCheckout, installApp, sendPlan, SITE_APP, viewOf } from "../../src/testapps.ts";
 import { testHost } from "../../src/host/testhost.ts";
 
@@ -102,18 +102,17 @@ try {
   store = h.db.get("site")!.store;
   await installApp(ih, "site", app);
   const k = (await h.router.hydrate("site")).kernel;
-  const rec = await k.store.get(await k.call("head", "site/app") as CID) as { programs: { site: CID } };
-  // The owner's own reads of the same function (#125, #135; `skein reads add … site.site`): the reads head.
-  const programs = { "site.site": rec.programs.site };
-  for (const [address, prefix, root] of [["/favicon.ico", false, "www/favicon.ico"], ["/", false, "www"]] as const) {
+  void k;
+  // Root's own read routes to the same filter (#125, #143; `skein routes add --filters site.get`).
+  for (const [address, root] of [["/favicon.ico", "www/favicon.ico"], ["/", "www"]] as const) {
     const view = await viewOf(ih, "site");
-    try { await sendPlan(ih, "site", await planReads(view, { op: "add", path: address, handler: "site.site", http: { prefix, fn: "get", settings: { root } } }, programs)); } finally { view.close(); }
+    try { await sendPlan(ih, "site", await planRoute(view, { op: "add", transport: "http", address, filters: ["site.get"], settings: { root } })); } finally { view.close(); }
   }
   const view = await viewOf(ih, "site");
   try {
     let clash = "";
-    try { await planReads(view, { op: "add", path: "/sendMessage", handler: "site.site", http: { fn: "get" } }, programs); } catch (e) { clash = (e as Error).message; }
-    check(/an http row is at that path/.test(clash), `the owner's read at a row's path (/sendMessage) refused: ${clash}`);
+    try { await planRoute(view, { op: "add", address: "/site/", prefix: true, filters: ["site.get"] }); } catch (e) { clash = (e as Error).message; }
+    check(/app site has it/.test(clash), `root's route at an app's key (/site/ prefix) refused: ${clash}`);
   } finally { view.close(); }
   await get("/site/");
   await h.router.settled();

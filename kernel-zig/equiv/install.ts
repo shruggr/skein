@@ -1,25 +1,24 @@
-// Installing apps (#72, #76, #79) end to end, as the owner's messages (#124,
-// #142: src/client/admin.ts, sent on the owner's session; src/testapps.ts
-// ownerCli; the owner's root read by `skein reads` over the control socket), into an
+// Installing apps (#72, #76, #79, #143) end to end, as root's messages (#124,
+// #142: src/client/admin.ts, sent on root's session; src/testapps.ts
+// ownerCli; root's read route by `skein routes` over the control socket), into an
 // instance of the stock system on a router:
 //
 //   skein-site (shruggr/skein-site at the commit src/testapps.ts pins, cloned
-//   by the install itself; or $SKEIN_SITE_DIR; 0.7.3, #125): the head
+//   by the install itself; or $SKEIN_SITE_DIR; #125, #143): the head
 //   `site/app` is the app record (the manifest as installed, linking the
-//   tree; no alias head), its one read (#135, `reads[]`) is served under
-//   /site/ (the files of its own tree's www) by a call, out of the reads head
-//   — no dispatch row, no entry; the owner's own read puts the same function
-//   at `/` (`skein reads add`), which an uninstall leaves; a read at a
-//   row's path refused; uninstalled, its reads are gone.
+//   tree; no alias head), its read route /site/ (filters only: its `get`
+//   answers, the files of its own tree's www) — no entry; root's own read
+//   route puts the same filter at `/` (`skein routes add`), which an
+//   uninstall leaves; uninstalled, its route is gone.
 //
 //   programs/test/app-demo (a counter over the SDK's dispatch helper): its
 //   start message schedules a heartbeat with the cron provider, whose tick
-//   reaches it in `app-demo/tick` (admitted from $cron only: a stranger's is
-//   not); a {fn, args} message from a caller in box `app-demo` is answered in
+//   reaches it in `app-demo/tick` (#143: an open box — no role gates a box's
+//   program, the app judges its sender); a {fn, args} message from a caller in box `app-demo` is answered in
 //   the caller's mailbox (result, bad-args, read-only for a `writes: false`
 //   function that writes, unknown-fn); its `peers` message to the kernel, sent
-//   as the instance itself, is refused (#87: no row admits a program to a
-//   kernel table; recorded, nothing runs, the address book unchanged); a
+//   as the instance itself, is gated away (#87, #143: the admin operations are
+//   root's, and the instance's key is not root; recorded, nothing runs, the address book unchanged); a
 //   program record it puts itself, claiming app chain (or the name wallet),
 //   called or launched, runs but its advance is refused (K1: not installed),
 //   while its own installed record still advances app-demo/…; the route /app-demo/call answers on the
@@ -41,6 +40,7 @@ import { RawBox } from "../../src/client/raw.ts";
 import { adminMain } from "../../src/client/admin-cli.ts";
 import { main } from "../../src/host/cli.ts";
 import { ownerCli, SITE_APP } from "../../src/testapps.ts";
+import { readFileSync } from "node:fs";
 import { testHost, until } from "../../src/host/testhost.ts";
 import { ephemeralWallet } from "../../src/wallet.ts";
 
@@ -91,16 +91,16 @@ try {
 
   // ------------------------------------------------ skein-site, from its repo (#125)
   const siteSpec = SITE_APP.dir ?? `${SITE_APP.repo}#${SITE_APP.rev}`;
+  const SITE_VERSION = (JSON.parse(readFileSync(join(here, "../../images/default/apps/site/etc/app.json"), "utf8")) as { version: string }).version;
   let code = await cli("install", siteSpec, "--instance", "inst", "--dry-run");
-  check(code === 0 && out.some((l) => l.includes("read      /site/* → site.get (root www) (anyone, by a call: nothing logged)")) && !out.some((l) => l.startsWith("  row ")), `the prompt shows the site's read under /site/, and no row (${code}: ${out.filter((l) => /^ {2}(row|read) /.test(l)).join(" | ")})`);
+  check(code === 0 && out.some((l) => /^ {2}route +http \/site\/ prefix \[site\.get\] → \(a read: its filters answer, nothing logged\) \(root www\)/.test(l)), `the prompt shows the site's read route under /site/ (${code}: ${out.filter((l) => /^ {2}route /.test(l)).join(" | ")})`);
   check((await record("site/app")) === undefined, "a dry run sends nothing");
   code = await cli("install", siteSpec, "--instance", "inst");
   check(code === 0, `skein install skein-site, sent to /sendMessage as the owner: exit ${code} ${err.join(" ")}`);
   const st = await record("site/app");
-  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === "0.7.7" && (await record("site")) === undefined, `the head site/app is the app record (0.7.7), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
-  const appRows = async (app: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}`);
-  const appReads = async (app?: string) => (((await record("reads"))?.reads ?? []) as Array<Record<string, unknown>>).filter((x) => x.app === app).map((x) => `${x.address}${x.prefix ? "*" : ""} ${String(x.fn)}`);
-  check((await appRows("site")).length === 0 && (await appReads("site")).join(",") === "/site/* get", `#135: the site's read in the reads head, no dispatch row: ${(await appReads("site")).join(", ")} · rows ${(await appRows("site")).join(", ")}`);
+  check(st?.kind === "app" && st.name === "site" && !!st.tree && !!(st.programs as Record<string, unknown>)?.site && st.version === SITE_VERSION && (await record("site")) === undefined, `the head site/app is the app record (${SITE_VERSION}), linking the tree and the program record; no alias head \`site\` (#79) (${JSON.stringify(st && { kind: st.kind, name: st.name, version: st.version })})`);
+  const routesOf = async (app?: string) => ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === app).map((r) => `${r.transport} ${r.address}${r.prefix ? "*" : ""}${r.program === undefined ? " (read)" : ""}`);
+  check((await routesOf("site")).join(",") === "http /site/* (read)", `#143: the site's read route, no program: ${(await routesOf("site")).join(", ")}`);
   const n0 = await h.entries("inst");
   let r = await get("/site/");
   check(r.status === 200 && r.body.includes('src="app.js"'), `GET /site/: its own tree's www/index.html (${r.status})`);
@@ -112,7 +112,7 @@ try {
 
   // ------------------------------------------------ app-demo: start, ticks, calls
   code = await cli("install", demoDir, "--instance", "inst");
-  check(code === 0 && out.some((l) => l.startsWith("  row       mailbox app-demo/tick from $cron → demo")), `skein install app-demo: exit ${code} ${err.join(" ")}`);
+  check(code === 0 && out.some((l) => l.startsWith("  route     mailbox app-demo/tick → demo")), `skein install app-demo: exit ${code} ${err.join(" ")}`);
   const state = async () => {
     const rec = await record("app-demo/app");
     return rec?.state ? await (await k()).store.get(rec.state as CID) as { count: number; ticks: number } : undefined;
@@ -121,11 +121,12 @@ try {
   check(!!ticked, `the start message scheduled a heartbeat with the cron provider, and its tick reached app-demo/tick from $cron (ticks ${ticked?.ticks})`);
   check(h.lines.some((l) => /cron: beat \(app-demo\/tick every 3600000 ms\) scheduled/.test(l)), "the cron provider took the schedule (beat, every hour)");
 
-  // A stranger's "tick" is not admitted (only $cron's row takes app-demo/tick).
+  // #143: a box is routed by its address alone — a stranger's message into app-demo/tick reaches the app (no role gates
+  // a box's program); the app judges its sender. A stranger's message into a box no route is at is refused.
   const strangerKey = PrivateKey.fromRandom();
-  const refused = await new RawBox(ephemeralWallet(strangerKey), `${h.base}/@inst`).send(inst, "app-demo/tick", { kind: "cron", name: "fake", due: 0 }).then(() => "sent", (e: Error) => e.message);
+  const refused = await new RawBox(ephemeralWallet(strangerKey), `${h.base}/@inst`).send(inst, "app-demo/nowhere", { kind: "cron", name: "fake", due: 0 }).then(() => "sent", (e: Error) => e.message);
   await h.router.settled();
-  check(/403 ERR_NOT_SUBSCRIBED/.test(refused) && (await state())?.ticks === ticked?.ticks, `a stranger's message into app-demo/tick is refused, and runs nothing (${refused})`);
+  check(/403 ERR_NOT_SUBSCRIBED/.test(refused), `a stranger's message into a box no route is at is refused (${refused})`);
 
   // Calls by message: answered in the caller's mailbox.
   const callerBox = new RawBox(caller, `${h.base}/@inst`);
@@ -150,18 +151,18 @@ try {
   check(a.error?.code === "unknown-fn", `an undeclared function: ${JSON.stringify(a.error)}`);
   check((await state())?.count === 5, "the refused calls changed nothing");
 
-  // #87: a program's `peers` message to the kernel is refused. app-demo emits the kernel's `peers`
-  // operation as the instance itself (any program can); no row admits the instance's key to an admin
-  // box, so the message is recorded (the loopback's `local` request, then the message) and runs nothing.
+  // #87, #143: a program's `peers` message to the kernel is gated away. app-demo emits the kernel's `peers`
+  // operation as the instance itself (any program can); `peers` is root's and the instance's key is not root,
+  // so the message is recorded (the loopback's `local` request, then the message) and runs nothing.
   const intruder = PrivateKey.fromRandom().toPublicKey().toString();
   const peersBefore = await record("peers");
   const linesBefore = h.lines.length;
   await callerBox.send(inst, "app-demo", { kind: "app-demo-peers", key: intruder, url: "http://intruder.test" });
   const noRow = await until("the program's peers message", async () => {
     await h.router.settled();
-    return h.lines.slice(linesBefore).find((l) => l.startsWith("[inst] ") && / in peers from [0-9a-f]+: no dispatch row; recorded, nothing runs/.test(l));
+    return h.lines.slice(linesBefore).find((l) => l.startsWith("[inst] ") && / in peers from [0-9a-f]+: peers is gated \(root\).*recorded, nothing runs/.test(l));
   }, 20_000).catch(() => undefined);
-  check(!!noRow, `a program's message to the kernel's \`peers\` box (sent as the instance) finds no row: recorded, nothing runs (${noRow ?? h.lines.slice(linesBefore).filter((l) => l.includes("peers")).join(" | ")})`);
+  check(!!noRow, `a program's message to the kernel's \`peers\` box (sent as the instance) is gated: recorded, nothing runs (${noRow ?? h.lines.slice(linesBefore).filter((l) => l.includes("peers")).join(" | ")})`);
   check(!h.lines.slice(linesBefore).some((l) => l.includes("kernel peers:")), "the kernel's peers operation did not run");
   const peersAfter = await record("peers");
   const book = peersAfter ? await Promise.all(((peersAfter.peers ?? []) as Array<{ peer: CID }>).map(async (p) => await (await k()).store.get(p.peer) as { key: Uint8Array })) : [];
@@ -190,7 +191,7 @@ try {
   check((await record("app-demo/forged"))?.kind === "app-demo-forged", "app-demo/forged moved by the installed program");
   await forge({ how: "installed", head: "chain/state" }, /forge call refused: .*advance: "chain\/state" is outside the write scope of app-demo \(app app-demo writes only heads under its own name/, "the installed record still writes only its own app's heads: chain/state refused");
 
-  // The route /app-demo/call: the answer on the connection (BRC-104, the caller admitted by "*").
+  // The route /app-demo/call: the answer on the connection (behind kernel.brc104: the caller its principal).
   const call = async (body: unknown) => {
     let res: Response;
     try {
@@ -229,44 +230,6 @@ try {
   c = await call({ fn: "demo.counter.get" });
   check(c.status === 404, `after uninstall, /app-demo/call is no route: ${c.status}`);
   check((await record("app-demo/app"))?.kind === "app", "the head app-demo/app is left");
-  // The owner's own read (#125, #135): the same function at `/` — `skein reads add`, signed with the owner's key
-  // in the client and handed to the host over its control socket (#142).
-  await h.router.listenControl(join(h.home, "host.sock"));
-  const keyFile = join(h.home, "operator.key");
-  writeFileSync(keyFile, `${h.ownerKey.toHex()}\n`, { mode: 0o600 });
-  const rootArgs = ["--prefix", "--fn", "get", "--settings", JSON.stringify({ root: "www" }), "/", "site.site", "--instance", "inst"];
-  const skein = async (cmd: string, ...args: string[]) => {
-    out.length = 0; err.length = 0;
-    const c = await adminMain(cmd, args, { vars: { SKEIN_HOME: h.home, SKEIN_OPERATOR_KEY: keyFile }, out: (l) => out.push(l), err: (l) => err.push(l) });
-    await h.router.settled();
-    if (process.env.VERBOSE) for (const l of [...out, ...err]) process.stdout.write(`  | ${l}\n`);
-    return c;
-  };
-  code = await skein("reads", "add", ...rootArgs, "--dry-run");
-  check(code === 0 && out.some((l) => /^reads add \/\* → .+\.get \(root www\) \(the owner's/.test(l)), `skein reads add --prefix … / site.site --dry-run: the owner's read, planned (${code}: ${[...out, ...err].join(" | ")})`);
-  code = await skein("reads", "add", "--fn", "get", "/sendMessage", "site.site", "--store", h.db.get("inst")!.store);
-  check(code !== 0 && err.some((l) => /an http row is at that path/.test(l)), `a read at a row's path (/sendMessage) refused at the plan (${code}: ${err.join(" | ")})`);
-  code = await skein("reads", "add", ...rootArgs);
-  check(code === 0, `skein reads add --instance inst: sent (${code}: ${[...out, ...err].join(" | ")})`);
-  r = await get("/");
-  check(r.status === 200 && r.body.includes('src="app.js"'), `GET / : the site, by the owner's read (${r.status})`);
-  r = await get("/app.js");
-  check(r.status === 200 && r.body.includes("skein-locators"), `GET /app.js: its files at the root too (${r.status})`);
-  r = await get("/manifest.json");
-  check(r.status === 200 && r.body.includes("groupPermissions"), `GET /manifest.json: the page's grouped request, at the origin (${r.status})`);
-  c = await call({ fn: "demo.counter.get" });
-  check(c.status === 405, `a path no row or other read takes is the root read's (a catch-all prefix): POST /app-demo/call, app-demo gone, is the site function's 405, signed (${c.status})`);
-  const ownerRead = (((await record("reads"))?.reads ?? []) as Array<Record<string, unknown>>).find((x) => x.address === "/");
-  check(!!ownerRead && ownerRead.app === undefined && ownerRead.prefix === true && ownerRead.root === "www", "the root read is the owner's (no app)");
-  code = await cli("uninstall", "site", "--instance", "inst");
-  r = await get("/site/");
-  check(code === 0 && r.status === 404 && !r.body.includes('src="app.js"'), `skein uninstall site: its read is gone — /site/ falls to the root read, which has no www/site/ (${code}, GET /site/ ${r.status})`);
-  check((await appReads("site")).length === 0 && (await appRows("app-demo")).length === 0, "no app reads or rows left");
-  r = await get("/");
-  check(r.status === 200, `the owner's root read is the owner's: the uninstall leaves it (GET / ${r.status})`);
-  code = await skein("reads", "remove", ...rootArgs);
-  r = await get("/");
-  check(code === 0 && r.status === 404, `skein reads remove with the same arguments: the root read is gone (${code}, GET / ${r.status})`);
 } catch (e) {
   check(false, `threw: ${(e as Error).stack}`);
 } finally {
