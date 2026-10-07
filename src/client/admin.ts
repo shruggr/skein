@@ -261,3 +261,25 @@ export async function catalogOf(view: InstanceView): Promise<CatalogEntry[]> {
   const c = JSON.parse(new TextDecoder().decode(await readBlob(view.store as never, leaf.cid))) as { apps?: CatalogEntry[] };
   return (c.apps ?? []).filter((e) => e && typeof e.name === "string" && typeof e.url === "string" && /^[0-9a-f]{40}$/i.test(e.hash ?? ""));
 }
+
+/**
+ * The kernel's gate (#143, kernel-zig/src/grants.zig), read from the instance's view: the roles that
+ * gate a route's handler (its app's `roles` for its fn; a kernel admin box's is root) and whether
+ * `key` passes them. Root passes anything; `user` passes any key; no gating roles: open.
+ */
+export async function gatePasses(view: InstanceView, row: DispatchRow, key: string): Promise<{ pass: boolean; roles: string[] }> {
+  const root = view.heads.find((h) => h.name === "grants")?.root;
+  const g = root ? await view.store.get(root).catch(() => undefined) as { roles?: Record<string, unknown[]> } | undefined : undefined;
+  const holds = (role: string) => (g?.roles?.[role] ?? []).some((k) => (k instanceof Uint8Array ? Buffer.from(k).toString("hex") : String(k)) === key);
+  const r = row as DispatchRow & { op?: string; fn?: string; app?: string };
+  let roles: string[] = [];
+  if (r.op) roles = ["root"];
+  else if (r.app && r.fn) {
+    const { appRecordIn } = await import("../host/plan.ts");
+    const rec = await appRecordIn(view, r.app);
+    const map = (rec?.record as { roles?: Record<string, string[]> } | undefined)?.roles ?? {};
+    roles = Object.entries(map).filter(([, fns]) => fns.includes(r.fn!)).map(([role]) => role === "root" || role === "user" ? role : `${r.app}.${role}`);
+  }
+  if (!roles.length || holds("root") || roles.includes("user") || roles.some((x) => x !== "root" && holds(x))) return { pass: true, roles };
+  return { pass: false, roles };
+}

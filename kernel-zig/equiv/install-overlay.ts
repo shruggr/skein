@@ -72,9 +72,9 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The apps under test: SKEIN_OVERLAY_DIR / SKEIN_CHAIN_DIR name checkouts, else these commits (the ones equiv/overlay.ts pins).
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
-const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "af7625385121df203fa8a341f8dd9711b55e6ab0";
+const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "ccaee43c1d7d74554f76f2eead38cd84f0aa379a";
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-install-overlay-"));
@@ -242,17 +242,20 @@ try {
   code = await cli("install", overlayDir, "--instance", "ov");
   const derived = out.filter((l) => l.includes("(derived: config.overlay)"));
   check(code === 0, `skein install skein-overlay beside the chain app (requires chain/1 satisfied): exit ${code} ${err.join(" ")}`);
-  check(["row       libp2p tm_demo from anyone → overlay.submit (filter beef)", "row       libp2p tm_demo-admit from anyone → overlay.peerAdmit", "row       libp2p tm_demo-proof from anyone → overlay.peerProof", "row       http /overlay/submit from anyone → overlay.submit (filter beef)", "read      /overlay/lookup → overlay.lookup (anyone, by a call: nothing logged)", "row       mailbox overlay from event → overlay", "row       mailbox overlay from $self → overlay"].every((x) => derived.some((l) => l.includes(x))) && derived.length === 7 && derived.filter((l) => l.includes("(filter beef)")).length === 2 && out.some((l) => l.includes("dispatch add http /overlay/submit from anyone → overlay.submit (filter beef)")), `the prompt shows the wiring derived from config.overlay, the filter of the submit rows (#121) among it (${derived.length} lines: ${derived.map((l) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "")).join(" | ")})`);
+  const norm = (l: string) => l.trim().replace(/\s+/g, " ").replace(" (derived: config.overlay)", "");
+  const wiring = ["route event overlay → overlay", "route mailbox overlay → overlay", "route http /overlay/submit [kernel.beef] → overlay.submit", "route http /overlay/lookup [overlay.lookup] → (a read", "route libp2p tm_demo [kernel.beef] → overlay.submit", "route libp2p tm_demo-admit → overlay.peerAdmit", "route libp2p tm_demo-proof → overlay.peerProof"];
+  check(wiring.every((x) => derived.some((l) => norm(l).startsWith(x))) && derived.length === 7 && derived.filter((l) => l.includes("[kernel.beef]")).length === 2, `the prompt shows the wiring derived from config.overlay, kernel.beef on the submit routes (#121, #143) among it (${derived.length} lines: ${derived.map(norm).join(" | ")})`);
   check(!out.some((l) => /grants|mailbox (chain|status|submit) from .* → overlay/.test(l)), "no grants, no chain/status/submit box for the overlay (#79: the chain app's)");
   // 0.7.6 (#128): the stock manifest's submission row is the box `submit` (overlay/submit here; the old own-box row "" is gone).
-  check(out.some((l) => l.includes("row       mailbox overlay/submit from anyone → overlay (filter beef)")) && !out.some((l) => l.includes("row       mailbox overlay from anyone")), `the prompt shows the manifest's submission row, the box overlay/submit from anyone (filter beef), and no own-box row from anyone (${out.filter((l) => /mailbox overlay\S* from/.test(l)).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")})`);
+  check(out.some((l) => norm(l).startsWith("route mailbox overlay/submit [kernel.beef] → overlay.submit")) && out.some((l) => norm(l).startsWith("route mailbox overlay/register → overlay.register")), `the prompt shows the manifest's submission route, the box overlay/submit (kernel.beef), and its register route (${out.filter((l) => /route +mailbox overlay/.test(l)).map(norm).join(" | ")})`);
   const app = await record("overlay/app");
   const appRows = async (name = "overlay") => ((await (await kA()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === name);
   const rowsT = await appRows();
-  check(app?.kind === "app" && app.version === "0.9.2" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.9.2), with config.overlay; no alias head `overlay`");
-  check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "mailbox overlay", "mailbox overlay/submit"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)) && !rowsT.some((r) => r.transport === "http" && r.address !== "/overlay/submit"), `the dispatch table has the derived rows, and no http row but /submit: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
-  const readsT = (((await record("reads"))?.reads ?? []) as Array<{ address: string; fn: string; app?: string }>).filter((r) => r.app === "overlay").map((r) => `${r.address} ${r.fn}`).sort();
-  check(JSON.stringify(readsT) === JSON.stringify(["/overlay/getDocumentationForLookupServiceProvider lookupDocumentation", "/overlay/getDocumentationForTopicManager topicDocumentation", "/overlay/listLookupServiceProviders listLookupServiceProviders", "/overlay/listTopicManagers listTopicManagers", "/overlay/lookup lookup"]), `#135: the reads head has the overlay's reads — the derived /lookup and the manifest's four: ${readsT.join(", ")}`);
+  check(app?.kind === "app" && app.version === "0.10.0" && (app.config as { overlay?: unknown })?.overlay !== undefined && (await headOf("overlay")) === null, "the head overlay/app is the app record (0.10.0), with config.overlay; no alias head `overlay`");
+  const httpT = rowsT.filter((r) => r.transport === "http").map((r) => String(r.address)).sort();
+  check(["libp2p tm_demo", "libp2p tm_demo-admit", "libp2p tm_demo-proof", "http /overlay/submit", "event overlay", "mailbox overlay", "mailbox overlay/submit", "mailbox overlay/register"].every((p) => rowsT.some((r) => `${r.transport} ${r.address}` === p)) && JSON.stringify(httpT) === JSON.stringify(["/overlay/getDocumentationForLookupServiceProvider", "/overlay/getDocumentationForTopicManager", "/overlay/listLookupServiceProviders", "/overlay/listTopicManagers", "/overlay/lookup", "/overlay/submit"]), `the route table has the derived routes; its http routes /submit and the five reads: ${rowsT.map((r) => `${r.transport} ${r.address}`).join(", ")}`);
+  const readsT = rowsT.filter((r) => r.transport === "http" && r.program === undefined).map((r) => `${r.address} ${(r.filters as string[]).join(",")}`).sort();
+  check(JSON.stringify(readsT) === JSON.stringify(["/overlay/getDocumentationForLookupServiceProvider overlay.lookupDocumentation", "/overlay/getDocumentationForTopicManager overlay.topicDocumentation", "/overlay/listLookupServiceProviders overlay.listLookupServiceProviders", "/overlay/listTopicManagers overlay.listTopicManagers", "/overlay/lookup overlay.lookup"]), `#143: the overlay's read routes (no handler; the filter answers) — the derived /lookup and the manifest's four: ${readsT.join(", ")}`);
   const topics1 = ["tm_demo", "tm_demo-admit", "tm_demo-proof"];
   const s1 = await until("the node subscribes the installed topics", () => { const s = served(); return s && topics1.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!s1 && s1.topics.length === 3, `live, no restart: the instance's node subscribes ${s1?.topics.join(", ")}`);
@@ -379,16 +382,16 @@ try {
   const mf2 = JSON.parse(readFileSync(join(dir2, "etc/app.json"), "utf8")) as { name: string; config: { overlay: Record<string, unknown> } };
   mf2.name = "overlay2";
   mf2.config.overlay = { topics: { tm_two: "topic-demo" }, lookups: { ls_demo: { program: "lookup-demo", topics: ["tm_two"] } }, gossip: { tm_two: true } };
-  // skein-overlay 0.7.7 (#128): the stock manifest's row {address: "register", sender: "$owner"} is the box
+  // skein-overlay 0.7.7 (#128): the stock manifest's route {address: "register"} (root-gated, #143) is the box
   // overlay2/register here; register / deregister go there (only there — refused bad-args in any other box, the
   // app's own included; 0.7.6: submissions in the box overlay2/submit).
   // 0.7.3: the manifest's libp2p row /skein/overlay/beef/1.0.0 (the want-answer stream) is global, not under the
   // app's name: two apps installing it clash ("app overlay has it"). Dropped from overlay2's copy — a design point
   // pending with David (one stream protocol per instance, or one per app).
-  (mf2 as unknown as { dispatch: Array<{ transport?: string; address: string }> }).dispatch = (mf2 as unknown as { dispatch: Array<{ transport?: string; address: string }> }).dispatch.filter((r) => !(r.transport === "libp2p" && r.address === "/skein/overlay/beef/1.0.0"));
+  (mf2 as unknown as { routes: Array<{ transport?: string; address: string }> }).routes = (mf2 as unknown as { routes: Array<{ transport?: string; address: string }> }).routes.filter((r) => !(r.transport === "libp2p" && r.address === "/skein/overlay/beef/1.0.0"));
   writeFileSync(join(dir2, "etc/app.json"), JSON.stringify(mf2, null, 2));
   code = await cli("install", dir2, "--instance", "ov");
-  check(code === 0 && out.some((l) => l.includes("row       mailbox overlay2 from event → overlay")) && out.some((l) => l.includes("row       mailbox overlay2/register from $owner → overlay")) && out.some((l) => l.includes("row       http /overlay2/submit from anyone → overlay.submit")), `two overlay apps on one instance: the same tree installed as overlay2 (its own box, its own routes, no row clash): exit ${code} ${err.join(" ")}`);
+  check(code === 0 && out.some((l) => norm(l).startsWith("route event overlay2 → overlay")) && out.some((l) => norm(l).startsWith("route mailbox overlay2/register → overlay.register")) && out.some((l) => norm(l).startsWith("route http /overlay2/submit [kernel.beef] → overlay.submit")), `two overlay apps on one instance: the same tree installed as overlay2 (its own box, its own routes, no row clash): exit ${code} ${err.join(" ")}`);
   const t3 = token(2);
   await t3.sign();
   const sub2 = await submitFetch(`${rA.originOf("ov")}/overlay2/submit`, { method: "POST", headers: { "x-topics": "tm_two" }, body: new Uint8Array(t3.toBEEF()) });
@@ -444,7 +447,7 @@ try {
   mf.config.overlay.lookups.ls_demo!.topics = ["tm_demo", "tm_three"];
   writeFileSync(join(dir, "etc/app.json"), JSON.stringify(mf, null, 2));
   code = await cli("install", dir, "--instance", "ov");
-  check(code === 0 && /^upgrade overlay /.test(out[0] ?? "") && out.some((l) => l.includes("row       libp2p tm_three from anyone → overlay.submit")), `reinstalled with config.overlay.topics.tm_three: exit ${code} ${out[0]} ${err.join(" ")}`);
+  check(code === 0 && /^upgrade overlay /.test(out[0] ?? "") && out.some((l) => norm(l).startsWith("route libp2p tm_three [kernel.beef] → overlay.submit")), `reinstalled with config.overlay.topics.tm_three: exit ${code} ${out[0]} ${err.join(" ")}`);
   const topics2 = [...topics1, "tm_two", "tm_two-admit", "tm_two-proof", "tm_three", "tm_three-admit", "tm_three-proof"];
   const s2 = await until("the node subscribes tm_three", () => { const s = served(); return s && topics2.every((t) => s.topics.includes(t)) ? s : undefined; }, 10_000).catch((e: Error) => { process.stdout.write(`  (${e.message})\n`); return undefined; });
   check(!!s2 && s2.topics.length === 9 && rA.p2p?.node("ov") !== undefined, `no restart: the node now subscribes both overlays' topics: ${s2?.topics.join(", ")}`);

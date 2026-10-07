@@ -38,9 +38,10 @@ management page at `/`. docs/BOOTSTRAP.md, "The default image".
   image (`images/host` merged over this one, with the onboarding app), its
   genesis's `root` the operator's key (docs/BOOTSTRAP.md, "The host image
   and the host skein").
-- `apps/chain/`, `apps/git/`, `apps/site/`: shruggr/skein-chain v0.4.0
-  (e8d2102), shruggr/skein-git v0.1.3 (3726730), shruggr/skein-site v0.7.7
-  (52a7534) — each the same git tree as that tag's commit.
+- `apps/chain/`, `apps/git/`, `apps/site/`: shruggr/skein-chain v0.5.0
+  (01e68b4), shruggr/skein-git v0.2.0 (01e804a), shruggr/skein-site v0.9.0
+  (b41f5d5) — each the same git tree as that tag's commit. images/host's
+  `apps/onboard/`: shruggr/skein-onboard v0.4.0 (189b7c2).
 - `chain/` (#132): **not in the repo** — the host adds it. The image a
   host boots skeins from is this directory with the whole header chain at
   `chain/headers/<first>` (2016 raw headers a block) and `chain/tip`, grown

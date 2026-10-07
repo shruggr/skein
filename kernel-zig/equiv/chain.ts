@@ -47,7 +47,7 @@ import { ephemeralWallet } from "../../src/wallet.ts";
 
 // The app under test: SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
 const here = dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (ok: boolean, what: string) => { process.stdout.write(`${ok ? "ok  " : "FAIL"} ${what}\n`); if (!ok) failures++; };
@@ -121,14 +121,15 @@ try {
   const spec = process.env.SKEIN_CHAIN_DIR ?? `${CHAIN_REPO}#${CHAIN_REV}`;
   const code = await cli("install", spec, "--instance", "ch");
   check(code === 0, `skein install skein-chain: exit ${code} ${err.join(" ")}`);
-  check(["event", "$self", "$owner"].every((who) => out.some((l) => l.includes(`row       mailbox chain from ${who} → chain`))) && out.some((l) => /row {7}mailbox chain\/status from \$status .*→ chain/.test(l)) && !out.some((l) => l.includes("mailbox chain from anyone")), `the prompt shows its rows (#79: no open box): ${out.filter((l) => l.includes("row ")).map((l) => l.trim().replace(/\s+/g, " ")).join(" | ")}`);
+  const routeLines = out.filter((l) => /^ {2}route /.test(l)).map((l) => l.trim().replace(/\s+/g, " "));
+  check(routeLines.some((l) => l.startsWith("route event chain ")) && routeLines.some((l) => l.startsWith("route mailbox chain [kernel.beef] ")) && routeLines.some((l) => l.startsWith("route mailbox chain/status ")) && routeLines.length === 3,
+    `the prompt shows its routes (#143: no sender; the BEEF decoded at the door): ${routeLines.join(" | ")}`);
   const app = await record("chain/app");
-  check(app?.kind === "app" && app.name === "chain" && app.version === "0.4.0", "the head chain/app is the app record (0.4.0)");
+  check(app?.kind === "app" && app.name === "chain" && app.version === "0.5.0", "the head chain/app is the app record (0.5.0)");
   const rows = ((await (await k()).dispatch()).rows as Array<Record<string, unknown>>).filter((r) => r.app === "chain");
-  const senderOf = (r: Record<string, unknown>) => r.sender instanceof Uint8Array ? Buffer.from(r.sender).toString("hex") : String(r.sender);
-  check(rows.length === 4 && rows.every((r) => r.transport === "mailbox" && !("optional" in r)) && rows.map((r) => r.address).join(",") === "chain,chain,chain,chain/status"
-    && senderOf(rows[0]!) === "event" && senderOf(rows[1]!) === inst && senderOf(rows[2]!) === callerId,
-  `its rows in the dispatch table (event; $self → the instance's key; $owner; optional not carried): ${rows.map((r) => `${r.transport} ${r.address} ${senderOf(r).slice(0, 10)}`).join(", ")}`);
+  check(rows.length === 3 && rows.every((r) => !("sender" in r) && !("optional" in r)) && rows.map((r) => `${r.transport} ${r.address}`).join(",") === "event chain,mailbox chain,mailbox chain/status"
+    && JSON.stringify(rows[1]!.filters) === '["kernel.beef"]',
+  `its routes in the table (#143: event chain; mailbox chain with kernel.beef; mailbox chain/status): ${rows.map((r) => `${r.transport} ${r.address} ${JSON.stringify(r.filters ?? [])}`).join(", ")}`);
 
   // ------------------------------------------------ the chain: block 1 holds the funding alone
   const alice = PrivateKey.fromRandom();
@@ -155,10 +156,10 @@ try {
   const send = async (body: Record<string, unknown>) => (await callerBox.send(inst, "chain", body)).id.toString();
   const answers = async (id: string, n: number, what: string) => await until(what, async () => { await h.router.settled(); const a = await answersTo(id); return a.length >= n ? a : undefined; }, 30_000);
 
-  // A stranger's call is refused at the door (no open box, #79): the messagebox admits only a sender a row takes.
+  // A stranger's call is admitted (#143: a route has no sender; chain's functions are ungated — no `roles`).
   const strangerWallet = ephemeralWallet(PrivateKey.fromRandom());
   const refused = await new RawBox(strangerWallet, `${h.base}/@ch`).send(inst, "chain", { fn: "status", args: { txid: "00".repeat(32) } }).then(() => "sent", (e: Error) => e.message);
-  check(/ERR_NOT_SUBSCRIBED/.test(refused), `a stranger's call to the chain app is refused: no row admits it (${refused})`);
+  check(refused === "sent", `a stranger's call to the chain app is admitted: its functions are ungated (#143) (${refused})`);
 
   // Proven in: answered at once.
   const postsBefore = arcade.posts.length;

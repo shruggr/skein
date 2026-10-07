@@ -75,17 +75,18 @@ test("explore: the owner reads the log, threads, a thread, a head and a record; 
   assert.equal(await h.entries("alpha"), n0 + 9, "eight reads since, and this one: an entry each");
   assert.deepEqual(after.heads, heads, "no head moved");
 
-  // Not the owner: refused by the read rule (403), signed by the instance all the same; recorded, nothing moved.
-  const stranger = await get("/explore", new AuthFetch(ephemeralWallet(PrivateKey.fromRandom())));
+  // Not root: refused at the gate (403, #143), signed by the instance all the same; no entry for it (a door answer), nothing moved.
+  const strangerKey = PrivateKey.fromRandom();
+  const stranger = await get("/explore", new AuthFetch(ephemeralWallet(strangerKey)));
   assert.equal(stranger.status, 403);
   await h.router.settled();
-  assert.equal(await h.entries("alpha"), n0 + 11, "the stranger's handshake and its refused read");
+  assert.equal(await h.entries("alpha"), n0 + 10, "the stranger's handshake; its refused read is no entry (#143)");
   const last = (await get("/explore")).v;
   assert.deepEqual(Object.keys(last.heads as Obj).sort(), Object.keys(heads).sort(), "the heads are the same ones");
   for (const [k, v] of Object.entries(heads)) if (k !== "frontdoor/sessions") assert.deepEqual((last.heads as Obj)[k], v, `head ${k} unmoved`);
 
-  // The reads' fuel is charged to the identity the front door verified (H13): the owner's, never another's.
+  // The reads' fuel is charged to the identity the front door verified (H13): the owner's, and the stranger's refused read (#143: its filter's fuel) to the stranger.
   h.router.flushLedger();
   const ledger = h.db.ledger("alpha");
-  assert.ok(ledger.length > 0 && ledger.every((r) => r.caller === h.ownerId && r.fuel > 0), `the ledger: ${JSON.stringify(ledger.map((r) => [r.caller.slice(0, 8), r.op]))}`);
+  assert.ok(ledger.length > 0 && ledger.every((r) => r.caller === (r === ledger.at(-1) ? strangerKey.toPublicKey().toString() : h.ownerId) && r.fuel > 0), `the ledger: ${JSON.stringify(ledger.map((r) => [r.caller.slice(0, 8), r.op]))}`);
 });

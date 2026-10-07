@@ -50,7 +50,7 @@ import type { CID } from "multiformats/cid";
 import { RawBox } from "../../src/client/raw.ts";
 import { adminMain } from "../../src/client/admin-cli.ts";
 import { wasmDirObjects } from "../../src/host/boot.ts";
-import { instanceView, planInstall, readApp, readStoredApp, readsIn, sendInstall } from "../../src/host/install.ts";
+import { instanceView, planInstall, readApp, readStoredApp, sendInstall } from "../../src/host/install.ts";
 import type { HttpRequest } from "../../src/host/providers.ts";
 import { fetchHttp } from "../../src/host/router.ts";
 import { testHost, until } from "../../src/host/testhost.ts";
@@ -172,6 +172,8 @@ const liarUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/liar
 
 const asked: HttpRequest[] = [];
 const network = async (r: HttpRequest) => { asked.push(r); return await fetchHttp(r); };
+// The ov-dyn record's routes (#143): the manifest's three, then the derived own box, /submit and the read /lookup.
+const OV_ROUTES = "mailbox register overlay, mailbox submit [kernel.beef] overlay, event  overlay, mailbox ov-dyn overlay, http /submit [kernel.beef] overlay.submit, http /lookup [ov-dyn.lookup] (read)";
 const afters: Array<() => unknown> = [];
 const h = await testHost({ after: (f) => afters.push(f) }, { http: network });
 let store = "";
@@ -236,7 +238,7 @@ try {
   const before = await h.entries("inst");
   const r = await sendInstall(plan, (box, body) => owner.send(inst, box, dagCbor.decode(body)));
   await h.router.settled();
-  check(r.messages === 5, `the install: head, three dispatch rows, start (${r.messages} messages)`);
+  check(r.messages === 5, `the install: head, three routes, start (${r.messages} messages)`);
   // The head's root is the git app's record (its start may since have set `state`: the same record with state).
   const { state: _s, ...installed } = (await record("app-demo/app")) ?? {};
   check(encode(installed as never).cid.equals(app), "the head app-demo/app is the git app's record (state aside)");
@@ -268,8 +270,11 @@ try {
   const replan = await planInstall(await readStoredApp(view, tree), await instanceView(view), { modules: wasmDirObjects(join(here, "../../wasm")) });
   check(!!again.result?.tree?.equals(tree) && !!again.result?.app?.equals(replan.recordCid) && !!replan.record.state && replan.upgrade === "0.1.0",
     `the same clone again: the same tree, and the record with the installed app's state carried over, as the client rebuilds it (${JSON.stringify(again.result ?? again.error)})`);
+  // #143: a message is taken in by the messagebox (its route is open); the gate runs on the box route when it is processed.
+  const nStranger = asked.length;
   const stranger = await new RawBox(ephemeralWallet(PrivateKey.fromRandom()), `${h.base}/@inst`).send(inst, "git", { fn: "git.clone", args: { url: repoUrl, hash: hashA } }).then(() => "sent", (x: Error) => x.message);
-  check(/403/.test(stranger), `a stranger's clone is not admitted: only the owner's row opens box git (${stranger})`);
+  await h.router.settled();
+  check(stranger === "sent" && asked.length === nStranger, `a stranger's clone is recorded and runs nothing: git's call is root's (#143), nothing fetched (${stranger}, ${asked.length - nStranger} fetches)`);
 
   // ------------------------------------------------ 4. an overlay with no topics, boxes relative to the app
   const ov = await clone(repoUrl.replace(/app-demo$/, "ov-dyn"), hashOv);
@@ -277,18 +282,15 @@ try {
   if (ov.result?.tree && ov.result.app) {
     const ovPlan = await planInstall(await readStoredApp(view, ov.result.tree), await instanceView(view), { modules: wasmDirObjects(join(here, "../../wasm")) });
     check(ovPlan.recordCid.equals(ov.result.app), `planInstall rebuilds its record: the same CID (${ovPlan.recordCid} = ${ov.result.app})`);
-    const ovRec = await kk.store.get(ov.result.app) as { dispatch?: Array<{ transport: string; address: string; sender: string; filter?: string }>; reads?: Array<{ address: string; fn: string }> };
-    const keys = (ovRec.dispatch ?? []).map((r) => `${r.transport} ${r.address} ${r.sender}${r.filter ? ` ${r.filter}` : ""}`).join(", ");
-    check(keys === "mailbox register $owner, mailbox submit * beef, mailbox  event, mailbox ov-dyn $self, http /submit * beef" && JSON.stringify(ovRec.reads?.map((r) => `${r.address} ${r.fn}`)) === '["/lookup lookup"]',
-      `its rows as written, then the derived ones the manifest has not (the box "" from event is the app's box); #135: /lookup a read: ${keys} · reads ${JSON.stringify(ovRec.reads)}`);
+    const ovRec = await kk.store.get(ov.result.app) as { routes?: Array<{ transport: string; address: string; filters?: string[]; handler?: string }> };
+    const keys = (ovRec.routes ?? []).map((r) => `${r.transport} ${r.address}${r.filters ? ` [${r.filters.join(",")}]` : ""} ${r.handler ?? "(read)"}`).join(", ");
+    check(keys === OV_ROUTES, `its routes as written, then the derived ones the manifest has not (#143: no sender; /lookup a read route): ${keys}`);
     const sentOv = await sendInstall(ovPlan, (box, body) => owner.send(inst, box, dagCbor.decode(body)));
     await h.router.settled();
-    check(sentOv.messages === 1 + 2 + 5, `the install: objects (the reads record, #135), head ov-dyn/app and head reads, five dispatch rows (${sentOv.messages} messages)`);
+    check(sentOv.messages === 1 + 6, `the install: head ov-dyn/app, six routes (${sentOv.messages} messages)`);
     const table = (await instanceView(view)).dispatch.filter((r) => (r as { app?: string }).app === "ov-dyn").map((r) => `${r.transport} ${r.address}`).sort().join(", ");
-    check(table === "http /ov-dyn/submit, mailbox ov-dyn, mailbox ov-dyn, mailbox ov-dyn/register, mailbox ov-dyn/submit",
+    check(table === "event ov-dyn, http /ov-dyn/lookup, http /ov-dyn/submit, mailbox ov-dyn, mailbox ov-dyn/register, mailbox ov-dyn/submit",
       `the kernel's table holds them under the app's name: ${table}`);
-    const reads = (await readsIn(await instanceView(view))).filter((r) => r.app === "ov-dyn").map((r) => `${r.address} ${r.fn}`);
-    check(JSON.stringify(reads) === '["/ov-dyn/lookup lookup"]', `#135: the reads head holds its /lookup: ${JSON.stringify(reads)}`);
   }
 
   // ------------------------------------------------ 6. the client: `skein install <url>#<hash> --instance` (#142)
@@ -308,13 +310,13 @@ try {
   check(!!cloneLine && asked.length - asked2 === 2, `the commit came by the git app's clone in the VM, two fetches (${cloneLine})`);
   check(out.some((l) => /objects ×1 \(0 records\) · head ×1 · dispatch ×1/.test(l)) && out.some((l) => /: 2 messages sent/.test(l)), `nothing of the tree crossed from the client: head and one row (${out.filter((l) => /messages/.test(l)).join(" | ")})`);
   const twoRow = (await instanceView(view)).dispatch.find((r) => (r as { app?: string }).app === "app-two");
-  check(!!twoRow && Buffer.from(twoRow.sender as Uint8Array).toString("hex") === h.ownerId, "its $owner row holds the operator's key");
-  // A stranger's key: no row in box git, refused before anything is sent.
+  check(!!twoRow && !("sender" in twoRow) && twoRow.address === "app-two", `its route, the app's box, no sender (#143) (${JSON.stringify(twoRow && { t: twoRow.transport, a: twoRow.address })})`);
+  // A stranger's key: not root — git's call refused at the gate (#143), nothing fetched.
   const strangerKey = join(h.home, "stranger.key");
   writeFileSync(strangerKey, `${PrivateKey.fromRandom().toHex()}\n`);
   const n2 = asked.length;
   const refused = await adminMain("install", [`${repoUrl}#${hashA}`, "--instance", "inst"], { ...env, vars: { ...env.vars, SKEIN_OPERATOR_KEY: strangerKey } });
-  check(refused === 1 && /takes git.clone only from its owner's row/.test(err.at(-1) ?? "") && asked.length === n2, `a key with no row in box git: refused, nothing fetched (${err.at(-1)})`);
+  check(refused === 1 && /403|gated/.test(err.at(-1) ?? "") && asked.length === n2, `a key that is not root: git.clone refused at the gate, nothing fetched (${err.at(-1)})`);
 } catch (err) {
   check(false, `threw: ${(err as Error).stack}`);
 } finally {

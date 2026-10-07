@@ -68,7 +68,7 @@ const WALLET = abi === "component" ? { ...WALLET_P1, code: { wasm: rawCid(readFi
 const WALLET_CID = encode(WALLET).cid;
 // The chain app (#78, #79): SKEIN_CHAIN_DIR names a checkout, else this commit.
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -409,7 +409,7 @@ check(report.sameChainProgram === true, "the same chain app program record in bo
 check(eq(report.edges, { sameRoot: true, spends: true }), `#42: the TS reader derives the kernel's edges map (same root), with spends edges (${JSON.stringify(report.edges)})`);
 
 if (db) {
-  // #121: the wallet's ingest messages carry the BEEF's bytes; the chain app's `$self` row names `filter: "beef"`,
+  // #121: the wallet's ingest messages carry the BEEF's bytes; the chain app's mailbox route names `filters: ["kernel.beef"]` (#143),
   // so the kernel's door decoded each before its `local` entry was written: the message record untouched (its id,
   // what the chain app's answers name), the body the door put for it (`door.bodies`) carrying the pointer record.
   const d = new DatabaseSync(db, { readOnly: true });
@@ -418,9 +418,9 @@ if (db) {
   let filtered = 0, linked = 0, bytesInBody = 0;
   for (const [c, b] of blocks) {
     if (CID.parse(c).code !== 0x71) continue;
-    let e: { kind?: string; door?: { filter?: string; bodies?: Array<{ of: CID; is: CID }> } };
+    let e: { kind?: string; door?: { filters?: string[]; bodies?: Array<{ of: CID; is: CID }> } };
     try { e = decode(b) as typeof e; } catch { continue; }
-    if (e?.kind !== "log" || e.door?.filter !== "beef" || !e.door.bodies) continue;
+    if (e?.kind !== "log" || !e.door?.filters?.includes("kernel.beef") || !e.door.bodies) continue;
     filtered++;
     for (const p of e.door.bodies) {
       const body = blocks.get(String(p.is));
@@ -429,7 +429,7 @@ if (db) {
       if (v?.args?.beef instanceof Uint8Array) bytesInBody++;
     }
   }
-  check(filtered > 0 && linked === filtered && bytesInBody === 0, `#121: the wallet's ingests went through the door: ${filtered} local entries filtered (beef), each message's body put with the pointer record's CID in place of the bytes (${linked}), none with bytes`);
+  check(filtered > 0 && linked === filtered && bytesInBody === 0, `#121: the wallet's ingests went through the door: ${filtered} local entries filtered (kernel.beef), each message's body put with the pointer record's CID in place of the bytes (${linked}), none with bytes`);
   const r = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(here, "replays.ts"), db, payeeDb], { encoding: "utf8" });
   process.stdout.write(r.stdout);
   if (r.status !== 0) process.stdout.write(r.stderr);

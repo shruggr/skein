@@ -77,7 +77,7 @@ import { signedSubmitter } from "../../src/testapps.ts";
 const OVERLAY_REPO = "https://github.com/shruggr/skein-overlay";
 const OVERLAY_REV = process.env.SKEIN_OVERLAY_REV ?? "ccaee43c1d7d74554f76f2eead38cd84f0aa379a"; // v0.10.0 (#143)
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
 const here = dirname(fileURLToPath(import.meta.url));
 const kernel = process.env.SKEIN_KERNEL_BIN ?? join(here, "../zig-out/bin/skein-kernel");
 const home = mkdtempSync(join(tmpdir(), "skein-kz-overlay-"));

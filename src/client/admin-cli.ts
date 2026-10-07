@@ -71,7 +71,7 @@ type Where = { instance?: string; store?: string; "dry-run"?: boolean };
 const isUrl = (s: string) => /^https?:\/\/[^/]/.test(s);
 
 /** The instance the command is for: --instance, an origin (the last positional), or --store (read only). */
-interface Session { target?: Target; view(): Promise<InstanceView>; identity(): Promise<string>; dry: boolean; close(): Promise<void> }
+interface Session { target?: Target; view(): Promise<InstanceView>; identity(): Promise<string>; dry: boolean; close(): Promise<void>; signer?: string }
 
 async function sessionOf(v: Where, origin: string | undefined, env: AdminEnv): Promise<Session> {
   const given = [v.instance !== undefined, origin !== undefined, v.store !== undefined].filter(Boolean).length;
@@ -88,7 +88,7 @@ async function sessionOf(v: Where, origin: string | undefined, env: AdminEnv): P
   const key = operatorKey(env.vars).key;
   const wallet = keyWallet(key);
   const target = v.instance !== undefined ? localTarget(env.vars, v.instance, wallet) : await remoteTarget(origin!, wallet);
-  return { target, view: () => target.view(), identity: async () => target.identity, dry: !!v["dry-run"], close: () => target.close() };
+  return { target, view: () => target.view(), identity: async () => target.identity, dry: !!v["dry-run"], close: () => target.close(), signer: key.toPublicKey().toString() };
 }
 
 /** The origin among the positionals: the last one when it is a URL and the command takes one more than it needs. */
@@ -273,9 +273,14 @@ async function install(spec: string, s: Session, config: Record<string, unknown>
     } else throw new Error(`${spec}: a catalog name, <url>#<40-hex commit>, or a directory`);
     if (!s.target) throw new Error("--store reads a store file: it cannot ask the instance's git app to clone (give a directory, or --instance / an origin)");
     // #143: the git app's box is a route; its function is gated by root (git's roles) — the gate judges the sender.
-    if (!view.dispatch.some((r) => r.transport === "mailbox" && r.address === "git")) {
+    const gitRoute = view.dispatch.find((r) => r.transport === "mailbox" && r.address === "git");
+    if (!gitRoute) {
       throw new Error(`the instance has no route to box git${view.heads.some((h) => h.name === appHead("git")) ? "" : " (no git app installed)"}`);
     }
+    // The gate, read before anything is sent (the kernel's own check runs on the message; a refused one runs nothing).
+    const { gatePasses } = await import("./admin.ts");
+    const gate = await gatePasses(view, gitRoute, s.signer!);
+    if (!gate.pass) throw new Error(`box git is gated (${gate.roles.join(", ")}) and ${s.signer!.slice(0, 10)}… holds none of those roles: nothing sent`);
     const t0 = Date.now();
     const id = await s.target.send("git", { fn: "git.clone", args: { url, hash } });
     const end = await s.target.answer(id);

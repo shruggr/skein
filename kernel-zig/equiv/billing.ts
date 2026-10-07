@@ -47,7 +47,7 @@ import { stateOf, type BillingConfig } from "../../src/host/billing.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CHAIN_REPO = "https://github.com/shruggr/skein-chain";
-const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "e8d21021182ae02c673e2a2809cea5e1988bd47a";
+const CHAIN_REV = process.env.SKEIN_CHAIN_REV ?? "01e68b4f814d1293016ff5002782af48a439bb43";
 const report: Record<string, unknown> = {};
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -184,7 +184,7 @@ try {
   // Until her chain app has taken header 101 (the door checks the BUMP against it: before, a refusal).
   const r1 = await until("the funding taken", async () => { const r = await fundAtHost("alice", f1); return r.status === 200 ? r : (await sleep(250), undefined); }, 60_000);
   report.funded = [r1.status, JSON.parse(r1.text).txid === f1.txid];
-  // #135: the funding row is a message route — the same funding sent to it directly, unsigned, is 401 (only the host's signed hand-in reaches it).
+  // #143: the funding route's one filter is kernel.beef — the same funding sent to it directly, unsigned, is taken too (the payment validates itself; already internalized, nothing new).
   report.fundDirect = (await fetch(`${h.base}/@alice/wallet/fund`, { method: "POST", headers: { "content-type": "application/octet-stream", "x-bsv-skein-outputs": f1.outputs }, body: Buffer.from(f1.beef) })).status;
 
   // The owner grants the host (#130 decided 1): the host row, with the terms the host publishes.
@@ -303,7 +303,7 @@ check(report.ok === true, `the scenario ran${report.error ? `: ${report.error}` 
 check(report.published === true, "the host publishes its terms at /.well-known/skein-host (its billing key, X, the rates)");
 check(eq(report.image, { wallet: true, fundRow: true }), `the default image carries the wallet and the funding route /wallet/fund (#143: kernel.beef — the payment validates itself) (${JSON.stringify(report.image)})`);
 check(eq(report.beforeTerms, { billing: true, open: true }), "no host row: no billing state, the host forwards as usual");
-check(report.fundDirect === 401, `#135: the funding row directly, unsigned: 401 (a message route; the host's hand-in is signed) (${String(report.fundDirect)})`);
+check(report.fundDirect === 200, `#143: the funding route directly, unsigned: taken (kernel.beef only; the payment validates itself) (${String(report.fundDirect)})`);
 check(eq(report.funded, [200, true]), `a funding delivered to the host (POST /fund/alice) is handed in on the funding row and internalized (${JSON.stringify(report.funded)})`);
 const st = (report.started ?? {}) as Record<string, unknown>;
 check(st.host === true && st.allowance === BILLING.allowance && st.ticks === 1 && st.bytes === true, `the owner's host row: the host ticks at once, billing starts — the host's key, its allowance the allocation, the store measured (${JSON.stringify(st)})`);

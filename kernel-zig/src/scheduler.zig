@@ -654,7 +654,13 @@ pub const Runtime = struct {
                 if (try rt.filter(a, f.string, transport, r, &ch, at)) |out| return .{ .answered = out };
             }
             if (r.isRead()) return .{ .answered = reject(500, "ERR_READ", "a read route's filters passed the request on: a read route has no handler (its last filter answers)") };
-            if (try rt.gateOf(a, r, ch.principal)) |no| return .{ .answered = no };
+            if (try rt.gateOf(a, r, ch.principal)) |no| {
+                // The refusal metered like a filter's: the principal the filters yielded, the fuel they spent (H13).
+                var x = no;
+                x.principal = ch.principal;
+                x.fuel = ch.fuel;
+                return .{ .answered = x };
+            }
         }
         return .{ .entry = try withRequest(a, entry, try rt.store.put(a, ch.request), try doorValue(a, &ch, null)) };
     }
