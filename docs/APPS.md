@@ -7,8 +7,8 @@ wallet and the overlay apps under their own names over the chain app, the
 form before #77 gone; and by #83: the shell and the chat loop are apps,
 shruggr/skein-shell and shruggr/skein-chat, and a genesis has no shell; and
 by #91: deploy by hash, the git app cloning in the VM, §3; and by #92: the
-management page, §3; and by #125: the management site an app, not in the
-default image, §3). Status of each
+management page, §3; and by #125: the management site an app, §3; and by
+#141: chain, git and site installed at birth in the default image, §3). Status of each
 part is marked (Built, #…) or (Spec.) in the text, and in §7's table. Authors of apps, topic managers,
 lookup services and management UIs build against this document; the
 contracts that are already built are cited where they live.
@@ -280,10 +280,9 @@ instance, and there are two ways:
 site is an app, shruggr/skein-site (name `site`): one function serving
 its own tree's `www` (the head `site/app`'s record, its `tree`, through
 skein-sdk's `files`) as one read (#135), `/site/*`; the page is the installer
-(there is no installer program). The default image has no site and serves
-nothing at `/`: the host's own skein carries the site, installed by the
-host's owner, and a user manages their skeins from there, the page talking
-to each one directly. **The root is the owner's**: an app's paths are under
+(there is no installer program). The default image installs it at birth
+(#141, docs/BOOTSTRAP.md "The default image"), with the owner's read at
+`/`: a new skein answers its page at its root. **The root is the owner's**: an app's paths are under
 its name, and the owner may add a read of their own to the site's
 function, `{address: "/", prefix: true, program: <the site's program
 record>, fn: "get", root: "www"}` in the reads head — `skein plan reads add
@@ -304,11 +303,11 @@ on approval it sends the messages, signed by the wallet on a BRC-104
 session. The page, `skein plan` + `skein send`, and a raw `1sat authfetch`
 loop are three ways to the same messages: none of it is the host's (#124).
 
-- **The git app first.** The default image carries the git app's tree
-  (`apps/git`, not wired). With no `git/app` head, the page plans the
-  install over that subtree: `objects` carries what the store lacks (the
-  module as a raw block, the program and app records), then `head`, the one
-  `dispatch` row (box `git` from the owner) and `start`.
+- **The git app is there.** The default image installs it at birth (#141)
+  without its one row — box `git` from the owner: an image has no owner.
+  After the claim the owner adds it: installing git again (`skein plan
+  install` over its tree, the image's `apps/git`) sends the head, unchanged,
+  and that row.
 - **Every other app by hash.** The page sends `{fn: "git.clone", args: {url,
   hash}}` to box `git` and reads the answer from the thread that message
   launched: `/explore/edges/<message>?rel=launched-by` names it,
@@ -354,9 +353,12 @@ message in box `claim`, its sender the owner (#127: `skein plan claim`, then
 `skein send`; or, for a hosted registration, signed by the owner's wallet
 before the instance existed and forwarded by the host's instance manager) —
 writes the owner's admin rows; from then on the
-owner installs exactly as above — the wallet, the chain app, the shell app,
-the chat app, whatever the catalog offers. `$owner` in a manifest resolves
-to the claimed key (the head `claim`, read by the install).
+owner installs exactly as above — the shell app, the chat app, whatever the
+catalog offers. `$owner` in a manifest resolves to the claimed key (the head
+`claim`, read by the install). The apps the image installed at birth (#141:
+chain, git, site) are there already, as installed apps, without their rows
+from `$owner` (an image has none): the owner adds those by installing the
+app again, which sends only what the table lacks.
 
 **Reconfiguration** is the same messages again. Installing an app that is
 installed (its `<name>/app` head's root is an app record) is the upgrade:
@@ -779,7 +781,7 @@ bounded at 64 MiB).
 | manifest schema (`programs`, `config`, `provides`/`requires`, `dispatch`, `start`/`stop`); the app record at `<app>/app`; `requires` check; `writes` validation; senders `event`, `$self` | built (#72, #77, #79: src/host/manifest.ts, install.ts; the SDK's `app`; the form before #77 refused) |
 | install client (manifest → objects + head + dispatch + start, the prompt); `skein plan install <repo#commit|dir>` / `uninstall` writing the owner's `/sendMessage` bodies, `skein send` (any BRC-100 wallet: `1sat authfetch`); `start`/`stop`, row senders | built (#72, #76, #77, #124) |
 | deploy by hash: the git app (shruggr/skein-git) clones one commit in the VM through the fetch provider and answers the app record; the client rebuilds it from the stored tree and sends `head`, `dispatch`, `start` | built (#91: §3; src/host/install.ts `readStoredApp`) |
-| the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's optional `/` row); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; the git app installed from the image's tree | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
+| the management page: an app (shruggr/skein-site, its page at `/site/`, its own tree's `www` served by skein-sdk's `files`; the owner's `/` read); install, uninstall and the address book from a browser, planned with src/host/plan.ts over the explorer's reads; chain, git and site installed at birth in the default image (#141) | built (#92, #125: §3; shruggr/skein-site 0.7.3, with the Inbox, #99, handles, #103, profiles, #104, and the grouped permission request, #97) |
 | the owner's own http row to an app's handler (`skein plan dispatch --http`; no `app`: an upgrade or uninstall of the app leaves it) | built (#125: src/client/admin.ts `planDispatch`) |
 | libp2p rows installed by apps; the host's libp2p node follows the dispatch table (subscribe/unsubscribe, handle/unhandle, live) | built (#72, #77: src/host/p2p.ts `libp2pConfig`, router.ts `syncDispatch`) |
 | an overlay app's wiring derived from `config.overlay` and shown in the prompt | built (#72, #77, #79: src/host/manifest.ts `overlayWiring`) |

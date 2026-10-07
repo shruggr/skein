@@ -216,7 +216,7 @@ function senderOf(s: string, view: InstanceView): { sender: DispatchRow["sender"
  * out (#78: the chain app's `status` row on a host with no status provider), as a genesis leaves out
  * a row from a provider its host has not; `skipped` says which. `optional` never reaches the kernel.
  */
-export function wiring(record: AppRecord, view: InstanceView, skipped: string[] = []): RowOp[] {
+export function wiring(record: AppRecord, view: InstanceView, skipped: string[] = [], o: { image?: boolean } = {}): RowOp[] {
   const out: RowOp[] = [];
   for (const r of record.dispatch as Row[]) {
     const { transport, address, prefix, sender, program, fn, optional, ...settings } = r;
@@ -224,6 +224,11 @@ export function wiring(record: AppRecord, view: InstanceView, skipped: string[] 
     if (!cid) throw new Error(`row ${rowKey(record.name, r)}: no program for role ${program}`);
     if (optional === true && sender.startsWith("$") && sender !== "$owner" && sender !== "$self" && !serviceOf(view, sender.slice(1))) {
       skipped.push(`${transport} ${rowAddress(record.name, r)} from ${sender}: no ${sender.slice(1)} provider in the address book (optional; left out)`);
+      continue;
+    }
+    // #141: an image's install leaves out the rows from `$owner` — an image has no owner; the owner adds them after the claim (a table edit, `skein plan dispatch add`).
+    if (o.image && sender === "$owner") {
+      skipped.push(`${transport} ${rowAddress(record.name, r)} from $owner: an image has no owner (left out; the owner adds it after the claim)`);
       continue;
     }
     const who = senderOf(sender, view);
@@ -324,8 +329,11 @@ export function shellProgram(read: ReadFile, role: string, src: ShellSource, app
   };
 }
 
-/** Plan the install of `t` into the instance `view` reads: every check (APPS.md §3 step 0), then what to send. */
-export async function planInstall(t: AppTree, view: InstanceView, o: { modules: Objects }): Promise<Plan> {
+/**
+ * Plan the install of `t` into the instance `view` reads: every check (APPS.md §3 step 0), then what to send.
+ * `image` (#141): the install an image carries at birth (boot.ts) — the same plan, its rows from `$owner` left out.
+ */
+export async function planInstall(t: AppTree, view: InstanceView, o: { modules: Objects; image?: boolean }): Promise<Plan> {
   const m = t.checked.manifest;
   const notes: string[] = [];
   // requires: every interface is provided by some installed app (each app head's root record).
@@ -350,7 +358,7 @@ export async function planInstall(t: AppTree, view: InstanceView, o: { modules: 
   const app = encode(record as never);
 
   const skipped: string[] = [];
-  const want = wiring(record, view, skipped);
+  const want = wiring(record, view, skipped, { image: o.image });
   for (const s of skipped) notes.push(`row ${s}`);
   // No row may take a key the genesis or another app has.
   const taken = new Map<string, string>();

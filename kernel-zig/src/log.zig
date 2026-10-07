@@ -73,6 +73,9 @@
 //            `tree` (issue #4): the system tree the instance booted from (a git
 //            tree, its objects pre-filled by the loader); processing the genesis
 //            sets the head `main` to it. `reads`: the front door's (#40).
+//            `heads` (#141): {<head name>: <record CID>} — an image's installed apps (`<app>/app`,
+//            the app record) and the `reads` head; processing the genesis advances each, after
+//            the dispatch rows (the records pre-filled by the loader, as the tree's objects are).
 //            `addressBook` (#70): the address book's seed (the host's providers,
 //            the owner's mailbox), written into the head `peers` when the
 //            genesis is processed.
@@ -412,6 +415,15 @@ pub fn isGenesis(x: ?Value) bool {
         for (c.array) |b| if (b != .string or b.string.len == 0) return false;
     }
     if (g.get("tree")) |t| if (Value.cidOf(t) == null or cidm.codecOf(Value.cidOf(t).?) != cidm.GIT_RAW) return false;
+    // An image's installed apps (#141): {<head name>: <record CID>}, each head advanced when the genesis is
+    // processed. Not `main` (the tree's), `claim` (the claim's) or `billing` (the kernel's own, #130).
+    if (g.get("heads")) |hs| {
+        if (!isCidMap(hs)) return false;
+        for (hs.map) |e| {
+            if (e.key.len == 0 or std.mem.indexOfAny(u8, e.key, " \t\n\r\x0b\x0c\x00") != null) return false;
+            for ([_][]const u8{ "main", "claim", "billing" }) |k| if (std.mem.eql(u8, e.key, k)) return false;
+        }
+    }
     // #40: the front door's reads [{caller?, op}].
     if (g.get("reads")) |rs| {
         if (rs != .array) return false;

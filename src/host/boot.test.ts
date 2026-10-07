@@ -10,7 +10,10 @@ import { join } from "node:path";
 import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
-import { anyOf, dirSource, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
+import * as dagCbor from "@ipld/dag-cbor";
+import { anyOf, dirSource, installAtBirth, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
+import { readApp } from "./install.ts";
+import { planInstall } from "./plan.ts";
 import { genesisRecord, keyHex, resolveReads, resolveSystem } from "./genesis.ts";
 import { WALLET } from "../runtime/programs.ts";
 
@@ -119,4 +122,45 @@ test("system tree: refusals — no dispatch rows, a bad .cid, a handler that is 
   const c = { identity: key(), owner: key(), handle: "a", domain: "localhost" };
   assert.throws(() => resolveSystem(c, {}, [{ box: "run", handler: "missing" }]), /no such program/);
   assert.throws(() => resolveSystem(c, {}, [], { peers: { infer: "$infer" } }), /no inference peer/);
+});
+
+test("#141: the default image installs chain, git and site at birth — the records, rows and heads a message install writes, no row from $owner, the site read at /", async () => {
+  const image = join(import.meta.dirname, "../../images/default");
+  const { root, objects } = await dirSource(image);
+  const src = anyOf(objects, wasmDirObjects(join(import.meta.dirname, "../../wasm")));
+  const s = await readSystemTree(src, root);
+  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site"]);
+  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
+  const identity = key();
+  const c = { identity, handle: "a", domain: "localhost" };
+  const sys = resolveSystem(c, programs, [], s.config, root, s.routes, s.reads, s.dispatch);
+  const kept = new Map<string, Uint8Array>();
+  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
+  const born = await installAtBirth(target, src, s, sys, c);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.4.0", "git 0.1.3", "site 0.7.7"]);
+  assert.deepEqual(Object.keys(born.heads).sort(), ["chain/app", "git/app", "reads", "site/app"]);
+  const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
+  for (const n of ["chain", "git", "site"]) assert.equal(get(born.heads[`${n}/app`]!).kind, "app", `${n}/app is its app record, in the store`);
+  // The rows: each with its app; none from the owner (an image has none: the owner adds them after the claim).
+  const rows = born.rows as Array<Record<string, any>>;
+  assert.ok(rows.every((r) => typeof r.app === "string"));
+  assert.deepEqual(rows.map((r) => `${r.app} ${r.transport} ${r.address} ${r.sender instanceof Uint8Array ? keyHex(r.sender) === identity ? "$self" : "a key" : r.sender}`), ["chain mailbox chain event", "chain mailbox chain $self"], "chain's event row (the headers feed) and $self row; git's only row is the owner's; status left out (no provider here)");
+  assert.ok(born.apps.find((a) => a.name === "git")!.notes.some((x) => /from \$owner: an image has no owner/.test(x)));
+  // The reads: the site's own under /site/, and the owner's at / (no app: an upgrade of site leaves it).
+  const reads = get(born.heads.reads!).reads as Array<Record<string, any>>;
+  const site = get(born.heads["site/app"]!);
+  assert.deepEqual(reads.map((r) => [r.address, r.prefix, r.fn, r.root, r.app, r.program.toString()]), [
+    ["/site/", true, "get", "www", "site", site.programs.site.toString()],
+    ["/", true, "get", "www", undefined, site.programs.site.toString()],
+  ]);
+  // The same app record as `skein plan install <dir>` over a claimed instance: same CID; its rows are these plus the owner's.
+  const owner = key();
+  const claimed = { store: { has: async () => false, get: async () => { throw new Error("none"); }, bytes: async () => { throw new Error("none"); }, putBlock: async () => {} } as never, owner, identity, programs: sys.programs, addressBook: [], heads: [], dispatch: [...sys.dispatch] };
+  const viaMessages = await planInstall(await readApp(join(image, "apps/chain")), claimed, { modules: src });
+  assert.ok(viaMessages.recordCid.equals(born.heads["chain/app"]!), "the image's chain/app is the message install's app record");
+  assert.deepEqual(viaMessages.rows.filter((r) => keyHex(r.row.sender) !== owner).map((r) => encode(r.row as never).cid.toString()), rows.filter((r) => r.app === "chain").map((r) => encode(r as never).cid.toString()), "the same rows, byte for byte, but the owner's");
+  assert.ok(viaMessages.rows.some((r) => keyHex(r.row.sender) === owner), "the message install adds the owner's row");
+  // The genesis carries the heads.
+  const g = genesisRecord(c, { ...sys, dispatch: [...sys.dispatch, ...born.rows], heads: born.heads }) as Record<string, any>;
+  assert.ok(g.heads["chain/app"].equals(born.heads["chain/app"]));
 });

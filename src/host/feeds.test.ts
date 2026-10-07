@@ -126,3 +126,29 @@ test("feeds: an SSE header feed fanned out to its subscribers, resumed after a d
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(conns.length, 2, "no reconnect after the last subscriber left");
 });
+
+test("#141: subscribing with a backfill — the headers it lacks first, as runs; live headers that arrive meanwhile wait behind them, a duplicate dropped", async (t) => {
+  const conns: ServerResponse[] = [];
+  const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/event-stream" }); res.write(": hello\n\n"); conns.push(res); });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => server.close());
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/headers`;
+  const got: string[] = [];
+  const feeds = new Feeds({ admit: async (_h, _box, ev) => { got.push(ev.raws ? `run ${(ev.raws as Uint8Array[]).map((r) => r[0]).join(",")}` : `live ${(ev.raw as Uint8Array)[0]}`); }, backoff: { min: 20, max: 100 } });
+  t.after(() => feeds.stop());
+  let release!: (raws: Uint8Array[]) => void;
+  const done = feeds.host("w", { kind: "headers", url }, () => new Promise((r) => { release = r; }));
+  await until("connected", () => conns[0]);
+  conns[0]!.write(`data: ${hdr(5)}\n\n`);
+  conns[0]!.write(`data: ${hdr(6)}\n\n`);
+  await until("queued while the backfill is read", () => feeds.pending("w") === 2 || undefined);
+  assert.deepEqual(got, [], "nothing admitted before the backfill");
+  release([3, 4, 5].map((n) => Buffer.alloc(80, n)));
+  await done;
+  await until("drained", () => got.length === 2 || undefined);
+  assert.deepEqual(got, ["run 3,4,5", "live 6"], "the backfill first (5 once), then the live stream");
+  // Already subscribed, or no backfill: nothing pushed first.
+  conns[0]!.write(`data: ${hdr(7)}\n\n`);
+  await until("live", () => got.length === 3 || undefined);
+  assert.equal(got[2], "live 7");
+});

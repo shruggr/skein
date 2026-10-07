@@ -266,6 +266,12 @@ docs/BOOTSTRAP.md). The kernel adds only this:
   pre-filled. Processing the genesis (`scheduler.zig`) sets the head `main` to
   it. The head update has no `thread` (`heads.By.thread` is optional), and the
   genesis is refused if the tree is not in the store.
+- **genesis `heads?`** (#141, `log.zig`): `{<head name>: <record CID>}`, the
+  heads of an image's installed apps (`<app>/app`, `reads`), their records
+  pre-filled by the loader. Processing the genesis advances each, after the
+  dispatch rows and `main`, with no `thread`; refused if a record is not in
+  the store, and a genesis naming `main`, `claim` or `billing` there is
+  malformed. No format bump: a genesis without it reads as before.
 - **genesis `owner?`** (#89, `log.zig`): an image names no owner. Its
   `claim` row is the kernel's `claim` operation (`scheduler.zig` claim):
   the owner is the message's sender (#127; a body's `owner` is not read),
@@ -287,7 +293,8 @@ docs/BOOTSTRAP.md). The kernel adds only this:
     are already put. The state pointer moves onto that record and the index is
     read from it. It works only on a store with no log, and only for this
     kernel's format.
-- **replay** (`replay.zig` copyLog): copies the genesis tree's objects, so a
+- **replay** (`replay.zig` copyLog): copies the genesis tree's objects, and
+  (#141) the records its `heads` name with every record they link, so a
   booted store replays to itself.
 
 ## Components (issue #34)

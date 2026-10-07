@@ -1,0 +1,26 @@
+{
+  "name": "skein-site",
+  "version": "0.7.7",
+  "private": true,
+  "description": "The management site of a skein, as an app (www/ served by its route handler): create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet, sign its profile, find handles.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@1sat/actions": "0.0.232",
+    "@1sat/connect": "0.0.103",
+    "@1sat/templates": "0.0.43",
+    "@1sat/types": "0.0.52",
+    "@1sat/utils": "0.0.42",
+    "@1sat/wallet-browser": "0.0.104",
+    "@bsv/message-box-client": "2.6.0",
+    "@bsv/sdk": "2.8.6",
+    "@ipld/dag-cbor": "10.0.2",
+    "@ipld/dag-json": "11.0.1",
+    "buffer": "6.0.3",
+    "esbuild": "0.28.2",
+    "multiformats": "14.0.5"
+  }
+}

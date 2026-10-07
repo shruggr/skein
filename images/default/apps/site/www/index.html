@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>skein</title>
+<link rel="icon" href="skein-mark.jpg" type="image/jpeg">
+<link rel="preload" href="fonts/instrument-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/outfit-latin-300-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="app.js"></script>
+</head>
+<body class="out">
+<header class="top">
+  <div class="bar">
+    <a class="brand" href="#/"><img src="skein-mark.jpg" alt="" width="34" height="34"><span class="word">skein</span></a>
+    <nav class="primary" aria-label="Main">
+      <a id="nav-skeins" href="#/">Skeins</a>
+      <a id="nav-inbox" href="#/inbox">Inbox</a>
+      <a id="nav-how" href="#how">How it works</a>
+    </nav>
+    <div class="wallet">
+      <span id="who" class="who"></span>
+      <button id="connect" class="go" type="button">Connect a wallet</button>
+    </div>
+  </div>
+</header>
+<main id="main"><p class="mut">Loading.</p></main>
+<footer><div class="foot"><span>This page talks to each skein directly, signed by your wallet.</span><nav class="foot-links" aria-label="About skein"><a href="https://skein.nexus">Docs</a><a href="https://github.com/shruggr/skein-site">Source</a></nav></div></footer>
+</body>
+</html>
