@@ -1,12 +1,11 @@
-// The operator's admin commands (#124, #142): each builds the owner's messages (admin.ts, plan.ts), signs
+// The operator's admin commands (#124, #142, #143): each builds root's messages (admin.ts, plan.ts), signs
 // them in this process with the operator's key (SKEIN_OPERATOR_KEY, default $SKEIN_HOME/operator.key;
 // hostenv.ts) and delivers them (target.ts) — no other process, no wallet command.
 //
 //   skein install <catalog-name | url#commit | dir> <where> [--config <file.json>] [--dry-run]
 //   skein uninstall <app> <where> [--dry-run]
-//   skein dispatch add|remove [--sender key] <box> <handler> <where> [--dry-run]
-//   skein dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--dry-run]
-//   skein reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--dry-run]
+//   skein routes add|remove [--transport t] [--prefix] [--filters f,g] [--fn f] [--settings json] <address> [<handler>] <where> [--dry-run]
+//   skein grant add|remove <key> [--role root|<app>.<role>] <where> [--dry-run]
 //   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
 //   skein peers remove <key> <where> [--dry-run]
 //   skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
@@ -35,29 +34,30 @@ import type { CID } from "multiformats/cid";
 import { appHead, readStoredApp, type AppTree, type InstanceView } from "../host/plan.ts";
 import { identityOf, operatorKey, type Vars } from "../host/hostenv.ts";
 import { keyWallet } from "../wallet.ts";
-import { catalogOf, messageJson, planClaim, planDeploy, planDispatch, planHost, planInstallApp, planPeers, planReads, planUninstallApp, type AdminPlan, type HostTerms, type PeerChange } from "./admin.ts";
+import { catalogOf, messageJson, planClaim, planDeploy, planGrant, planHost, planInstallApp, planPeers, planRoute, planUninstallApp, type AdminPlan, type HostTerms, type PeerChange, type RouteArgs } from "./admin.ts";
 import { localTarget, remoteTarget, stdoutOf, type Target } from "./target.ts";
 
 export const ADMIN_USAGE = `usage (the operator's messages, signed with SKEIN_OPERATOR_KEY, default $SKEIN_HOME/operator.key):
   skein install <catalog-name | url#commit | dir> <where> [--config <file.json>] [--dry-run]
                                                      an app (docs/APPS.md §3): a name from the instance's catalog or a repository
                                                      and commit, cloned by the instance's git app; head <app>/app, its rows, start
-  skein uninstall <app> <where> [--dry-run]          its stop, then its dispatch rows removed (the heads are left)
-  skein dispatch add|remove [--sender key] <box> <handler> <where> [--dry-run]     a mailbox row of the dispatch table (#77)
-  skein dispatch add|remove --http [--prefix] --fn f [--settings json] [--sender key|session] <path> <handler> <where> [--dry-run]
-                                                     an http row; <handler>: a program record CID, a genesis program, or <app>.<role>
-  skein reads add|remove [--prefix] --fn f [--settings json] <path> <handler> <where> [--dry-run]
-                                                     the owner's own read (#135: e.g. the site at /)
+  skein uninstall <app> <where> [--dry-run]          its stop, then its routes removed (the heads are left)
+  skein routes add [--transport mailbox|event|http|libp2p] [--prefix] [--filters f,g] [--fn f] [--settings json] <address> [<handler>] <where> [--dry-run]
+                                                     root's own route (#143): <handler> a program record CID, a genesis program,
+                                                     or <app>.<role>; an http route with --filters and no handler is a read route
+                                                     (the site at /: routes add --prefix --filters site.get --settings '{"root":"www"}' /)
+  skein routes remove [--transport t] [--prefix] <address> <where> [--dry-run]
+  skein grant add|remove <key> [--role root|<app>.<role>] <where> [--dry-run]     a grant (#143; root by default)
   skein peers add <key> <address> [--transport mailbox|libp2p|local] [--handle h@d] <where> [--dry-run]
   skein peers remove <key> <where> [--dry-run]      an address-book entry (#70)
   skein host add|remove (<host-key> --x sats [--rates json] | --from <host origin>) <where> [--dry-run]
                                                      the host row (#130)
-  skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]               an image's claim (#127): the key that sends it owns it
+  skein claim [--messagebox url] [--handle h@d] <where> [--dry-run]               an image's claim (#127, #143): root to the key that sends it
   skein deploy <dir> [--only glob,glob | --all] <where> [--dry-run]               a directory into main (objects, head)
 <where>: --instance <handle> (this host machine: over its control socket) | <origin> (one BRC-104 session)
          | --store <runtime.db> (read only: planned and printed, nothing sent)`;
 
-export const ADMIN_COMMANDS = ["install", "uninstall", "dispatch", "reads", "peers", "host", "claim", "deploy"] as const;
+export const ADMIN_COMMANDS = ["install", "uninstall", "routes", "grant", "peers", "host", "claim", "deploy"] as const;
 
 export interface AdminEnv {
   vars: Vars;
@@ -138,24 +138,23 @@ export async function adminMain(cmd: string, argv: string[], env: AdminEnv): Pro
         s = await sessionOf(v, origin, env);
         return await deliver(await planUninstallApp(app, await s.view()), s, env);
       }
-      case "dispatch": {
-        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, sender: { type: "string" }, http: { type: "boolean" }, prefix: { type: "boolean" }, fn: { type: "string" }, settings: { type: "string" } } });
-        const { args: [op, box, handler, ...more], origin } = splitOrigin(positionals, 3);
-        if (!handler || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
-        if (!v.http && (v.prefix || v.fn !== undefined || v.settings !== undefined)) { env.err("skein dispatch: --prefix, --fn and --settings are an http row's (--http)"); return 2; }
-        const settings = v.settings !== undefined ? json("skein dispatch --settings", v.settings) : undefined;
+      case "routes": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, transport: { type: "string" }, prefix: { type: "boolean" }, filters: { type: "string" }, fn: { type: "string" }, settings: { type: "string" } } });
+        const origin = positionals.length > 1 && isUrl(positionals.at(-1)!) ? positionals.at(-1) : undefined;
+        const [op, address, handler, ...more] = origin ? positionals.slice(0, -1) : positionals;
+        if (!address || more.length || (op !== "add" && op !== "remove") || (op === "remove" && handler !== undefined)) { env.err(ADMIN_USAGE); return 2; }
+        const settings = v.settings !== undefined ? json("skein routes --settings", v.settings) : undefined;
+        const filters = v.filters !== undefined ? v.filters.split(",").map((x) => x.trim()).filter(Boolean) : undefined;
         s = await sessionOf(v, origin, env);
-        const programs = await handlerPrograms(s, handler);
-        return await deliver(planDispatch(await s.identity(), { op, sender: v.sender, box: box!, handler, ...(v.http ? { http: { prefix: !!v.prefix, fn: v.fn ?? "", settings } } : {}) }, programs), s, env);
+        const programs = handler ? await handlerPrograms(s, handler) : {};
+        return await deliver(await planRoute(await s.view(), { op, address, ...(v.transport ? { transport: v.transport as RouteArgs["transport"] } : {}), ...(v.prefix ? { prefix: true } : {}), ...(filters ? { filters } : {}), ...(handler ? { handler } : {}), ...(v.fn ? { fn: v.fn } : {}), ...(settings ? { settings } : {}) }, programs), s, env);
       }
-      case "reads": {
-        // #143: a read is a route with filters only — `<app>.<filter>` answers it (phase 2 reworks this command).
-        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, prefix: { type: "boolean" }, settings: { type: "string" } } });
-        const { args: [op, path, filter, ...more], origin } = splitOrigin(positionals, 3);
-        if (!filter || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
-        const settings = v.settings !== undefined ? json("skein reads --settings", v.settings) : undefined;
+      case "grant": {
+        const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, role: { type: "string" } } });
+        const { args: [op, key, ...more], origin } = splitOrigin(positionals, 2);
+        if (!key || more.length || (op !== "add" && op !== "remove")) { env.err(ADMIN_USAGE); return 2; }
         s = await sessionOf(v, origin, env);
-        return await deliver(await planReads(await s.view(), { op, path: path!, filter, prefix: !!v.prefix, ...(settings ? { settings } : {}) }), s, env);
+        return await deliver(await planGrant(await s.view(), key, { ...(v.role ? { role: v.role } : {}), ...(op === "remove" ? { remove: true } : {}) }), s, env);
       }
       case "peers": {
         const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: { ...where, transport: { type: "string" }, handle: { type: "string" } } });

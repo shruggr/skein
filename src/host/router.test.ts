@@ -22,7 +22,6 @@ import { CID } from "multiformats/cid";
 import { RawBox } from "../client/raw.ts";
 import { KERNEL_BIN } from "./kernel.ts";
 import { main } from "./cli.ts";
-import { planDispatch } from "../client/admin.ts";
 import { sendPlan } from "../testapps.ts";
 import { testHost, until } from "./testhost.ts";
 import { HANDLE_CERTIFICATE_TYPE, NO_REVOCATION_OUTPOINT } from "./handles.ts";

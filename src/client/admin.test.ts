@@ -12,7 +12,7 @@ import { join } from "node:path";
 import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
 import { encode } from "../runtime/cid.ts";
-import { messageJson, planDispatch, planPeers } from "./admin.ts";
+import { messageJson, planGrant, planPeers, planRoute } from "./admin.ts";
 import { signMessage } from "./raw.ts";
 import { identityOf, operatorKey, withHostEnv } from "../host/hostenv.ts";
 import { keyWallet } from "../wallet.ts";
@@ -29,31 +29,43 @@ test("messageJson: the /sendMessage JSON body; its body read as DAG-JSON is the 
   assert.deepEqual(dagCbor.encode(back), dagCbor.encode(body));
 });
 
-test("planDispatch / planPeers: the kernel's bodies (a route with no sender, #143; a key as bytes)", () => {
-  const p = planDispatch(KEY, { op: "add", box: "register", handler: String(encode({ kind: "program" } as never).cid) });
-  const row = (p.messages[0]!.body as { row: { sender?: unknown; transport: string; address: string } }).row;
+/** A view with no store: what planRoute reads of an instance (the route table, the heads). */
+const view = (dispatch: unknown[] = []) => ({ store: { get: async () => { throw new Error("none"); }, has: async () => false, bytes: async () => { throw new Error("none"); }, putBlock: async () => {} }, identity: KEY, programs: {}, addressBook: [], heads: [], dispatch }) as never;
+
+test("planRoute / planPeers / planGrant: the kernel's bodies (a route with no sender, #143; a key as bytes)", async () => {
+  const prog = encode({ kind: "program" } as never).cid;
+  const p = await planRoute(view(), { op: "add", address: "register", handler: String(prog) });
+  const row = (p.messages[0]!.body as { row: Record<string, unknown> }).row;
   assert.equal(p.messages[0]!.box, "dispatch");
-  assert.deepEqual([row.transport, row.address, row.sender], ["mailbox", "register", undefined]);
-  assert.throws(() => planDispatch(KEY, { op: "add", sender: KEY, box: "register", handler: String(encode({ kind: "program" } as never).cid) }), /--sender: gone \(#143\)/);
+  assert.deepEqual([row.transport, row.address, row.sender, String(row.program)], ["mailbox", "register", undefined, String(prog)]);
   const q = planPeers(KEY, [{ op: "add", key: KEY, transport: "mailbox", address: "https://x.example", handle: "bob", domain: "example.com" }, { op: "remove", key: KEY }]);
   assert.deepEqual(q.messages.map((m) => (m.body as { op: string }).op), ["add", "remove"]);
   assert.ok((q.messages[1]!.body as { key: unknown }).key instanceof Uint8Array);
   assert.throws(() => planPeers(KEY, [{ op: "remove", key: "02ab" }]), /not an identity key/);
+  const g = await planGrant(view(), KEY, { role: "amm.admin" });
+  assert.deepEqual([g.messages[0]!.box, (g.messages[0]!.body as { op: string; role: string }).op, (g.messages[0]!.body as { role: string }).role], ["grant", "add", "amm.admin"]);
+  assert.ok((g.messages[0]!.body as { principal: unknown }).principal instanceof Uint8Array);
+  await assert.rejects(planGrant(view(), KEY, { role: "user" }), /user is any principal/);
 });
 
-test("planDispatch --http (#125, #143): root's own http route (prefix, filters, fn, the handler's settings; no app, no sender); refusals", () => {
+test("planRoute (#125, #143): root's own http route (prefix, filters, fn, settings; no app, no sender); a read route; removes; refusals", async () => {
   const prog = encode({ kind: "program" } as never).cid;
-  const p = planDispatch(KEY, { op: "add", box: "/", handler: "site.site", http: { prefix: true, fn: "get", settings: { root: "www" } } }, { "site.site": prog });
+  const p = await planRoute(view(), { op: "add", address: "/x", prefix: true, filters: ["kernel.brc104"], handler: "site.site", fn: "get", settings: { root: "www" } }, { "site.site": prog });
   const row = (p.messages[0]!.body as { row: Record<string, unknown> }).row;
-  assert.deepEqual({ ...row, program: String(row.program) }, { transport: "http", address: "/", prefix: true, program: String(prog), fn: "get", root: "www" });
-  assert.equal(p.prompt[0], `dispatch add http / prefix → site.site.get (${prog}) (root www)`);
-  const s = planDispatch(KEY, { op: "add", box: "/x", handler: String(prog), http: { fn: "get", filters: ["kernel.brc104"] } });
-  assert.deepEqual([(s.messages[0]!.body as { row: { filters?: unknown; prefix?: unknown } }).row.filters, (s.messages[0]!.body as { row: { prefix?: unknown } }).row.prefix], [["kernel.brc104"], undefined]);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "x", handler: String(prog), http: { fn: "get" } }), /a path/);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "/a/../b", handler: String(prog), http: { fn: "get" } }), /a path/);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "" } }), /--fn/);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "/", handler: String(prog), http: { fn: "get", settings: { app: "site" } } }), /the route's own/);
-  assert.throws(() => planDispatch(KEY, { op: "add", box: "x", sender: "session", handler: String(prog) }), /--sender: gone/);
+  assert.deepEqual({ ...row, program: String(row.program) }, { root: "www", transport: "http", address: "/x", prefix: true, filters: ["kernel.brc104"], program: String(prog), fn: "get" });
+  assert.equal(p.prompt[0], `dispatch add http /x prefix [kernel.brc104] → ${prog}.get (root www) (root's own: no app)`);
+  // A read route needs its filter declared by an installed app.
+  await assert.rejects(planRoute(view(), { op: "add", address: "/", prefix: true, filters: ["site.get"] }), /no installed app site declares it/);
+  const held = { transport: "http", address: "/y", program: prog, fn: "get" };
+  const r = await planRoute(view([held]), { op: "remove", address: "/y" });
+  assert.deepEqual((r.messages[0]!.body as { op: string; row: unknown }), { op: "remove", row: held }, "a remove sends the route as held");
+  await assert.rejects(planRoute(view([{ ...held, app: "site" }]), { op: "remove", address: "/y" }), /root has no route there/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "x", transport: "http", handler: String(prog), fn: "get" }), /a path/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "/a/../b", handler: String(prog), fn: "get" }), /a path/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "/", handler: String(prog) }), /--fn/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "/", handler: String(prog), fn: "get", settings: { app: "site" } }), /the route's own/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "x", prefix: true, handler: String(prog) }), /--prefix: an http route's/);
+  await assert.rejects(planRoute(view(), { op: "add", address: "/z" }), /only an http read route/);
 });
 
 test("host.env (#142): every SKEIN_* line, quotes and comments stripped, the environment wins; the operator's key made once, 0600", async (t) => {

@@ -425,6 +425,7 @@ export async function planRootRoute(view: InstanceView, op: "add" | "remove", ro
   } else if (!held || held.app) throw new Error(`route ${k}: root has no route there`);
   const { app: _app, ...own } = row;
   void _app;
-  const r: RowOp = { op, row: own as DispatchRow };
+  // A remove sends the route as held (the kernel checks it whole).
+  const r: RowOp = { op, row: op === "remove" ? held! : own as DispatchRow };
   return { prompt: [`dispatch ${op} ${showRow(r)} (root's own: no app)`], rows: [r] };
 }

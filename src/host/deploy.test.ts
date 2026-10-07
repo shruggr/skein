@@ -230,33 +230,39 @@ test("skein deploy: a directory into main on a session with the instance's origi
   await mainIs(await store("kurt"), root!);
 });
 
-test("skein dispatch --instance: a message to box `dispatch` as the owner, over the control socket, changes a running instance's dispatch table (a kernel operation), a handler named from its genesis; no new genesis", { skip }, async (t) => {
+test("skein routes --instance (#143): a message to box `dispatch` as root, over the control socket, changes a running instance's route table (a kernel operation), a handler named from its genesis; no new genesis; skein grant", { skip }, async (t) => {
   const { h, env, store } = await setup(t, ["martha"]);
   const s = await store("martha");
   const e = env();
-  const plan = async (...argv: string[]) => { const code = await adminMain("dispatch", [...argv, "--instance", "martha"], e.env); await h.router.settled(); return code; };
+  const plan = async (...argv: string[]) => { const code = await adminMain("routes", [...argv, "--instance", "martha"], e.env); await h.router.settled(); return code; };
   const genesis = (await collect(s.log.entries(0)))[0]!.cid;
-  const before = await until("the genesis processed (its seed rows)", () => currentDispatch(s));
+  const before = await until("the genesis processed (its seed routes)", () => currentDispatch(s));
   const resolve = (await programsOf(s)).resolve!;
-  const peer = PrivateKey.fromRandom().toPublicKey().toString();
   const last = async () => (await currentDispatch(s))!.at(-1)!;
 
-  // #143: a route has no sender — `--sender` is refused; the route is the box's alone.
-  assert.equal(await plan("add", "--sender", peer, "register", "resolve"), 1);
-  assert.match(e.err.at(-1)!, /--sender: gone \(#143\)/);
   assert.equal(await plan("add", "register", "resolve"), 0, e.err.join("\n"));
-  await until("the new row", async () => (await last()).address === "register" ? true : undefined);
+  await until("the new route", async () => (await last()).address === "register" ? true : undefined);
   const row = await last();
-  assert.deepEqual([row.transport, row.address, String(row.program)], ["mailbox", "register", String(resolve)]);
-  assert.equal(await plan("remove", "register", String(resolve)), 0);
-  await until("the row removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
-  assert.deepEqual(await currentDispatch(s), before, "removed: the rows as they were");
+  assert.deepEqual([row.transport, row.address, String(row.program), row.sender], ["mailbox", "register", String(resolve), undefined]);
+  assert.equal(await plan("remove", "register"), 0, e.err.join("\n"));
+  await until("the route removed", async () => (await currentDispatch(s))!.length === before!.length ? true : undefined);
+  assert.deepEqual(await currentDispatch(s), before, "removed: the routes as they were");
   assert.ok((await collect(s.log.entries(0)))[0]!.cid.equals(genesis), "the same genesis");
 
   assert.equal(await plan("swap", "register", "resolve"), 2);
   assert.equal(await plan("add", "register", "no-such-program"), 1);
   assert.match(e.err.at(-1)!, /not a CID or a program name/);
-  assert.equal(await main(["dispatch", "martha", "add", "register", "resolve"], e.env), 2, "skein-host changes no dispatch table");
+  assert.equal(await plan("remove", "nothing"), 1);
+  assert.match(e.err.at(-1)!, /root has no route there/);
+
+  // skein grant: an app role to a key, the grants head moved; revoked.
+  const peer = PrivateKey.fromRandom().toPublicKey().toString();
+  const grants = async () => { const c = await (await h.router.hydrate("martha")).kernel.call("head", "grants") as CID | null; return c ? (await s.get(c) as unknown as { roles: Record<string, Uint8Array[]> }).roles : {}; };
+  assert.equal(await adminMain("grant", ["add", peer, "--role", "demo.ops", "--instance", "martha"], e.env), 0, e.err.join("\n"));
+  await until("granted", async () => (await grants())["demo.ops"]?.length ? true : undefined);
+  assert.equal(await adminMain("grant", ["remove", peer, "--role", "demo.ops", "--instance", "martha"], e.env), 0, e.err.join("\n"));
+  await until("revoked", async () => !(await grants())["demo.ops"] ? true : undefined);
+  assert.equal(await main(["dispatch", "martha", "add", "register", "resolve"], e.env), 2, "skein-host changes no route table");
 });
 
 // ---------------------------------------------------------------- the roster

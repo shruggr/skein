@@ -1,16 +1,15 @@
 # The default image
 
-One genesis for everyone, with no owner in it (#89). It has the front door,
-the messagebox, the wallet (#116, #130) and its funding row, and one row to
-the kernel: `claim`, from anyone. The first claim's sender is the owner
-(#127: never a key in its body) — the owner's own message, or a claim the
-owner signed before the instance existed, which the host forwards into it:
-the kernel writes the owner's admin rows and the explorer row and removes
-the claim row. **Three apps are installed at birth** (#141): chain, git and
-site — as apps, each with its record under `<app>/app`, its rows and its
-reads, so the owner upgrades them like any other and their state stays
-their own. A new skein answers its management page at `/`.
-docs/BOOTSTRAP.md, "The default image".
+One genesis for everyone, with no root in it (#89, #143). It has the front
+door, the messagebox, the wallet (#116, #130) and its funding route, the
+admin routes (root's: nobody holds root yet) and the claim route, open:
+the first claim's sender is granted root (#127: never a key in its body) —
+the claimant's own message, or a claim signed before the instance existed,
+which the host forwards into it — and the claim route is removed. **Three
+apps are installed at birth** (#141): chain, git and site — as apps, each
+with its record under `<app>/app` and its routes, so root upgrades them like
+any other and their state stays their own. A new skein answers its
+management page at `/`. docs/BOOTSTRAP.md, "The default image".
 
 - `bin/frontdoor.cid`, `bin/messagebox.cid`: the kernel's pinned modules
   (`wasm/`), by CID; `scripts/pin-programs.sh` keeps them current.
@@ -18,29 +17,26 @@ docs/BOOTSTRAP.md, "The default image".
   every skein — the same program record as src/runtime/programs.ts
   `WALLET`: a skein made from the image pays its host from it (docs/VM.md
   "Billing").
-- `etc/dispatch.json`: the claim row, the messagebox's box and http rows, and
-  the funding row (#130) `{http, /wallet/fund, *, wallet, fund, filter:
-  "beef"}`: a payment to the skein's wallet — an Atomic BEEF with the
-  header `x-skein-outputs` — validated at the door, internalized; the host
-  hands one in there (`POST /fund/<handle>`) even while the skein is asleep.
-  The explorer row (`/explore`) is the claim's: the kernel writes it with
-  the owner's key (#121).
-- `etc/apps.json` (#141): the apps installed at birth — `apps/chain`,
-  `apps/git`, `apps/site`, in that order — and the owner's read `/` (prefix)
-  → `site.site`'s `get`, root `www`. The loader plans each one with
-  src/host/plan.ts (`readStoredApp` over its tree here, `planInstall`,
-  `planOwnerRead`) and the genesis carries the result: the records in the
-  store, the rows (each with `app`) in `dispatch`, and the heads
-  `<app>/app` and `reads` in `heads`. The same CIDs as an install by
-  messages, except that no row whose manifest sender is `$owner` is written
-  (an image has no owner): chain's `chain` row from the owner and git's
-  only row. The owner adds those after the claim: `skein install
-  images/default/apps/<app> (--instance <handle> | <origin>)` sends the
-  head (unchanged) and just those rows, as the install writes them (with
-  `app`; chain's with `filter: beef`). The host skein is the exception: it
-  boots from the host image (`images/host` merged over this one, with the
-  onboarding app) with the operator's key named in its genesis, so its
-  `$owner` rows are written at birth (docs/BOOTSTRAP.md, "The host image
+- `etc/dispatch.json` (#143: routes, no senders): the claim route, `:ack`
+  (an event route), the handshake route, the messagebox's http routes and
+  the explorer behind `kernel.brc104` (the explorer gated by root: every
+  genesis's `roles`), and the funding route `{http, /wallet/fund,
+  filters: ["kernel.beef"], wallet, fund}`: a payment to the skein's wallet —
+  an Atomic BEEF with the header `x-skein-outputs` — validated at the door,
+  internalized; the host hands one in there (`POST /fund/<handle>`) even
+  while the skein is asleep.
+- `etc/apps.json` (#141, #143): the apps installed at birth — `apps/chain`,
+  `apps/git`, `apps/site`, in that order — and root's own route `/`
+  (prefix): the read route `{filters: ["site.get"], root: "www"}`. The
+  loader plans each app with src/host/plan.ts (`readStoredApp` over its tree
+  here, `planInstall`, `planRootRoute`) and the genesis carries the result:
+  the records in the store, the routes (each app's with `app`) in
+  `dispatch`, and the heads `<app>/app` in `heads`. The same CIDs as an
+  install by messages. Nothing waits for the claim: an app's functions that
+  were "from `$owner`" are gated by root in its manifest's `roles` (git's
+  `call`), and the claim grants root. The host skein boots from the host
+  image (`images/host` merged over this one, with the onboarding app), its
+  genesis's `root` the operator's key (docs/BOOTSTRAP.md, "The host image
   and the host skein").
 - `apps/chain/`, `apps/git/`, `apps/site/`: shruggr/skein-chain v0.4.0
   (e8d2102), shruggr/skein-git v0.1.3 (3726730), shruggr/skein-site v0.7.7

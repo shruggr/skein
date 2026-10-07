@@ -15,7 +15,7 @@ import * as dagCbor from "@ipld/dag-cbor";
 import * as dagJson from "@ipld/dag-json";
 import type { CID } from "multiformats/cid";
 import { type Rec } from "./bundle.ts";
-import { dispatchBody, handlerCid, hashDir, recordBundles } from "./client.ts";
+import { handlerCid, hashDir, recordBundles } from "./client.ts";
 import { dispatchOrigin, fold, type DispatchRow } from "../runtime/dispatch.ts";
 import { MAIN } from "../runtime/heads.ts";
 import { DEFAULT_ONLY, onlyIgnore, type AddressEntry } from "../host/deploy.ts";
@@ -66,53 +66,48 @@ export async function planUninstallApp(name: string, view: InstanceView): Promis
   return { prompt, recipient: view.identity, messages };
 }
 
-/** An http route's own parts (#125, #143): `prefix`, its `filters`, the handler's `fn`, and its settings (a file server's `root`, `index`), carried to it as `match`. */
-export interface HttpRowArgs { prefix?: boolean; fn: string; filters?: string[]; settings?: Record<string, unknown> }
-
 /** The fields of a route that are not a handler's settings. */
 const ROW_FIELDS = ["transport", "address", "prefix", "filters", "sender", "program", "fn", "app", "optional"];
 
-/**
- * One route of the route table (#77, #143): a mailbox route `{op, row: {transport: "mailbox", address:
- * box, program}}`, or with `http` an http route `{transport: "http", address: <path>, prefix?, filters?,
- * program, fn, …settings}` (#125: root's own route, such as the site at `/`: no `app`, so an app's
- * upgrade or uninstall leaves it). The handler is a program record CID or a name the instance's genesis
- * gives (`programs`). No sender (#143).
- */
-export function planDispatch(recipient: string, a: { op: "add" | "remove"; sender?: string; box: string; handler: string; http?: HttpRowArgs }, programs: Record<string, CID> = {}): AdminPlan {
-  if (a.sender !== undefined) throw new Error("--sender: gone (#143) — a route has no sender; gate the function with a role and grant it");
-  if (!a.http) {
-    const body = dispatchBody(a, programs);
-    return { prompt: [`dispatch ${a.op} mailbox ${a.box} → ${a.handler} (${String(body.row.program)})`], recipient, messages: [{ box: "dispatch", body }] };
-  }
-  const h = a.http;
-  if (!a.box.startsWith("/") || /[\\\0?#]/.test(a.box) || a.box.split("/").some((x) => x === "." || x === "..")) throw new Error(`http address ${JSON.stringify(a.box)}: a path (from /, no ".", "..", query or fragment)`);
-  if (!h.fn) throw new Error("an http route names its handler's function (--fn)");
-  const settings = h.settings ?? {};
-  const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
-  if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the route's own, not a setting`);
-  const program = handlerCid(a.handler, programs);
-  const row = { ...settings, transport: "http", address: a.box, ...(h.prefix ? { prefix: true } : {}), ...(h.filters?.length ? { filters: h.filters } : {}), program, fn: h.fn };
-  const shown = Object.entries(settings).map(([k, v]) => `${k} ${typeof v === "string" ? v : JSON.stringify(v)}`).join(", ");
-  return {
-    prompt: [`dispatch ${a.op} http ${a.box}${h.prefix ? " prefix" : ""}${h.filters?.length ? ` [${h.filters.join(", ")}]` : ""} → ${a.handler}.${h.fn} (${String(program)})${shown ? ` (${shown})` : ""}`],
-    recipient, messages: [{ box: "dispatch", body: { op: a.op, row } }],
-  };
+/** One of root's own routes as `skein routes` takes it (#143). */
+export interface RouteArgs {
+  op: "add" | "remove";
+  transport?: "mailbox" | "event" | "http" | "libp2p";
+  address: string;
+  prefix?: boolean;
+  filters?: string[];
+  /** A program record CID, a genesis program's name, or `<app>.<role>` (resolved by the caller into `programs`); none: an http read route. */
+  handler?: string;
+  fn?: string;
+  settings?: Record<string, unknown>;
 }
 
 /**
- * Root's own read route (#135, #143): one path answered by a filter — `<app>.<filter>`, a function an
- * installed app declares under `filters` — for anyone, signed or not, nothing logged: one `dispatch`
- * message adding (removing) the route {transport: "http", address, prefix?, filters: [<filter>],
- * …settings}. E.g. the site at the root: the filter `site.get`, `--prefix`, settings {"root": "www"}.
+ * Root's own route (#125, #143; `skein routes`): one `dispatch` add or remove of a route with no `app` —
+ * an app's upgrade or uninstall leaves it. A mailbox or event route at a box, an http route at a path
+ * (with `filters` and a handler's `fn`, or filters only: a read route — the site at `/`: filters
+ * ["site.get"], settings {root: "www"}), a libp2p route at a topic. No sender (#143). A remove names the
+ * key (transport, address, prefix) only.
  */
-export async function planReads(view: InstanceView, a: { op: "add" | "remove"; path: string; filter: string; prefix?: boolean; settings?: Record<string, unknown> }): Promise<AdminPlan> {
-  if (!a.path.startsWith("/") || /[\\\0?#]/.test(a.path) || a.path.split("/").some((x) => x === "." || x === "..")) throw new Error(`read ${JSON.stringify(a.path)}: a path (from /, no ".", "..", query or fragment)`);
+export async function planRoute(view: InstanceView, a: RouteArgs, programs: Record<string, CID> = {}): Promise<AdminPlan> {
+  const transport = a.transport ?? (a.address.startsWith("/") ? "http" : "mailbox");
+  if (!["mailbox", "event", "http", "libp2p"].includes(transport)) throw new Error(`--transport ${transport}: mailbox, event, http or libp2p`);
+  if (transport === "http" && (!a.address.startsWith("/") || /[\\\0?#]/.test(a.address) || a.address.split("/").some((x) => x === "." || x === ".."))) throw new Error(`http address ${JSON.stringify(a.address)}: a path (from /, no ".", "..", query or fragment)`);
+  if (transport !== "http" && a.prefix) throw new Error("--prefix: an http route's");
   const settings = a.settings ?? {};
   const bad = Object.keys(settings).filter((k) => ROW_FIELDS.includes(k));
   if (bad.length) throw new Error(`--settings: ${bad.join(", ")} ${bad.length > 1 ? "are" : "is"} the route's own, not a setting`);
-  const row = { ...settings, transport: "http", address: a.path, ...(a.prefix ? { prefix: true } : {}), filters: [a.filter] } as DispatchRow;
-  const p = await planRootRoute(view, a.op, row);
+  let row: Record<string, unknown> = { transport, address: a.address, ...(a.prefix ? { prefix: true } : {}) };
+  if (a.op === "add") {
+    if (a.handler === undefined) {
+      if (transport !== "http" || !a.filters?.length) throw new Error("a route names its handler; only an http read route (--filters, no handler) has none");
+      if (a.fn) throw new Error("--fn: a read route has no handler");
+    } else if (transport === "http" || transport === "libp2p") {
+      if (!a.fn) throw new Error(`an ${transport} route names its handler's function (--fn)`);
+    }
+    row = { ...settings, ...row, ...(a.filters?.length ? { filters: a.filters } : {}), ...(a.handler !== undefined ? { program: handlerCid(a.handler, programs), ...(a.fn ? { fn: a.fn } : {}) } : {}) };
+  }
+  const p = await planRootRoute(view, a.op, row as DispatchRow);
   return { prompt: p.prompt, recipient: view.identity, messages: p.rows.map((r) => ({ box: "dispatch", body: { op: r.op, row: r.row } })) };
 }
 

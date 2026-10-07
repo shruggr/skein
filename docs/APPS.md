@@ -348,8 +348,8 @@ instance, and there are two ways:
   for a repository, #142: `skein install <url>#<commit>` or a name from the
   instance's catalog). With
   [shruggr/skein-git](https://github.com/shruggr/skein-git) installed (name
-  `git`, box `git` from `$owner`, interface `git/1`), a page needs two
-  owner-signed steps and no `objects`:
+  `git`, box `git`, its `call` gated by root, interface `git/1`), a page
+  needs two root-signed steps and no `objects`:
   1. `{fn: "git.clone", args: {url, hash}}` to box `git` — `hash` a commit
      id, the user's intent. The git app records `fetch` intentions (#126:
      the host's HTTP proxy, signed by the instance's key, docs/MESSAGES.md

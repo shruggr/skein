@@ -79,26 +79,18 @@ names them:
 The loader (`boot`, src/host/boot.ts `installAtBirth`) plans each with
 src/host/plan.ts — `readStoredApp` over the app's tree in the image,
 `planInstall` against the instance as its genesis will stand,
-`planOwnerRead` for the read — puts the records into the store, appends the
-rows to the genesis's `dispatch`, and names the heads in the genesis's
-`heads` (`{"chain/app": <record>, "git/app": …, "site/app": …, "reads":
-…}`), which the kernel advances when it processes the genesis, after the
-dispatch rows (as `tree` sets `main`). The CIDs are an install's. One
-difference: **no row whose manifest sender is `$owner`** — an image has no
-owner, and such a row is a table edit by whoever holds a `dispatch` row,
-not install configuration. Here that is chain's `chain` row from the owner
-(an owner's own ingest) and git's only row (the owner's `git.clone`).
-After the claim the owner adds them: installing the app again (`skein
-install images/default/apps/<app> --instance <handle>`, or `<origin>`
-instead of `--instance`) sends the head, unchanged, and just those rows; the
-management page does the same from the owner's wallet.
+`planRootRoute` for root's route at `/` — puts the records into the store,
+appends the routes to the genesis's `dispatch`, and names the heads in the
+genesis's `heads` (`{"chain/app": <record>, "git/app": …, "site/app": …}`),
+which the kernel advances when it processes the genesis, after the routes
+(as `tree` sets `main`). The CIDs are an install's, with no difference
+(#143: no route names a sender, and the install grants no key — what was
+"from `$owner`" is a function gated by root in the app's `roles`, git's
+`call`; the claim grants root).
 
-- **The explorer** is not a row of the image (#121: every sender is a key,
-  and an image has no owner's key yet). The claim writes it — `/explore`
-  and below, the front door's `explore`, sender the claimed owner's key —
-  beside the owner's admin rows. Before the claim there is no explorer
-  (404). (An image written before #121 carried the row with #115's `owner`
-  symbol; the kernel still reads it, and its claim adds no second row.)
+- **The explorer** is a route of every genesis (`/explore` and below,
+  behind `kernel.brc104`, the front door's `explore` gated by root). Before
+  the claim nobody holds root: 403.
 ### The host image and the host skein (#142)
 
 The host skein is made from the **host image**: `images/host` merged over
@@ -109,23 +101,20 @@ The merge (src/host/boot.ts `mergeImages`) adds every path of the host part
 to the default image's tree: a directory in both is merged, a file in both
 must be the same blob, and `etc/apps.json` lists are joined (an app in
 both is refused); any other path in both is refused, by its path. The
-installer's own checks (no row with a key another app has, no read at a
-row's path, the heads) run when the merged image's four apps — chain, git,
+installer's own checks (no route with a key another app has, the heads)
+run when the merged image's four apps — chain, git,
 site, onboard — are installed at birth. The chain part is added to the
 merged tree as to the default one.
 
-The host skein's genesis **names its owner**: the operator's key
-(`$SKEIN_HOME/operator.key`, below "Commands"). Booted with an owner named,
-the image's claim row is left out and the genesis carries what a claim
-would have written: the owner's four admin rows and the explorer row
-(`/explore` and below, the front door's `explore`, from the owner). The
-apps installed at birth get their `$owner` rows with that key (chain's
-`chain` row, git's `git` row). The onboarding app's config is written at
+The host skein's genesis **names its root** (#143: `root: [<key>]`): the
+operator's key (`$SKEIN_HOME/operator.key`, below "Commands"). Booted with
+root named, the image's claim route is left out: the genesis's `root` is
+what a claim would have granted. The onboarding app's config is written at
 birth from the host's settings (`config.onboard`: `domain` from
 `SKEIN_HANDLE_DOMAIN`, default the domain of `SKEIN_ROUTER_ORIGIN`;
 `origin` from `SKEIN_ROUTER_ORIGIN`; `name` from `SKEIN_HOST_NAME`; `note`
 from `SKEIN_HOST_NOTE`), merged over the manifest's as an install's
-`--config` is: that app record is this host skein's own. No claim row, no
+`--config` is: that app record is this host skein's own. No claim route, no
 claim entry: the skein is published at once. A user skein is unchanged: it
 boots from the default image and is claimed (below).
 
@@ -220,45 +209,41 @@ The image's genesis is written by `skein-host add <h> --image <spec>`:
 
 The host brings only its own facts to an image's genesis: the instance's
 identity, handle and domain, its providers in the address book, where its
-domain resolves, its defaults. There is no `owner`, no owner's mailbox, no
-inference peer and no names. A tree whose genesis would name no owner must
-carry a claim row (the loader refuses it otherwise), and `$owner` anywhere
-in it is refused. The host skein is the one image booted with an owner
-named (above). The heads' owner column is unaffected: it is the app a
-head's name belongs to, not a key.
+domain resolves, its defaults. There is no `root`, no root holder's
+mailbox, no inference peer and no names. A tree whose genesis would name no
+root must carry a claim route (the loader refuses it otherwise), and
+`$owner` anywhere in it is refused (#143). The host skein is the one image
+booted with root named (above). The heads' owner column is unaffected: it
+is the app a head's name belongs to, not a key.
 
 ### The claim
 
-The claim row is
+The claim route is
 
 ```json
-{ "transport": "mailbox", "address": "claim", "sender": "*", "program": "kernel", "fn": "claim" }
+{ "transport": "mailbox", "address": "claim", "program": "kernel", "fn": "claim" }
 ```
 
 A message in box `claim` whose body is `{messagebox?: <url>, handle?,
 domain?}` is the kernel's `claim` operation (docs/VM.md). **Its sender is
-the owner** (#127): the key that signed it, never a key in the body (a
-body's `owner` is not read). In one step, under the message's entry, the
-kernel:
+granted root** (#127, #143): the key that signed it, never a key in the
+body. In one step, under the message's entry, the kernel:
 
-1. adds the sender's four admin rows (`objects`, `head`, `dispatch`, `peers`,
-   each from the sender to the kernel) and the explorer row (#121: `/explore` and below, the front door's `explore`, from the sender);
-2. removes the claim row;
-3. points the head `claim` at `{owner: <the sender>, messagebox?, handle?,
-   domain?}` (what was claimed: how the kernel and the host know the owner
-   of an instance whose genesis names none);
-4. with a `messagebox`, writes the owner's address-book entry (source
-   `claim`), so that what the instance sends its owner can be delivered.
+1. grants root to the sender (the head `grants`);
+2. removes the claim route;
+3. points the head `claim` at `{claimant: <the sender>, messagebox?,
+   handle?, domain?}` (what was claimed);
+4. with a `messagebox`, writes the claimant's address-book entry (source
+   `claim`), so that what the instance sends it can be delivered.
 
-A second claim finds no row: recorded, nothing runs. A claim into an
-instance whose genesis names an owner, or whose table has an admin row
-already, is refused and nothing is written.
+A second claim finds no route: recorded, nothing runs. A claim into an
+instance where root is held already is refused and nothing is written.
 
 The host holds no owner's key and signs no claim. The claim comes one of
 two ways:
 
-- **A bare image** (`skein-host add --image`): the row admits anyone, and
-  whoever sends the claim first owns the instance. It is not meant to be
+- **A bare image** (`skein-host add --image`): the route takes anyone, and
+  whoever sends the claim first is root. It is not meant to be
   secure: the operator claims a self-hosted instance the first thing once it
   runs — `skein claim [--messagebox url] [--handle h@d] (--instance <handle>
   | <its origin>)`, signed with the operator's key.
@@ -270,9 +255,9 @@ two ways:
   instance manager's `create` (#90) adds the row disabled, boots it from
   the image, **forwards that signed message** as a `local` request — the
   instance's first entry after its genesis — and waits for the kernel to
-  take it; the front door checks the signature, the kernel takes the owner
-  from the signer. Only then is the row enabled, which publishes its
-  hostname, so nothing reaches the claim row first (it stays `*`). A claim
+  take it; the door checks the signature, the kernel grants root to the
+  signer. Only then is the row enabled, which publishes its hostname, so
+  nothing reaches the claim route first. A claim
   whose sender is not the registrant, or whose signature does not hold, is
   refused and the instance is left unpublished (docs/ARCH.md, "The host
   skein").
@@ -295,50 +280,43 @@ etc/config.json          optional: {defaults: {k: string}, peers: {role: key}, n
                                    program named chain (#78: the chain module); a genesis-wired
                                    overlay engine and its lookup service programs need overlay/
                                    (#79: an overlay writes only under its name; kernel-zig/equiv/overlay.ts)
-etc/dispatch.json        the dispatch rows (#77): [{transport?: mailbox | http | libp2p, address, prefix?: true,
-                         sender?: "*" | "session" | key, program, fn?, …settings}] — a box, an HTTP path or a libp2p
-                         topic / "/<protocol>"; the sender a key (hex, $owner, $infer, or a host provider's $<name> —
-                         $status, $cron; one naming a provider the host has not is left out) or "*" (anyone, the
-                         default); the program a bin/ name, a CID, or "kernel" with fn the operation. One of this
-                         file or etc/subscriptions.json is required.
-etc/subscriptions.json   the form before #77, still read: [{sender?: key, box?, handler}], each a mailbox row
-etc/routes.json          the form before #77, still read (#40): [{path | prefix, program, fn, auth?: "none", read?: op, root?, index?}],
-                         each an http row (auth none → sender "*", else "session") or, for a `libp2p:` path, a
-                         libp2p row; default: the default http rows (root, index: a file handler's, #52)
-etc/reads.json           the form before #115, still read: who may call a route marked `read: op`, [{caller?: key, op} | {owner: true, op}]; folded into those rows' senders at genesis; default: the default reads
+etc/dispatch.json        the routes (#77, #143): [{transport?: mailbox | event | http | libp2p, address, prefix?: true,
+                         filters?: [filter], program?, fn?, …settings}] — a box, an event's box, an HTTP path or a
+                         libp2p topic / "/<protocol>"; the program a bin/ name, a CID, or "kernel" with fn the
+                         operation; no program: an http read route (its filters answer). No sender (#143). Required.
+                         A tree that names no http route gets the default ones (each dropped when its program is lacking).
+etc/apps.json            optional (#141): {install: [<an app's tree>], routes?: [<root's own route>]}
 …                        anything else: the instance's own files (SOUL.md, skills/, …)
 ```
 
-- A **key** is an identity key in hex, or `$owner` / `$infer`. Those are the
-  host's (`SKEIN_OWNER`, `SKEIN_INFER`), so one published tree serves any
-  owner. A row with no `sender` (or `"*"`) takes anyone.
-- A row's **program** is a `bin/` name or a program record's CID. A row to a
-  program the system lacks is dropped. A row whose key is an admin row's
-  (the owner's `objects`, `head`, `dispatch`, `peers`) is left out: those are
-  the kernel's.
-- **Rows** (#40, #77, #115) are the kernel's dispatch table
-  (docs/MESSAGES.md): an `http` row is an exact address or a prefix (exact
-  first, then the longest prefix), the program and function the front door
-  calls with the request, sender `"*"` for an open route (an overlay's,
-  docs/OVERLAY.md; a signed request on it is still verified and answered
-  signed), `"session"` for BRC-104, or a key (#121: the owner's rows name the
-  owner's key; #115's `"owner"` is read only in a row a log already holds); a row's `read: op` names an op `etc/reads.json` must
-  allow the caller, folded into the row's sender at genesis (the genesis
-  has no reads table). The default http rows
-  are the BRC-33 messagebox — `sendMessage`, `listMessages`,
+(`etc/subscriptions.json`, `etc/routes.json` and `etc/reads.json`, the
+forms before #77 and #115, are refused: they spoke of senders, #143.)
+
+- A **key** in `etc/config.json` (`peers`, `names`) is an identity key in
+  hex, `$self`, `$infer` or a host provider's `$<name>`. `$owner` is gone
+  (#143): root is the genesis's `root` (the host's), or a claim's.
+- A route's **program** is a `bin/` name or a program record's CID. A route
+  to a program the system lacks is dropped. A route whose key is an admin
+  route's (`objects`, `head`, `dispatch`, `peers`, `grant`) is left out:
+  those are the kernel's.
+- **Routes** (#40, #77, #143) are the kernel's route table
+  (docs/MESSAGES.md): an `http` route is an exact address or a prefix
+  (exact first, then the longest prefix), its filters and the program and
+  function the front door calls with the request. The default http routes
+  are the handshake (`/.well-known/auth` → the front door's `handshake`),
+  the BRC-33 messagebox — `sendMessage`, `listMessages`,
   `acknowledgeMessage` at the root and under `/messagebox` (program
-  `messagebox`) — and the explorer, prefix `/explore` (program `frontdoor`,
-  fn `explore`, `read: "explore"`). The default reads are
-  `[{caller: "$owner", op: "explore"}]`: the owner may explore. A tree that
-  writes `etc/routes.json` replaces the default http rows whole (include them
-  to keep the messagebox); likewise `etc/reads.json`.
+  `messagebox`, behind `kernel.brc104`) — and the explorer, prefix
+  `/explore` (program `frontdoor`, fn `explore`, behind `kernel.brc104`,
+  gated by root: `etc/config.json`'s `roles` add to the stock
+  `{root: ["frontdoor.explore"]}`).
 - **Files** (#52, #125): serving files is a function, skein-sdk's `files`
   module (`files.serve(a, req, tree, files.rowOptions(req))`), which any
   http handler calls with the tree it picks — its own app's
   (shruggr/skein-site serves its tree's `www`), a head's, any CID. A row to
   such a handler carries its settings, e.g. `{"transport": "http",
-  "address": "/site", "prefix": true, "sender": "*", "program": <the
-  handler>, "fn": "get", "root": "www"}`; `root` and `index` are passed to
+  "address": "/site", "prefix": true, "filters": ["site.get"], "root":
+  "www"}` (a read route: the site's filter answers); `root` and `index` are passed to
   the handler as the row that matched (docs/MESSAGES.md, "Files"). The
   static app (shruggr/skein-static) is archived.
 - **`owner.messagebox`** becomes the genesis's `defaults.ownerMessagebox`:
@@ -387,7 +365,7 @@ etc/reads.json           the form before #115, still read: who may call a route 
 
 `skein-host system <dir>` writes the default system as such a tree:
 `bin/*.cid` + `bin/*.json` taken from the kernel's own records, plus `etc/`
-(`config.json` with the default `scopes`, `dispatch.json`, `reads.json`).
+(`config.json` with the default `scopes` and `roles`, `dispatch.json`).
 Booting from it unchanged gives the same programs and rows as code genesis,
 plus the tree.
 
@@ -397,8 +375,8 @@ core. An application that wants it adds its own row, with its own rules on
 who may call it: e.g. `{"address": "register", "program": "resolve"}` (anyone;
 the resolve program's claim handler records `{handle, domain}` under
 `resolve/peers` — never the address book, #87 — only if the
-handle resolves to the sender), or `{"sender": "<key>", "address":
-"register", "program": "<its own program>"}`. Without one, the admin
+handle resolves to the sender), or a route to a function of its own
+gated by a role it grants (#143). Without one, the admin
 configures the address book (`skein peers add <key> <mailbox-url>
 [--handle h@d] <origin>`: the kernel's `peers`
 operation), and a sender
@@ -414,8 +392,8 @@ Apps live in their own repos (#71). Each repo is the app's tree: `bin/`,
 |---|---|---|
 | shruggr/skein-shell | the shell app (#83): `run` (a command over a tree, row `run` from the owner: the box `shell/run`, #128) and the shell itself — brush, coreutils, the toolset, python's stdlib, each a file of its tree, declared as a shell program in its manifest (docs/APPS.md §6b) | `skein install https://github.com/shruggr/skein-shell#<commit> <origin>` (below). A genesis has no shell: an instance runs commands only once this is installed |
 | shruggr/skein-chat | the chat app (#83): the turn loop, rows `chat` from the owner and from anyone; its `bash` calls run the shell app's shell when the instance has the shell app | `skein install https://github.com/shruggr/skein-chat#<commit> <origin>` |
-| shruggr/skein-site | the management site (#92; an app since #125): one route handler serving its own tree's `www` (skein-sdk `files`) | `skein install https://github.com/shruggr/skein-site#<commit> <origin>`: its read under `/site/`; then, if the owner wants the page at `/`, the owner's own read (#135): `skein reads add --prefix --fn get --settings '{"root":"www"}' / site.site <origin>` (docs/APPS.md §3, "The management page") |
-| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein install https://github.com/shruggr/skein-chain#<commit> <origin>`: rows `chain` from `event`, `$self` and `$owner`, `status` (the box `chain/status`, #128) from `$status` (optional); or at boot, `bin/chain.wasm` and those rows in `etc/dispatch.json` (there written `chain/status`: a genesis row is as written) (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
+| shruggr/skein-site | the management site (#92; an app since #125): its filter `get` serving its own tree's `www` (skein-sdk `files`) | `skein install https://github.com/shruggr/skein-site#<commit> <origin>`: its read route under `/site/`; then, if root wants the page at `/`, root's own read route (#143): `skein routes add --prefix --filters site.get --settings '{"root":"www"}' / <origin>` (docs/APPS.md §3, "The management page") |
+| shruggr/skein-chain | the chain module (#78; 0.2.0, #79): the one writer of the instance's chain state under `chain/state`; ingest a BEEF, broadcast, answers on each state change | `skein install https://github.com/shruggr/skein-chain#<commit> <origin>`: its routes (#143) — an event route `chain`, a mailbox route `chain` behind `kernel.beef`, `status` (the box `chain/status`, #128); or at boot, `bin/chain.wasm` and those routes in `etc/dispatch.json` (there written `chain/status`: a genesis route is as written) (the default scope `chain: ["chain/"]` covers its writes). The wallet and the overlay apps need it |
 | shruggr/skein-overlay | the overlay services engine (#36; 0.3.0, #79: its state under its name, over the chain app) and its demo topic manager and lookup service; the topic/lookup contract as Zig modules | `skein install https://github.com/shruggr/skein-overlay#<commit> <origin>` (after the chain app: `requires chain/1`): its wiring derived from `config.overlay` (docs/APPS.md §6), its topics subscribed by the instance's libp2p node; or at boot, a system tree (docs/OVERLAY.md in that repo) |
 | shruggr/skein-git | the git app (#91): `git.clone {url, hash}` from the owner, box `git` — one commit fetched through the fetch provider, checked against the hash, kept in the store, its app record built and answered (deploy by hash, below) | `skein install https://github.com/shruggr/skein-git#<commit> <origin>` |
 
@@ -455,20 +433,20 @@ There are three ways to install an app.
   reads the answer from the thread it launched, plans from the stored tree,
   and sends `head`, the rows and `start` — nothing of the app's tree or
   modules crosses from the client. A catalog name is looked up in the
-  instance's own site tree (`www/catalog.json` of its `site/app`). A key
-  with no row in box `git` (git's `$owner` row) is refused before anything
-  is sent. A directory is read on the client's machine and the objects the
+  instance's own site tree (`www/catalog.json` of its `site/app`). An
+  instance with no route at box `git` is refused before anything is sent;
+  git's `call` is root's (#143), so a key without root gets nothing back. A directory is read on the client's machine and the objects the
   instance lacks are sent (`objects`, ≤ 1 MiB per message, a larger record
   alone in its own); a tree the instance holds already (an image's app,
   `images/default/apps/<app>`) sends only the head and what changes.
 
   The checks (docs/APPS.md §2, §3; src/host/manifest.ts, plan.ts): every
   `requires` interface provided by an installed app's `*/app` head; the
-  name free; no row with a key the genesis or another app has; every
-  `$<provider>` sender in the address book. The prompt: the head
-  `<app>/app`, each row (`row <transport> <address> from <who> →
-  <role>.<fn>`: an http address under `/<app>/`, a libp2p topic or
-  protocol as it is), each read, `start`/`stop`, `requires`/`provides`,
+  name free; no route with a key the genesis, root or another app has;
+  another app's filter declared by that app. The prompt: the head
+  `<app>/app`, each route (`route <transport> <address> [<filters>] →
+  <role>.<fn> | (a read)`: an http address under `/<app>/`, a libp2p topic
+  or protocol as it is), its filters and roles, `start`/`stop`, `requires`/`provides`,
   what an overlay publishes, and the messages. An overlay app's wiring
   (docs/APPS.md §6) is derived from its `config.overlay` and marked
   "(derived: config.overlay)". The messages, in order, each a kernel
@@ -480,8 +458,8 @@ There are three ways to install an app.
      `main`);
   2. `head` `{name: "<app>/app", tree: <the app record>}` (#79: no alias head;
      a manifest in the form before #77 is refused);
-  3. `dispatch` `{op: "add", row}` per row, the sender resolved, an http
-     address under `/<app>/`, `app: <name>` on the row. The host's libp2p
+  3. `dispatch` `{op: "add", row}` per route (#143: no sender, no key
+     granted), an http address under `/<app>/`, `app: <name>` on the route. The host's libp2p
      node follows the dispatch table: an installed libp2p topic is
      subscribed, a protocol served, live — the node started if the instance
      had none;
@@ -494,14 +472,13 @@ There are three ways to install an app.
   the app's rows (its libp2p topics unsubscribed); the heads are left.
 
   One at a time, the same way: `skein deploy <dir>` (objects and `head
-  main`), `skein dispatch add|remove [--sender <key>] <box> <handler>` (a
-  mailbox row), `skein reads add|remove [--prefix] --fn <fn> [--settings
-  <json>] <path> <handler>` (#135: a read of the owner's — the site at `/`),
-  `skein dispatch add --http [--prefix] --fn <fn> [--settings <json>]
-  <path> <handler>` (#125: an http row of the owner's, a message route, the
+  main`), `skein routes add|remove [--transport t] [--prefix] [--filters
+  f,g] [--fn f] [--settings <json>] <address> [<handler>]` (#143: root's
+  own route — a box, an http path, the site's read route at `/`; the
   handler a program record CID, a genesis program or `<app>.<role>`, an
-  installed app's; an app's own http and libp2p rows come through
-  `install`), `skein peers …`, `skein host …` (#130), `skein claim`.
+  installed app's; an app's own routes come through `install`), `skein
+  grant add|remove <key> [--role root|<app>.<role>]`, `skein peers …`,
+  `skein host …` (#130), `skein claim`.
 - **By hash, from a page** (#91, built): the clone happens in the VM. With
   the git app installed, two owner-signed steps:
 
@@ -606,12 +583,12 @@ are read the same way once their carrier shape is mapped onto
 ```
 skein-host run                                            the host; on its first run the host skein (#142)
 skein-host init [--handle host]                           the first run's part alone: the host skein, once
-skein-host grant <key> [--apps] [--instance <h>]          a key's admin rows (and the apps' $owner rows) in the host skein
+skein-host grant <key> [--role r] [--remove] [--instance <h>]   a grant in the host skein (#143; root by default)
 skein-host system <dir>                                   the default system tree
 skein-host add <h> --boot <dir>                           Source A
 skein-host add <h> --boot <tree-cid> [--from store.db]    a tree already in a store
 skein-host add <h> --packet <file> [--scope cid] [--proofs roots.json]   Source B (tree or checkpoint)
-skein-host add <h> --image <default | dir | tree-cid [--from store.db]>  an image: no owner, the claim row (#89)
+skein-host add <h> --image <default | dir | tree-cid [--from store.db]>  an image: no root, the claim route (#89)
 skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpoint] [--form ordfs|git] [--no-index] [--mined roots.json]
 ```
 
@@ -620,19 +597,19 @@ skein-host pack <h|dir|tree-cid> <out> [--from store.db] [--tree cid] [--checkpo
 (src/host/hostenv.ts). **The operator's key** is the file
 `SKEIN_OPERATOR_KEY` names, default `$SKEIN_HOME/operator.key`: one line,
 hex or WIF, mode 0600 — used if present, made by `skein-host run` if not.
-It owns the host skein, and the client `skein` signs with it.
+It is the host skein's root (#143), and the client `skein` signs with it.
 
 `skein-host run` on its first run (no host skein in host.db) makes the
 master secret and host.db as before, the operator's key if absent, and the
 host skein from the host image (above), published at once, and prints its
 identity, its URL, the operator's key and the grant line; then it serves.
 Later runs start what exists. `init` is the first run's part alone (no
-router left running). `grant <key> [--apps]` sends the key's four admin
-rows and its explorer row — with `--apps`, every installed app's `$owner`
-rows too — into the host skein (or `--instance <h>`): the operator's
-messages, signed with its key, handed to the running host over its control
-socket; rows already there are not sent again. A browser wallet that should
-manage the host skein is given its rows this way.
+router left running). `grant <key> [--role root|<app>.<role>] [--remove]`
+sends the kernel's `grant` operation — root by default — into the host
+skein (or `--instance <h>`): the operator's message, signed with its key,
+handed to the running host over its control socket; nothing is sent when
+the grants say so already. A browser wallet that should manage the host
+skein is granted root this way.
 
 `add --boot/--packet` runs the loader when the row is added, on its new, empty
 store (`Router.bootRow` → `bootStore`: a kernel started, `boot`, stopped). The
@@ -656,7 +633,7 @@ boot is written, and the process exits 0.
   address escapes, the senders, the form before #77 refused, shapes,
   `requires`); `kernel-zig/equiv/install.ts`
   (in `run.sh`): the owner's messages for shruggr/skein-site (and the
-  owner's root read to its handler, `skein reads` over the control socket,
+  root's read route at `/`, `skein routes` over the control socket,
   which its uninstall leaves) and
   programs/test/app-demo into a running instance, driven, uninstalled,
   replayed. `kernel-zig/equiv/files.ts` (in `run.sh`): skein-sdk's `files`
@@ -665,7 +642,7 @@ boot is written, and the process exits 0.
   scope-mismatch, hash-mismatch, incomplete, unproven and malformed refusals; a
   patched file resolved through its base, and incomplete without it.
 - `src/host/boot.test.ts`: the tree read and resolved (including a component
-  in `bin/`, the order of defaults, the owner's admin rows first); its
+  in `bin/`, the order of defaults, the admin routes first, `root`); its
   refusals.
 - `src/host/vcdiff.test.ts`: the vcdiff decoder.
 - `src/host/image-chain.test.ts` (#132): the image's chain part filled from
@@ -680,15 +657,14 @@ boot is written, and the process exits 0.
   next header is the first header event it takes, and its chain state then
   holds every header from genesis (no feed replay); `add --image default`
   boots from the same image; replayed.
-- `src/host/boot.test.ts` also resolves the default image: no owner, no
-  admin rows, the claim row its one kernel row, no explorer row, no http
-  row at `/`, `/site` or `/manifest.json`; `$owner` in an image refused; and
-  (#141) its apps at birth: the records of chain, git and site in the
-  store, their rows with `app` (chain's event and `$self` rows; no row from
-  `$owner`), the heads `chain/app`, `git/app`, `site/app` and `reads` (the
-  site's `/site/` read and the owner's `/`), chain's app record and rows the
-  same CIDs as an install by messages over the same tree into a claimed
-  instance, but for the owner's row.
+- `src/host/boot.test.ts` also resolves the default image: no root, the
+  admin routes and the claim route, the explorer behind `kernel.brc104`
+  (root's), no http route at `/`, `/site` or `/manifest.json`; a sender or
+  `$owner` refused (#143); and (#141) its apps at birth: the records of
+  chain, git and site in the store, their routes with `app`, root's read
+  route at `/`, the heads `chain/app`, `git/app`, `site/app`, chain's app
+  record and routes the same CIDs as an install by messages over the same
+  tree.
 - `src/host/image-chain.test.ts` and `src/host/feeds.test.ts` (#141): the
   backfill — a skein whose tip lags the image's gets the headers it lacks,
   in order; one at the tip, past it or with no tip none; a forked tip from
@@ -719,11 +695,10 @@ boot is written, and the process exits 0.
   child's book has no manager; refusals as answers; another instance's
   message not acted on; `stop`/`start`.
 - `kernel-zig/equiv/host.ts` (in `run.sh`, #90, #142): `skein-host init` —
-  the host skein owned by the operator's key at birth (its admin rows,
-  explorer row and the apps' `$owner` rows; no claim row: a claim is
-  refused), the onboarding app installed at birth with the settings'
-  config; `skein-host grant <key> --apps` (the key reads the explorer
-  after it; a second grant sends nothing); a client's session creates alice through it
+  the host skein's root the operator's key at birth (#143: no claim route:
+  a claim is refused), the onboarding app installed at birth with the
+  settings' config; `skein-host grant <key>` (root: the key reads the
+  explorer after it; a second grant sends nothing); a client's session creates alice through it
   with its own signed claim (none or another key's refused), alice claimed
   by the client and answering at her url,
   the client installs app-demo in her; a second create refused; both stores

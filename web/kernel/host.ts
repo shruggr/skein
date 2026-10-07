@@ -371,9 +371,20 @@ export class BrowserHost {
         return await this.kernel.answer(e);
       });
     } catch (e) {
-      // #143: turned away or answered at the door, nothing written — answered plain here (phase 2: signed, as the node host's).
+      // #143: turned away or answered at the door, nothing written. A signed request gets it signed on its session (the
+      // front door's fn "respond", a call), as the node host answers it (src/host/frontdoor.ts doorAnswer); else plain.
       if (!(e instanceof DoorAnswered)) throw e;
       const d = e.answer;
+      if (Object.keys(headers).some((h) => h.startsWith("x-bsv-auth-"))) {
+        const arg = d.kind === "answer"
+          ? { request: record, answer: { status: d.status, ...(d.type ? { type: d.type } : {}), ...(d.headers ? { headers: d.headers } : {}), body: d.body ?? new Uint8Array() } }
+          : { request: record, refused: { status: d.status, code: d.code ?? "ERR_REFUSED", reason: d.reason ?? "refused" } };
+        const c = await this.kernel.call("call", { program: "frontdoor", fn: "respond", arg: dagCbor.encode(arg), now: Date.now() }) as { ok?: boolean; result?: Uint8Array };
+        if (c?.ok && c.result) {
+          const x = dagCbor.decode(c.result) as { status: number; headers?: Record<string, string>; body?: Uint8Array };
+          return new Response(x.body?.length ? x.body as BodyInit : null, { status: x.status, headers: x.headers ?? {} });
+        }
+      }
       if (d.kind === "answer") return new Response(d.body?.length ? d.body as BodyInit : null, { status: d.status, headers: { ...(d.headers ?? {}), "content-type": d.type ?? "application/json" } });
       return json(d.status, d.code ?? "ERR_REFUSED", d.reason ?? "refused");
     }

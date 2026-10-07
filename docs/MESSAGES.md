@@ -77,268 +77,201 @@ A reader with the log can check every message: the request that carried it
 is in the log as received, and the mail record carries the BRC-104 signed
 request (below), which verifies with the instance's key alone.
 
-## The dispatch table and the kernel's operations (#77)
+## The route table, the grants and the kernel's operations (#77, #143)
 
-The kernel keeps four tables: **objects** (blocks by CID), **heads** (name →
-root, with an owner: the app the name is under), the **dispatch table** and
-the **address book**. The dispatch table is one chain of rows
+The kernel keeps its tables: **objects** (blocks by CID), **heads** (name →
+root), the **route table** (the dispatch chain), the **address book** and
+the **grants** (the head `grants`). David Case (2026-10-08): "permissions and
+routing might be two entirely different things." The route table is one
+chain of routes
 
 ```
-{transport: "mailbox" | "http" | "libp2p" | "local", address, prefix?: true,
- sender: "*" | "event" | "session" | bytes(33), program: <program record CID> | "kernel", fn?,
- filter?: "beef", …settings}
+{transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
+ filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"],
+ program?: <program record CID> | "kernel", fn?, app?, …settings}
 ```
 
-— a box, an HTTP path (prefix or exact), a libp2p topic or `/<protocol>` (exact);
-who may send there (`event`, #79: events only — the host's wiring and a
-route's admits, never a message; every other sender is a key, #121: the
-owner's rows name the owner's key, an image's the claim's — #115's `owner`
-symbol is gone, still read in a row a log already holds); what the door
-runs on the package before it is logged (`filter`, #121: `beef`); which program is stepped or called, or which of the
-kernel's own operations runs. A route and a subscription differ only in
-where the address comes from; the kernel matches every transport, first
-match wins (docs/VM.md, "The dispatch table", for the full rules). A program never writes the table: there is no
-`subscribe` import, no `routes` head. Every change is an **admin message**
-from the owner or a delegate at one of the kernel's admin boxes, which the
-kernel itself performs — no program is stepped:
+— a box (`mailbox`: messages; `event`: the host's wiring, never a message),
+an HTTP path (prefix or exact), a libp2p topic or `/<protocol>` (exact);
+what runs on the package before anything is recorded (`filters`); which
+program's function is stepped or called, or which of the kernel's own
+operations runs — or, for an http route with no program, nothing: a **read
+route**, its filters answer. No route says who may send (docs/VM.md "The
+route table" for the full rules). Who may run a function is the **gate**'s:
+the roles that gate it (an app record's `roles`, the genesis's), the
+principal the filters yielded, and the grants. A program never writes these
+tables. Every change is an **admin message** at one of the kernel's admin
+boxes, gated by **root**, which the kernel itself performs — no program is
+stepped:
 
 | box | body | the operation |
 |---|---|---|
 | `objects` | `{records: [{cid, bytes}], root?}` | each block stored under its CID (hash-checked); `root` → `main` if there is none |
-| `head` | `{name, tree}` | the head advanced to a record in the store (owner = the name's app) |
-| `dispatch` | `{op: "add" \| "remove", row}` | the row added (replacing the row with its key: transport, address, prefix, sender), or removed |
+| `head` | `{name, tree}` | the head advanced to a record in the store (not `billing` or `grants`: the kernel's) |
+| `dispatch` | `{op: "add" \| "remove", row}` | the route added (replacing the route with its key: transport, address, prefix), or removed |
 | `peers` | `{op: "add", key, transport?, address? \| url?, handle?, domain?}` \| `{op: "remove", key}` | the address book |
-| `claim` | `{messagebox?, handle?, domain?}` | an image's claim row, from anyone (#89): **the owner is the message's sender** (#127; a body's `owner` is not read) — the sender's four admin rows added, and the explorer row with the sender's key (#121), the claim row removed, the head `claim` → `{owner: <the sender>, messagebox?, handle?, domain?}`, the owner's messagebox into the address book (source `claim`) — in one step; refused if the instance is owned or the sender is not a key |
+| `grant` | `{op: "add" \| "remove", role, principal}` | the grants (#143): `root` or `<app>.<role>` to (or from) a key |
+| `claim` | `{messagebox?, handle?, domain?}` | an image's claim route, open (#89): **root is granted to the message's sender** (#127, #143; a body's key is not read), the claim route removed, the head `claim` → `{claimant: <the sender>, messagebox?, handle?, domain?}`, the claimant's messagebox into the address book (source `claim`) — in one step; refused if root is held or the sender is not a key |
 
-Every genesis that names an owner seeds the owner's four admin rows
-(`sender` the owner, `program` `kernel`); an image (the default image,
-docs/BOOTSTRAP.md) names none and seeds the claim row instead: the owner's
-own message takes it (#127) — sent to the instance (a bare image: the first
-claim's sender owns it; `skein claim`), or signed before the instance
-existed and forwarded by the host's instance manager as its first entry
-(`create`, #90), before the instance is published. A claim is the one
-message that may name **no recipient**: the mail record without
+Every genesis seeds the admin routes and its `root` (the initial root
+holders: the host skein's operator key, #142); an image (the default image,
+docs/BOOTSTRAP.md) names no root and seeds the claim route instead: the
+claimant's own message takes it (#127) — sent to the instance (a bare
+image: the first claim's sender is root; `skein claim`), or signed before
+the instance existed and forwarded by the host's instance manager as its
+first entry (`create`, #90), before the instance is published. A claim is
+the one message that may name **no recipient**: the mail record without
 `recipient`, box `claim`, and one of the few a sender signs itself (#126
 step 4: no session of the instance's carries a claim forwarded into it) —
 `[2, "metanet handles envelope"]`, key `send`, counterparty anyone, the
 sender's key alone checks it; SDK `message.zig` ≥ 0.6.1, the front door, the
-kernel's `isMail`. #127 is its own mechanism, untouched by #126 step 4. Any other message naming none is not admitted. Delegating administration is the owner adding a row
-with the same operation and another sender. A refused operation (a bad
-body, a record not in the store) is a log line and nothing written. The
-client commands: `skein install|uninstall|dispatch|reads|peers|host|claim|deploy`
-build the owner's messages, sign them in the client's process with the
+kernel's `isMail`. Any other message naming none is not admitted.
+Delegating administration is root granting root (or an app's role) to
+another key. A refused operation (a bad body, a record not in the store)
+is a log line and nothing written; a message the gate refuses (the sender
+holds no role the function needs) is recorded and nothing runs. The client
+commands: `skein install|uninstall|routes|grant|peers|host|claim|deploy`
+build root's messages, sign them in the client's process with the
 operator's key and send them — over the host's control socket (op
 `message`: a signed `local` request) on the host machine, else on one
-BRC-104 session (#124, #142, docs/APPS.md §3); `skein import` (objects) and
-`skein head` send one each through the client's own wallet. An app's own writes are heads under its name,
-`<app>/…` (docs/VM.md, "Heads"); the front door's sessions are
-`frontdoor/sessions`.
+BRC-104 session (#124, #142, docs/APPS.md §3). An app's own writes are
+heads under its name, `<app>/…` (docs/VM.md, "Heads"); the front door's
+sessions are `frontdoor/sessions`.
 
 ## The instance as an HTTP server
 
 Each instance is an HTTP server at an origin of its own. Its **front door**
 (`programs/frontdoor`, Zig) is the program that answers. The host's HTTP
-transport (`src/host/router.ts`) picks the instance by URL and sends the
-request to one of two doors (below): a message is appended as a `request`
+transport (`src/host/router.ts`) picks the instance by URL and hands the
+request to the kernel's door (below): what the door admits is a `request`
 entry and the kernel steps the front door on it — the host holds the
 client's connection until that thread has come to rest and returns its
 answer as the HTTP response (#66, "A synchronous client waits on the
-thread", below); a read is a kernel `call`. The host holds no mail and no
-sessions, and verifies nothing.
+thread", below); what the door answers itself (a read route, a rejection,
+the gate's refusal) comes back at once, nothing logged. The host holds no
+mail and no sessions, and verifies nothing.
 
-### The front door: two doors (#135)
+### The front door: one table, filters, the gate (#135, #143)
 
-Decided 2026-10-07 (David): "The security boundary is absolute." And
-corrected the same day: "I never, ever said or meant to say signed only.
-The security boundary is signed or validatable. Validated." A request is
-admitted when it is **signed** (a session and a signature: the sender is a
-key) **or validated** (the payload proves itself: today the row's `beef`
-filter — every BUMP checked against the chain state; the transactions
-carry their own signatures). A read needs neither. Anything else is
-refused.
+Decided 2026-10-07 (David): "The security boundary is absolute." Corrected
+the same day: "The security boundary is signed or validatable. Validated."
+And 2026-10-08: a filter is "an unlogged handler for a request that
+determines how it gets handled within the system"; routing and permission
+are apart. Every HTTP request goes to the kernel's door
+(`src/host/frontdoor.ts` `serveHttp` → `admit`; kernel-zig `scheduler.zig`
+`door`):
 
-1. **The kernel's door admits messages and validated payloads.** An
-   `http` row of the dispatch table is a **message route**: a request
-   reaches it signed (BRC-104: `x-bsv-auth-*` headers) — verified at the
-   door and answered signed on its session, whatever the row's sender.
-   The one unsigned path is an **open row (sender `*`) whose `filter`
-   validates the payload** (`beef`): the door admits a plain request
-   there when the filter passes it — a payload the filter refuses is the
-   door's refusal entry, answered plain (400) — and the handler's answer
-   is plain. Its admission carries no sender key: the entry's `door` is
-   `{filter: "beef", beefs: [<pointer record>]}` with no `verified`, and
-   the handler gets no `caller` (as with a gossiped submission, submitter
-   identity is not involved). On any other row an unsigned request is
-   refused 401. `X-Topics` and the like are metadata beside the payload,
-   not signed: "it's just metadata about which things this is going to be
-   validated against. It's still just self-validating." A signed request
-   to the same open row is verified and answered signed.
-2. **Reads are `call`s.** A path the instance's **reads** name is served by
-   the host as a kernel `call` of a program's function over the current
-   state — the front door's fn `read` with the request as received and the
-   read as the handler's `match`. Nothing is admitted, nothing is logged;
-   the fuel is the host's to meter (billing's read-call fuel). Any HTTP
-   method (a BRC-24 lookup is a POST and is a read); signed or not — a
-   signed one is verified and answered signed on its session (its caller
-   the handler's `caller`), an unsigned one answered plain. A read is
-   read-only by definition: a function that writes fails inside the call.
-3. **The host routes HTTP onto the two** (`src/host/frontdoor.ts`
-   `serveHttp`). The reads and the `http` rows are matched together as the
-   table matches its rows — exact paths first, then the longest prefix;
-   **a read and a row never share a path** (address and prefix: the install
-   refuses the clash, and so does `skein reads`). A read wins → the
-   call. A row wins, or nothing matches: a signed request goes through the
-   kernel's door (an entry; a path no row takes is the door's signed 404);
-   so does an unsigned one at an open row whose filter validates (1.,
-   above: an entry, answered plain); any other unsigned one is answered by
-   the host with no entry — **401** when a row is at the path (a message
-   route: sign it; the stock client shakes hands), else **404**. The
-   handshake (`/.well-known/auth`) is the door's, signed or not.
+1. **The route.** The one table, by path: the exact route first, then the
+   longest prefix. No route: 404, no entry (signed when the request is).
+2. **The filters**, in the route's order, before anything is recorded, over
+   the request and the state as it stands: `kernel.brc104` (the BRC-104
+   request check — the session in `frontdoor/sessions` by its `yourNonce`,
+   not expired, and the signature, through the signer; the principal is the
+   client's key; no `x-bsv-auth-*` headers, an unknown or expired session or
+   a bad signature: 401, the stock client shakes hands), `kernel.beef`
+   (every BEEF in the body decoded and every BUMP checked against the chain
+   app's headers; the bytes replaced by the pointer record; a BUMP that does
+   not check 400; no BEEF and no principal before it 400 "nothing to
+   validate" — signed or validated), and an app's own (`<app>.<filter>`, a
+   call in the deterministic profile). Each passes the request on (with a
+   principal, with blocks it stored), rejects it, or answers it. A route
+   lists only what it names: `["kernel.brc104"]` signed only;
+   `["kernel.beef"]` validated (an overlay's `/submit`: the stock
+   TopicBroadcaster's plain POST is admitted, with no sender key);
+   `["kernel.brc104", "kernel.beef"]` signed, and validated if it carries a
+   BEEF; none — anyone.
+3. **The gate.** The roles that gate the route's function (the app
+   record's `roles`; the genesis's: the explorer is root's) against the
+   principal: root passes anything, `user` any principal, an app role its
+   holders; no principal 401, the wrong one 403.
+4. **The outcome.** A rejection, a filter's answer (a **read route**: no
+   handler — the site's pages, a lookup, a resolver: anyone, any method,
+   signed or not; the fuel on the host's meter) and the gate's refusal
+   write **no entry**: the host answers at once — signed on the request's
+   session when the request is signed and its session verifies (the front
+   door's fn `respond`, a call), plain otherwise. What passes is the entry
+   — `door: {principal?, verified?, filters, beefs?, blocks?}` — and the
+   front door's step on it runs the route's handler (its `caller` the
+   principal) and signs its answer on the session when the request is
+   signed (#135: a signed request gets a signed answer, BRC-104 §6.4,
+   whatever the route's filters). The handshake (`/.well-known/auth`) is a
+   route of its own to the front door's `handshake`, no filters.
 
-**Where reads come from.** The head `reads` (src/host/plan.ts
-`READS_HEAD`): its root `{kind: "reads", reads: [{address: <the path as
-served>, prefix?: true, program: <program record>, fn, app?, …settings}]}`.
-An app's manifest declares its reads (`reads[]`, docs/APPS.md §2; the
-overlay's `/lookup` is derived from `config.overlay`); the install writes
-them into the head beside the others' (the kernel's `objects` and `head`
-operations, as the owner) — an upgrade replaces them, an uninstall takes
-them out. The owner adds reads of its own (`skein reads add|remove
-[--prefix] --fn f [--settings json] <path> <handler>`; no `app`, so an
-app's upgrade or uninstall leaves them): the site at `/` is one. State, so
-replay-derived, as the dispatch table is; the host reads the head when its
-root moves.
-
-| path (examples) | door |
+| path (examples) | route |
 |---|---|
-| `/site/*`, the owner's `/`, `/onboard/resolve`, `/onboard/search`, `/onboard/manifest.json`, `/onboard/bsvalias/id/*`, `/<overlay>/lookup`, `/<overlay>/listTopicManagers` … | a read: a call, anyone |
-| `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/amm/call`, `/wallet/fund`, `/explore*` | a message route: signed |
-| `/<overlay>/submit` (open, `filter: beef`) | a message route: signed, or validated (a plain POST whose BEEF checks) |
+| `/site/*`, root's `/`, `/onboard/resolve`, `/onboard/search`, `/onboard/manifest.json`, `/onboard/bsvalias/id/*`, `/<overlay>/lookup`, `/<overlay>/listTopicManagers` … | read routes: filters only, anyone, nothing logged |
+| `/sendMessage`, `/onboard/register`, `/onboard/profile`, `/onboard/call`, `/amm/call`, `/explore*` | `kernel.brc104`: signed |
+| `/<overlay>/submit`, `/wallet/fund` | `kernel.beef`: validated |
 
-The stock TopicBroadcaster's plain POST `/submit` is admitted: its BEEF
-validates. Any other plain write — an unsigned profile — gets 401 and
-shakes hands. The host's funding hand-in to
-`/wallet/fund` is a message too: the host signs it over a BRC-104 session
-with its billing key (docs/WALLET.md, Billing).
+The host's funding hand-in to `/wallet/fund` is validated by its BEEF
+(docs/WALLET.md, Billing).
 
 ```
 request {kind: "http", method, path, route, query, headers: {name: value}, body: bytes}
-entry   {kind: "log", prev, n, time, request: <that record>, transport: "http"}
+entry   {kind: "log", prev, n, time, request: <that record, as the filters handed it back>, transport: "http", door}
 ```
 
-`path` is what the client sent (what BRC-104 signs), `route` what the
-dispatch table and the reads see (the host strips `/@<handle>`), header
-names lower-cased. A read is the same record, handed to the call and kept
-nowhere.
+`path` is what the client sent (what BRC-104 signs), `route` what the route
+table sees (the host strips `/@<handle>`), header names lower-cased. A
+request the door answers is the same record, kept nowhere.
 
 ```
 http://<handle>.localhost:<port>/…     the instance's origin (the Host header)
-http://<host>:<port>/@<handle>/…       the same instance, a dev form: the host strips the prefix for the rows
+http://<host>:<port>/@<handle>/…       the same instance, a dev form: the host strips the prefix for the routes
 ```
 
-**Auth is by key.** The kernel picks the request's row (#115: the
-dispatch table, on the identity the request claims in
-`x-bsv-auth-identity-key`) and hands the front door that row. The
-front door runs BRC-103/104: for a row that is not open, the verification
-of the general message — its session holds the claimed identity and the
-signature verifies, against the instance's session table (below) — at the
-door (#121: its fn `verify`, called by the kernel before the entry is
-written; a failure is a refusal entry, its status and `{status: "error",
-code, description}` the answer); the handshake at `/.well-known/auth` in
-its step on the request. The caller is the identity key the session proved
-(`door.verified` on the entry); there is no account, no handle check, no
-envelope. Answers are signed on the session through the instance's signer
-(the kernel's `wallet`, a recorded call of the step).
+**Auth is by key.** `kernel.brc104` establishes who a request is from; the
+caller is the identity key the session proved (`door.principal` on the
+entry); there is no account, no handle check, no envelope. Answers are
+signed on the session through the instance's signer (the kernel's
+`wallet`, a recorded call of the step; a call's for what the door answers).
 
 - **Sessions are state** (#68). The BRC-103 session table is records the
-  front door reads and writes; a handshake is a request like any other,
-  and its step writes the new session. Sessions survive a restart (a new
-  kernel process, a crash, an idle stop): a client's session is there when
-  the instance comes back. Replay needs no session besides: each logged
-  message carries the sender key, the 104 signature and both nonces.
+  front door writes on the handshake and `kernel.brc104` reads; a handshake
+  is a request like any other, and its step writes the new session.
+  Sessions survive a restart (a new kernel process, a crash, an idle
+  stop). Replay needs no session besides: each logged request carries the
+  sender key, the 104 signature and both nonces.
   - **Where.** The head `frontdoor/sessions` (#77: the front door's own,
-    under its name; `programs/frontdoor/sessions.zig`):
-    `{kind: "sessions", buckets: [<bucket> × 16]}`, each bucket `{kind:
-    "session-bucket", sessions: [{nonce, peer: bytes(33), peerNonce,
-    created}]}`; a session lives in bucket sha256(nonce)[0] mod 16, so a
-    request reads one small record and a handshake rewrites the buckets it
-    changes and the root. `nonce` is ours (what a request's `yourNonce`
-    names); `created` the handshake entry's time.
+    under its name; `programs/frontdoor/sessions.zig`, read by
+    kernel-zig `door.zig` `sessionOf`): `{kind: "sessions", buckets:
+    [<bucket> × 16]}`, each bucket `{kind: "session-bucket", sessions:
+    [{nonce, peer: bytes(33), peerNonce, created}]}`; a session lives in
+    bucket sha256(nonce)[0] mod 16. `nonce` is ours (what a request's
+    `yourNonce` names); `created` the handshake entry's time.
   - **Lookup and expiry.** A request's session is found by its `yourNonce`.
     Expiry: `defaults.sessionTtlMs` (a day) from `created`, judged by the
-    request entry's time. An unknown or expired session gets a plain 401,
-    and the standard client shakes hands again by itself.
+    request's time. An unknown or expired session gets a plain 401, and the
+    standard client shakes hands again by itself.
   - **Bounds and replay.** A handshake drops the expired sessions and, past
     1024, the oldest. A replayed initialRequest (the peer and initial nonce
     of a session held) is refused. A replayed signed request verifies (its
-    nonce is not remembered: a replayed read reads again); a replayed write
-    is the same mail record, which the kernel admits once (the `unique` map).
-    The records are prunable like any others; nothing prunes them yet.
-- **Routes are rows of the dispatch table** (#77, #115): the `http` rows
-  `{transport: "http", address: <path>, prefix?: true, sender: "*" |
-  "session" | <key>, program: <cid>, fn, filter?, …the handler's
-  settings}`. The kernel matches them (dispatch.zig `forHttp`): exact
-  addresses first, then prefixes, longest first; within each, the first row
-  in table order whose sender takes the identity the request claims.
-  `sender` says only which keys may reach the route, never how the wire
-  is answered: `"*"` any key (#135: signed — an unsigned request never
-  reaches a row; the host answers it 401); `"session"` any identity with a BRC-104
-  session; a key that identity's (#121, #126: the owner's
-  rows name the owner's key; there is no `"owner"` sender symbol). `filter: "beef"` (#121): the door decodes the body's BEEF
-  before the entry is written and the handler's `body` is the pointer
-  record's CID (an overlay's submit); a BEEF that does not check is a
-  refusal at the door (400, no thread). **A signed request gets a signed
-  answer** (decided 2026-10-07, BRC-104 §6.4): a request carrying
-  `x-bsv-auth-*` headers is a general message, and the front door verifies
-  its session and signature and signs its answer on that session whatever
-  the row's sender, `*` included (the handler gets its `caller`); a bad
-  signature or an unknown or expired session is a plain 401, as on any
-  row. A request without those headers reaches no row (#135: the host
-  answers it 401, no entry; before #135 an open row took it, plain). A
-  signed request no row takes is refused by the front
-  door as the kernel says: no row at the path, 404 (verified and signed
-  when the request is signed); a row there needs a session and the request
-  has none, 401 (the stock client shakes hands); none takes its identity,
-  403, signed on the session. A refusal at the door (#121: the row's
-  filter, no thread ran) of a signed request is signed too (#135): the host
-  answers it with a front-door call (fn `refusal`, the request as received,
-  at its entry's time), which verifies the session and signs the refusal
-  on it; only a request whose session does not verify — unknown, expired,
-  a bad signature — gets its refusal plain (there is no session to sign
-  on). The genesis seeds the default rows; an app's install adds its
-  rows under `/<app>/` through the kernel's `dispatch` operation
-  (docs/APPS.md §3); the kernel matches against the table as it stands at
-  each step. The front door never sees the table: it gets the row
-  (`match`), verifies, and calls the row's handler, an in-VM call of
-  `program`'s `fn` in its step; what that receives and returns is the
-  program-facing contract below ("Route handlers").
-- **Files** (#52; #125: skein-sdk's `files` module, the static app
-  archived): any handler serves a site with `files.serve(a, req, tree,
-  files.rowOptions(req))` over the tree it picks (shruggr/skein-site: its
-  own app record's `tree`). A read (#135) `{address, prefix?, program:
-  <the handler>, fn: "get", root?, index?}` answers
-  `GET`/`HEAD` with the file at `<root>/<path>` in that tree — `path` the route past the prefix, percent-decoded;
-  `root` default the tree's top; a path ending in `/` (or an exact route on
-  a directory) its `index`, default `index.html`; a directory without the
-  `/` a 301 to it. `type` comes from the extension (html, css, js, mjs,
-  json, map, svg, png, jpg, gif, webp, ico, txt, md, wasm, woff2, pdf; else
-  `application/octet-stream`). The `ETag` is the blob's CID (git-raw,
-  sha1), and `If-None-Match` naming it is a 304. 404 for a missing file, a
-  non-file (link, submodule), a `..` segment, a NUL or a bad escape (nothing
-  outside the root is served); 405 for another method (`Allow: GET, HEAD`).
-  A read: no entry (#135: a call), and no head moves.
-- **The explorer is a message route** (#115; the explorer's `read` op is
-  not `reads[]`): who may call it is its row's sender, and its answer is a
-  read of live state made after the request's thread (fn `read` with the
-  entry's request). The explorer's row is the owner's key (#121:
-  code genesis names it; the default image has no explorer row, and the
-  claim writes it with the claimed owner's key — so nobody reads it before a
-  claim); others get 403, signed — a refusal, recorded on the request's
-  thread. Granting another key the explorer is the owner adding a row with
-  that sender through `dispatch`. A system tree's `etc/reads.json`
-  (`[{caller?: <key>, op}]` or `[{owner: true, op}]`, the form before #115)
-  is still read: at genesis each read becomes the sender of the rows marked
-  `read: op` (src/host/genesis.ts `foldReads`; `owner: true` the owner's key,
-  and no row in an image), and the genesis carries no `reads`.
+    nonce is not remembered); a replayed write is the same mail record,
+    which the kernel admits once (the `unique` map).
+- **Routes are the table's** (#77, #143): an app's install adds its routes
+  under `/<app>/` through the kernel's `dispatch` operation (docs/APPS.md
+  §3); root adds its own anywhere (`skein routes add|remove`: no `app`, so
+  an app's upgrade or uninstall leaves them — the site at `/` is one, the
+  read route `{http, /, prefix, filters: ["site.get"], root: "www"}`). The
+  front door never sees the table: it gets the route (`match`) and calls
+  its handler, an in-VM call of `program`'s `fn` in its step; what that
+  receives and returns is the program-facing contract below ("Route
+  handlers").
+- **Files** (#52; #125: skein-sdk's `files` module): any handler — or a
+  filter — serves a site with `files.serve` over the tree it picks
+  (shruggr/skein-site: its own app record's `tree`). A read route's filter
+  `get` with settings `{root?, index?}` answers `GET`/`HEAD` with the file
+  at `<root>/<path>` in that tree — `path` the route past the prefix,
+  percent-decoded; a path ending in `/` its `index`, default `index.html`;
+  a directory without the `/` a 301 to it. The `ETag` is the blob's CID,
+  and `If-None-Match` naming it is a 304. 404 for a missing file or a path
+  that escapes; 405 for another method. No entry, no head moves.
+- **The explorer** is a route behind `kernel.brc104` whose function is
+  gated by root (the genesis's `roles: {root: ["frontdoor.explore"]}`):
+  every genesis has it; nobody reads an image's before its claim; others
+  get 403, signed, nothing logged. Its answer is a read of live state made
+  after the request's thread (fn `read` with the entry's request).
+  Granting another key the explorer is granting it root.
 
 ### Route handlers: the program-facing contract (#68, #66)
 
@@ -998,24 +931,21 @@ else that needs a transaction on the chain sends it a BEEF —
 `{fn: "ingest", args: {beef}}` in box `chain` — and is answered at its
 address. The wallet and the overlay apps are programs of the same
 instance: they emit the ingest to the instance itself (docs/VM.md "emit":
-the host's loopback), admitted by the chain app's row from `$self`, end
-their step awaiting that message, and each answer steps them again (#79).
-The owner may call it too (its row from `$owner`); nobody else can. The
+the host's loopback), routed by the chain app's box route (#143: no sender —
+the route names `kernel.beef`, and the chain app judges its caller), end
+their step awaiting that message, and each answer steps them again (#79). The
 answers come at once when it arrives proven, else on each state change
 (`accepted` on the first status that is not a rejection, `proven` on its
 proof, `rejected`), several `{fn, request, replyTo, result}` answers to one
 request. **Every unproven transaction at rest has a registered broadcast**
 (a record in the chain state's `broadcasts`); proof triggering is the answer
 to that broadcast — the chain app's thread awaits the transaction's CID —
-not separate wiring. Its rows (its manifest; or a system tree's
-`etc/dispatch.json` with `bin/chain.wasm`, writing under its default scope
-`chain/`) — specific wiring, not an open box (#79):
+not separate wiring. Its routes (its manifest, #143):
 
 ```
-{"address": "chain",  "sender": "event",   "program": "chain"}                     the host's events (feeds, the broadcaster's proofs)
-{"address": "chain",  "sender": "$self",   "program": "chain"}                     the instance's own apps (the wallet, the overlay apps)
-{"address": "chain",  "sender": "$owner",  "program": "chain"}                     the owner
-{"address": "status", "sender": "$status", "program": "chain", "optional": true}   the status provider, box chain/status (left out without one)
+{"transport": "event", "address": "", "handler": "chain"}                     the host's events (feeds, the broadcaster's proofs)
+{"address": "", "filters": ["kernel.beef"], "handler": "chain"}              messages: the instance's own apps, root
+{"address": "status", "handler": "chain"}                                    the status provider, box chain/status
 ```
 
 Neither the wallet nor an overlay app takes these events or broadcasts
@@ -1385,8 +1315,8 @@ sender:
 
 `replyTo` routes it as a reply: a program that emitted the call and awaits
 the message's CID is stepped with it (`reply`, above). Over HTTP, the
-app's row `{transport: "http", address: "/call", sender: "session", fn:
-"call"}` takes the same `{fn, args}` as the POST body and answers `{fn,
+app's route `{transport: "http", address: "/call", filters: ["kernel.brc104"],
+handler: "<role>.call"}` takes the same `{fn, args}` as the POST body and answers `{fn,
 result}` or `{fn, error}` on the connection (200; 400, 403 `not-admitted`,
 404, 409, 500).
 
@@ -1405,13 +1335,13 @@ request {kind: "p2p", topic, from: bytes (the peer ID's multihash), seqno: bytes
 answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body?: bytes, close?: bool}
 ```
 
-- **Routing.** The kernel matches the dispatch table's `libp2p` rows (#115,
-  dispatch.zig `forLibp2p`) and hands the front door the row: the first row
-  in table order whose address is the topic or `/<protocol>` exactly and
-  whose sender takes the peer's key (from `from`). `{transport: "libp2p",
-  address: <topic>, sender: "*", program, fn}` for a topic, `address:
-  "/<protocol>"` for a stream protocol (from `etc/dispatch.json`, or the
-  older `etc/routes.json`'s `libp2p:` paths; a protocol's handler named in
+- **Routing.** The kernel matches the route table's `libp2p` routes (#115,
+  #143, dispatch.zig `forLibp2p`) and hands the front door the route: the
+  one whose address is the topic or `/<protocol>` exactly (the publisher's
+  key, from `from`, is the principal: the transport's own check).
+  `{transport: "libp2p", address: <topic>, filters?, program, fn}` for a
+  topic, `address: "/<protocol>"` for a stream protocol (from
+  `etc/dispatch.json`; a protocol's handler named in
   `etc/config.json` `libp2p.protocols` becomes its row; or installed by an
   app, #72: a manifest's pre-configured topic, OpNS style). A topic no row
   is at is matched by a **subscription** (below). Neither: `ignore`. The
@@ -1422,9 +1352,10 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   its manifest. A subscription is the delivery record: the kernel delivers a
   message on that exact topic to the app's `program` (a role in its record
   at `<app>/app`, resolved when the message comes) at `fn` — the front door
-  is handed `{transport: "libp2p", address: <topic>, sender: "*", program:
-  <the role's record>, fn, app, filter?}` as `match`, and the door, its
-  filter and the handler's call run exactly as for a row. No row is needed
+  is handed `{transport: "libp2p", address: <topic>, program: <the role's
+  record>, fn, app, filters?}` as `match` (a subscription's `filter`, the
+  SDK's `"beef"`, is `kernel.beef`), and the door, its filters and the
+  handler's call run exactly as for a route. No row is needed
   or consulted for it. A subscription is the app's own, keyed by (app,
   topic): an app's subscribe replaces its own; another app's subscribe of the
   same topic is that app's and does not take the topic — the first standing
@@ -1520,10 +1451,11 @@ answer  {verdict: "accept" | "reject" | "ignore", reason?, admit?: [entry], body
   that `from` is a secp256k1 peer ID (identity multihash of
   the key's protobuf) and that `signature` is its ECDSA signature (DER,
   sha2-256) over `"libp2p-pubsub:"` ‖ protobuf `{1: from, 2: body, 3: seqno,
-  4: topic}` — GossipSub's StrictSign. A bad one is a refusal entry (`reject`),
-  and nothing runs. Then the row's `filter` (an overlay's `<topic>` row:
-  `beef`, the body's BEEF decoded and replaced by its pointer record; a bad
-  BUMP is a refusal, `reject`; no chain state to check it by, `ignore`).
+  4: topic}` — GossipSub's StrictSign. A bad one is turned away (`reject`;
+  #143: no entry), and nothing runs. Then the route's filters (an overlay's
+  `<topic>` route: `kernel.beef`, the body's BEEF decoded and replaced by its
+  pointer record; a bad BUMP is `reject`; no chain state to check it by,
+  `ignore`).
   Then the handler (the route's program and fn, an in-VM call) gets the
   request plus `key` (the 33-byte key out of `from`) and `request` (the
   record's CID), and judges from state: `{verdict, admit?}`. A handler that

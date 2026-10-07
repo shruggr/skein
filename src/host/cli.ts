@@ -3,7 +3,7 @@
 // and the router (router.ts, #33) that serves every enabled row.
 //   skein-host run                    the host (#142): on the first run it makes the host skein, then serves
 //   skein-host init [--handle host]   the first run's part alone: the host skein made (once), nothing served
-//   skein-host grant <key> [--apps] [--instance <handle>]   a key's admin rows (and with --apps its owner rows)
+//   skein-host grant <key> [--role root|<app>.<role>] [--remove] [--instance <handle>]   a grant (#143)
 //   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
 //   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance (#40) for an identity outside the
 //                                     host: Router.createInstance with image `mailbox`, the instance manager's own create (#113)
@@ -40,13 +40,13 @@
 // host.db) it makes the master secret and host.db as before, the operator's key (SKEIN_OPERATOR_KEY,
 // default $SKEIN_HOME/operator.key: used if present, made if not, plain, 0600) and the HOST SKEIN —
 // Router.createInstance with `host`: from the host image (images/host merged over images/default: the
-// chain, git, site and onboarding apps), its genesis naming the operator's key as its owner (its admin
-// rows, its explorer row and every app's `$owner` rows at birth; no claim row), the onboarding app's config
+// chain, git, site and onboarding apps), its genesis's `root` the operator's key (#143: root from birth;
+// no claim route), the onboarding app's config
 // from host.env (domain SKEIN_HANDLE_DOMAIN, default the router origin's domain; origin
 // SKEIN_ROUTER_ORIGIN; name SKEIN_HOST_NAME; note SKEIN_HOST_NOTE), the instance manager and the certifier in
 // its address book, published at once — and prints its identity and URLs. Later runs start what exists.
-// `init` is the first run's part alone. `grant` gives another key (a browser wallet's) the host skein's
-// admin rows — the operator's message, signed with its key and handed to the running host
+// `init` is the first run's part alone. `grant` grants a role — root by default — to another key (a
+// browser wallet's) in the host skein: the operator's message, signed with its key and handed to the running host
 // (src/client/target.ts, the control socket's `message` op).
 // `add` inserts, or updates the given fields of an existing row. A new row's
 // identity is the signer's (signer.ts, #18): derived from the router's master
@@ -148,8 +148,9 @@ const USAGE = `usage:
   skein-host run                                          the host: on the first run the host skein (owned by the operator's key), then the router on :8100
                                                           (instances at <handle>.localhost:8100), a kernel per instance on demand; host page and roster on :4600
   skein-host init [--handle host]                         the first run's part alone: the host skein (#142), once; nothing served
-  skein-host grant <key> [--apps] [--instance <handle>]   the key's admin rows (and with --apps the apps' owner rows) in the host skein (or
-                                                          <handle>): the operator's messages, to the running host
+  skein-host grant <key> [--role root|<app>.<role>] [--remove] [--instance <handle>] [--dry-run]
+                                                          a grant (#143; root by default) in the host skein (or <handle>):
+                                                          the operator's message, to the running host
   skein-host add <handle> [--domain d] [--derive] [--identity hex] [--store path] [--tree cid] [--knows a,b|*] [--disabled]
   skein-host add <handle> --mailbox --owner <hex> [--domain d]   a mailbox instance for an identity outside the host (#40): the instance manager's create (#113)
   skein-host knows <handle> [a,b | --all | --none]        which agents its ROSTER.md lists; no list: print them
@@ -440,7 +441,7 @@ async function createHostSkein(router: Router, db: HostDb, handle: string, env: 
   const cfg = config.onboard!.onboard as { domain: string; origin: string };
   env.out(`skein-host: first run — the host skein ${c.handle} ${c.identity} at ${c.url}, owned by the operator's key ${owner} (${op.path}${op.made ? ", made now, mode 0600" : ""}) · ${Date.now() - t0} ms`);
   env.out(`skein-host: apps chain, git, site, onboard installed at birth · handles @${cfg.domain} · registrations and BRC-169 at ${cfg.origin}/`);
-  env.out(`skein-host: to manage it from a browser wallet: skein-host grant <the wallet's identity key> --apps · the operator's own messages: skein install|dispatch|… --instance ${c.handle}`);
+  env.out(`skein-host: to manage it from a browser wallet: skein-host grant <the wallet's identity key> --role root · the operator's own messages: skein install|routes|grant|… --instance ${c.handle}`);
   return db.get(handle)!;
 }
 
