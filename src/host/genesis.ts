@@ -1,4 +1,4 @@
-// Format 9 (#143: routes without senders, filters, roles and grants, root instead of an owner; format 8,
+// Format 10 (#146: the BEEF envelope beside the pointer record; format 9, #143: routes without senders, filters, roles and grants, root instead of an owner; format 8,
 // #77: the kernel's tables — one route table, admin operations in the kernel, write scope by app name;
 // format 7, #65, #69; format 6, #70, #67; #68: requests appended as received; format 3, #40; format 2,
 // #33: unsigned entries, keys as bytes) on the host's side: the genesis a new instance's log starts with,
@@ -456,7 +456,7 @@ export function genesis2(c: Genesis2Config, programs: Record<string, CID>): Reco
 /** Write a genesis over `s` into an empty store through its kernel; the entry's CID. */
 export async function writeSystemGenesis(k: Kernel, c: Genesis2Config, s: System, time: Stamp = clockNow()): Promise<CID> {
   const g = await k.store.put(genesisRecord(c, s) as never);
-  return await k.store.log.append(await nextEntry(k.store, { genesis: g }, time) as never); // the kernel's log takes a format-9 entry; Store's type is format 1
+  return await k.store.log.append(await nextEntry(k.store, { genesis: g }, time) as never); // the kernel's log takes a format-10 entry; Store's type is format 1
 }
 
 /** Code genesis (the stock system) into an empty store; the entry's CID. */
