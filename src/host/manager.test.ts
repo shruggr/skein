@@ -10,7 +10,8 @@
 // message from any other instance is not acted on and not answered; `stop`
 // unpublishes, `start` publishes again. #113: `create` records the domain it
 // is given; image `mailbox` makes a mailbox instance (what a registration
-// asks for), the same owner and handle again the same answer. (kernel-zig/
+// asks for), the same owner and handle again the same answer. GET /skeins?key=
+// lists a key's skeins on the host from their grants. (kernel-zig/
 // equiv/host.ts runs the whole flow through the onboarding app.)
 
 import { test } from "node:test";
@@ -135,6 +136,13 @@ test("the instance manager: create (the owner's claim forwarded before published
   assert.match(String(a[0]?.body.error), /has a mailbox instance here already: mel/);
   a = await send("host", "create", { handle: "mel", owner: Uint8Array.from(Buffer.from(client, "hex")), image: "mailbox" });
   assert.match(String(a[0]?.body.error), /handle mel is taken/);
+
+  // GET /skeins?key= at the host's origin: the skeins whose `grants` name the key root (#143), from the host; mailbox instances not listed.
+  const held = async (key: string) => { const r = await fetch(`${h.base}/skeins?key=${key}`); return { status: r.status, body: await r.json() as Array<{ handle: string; identity: string; url: string }> }; };
+  assert.deepEqual((await held(client)).body, ["alice", "dora"].map((x) => ({ handle: x, identity: h.keyOf(x).toPublicKey().toString(), url: h.origin(x) })), "the client's two claimed skeins");
+  assert.deepEqual((await held(h.ownerId)).body.map((x) => x.handle), ["host"], "the operator's: the host skein");
+  assert.deepEqual((await held(mailer)).body, [], "a mailbox instance is not listed");
+  assert.equal((await held("nope")).status, 400);
 
   // Another instance (its own key, from its own handle) is not acted on, and not answered.
   h.instance("other");

@@ -716,8 +716,8 @@ boot is written, and the process exits 0.
   headless Chrome on a host skein (#142: owned by the operator's key at
   birth, the site and the onboarding app installed at birth, host.env naming
   the host; the onboarding app's tree installed again with `--config`) —
-  create from the page, the locator in the
-  wallet's basket, the new skein managed from the host's page (chain, git and site there from birth, #141; git's
+  create from the page (nothing written into the wallet), Your skeins from
+  the host's `GET /skeins?key=`, the new skein managed from the host's page (chain, git and site there from birth, #141; git's
   owner row added by installing git again as the owner),
   app-demo deployed by hash from the page, the explorer, the host skein's
   children; replayed.

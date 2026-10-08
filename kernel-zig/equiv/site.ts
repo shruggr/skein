@@ -22,9 +22,9 @@
 //
 //   1. create: the form sends {fn: "onboard.create", args: {handle: alice}}
 //      to /onboard/call on your session; the answer {handle, identity, url};
-//      a locator token (a PushDrop output in basket skein-locators: alice's
-//      identity, url, handle) written into your wallet; the page opens alice's
-//      view (alice serves no page: she is managed from the host's);
+//      nothing is written into your wallet (no token tracks a skein); the
+//      page opens alice's view (alice serves no page: she is managed from
+//      the host's);
 //   2. alice's apps, from the host's page talking to alice: her apps read from her
 //      explorer (yours: you own her) — chain, git and site, installed at birth
 //      (#141; #143: their routes came with the image, root's by the claim); then install app-demo by hash from a
@@ -33,8 +33,10 @@
 //      read out of the stored tree, the record rebuilt in the page (the same
 //      CID), the prompt, then head + dispatch + start; app-demo runs;
 //   3. the explorer renders alice's log (genesis, the claim, the requests);
-//   4. back on the host skein, a locator for it added from the page; its page
-//      lists alice under the skeins created there;
+//   4. back on the host skein's page, Your skeins is the host's answer
+//      (GET <router>/skeins?key=: the skeins whose grants name your key
+//      root): the host skein and alice; the host skein's page lists alice
+//      under the skeins created there;
 //   5. a handle (#103, #113): the page's Register form (skein-site ≥ 0.5.3)
 //      signs `register <name>@<domain>` (/.well-known/skein-host for the
 //      domain) and posts it to /account/register over your wallet's
@@ -296,15 +298,15 @@ try {
   const g = pmf.metanet?.groupPermissions ?? {};
   const has = (level: number, name: string, counterparty?: string) => !!g.protocolPermissions?.some((p) => p.protocolID[0] === level && p.protocolID[1] === name && p.counterparty === counterparty);
   const wanted: Array<[number, string, string | undefined]> = [
-    [1, "identity key retrieval", "self"], [2, "server hmac", "self"], [2, "auth message signature", undefined], [1, "skein locator", "self"],
+    [1, "identity key retrieval", "self"], [2, "server hmac", "self"], [2, "auth message signature", undefined],
     [2, "skein register", "anyone"], [1, `certificate acquisition ${HANDLE_CERTIFICATE_TYPE}`, "self"], [1, "certificate list", "self"], [PROFILE_PROTOCOL[0], PROFILE_PROTOCOL[1], "anyone"],
   ];
   const missing = wanted.filter(([l, n, c]) => !has(l, n, c)).map(([l, n]) => `[${l}, ${n}]`);
   const cps = (pmf.metanet?.counterpartyPermissions?.protocols ?? []).map((p) => p.protocolName);
   check(pm.status === 200 && /json/.test(pm.type) && !pmf.metanet?.handles && missing.length === 0 && g.protocolPermissions?.length === wanted.length
-    && g.basketAccess?.length === 1 && g.basketAccess[0]!.basket === "skein-locators" && g.spendingAuthorization === undefined
+    && g.basketAccess === undefined && g.spendingAuthorization === undefined
     && cps.join(",") === "auth message signature,certificate field encryption",
-    `GET /manifest.json at the host skein's origin is the site's (${pm.type}): ${g.protocolPermissions?.length} protocols${missing.length ? ` (missing ${missing.join(", ")})` : ""}, basket ${g.basketAccess?.map((b) => b.basket).join(",")}, spending ${g.spendingAuthorization === undefined ? "none (0.5.2)" : "present"}; counterparty protocols ${cps.join(", ")}`);
+    `GET /manifest.json at the host skein's origin is the site's (${pm.type}): ${g.protocolPermissions?.length} protocols${missing.length ? ` (missing ${missing.join(", ")})` : ""}, basket ${g.basketAccess?.map((b) => b.basket).join(",") ?? "none"}, spending ${g.spendingAuthorization === undefined ? "none (0.5.2)" : "present"}; counterparty protocols ${cps.join(", ")}`);
   const rm = await atOrigin("127.0.0.1", "/manifest.json");
   const rmf = JSON.parse(rm.body) as { metanet?: { trust?: { publicKey?: string }; handles?: { resolve?: string }; groupPermissions?: unknown } };
   check(rm.status === 200 && !!rmf.metanet?.trust?.publicKey && rmf.metanet.handles?.resolve === `${base}/.well-known/metanet-handles/resolve` && !rmf.metanet.groupPermissions,
@@ -353,15 +355,11 @@ try {
   check(page.url().startsWith(`${sitePage}?key=`) && page.url().endsWith(`#/s/${aliceId}`), `the page stays the host's, on alice's view (#125: she serves no page) (${page.url().replace(/key=[0-9a-f]+/, "key=…")})`);
   const aliceRoot = await fetch(`${base}/@alice/`);
   check(aliceRoot.status === 200 && (await aliceRoot.text()).includes('src="app.js"'), `alice serves the site at / (#141: installed at birth, the owner's read at /): ${aliceRoot.status}`);
-  const locators = await page.evaluate(async () => {
-    const w = (window as unknown as { site: { wallet: { listOutputs(a: unknown): Promise<{ outputs: Array<{ outpoint: string; lockingScript: string }> }> } } }).site.wallet;
-    return (await w.listOutputs({ basket: "skein-locators", include: "locking scripts" })).outputs;
+  const baskets = await page.evaluate(async () => {
+    const w = (window as unknown as { site: { wallet: { listOutputs(a: unknown): Promise<{ outputs: unknown[] }> } } }).site.wallet;
+    return (await w.listOutputs({ basket: "skein-locators" })).outputs.length;
   });
-  const { PushDrop, LockingScript } = await import("@bsv/sdk");
-  const fields = locators.map((o) => PushDrop.decode(LockingScript.fromHex(o.lockingScript)).fields.map((f) => Buffer.from(f)));
-  check(fields.length === 1 && fields[0]![0]!.toString("hex") === aliceId && fields[0]![1]!.toString() === `${base}/@alice` && fields[0]![2]!.toString() === "alice",
-    `the locator token is in your wallet's basket skein-locators: a PushDrop of [identity, url, handle] (${fields.map((f) => f.map((x) => x.length).join("/")).join(" ")})`);
-  check(broadcasts.length === 1, `the locator's transaction was broadcast through the wallet's services (${broadcasts.length})`);
+  check(baskets === 0 && broadcasts.length === 0, `nothing written into your wallet at create: no skein token, no broadcast (${baskets} outputs, ${broadcasts.length} broadcasts)`);
   check((await rootsOf("alice")).join(",") === you, "alice is claimed for your key: root (#143)");
 
   // ------------------------------------------------ 2. alice's apps: chain, git and site from her image (#141); then app-demo by hash
@@ -403,16 +401,17 @@ try {
   // ------------------------------------------------ 4. the host skein's page: its children
   await page.goto(`${sitePage}${search}`);
   await ready();
-  await page.click("[aria-controls=add-panel]"); // 0.7.x: the add form behind its link
-  await page.fill("#add-locator input[name=handle]", "host");
-  await page.click("#add-locator button[type=submit]");
   const hostId = db.get("host")!.identity!;
-  await page.waitForSelector(`[data-locator="${hostId}"]`, { timeout: 120_000 });
-  check(true, "a locator for the host skein added from the page (its identity from its signed answer)");
+  await page.waitForSelector(`[data-skein="${aliceId}"]`, { timeout: 60_000 });
+  const cards = await page.locator("#skeins [data-skein]").evaluateAll((xs) => xs.map((x) => x.getAttribute("data-skein")));
+  const mine = await (await fetch(`${base}/skeins?key=${you}`)).json() as Array<{ handle: string; identity: string; url: string }>;
+  check(cards.join(",") === [hostId, aliceId].join(",") && mine.map((x) => `${x.handle} ${x.identity} ${x.url}`).join(",") === [`host ${hostId} ${base}/@host`, `alice ${aliceId} ${base}/@alice`].join(","),
+    `Your skeins is the host's answer, GET /skeins?key= from the skeins' grants: the host skein and alice (${mine.map((x) => x.handle).join(", ")})`);
+  check((await page.locator("text=Remove from wallet").count()) === 0 && (await page.locator("text=Add one you already have").count()) === 0, "no Remove from wallet, no Add by URL");
   await page.goto(`${sitePage}${search}#/s/${hostId}`);
   await page.waitForSelector("#children", { timeout: 60_000 });
   const kids = await page.locator("#children").innerText();
-  check(/alice/.test(kids) && kids.includes(`${base}/@alice`) && /Open/.test(kids), `the host skein's page lists the skeins created there, alice openable through her locator (${kids.replace(/\s+/g, " ").trim()})`);
+  check(/alice/.test(kids) && kids.includes(`${base}/@alice`) && /Open/.test(kids), `the host skein's page lists the skeins created there, alice openable (${kids.replace(/\s+/g, " ").trim()})`);
 
   // ------------------------------------------------ 5. a handle (#103, #113)
   await page.goto(`${sitePage}${search}`);

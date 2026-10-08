@@ -105,7 +105,7 @@ try {
   let r = await get("/site/");
   check(r.status === 200 && r.body.includes('src="app.js"'), `GET /site/: its own tree's www/index.html (${r.status})`);
   r = await get("/site/app.js");
-  check(r.status === 200 && r.body.includes("skein-locators"), `GET /site/app.js: the page's script (${r.status})`);
+  check(r.status === 200 && r.body.includes("onboard.create"), `GET /site/app.js: the page's script (${r.status})`);
   r = await get("/");
   check(r.status === 404, `GET / : nothing at the root until the owner says so (${r.status})`);
   check(await h.entries("inst") === n0, `#135: a read is no entry, nor is an unsigned 404 (${(await h.entries("inst")) - n0})`);

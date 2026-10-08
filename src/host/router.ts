@@ -25,6 +25,8 @@
 //   POST /account/profile                        → /onboard/profile         a handle holder's signed profile
 //   GET  /bsvalias/id/<handle>[@<domain>]        → /onboard/bsvalias/id/…   the paymail PKI, from the same records
 //   With no host skein: 404 (tests may answer them with a fixture: `discovery`).
+//   GET  /skeins?key=<hex>                at the host's own origin: the skeins here whose head `grants` names the key
+//                                         among root's holders, [{handle, identity, url}] (no wallet token tracks them)
 //   GET  /.well-known/skein-host          at every host name, an instance's too (#103): {origin, domain} — this
 //                                         router's origin and the handle domain (the onboarding app's
 //                                         config.onboard.domain), for a page an instance serves (the management
@@ -109,6 +111,7 @@ import { DEFAULT_BOX, Feeds, feedsOf, txCid, type FeedSpec } from "./feeds.ts";
 import { Cron, dbSchedules } from "./cron.ts";
 import { currentDispatch, takesEvent, takesMail, type DispatchRow } from "../runtime/dispatch.ts";
 import { openStoreFile } from "../runtime/index-store.ts";
+import { rootOf } from "./install.ts";
 import { existsSync } from "node:fs";
 import { now as clockNow } from "./clock.ts";
 import { boot, bootStore, type BootSource, type Booted } from "./boot.ts";
@@ -1466,6 +1469,7 @@ export class Router {
       return await this.held(this.forward(t.handle, t.route, url, req));
     }
     const path = url.pathname;
+    if (req.method === "GET" && path === "/skeins") return await this.skeinsHeldBy(url.searchParams.get("key") ?? "");
     // #113: the host's own origin's BRC-169 requests are the host skein's (its onboarding app's routes).
     const route = DISCOVERY[`${req.method} ${path}`] ?? (req.method === "GET" && path.startsWith(PAYMAIL_PREFIX) ? `/${ONBOARD_APP}${path}` : undefined);
     if (route) {
@@ -1477,6 +1481,25 @@ export class Router {
     }
     if (path === `${ARC_ROUTE}/callback`) return await this.arcRequest(req, path);
     return json(404, { status: "error", code: "ERR_NOT_FOUND", description: "no instance here: an instance is at http://<handle>.localhost:<port>/ or /@<handle>/" });
+  }
+
+  /**
+   * GET /skeins?key=<hex> at the host's own origin: the skeins on this host whose head `grants`
+   * (#143) names `key` among root's holders — each enabled agent row's store file read read-only,
+   * no kernel — as JSON [{handle, identity, url}]. A key's skeins are the host's to say (no token
+   * in a wallet tracks them). Unsigned, anyone; mailbox instances are not listed.
+   */
+  private async skeinsHeldBy(key: string): Promise<RouterResponse> {
+    if (!/^0[23][0-9a-f]{64}$/.test(key)) return json(400, { status: "error", code: "ERR_BAD_REQUEST", description: "key: an identity key (33 bytes, hex)" });
+    const out: Array<{ handle: string; identity: string; url: string }> = [];
+    for (const row of this.o.db.list("enabled")) {
+      if (row.kind === "mailbox" || !row.identity || !existsSync(row.store)) continue;
+      let roots: string[];
+      const s = openStoreFile(row.store, { readOnly: true });
+      try { roots = await rootOf(s); } catch { roots = []; } finally { s.close(); }
+      if (roots.includes(key)) out.push({ handle: row.handle, identity: row.identity, url: this.originOf(row.handle) });
+    }
+    return json(200, out);
   }
 
   /** A forwarded request, held among the in-flight ones (shutdown answers them 503). */

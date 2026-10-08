@@ -174,15 +174,15 @@ bin/skein-host run        # the first run: operator.key, master.key, host.db and
   handle that is taken is refused (409).
 - **The management page.** Open the host skein's origin
   (`http://host.localhost:8100/`) with a BRC-100 wallet in the browser: it
-  creates a skein for your key through that route, writes a **locator** (an
-  output in your wallet, basket `skein-locators`: the skein's identity, URL
-  and handle) and opens the new skein's own copy of the page. There it reads
+  creates a skein for your key through that route and opens the new
+  skein's own copy of the page. Nothing is written into your wallet: the
+  page lists your skeins from the host (`GET <router>/skeins?key=<your
+  identity key>`, the skeins whose head `grants` names your key root). There it reads
   the skein through its explorer and installs apps: the git app from the
   image, then any app by repository URL and commit id — you see the rows each
   asks for before your wallet signs. Deploy by hash needs the host to carry
   requests beyond itself: run it with `SKEIN_HTTP=fetch`. Every skein from
-  the default image serves the same page (shruggr/skein-site); one page
-  manages skeins on many hosts, each through its locator.
+  the default image serves the same page (shruggr/skein-site).
 - **A handle from the page** (#103). On the same page, "Register a handle"
   asks the host for `<name>@<domain>` for your key (the domain is the
   router's host name, `id.skein.nexus` in production; the page finds the
@@ -226,8 +226,8 @@ bin/skein chat --new --wait 'what is here?'      # box chat (the chat app; needs
 ```
 
 - In a browser: a skein from the default image serves the management page
-  at its origin (`/`). It talks to that skein, and to every skein your
-  wallet keeps a locator for, with the same requests as the commands below,
+  at its origin (`/`). It talks to that skein, and to every skein on its
+  host whose grants name your key root, with the same requests as the commands below,
   signed by your wallet. Its Inbox lists a box of any mailbox you give it
   (by default the mailbox your handle certificate resolves to) and syncs its
   `metanet_inbox` into that wallet with `@1sat/actions`' `syncMetanetInbox`.
@@ -366,7 +366,7 @@ TMPDIR=/tmp/sk kernel-zig/equiv/run.sh           # equivalence: shell, git, repl
 | [shruggr/skein-chat](https://github.com/shruggr/skein-chat) | the chat app: the turn loop (`chat`), its `bash` calls in the shell app's shell | v0.1.0 |
 | [shruggr/skein-onboard](https://github.com/shruggr/skein-onboard) | the onboarding app, installed in the host skein: creates a skein for a wallet through the instance manager (the wallet's signed claim forwarded, #127); registration over the registrant's session (#135) | v0.3.3 |
 | [shruggr/skein-git](https://github.com/shruggr/skein-git) | the git app: clones one commit by hash into the store, in the VM, and builds its app record (deploy by hash) | v0.1.2 |
-| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site, an app (#125: its page at `/site/`, served from its own tree by skein-sdk's `files`; the owner may add a row for `/`): locators in your wallet, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.7.6 |
+| [shruggr/skein-site](https://github.com/shruggr/skein-site) | the management site, an app (#125: its page at `/site/`, served from its own tree by skein-sdk's `files`; the owner may add a row for `/`): your skeins from the host, create a skein, install apps, the explorer, the Inbox, handles and their profiles | v0.7.6 |
 | [shruggr/skein-nexus](https://github.com/shruggr/skein-nexus) | the source of https://skein.nexus | |
 
 This repository's layout:
