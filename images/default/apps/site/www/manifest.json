@@ -1,6 +1,6 @@
 {
   "name": "skein",
-  "description": "The management page of a skein: create skeins, keep their locators in your wallet, install apps, register a handle and keep its certificate.",
+  "description": "The management page of a skein: create skeins, install apps, register a handle and keep its certificate.",
   "metanet": {
     "groupPermissions": {
       "description": "Manage your skeins from this page.",
@@ -27,14 +27,6 @@
             "auth message signature"
           ],
           "description": "Sign your session with each skein you open."
-        },
-        {
-          "protocolID": [
-            1,
-            "skein locator"
-          ],
-          "counterparty": "self",
-          "description": "Lock the locators of your skeins (a 1-sat PushDrop output each)."
         },
         {
           "protocolID": [
@@ -67,12 +59,6 @@
           ],
           "counterparty": "anyone",
           "description": "Sign your handle's profile (a name and an avatar)."
-        }
-      ],
-      "basketAccess": [
-        {
-          "basket": "skein-locators",
-          "description": "Your skeins: list, add and remove their locators."
         }
       ]
     },

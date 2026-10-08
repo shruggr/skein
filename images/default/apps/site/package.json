@@ -1,8 +1,8 @@
 {
   "name": "skein-site",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
-  "description": "The management site of a skein, as an app (www/ served by its route handler): create a skein, keep locators in your wallet, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet, sign its profile, find handles.",
+  "description": "The management site of a skein, as an app (www/ served by its route handler): create a skein, list yours from the host, install apps, read the log, sync a mailbox into your wallet, register a handle and keep its certificate in your wallet, sign its profile, find handles.",
   "type": "module",
   "scripts": {
     "build": "node build.mjs"

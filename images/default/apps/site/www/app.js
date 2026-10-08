@@ -5,7 +5,8 @@
 // changes there is a message from you to that skein. The skein that served
 // the page is never in the path for another skein's data.
 //
-//   #/                       your skeins (locators in your wallet), add one, create one here; your
+//   #/                       your skeins (this page's host lists them: the skeins whose head `grants`
+//                            names your key root, GET <host>/skeins?key=), create one here; your
 //                            handles (certificates in your wallet), register one on this page's host,
 //                            each one's profile (#104: name and avatar, signed by your wallet); find a
 //                            handle on this page's host (BRC-169 search)
@@ -27,15 +28,11 @@
 // (createWebWallet, webwallet.js) instead of connecting one; &services=<url>
 // points that wallet at a 1sat services endpoint.
 
-import { appRecordIn, Certificate, chunk, CID, connectWallet, createContext, dagJson, decodeProfile, describe, dispatchOrigin, encodeProfile, fold, formatOrdinalOutpoint, Hash, LockingScript, lookup, MasterCertificate, MessageBoxClient, outpointFromBytes, outpointToBytes, parseTree, planInstall, planUninstall, ProtoWallet, PushDrop, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, signClaim, syncMetanetInbox, Utils, WalletClient, wiring } from "./lib.js";
+import { appRecordIn, Certificate, chunk, CID, connectWallet, createContext, dagJson, decodeProfile, describe, dispatchOrigin, encodeProfile, fold, formatOrdinalOutpoint, Hash, lookup, MasterCertificate, MessageBoxClient, outpointFromBytes, outpointToBytes, parseTree, planInstall, planUninstall, ProtoWallet, RawBox, readStoredApp, rowKey, sendInstall, sendUninstall, signClaim, syncMetanetInbox, Utils, WalletClient, wiring } from "./lib.js";
 
 const q = new URLSearchParams(location.search);
 /** The skein that served this page: its base URL (the page is its `/site/`, or its `/` by root's route). */
 const here = new URL(".", location.href).href.replace(/\/+$/, "").replace(/\/site$/, "");
-/** Locator tokens: PushDrop outputs in this basket, fields [identity (33 bytes), url, handle]. */
-const BASKET = "skein-locators";
-const PROTOCOL = [1, "skein locator"];
-const KEY_ID = "1";
 const GIT_RAW = 0x78;
 /** BRC-169 §4.5: the handle-certificate type. */
 const HANDLE_TYPE = Utils.toBase64(Hash.sha256(Utils.toArray("metanet-handles handle certificate v1", "utf8")));
@@ -53,7 +50,7 @@ const REGISTER = [2, "skein register"];
 const PROFILE = [1, "metanet handles profile"];
 const PROFILE_KEY_ID = "1";
 
-const state = { wallet: undefined, me: "", locators: [], catalog: [], boxes: new Map(), host: undefined, handles: undefined };
+const state = { wallet: undefined, me: "", skeins: [], skeinsError: "", catalog: [], boxes: new Map(), host: undefined, handles: undefined };
 window.site = state;
 
 // ---------------------------------------------------------------- DOM
@@ -261,7 +258,7 @@ async function useWallet() {
   renderWho();
   $("who").title = state.me;
   $("connect").hidden = true;
-  await loadLocators();
+  await loadSkeins();
 }
 
 /**
@@ -297,39 +294,28 @@ function connectFailed(e) {
   who.textContent = msg;
 }
 
-// ---------------------------------------------------------------- locators
+// ---------------------------------------------------------------- your skeins, from the host
 
-async function loadLocators() {
-  const r = await state.wallet.listOutputs({ basket: BASKET, include: "locking scripts", limit: 1000 });
-  state.locators = [];
-  for (const o of r.outputs) {
-    try {
-      const { fields } = PushDrop.decode(LockingScript.fromHex(o.lockingScript));
-      const [identity, url, handle] = fields;
-      state.locators.push({ identity: Utils.toHex(identity), url: Utils.toUTF8(url), handle: Utils.toUTF8(handle), outpoint: o.outpoint });
-    } catch { /* an output of the basket that is not a locator: not shown */ }
-  }
-  return state.locators;
+/**
+ * Your skeins on this page's host: the host answers GET <its origin>/skeins?key=<your
+ * identity key> from each skein's head `grants` (#143: the skeins whose root role names
+ * your key), [{handle, identity, url}]. Nothing in your wallet tracks them. A host that
+ * does not answer: none, its reason kept for the page.
+ */
+async function loadSkeins() {
+  state.skeins = [];
+  state.skeinsError = "";
+  try {
+    const host = await hostInfo();
+    if (!host) return state.skeins;
+    const r = await fetch(`${host.origin}/skeins?key=${state.me}`);
+    if (r.status !== 200) throw new Error(`${host.origin}/skeins: HTTP ${r.status}`);
+    state.skeins = (await r.json()).filter((x) => isKey(x.identity ?? "") && typeof x.url === "string").map(({ handle, identity, url }) => ({ handle: handle ?? "", identity, url }));
+  } catch (e) { state.skeinsError = errText(e); }
+  return state.skeins;
 }
 
-async function addLocator({ identity, url, handle }) {
-  if (!isKey(identity)) throw new Error("not an identity key (33 bytes, hex)");
-  const script = await new PushDrop(state.wallet).lock([Utils.toArray(identity, "hex"), Utils.toArray(url, "utf8"), Utils.toArray(handle, "utf8")], PROTOCOL, KEY_ID, "self", true);
-  await state.wallet.createAction({
-    description: "skein locator",
-    outputs: [{ lockingScript: script.toHex(), satoshis: 1, basket: BASKET, outputDescription: `skein locator ${handle}`.slice(0, 50), tags: ["skein-locator"] }],
-    // Broadcast now: a locator the network has not taken is not one yet.
-    options: { randomizeOutputs: false, acceptDelayedBroadcast: false },
-  });
-  await loadLocators();
-}
-
-async function removeLocator(l) {
-  await state.wallet.relinquishOutput({ basket: BASKET, output: l.outpoint });
-  await loadLocators();
-}
-
-const locatorOf = (identity) => state.locators.find((l) => l.identity === identity);
+const skeinListed = (identity) => state.skeins.find((l) => l.identity === identity);
 
 // ---------------------------------------------------------------- a skein, read and written directly
 
@@ -444,19 +430,11 @@ class Skein {
 
 const skeins = new Map();
 function skeinOf(identity) {
-  const loc = locatorOf(identity);
+  const loc = skeinListed(identity);
   if (!loc) return undefined;
   let s = skeins.get(loc.url);
   if (!s) { s = new Skein(loc); skeins.set(loc.url, s); }
   return s;
-}
-
-/** The identity a skein's answers are signed by: one signed request (a read the skein may refuse; the signature is what counts). */
-async function identityAt(url) {
-  const s = new Skein({ url, identity: "", handle: "" });
-  await s.fetch("/explore");
-  if (!s.answeredBy) throw new Error(`${url}: no signed answer (is it a skein?)`);
-  return s.answeredBy;
 }
 
 // ---------------------------------------------------------------- handles (BRC-169, #103)
@@ -716,7 +694,7 @@ async function route() {
     if (parts[0] !== "s") return await home(m);
     const sk = skeinOf(parts[1]);
     if (!sk) {
-      m.append(h("h1", {}, short(parts[1] ?? "")), h("p", { class: "bad" }, "No locator in your wallet names this skein."), h("p", {}, h("a", { href: "#/" }, "Your skeins")));
+      m.append(h("h1", {}, short(parts[1] ?? "")), h("p", { class: "bad" }, "Not among your skeins on this host."), h("p", {}, h("a", { href: "#/" }, "Your skeins")));
       return;
     }
     m.append(skeinHeader(sk, parts[2] ?? ""));
@@ -760,34 +738,12 @@ async function home(m) {
   const skeinsSec = h("section", { class: "sec" });
   m.append(skeinsSec);
 
-  // Add a locator (a bookmark: what it resolves to is what your key may do there), behind its link.
-  const add = h("div", { class: "status" });
-  const url = h("input", { type: "text", name: "url", placeholder: "the skein's URL", "aria-label": "The skein's URL", value: here });
-  const handle = h("input", { type: "text", name: "handle", placeholder: "a name for it", "aria-label": "A name for it" });
-  const addPanel = h("div", { class: "card add-panel", id: "add-panel", hidden: true },
-    h("p", { class: "mut small" }, "A locator is an output in your wallet (basket skein-locators) naming a skein's identity and where it answers. Anyone may keep one for any skein."),
-    h("form", { class: "row", id: "add-locator", onsubmit: async (e) => {
-      e.preventDefault();
-      try {
-        status(add, "asking the skein for its identity");
-        const u = url.value.trim().replace(/\/+$/, "");
-        const identity = await identityAt(u);
-        status(add, `writing the locator (${short(identity)}) into your wallet`);
-        await addLocator({ identity, url: u, handle: handle.value.trim() || new URL(u).hostname.split(".")[0] });
-        route();
-      } catch (err) { status(add, errText(err), "bad"); }
-    } }, url, handle, h("button", { type: "submit", class: "outline" }, "Add")), add);
-  const reveal = h("button", { type: "button", class: "linklike", "aria-expanded": "false", "aria-controls": "add-panel", onclick: () => {
-    addPanel.hidden = !addPanel.hidden;
-    reveal.setAttribute("aria-expanded", String(!addPanel.hidden));
-  } }, "Add one you already have, by its URL");
-  skeinsSec.append(h("div", { class: "sec-head" }, h("h1", {}, "Your skeins"), reveal), addPanel);
-
-  // One card per locator.
-  const grid = h("div", { class: "grid", id: "locators" });
-  for (const l of state.locators) {
-    const st = h("span", { class: "status small" });
-    grid.append(h("article", { class: "card skein-card", "data-locator": l.identity },
+  // Your skeins on this host (the host's answer from their grants), one card each.
+  await loadSkeins();
+  skeinsSec.append(h("div", { class: "sec-head" }, h("h1", {}, "Your skeins")));
+  const grid = h("div", { class: "grid", id: "skeins" });
+  for (const l of state.skeins) {
+    grid.append(h("article", { class: "card skein-card", "data-skein": l.identity },
       h("div", { class: "card-top" },
         h("div", { class: "card-id" },
           h("a", { class: "card-title", href: `#/s/${l.identity}` }, l.handle || short(l.identity)),
@@ -795,9 +751,7 @@ async function home(m) {
         inspectLink(l.identity)),
       h("div", { class: "meta" }, "identity ", idView(l.identity, { label: "identity key" })),
       h("div", { class: "actions" },
-        h("a", { class: "btn primary", href: `#/s/${l.identity}` }, "Manage"),
-        confirmAction({ label: "Remove from wallet", question: `Remove ${l.handle || "this skein"} from your wallet? The skein keeps running; you can add it again by its URL.`, yes: "Remove", run: async (say) => { say("Your wallet is releasing the locator…"); await removeLocator(l); route(); } })),
-      st));
+        h("a", { class: "btn primary", href: `#/s/${l.identity}` }, "Manage"))));
   }
 
   // Create a skein (on a host skein: the onboarding app's route on the skein that served this page).
@@ -831,9 +785,10 @@ async function home(m) {
       if (r.status === 404) throw new Error("this skein does not create skeins (no onboarding app here)");
       if (r.status !== 200 || !v.result) throw new Error(v.error?.message ?? `HTTP ${r.status} ${text.slice(0, 200)}`);
       const { identity, url: at } = v.result;
-      status(made, `created ${handle}: ${at}\nwriting its locator into your wallet`, "ok");
-      await addLocator({ identity, url: at, handle });
-      status(made, `created ${handle}: ${at}\nlocator written; opening it`, "ok");
+      status(made, `created ${handle}: ${at}\nopening it`, "ok");
+      // The host lists it now (its grants name your key root); its answer stands in if the list is behind.
+      await loadSkeins();
+      if (!skeinListed(identity)) state.skeins.push({ handle, identity, url: at });
       // A new skein serves no page (#125): it is managed from here, talking to it directly.
       location.hash = `#/s/${identity}`;
     } catch (err) { status(made, errText(err), "bad"); } finally { busy(false); }
@@ -845,7 +800,8 @@ async function home(m) {
     wait,
     made);
   grid.append(form);
-  if (!state.locators.length) skeinsSec.append(h("p", { class: "mut" }, "No locators in your wallet yet."));
+  if (state.skeinsError) skeinsSec.append(h("p", { class: "bad" }, `Your skeins: ${state.skeinsError}`));
+  else if (!state.skeins.length) skeinsSec.append(h("p", { class: "mut" }, "No skein on this host is yours yet."));
   skeinsSec.append(grid);
 
   await handlesSection(m);
@@ -964,7 +920,7 @@ function show(sk, v, depth = 0) {
  */
 async function readSkein(m, sk) {
   const mismatch = () => (sk.answeredBy && sk.answeredBy !== sk.loc.identity
-    ? h("p", { class: "bad" }, "This URL answers as ", idView(sk.answeredBy, { label: "identity key" }), ", not the identity your locator names.")
+    ? h("p", { class: "bad" }, "This URL answers as ", idView(sk.answeredBy, { label: "identity key" }), ", not the identity the host lists for it.")
     : "");
   let view;
   try { view = await sk.view(); } catch (e) {
@@ -1186,17 +1142,14 @@ async function appsPage(m, sk) {
     for (const k of kids) {
       const r = await sk.record(k.root);
       const kid = keyText(r?.identity);
-      const ks = h("span", { class: "status small" });
-      const have = locatorOf(kid);
+      const have = skeinListed(kid);
       grid.append(h("article", { class: "card skein-card", "data-child": r?.handle ?? "" },
         h("div", { class: "card-id" },
           have ? h("a", { class: "card-title", href: `#/s/${kid}` }, r?.handle ?? k.name) : h("span", { class: "card-title" }, r?.handle ?? k.name),
           r?.url ? h("a", { class: "url", href: `${r.url}/` }, r.url) : ""),
         kid ? h("div", { class: "meta" }, "identity ", idView(kid, { label: "identity key" })) : "",
         h("div", { class: "actions" },
-          have ? h("a", { class: "btn", href: `#/s/${kid}` }, "Open")
-            : h("button", { type: "button", class: "go", onclick: async () => { status(ks, "writing the locator into your wallet"); try { await addLocator({ identity: kid, url: r.url, handle: r.handle }); route(); } catch (e) { status(ks, errText(e), "bad"); } } }, "Add to wallet")),
-        ks));
+          have ? h("a", { class: "btn", href: `#/s/${kid}` }, "Open") : "")));
     }
   }
 }
