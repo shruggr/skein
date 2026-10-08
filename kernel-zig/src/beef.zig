@@ -479,7 +479,6 @@ pub fn encode(a: std.mem.Allocator, rec: Value, blocks: Blocks) ![]u8 {
     if (txs != .array or marks != .array or bumps != .array or marks.array.len != txs.array.len) return error.Malformed;
     var out: std.ArrayList(u8) = .empty;
     try putU32(a, &out, if (version == 1) V1 else V2);
-
     try putVarint(a, &out, bumps.array.len);
     for (bumps.array) |b| {
         const path = Value.cidOf(b.get("path")) orelse return error.Malformed;

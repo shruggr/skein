@@ -286,7 +286,7 @@ the entry that drove the step, `step: {thread, step, entry, at}`) with `arg`
 { caller?:     bytes(33)       the identity the BRC-104 session proved (absent for an unsigned request, on an open route)
   method, path, route, query,  the request as received (path as the client signed it; route as the table saw it)
   headers:     {name: value}   names lower-cased, x-bsv-auth-* included
-  body:        bytes | <cid>  as received; #121: on a row whose `filter` is `beef`, the BEEF's pointer record (docs/VM.md "The door")
+  body:        bytes | {envelope}  as received; #121: on a row whose `filter` is `beef`, the BEEF's envelope {form, beef: <pointer record>, subject?, vout?} (#146; docs/VM.md "The door")
   contentType: text            the media type alone
   session?:    {payload, signature, nonce, yourNonce}   the 104 proof, to keep in what the handler writes (no payload when a filter replaced the body: reconstructible)
   match:       the dispatch row that matched, as the table holds it (`address`, `prefix: true` for a prefix row;

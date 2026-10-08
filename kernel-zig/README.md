@@ -11,9 +11,10 @@ implementation: the same log gives the same entries, records, CIDs, derived
 state and fuel on every replay, and the equivalence suite checks that Zig
 against Zig.
 
-The kernel at log format 9 (#143: routes without senders, filters before
-anything is recorded, roles and the grants head, root instead of an
-owner — "Format 9" below). Format 8: one dispatch table routes (rows for boxes, HTTP
+The kernel at log format 10 (#146: the BEEF envelope beside the pointer
+record — "Format 10" below). Format 9 (#143): routes without senders,
+filters before anything is recorded, roles and the grants head, root
+instead of an owner. Format 8: one dispatch table routes (rows for boxes, HTTP
 paths, libp2p topics and protocols), and the kernel matches every
 transport's packages against it, first match wins (#115, `dispatch.zig`:
 the front door is handed the matched row and only verifies who the package
@@ -578,14 +579,16 @@ at once (`{state: "refused", refused}`). The front door's step trusts
 
 The `beef` filter (`door.zig`, `beef.zig`): every byte string in the
 package that starts with a BEEF pattern (`beef.patterns`: V1 `0100beef`,
-V2 `0200beef`, Atomic `01010101`+txid, Outpoint `16a7beef`+txid+vout) is
+V2 `0200beef`, Atomic `01010101`+txid, Outpoint `16a7beef`+txid+vout,
+Subject `5709beef`+txid+BEEF V2) is
 decoded; every BUMP checked against the headers in `chain/state` (read
 only; none: refused, "no chain state"); each transaction stored once as its
 `bitcoin-tx` block, each BUMP as the raw block of its bytes and its merkle
-nodes; the bytes replaced by a link to the pointer record
-`{kind: "beef", form, version, subject, vout?, txs, marks, bumps: [{height,
-path, block, proves}]}`. `beef.encode` (and skein-sdk's
-`chain.record.beefOf`, and `src/runtime/beef.ts`) give the exact bytes back;
+nodes; the bytes replaced by the envelope `{form, beef: <pointer record>,
+subject?, vout?}` (#146), the pointer record the BEEF alone
+`{kind: "beef", version, txs, marks, bumps: [{height, path, block,
+proves}]}`. `beef.wire` (and skein-sdk's `chain.record.wireOf`, and
+`src/runtime/beef.ts` `wireOf`) give the exact bytes back;
 `door.restore` puts them back in a package. `replay` copies what the door
 put beside each entry (`replay.zig` `copyDoor`).
 
@@ -638,6 +641,16 @@ re-runs it), and a step reads its own pending head moves. Depth at most 8,
 output at most 64 MiB. `test/call/probe.wasm`
 (`test/call/probe.zig`) is the probe `src/host/call.test.ts` drives. The
 docs: `docs/VM.md`, "Calls".
+
+### Format 10 (issue #146)
+
+The BEEF envelope beside the pointer record, not in it. The door puts
+`{form, beef: <pointer record CID>, subject?, vout?}` where a BEEF's bytes
+were; the pointer record is the BEEF alone (`version`, `txs`, `marks`,
+`bumps`), so two envelopes over the same BEEF share one record. Subject
+BEEF (BRC-233: `57 09 be ef`, the subject txid, a BEEF V2; the subject in
+it, the rest any transactions) is one more form. A store in format 9 is
+refused (re-genesis; no migration).
 
 ### Format 9 (issue #143)
 

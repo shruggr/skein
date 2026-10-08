@@ -279,8 +279,8 @@ root holders; the claim grants root to its claimant; the admin operation
   nothing runs.
 - **Registering a program** is a route to its CID. Its record (and module)
   must be in the store first: `objects` delivers them.
-- A store whose log predates format 9 is refused at start ("before format
-  9"): it needs a new genesis (no migration).
+- A store whose log predates format 10 is refused at start ("before format
+  10", #146): it needs a new genesis (no migration).
 
 ## Programs and execution
 
@@ -763,7 +763,8 @@ values (an http body, a libp2p message's body, a carried message's body
 fields: through maps and arrays) and takes those that start with a BEEF
 pattern (`beef.zig` `patterns`, a table: BEEF V1 `01 00 be ef`, V2 `02 00
 be ef`, Atomic BEEF `01 01 01 01` + txid, Outpoint BEEF `16 a7 be ef` +
-txid + vout, BRC-62/96/95/158). For each:
+txid + vout, Subject BEEF `57 09 be ef` + txid + a BEEF V2 —
+BRC-62/96/95/158/233). For each:
 
 - it decodes the BEEF; one that does not decode is a refusal;
 - it checks **every BUMP** against the headers in the chain app's state
@@ -776,12 +777,16 @@ txid + vout, BRC-62/96/95/158). For each:
 - it stores each transaction **once** as its `bitcoin-tx` block (CID =
   txid), each BUMP as the raw block of its bytes and the merkle nodes it
   reveals (a block the store holds is not written again);
-- it puts the **pointer record** where the bytes were, a link:
+- it puts the **envelope** where the bytes were (#146: the envelope is not
+  BEEF), beside a link to the **pointer record**, the BEEF alone — two
+  envelopes over the same BEEF share one record:
 
 ```
-{kind: "beef", form: "beef" | "atomic" | "outpoint", version: 1 | 2,
- subject: <bitcoin-tx CID>,             the Atomic/Outpoint BEEF's txid, else the last transaction
- vout?: int,                            an Outpoint BEEF's output
+envelope  {form: "beef" | "atomic" | "outpoint" | "subject",
+           beef: <pointer record CID>,
+           subject?: <bitcoin-tx CID>,  an enveloped form's txid (a bare BEEF's subject is its last transaction)
+           vout?: int}                  an Outpoint BEEF's output
+record    {kind: "beef", version: 1 | 2,
  txs: [<bitcoin-tx CID>, …],            every transaction in wire order (a V2 txid-only one too)
  marks: [<bump index> | null | "txid"], per transaction: what the wire says beside it
  bumps: [{height, path: <raw CID: the BUMP as received>,
@@ -792,8 +797,8 @@ A rejection still stores what decoded (#143: no entry names it — the
 blocks are content-addressed and harmless), but no merkle nodes. With no
 BEEF in the package and no principal from a filter before it, `kernel.beef`
 rejects: "nothing to validate" (#135: signed or validated). The encoder — the
-exact wire bytes from the record and its blocks — is `beef.zig` `encode`
-in the kernel, skein-sdk's `chain.record.beefOf` for programs (the chain
+exact wire bytes from the envelope, the record and its blocks — is `beef.zig`
+`wire` in the kernel, skein-sdk's `chain.record.wireOf` for programs (the chain
 app's `ingest`, the overlay's gossip), `src/runtime/beef.ts` on the
 host's side.
 

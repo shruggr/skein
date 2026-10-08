@@ -22,7 +22,9 @@
 //                   (the head `chain/state`, read only); each transaction is
 //                   stored as its `bitcoin-tx` block, each BUMP as the raw block
 //                   of its bytes and the merkle nodes it reveals; and the bytes
-//                   are replaced by a link to the pointer record (beef.zig). A
+//                   are replaced by the envelope — {form, beef: <a link to the
+//                   pointer record>, subject?, vout?} — the record the BEEF
+//                   alone, the envelope beside it (beef.zig, #146). A
 //                   BUMP that does not check is a rejection (400), as is a
 //                   package with no BEEF in it when no filter before it yielded
 //                   a principal (#135: signed or validated — "nothing to
@@ -170,7 +172,7 @@ const Walk = struct {
         const blk = try cbor.block(a, try beef.record(a, d, checked));
         try w.pending.append(a, .{ .cid = blk.cid, .bytes = blk.bytes });
         try w.beefs.append(a, blk.cid);
-        return cbor.cidv(blk.cid);
+        return beef.envelope(a, d, blk.cid);
     }
 
     fn once(w: *Walk, c: []const u8, b: []const u8) !void {
@@ -203,12 +205,13 @@ pub fn filterBeef(a: std.mem.Allocator, s: Store, v: Value) !Filtered {
     return .{ .value = out, .beefs = w.beefs.items, .refused = w.refused };
 }
 
-/// The bytes a package's pointer links stand for, put back (the lossless rule's other half): each
-/// link to a pointer record named in `beefs` replaced by the BEEF it records (beef.zig `encode`).
+/// The bytes a package's envelopes stand for, put back (the lossless rule's other half): each
+/// envelope whose pointer record is named in `beefs` replaced by the bytes it and its record give
+/// (beef.zig `wire`).
 pub fn restore(a: std.mem.Allocator, s: Store, v: Value, beefs: []const []const u8) !Value {
     switch (v) {
-        .cid => |c| {
-            for (beefs) |x| if (std.mem.eql(u8, x, c)) {
+        .map => |m| {
+            if (beef.pointerOf(v)) |c| for (beefs) |x| if (std.mem.eql(u8, x, c)) {
                 const rec = (try s.get(a, c)) orelse return error.NotFound;
                 const G = struct {
                     fn get(ctx: *anyopaque, al: std.mem.Allocator, k: []const u8) anyerror!?[]const u8 {
@@ -217,11 +220,8 @@ pub fn restore(a: std.mem.Allocator, s: Store, v: Value, beefs: []const []const 
                     }
                 };
                 var sc = s;
-                return .{ .bytes = try beef.encode(a, rec, .{ .ctx = &sc, .get = G.get }) };
+                return .{ .bytes = try beef.wire(a, v, rec, .{ .ctx = &sc, .get = G.get }) };
             };
-            return v;
-        },
-        .map => |m| {
             const out = try a.alloc(cbor.Entry, m.len);
             for (m, out) |e, *o| o.* = .{ .key = e.key, .value = try restore(a, s, e.value, beefs) };
             return .{ .map = out };
