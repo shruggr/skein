@@ -10,11 +10,11 @@ topic per token, registered by root at runtime.
 
 | role | source | what it does |
 |---|---|---|
-| `overlay` | skein-overlay 0.11.0 (`bin/overlay.wasm`, copied) | a submission by message in box `amm/submit`, answered to the submitter's box, or by `POST /submit` (BRC-22, the STEAK); `/lookup`, gossip, the listing and documentation reads; `register` / `deregister` a topic (and `registerLookup` / `deregisterLookup` its lookup), and with it the market's liveness and the validator's beacon on `tm_mandala_<txid>_0-live` (below, "Market and validator"); hands every admitted BEEF to the chain app |
+| `overlay` | skein-overlay 0.12.0 (`bin/overlay.wasm`, copied) | a submission by message in box `amm/submit`, answered to the submitter's box, or by `POST /submit` (BRC-22, the STEAK); `/lookup`, gossip, the listing and documentation reads; `register` / `deregister` a topic (and `registerLookup` / `deregisterLookup` its lookup), and with it the market's liveness and the validator's beacon on `tm_mandala_<txid>_0-live` (below, "Market and validator"); hands every admitted BEEF to the chain app |
 | `mandala-topic` | skein-mandala 0.9.0 (copied) | judges `tm_mandala_<txid>_0` (`tm_mandala_<assetId>`, `_<vout>` always) by the BRC-162 rules; `tm_mandala` admits every deploy |
 | `mandala-lookup` | skein-mandala 0.9.0 (copied) | `ls_mandala`, `ls_mandala_deploys`, each token's `ls_mandala_<assetId>` (BRC-207: `mandala-spendability`, `mandala-admission`), one index; its fn `tokens`, the token list, the read route `/mandala/tokens` (0.6.0: the token list is a read of the components) |
 | `amm-lookup` | `programs/amm-lookup` | `ls_amm`: the live pools that pass the pool checks, per token |
-| `amm-validator` | `programs/amm-validator` | the validator's three direct calls, for every registered token when the validator role is on (root's switch, else `config.overlay.validator`); submits by message to its own overlay |
+| `amm-validator` | `programs/amm-validator` | the validator's three direct calls, for every registered token (always, 0.8.1); submits by message to its own overlay |
 | `amm-p2p` | `programs/amm-p2p` | the relay, the pages (`www/` from the app's tree); the catch-up utility, unscheduled |
 | | `src/pool.zig` | the pool library (module `pool`), over `mandala`'s parser and rules |
 | | `pool/Pool.runar.go` | the contract |
@@ -70,7 +70,7 @@ state.
 | `POST /submit` | BRC-22 (`X-Topics` a registered topic): the request waits on the submission and answers the STEAK; 400 for a BEEF that does not verify or a rejected transaction; 503 + Retry-After while undecided (skein-overlay 0.9.1; 0.7.3–0.9.0 answered `{id}`) |
 | `POST /lookup` | BRC-24: `ls_amm` `{tokenId}`, `{tokenId, outpoint, beef?}`, `{tokenId, validatorIdentityKey}`; `ls_mandala`, `ls_mandala_deploys` (skein-mandala README) |
 | `GET /listTopicManagers`, `/listLookupServiceProviders`, `/getDocumentationFor…` | the listings (each program's `metadata` / `documentation`); reads since 0.5.0 |
-| `GET /.live/tm_mandala_<txid>_0-live` | the runtime's liveness read (skein #138, no program): `[{sender, at, body, from}]` newest first, the beats within the window (`body` empty: the validator is `sender`, its peer ID `from`); 404 when the app keeps no liveness for the topic (not a market, or the topic not registered) |
+| `GET /.live/tm_mandala_<txid>_0-live` | the runtime's liveness read (skein #138, no program): `[{sender, at, body, from}]` newest first, the beats within the window (`body` the topic's view digest; the validator is `sender`, its peer ID `from`); 404 when the app keeps no liveness for the topic (the topic not registered) |
 | `GET /mandala/tokens` | mandala-lookup `tokens`: the token list, `{limit?, skip?}` → `[{tokenId, topic, sym, dec, icon?, txid, vout}]` (`icon` a Mandala deploy's embedded image as a data URL, skein-mandala 0.9.0); a read (0.6.0) |
 | `POST /call` | amm-p2p: `{fn, args}` for the three interfaces below |
 | `GET /…` (prefix `/`) | amm-p2p `serve`: the pages, `www/` of the app's own tree (skein-sdk `files.serve`); a read since 0.5.0 |
@@ -116,7 +116,8 @@ marketplace relay").
 
 **libp2p**: `/amm-validator/1/swap`, `/addLiquidity`, `/deploy`
 (amm-validator; one signed-message package per frame); the engine's
-`<topic>`, `-admit`, `-proof` for each registered topic; `tm_mandala_<txid>_0-live`,
+`<topic>` (submit and admit messages, one mesh) and `-proof` for each
+registered topic (skein-overlay 0.12.0; `-admit` before); `tm_mandala_<txid>_0-live`,
 beaconed by a validator's host and subscribed, without admitting anything,
 by a market's liveness tool (below).
 
@@ -125,39 +126,24 @@ job: "catchup"}` — a utility nothing schedules (0.6.0). amm-p2p takes no
 start or stop: the manifest has none, and the owner's `{kind:
 "amm-p2p-start" | "amm-p2p-stop"}` is refused (`BadMessage`).
 
-**Market and validator** (0.6.0, shruggr/skein#120). David, 2026-10-06
-evening: "a skein runs as a market and/or a validator by two settings in the engine's configuration (`config.overlay.market: {window}`, `config.overlay.validator: {every}`), and registering a token's topic is the one act that drives both". Two roles of the engine (skein-overlay 0.9.0+), the only role settings.
-
-**Root's switch** (0.6.2, skein-overlay 0.9.2; root since 0.7.0). David, 2026-10-07:
-"this shouldn't have been a config in the manifest. This should be a
-setting that the user is configuring". This manifest sets neither: both
-roles are off as installed. Root turns one on at install with
-`--config '{"overlay": {"market": {"window": 40000}, "validator": {"every":
-30000}}}'` (the initial value), or at any time by a message to the engine
-in `amm/register`, as register is sent — the Market and Validator switches
-on the Token topics page (`mandala/tokens/`, skein-mandala 0.7.3):
-
-```
-{"fn": "market", "args": {"window": 40000}}    |  {"fn": "market", "args": {"off": true}}
-{"fn": "validator", "args": {"every": 30000}}  |  {"fn": "validator", "args": {"off": true}}
-```
-
-answered `{market?: {window}, validator?: {every}}`, the roles in effect.
-The switch is kept beside the registered set in `amm/topics` (`market?` /
-`validator?`, `{window}` / `{every}` or `{off: true}`) and has precedence
-over `config.overlay` from then on. On emits `liveness` / `beacon` on
-`tm_mandala_<txid>_0-live` for every token already registered, off `unliveness` /
-`unbeacon`; registers and deregisters from then on follow the roles in
-effect. The Validator page shows the roles in effect, read the same way
-(the switch in `amm/topics` over the app record's `config.overlay`;
-web/ui `src/validator/control.ts` `withSwitches`).
+**Market and validator, always** (0.6.0, shruggr/skein#120; 0.8.1,
+skein-overlay 0.12.0). David, 2026-10-09: "every skein is marketplace AND
+validator from install, always". Two roles of the engine, never off; the
+owner's switch of 0.6.2 (skein-overlay 0.9.2, `{fn: "market" |
+"validator"}` in `amm/register`, kept in `amm/topics`) and the Token topics
+page's Market and Validator switches are gone. `config.overlay.market:
+{window}` / `.validator: {every}` give the ms (this manifest sets neither:
+40 000 / 30 000). The Validator page shows both always on, with the ms
+(web/ui `src/validator/control.ts` reads the app record's `config.overlay`
+only).
 
 The engine, on `register {topic: "tm_mandala_<txid>_0", program: "mandala-topic"}`
-(box `amm/register`, from root): subscribes the topic and seeds; with
-the market on, emits `{event: "liveness", topic: "tm_mandala_<txid>_0-live", window}`; with
-`validator`, `{event: "beacon", topic: "tm_mandala_<txid>_0-live", every, body:
-<empty>}` — "the beat needs no body: the frame carries the sender's
-identity key and the gossip message the peer id". `deregister` reverses
+(box `amm/register`, from root): subscribes the topic and seeds; emits
+`{event: "liveness", topic: "tm_mandala_<txid>_0-live", window}` and
+`{event: "beacon", topic: "tm_mandala_<txid>_0-live", every, body}` — the
+frame carries the sender's identity key and the gossip message the peer
+id; the body is the topic's view digest `{view: {count, digest}}`
+(skein-overlay 0.12.0), re-declared when it changes. `deregister` reverses
 both (`unliveness`, `unbeacon`). A start or a re-read emits nothing: the
 intents stand in the log.
 
@@ -165,13 +151,12 @@ intents stand in the log.
   — signs an LP's `addLiquidity`, consents to a pool `deploy` as the pool's
   validator (receiving liquidity, not the node putting up funds of its own)
   — for any token whose topic is in the engine's registered set (the head
-  `amm/topics`) when the validator role is on (the switch kept there, else
-  `config.overlay.validator`); otherwise every
+  `amm/topics`; always, 0.8.1); otherwise every
   `swap`, `addLiquidity` and `deploy` is refused `{ok: false, reason:
   "not_validating", detail}` before anything is checked or signed. It reads
-  the setting and the set at each call. Each beat is the host's signed
+  the set at each call. Each beat is the host's signed
   frame (docs/MESSAGES.md "Beacons"): dag-cbor `{body, at, sender,
-  signature}`, `body` empty, `sender` the instance's identity key; the
+  signature}`, `body` the topic's view digest, `sender` the instance's identity key; the
   gossip message's peer is the node's peer ID, derived from the instance's
   root (`[2, "skein instance"]`, key ID `libp2p:<handle>`, counterparty
   self; skein signer.ts `peerKey`).
@@ -201,9 +186,10 @@ split, we would split it across multiple skeins".
 `etc/app.json`: the six programs; `config.overlay` with no topics and the
 lookups `ls_mandala`, `ls_mandala_deploys` (both `mandala-lookup`) and
 `ls_amm` (`amm-lookup`), none with a `topics` list, so each listens to every
-topic served; gossip on (the default); no `market` or `validator` (0.6.2:
-both off until root turns one on, above; 0.6.0–0.6.1 set
-`market: {window: 40000}` and `validator: {every: 30000}`); `config.amm` (`ammValidator`,
+topic served; gossip on (the default); no `market` or `validator` (0.8.1:
+both always on, at the defaults 40 000 / 30 000 ms; 0.6.0–0.6.1 set
+`market: {window: 40000}` and `validator: {every: 30000}`, 0.6.2–0.8.0 had
+root's switch); `config.amm` (`ammValidator`,
 `commission`); `provides` the three `amm.*` interfaces (each `submit` with
 `peerId: "string"` beside `validator`, 0.4.0); `requires: ["chain/1"]`; no
 `start` / `stop` (0.6.0).
@@ -213,10 +199,10 @@ both off until root turns one on, above; 0.6.0–0.6.1 set
 shruggr/skein#143 (0.7.0): a route names a transport, an address, its
 filters and a handler; no sender. Mailbox addresses are relative to the app
 (shruggr/skein#128: `"x"` is the box `amm/x`); one route per box. Who may
-run a function is `roles`: `{"root": ["register", "registerLookup", "deregisterLookup", "market", "validator"]}`.
+run a function is `roles`: `{"root": ["register", "registerLookup", "deregisterLookup"]}`.
 
-1. `register` → `overlay.register` (register / deregister and the
-   switches; root's: any other key's message is recorded and runs nothing)
+1. `register` → `overlay.register` (register / deregister and
+   registerLookup / deregisterLookup; root's: any other key's message is recorded and runs nothing)
 2. `submit`, `kernel.beef` → `overlay.submit` (submissions by message from
    anyone whose BEEF validates; the validator's own among them; skein-overlay 0.7.6)
 3. `amm-p2p` → `amm-p2p` (the relay's interfaces by message, `{fn, args}`,
@@ -267,19 +253,20 @@ called as a filter it answers `{answer: <the page>}` (0.7.0).
   0.7.1+'s manifest row): not carried, as skein-mandala 0.6.0 does not; a
   submission paused on a parent resumes only when a later submission brings
   it.
-- **`tm_mandala_<txid>_0-live` off a market host.** Liveness is kept by a host
-  serving a market (the market role on, above); on any other host its
-  `.live` read answers 404 and its Swap page plans nothing.
+- **`tm_mandala_<txid>_0-live` for an unregistered token.** Liveness is
+  kept for a registered topic (every skein a market, 0.8.1); for a token
+  not registered here the `.live` read answers 404 and its Swap page plans
+  nothing.
 - **Catch-up and proofs by block.** Never specified; sync is
   shruggr/skein#112's `want`. The `/amm/proofs/1.0.0` row is gone and no
   start schedules the catch-up pass; the code stays as a utility
   (`proofsByBlock`, `catchup`).
 - **A setting changed after a register.** The roles' events are emitted at
-  `register` / `deregister` and at root's switch (0.6.2) only (the
-  intents stand in the log): a market window or a beat changed by a
+  `register` / `deregister` only (the
+  intents stand in the log; root's switch is gone, 0.8.1): a market window or a beat changed by a
   reinstall applies to the topics registered after it; a topic registered
   before keeps its standing liveness and beacon (deregister and register it
-  again, or switch the role: the switch emits for every registered topic). An instance upgraded from 0.5.0 keeps
+  again). An instance upgraded from 0.5.0 keeps
   the beacons and liveness amm-p2p emitted then (keyed by app and topic, as
   the engine's are; a register of a topic registered already emits nothing,
   so deregister and register it to replace them). Their beats still carry

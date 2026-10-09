@@ -126,13 +126,13 @@ images/host/apps/onboard --instance host --config <file.json>`).
 ### The Open Exchange image (#147)
 
 `images/open-exchange` merged over `images/default`, as the host image is:
-the default image's three apps and `apps/amm/` (shruggr/skein-amm v0.8.0,
+the default image's three apps and `apps/amm/` (shruggr/skein-amm v0.8.1,
 the tag's git tree), installed at birth after them. amm carries
 skein-mandala v0.9.0 and its own overlay engine (`bin/overlay.wasm`,
 skein-overlay 0.11.0's build), so tonight the image has **one engine, amm's**.
 The standalone engine app (shruggr/skein-overlay) returns when the engine
 leaves amm: amm and mandala then register into it (decided 2026-10-08);
-amm 0.8.0 is not there yet. Its `etc/apps.json` names root's own routes:
+amm 0.8.1 is not there yet. Its `etc/apps.json` names root's own routes:
 
 - `POST /submit` → amm's engine's submit handler: `{transport: "http",
   address: "/submit", filters: ["kernel.beef"], program: "amm.overlay",

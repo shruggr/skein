@@ -10,7 +10,8 @@
  *                      POST lookup, POST submit, GET .live/tm_mandala_<txid>_0-live, POST call under
  *                      it). The pages are the app's `www/`, served at
  *                      `<base>/` (index.html), so the base is the page's own
- *                      directory (`appBaseOf`); `VITE_AMM_OVERLAY` overrides
+ *                      directory (`appBaseOf`; at the origin's root, `<origin>/amm`);
+ *                      `VITE_AMM_OVERLAY` overrides
  *                      it (a dev server on another origin)
  *   VITE_AMM_PEER_OVERLAY  another instance's AMM base URL (no default): the
  *                      Validator page reads this instance's liveness (and
@@ -31,13 +32,21 @@ const env = (import.meta as { env?: Record<string, string | undefined> }).env;
  * The app's base URL from the page's own URL: the directory the page is
  * served from (`https://alice.skein.nexus/amm/` → `https://alice.skein.nexus/amm`,
  * `http://127.0.0.1:8100/@alice/amm/index.html` → `http://127.0.0.1:8100/@alice/amm`).
- * Undefined for a page at an origin's root (a dev server), which names no app.
+ * At the origin's root (the instance's root route `/` serving this app's www/,
+ * shruggr/skein#147: `https://alice.skein.nexus/`, or a host's dev form
+ * `http://127.0.0.1:8100/@alice/`) the page names no app, and the app is the
+ * same skein's `amm`: `<origin>/amm` (`…/@alice/amm`).
  */
 export function appBaseOf(href: string): string | undefined {
   const u = new URL(href);
   const path = u.pathname.replace(/[^/]*$/, "").replace(/\/+$/, "");
-  return path ? u.origin + path : undefined;
+  const segs = path.split("/").filter((x) => x !== "");
+  if (segs.length === 0 || (segs.length === 1 && segs[0].startsWith("@"))) return `${u.origin}${path}/${ROOT_APP}`;
+  return u.origin + path;
 }
+
+/** The app the pages are at the origin's root (skein#147): this one, installed as `amm`. */
+export const ROOT_APP = "amm";
 
 /** The app's name: the last segment of its base URL (`…/amm` → `amm`); undefined for an origin. */
 export function appName(base: string): string | undefined {

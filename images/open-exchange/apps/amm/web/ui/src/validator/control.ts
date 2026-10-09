@@ -7,16 +7,13 @@
  * defaults, …}`) for the instance's identity, and the installed
  * app record (`<app>/app`) for the policy: `config.amm.ammValidator` and the
  * engine's two roles, market and validator (skein-amm 0.6.0, shruggr/skein#120).
- * The roles are root's switch (0.6.2, skein-overlay 0.9.2; David,
- * 2026-10-07: "this shouldn't have been a config in the manifest. This
- * should be a setting that the user is configuring"): read as the engine
- * reads them, the switch kept in the registered set's record (`<app>/topics`:
- * `market?: {window} | {off: true}`, `validator?: {every} | {off: true}`)
- * over the app record's `config.overlay.market {window}` /
- * `config.overlay.validator {every}` (`withSwitches`).
+ * The roles are not switches (skein-amm 0.8.1, skein-overlay 0.12.0; David,
+ * 2026-10-09: every skein is a market and a validator from install, always):
+ * `config.overlay.market {window}` / `config.overlay.validator {every}` are
+ * the values, read as the policy's `marketWindowMs` / `validatorEveryMs`
+ * (absent: the engine's defaults).
  *
- * Nothing is sent from here: the switches are on the Token topics page, mandala/tokens/ (the
- * engine's `market` / `validator` message to `<app>/register`).
+ * Nothing is sent from here.
  */
 
 /** What the page needs of `AuthFetch` (and what the tests fake). */
@@ -42,9 +39,9 @@ function parseBody(text: string): unknown {
 export interface ValidatorPolicy {
   minValidatorFeeBps?: number;
   maxLpFeeBps?: number;
-  /** The market's liveness window (ms; the switch, else `config.overlay.market.window`): this instance is a market; absent, it is not. */
+  /** The market's liveness window (ms; `config.overlay.market.window`); absent: the engine's default (this instance is always a market). */
   marketWindowMs?: number;
-  /** The validator's beat (ms; the switch, else `config.overlay.validator.every`): this instance is a validator; absent, it is not. */
+  /** The validator's beat (ms; `config.overlay.validator.every`); absent: the engine's default (this instance is always a validator). */
   validatorEveryMs?: number;
 }
 
@@ -188,25 +185,6 @@ export async function readAppPolicy(authFetch: AuthFetchLike, instanceUrl: strin
   };
   const rec = await headRecord(`${app}/app`);
   if (!rec || typeof rec !== "object" || (rec as { kind?: unknown }).kind !== "app") return undefined;
-  return withSwitches(policyOf(rec as Record<string, unknown>), await headRecord(`${app}/topics`));
+  return policyOf(rec as Record<string, unknown>);
 }
 
-/**
- * The roles in effect (skein-overlay 0.9.2, `topics.effective`): root's
- * switch kept in the registered set's record `<app>/topics` (`market: {window}
- * | {off: true}`, `validator: {every} | {off: true}`) over the policy's
- * `config.overlay` values; a role never switched keeps the manifest's.
- */
-export function withSwitches(policy: ValidatorPolicy, topicsRecord: unknown): ValidatorPolicy {
-  const r = (topicsRecord ?? {}) as Record<string, unknown>;
-  if (r.kind !== "overlay-topics") return policy;
-  const out: ValidatorPolicy = { ...policy };
-  for (const [role, field, key] of [["market", "window", "marketWindowMs"], ["validator", "every", "validatorEveryMs"]] as const) {
-    const sw = r[role] as Record<string, unknown> | undefined;
-    if (!sw || typeof sw !== "object") continue;
-    const ms = num(sw[field]);
-    if (sw.off === true || ms === undefined) delete out[key];
-    else out[key] = ms;
-  }
-  return out;
-}

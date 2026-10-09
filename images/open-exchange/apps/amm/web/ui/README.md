@@ -59,6 +59,17 @@ wallet's filings and `ls_amm` queries carry the same string
 (`src/lib/tokenId.ts`), so the pages no longer read `/mandala/tokens` to
 learn a token's origin.
 
+**skein-amm 0.8.1: market and validator always; the page base at the
+origin root** (skein-overlay 0.12.0; David Case, 2026-10-09: "every skein
+is marketplace AND validator from install, always"). The switches below
+(0.6.2) are gone: the Validator page's Policy shows both always on, with
+the ms of the app record's `config.overlay.market` / `.validator` or the
+engine's defaults (`src/validator/control.ts` `readAppPolicy` reads the
+app record only; `withSwitches` is gone). Served at the origin's root
+(`/`, the read route of shruggr/skein#147), the pages take `<origin>/amm`
+as the app's base (`src/lib/config.ts` `appBaseOf`; `/@<handle>/` the
+same, `…/@<handle>/amm`); `/amm/` and `/@<handle>/amm/` as before.
+
 **skein-amm 0.7.0: root, not an owner** (shruggr/skein#143, skein's routes,
 filters and roles). The explorer (`/explore`) and the engine's
 `amm/register` box (register, deregister, the Market and Validator

@@ -43,13 +43,12 @@
 //! same package, `match`, and `reply` / `resolved` when called again). Everything else is as above:
 //! the `{wait: true}` and its `await` are the relay thread's.
 //!
-//! The validator role (0.6.0, shruggr/skein#120, David 2026-10-06 evening; 0.6.2: the owner's
-//! switch, skein-overlay 0.9.2 `validator {every} | {off: true}` in `<app>/register`, over
-//! `config.overlay.validator`): a swap, addLiquidity
-//! or deploy is signed only when the engine's validator role is on and the token's
+//! The validator role (0.6.0, shruggr/skein#120, David 2026-10-06 evening; 0.8.1, skein-overlay
+//! 0.12.0, David 2026-10-09: "every skein is marketplace AND validator from install, always" — the
+//! owner's switch of 0.6.2 is gone): a swap, addLiquidity or deploy is signed only when the token's
 //! topic `tm_mandala_<txid>_0` is in the engine's registered set (the head `<app>/topics`, written by the
 //! owner's `register` / `deregister`); else refused `not_validating`. "The validator program signs
-//! for any registered token when `validator` is set." (0.3.2–0.5.0: amm-p2p's validated set,
+//! for any registered token." (0.3.2–0.5.0: amm-p2p's validated set,
 //! `validate` / `unvalidate` in box `amm/validate`; gone.)
 //!
 //! Config: the app record's `config.amm.ammValidator` (`{"minValidatorFeeBps": n,
@@ -108,18 +107,12 @@ fn settings(a: std.mem.Allocator, in: Value) !Settings {
     return std.json.parseFromSliceLeaky(Settings, a, text, .{ .ignore_unknown_fields = true }) catch error.BadConfig;
 }
 
-/// The topics this instance signs for (0.6.0, shruggr/skein#120, David 2026-10-06 evening: "The
-/// validator program signs for any registered token when `validator` is set"): with the validator
-/// role in effect, every topic in the engine's registered set, the head `<app>/topics`; without
-/// it, none (each refused `not_validating`). The role in effect is the engine's (0.6.2, skein-overlay
-/// 0.9.2): the owner's switch kept in that same record (`topics.switchesOf`) over
-/// `config.overlay.validator` (`config.rolesOf`, read from the input as the engine reads its
-/// configuration) — `topics.effective`.
+/// The topics this instance signs for (0.6.0, shruggr/skein#120; 0.8.1, David 2026-10-09: every
+/// skein is a validator, always): every topic in the engine's registered set, the head
+/// `<app>/topics`; any other refused `not_validating`.
 fn validatedSet(a: std.mem.Allocator, in: Value) ![]const []const u8 {
     const c = (try vm.head(a, try ov.topics.headName(a, ov.calls.appOf(in)))) orelse return &.{};
     const rec = try vm.store().getValue(a, c);
-    const roles = ov.topics.effective(try ov.topics.switchesOf(rec), try ov.config.rolesOf(a, in));
-    if (roles.validator == null) return &.{};
     const entries = try ov.topics.entriesOf(a, rec);
     const out = try a.alloc([]const u8, entries.len);
     for (entries, out) |e, *o| o.* = e.topic;

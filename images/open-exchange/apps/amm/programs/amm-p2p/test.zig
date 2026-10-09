@@ -1888,9 +1888,10 @@ test "the routes, filters and roles (shruggr/skein#143, 0.7.0): no dispatch, rea
     const m = try dagjson.decode(a, manifest_json);
     try testing.expect(m.get("dispatch") == null and m.get("reads") == null);
     const gated = m.get("roles").?.get("root").?.array;
-    // register, registerLookup, deregisterLookup (skein-overlay 0.11.0), market, validator.
-    try testing.expectEqual(@as(usize, 5), gated.len);
-    for ([_][]const u8{ "register", "registerLookup", "deregisterLookup", "market", "validator" }, gated) |x, g| try testing.expectEqualStrings(x, scbor.Value.str(g).?);
+    // register, registerLookup, deregisterLookup (skein-overlay 0.11.0); no market / validator
+    // (0.8.1, skein-overlay 0.12.0: always both, no switch).
+    try testing.expectEqual(@as(usize, 3), gated.len);
+    for ([_][]const u8{ "register", "registerLookup", "deregisterLookup" }, gated) |x, g| try testing.expectEqualStrings(x, scbor.Value.str(g).?);
     const filters = m.get("filters").?;
     try testing.expectEqualStrings("amm-p2p.serve", scbor.Value.str(filters.get("page")).?);
     try testing.expectEqualStrings("mandala-lookup.tokens", scbor.Value.str(filters.get("tokens")).?);

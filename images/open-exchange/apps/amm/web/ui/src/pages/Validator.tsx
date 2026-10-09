@@ -2,11 +2,10 @@
  * The Validator page: root's view of their own skein instance as an AMM
  * validator — who it is (handle, identity, peer ID), whether a peer hears its
  * heartbeat, the token topics registered with its engine, its policy and the
- * two roles in effect (market, validator: root's switch on the Tokens
- * page (mandala/tokens/), kept in `<app>/topics`, over `config.overlay.market` / `.validator`;
- * skein-amm 0.6.2) when root can read them (through the wallet-backed
- * AuthFetch), the pools it serves and the validators it sees. Nothing is sent
- * from here: the two switches are on the Token topics page (mandala/tokens/).
+ * two roles (market and validator: always both, skein-amm 0.8.1; their
+ * values `config.overlay.market` / `.validator`) when root can read them
+ * (through the wallet-backed AuthFetch), the pools it serves and the
+ * validators it sees. Nothing is sent from here.
  */
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type { PoolState } from "@amm-poc/matching-engine";
@@ -121,12 +120,10 @@ function RegisteredSection({ refreshKey }: { refreshKey: number }) {
       <p>
         <small>
           The token topics registered with this instance&apos;s engine (the Token topics page registers them). Registering a
-          token&apos;s topic is the one act that drives both roles: with the market on the engine asks for the
-          topic&apos;s liveness (<code>tm_mandala_&lt;txid&gt;_0-live</code>, read at <code>/amm/.live/…</code>); with the validator on
-          it beacons <code>tm_mandala_&lt;txid&gt;_0-live</code> and this instance signs the token&apos;s swaps and takes on its new
-          liquidity (addLiquidity, pool deploys). Deregistering reverses both. Both roles are off until you turn one on:
-          the Market and Validator switches on the Token topics page (<a href="mandala/tokens/">mandala/tokens/</a>; or <code>--config</code> at install). They are shown under
-          Policy.
+          token&apos;s topic is the one act that drives both roles, and this instance is always both, a market and a
+          validator: the engine asks for the topic&apos;s liveness (<code>tm_mandala_&lt;txid&gt;_0-live</code>, read at{" "}
+          <code>/amm/.live/…</code>), beacons <code>tm_mandala_&lt;txid&gt;_0-live</code>, and this instance signs the token&apos;s swaps
+          and takes on its new liquidity (addLiquidity, pool deploys). Deregistering reverses both. There is no switch.
         </small>
       </p>
       {error && <p className="bad" role="alert">{error}</p>}
@@ -181,7 +178,7 @@ function PolicySection(props: { genesis: GenesisRead | null; onRead: (g: Genesis
 
   const p = genesis?.ok ? genesis.policy : undefined;
   const show = (v: number | undefined, unit: string) => (v === undefined ? <span className="warn">not configured</span> : `${v} ${unit}`);
-  const role = (v: number | undefined, what: string) => (v === undefined ? <span className="warn">off</span> : `on: ${what} ${v / 1000} s`);
+  const role = (v: number | undefined, what: string) => (v === undefined ? "always on (the engine's default)" : `always on: ${what} ${v / 1000} s`);
   return (
     <section>
       <h2>Policy</h2>
@@ -197,8 +194,8 @@ function PolicySection(props: { genesis: GenesisRead | null; onRead: (g: Genesis
       ) : (
         <p className="warn">
           Not readable from the instance: min validator fee, max LP fee (the app record's <code>config.amm.ammValidator</code>) and
-          the two roles (root&apos;s switch in <code>&lt;app&gt;/topics</code>, else <code>config.overlay.market</code> /{" "}
-          <code>config.overlay.validator</code>) are not exposed by any open route.
+          the two roles&apos; values (<code>config.overlay.market</code> / <code>config.overlay.validator</code>) are not exposed by
+          any open route.
         </p>
       )}
       <p>
@@ -214,8 +211,8 @@ function PolicySection(props: { genesis: GenesisRead | null; onRead: (g: Genesis
       {error && <p className="bad" role="alert">{error}</p>}
       <NotBuilt>
         Editing the fees: they are the manifest's <code>config.amm</code>, changed by installing the app again with a new
-        manifest; the app offers no <code>writes: true</code> function for them. The two roles are not edited here: they are
-        the Market and Validator switches on the Token topics page (<code>mandala/tokens/</code>).
+        manifest; the app offers no <code>writes: true</code> function for them. The two roles have no switch: this instance is
+        always a market and a validator.
       </NotBuilt>
     </section>
   );
