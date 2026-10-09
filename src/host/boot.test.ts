@@ -11,7 +11,7 @@ import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import * as dagCbor from "@ipld/dag-cbor";
-import { anyOf, dirSource, installAtBirth, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
+import { anyOf, dirSource, installAtBirth, MemBlocks, mergeImages, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
 import { readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
 import { genesisRecord, keyHex, resolveSystem } from "./genesis.ts";
@@ -154,4 +154,40 @@ test("#141, #143: the default image installs chain, git and site at birth — th
   // The genesis carries the heads.
   const g = genesisRecord(c, { ...sys, dispatch: [...sys.dispatch, ...born.rows], heads: born.heads }) as Record<string, any>;
   assert.ok(g.heads["chain/app"].equals(born.heads["chain/app"]));
+});
+
+test("#147: the Open Exchange image (images/open-exchange over images/default) installs chain, git, site, overlay and amm; /submit and /lookup at the root to the engine app, / to the amm landing, the site at /site/", async () => {
+  const base = await dirSource(join(import.meta.dirname, "../../images/default"));
+  const own = await dirSource(join(import.meta.dirname, "../../images/open-exchange"));
+  const merged = new MemBlocks();
+  const src = anyOf(merged, base.objects, own.objects, wasmDirObjects(join(import.meta.dirname, "../../wasm")));
+  const root = await mergeImages(src, base.root, own.root, merged);
+  const s = await readSystemTree(src, root);
+  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site", "apps/overlay", "apps/amm"]);
+  assert.deepEqual(s.apps?.routes?.map((r) => `${r.address}${r.prefix ? " prefix" : ""}`), ["/submit", "/lookup", "/ prefix"], "the default image's / (the site) replaced by the amm landing");
+  const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
+  const c = { identity: key(), handle: "a", domain: "localhost" };
+  const sys = resolveSystem(c, programs, s.config, root, s.dispatch);
+  const kept = new Map<string, Uint8Array>();
+  const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
+  const born = await installAtBirth(target, src, s, sys, c);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.5.0", "git 0.2.0", "site 0.10.0", "overlay 0.11.0", "amm 0.8.0"]);
+  assert.deepEqual(Object.keys(born.heads).sort(), ["amm/app", "chain/app", "git/app", "overlay/app", "site/app"]);
+  const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
+  const rows = born.rows as Array<Record<string, any>>;
+  const show = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
+  const rootRows = rows.filter((r) => r.app === undefined);
+  assert.deepEqual(rootRows.map(show), [
+    "root http /submit [kernel.beef] .submit",
+    "root http /lookup [overlay.lookup]",
+    "root http / prefix [amm.page]",
+  ], "root's own routes: the engine's submit and lookup at the origin root, the landing at /");
+  const engine = get(born.heads["overlay/app"]!);
+  assert.ok(rootRows[0]!.program.equals(engine.programs.overlay), "/submit → the engine app's overlay program (as its own /overlay/submit)");
+  assert.ok(rows.some((r) => r.app === "overlay" && r.address === "/overlay/submit" && r.program?.equals(engine.programs.overlay) && r.fn === "submit"), "the engine's own /overlay/submit stays");
+  assert.ok(rows.some((r) => r.app === "overlay" && r.address === "/overlay/lookup"), "the engine's own /overlay/lookup stays");
+  assert.equal(rootRows[2]!.program, undefined, "/ is a read route");
+  assert.deepEqual([rootRows[2]!.root, rootRows[2]!.index], ["www", "index.html"], "the landing: the amm app's www/");
+  assert.ok(rows.some((r) => show(r) === "site http /site/ prefix [site.get]"), "the management site at /site/");
+  assert.ok(!rows.some((r) => r.app === undefined && r.filters?.includes("site.get")), "no root route to the site");
 });
