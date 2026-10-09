@@ -39,7 +39,7 @@ import { scan, type ScanOptions } from "../dev/scan.ts";
 import { now as clockNow } from "./clock.ts";
 import * as dagCbor from "@ipld/dag-cbor";
 import type { DispatchRow } from "../runtime/dispatch.ts";
-import { mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
+import { appRecordIn, mergeConfig, planInstall, planRootRoute, readStoredApp, type InstanceView, type ViewStore } from "./plan.ts";
 import { CLAIM_ROW, codeSystem, HANDSHAKE_ROW, rowsOf, resolveSystem, STOCK_HTTP, writeSystemGenesis, type ConfigSpec, type DispatchSpec, type Genesis2Config, type System } from "./genesis.ts";
 import type { Kernel } from "./kernel.ts";
 
@@ -317,7 +317,18 @@ export async function installAtBirth(k: Pick<Kernel, "hasBlock" | "putBlock">, o
     for (const r of p.rows) { rows.push(r.row); view.dispatch.push(r.row); }
     apps.push({ name: p.app, version: p.version, notes: p.notes });
   }
-  for (const r of rowsOf(t.apps!.routes ?? [], s.programs)) {
+  // #147: a root route's handler may be `<app>.<role>` — an app installed above, its program record (as `skein routes add`).
+  const named: Record<string, CID> = { ...s.programs };
+  for (const r of t.apps!.routes ?? []) {
+    const role = typeof r.program === "string" ? /^([a-z0-9][a-z0-9-]*)\.([A-Za-z0-9_-]+)$/.exec(r.program) : null;
+    if (!role || named[r.program!]) continue;
+    const app = await appRecordIn(view, role[1]!);
+    if (!app) throw new Error(`${APPS}: route ${r.address}: handler ${r.program}: no app ${role[1]} installed at birth`);
+    const cid = app.record.programs[role[2]!];
+    if (!cid) throw new Error(`${APPS}: route ${r.address}: handler ${r.program}: app ${role[1]} has no program ${role[2]} (${Object.keys(app.record.programs).join(", ")})`);
+    named[r.program!] = cid;
+  }
+  for (const r of rowsOf(t.apps!.routes ?? [], named)) {
     const p = await planRootRoute(view, "add", r);
     for (const x of p.rows) { rows.push(x.row); view.dispatch.push(x.row); }
   }
@@ -401,11 +412,14 @@ export const WASM_DIR = join(ROOT, "wasm");
 export const DEFAULT_IMAGE = join(ROOT, "images/default");
 /** The host image's own part (#142): merged over the default image (mergeImages), the host skein's image. */
 export const HOST_IMAGE = join(ROOT, "images/host");
+/** The Open Exchange image's own part (#147): merged over the default image (mergeImages) — the overlay engine and the amm app, root routes /submit, /lookup and / (the amm landing). */
+export const OPEN_EXCHANGE_IMAGE = join(ROOT, "images/open-exchange");
 
 /**
  * Two image trees merged (#142: images are starting trees that merge): every path of `over` added to
  * `base`. A directory in both is merged; a file in both must be the same blob — except `etc/apps.json`,
- * whose `install` and `routes` lists are joined (an app in both is refused). Any other path in both is a
+ * whose `install` and `routes` lists are joined (an app in both is refused; a root route of `over` at the
+ * same transport, address and prefix as one of `base`'s replaces it, #147). Any other path in both is a
  * collision, refused with its path. The installer's own checks (boxes, heads, paths) run when the merged
  * image's apps are installed at birth (installAtBirth). The new trees and the merged apps.json go into
  * `out`; every other object stays where it was.
@@ -428,7 +442,10 @@ export async function mergeImages(objects: Objects, base: CID, over: CID, out: M
         const x = JSON.parse(await blob(had.cid, path)) as ImageApps, y = JSON.parse(await blob(e.cid, path)) as ImageApps;
         const both = (x.install ?? []).filter((p) => (y.install ?? []).includes(p));
         if (both.length) throw new Error(`${APPS}: ${both.join(", ")} installed by both images`);
-        const routes = [...(x.routes ?? []), ...(y.routes ?? [])];
+        // #147: a root route of `over` at a route of `base`'s (same transport, address, prefix) replaces it (Open Exchange's `/`).
+        const key = (r: DispatchSpec) => `${r.transport ?? "mailbox"} ${r.address}${r.prefix ? " prefix" : ""}`;
+        const mine = new Set((y.routes ?? []).map(key));
+        const routes = [...(x.routes ?? []).filter((r) => !mine.has(key(r))), ...(y.routes ?? [])];
         const h = hashBlob(new TextEncoder().encode(`${JSON.stringify({ install: [...(x.install ?? []), ...(y.install ?? [])], ...(routes.length ? { routes } : {}) }, null, 2)}\n`));
         await out.putBlock(h.cid, h.object);
         entries.set(e.name, { ...e, cid: h.cid });
