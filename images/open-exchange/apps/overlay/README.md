@@ -1,0 +1,577 @@
+# skein-overlay
+
+The overlay services engine for a [skein](https://github.com/shruggr/skein),
+as an app: BRC-22 submit and BRC-24 lookup, served by the instance's own
+front door, with topic managers and lookup services as programs the engine
+calls. It is also a Zig package: an overlay of your own depends on it for
+the topic and lookup contracts. Version **0.11.0**.
+
+## What it is
+
+- **The engine** (`bin/overlay.wasm`): two ways to submit. `POST /submit`
+  is BRC-22: the request waits on the submission's thread and answers the
+  STEAK (0.9.1). A submission by message, `{fn: "submit", args: {beef,
+  topics}}`, into the app's box `<app>/submit`, is answered by message. The engine decodes
+  the BEEF once, asks the topic managers to judge it by CID, and hands it to
+  the chain app ([shruggr/skein-chain](https://github.com/shruggr/skein-chain),
+  required as `chain/1`) with `ingest`. It is admitted on the chain app's
+  first `accepted` or `proven` answer. A message's submitter is answered by message,
+  in its own box: **admitted** (status `pending`, the STEAK per topic), then
+  **every proof**, or **rejected**. Nothing persists unless a topic takes
+  it, apart from the request. `/lookup` is a read.
+- **State under its own name.** The engine and its lookup services write
+  only `<app>/state`, `<app>/gossip`, `<app>/topics`, `<app>/lookups` and
+  each lookup program's index `<app>/ls_<…>`; the app record is `<app>/app`. The chain state is the chain app's `chain/state`, read by
+  CID. Two overlay apps on one instance share the chain and nothing else.
+- **Gossip** over libp2p, per topic: `<topic>` (the raw submission),
+  `<topic>-admit`, `<topic>-proof`.
+- **The examples**: `tm_demo` (`bin/topic-demo.wasm`) and `ls_demo`
+  (`bin/lookup-demo.wasm`).
+
+Exported Zig modules:
+
+| module | file | what |
+|---|---|---|
+| `topic` | `src/topic.zig` | the topic manager contract: `pub fn main() u8 { return topic.main(identify); }` |
+| `lookup` | `src/lookup.zig` | the lookup service contract: `pub fn main() u8 { return lookup.main(spec); }` |
+| `sk` | `src/vm.zig` | the `skein` imports as an overlay program sees them |
+
+They pull in the SDK's `chain` module only.
+
+**What is built and where it goes.** Submit walks the whole BEEF oldest
+first and judges every transaction of the requested topics before the
+subject; each one a topic takes is ingested through the chain app on its
+own and admitted, in order, on its own answer (skein-overlay#1). A
+submission whose parent is neither in the BEEF nor held pauses, however it
+came: it is noted pending, waiting on those parents, and the engine records
+a want per (parent, topic, peer?) — `{event: "want", txid, topic, peer?}`
+(shruggr/skein#112). With a peer (a gossip pause: the publisher, and every
+peer whose `-admit` for it was seen, more as admits arrive) the host asks
+that peer on a direct stream; without one (a submission by message or
+HTTP) it asks peers from its mesh for the topic. Each want that ends is
+cleared by `{event: "unwant", txid, topic, peer?}`. A peer answers a want
+on the stream `/skein/overlay/beef/1.0.0` (one Atomic BEEF per frame, the
+wanted txid its subject; no reply frame), routed to `submit` as a
+submission from that peer; when the parent is in, the paused one is routed
+again. The pause is internal: the submitter hears nothing of it. A
+transaction admitted on `accepted` sends the app itself a `watch`, which
+waits for `proven` (publishes `-proof`) or `rejected` (unwinds); with a
+submitter to answer, each proof is relayed and a new watch waits for the
+next (a reorg's). Not built: the decided direction of shruggr/skein#31
+("Decided 2026-10-02 (night)"): a reference to a transaction is a
+registration for the life of the transaction, and a judgement is re-run
+when the chain state it depended on changes.
+
+## Use it
+
+Install the chain app, then the overlay:
+
+```
+skein-host install https://github.com/shruggr/skein-chain --instance <handle>
+skein-host install https://github.com/shruggr/skein-overlay --instance <handle>
+```
+
+The chain app proves nothing without the host's headers feed and broadcasts
+nothing without its broadcaster; shruggr/skein-chain's README, "Use it",
+has what the host must provide.
+
+Its BRC-23 base URL is `https://<handle>.<host>/<app>`; on a host without
+wildcard DNS (local dev) the router also serves it as `/@<handle>/<app>` on
+the host's origin. Its endpoints are under it: `POST <base>/submit`
+(`POST https://alice.skein.nexus/overlay/submit`, or
+`POST http://127.0.0.1:8100/@alice/overlay/submit`), a route that takes a
+signed request (BRC-104) from any key, or an unsigned one whose BEEF
+validates (skein's front door, shruggr/skein#135); and the
+reads, open to anyone, signed or not: `POST <base>/lookup` and the listing
+and documentation paths (shruggr/skein#135). The @bsv/sdk
+`TopicBroadcaster` and `LookupResolver` reject a base URL with a path, so
+call the endpoints directly (`POST <base>/submit` with the BEEF and
+`X-Topics`), or have root add the two root routes that answer them at
+the origin's root ("Root routes", below). `/submit` answers BRC-22's STEAK once the submission is
+decided (503 + `Retry-After` when nothing is decided within the host's
+bound; resubmit to poll the same flow): docs/OVERLAY.md, "Submitting".
+
+### Write an overlay of your own
+
+An overlay app is a tree with the engine's module, your topic managers and
+lookup services, and `etc/app.json` naming them in `config.overlay`.
+
+`build.zig.zon`:
+
+```zig
+.dependencies = .{
+    .skein_overlay = .{
+        .url = "https://github.com/shruggr/skein-overlay/archive/refs/tags/v0.4.0.tar.gz",
+        .hash = "skein_overlay-0.4.0-IMuNgRwfFADMLyxiAIDkDNkH4RwJT5SRmG5rqnV1RSXE",
+    },
+},
+```
+
+`build.zig`:
+
+```zig
+const wasi = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+const ov = b.dependency("skein_overlay", .{ .target = wasi, .optimize = .ReleaseSafe });
+const exe = b.addExecutable(.{
+    .name = "topic-mine",
+    .root_module = b.createModule(.{
+        .root_source_file = b.path("src/topic_mine.zig"),
+        .target = wasi,
+        .optimize = .ReleaseSafe,
+        .strip = true,
+        .imports = &.{.{ .name = "topic", .module = ov.module("topic") }},
+    }),
+});
+b.installArtifact(exe);
+```
+
+A topic manager is its identify function. `tm_demo` in full
+(`src/topic_demo.zig`):
+
+```zig
+const std = @import("std");
+const topic = @import("topic");
+
+pub const tag = "\x07tm_demo\x75"; // push "tm_demo", OP_DROP
+
+pub fn isToken(script: []const u8, satoshis: i64) bool {
+    return satoshis >= 1 and script.len > tag.len and std.mem.startsWith(u8, script, tag);
+}
+
+pub fn identify(a: std.mem.Allocator, call: topic.Call) anyerror!topic.Instructions {
+    var admit: std.ArrayList(u32) = .empty;
+    for (call.tx.outputs, 0..) |o, i| if (isToken(o.locking_script.bytes, o.satoshis)) try admit.append(a, @intCast(i));
+    return .{ .outputs_to_admit = admit.items, .coins_to_retain = if (admit.items.len > 0) call.previous_coins else &.{} };
+}
+
+pub fn main() u8 {
+    return topic.main(identify);
+}
+```
+
+A lookup service is a `lookup.Spec` (its map names, `answer`, and the
+`admitted` / `spent` / `rejected` hooks); `src/lookup_demo.zig` is a complete
+one with its own index.
+
+Either may also define `pub fn metadata(a, name) !topic.Metadata` (or
+`lookup.Metadata`: name, shortDescription, iconURL?, version?,
+informationURL?) and `pub fn documentation(a, name) ![]const u8`
+(markdown); the listing and documentation reads call them. Without them it
+lists under its configured name with an empty description. Where the text
+comes from (a literal, a file in the tree) is the program's own.
+
+The manifest (`etc/app.json`, this repo's own, description left out):
+
+```json
+{
+  "kind": "app",
+  "name": "overlay",
+  "version": "0.11.0",
+  "programs": {
+    "overlay": "bin/overlay.wasm",
+    "topic-demo": "bin/topic-demo.wasm",
+    "lookup-demo": "bin/lookup-demo.wasm"
+  },
+  "config": {
+    "overlay": {
+      "topics": { "tm_demo": "topic-demo" },
+      "lookups": { "ls_demo": { "program": "lookup-demo", "topics": ["tm_demo"] } },
+      "gossip": { "tm_demo": true }
+    }
+  },
+  "requires": ["chain/1"],
+  "filters": {
+    "listTopicManagers": "overlay.listTopicManagers",
+    "listLookupServiceProviders": "overlay.listLookupServiceProviders",
+    "topicDocumentation": "overlay.topicDocumentation",
+    "lookupDocumentation": "overlay.lookupDocumentation"
+  },
+  "roles": { "root": ["register", "registerLookup", "deregisterLookup", "market", "validator"] },
+  "routes": [
+    {"address": "register", "handler": "overlay.register"},
+    {"address": "submit", "filters": ["kernel.beef"], "handler": "overlay.submit"},
+    {"transport": "libp2p", "address": "/skein/overlay/beef/1.0.0", "filters": ["kernel.beef"], "handler": "overlay.submit"},
+    {"transport": "http", "address": "/listTopicManagers", "filters": ["listTopicManagers"]},
+    {"transport": "http", "address": "/listLookupServiceProviders", "filters": ["listLookupServiceProviders"]},
+    {"transport": "http", "address": "/getDocumentationForTopicManager", "filters": ["topicDocumentation"]},
+    {"transport": "http", "address": "/getDocumentationForLookupServiceProvider", "filters": ["lookupDocumentation"]}
+  ]
+}
+```
+
+The format is skein's routes, filters and roles (shruggr/skein#143,
+docs/APPS.md §2): a route names a transport, an address, its filters and a
+handler, and no sender; who may run a function is `roles`.
+
+- `programs.overlay` is the engine: copy `bin/overlay.wasm` from this repo
+  into your tree (or `bin/overlay.cid` when the instance already holds it).
+  The engine is the role `overlay`.
+- The rest of the wiring is derived from `config.overlay` by the install:
+  the http route `/submit` (`kernel.beef`, handler `overlay.submit`), the
+  read route `/lookup` (its filter `lookup`, which the install adds to
+  `filters` as `overlay.lookup` unless the manifest names its own), the
+  libp2p routes `<topic>` (`kernel.beef`), `<topic>-admit`, `<topic>-proof`,
+  and the app's box `<app>` twice, an `event` route and a `mailbox` route.
+  The install prompt reads them all aloud, marked derived.
+- Read routes (shruggr/skein#143). An http route with no handler is a
+  **read**: its filters answer and nothing is logged. The overlay's reads
+  are `/lookup` (derived) and the four listing and documentation paths
+  above, each with the engine's function as its filter. Called as a filter
+  (the input's `filter: true`), the engine answers `{answer: {status,
+  type, body}}`, the same http answer as before inside it; anyone, signed
+  or not. A read route names no program, so the engine finds its app by
+  the route's `app` (src/config.zig `matchedApp`).
+- One box per function class (shruggr/skein#128), three boxes:
+  `<app>/submit` for submissions, `<app>/register` for registration, `<app>`
+  for the engine's own events and messages.
+- The route `submit` (`<app>/submit`, `kernel.beef`: anyone whose BEEF
+  validates) is where submissions by message arrive (`{fn: "submit", args:
+  {beef, topics}}`; the door decodes the BEEF). The answers go to the
+  sender in that box. `POST /submit` (the derived http route) runs in the
+  request's step and waits; its threads and `wait` messages use the derived
+  `<app>` routes.
+- The route `register` (`<app>/register`, handler `overlay.register`) takes
+  `register` / `deregister` and the `market` / `validator` switches; they
+  are refused in any other box. `roles: {root: ["register", …]}` gates it:
+  only a key holding root runs it (a message from any other key is
+  recorded and runs nothing). Root may grant the function to others with
+  an app role of its own; the manifest declares none.
+- The derived routes on `<app>` take the libp2p routes' admits (a gossiped
+  or streamed submission's routed event, a peer's admit; the `event`
+  route) and the engine's own `watch`, `resume` and `wait` (the `mailbox`
+  route, by the host's loopback). The engine takes only the instance's
+  own messages there (`NotFromThisInstance` otherwise). An app that puts
+  another program on its box `<app>` overrides the derived mailbox route
+  and breaks those: keep `<app>` the engine's.
+- The libp2p route `/skein/overlay/beef/1.0.0` is the want-answer stream
+  (shruggr/skein#112): a peer the engine wants a parent from answers on
+  it, one Atomic BEEF per frame; the door decodes it (`kernel.beef`)
+  and `submit` takes it as a submission from that peer. Keep it in your
+  manifest for catch-up to work.
+- The name rule: every head your programs write is under your app's name.
+  Install under another name (`amm`, say) and its state is `amm/state`,
+  `amm/ls_<service>`.
+- `config.overlay` is read from the app record at every step: a reinstall
+  with a changed configuration takes effect at the next step.
+
+### Register a topic
+
+Topics may be declared in `config.overlay.topics` (an overlay with fixed
+topics, e.g. OpNS's one global topic) or registered at runtime: one call
+per topic. A dynamic overlay (one topic per token, `tm_<txid>`) declares
+none and registers the ones the operator runs. The engine's two functions:
+root sends them to the app's `register` box (the manifest's route
+`{"address": "register", "handler": "overlay.register"}`, gated by `roles:
+{root: ["register", …]}`, shruggr/skein#143; a mailbox address is relative
+to the app, so installed it is `<app>/register`, shruggr/skein#128):
+
+```
+{fn: "register",   args: {topic, program}}   program: the role in `programs` that judges it
+{fn: "deregister", args: {topic}}
+```
+
+Both are idempotent and answer `{topic, active}`; an unknown role is
+refused. The set is the engine's own head `<app>/topics` (`{kind:
+"overlay-topics", topics: [{topic, program}]}`), served beside the declared
+topics from the next step or call. `register` emits `subscribe {topic,
+program, fn, filter?}` for `<topic>` (`submit`, `filter: "beef"`: the
+door decodes the BEEF as for `/submit`), `<topic>-admit` (`peerAdmit`) and
+`<topic>-proof` (`peerProof`), `program` the engine's own role;
+`deregister` emits `unsubscribe {topic}` for the three (skein #119): the
+host subscribes and routes by them. Who may call is your manifest's
+`roles` for the route's handler `register` (the function the engine runs
+is the body's `fn`). The engine takes
+them only in the box `register` (`<app>/register`, one box per function
+class, shruggr/skein#128, 0.7.5, 0.7.7); in any other box — `<app>`,
+`<app>/submit` — they are refused with `bad-args` (`register: not taken in
+box <box>; send it in <app>/register`), writing and emitting nothing. The
+answer goes back in the box they came in. A lookup service without a `topics`
+list listens to every topic, declared or registered. With
+`config.overlay.market: {window}` set, a register also emits `liveness
+{topic: "<topic>-live", window}`; with `config.overlay.validator: {every}`,
+`beacon {topic: "<topic>-live", every, body: <empty>}`; a deregister emits
+`unliveness` / `unbeacon` likewise (0.9.0). Those two settings are only
+the initial value: root switches a role in the same box, `{fn:
+"market", args: {window} | {off: true}}` / `{fn: "validator", args: {every}
+| {off: true}}`, answered `{market?, validator?}` (0.9.2). docs/OVERLAY.md
+"Register a topic" has the rest.
+
+### Register a lookup service
+
+Lookup services have their own pair of calls (0.11.0; David Case,
+2026-10-08: separate from the topics'), in the same box `<app>/register`,
+gated the same way:
+
+```
+{fn: "registerLookup",   args: {service, program, topics?}}   program: the role in `programs` that answers it
+{fn: "deregisterLookup", args: {service}}
+```
+
+Idempotent, answered `{service, active}`; another program or other
+topics for a registered service, or an unknown role, are refused. The set
+is the head `<app>/lookups` (`{kind: "overlay-lookups", lookups:
+[{service, program, topics?}]}`), served as if `config.overlay.lookups`
+named each: `/lookup` routes it, `/listLookupServiceProviders` lists it,
+the hooks reach it. A name neither declared nor registered answers 400
+"Lookup service not supported" (no wildcard). The hooks reach each lookup
+**program** once per admitted transaction and topic, not once per name,
+and a program serving many names keeps one index: its `Spec.index`
+(`ls_demo`), else `ls_<role>`; each call names the service it was called
+as (`Service.name`). docs/OVERLAY.md "Register a lookup service".
+
+### Root routes
+
+The @bsv/sdk clients take a bare origin and call `<origin>/submit` and
+`<origin>/lookup`. One overlay app per skein, so root may answer both at
+the origin's root with two root routes (shruggr/skein#143) to the app's
+`submit` handler and `lookup` filter (an app installed as `mandala`):
+
+```
+skein routes add --transport http --filters kernel.beef --fn submit /submit mandala.overlay <origin>
+skein routes add --transport http --filters mandala.lookup /lookup <origin>
+```
+
+The engine finds its app from either (the handler's program record; the
+filter `<app>.lookup`). An install that asks for them is not built: the
+manifest format has no such request (a skein change; docs/OVERLAY.md
+"Root routes" sketches one).
+
+## Build and test
+
+Zig 0.16.0 (`mise.toml`).
+
+```
+zig build          # zig-out/bin/{overlay,topic-demo,lookup-demo}.wasm
+zig build bin      # the same, into bin/ (committed; the build is reproducible)
+zig build test     # the submission flow and the contracts, natively
+```
+
+With a local SDK checkout: `zig build --fork=../skein-sdk`. skein runs this
+app end to end in `kernel-zig/equiv/overlay.ts` and `install-overlay.ts`,
+which clone this repo at a pinned commit (or take `$SKEIN_OVERLAY_DIR`).
+
+## Docs
+
+| what | where |
+|---|---|
+| the overlay in full: submission, state, contracts, the wire, gossip, two overlays, a system tree | [docs/OVERLAY.md](docs/OVERLAY.md) |
+| the chain app's contract | shruggr/skein-chain `docs/CHAIN.md` |
+| apps, manifests, install; an overlay as an app | skein `docs/APPS.md` §6 |
+
+Not built: BRC-88 SHIP/SLAP (decided 2026-10-08, stopped: revoking an ad
+spends it, and the skein's wallet program takes no caller-supplied inputs;
+docs/OVERLAY.md "Not built"), GASP sync and catch-up from a peer, the
+`historical-tx` modes.
+
+## Versions
+
+| | |
+|---|---|
+| this app and package | 0.11.0 (tag `v0.11.0`) |
+| skein-sdk | v0.7.1, by tag URL and hash in `build.zig.zon` (modules `chain` and, for the engine, `sk`; bsvz comes through it) |
+| requires | `chain/1` (shruggr/skein-chain 0.3.0) |
+| skein | log format 9, the routes / filters / roles manifest (shruggr/skein#143); skein's equivs pin this repo by commit |
+
+0.3.0 moved the state under `<app>/…`, made the chain app's answer the gate
+and exported the modules (shruggr/skein#79).
+
+0.4.0 gave the topic and lookup contracts `metadata` and `documentation`,
+answered by the programs on the listing and documentation routes (#2), and
+made submit take the BEEF as its pointer record, with no re-proof at submit
+and the CID carried by ingest and gossip (shruggr/skein#121).
+
+0.4.1 keeps the submission as handed over on the `applied` record (`beef`,
+for internalizing) and serves lookups by the chain state's `beefOf` on
+skein-sdk v0.5.1, which stops at a proven transaction's own path (#3).
+
+0.5.0 added `config.overlay.prefixes` (topics an app activated live under
+a prefix); 0.6.0 removes it — no topic prefixes anywhere — and adds the
+engine's `register {topic, program}` / `deregister {topic}`: the topics
+registered at runtime under `<app>/topics`, served beside the declared
+ones, with the `subscribe` / `unsubscribe` events the host routes by
+(shruggr/skein#119, #120).
+
+0.6.1 puts `filter: "beef"` on the `<topic>` subscribe, so the door
+decodes a gossiped submission's BEEF as it does for `/submit`.
+
+0.6.2 takes `register` / `deregister` in any box a row routes to the
+engine, and the manifest routes the owner's to the app's `overlay` box
+(`<app>/overlay`, shruggr/skein#128).
+
+0.7.0 walks the submission's BEEF oldest first (skein-overlay#1): every
+transaction before the subject is judged, each one taken is ingested and
+admitted on its own answer, in order; a submission missing a parent pauses
+(`pending` with `waiting`, a `want` event per parent, a `resume` to itself
+when a later submission brings one). The submit event gains `earlier`,
+`wanted`, `requested` and `waiting`; the state gains the map `wants`.
+
+0.7.1 (shruggr/skein#112, revised): the want is `{event: "want", txid,
+peer}` — one per (parent, peer), the peer that announced the submission or
+something needing it; no topic. The map `wants` is `parent ‖ peer →
+[subject]`; all of a subject's wants clear when it resumes and are recorded
+again for what it still lacks. Only a submission from a libp2p peer
+pauses; over HTTP a BEEF lacking parents is refused, 400, naming them. The
+manifest gains the stream row `/skein/overlay/beef/1.0.0` (filter `beef`,
+fn `submit`), where a peer answers a want with one Atomic BEEF per frame.
+
+0.7.2 (shruggr/skein#112, settled 2026-10-05): a submission is a message,
+`{fn: "submit", args: {beef, topics, offChainValues?}}`, into the app's box
+`<app>` (a new row, open to anyone, `filter: "beef"`); `POST /submit`
+carries the same message and answers delivery only, `200 {id}` (the request
+record's CID) — no STEAK on the connection, no 503. The submitter is
+answered by message in the box it wrote to (`{fn: "submit", request,
+replyTo, result}`): `admitted` with status `pending` and the STEAK, then
+each `proven` (a reorg's too), or `rejected`. Every submission missing a
+parent pauses (no 400 over HTTP). The want is `{event: "want", txid, topic,
+peer?}`, one per (txid, topic, peer?): a gossip pause's peers are the
+publisher and every peer whose `-admit` for it was seen (the peer-admit
+record gains `peer`), more as admits arrive; a pause by message or HTTP
+wants with no peer. Each want's end is the event `{event: "unwant", txid,
+topic, peer?}` (the builder's smallest option, David to review). The map
+`wants` is `txid ‖ tp ‖ peer? → [subject]`. A `register` / `deregister` in
+`<app>` is taken from the instance itself only.
+
+0.7.3: `POST /submit` launches nothing (a step that launches a thread waits
+on it, so the request did not end: 500 `ERR_FRONT_DOOR`). It answers `200
+{id}` (still the request record's CID) with `admit: [{event, box: <app>}]`,
+the event `{kind: "submission", body: {fn: "submit", args}, request,
+transport: "http", sender?}`, routed into the app's box as the libp2p route
+admits its submit event; the engine's step on it is the message step's.
+
+0.7.4, on skein-sdk v0.7.1 (the address book has no roles, shruggr/skein#126):
+the libp2p provider is the address book's entry at (`local`, `libp2p`)
+(the SDK's `peerAt`), so gossip out publishes again. A submission by
+message is answered once per state change: the message step's wake at the
+end of the thread it launched (`resolved` in its input) routes nothing and
+answers nothing (outcome `woke`) — before, it answered `admitted` a second
+time, from the state.
+
+0.7.5: one box per function class (shruggr/skein#128, as decided for
+0.6.2): `register` / `deregister` are taken only in the box the manifest
+names `overlay` (`<app>/overlay`); in any other box, the app's own
+included and whoever sent them, they are refused with `bad-args`. `submit`
+is taken in any box a row routes to the engine, so an app may open
+`{"address": "submit", "sender": "*", "program": "overlay", "filter":
+"beef"}` when its own box belongs to another program.
+
+0.7.6: one box per function class, completed (shruggr/skein#128): the
+submission box is `<app>/submit` everywhere. The stock manifest's
+submission row is `{"address": "submit", "sender": "*", "program":
+"overlay", "filter": "beef"}` (was `""`, the app's own box), and `POST
+/submit` admits its `submission` event into `<app>/submit` (was `<app>`),
+so an app whose own box belongs to another program gets HTTP and message
+submissions in one box; the answers go to the sender in that box. The
+skein install's derived http row `/<app>/submit` is unchanged (only where
+its handler admits moved). The libp2p routes still admit their routed
+`submit` event (and `peer-admit`) into `<app>` through the derived `event`
+row, and the engine's `watch` / `resume` stay there; registration stays in
+`<app>/overlay` (renamed in 0.7.7).
+
+0.7.7: the registration box is `register` (`<app>/register`; was
+`overlay`): the manifest row is `{"address": "register", "sender":
+"$owner", "program": "overlay"}`, named for its function class like
+`submit`. Why: a manifest row whose address equals the app's name is the
+app's own box (shruggr/skein#128), so for an app named `overlay` the row
+`overlay` resolved to `overlay`, not `overlay/overlay`, and 0.7.5's
+register-only-in-`<app>/overlay` refused the owner. An app embedding the
+engine renames its row `overlay` → `register`; the owner sends to
+`<app>/register`.
+
+0.7.8: `register {topic, program, seed?: [txid…]}` seeds the topic from
+what the chain state already holds: each held seed is judged under the new
+topic only, oldest first over its held ancestry, and admitted from the
+state as a submission of it would be (no resubmission, no wallet); the
+answer adds `seeded` and `missing` (and `untaken` when a held seed is taken
+by nothing). Idempotent: a seed already admitted under the topic is not
+judged again. docs/OVERLAY.md "Register a topic" has the rest. The manifest's
+rows are unchanged.
+
+0.8.0: the listings and the documentation are reads (shruggr/skein#135,
+two doors): the manifest declares `/listTopicManagers`,
+`/listLookupServiceProviders`, `/getDocumentationForTopicManager` and
+`/getDocumentationForLookupServiceProvider` in `reads[]` (`{address,
+program: "overlay", fn}`) and drops the four `http` rows that served them.
+The host serves each as a call over the current state: any method, signed
+or not, no entry, nothing logged. `/lookup` stays derived (a read);
+`/submit` stays a derived http row (a message route: a signed request), and
+the rows `submit` and `register` are unchanged. The engine is unchanged:
+its four functions only ever read (the configured programs' `metadata` /
+`documentation`), as `/lookup` did. An app that embeds the engine moves the
+same four rows into its `reads`.
+
+0.9.0: market and validator (shruggr/skein#120, David 2026-10-06 evening:
+"a skein runs as a market and/or a validator by two settings in the engine's configuration (`config.overlay.market: {window}`, `config.overlay.validator: {every}`), and registering a token's topic is the one act that drives both"). Two optional settings: `config.overlay.market: {window: <ms>}` and
+`config.overlay.validator: {every: <ms>}`. A `register` that changes the
+set emits, after its three subscribes, `liveness {topic: "<topic>-live",
+window}` when a market and `beacon {topic: "<topic>-live", every, body:
+<empty>}` when a validator; a `deregister` emits `unliveness` / `unbeacon`
+likewise. Nothing extra at a start or re-read. A value that is not an
+integer from 1 000 ms to a day refuses the registration (`bad-args`).
+docs/OVERLAY.md "Market and validator". The manifest's rows are unchanged.
+
+0.9.1: `POST /submit` is BRC-22 and synchronous again (shruggr/skein#112;
+David, 2026-10-07: "the HTTP `/submit` route is BRC-22 or it does not exist; it never returns a different shape").
+The route launches the submission's thread and waits on it (skein's
+wait-on-thread, as 0.7.1 did), answering the STEAK; 400 for a BEEF that
+does not verify or a transaction the chain app rejected; 200 with the empty
+STEAK when no topic takes it; 503 + `Retry-After` when nothing is decided.
+A resubmission is a poll on the same flow: in progress, it waits on the
+same thread; judged, the first submission's STEAK from the state, nothing
+run again. A submission lacking a parent pauses as before, and its requests
+wait for the pause to end (the engine's `wait` message, answered when the
+pause ends); several waiters are all answered. A submission by message into
+`<app>/submit` is unchanged, answered by messages. 0.7.3–0.9.0's
+`submission` event is still stepped (a log written then).
+docs/OVERLAY.md "Submitting". The manifest's rows are unchanged.
+
+0.9.2: the roles are the owner's switch (David, 2026-10-07: "this
+shouldn't have been a config in the manifest. This should be a setting
+that the user is configuring"). The owner sends, in `<app>/register` (the
+`register` row), `{fn: "market", args: {window: <ms>}}` or `{fn: "market",
+args: {off: true}}`, and `{fn: "validator", args: {every: <ms>}}` or `{fn:
+"validator", args: {off: true}}`; no reinstall. The answer is the roles in
+effect, `{market?: {window}, validator?: {every}}`. The switch is kept in
+the set's record `<app>/topics` beside `topics` and has precedence over
+`config.overlay.market` / `.validator` from then on (the manifest sets the
+initial value; never switched, the manifest's). On emits `liveness` /
+`beacon` for every registered topic, off `unliveness` / `unbeacon`;
+`register` / `deregister` emit by the roles in effect. Idempotent.
+docs/OVERLAY.md "Market and validator". The manifest's rows are unchanged.
+
+0.10.0: skein's routes, filters and roles (shruggr/skein#143). The
+manifest's `dispatch` and `reads` are `routes`: the box `register` is the
+handler `overlay.register`, gated by `roles: {root: ["register", "market",
+"validator"]}` (was the row from `$owner`); the box `submit` and the libp2p
+stream `/skein/overlay/beef/1.0.0` list `kernel.beef` (was `filter:
+"beef"`, sender `*`); the four listing and documentation reads are read
+routes, each with the engine's function as its filter (`filters`). The
+engine: a read called as a filter (`filter: true` in the call's input)
+answers `{answer: <the http answer>}` (src/routes.zig); a read route's
+call names no program, so the engine's configuration comes from the app
+the route names (`match.app`, src/config.zig `matchedApp`). Nothing else
+changed; the engine never read an `owner` input.
+
+0.11.0: lookup registration and root routes (David Case, 2026-10-08). The
+engine's own pair of calls for lookup services, separate from the topics'
+`register` / `deregister` (unchanged): `registerLookup {service, program,
+topics?}` / `deregisterLookup {service}` in `<app>/register`, idempotent,
+answered `{service, active}`, the set under the head `<app>/lookups`
+(src/lookups.zig), served as `config.overlay.lookups` is (src/config.zig
+`withRegistered`); an unregistered name still answers "Lookup service not
+supported". The admitted-output hooks reach each lookup program once, not
+once per name (src/calls.zig `hookTargets`), and a program keeps one index
+whatever names it serves: `Spec.index`, else `ls_<role>` (src/lookup.zig
+`indexOf`; the calls carry `program`, the role; `Service.name` is the
+called name, `Service.index` the index) — before, `lookup.main` read
+`<app>/ls_<called name>` while the hooks wrote under each configured
+name. `ls_demo` keeps `<app>/ls_demo` (`.index = "ls_demo"`). Root routes:
+the engine finds its app from a root read route's filter `<app>.lookup`
+(src/config.zig `filterApp`), so `/submit` and `/lookup` work at the
+origin's root (README "Root routes"). The manifest's roles list the two
+new functions. BRC-88 SHIP/SLAP ads: not built (stopped; docs/OVERLAY.md
+"Not built").
+
+## Contributing
+
+Work is tracked in shruggr/skein; start at issue
+[#31](https://github.com/shruggr/skein/issues/31). MIT, as skein.

@@ -1,0 +1,12 @@
+{
+  "current": {
+    "outpoint": "ea030d7f733ed7f5bd1f9b36725b5586301bba7a95137183fbfbb9660c298161_0",
+    "bsvReserve": 1019910,
+    "tokenReserve": 4902394,
+    "liquidityFeeBps": 30,
+    "validationFeeBps": 5,
+    "commissionBps": 10,
+    "validatorIdentityKey": "03142715675faf8da1ecc4d51e0b9e539fa0d52fdd96ed60dbe99adb15d6b05ad9"
+  },
+  "hops": 1
+}

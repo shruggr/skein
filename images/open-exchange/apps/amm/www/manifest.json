@@ -1,0 +1,78 @@
+{
+  "name": "AMM PoC Market",
+  "short_name": "AMM Market",
+  "description": "Swap tokens against AMM pools, run pools as an LP, and run your instance as a validator.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "metanet": {
+    "groupPermissions": {
+      "description": "AMM PoC Market reads your tokens, builds swaps and pools with your wallet, and receives the sats pools pay you.",
+      "spendingAuthorization": {
+        "amount": 10000000,
+        "description": "Up to 0.1 BSV a month for swap inputs, pool deposits and network fees."
+      },
+      "protocolPermissions": [
+        {
+          "protocolID": [0, "onesat"],
+          "description": "Derive the keys that hold your tokens and pools (1Sat token keys)."
+        },
+        {
+          "protocolID": [2, "3241645161d8"],
+          "counterparty": "self",
+          "description": "Derive one-time keys for the sats pools pay you, and for your LP position (BRC-29 payments to yourself)."
+        },
+        {
+          "protocolID": [1, "identity key retrieval"],
+          "description": "Show which wallet is connected and name it as the sender of payments to yourself."
+        },
+        {
+          "protocolID": [2, "server hmac"],
+          "counterparty": "self",
+          "description": "Create and check the session nonces of authenticated requests to the overlay instance."
+        },
+        {
+          "protocolID": [2, "auth message signature"],
+          "description": "Sign authenticated requests to the overlay instance (asked once per instance, on first use)."
+        },
+        {
+          "protocolID": [1, "action label amm-swap"],
+          "description": "Label the swaps you build, their funding and their payouts so they are listed together in your wallet."
+        },
+        {
+          "protocolID": [1, "action label amm-pool-deploy"],
+          "description": "Label the pools you create so they are listed together in your wallet."
+        },
+        {
+          "protocolID": [1, "action label amm-remove-liquidity"],
+          "description": "Label your liquidity withdrawals so they are listed together in your wallet."
+        },
+        {
+          "protocolID": [1, "action label amm-add-liquidity"],
+          "description": "Label your liquidity deposits so they are listed together in your wallet."
+        },
+        {
+          "protocolID": [1, "action label amm-payout"],
+          "description": "Label the pool payouts your wallet takes in so they are listed together."
+        }
+      ],
+      "basketAccess": [
+        {
+          "basket": "bsv21",
+          "description": "Read and file your tokens and the pools you hold as LP."
+        },
+        {
+          "basket": "1sat",
+          "description": "Read your ordinals to offer them as token icons, and file a new icon you inscribe."
+        },
+        {
+          "basket": "1sat-deposit",
+          "description": "File the exact funding output of each swap under a short hold, and drop it once the swap has spent it."
+        }
+      ],
+      "certificateAccess": []
+    }
+  }
+}

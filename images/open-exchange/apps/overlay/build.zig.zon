@@ -1,0 +1,22 @@
+.{
+    .name = .skein_overlay,
+    .version = "0.11.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x61cfd392818dcb20,
+    .dependencies = .{
+        .skein_sdk = .{
+            .url = "https://github.com/shruggr/skein-sdk/archive/refs/tags/v0.7.1.tar.gz",
+            .hash = "skein_sdk-0.7.1-YroFBKSAGQDp_BgwEXLE1N0bA2Cxk4iMSIcvmZnHKSrK",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test.zig",
+        "bin",
+        "etc",
+        "docs",
+        "README.md",
+    },
+}
