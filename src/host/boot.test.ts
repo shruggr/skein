@@ -11,6 +11,12 @@ import { PrivateKey } from "@bsv/sdk";
 import { CID } from "multiformats/cid";
 import { encode } from "../runtime/cid.ts";
 import * as dagCbor from "@ipld/dag-cbor";
+import { main } from "./cli.ts";
+import { HostDb } from "./instances.ts";
+import { KERNEL_BIN } from "./kernel.ts";
+import { Router } from "./router.ts";
+import { Signer } from "./signer.ts";
+import { existsSync } from "node:fs";
 import { anyOf, dirSource, installAtBirth, MemBlocks, mergeImages, rawCid, readSystemTree, wasmDirObjects } from "./boot.ts";
 import { readApp } from "./install.ts";
 import { planInstall } from "./plan.ts";
@@ -156,14 +162,14 @@ test("#141, #143: the default image installs chain, git and site at birth — th
   assert.ok(g.heads["chain/app"].equals(born.heads["chain/app"]));
 });
 
-test("#147: the Open Exchange image (images/open-exchange over images/default) installs chain, git, site, overlay and amm; /submit and /lookup at the root to the engine app, / to the amm landing, the site at /site/", async () => {
+test("#147: the Open Exchange image (images/open-exchange over images/default) installs chain, git, site and amm (its engine with it); /submit and /lookup at the root to amm's engine, / to the amm landing, the site at /site/", async () => {
   const base = await dirSource(join(import.meta.dirname, "../../images/default"));
   const own = await dirSource(join(import.meta.dirname, "../../images/open-exchange"));
   const merged = new MemBlocks();
   const src = anyOf(merged, base.objects, own.objects, wasmDirObjects(join(import.meta.dirname, "../../wasm")));
   const root = await mergeImages(src, base.root, own.root, merged);
   const s = await readSystemTree(src, root);
-  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site", "apps/overlay", "apps/amm"]);
+  assert.deepEqual(s.apps?.install, ["apps/chain", "apps/git", "apps/site", "apps/amm"]);
   assert.deepEqual(s.apps?.routes?.map((r) => `${r.address}${r.prefix ? " prefix" : ""}`), ["/submit", "/lookup", "/ prefix"], "the default image's / (the site) replaced by the amm landing");
   const programs = Object.fromEntries(s.programs.map((p) => [p.name, encode(p.record).cid]));
   const c = { identity: key(), handle: "a", domain: "localhost" };
@@ -171,23 +177,49 @@ test("#147: the Open Exchange image (images/open-exchange over images/default) i
   const kept = new Map<string, Uint8Array>();
   const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
   const born = await installAtBirth(target, src, s, sys, c);
-  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.5.0", "git 0.2.0", "site 0.10.0", "overlay 0.11.0", "amm 0.8.0"]);
-  assert.deepEqual(Object.keys(born.heads).sort(), ["amm/app", "chain/app", "git/app", "overlay/app", "site/app"]);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.5.0", "git 0.2.0", "site 0.10.0", "amm 0.8.0"]);
+  assert.deepEqual(Object.keys(born.heads).sort(), ["amm/app", "chain/app", "git/app", "site/app"]);
   const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
   const rows = born.rows as Array<Record<string, any>>;
-  const show = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
   const rootRows = rows.filter((r) => r.app === undefined);
-  assert.deepEqual(rootRows.map(show), [
+  assert.deepEqual(rootRows.map(showRow), [
     "root http /submit [kernel.beef] .submit",
-    "root http /lookup [overlay.lookup]",
+    "root http /lookup [amm.lookup]",
     "root http / prefix [amm.page]",
-  ], "root's own routes: the engine's submit and lookup at the origin root, the landing at /");
-  const engine = get(born.heads["overlay/app"]!);
-  assert.ok(rootRows[0]!.program.equals(engine.programs.overlay), "/submit → the engine app's overlay program (as its own /overlay/submit)");
-  assert.ok(rows.some((r) => r.app === "overlay" && r.address === "/overlay/submit" && r.program?.equals(engine.programs.overlay) && r.fn === "submit"), "the engine's own /overlay/submit stays");
-  assert.ok(rows.some((r) => r.app === "overlay" && r.address === "/overlay/lookup"), "the engine's own /overlay/lookup stays");
+  ], "root's own routes: amm's engine's submit and lookup at the origin root, the landing at /");
+  const amm = get(born.heads["amm/app"]!);
+  assert.ok(rootRows[0]!.program.equals(amm.programs.overlay), "/submit → amm's engine program (as its own /amm/submit)");
+  assert.ok(rows.some((r) => r.app === "amm" && r.address === "/amm/submit" && r.program?.equals(amm.programs.overlay) && r.fn === "submit"), "amm's own /amm/submit stays");
+  assert.ok(rows.some((r) => r.app === "amm" && r.address === "/amm/lookup"), "amm's own /amm/lookup stays");
   assert.equal(rootRows[2]!.program, undefined, "/ is a read route");
   assert.deepEqual([rootRows[2]!.root, rootRows[2]!.index], ["www", "index.html"], "the landing: the amm app's www/");
-  assert.ok(rows.some((r) => show(r) === "site http /site/ prefix [site.get]"), "the management site at /site/");
+  assert.ok(rows.some((r) => showRow(r) === "site http /site/ prefix [site.get]"), "the management site at /site/");
   assert.ok(!rows.some((r) => r.app === undefined && r.filters?.includes("site.get")), "no root route to the site");
+});
+
+const showRow = (r: Record<string, any>) => `${r.app ?? "root"} ${r.transport} ${r.address}${r.prefix ? " prefix" : ""}${r.filters ? ` [${r.filters.join(",")}]` : ""}${r.fn ? ` .${r.fn}` : ""}`;
+
+test("#147: skein-host add <handle> --image open-exchange — the row boots unclaimed with chain, git, site and amm and the three root routes", { skip: !existsSync(KERNEL_BIN) && "kernel-zig not built" }, async (t) => {
+  const home = await fs.mkdtemp(join(tmpdir(), "skein-ox-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const vars = { HOME: home, SKEIN_HOME: home, SKEIN_MASTER_KEY: "66".repeat(32), SKEIN_OWNER: PrivateKey.fromRandom().toPublicKey().toString(), PATH: process.env.PATH };
+  const out: string[] = [], err: string[] = [];
+  const env = { vars, out: (l: string) => out.push(l), err: (l: string) => err.push(l) };
+  assert.equal(await main(["add", "ox", "--image", "nope"], env), 1, "an unknown image name is refused");
+  assert.equal(await main(["add", "ox2", "--image", "open-exchange"], env), 0, err.join("\n"));
+  assert.match(out.join("\n"), /booted from the image .* no owner: claim it/);
+  const db = new HostDb(join(home, "host.db"));
+  const signer = new Signer(PrivateKey.fromHex(vars.SKEIN_MASTER_KEY));
+  const router = new Router({ db, walletFor: (row) => signer.wallet(row.handle), home, idleMs: 0, kernel: { env: { SKEIN_HOME: home } } });
+  t.after(async () => { await router.close(); db.close(); });
+  const k = (await router.hydrate("ox2")).kernel;
+  const rows = (await k.dispatch()).rows as Array<Record<string, any>>;
+  assert.deepEqual([...new Set(rows.filter((r) => r.app).map((r) => r.app))], ["chain", "git", "site", "amm"], "the four apps installed at birth");
+  assert.deepEqual(rows.filter((r) => r.app === undefined && r.transport === "http" && ["/submit", "/lookup", "/"].includes(r.address)).map(showRow), [
+    "root http /submit [kernel.beef] .submit",
+    "root http /lookup [amm.lookup]",
+    "root http / prefix [amm.page]",
+  ]);
+  assert.ok(rows.some((r) => r.program === "kernel" && r.address === "claim"), "unclaimed: the claim route");
+  for (const n of ["chain", "git", "site", "amm"]) assert.ok(await k.call("head", `${n}/app`), `${n}/app`);
 });
