@@ -83,7 +83,7 @@ codec (`src/beef.zig`) and uses only bsvz's transaction and BUMP parsers.
 | transaction | `bitcoin-tx` (0xb1, dbl-sha2-256) | the standard serialization | CID = txid; put and kept by the step that builds or internalizes it (so its inputs are the kernel's `spends` edges, #42), and by the chain app when it ingests it |
 | `action` | dag-cbor | `txid`, `tx` (link), `description`, `labels`, `noSend?` | a transaction that is ours |
 | `output` | dag-cbor | `txid`, `vout`, `tx` (link), `basket`, `protocol`, protocol fields | a coin; satoshis and script come from the tx |
-| `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (outpoints), `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
+| `draft` | dag-cbor | `description`, `labels`, `outputs`, `inputs` (in the transaction's order: an outpoint of ours, or a caller's input `{outpoint, unlockingScriptLength, unlockingScript?, inputDescription, sequenceNumber}`), `inputBEEF?`, `derivationPrefix`, `derivationSuffix`, `satsPerKb`, `noSend` | a signable createAction; its CID is signAction's `reference` |
 | `wallet-state` | dag-cbor | `network`, `chain` (the `chain/state` it was read against, or null), `maps: {name: root \| null}` | what the head `wallet/state` names |
 | `wallet-result` | dag-cbor | `op`, per-op fields, `state` | a step's answer, kept in its thread |
 
@@ -228,25 +228,52 @@ may be unmined: its coins are spendable at once.
 
 ## The builder and the signer
 
-`createAction` (BRC-100's, for the wallet's own funds): inputs are our
-spendable `default`-basket outputs (payments and change), largest first,
-until they cover the outputs and the fee; the outputs are the caller's, in
-order; then one change output, P2PKH to a fresh BRC-29 key of ours
-(protocol `[2, "3241645161d8"]`, keyID `"<prefix> <suffix>"` drawn from the
-thread's random, counterparty self). Fee: SatoshisPerKilobyte (genesis
-`defaults.walletFeeRate`, sat/kB, default 100) over the size with each P2PKH
-unlocking script estimated at 106 bytes (go-sdk's `EstimateLength`), change
+`createAction` (BRC-100's): the caller's inputs first, if any, in its
+order; then ours, our spendable `default`-basket outputs (payments and
+change), largest first, until the inputs together cover the outputs and the
+fee; the outputs are the caller's, in order; then one change output, P2PKH
+to a fresh BRC-29 key of ours (protocol `[2, "3241645161d8"]`, keyID
+`"<prefix> <suffix>"` drawn from the thread's random, counterparty self).
+Fee: SatoshisPerKilobyte (genesis `defaults.walletFeeRate`, sat/kB, default
+100) over the size with each of our P2PKH unlocking scripts estimated at 106
+bytes (go-sdk's `EstimateLength`) and each caller's input at its
+`unlockingScriptLength` (or its `unlockingScript`'s length), change
 included; a change of zero drops the change output (go-sdk `Fee`,
 `ChangeDistributionEqual`). The result is the Atomic BEEF: ancestry back to
 proven transactions (their BUMPs, merged per block), parents first.
 Its ancestry is read from the chain state (a transaction the chain app has
 not ingested yet — the wallet's own, just built — from the store, where the
-wallet put it). `options.signAndProcess: false` keeps a `draft` and returns
-it signable (`reference`, the unsigned BEEF); `signAction({reference})`
-rebuilds the same transaction (its inputs must still be live and unspent)
-and signs it. `options.noSend: true` records without handing it to the
-chain app. Caller-supplied inputs,
-`lockTime`, `randomizeOutputs`, `sendWith` are not taken.
+wallet put it), and for a caller's input from a transaction neither holds,
+from the caller's `inputBEEF`. `options.signAndProcess: false` keeps a
+`draft` and returns it signable (`reference`, the unsigned BEEF);
+`signAction({reference})` rebuilds the same transaction (its inputs must
+still be live and unspent) and signs it. `options.noSend: true` records
+without handing it to the chain app. `lockTime`, `randomizeOutputs`,
+`sendWith` are not taken.
+
+**Caller-supplied inputs (#93).** `inputs: [{outpoint, unlockingScript |
+unlockingScriptLength, inputDescription, sequenceNumber?}]` names coins the
+caller unlocks itself — a token in a basket of the wallet's (after a `basket
+insertion`), or any outpoint whose source is held or in `inputBEEF`. They
+are not funding: they count toward the inputs' total like ours, and ours are
+added only as the outputs and the fee over everything need them (none when
+the caller's cover it; the change is ours either way). A coin already spent
+is refused (`InputSpent`). When any caller input has no `unlockingScript`,
+createAction keeps the draft and returns it signable, as `signAndProcess:
+false` does. The caller then makes its own unlock: it reads its input's
+BIP143 sighash off the unsigned transaction in the returned BEEF (its own
+sighash flags; the wallet's inputs carry no script yet, and BIP143 commits
+to no other input's script), asks the signer for its signature with the
+existing `createSignature` (call 15, its own protocol, keyID and
+counterparty, `hashToDirectlySign`) and `getPublicKey` if its script needs
+the key, and assembles the unlocking script. `signAction({reference,
+spends: {"<inputIndex>": {unlockingScript, sequenceNumber?}}})` puts each
+script on its input (an index that is not a caller's input is refused,
+`BadSpend`; a caller's input still without a script, `MissingUnlockingScript`;
+a script longer than the `unlockingScriptLength` the fee was paid for,
+`UnlockingScriptTooLong`), signs ours, and takes the usual path: recorded,
+ingested at the chain app. The fee and the change are the draft's: the
+lengths are the declared ones, never the scripts' own.
 
 **Every key operation is a signer call** over the `wallet` import (BRC-100
 wire frames, recorded as `oracle` records, the kind keeping the signer's old name): `getPublicKey` (call 8; forSelf; counterparty the
@@ -257,7 +284,10 @@ BIP143/ForkID sighash (`ALL|FORKID`) — go-sdk's own pattern
 32-byte hash, nothing else; the unlocking script is `<DER ‖ 0x41> <pubkey>`.
 `vectors/signing.json` (go-sdk ProtoWallet) fixes every frame, preimage,
 sighash, fee, change amount and the final transaction; the wallet reproduces
-them byte for byte.
+them byte for byte. Its `caller-pushdrop-in` case is #93's: a 1-sat PushDrop
+token (go-sdk's template) spent forward with one funding input of ours, the
+token's unlock the caller's own `createSignature` over its sighash in the
+draft, estimated at 73 bytes (the template's `EstimateLength`).
 
 `internalize` asks the signer only `getPublicKey` (the BRC-29 payee key).
 This is how Yours funds skein ("Browser with Yours"): a BRC-29 payment to a
@@ -308,8 +338,8 @@ coming path for a payment from anyone else.
 | body (owner) | does → result |
 |---|---|
 | `{op: "internalize", tx, outputs, description, labels?}` | BRC-100 `internalizeAction`, then ingested → `{txid, status, outputs, ingest, outcome: "pending", awaiting: true}` |
-| `{op: "createAction", description, outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?}`, and unless a draft or noSend `{ingest, outcome: "pending", awaiting: true}` |
-| `{op: "signAction", reference}` | → as createAction |
+| `{op: "createAction", description, inputs?: [{outpoint: "<txid>.<vout>", unlockingScript? (bytes) \| unlockingScriptLength?, inputDescription, sequenceNumber?}], inputBEEF? (bytes), outputs: [{lockingScript, satoshis, outputDescription?, basket?, tags?, customInstructions?}], labels?, options?: {signAndProcess?, noSend?}}` | → `{txid, tx (Atomic BEEF), reference?}` (`reference` when a draft: signAndProcess false, or a caller's input without its unlockingScript), and unless a draft or noSend `{ingest, outcome: "pending", awaiting: true}` |
+| `{op: "signAction", reference, spends?: {"<inputIndex>": {unlockingScript (bytes), sequenceNumber?}}}` | → as createAction |
 | `{op: "list", basket?, includeSpent?}` | → `{basket, outputs: [{txid, vout, satoshis, lockingScript, spendable, status}], total}` |
 | `{op: "headers" \| "proof", …}` | refused: the chain app's (#79) |
 | args `{pay: {to, x, checkpoint}}` (#130: the kernel's pay step, not a message) | X sats to the host `to` (a BRC-29 key derived for it, counterparty the host), or all our coins less the fee if they do not cover X; the other output `OP_FALSE OP_RETURN <checkpoint>` (0 sats); emitted as the event `payment`, ingested → `{txid, amount, checkpoint, ingest, outcome: "pending", awaiting: true}`, or `{amount: 0, reason}` with nothing to pay with. Refused unless the kernel launched it (its origin's `launchedBy` is the entry it processes). Coins whose ancestry the chain state cannot prove yet (a funding not ingested) are left out on a second try |
@@ -342,15 +372,15 @@ node ../skein-sdk/wallet/vectors/gen-ts/run.mjs    # TS cross-check of the vecto
 (cd ../skein-sdk/wallet/vectors/gen-go && go run . gen)  # regenerate vectors (extract / fetch refresh inputs)
 ```
 
-Vector counts (the SDK's `zig build test`, v0.5.0): tx 39 (fees 429), BEEF 27, merkle 43 (the
+Vector counts (the SDK's `zig build test`, with #93): tx 39 (fees 429), BEEF 27, merkle 43 (the
 vector paths' nodes stored and every leaf's BUMP rebuilt from them; three
 transactions of one block proven by separate BUMPs in all six orders: one
 node set, each BUMP rebuilt byte for byte), headers 46, BRC-29 24, wire 13,
-signing 10, chronicle 3, plus 6 wallet scenarios and the index cost check (#41) (3 of
+signing 13, chronicle 3, plus 7 wallet scenarios and the index cost check (#41) (3 of
 them settlement: each transition, bubbling, double spend, abandonment); the TS
 cross-check: 458. The wasm build is reproducible.
 
 ## Open
 
-- Certificates, labels as their own index, relinquish, caller-supplied
-  inputs, output randomization: not built.
+- Certificates, labels as their own index, relinquish, output
+  randomization: not built.
