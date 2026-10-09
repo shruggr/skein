@@ -3,7 +3,7 @@
 A non-custodial BSV ↔ token AMM over Mandala tokens (BRC-162), as one
 [skein](https://github.com/shruggr/skein) overlay app, name `amm`. Its tree
 carries the overlay engine, the Mandala components, the AMM's own programs
-and its pages. Version **0.9.0**, the Open Exchange (David Case,
+and its pages. Version **0.9.1** (0.9.0 + the connect fix), the Open Exchange (David Case,
 2026-10-08/09; docs/AMM.md "The pool rule", "The claim and the listing",
 "Prices"): the contract is Swap and Close (`Close(lpSig, bsvFee)`, the LP's
 alone, everything out; AddLiquidity and RemoveLiquidity are gone: a

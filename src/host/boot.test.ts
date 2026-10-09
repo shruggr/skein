@@ -177,7 +177,7 @@ test("#147: the Open Exchange image (images/open-exchange over images/default) i
   const kept = new Map<string, Uint8Array>();
   const target = { hasBlock: async (cid: CID) => kept.has(cid.toString()) || !!(await src.get(cid)), putBlock: async (cid: CID, b: Uint8Array) => { kept.set(cid.toString(), b); } };
   const born = await installAtBirth(target, src, s, sys, c);
-  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.6.0", "git 0.2.0", "site 0.10.0", "amm 0.9.0"]);
+  assert.deepEqual(born.apps.map((a) => `${a.name} ${a.version}`), ["chain 0.6.0", "git 0.2.0", "site 0.10.0", "amm 0.9.1"]);
   assert.deepEqual(Object.keys(born.heads).sort(), ["amm/app", "chain/app", "git/app", "site/app"]);
   const get = (cid: CID) => dagCbor.decode(kept.get(cid.toString())!) as Record<string, any>;
   const rows = born.rows as Array<Record<string, any>>;

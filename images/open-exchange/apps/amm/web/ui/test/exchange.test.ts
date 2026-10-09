@@ -10,6 +10,7 @@ import { decode, encode } from "cbor2";
 import { P1SAT_PROTOCOL } from "@1sat/actions";
 import {
   closePosition,
+  connectAction,
   deployPosition,
   deregisterToken,
   discoveryTokens,
@@ -388,5 +389,21 @@ describe("formats and routes", () => {
     expect(parseRoute("#/liquidity")).toEqual({ page: "liquidity" });
     expect(parseRoute("")).toEqual({ page: "landing" });
     expect(parseRoute("#/nope")).toEqual({ page: "landing" });
+  });
+});
+
+describe("connectAction (0.9.1: the connect dialog listed nothing)", () => {
+  it("auto-detects the wallet when no providers are configured", async () => {
+    let opened = 0, connected = 0;
+    expect(connectAction(0, () => { opened++; }, async () => { connected++; })).toBe("auto");
+    expect(opened).toBe(0); expect(connected).toBe(1);
+  });
+  it("opens the dialog when providers are configured", () => {
+    let opened = 0, connected = 0;
+    expect(connectAction(2, () => { opened++; }, async () => { connected++; })).toBe("dialog");
+    expect(opened).toBe(1); expect(connected).toBe(0);
+  });
+  it("swallows a failed auto-connect (the wallet shows its own error)", () => {
+    expect(connectAction(0, () => {}, async () => { throw new Error("no wallet"); })).toBe("auto");
   });
 });

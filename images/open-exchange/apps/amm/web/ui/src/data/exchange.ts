@@ -356,6 +356,17 @@ function symOf(meta: Map<string, ListedToken>, tokenId: string): string {
 // Session and root
 // ---------------------------------------------------------------------------
 
+/**
+ * What "Connect a wallet" does: the dialog when providers are configured,
+ * otherwise the wallet's auto-detecting connect (an injected BRC-100 wallet
+ * such as Yours). With no providers the dialog would list nothing (0.9.1).
+ */
+export function connectAction(providers: number, openDialog: () => void, connect: () => Promise<void>): "dialog" | "auto" {
+  if (providers > 0) { openDialog(); return "dialog"; }
+  void connect().catch(() => {});
+  return "auto";
+}
+
 /** The connected wallet (@1sat/react `useWallet`, `useConnectDialog`); it also sets the context. */
 export function useSession(): Session {
   const w = useWallet();
@@ -366,7 +377,16 @@ export function useSession(): Session {
   if (afRef.current.wallet !== wallet) afRef.current = { wallet, af: wallet ? (new AuthFetch(wallet) as unknown as Signed) : null };
   const connected = status === "connected";
   setExchangeContext({ wallet: connected ? wallet : null, af: connected ? afRef.current.af : null, identityKey: connected ? w.identityKey : null });
-  return { status, identityKey: connected ? w.identityKey : null, connect: openConnectDialog, disconnect: w.disconnect };
+  // Connect as 0.8's <ConnectButton/> did: the wallet's own connect, which
+  // auto-detects an injected BRC-100 wallet (Yours). The connect dialog lists
+  // only `providers` configured on WalletProvider, and none are, so opening it
+  // showed an empty "Choose how to connect." (0.9.1). The dialog is kept for
+  // when providers are configured.
+  const connect = useCallback(
+    () => connectAction(w.availableProviders.length, openConnectDialog, w.connect),
+    [w.availableProviders, w.connect, openConnectDialog],
+  );
+  return { status, identityKey: connected ? w.identityKey : null, connect, disconnect: w.disconnect };
 }
 
 /**
