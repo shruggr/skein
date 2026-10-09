@@ -37,8 +37,13 @@
 //!
 //! Body operations (dag-cbor; docs/WALLET.md):
 //!   {op: "internalize", tx, outputs, description, labels?}   BRC-100 internalizeAction (Atomic BEEF)
-//!   {op: "createAction", description, outputs, labels?, options?: {signAndProcess?, noSend?}}   BRC-100 createAction
-//!   {op: "signAction", reference}                BRC-100 signAction for a draft (signAndProcess: false)
+//!   {op: "createAction", description, inputs?, inputBEEF?, outputs, labels?, options?: {signAndProcess?, noSend?}}
+//!                                                BRC-100 createAction; inputs (#93): [{outpoint "<txid>.<vout>",
+//!                                                unlockingScript? (bytes) | unlockingScriptLength?, inputDescription,
+//!                                                sequenceNumber?}], the caller's coins, not funding
+//!   {op: "signAction", reference, spends?}       BRC-100 signAction for a draft (signAndProcess: false, or a caller's
+//!                                                input without its unlockingScript); spends (#93): {"<inputIndex>":
+//!                                                {unlockingScript (bytes), sequenceNumber?}}
 //!   {op: "list", basket?, includeSpent?}        our outputs in a basket (default "default")
 //!
 //! Billing (#130), one more:
@@ -389,20 +394,16 @@ const Wallet = struct {
         return out.items;
     }
 
-    fn selectInputs(self: *Wallet, outputs: []const w.builder.Output, sats_per_kb: u64) ![]w.builder.Input {
-        const all = try self.spendableInputs();
-        var need: u64 = 0;
-        for (outputs) |o| need += o.satoshis;
-        var have: u64 = 0;
-        for (all, 1..) |in, n| {
-            have += in.satoshis;
-            if (have >= need + try w.builder.estimateFee(self.a, n, outputs, 25, sats_per_kb)) return all[0..n];
-        }
-        return error.InsufficientFunds;
+    /// The caller's inputs, then ours, largest first, until they cover the outputs and the fee over all of them.
+    fn selectInputs(self: *Wallet, caller: []const w.builder.Input, outputs: []const w.builder.Output, sats_per_kb: u64) ![]w.builder.Input {
+        return w.builder.select(self.a, caller, try self.spendableInputs(), outputs, sats_per_kb);
     }
 
     const CreateArgs = struct {
         description: []const u8,
+        /// The caller's inputs (#93) and the BEEF of their sources we cannot read.
+        inputs: []const w.wallet.CreateInput = &.{},
+        input_beef: ?[]const u8 = null,
         outputs: []const w.wallet.Wallet.CreateOutput,
         labels: []const []const u8 = &.{},
         sign_and_process: bool = true,
@@ -419,30 +420,43 @@ const Wallet = struct {
             if (o.basket) |b| if (b.len == 0 or eql(u8, b, "default")) return error.BadBasket;
             x.* = .{ .satoshis = o.satoshis, .locking_script = o.locking_script };
         }
-        const inputs = try self.selectInputs(outs, sats_per_kb);
+        // The caller's inputs (#93): first, in its order; their sources ours to read, or in its inputBEEF.
+        const extra: ?w.beef.Beef = if (args.input_beef) |ib| w.beef.parse(a, ib) catch return error.InvalidBeef else null;
+        const caller = try a.alloc(w.builder.Input, args.inputs.len);
+        var signable = !args.sign_and_process;
+        for (args.inputs, caller, 0..) |spec, *in, i| {
+            for (args.inputs[0..i]) |prev| if (prev.vout == spec.vout and eql(u8, &prev.txid, &spec.txid)) return error.DuplicateInput;
+            if (try self.isSpent(w.store.outpointKey(spec.txid, spec.vout))) return error.InputSpent;
+            const raw = (try self.txRaw(spec.txid)) orelse w.wallet.beefRaw(extra, spec.txid) orelse return error.UnknownInput;
+            in.* = try w.wallet.callerInput(a, spec, raw);
+            if (spec.unlocking_script == null) signable = true;
+        }
+        const inputs = try self.selectInputs(caller, outs, sats_per_kb);
         const change_key = w.builder.Key{ .key_id = try w.brc29.keyId(a, change_prefix, change_suffix), .counterparty = .self };
-        const built = try w.builder.build(a, signer, inputs, outs, change_key, sats_per_kb, args.sign_and_process);
-        if (args.sign_and_process) return self.recordSigned(built, args, change_prefix, change_suffix);
+        const built = try w.builder.build(a, signer, inputs, outs, change_key, sats_per_kb, !signable);
+        if (!signable) return self.recordSigned(built, args, change_prefix, change_suffix, extra);
         // A draft: what signAction needs to build the same transaction again, signed.
-        const ops = try a.alloc(Value, inputs.len);
-        for (inputs, ops) |in, *o| o.* = .{ .bytes = try a.dupe(u8, &w.store.outpointKey(in.source_txid, in.vout)) };
-        const draft = try self.s.putValue(a, .{ .map = try a.dupe(cbor.Entry, &.{
+        var fields: std.ArrayList(cbor.Entry) = .empty;
+        try fields.appendSlice(a, &.{
             .{ .key = "kind", .value = .{ .text = "draft" } },
             .{ .key = "description", .value = .{ .text = args.description } },
             .{ .key = "labels", .value = .{ .array = try w.wallet.textArray(a, args.labels) } },
             .{ .key = "outputs", .value = .{ .array = try encodeOutputs(a, args.outputs) } },
-            .{ .key = "inputs", .value = .{ .array = ops } },
+            .{ .key = "inputs", .value = .{ .array = try w.wallet.encodeDraftInputs(a, inputs, args.inputs) } },
             .{ .key = "derivationPrefix", .value = .{ .text = change_prefix } },
             .{ .key = "derivationSuffix", .value = .{ .text = change_suffix } },
             .{ .key = "satsPerKb", .value = .{ .uint = sats_per_kb } },
             .{ .key = "noSend", .value = .{ .boolean = args.no_send } },
-        }) });
+        });
+        if (args.input_beef) |ib| try fields.append(a, .{ .key = "inputBEEF", .value = .{ .bytes = ib } });
+        const draft = try self.s.putValue(a, .{ .map = fields.items });
         try self.map("drafts").add(draft);
-        return .{ .txid = built.txid, .beef = try self.atomicBeef(built.txid, built.raw, built.tx), .reference = draft, .no_send = args.no_send };
+        return .{ .txid = built.txid, .beef = try self.atomicBeefWith(built.txid, built.raw, built.tx, extra), .reference = draft, .no_send = args.no_send };
     }
 
-    /// signAction for a draft of ours: the same inputs (still live and unspent), now signed and recorded.
-    fn signAction(self: *Wallet, reference: []const u8, signer: w.builder.Signer) !Created {
+    /// signAction for a draft of ours: the same inputs (still live and unspent), the caller's
+    /// unlocking scripts from `spends` (#93) on its inputs, ours signed; recorded.
+    fn signAction(self: *Wallet, reference: []const u8, spends: []const w.wallet.Spend, signer: w.builder.Signer) !Created {
         const a = self.a;
         const d = self.record(reference) catch return error.UnknownReference;
         if (!eql(u8, d.getText("kind") orelse "", "draft")) return error.UnknownReference;
@@ -450,7 +464,17 @@ const Wallet = struct {
         const outputs = try w.wallet.decodeOutputs(a, d.getArray("outputs") orelse return error.BadRecord);
         const ops = d.getArray("inputs") orelse return error.BadRecord;
         const inputs = try a.alloc(w.builder.Input, ops.len);
+        const extra: ?w.beef.Beef = if (d.getBytes("inputBEEF")) |ib| w.beef.parse(a, ib) catch return error.BadRecord else null;
         for (ops, inputs) |o, *in| {
+            if (o == .map) { // a caller's input (#93)
+                const opb = o.getBytes("outpoint") orelse return error.BadRecord;
+                if (opb.len != 36) return error.BadRecord;
+                const op = try w.store.outpointOf(opb);
+                if ((try self.status(op.txid)) == .rejected) return error.DraftRejected;
+                if (try self.isSpent(opb[0..36].*)) return error.InputSpent;
+                in.* = try w.wallet.draftCallerInput(a, o, (try self.txRaw(op.txid)) orelse w.wallet.beefRaw(extra, op.txid) orelse return error.BadRecord);
+                continue;
+            }
             if (o != .bytes or o.bytes.len != 36) return error.BadRecord;
             const op = try w.store.outpointOf(o.bytes);
             if ((try self.status(op.txid)) == .rejected) return error.DraftRejected;
@@ -466,6 +490,7 @@ const Wallet = struct {
                 .key = (try self.keyOf(try self.record(rc))) orelse return error.BadRecord,
             };
         }
+        try w.wallet.applySpends(inputs, spends);
         const outs = try a.alloc(w.builder.Output, outputs.len);
         for (outputs, outs) |o, *x| x.* = .{ .satoshis = o.satoshis, .locking_script = o.locking_script };
         const prefix = d.getText("derivationPrefix") orelse return error.BadRecord;
@@ -478,12 +503,12 @@ const Wallet = struct {
             .outputs = outputs,
             .labels = try w.wallet.textsOf(a, d.getArray("labels") orelse &.{}),
             .no_send = d.getBool("noSend") orelse false,
-        }, prefix, suffix);
+        }, prefix, suffix, extra);
     }
 
     /// A signed transaction of ours: its block (put and kept), the action, our change and the basket
     /// outputs, and its inputs as spent by it.
-    fn recordSigned(self: *Wallet, built: w.builder.Built, args: CreateArgs, change_prefix: []const u8, change_suffix: []const u8) !Created {
+    fn recordSigned(self: *Wallet, built: w.builder.Built, args: CreateArgs, change_prefix: []const u8, change_suffix: []const u8, extra: ?w.beef.Beef) !Created {
         const a = self.a;
         const tx_cid = try self.s.putBitcoin(a, .tx, built.raw);
         try self.putAction(built.txid, tx_cid, args.description, args.labels, &.{.{ .key = "noSend", .value = .{ .boolean = args.no_send } }});
@@ -516,7 +541,7 @@ const Wallet = struct {
             if (o.custom_instructions) |ci| try fields.append(a, .{ .key = "customInstructions", .value = .{ .text = ci } });
             try self.putOutput(built.txid, @intCast(i), .{ .map = fields.items });
         }
-        return .{ .txid = built.txid, .beef = try self.atomicBeef(built.txid, built.raw, built.tx), .no_send = args.no_send };
+        return .{ .txid = built.txid, .beef = try self.atomicBeefWith(built.txid, built.raw, built.tx, extra), .no_send = args.no_send };
     }
 
     pub const SpvCtx = struct {
@@ -600,7 +625,13 @@ const Wallet = struct {
     /// The Atomic BEEF of a transaction: its ancestry back to proven transactions (their BUMPs from
     /// the chain state, merged per block), parents first, then the transaction.
     fn atomicBeef(self: *Wallet, txid: [32]u8, raw: []const u8, tx: Transaction) ![]const u8 {
-        var acc = BeefAcc{ .wal = self };
+        return self.atomicBeefWith(txid, raw, tx, null);
+    }
+
+    /// As `atomicBeef`, with the ancestors we cannot read taken from `extra` (createAction's
+    /// `inputBEEF`, #93: a caller's input from a transaction neither we nor the chain state hold).
+    fn atomicBeefWith(self: *Wallet, txid: [32]u8, raw: []const u8, tx: Transaction, extra: ?w.beef.Beef) ![]const u8 {
+        var acc = BeefAcc{ .wal = self, .extra = extra };
         for (tx.inputs) |in| try acc.visit(in.previous_outpoint.txid.bytes);
         try acc.entries.append(self.a, .{ .txid = txid, .format = .raw, .raw = raw, .tx = tx });
         acc.flagLeaves();
@@ -609,25 +640,44 @@ const Wallet = struct {
 
     const BeefAcc = struct {
         wal: *Wallet,
+        /// Ancestors we cannot read (createAction's `inputBEEF`), or null.
+        extra: ?w.beef.Beef = null,
         entries: std.ArrayList(w.beef.Entry) = .empty,
         bumps: std.ArrayList(w.bsvz.spv.MerklePath) = .empty,
+
+        fn addBump(acc: *BeefAcc, p: w.bsvz.spv.MerklePath) !usize {
+            const a = acc.wal.a;
+            return for (acc.bumps.items, 0..) |*bp, i| {
+                if (bp.block_height != p.block_height) continue;
+                bp.combine(&p, a) catch continue;
+                break i;
+            } else blk: {
+                try acc.bumps.append(a, p);
+                break :blk acc.bumps.items.len - 1;
+            };
+        }
 
         fn visit(acc: *BeefAcc, txid: [32]u8) anyerror!void {
             const a = acc.wal.a;
             for (acc.entries.items) |e| if (eql(u8, &e.txid, &txid)) return;
-            const raw = (try acc.wal.txRaw(txid)) orelse return error.MissingAncestor;
+            const held = try acc.wal.txRaw(txid);
+            if (held == null) if (acc.extra) |x| if (x.find(txid)) |e| {
+                // From the caller's inputBEEF: with its BUMP, or its own ancestry before it.
+                const raw = e.raw orelse return error.MissingAncestor;
+                const tx = try Transaction.parse(a, raw);
+                if (e.bump) |bi| {
+                    try acc.entries.append(a, .{ .txid = txid, .format = .raw_with_bump, .bump = try acc.addBump(x.bumps[bi]), .raw = raw, .tx = tx });
+                    return;
+                }
+                for (tx.inputs) |in| try acc.visit(in.previous_outpoint.txid.bytes);
+                try acc.entries.append(a, .{ .txid = txid, .format = .raw, .raw = raw, .tx = tx });
+                return;
+            };
+            const raw = held orelse return error.MissingAncestor;
             const tx = try Transaction.parse(a, raw);
             if ((try acc.wal.status(txid)) == .proven) {
                 const p = (try acc.wal.chain.?.proofFor(txid)) orelse return error.MissingProof;
-                const idx = for (acc.bumps.items, 0..) |*bp, i| {
-                    if (bp.block_height != p.block_height) continue;
-                    bp.combine(&p, a) catch continue;
-                    break i;
-                } else blk: {
-                    try acc.bumps.append(a, p);
-                    break :blk acc.bumps.items.len - 1;
-                };
-                try acc.entries.append(a, .{ .txid = txid, .format = .raw_with_bump, .bump = idx, .raw = raw, .tx = tx });
+                try acc.entries.append(a, .{ .txid = txid, .format = .raw_with_bump, .bump = try acc.addBump(p), .raw = raw, .tx = tx });
                 return;
             }
             for (tx.inputs) |in| try acc.visit(in.previous_outpoint.txid.bytes);
@@ -776,14 +826,18 @@ fn run(a: std.mem.Allocator) !void {
             const suffix = try a.alloc(u8, enc.calcSize(12));
             _ = enc.encode(prefix, rnd[0..12]);
             _ = enc.encode(suffix, rnd[12..24]);
+            const ins = body.get("inputs");
+            if (ins != null and ins.? != .array) return error.BadBody;
             break :blk try wal.createAction(.{
                 .description = body.getText("description") orelse "",
+                .inputs = if (ins) |i| try w.wallet.decodeInputs(a, i.array) else &.{},
+                .input_beef = body.getBytes("inputBEEF"),
                 .outputs = try w.wallet.decodeOutputs(a, (try field(body, "outputs")).array),
                 .labels = try textList(a, body.get("labels")),
                 .sign_and_process = if (opts) |o| o.getBool("signAndProcess") orelse true else true,
                 .no_send = if (opts) |o| o.getBool("noSend") orelse false else false,
             }, ws.signer(), prefix, suffix, fee_rate);
-        } else try wal.signAction(body.getCid("reference") orelse return error.BadBody, ws.signer());
+        } else try wal.signAction(body.getCid("reference") orelse return error.BadBody, try w.wallet.decodeSpends(a, body.get("spends")), ws.signer());
         try out.appendSlice(a, &.{
             .{ .key = "txid", .value = .{ .text = try a.dupe(u8, &w.header.toHex(created.txid)) } },
             .{ .key = "tx", .value = .{ .bytes = created.beef } },
@@ -985,7 +1039,7 @@ fn payHost(a: std.mem.Allocator, wal: *Wallet, signer: w.builder.Signer, to: [33
         .{ .satoshis = outs[0].satoshis, .locking_script = outs[0].locking_script, .description = "hosting" },
         .{ .satoshis = 0, .locking_script = outs[1].locking_script, .description = "checkpoint" },
     };
-    const created = try wal.recordSigned(built, .{ .description = "hosting", .outputs = &cos, .labels = &.{"hosting"} }, change_prefix, change_suffix);
+    const created = try wal.recordSigned(built, .{ .description = "hosting", .outputs = &cos, .labels = &.{"hosting"} }, change_prefix, change_suffix, null);
     return .{ .txid = built.txid, .tx_cid = try a.dupe(u8, &w.store.hashCid(.tx, built.txid)), .amount = outs[0].satoshis, .beef = created.beef, .prefix = prefix, .suffix = suffix };
 }
 
