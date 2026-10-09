@@ -25,7 +25,9 @@
 //            wired to (`route`: its waker, its HTTP proxy), whose signed answer
 //            names the event and carries the request (intention, below);
 //            `payment` (#130) — the kernel's pay step's, the host's own: its
-//            billing (billing.ts, Router.payment) keeps and broadcasts it
+//            billing (billing.ts, Router.payment) keeps and broadcasts it;
+//            and every event, whatever its name, to the event streams (#148,
+//            events.ts: a page's subscription to its app's events) too
 //
 // (A `mailbox` recipient's message never comes here: the instance delivers
 // it itself, with the kernel's authfetch, #126.)
@@ -173,6 +175,8 @@ export interface ProvidersOptions {
   broadcast?(handle: string, tx: Uint8Array, beef?: Uint8Array): void;
   /** The libp2p node's subscriptions (#119), beacons (#126) and liveness (#138): a `subscribe` / `unsubscribe` / `beacon` / `unbeacon` / `liveness` / `unliveness` record {kind: "event", event, app, topic, …} from `handle`. Absent: no libp2p node (dropped). */
   topicEvent?(handle: string, record: Record<string, unknown>): void;
+  /** #148: every event record {kind: "event", event, …} from `handle`, whatever its name, as it is handed over (after its step's commit) — the event streams follow the log on it (events.ts). Besides what its name is wired to. */
+  emitted?(handle: string, record: Record<string, unknown>): void;
   /** The cron provider's schedule (#69, cron.ts): a request from `handle` (key `sender`), the message `id` → the answer body. Absent: no cron provider. */
   cron?(handle: string, sender: string, id: string, body: unknown): Record<string, unknown>;
   /**
@@ -286,6 +290,7 @@ export class Providers {
    */
   private event(handle: string, out: Outgoing): void {
     const m = out.message as unknown as Record<string, unknown>;
+    if (m.kind === "event" && typeof m.event === "string") this.o.emitted?.(handle, m); // #148
     if (out.address === "broadcast" && m.kind === "broadcast") {
       if (!this.o.broadcast) { this.say(handle, "broadcast: this host has no Arcade (SKEIN_ARC_URL): dropped"); return; }
       this.o.broadcast(handle, out.body, m.beef instanceof Uint8Array ? m.beef : undefined);
