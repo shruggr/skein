@@ -1,6 +1,5 @@
 {
   "install": [
-    "apps/overlay",
     "apps/amm"
   ],
   "routes": [
@@ -10,14 +9,14 @@
       "filters": [
         "kernel.beef"
       ],
-      "program": "overlay.overlay",
+      "program": "amm.overlay",
       "fn": "submit"
     },
     {
       "transport": "http",
       "address": "/lookup",
       "filters": [
-        "overlay.lookup"
+        "amm.lookup"
       ]
     },
     {
