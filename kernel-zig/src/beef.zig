@@ -3,10 +3,11 @@
 // as bytes: the door decodes it, stores each transaction once as its
 // `bitcoin-tx` block (CID = txid), each BUMP as the raw block of its bytes
 // and the merkle nodes it reveals, and replaces the bytes with a link to the
-// pointer record below. The encoder (`encode`) gives back the exact wire
-// bytes from the record and the blocks: what a signature covered stays
-// reconstructible (the door's lossless rule). skein-sdk's `chain.beef.beefOf`
-// is the same encoder for programs.
+// envelope below, which links the pointer record. The encoder (`wire`, over
+// `encode`) gives back the exact wire bytes from the envelope, the record and
+// the blocks: what a signature covered stays reconstructible (the door's
+// lossless rule). skein-sdk's `chain.record.wireOf` is the same encoder for
+// programs.
 //
 // Recognized by the leading pattern (`patterns`, a table: a new envelope is
 // one more row):
@@ -15,14 +16,26 @@
 //   02 00 be ef                         BEEF V2 (BRC-96)
 //   01 01 01 01 ‖ txid(32) ‖ BEEF        Atomic BEEF (BRC-95): the subject transaction
 //   16 a7 be ef ‖ txid(32) ‖ vout(4) ‖ BEEF   Outpoint BEEF (BRC-158): the subject output
+//   57 09 be ef ‖ txid(32) ‖ BEEF V2     Subject BEEF (BRC-233): the subject transaction, the
+//                                        others any transactions (not only its ancestors)
 //
-// The pointer record (dag-cbor):
+// The envelope is not BEEF (#146): it is what the door puts where the bytes
+// were (in an http body, a libp2p message's body, a field of a dag-cbor body),
+// a map beside the link to the pointer record:
+//
+//   {form: "beef" | "atomic" | "outpoint" | "subject",   the pattern the bytes started with
+//    beef: <pointer record CID>,             the BEEF itself (below)
+//    subject?: <bitcoin-tx CID>,             an enveloped form's subject txid (absent for "beef":
+//                                            a bare BEEF's subject is its last transaction)
+//    vout?: int}                             Outpoint BEEF: the subject output
+//
+//   e.g. {form: "subject", beef: <the pointer record's CID>, subject: <the subject's bitcoin-tx CID>}
+//
+// The pointer record (dag-cbor) is the BEEF alone, what its bytes carry: two
+// envelopes over the same BEEF (Atomic and Subject, say) share one record.
 //
 //   {kind: "beef",
-//    form: "beef" | "atomic" | "outpoint",   the envelope
-//    version: 1 | 2,                         the inner BEEF's
-//    subject: <bitcoin-tx CID>,              the Atomic/Outpoint BEEF's txid, else the last transaction
-//    vout?: int,                             Outpoint BEEF: the subject output
+//    version: 1 | 2,                         the BEEF's
 //    txs: [<bitcoin-tx CID>, …],             every transaction, in wire order (a V2 txid-only entry
 //                                            too: its CID; its block is not carried)
 //    marks: [<int> | null | "txid", …],      per transaction, what the wire says beside it: the BUMP
@@ -43,7 +56,7 @@ const Value = cbor.Value;
 
 pub const Error = error{ Malformed, OutOfMemory };
 
-pub const Form = enum { beef, atomic, outpoint };
+pub const Form = enum { beef, atomic, outpoint, subject };
 
 /// A leading pattern: four magic bytes, then `head` bytes of subject before an inner BEEF (none for
 /// a bare BEEF, whose magic is its version).
@@ -54,7 +67,14 @@ pub const patterns = [_]Pattern{
     .{ .magic = .{ 0x02, 0x00, 0xbe, 0xef }, .form = .beef, .head = 0 },
     .{ .magic = .{ 0x01, 0x01, 0x01, 0x01 }, .form = .atomic, .head = 32 },
     .{ .magic = .{ 0x16, 0xa7, 0xbe, 0xef }, .form = .outpoint, .head = 36 },
+    .{ .magic = .{ 0x57, 0x09, 0xbe, 0xef }, .form = .subject, .head = 32 },
 };
+
+/// An enveloped form's pattern.
+fn patternOf(f: Form) Pattern {
+    for (patterns) |p| if (p.form == f and p.head > 0) return p;
+    unreachable;
+}
 
 const V1: u32 = 0xEFBE0001;
 const V2: u32 = 0xEFBE0002;
@@ -197,6 +217,7 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8) Error!Beef {
         V2 => 2,
         else => return error.Malformed,
     };
+    if (p.form == .subject and version != 2) return error.Malformed; // BRC-233: a BEEF V2 only
     const nb = try r.count(3);
     const bumps = try a.alloc(Bump, nb);
     for (bumps) |*b| b.* = try r.bump(a);
@@ -230,7 +251,7 @@ pub fn parse(a: std.mem.Allocator, bytes: []const u8) Error!Beef {
     const b = Beef{ .form = p.form, .version = version, .subject = undefined, .vout = vout, .bumps = bumps, .txs = txs };
     var out = b;
     if (subject) |s| {
-        if (b.indexOf(s) == null) return error.Malformed; // BRC-95/158: the subject is in the BEEF
+        if (b.indexOf(s) == null) return error.Malformed; // BRC-95/158/233: the subject is in the BEEF
         out.subject = s;
     } else {
         if (txs.len == 0) return error.Malformed;
@@ -339,7 +360,8 @@ pub fn blockCid(a: std.mem.Allocator, hash: [32]u8) ![]u8 {
 /// What the door checked each BUMP against: the header's CID (null: nothing to check it by).
 pub const Checked = struct { block: ?[]const u8 };
 
-/// The pointer record for a decoded BEEF (the header's shape). `checked` is per BUMP.
+/// The pointer record for a decoded BEEF (the header's shape): the BEEF alone, no envelope.
+/// `checked` is per BUMP.
 pub fn record(a: std.mem.Allocator, b: Beef, checked: []const Checked) !Value {
     const txs = try a.alloc(Value, b.txs.len);
     const marks = try a.alloc(Value, b.txs.len);
@@ -365,10 +387,7 @@ pub fn record(a: std.mem.Allocator, b: Beef, checked: []const Checked) !Value {
     }
     var m = cbor.MapBuilder.init(a);
     try m.put("kind", cbor.string("beef"));
-    try m.put("form", cbor.string(@tagName(b.form)));
     try m.put("version", cbor.int(b.version));
-    try m.put("subject", cbor.cidv(try txCid(a, b.subject)));
-    if (b.vout) |o| try m.put("vout", cbor.int(o));
     try m.put("txs", .{ .array = txs });
     try m.put("marks", .{ .array = marks });
     try m.put("bumps", .{ .array = bumps });
@@ -379,6 +398,25 @@ pub fn record(a: std.mem.Allocator, b: Beef, checked: []const Checked) !Value {
 pub fn isRecord(v: ?Value) bool {
     const x = v orelse return false;
     return x == .map and std.mem.eql(u8, Value.str(x.get("kind")) orelse "", "beef");
+}
+
+/// The envelope the door puts where a BEEF's bytes were (the header's shape): its form, the
+/// link to its pointer record (`pointer`), and an enveloped form's subject (and vout).
+pub fn envelope(a: std.mem.Allocator, b: Beef, pointer: []const u8) !Value {
+    var m = cbor.MapBuilder.init(a);
+    try m.put("form", cbor.string(@tagName(b.form)));
+    try m.put("beef", cbor.cidv(pointer));
+    if (b.form != .beef) try m.put("subject", cbor.cidv(try txCid(a, b.subject)));
+    if (b.vout) |o| try m.put("vout", cbor.int(o));
+    return m.value();
+}
+
+/// An envelope's pointer record CID, when `v` is an envelope's shape (a map with a known `form`
+/// and a `beef` link); else null.
+pub fn pointerOf(v: Value) ?[]const u8 {
+    if (v != .map) return null;
+    _ = std.meta.stringToEnum(Form, Value.str(v.get("form")) orelse "") orelse return null;
+    return Value.cidOf(v.get("beef"));
 }
 
 // ---------------------------------------------------------------- the encoder
@@ -414,12 +452,25 @@ fn putU32(a: std.mem.Allocator, out: *std.ArrayList(u8), v: u32) !void {
     try out.appendSlice(a, &std.mem.toBytes(std.mem.nativeToLittle(u32, v)));
 }
 
-/// The wire bytes a pointer record stands for, from it and the blocks it names: exactly the bytes
-/// the door decoded (the lossless rule). error.Malformed: not a pointer record; error.NotFound: a
-/// block it names is not held.
+/// The wire bytes an envelope stands for, from it, its pointer record and the blocks they name:
+/// exactly the bytes the door decoded (the lossless rule) — the envelope's prefix, then the BEEF.
+/// error.Malformed: not an envelope, or a form its record cannot carry (Subject BEEF: V2 only).
+pub fn wire(a: std.mem.Allocator, env: Value, rec: Value, blocks: Blocks) ![]u8 {
+    const form = std.meta.stringToEnum(Form, Value.str(env.get("form")) orelse "") orelse return error.Malformed;
+    if (form == .beef) return encode(a, rec, blocks);
+    if (form == .subject and Value.intOf(rec.get("version")) != 2) return error.Malformed;
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, &patternOf(form).magic);
+    try out.appendSlice(a, &(try digest32(Value.cidOf(env.get("subject")) orelse return error.Malformed)));
+    if (form == .outpoint) try putU32(a, &out, std.math.cast(u32, Value.intOf(env.get("vout")) orelse return error.Malformed) orelse return error.Malformed);
+    try out.appendSlice(a, try encode(a, rec, blocks));
+    return out.items;
+}
+
+/// The BEEF a pointer record stands for (no envelope), from it and the blocks it names.
+/// error.Malformed: not a pointer record; error.NotFound: a block it names is not held.
 pub fn encode(a: std.mem.Allocator, rec: Value, blocks: Blocks) ![]u8 {
     if (!isRecord(rec)) return error.Malformed;
-    const form = std.meta.stringToEnum(Form, Value.str(rec.get("form")) orelse "") orelse return error.Malformed;
     const version = Value.intOf(rec.get("version")) orelse return error.Malformed;
     if (version != 1 and version != 2) return error.Malformed;
     const txs = (rec.get("txs") orelse return error.Malformed);
@@ -427,14 +478,6 @@ pub fn encode(a: std.mem.Allocator, rec: Value, blocks: Blocks) ![]u8 {
     const bumps = (rec.get("bumps") orelse return error.Malformed);
     if (txs != .array or marks != .array or bumps != .array or marks.array.len != txs.array.len) return error.Malformed;
     var out: std.ArrayList(u8) = .empty;
-    switch (form) {
-        .beef => {},
-        .atomic, .outpoint => {
-            try out.appendSlice(a, &(if (form == .atomic) patterns[2].magic else patterns[3].magic));
-            try out.appendSlice(a, &(try digest32(Value.cidOf(rec.get("subject")) orelse return error.Malformed)));
-            if (form == .outpoint) try putU32(a, &out, std.math.cast(u32, Value.intOf(rec.get("vout")) orelse return error.Malformed) orelse return error.Malformed);
-        },
-    }
     try putU32(a, &out, if (version == 1) V1 else V2);
     try putVarint(a, &out, bumps.array.len);
     for (bumps.array) |b| {
@@ -577,9 +620,13 @@ test "beef: the pattern table (V1, V2, Atomic, Outpoint; an envelope needs an in
     const outpoint = try std.mem.concat(a, u8, &.{ &.{ 0x16, 0xa7, 0xbe, 0xef }, &([_]u8{7} ** 32), &.{ 5, 0, 0, 0 }, &.{ 1, 0, 0xbe, 0xef } });
     try std.testing.expectEqual(Form.outpoint, recognize(outpoint).?.form);
     try std.testing.expectEqual(@as(usize, 36), recognize(outpoint).?.head);
+    // BRC-233: 57 09 be ef on the wire (0xEFBE0957 little-endian), a txid, a BEEF.
+    const subject = try std.mem.concat(a, u8, &.{ &.{ 0x57, 0x09, 0xbe, 0xef }, &([_]u8{7} ** 32), &.{ 2, 0, 0xbe, 0xef } });
+    try std.testing.expectEqual(Form.subject, recognize(subject).?.form);
+    try std.testing.expectEqual(@as(usize, 32), recognize(subject).?.head);
 }
 
-test "beef: every form decodes and re-encodes to the same bytes (V1, V2, V2 txid-only, Atomic, Outpoint)" {
+test "beef: every form decodes and re-encodes to the same bytes (V1, V2, V2 txid-only, Atomic, Outpoint, Subject)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -590,17 +637,30 @@ test "beef: every form decodes and re-encodes to the same bytes (V1, V2, V2 txid
     const ctxid = txidOf(f.child);
     const atomic = try std.mem.concat(a, u8, &.{ &.{ 1, 1, 1, 1 }, &ctxid, v2 });
     const outpoint = try std.mem.concat(a, u8, &.{ &.{ 0x16, 0xa7, 0xbe, 0xef }, &ctxid, &.{ 0, 0, 0, 0 }, v1 });
-    for ([_][]const u8{ v1, v2, v2t, atomic, outpoint }) |wire| {
-        const b = try parse(a, wire);
+    const subject = try std.mem.concat(a, u8, &.{ &.{ 0x57, 0x09, 0xbe, 0xef }, &ctxid, v2 });
+    for ([_][]const u8{ v1, v2, v2t, atomic, outpoint, subject }) |bytes| {
+        const b = try parse(a, bytes);
         try std.testing.expectEqualSlices(u8, &ctxid, &b.subject);
         try std.testing.expectEqual(@as(usize, 2), b.txs.len);
         var m = testing.Map{};
         try testing.hold(a, &m, b);
         const rec = try record(a, b, &.{.{ .block = null }});
-        // Through dag-cbor, as the log holds it.
-        const back = try cbor.decode(a, try cbor.encode(a, rec));
-        try std.testing.expectEqualSlices(u8, wire, try encode(a, back, m.blocks()));
+        const blk = try cbor.block(a, rec);
+        // Through dag-cbor, as the log holds them: the envelope in the package, the record a block.
+        const env = try cbor.decode(a, try cbor.encode(a, try envelope(a, b, blk.cid)));
+        try std.testing.expectEqualSlices(u8, blk.cid, pointerOf(env).?);
+        const back = try cbor.decode(a, blk.bytes);
+        try std.testing.expectEqualSlices(u8, bytes, try wire(a, env, back, m.blocks()));
+        // The record is the BEEF alone: no envelope in it.
+        try std.testing.expect(back.get("form") == null and back.get("subject") == null and back.get("vout") == null);
     }
+    // Two envelopes over the same BEEF (Atomic and Subject over v2): one record.
+    const ra = try cbor.block(a, try record(a, try parse(a, atomic), &.{.{ .block = null }}));
+    const rs = try cbor.block(a, try record(a, try parse(a, subject), &.{.{ .block = null }}));
+    const rb = try cbor.block(a, try record(a, try parse(a, v2), &.{.{ .block = null }}));
+    try std.testing.expectEqualSlices(u8, ra.cid, rs.cid);
+    try std.testing.expectEqualSlices(u8, rb.cid, rs.cid);
+
     const o = try parse(a, outpoint);
     try std.testing.expectEqual(Form.outpoint, o.form);
     try std.testing.expectEqual(@as(?u32, 0), o.vout);
@@ -645,4 +705,38 @@ test "beef: the BUMP check — the root it gives, the nodes it reveals, what it 
     txs[1].mark = .{ .bump = 0 };
     other.txs = txs;
     try std.testing.expectError(error.Malformed, proves(a, other, 0));
+}
+
+test "beef: Subject BEEF (BRC-233) — any transactions, the subject present, a BEEF V2 only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f = try fixture(a);
+    const ptxid = txidOf(f.parent);
+    const ctxid = txidOf(f.child);
+    // The subject is the parent, not the last transaction, and the child is no ancestor of it: allowed.
+    const v2 = try v2Of(a, f, false);
+    const s = try std.mem.concat(a, u8, &.{ &.{ 0x57, 0x09, 0xbe, 0xef }, &ptxid, v2 });
+    const b = try parse(a, s);
+    try std.testing.expectEqual(Form.subject, b.form);
+    try std.testing.expectEqualSlices(u8, &ptxid, &b.subject);
+    var m = testing.Map{};
+    try testing.hold(a, &m, b);
+    const rec = try record(a, b, &.{.{ .block = null }});
+    const blk = try cbor.block(a, rec);
+    const env = try envelope(a, b, blk.cid);
+    try std.testing.expectEqualStrings("subject", Value.str(env.get("form")).?);
+    try std.testing.expectEqualSlices(u8, try txCid(a, ptxid), Value.cidOf(env.get("subject")).?);
+    try std.testing.expectEqualSlices(u8, s, try wire(a, env, rec, m.blocks()));
+    // The subject not in the BEEF: malformed.
+    var other = ptxid;
+    other[0] ^= 1;
+    try std.testing.expectError(error.Malformed, parse(a, try std.mem.concat(a, u8, &.{ &.{ 0x57, 0x09, 0xbe, 0xef }, &other, v2 })));
+    // A BEEF V1 inside: malformed (recognized by its pattern, refused by the parse).
+    const in_v1 = try std.mem.concat(a, u8, &.{ &.{ 0x57, 0x09, 0xbe, 0xef }, &ctxid, try v1Of(a, f) });
+    try std.testing.expect(recognize(in_v1) != null);
+    try std.testing.expectError(error.Malformed, parse(a, in_v1));
+    // An envelope saying "subject" over a V1 record: the encoder refuses it.
+    const r1 = try record(a, try parse(a, try v1Of(a, f)), &.{.{ .block = null }});
+    try std.testing.expectError(error.Malformed, wire(a, env, r1, m.blocks()));
 }

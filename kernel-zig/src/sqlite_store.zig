@@ -60,7 +60,8 @@ pub const SqliteStore = struct {
     /// before format 7 (issues #65, #69) broadcasts were messages, wakes were
     /// entries and the genesis carried jobs; before format 8 (#77) routing was
     /// a subscriptions chain plus routes, and the admin boxes had handler programs;
-    /// before format 9 (#143) routes had senders and an owner sat in the genesis.
+    /// before format 9 (#143) routes had senders and an owner sat in the genesis;
+    /// before format 10 (#146) a BEEF pointer record carried its envelope.
     pub fn open(alloc: std.mem.Allocator, io: std.Io, path: []const u8) !*SqliteStore {
         if (std.Io.Dir.cwd().statFile(io, path, .{})) |st| {
             if (st.size > 0) {
@@ -69,6 +70,8 @@ pub const SqliteStore = struct {
                 if (probe.predatesFuel()) {
                     if (probe.ix.loaded_format < 1) {
                         std.log.err("{s}: a store written before fuel metering (issue #5): its updates carry no fuel; refused (start a new store: re-genesis)", .{path});
+                    } else if (probe.ix.loaded_format == 9) {
+                        std.log.err("{s}: a store written before format 10 (issue #146: the BEEF envelope beside the pointer record, not in it; Subject BEEF): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 8) {
                         std.log.err("{s}: a store written before format 9 (issue #143: routes without senders, filters before anything is recorded, roles and the grants head, root instead of an owner): refused (start a new store: re-genesis)", .{path});
                     } else if (probe.ix.loaded_format == 7) {

@@ -1,5 +1,6 @@
-// The input log and the record shapes the scheduler checks, in format 9
-// (#143: routes, filters, roles; #77: the kernel's four tables; format 7, #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
+// The input log and the record shapes the scheduler checks, in format 10
+// (#146: the BEEF envelope beside the pointer record, not in it — no migration, a store in format 9
+// is refused; #143, format 9: routes, filters, roles; #77: the kernel's four tables; format 7, #65, #69; format 6, #70, #67; format 5, #68; format 3, #40; format 2, #33: entries
 // unsigned, identity keys as 33-byte byte strings in every record). Skein is
 // a state process: every package a transport carries in is an entry,
 // appended as received, and the instance's middleware (the front door) is
@@ -12,7 +13,9 @@
 //   door     (#121, #143) a request's admission: what the door established before the entry was
 //            written — {principal?: bytes(33) (who the filters, or the transport, say it is from),
 //            verified?: {caller, theirs, requestId} (kernel.brc104's: the session the answer is
-//            signed on), filters?: [<the route's filters that ran>], beefs?: [<pointer record CID>],
+//            signed on), filters?: [<the route's filters that ran>], beefs?: [<pointer record CID>]
+//            (#146: the package holds each BEEF's envelope {form, beef: <pointer record CID>,
+//            subject?, vout?} where its bytes were; beef.zig),
 //            blocks?: [<CID a filter stored>], bodies?: [{of, is}]} — the request record then the
 //            package as the door handed it back (a filter's rewrite: door.zig, beef.zig). A request
 //            a filter rejects or answers, or the gate refuses, writes no entry (#143)

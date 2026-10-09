@@ -101,8 +101,11 @@ pub const STATE_KIND = "skein-state";
 /// `filters` run before anything is recorded (a rejection or an answer writes no entry: no `refused` entries),
 /// and may have no handler (a read route); events are their own transport; the head `grants` (roles → keys)
 /// gates functions; the genesis names `root` (no `owner`, no `reads`) and `roles`; the claim grants root; the
-/// steps' and calls' input has no `owner`. A store in format 8 is refused: no migration (re-genesis).
-pub const FORMAT: i64 = 9;
+/// steps' and calls' input has no `owner`. A store in format 8 is refused: no migration (re-genesis);
+/// 10 = the BEEF envelope beside the pointer record (#146): the door puts {form, beef: <record>, subject?,
+/// vout?} where a BEEF's bytes were, and the pointer record is the BEEF alone (no form, subject or vout);
+/// Subject BEEF (BRC-233) is one more form. A store in format 9 is refused: no migration (re-genesis).
+pub const FORMAT: i64 = 10;
 pub const POINTER = "state";
 
 /// A CID held by value (roots outlive the forest's arena).

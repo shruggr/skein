@@ -140,7 +140,7 @@ export fn skein_open(store: u32) i32 {
     const s = WebStore.open(gpa, store, false) catch |err| return fail(@errorName(err));
     if (s.predatesFuel()) {
         s.close();
-        return fail("a store written in an older format (before format 9, issue #143: routes, filters, roles): refused (start a new store: re-genesis)");
+        return fail("a store written in an older format (before format 10, issue #146: the BEEF envelope beside the pointer record): refused (start a new store: re-genesis)");
     }
     ws = s;
     const r = getRunner() catch |err| return fail(@errorName(err));

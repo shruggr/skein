@@ -122,7 +122,7 @@ pub fn copyLog(a: std.mem.Allocator, from: *SqliteStore, to: *SqliteStore) !void
     }
 }
 
-/// What the door put for a request (#121), beside it: every pointer record the package links (and,
+/// What the door put for a request (#121), beside it: every pointer record the package's envelopes link (#146; and,
 /// for a signed message carried in, the body the door put — the package's `body` bytes — and the
 /// records it links), each with the blocks it names: its transactions, its BUMPs' bytes, and the
 /// merkle nodes each BUMP the door checked reveals.
