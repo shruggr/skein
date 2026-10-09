@@ -11,7 +11,8 @@
 //          prefix?: true,          http only: `address` is a prefix (exact paths match first,
 //                                  then the longest prefix); a libp2p route is exact (#119)
 //          filters?: [text],       what runs on the package before anything is recorded, in
-//                                  order (door.zig): "kernel.brc104", "kernel.beef", or
+//                                  order (door.zig): "kernel.brc104", "kernel.beef", "kernel.pay"
+//                                  (#149: http, after kernel.brc104), or
 //                                  "<app>.<filter>" — a function the app's record lists under
 //                                  `filters`. http, libp2p and mailbox routes; an event has none
 //          program?: <cid> | "kernel",
@@ -22,6 +23,7 @@
 //                                  and `rates` its settings, billing.zig). Absent: a READ route
 //                                  (http only): its filters answer, nothing is logged
 //          fn?: text,              the handler's function; kernel: the operation
+//          price?: int,            #149: sats kernel.pay charges (0 or absent: free)
 //          app?: text,             the app that installed it: its write scope, and the roles its
 //                                  record declares for `fn` (grants.zig gate)
 //          …}                      a handler's own settings, carried to it as `match` (a file
@@ -58,7 +60,7 @@ pub const admin_ops = [_][]const u8{ "objects", "head", "dispatch", "peers", "gr
 pub const kernel_ops = admin_ops ++ [_][]const u8{ "claim", billing.OP };
 
 /// The kernel's own filters (door.zig): `kernel.<name>`.
-pub const kernel_filters = [_][]const u8{ "kernel.brc104", "kernel.beef" };
+pub const kernel_filters = [_][]const u8{ "kernel.brc104", "kernel.beef", "kernel.pay" };
 
 pub const Row = struct {
     transport: []const u8,
@@ -152,14 +154,26 @@ pub fn problem(a: std.mem.Allocator, v: Value) !?[]u8 {
     var n_filters: usize = 0;
     if (v.get("filters")) |fs| if (fs != .null) {
         if (fs != .array) return try a.dupe(u8, "filters: a list of filter names (\"kernel.brc104\", \"kernel.beef\", \"<app>.<filter>\")");
+        var signed = false;
         for (fs.array) |f| {
             const name = Value.str(f) orelse return try a.dupe(u8, "filters: each is a filter's name");
-            if (!isFilterRef(name)) return try std.fmt.allocPrint(a, "filters: {s} is not kernel.brc104, kernel.beef or <app>.<filter>", .{try json.quoted(a, name)});
+            if (!isFilterRef(name)) return try std.fmt.allocPrint(a, "filters: {s} is not kernel.brc104, kernel.beef, kernel.pay or <app>.<filter>", .{try json.quoted(a, name)});
+            if (std.mem.eql(u8, name, "kernel.brc104")) signed = true;
+            // #149: a payment is from the authenticated sender (its BRC-29 key is derived from theirs).
+            if (std.mem.eql(u8, name, "kernel.pay")) {
+                if (!std.mem.eql(u8, t, "http")) return try a.dupe(u8, "filters: kernel.pay prices an http route");
+                if (!signed) return try a.dupe(u8, "filters: kernel.pay needs kernel.brc104 before it (#149: the sender must be authenticated)");
+            }
         }
         n_filters = fs.array.len;
         if (n_filters > 0 and (std.mem.eql(u8, t, "event") or std.mem.eql(u8, t, "local"))) return try std.fmt.allocPrint(a, "filters: an {s} route has none (only http, libp2p and mailbox routes filter)", .{t});
     };
     if (v.get("filter") != null) return try a.dupe(u8, "filter: gone (#143): name `filters`, a list (\"kernel.beef\")");
+    // #149: the route's price in sats, kernel.pay's to charge.
+    if (v.get("price")) |p| if (p != .null) {
+        const sats = Value.intOf(p) orelse return try a.dupe(u8, "price: want sats (an integer, 0 or more)");
+        if (sats < 0 or sats > std.math.maxInt(i64)) return try a.dupe(u8, "price: want sats (an integer, 0 or more)");
+    };
     if (v.get("app")) |x| if (x != .null and Value.str(x) == null) return try a.dupe(u8, "app: want text");
     if (v.get("fn")) |f| if (f != .string and f != .null) return try a.dupe(u8, "fn: want text");
     const prog = v.get("program") orelse {
@@ -435,4 +449,33 @@ test "routes: filters, read routes, prefixes; an http path exact first, then the
     try std.testing.expectEqual(@as(usize, 1), forLibp2p(rows, "tm_ab").?.filters.len);
     try std.testing.expect(forLibp2p(rows, "tm_abc") == null);
     try std.testing.expectEqualStrings("kernel.brc104", forHttp(rows, "/site/x").?.filters[0].string);
+}
+
+test "kernel.pay (#149): after kernel.brc104 on an http route; price is sats" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cid1 = try @import("cid").parse(a, "bafyreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy");
+    const route = struct {
+        fn f(al: std.mem.Allocator, t: []const u8, filters: []const []const u8, price: ?Value, c: []const u8) !Value {
+            var m = cbor.MapBuilder.init(al);
+            try m.put("transport", cbor.string(t));
+            try m.put("address", cbor.string("/paid"));
+            const fs = try al.alloc(Value, filters.len);
+            for (filters, fs) |x, *o| o.* = cbor.string(x);
+            try m.put("filters", .{ .array = fs });
+            try m.put("program", cbor.cidv(c));
+            try m.put("fn", cbor.string("h"));
+            try m.put("price", price);
+            return m.value();
+        }
+    }.f;
+    try std.testing.expect((try problem(a, try route(a, "http", &.{ "kernel.brc104", "kernel.pay" }, cbor.int(100), cid1))) == null);
+    try std.testing.expect((try problem(a, try route(a, "http", &.{ "kernel.brc104", "kernel.pay" }, null, cid1))) == null);
+    const unsigned = (try problem(a, try route(a, "http", &.{"kernel.pay"}, cbor.int(100), cid1))).?;
+    try std.testing.expect(std.mem.indexOf(u8, unsigned, "kernel.brc104 before it") != null);
+    try std.testing.expect((try problem(a, try route(a, "http", &.{ "kernel.pay", "kernel.brc104" }, cbor.int(100), cid1))) != null);
+    try std.testing.expect((try problem(a, try route(a, "libp2p", &.{ "kernel.brc104", "kernel.pay" }, cbor.int(100), cid1))) != null);
+    try std.testing.expect((try problem(a, try route(a, "http", &.{"kernel.brc104"}, cbor.int(-1), cid1))) != null);
+    try std.testing.expect((try problem(a, try route(a, "http", &.{"kernel.brc104"}, cbor.string("100"), cid1))) != null);
 }

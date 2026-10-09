@@ -14,7 +14,7 @@
 //             addressBook?: [{key: bytes(33), transport, address, handle?, domain?}],
 //             heads?: {<head name>: <record CID>}}  (#141: an image's installed apps, `<app>/app`)
 //   route    {transport: "mailbox" | "event" | "http" | "libp2p" | "local", address, prefix?: true,
-//             filters?: ["kernel.brc104" | "kernel.beef" | "<app>.<filter>"], program?: <program record CID> | "kernel",
+//             filters?: ["kernel.brc104" | "kernel.beef" | "kernel.pay" | "<app>.<filter>"], program?: <program record CID> | "kernel",
 //             fn?, …settings}
 //            (`dispatch`: the seed of the kernel's route table, docs/APPS.md §2 — the admin routes (boxes
 //            objects, head, dispatch, peers, grant → the kernel, gated by root), the boxes programs take,
@@ -339,7 +339,8 @@ export function rowsOf(specs: DispatchSpec[], programs: Record<string, CID>): Di
     if (s.sender !== undefined) throw new Error(`etc/dispatch.json: route ${s.address}: \`sender\` is gone (#143: a route has none — filters say who it is from, roles gate functions)`);
     const transport = s.transport ?? "mailbox";
     if (!TRANSPORTS.includes(transport)) throw new Error(`etc/dispatch.json: route ${s.address}: transport ${JSON.stringify(transport)} is not mailbox, event, http, libp2p or local`);
-    if (s.filters !== undefined && (!Array.isArray(s.filters) || !s.filters.every(isFilterRef))) throw new Error(`etc/dispatch.json: route ${s.address}: filters is a list of "kernel.brc104", "kernel.beef" or "<app>.<filter>"`);
+    if (s.filters !== undefined && (!Array.isArray(s.filters) || !s.filters.every(isFilterRef))) throw new Error(`etc/dispatch.json: route ${s.address}: filters is a list of "kernel.brc104", "kernel.beef", "kernel.pay" or "<app>.<filter>"`);
+    if (s.filters?.includes("kernel.pay") && !s.filters.slice(0, s.filters.indexOf("kernel.pay")).includes("kernel.brc104")) throw new Error(`etc/dispatch.json: route ${s.address}: kernel.pay needs kernel.brc104 before it (#149: the sender must be authenticated)`);
     if (s.program === undefined) {
       if (transport !== "http" || !s.filters?.length) throw new Error(`etc/dispatch.json: route ${s.address}: no program — only an http read route (its filters answer) has none`);
       const { transport: _t, ...rest } = s;

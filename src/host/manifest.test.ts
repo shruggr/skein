@@ -73,11 +73,19 @@ test("routes: no sender (#143), the transports, handlers, filters, the keys", ()
   assert.match(route({ handler: undefined }), /handler: a mailbox, event or libp2p route names its handler/);
   assert.match(route({ prefix: true }), /a mailbox route has no prefix/);
   assert.match(route({ transport: "event", filters: ["kernel.beef"] }), /an event route has no filters/);
-  assert.match(route({ filters: ["kernel.nope"] }), /filter kernel\.nope: the kernel's are kernel\.brc104, kernel\.beef/);
+  assert.match(route({ filters: ["kernel.nope"] }), /filter kernel\.nope: the kernel's are kernel\.brc104, kernel\.beef, kernel\.pay/);
   assert.match(route({ filters: ["nope"] }), /filter nope: not one of this app's/);
   assert.match(route({ filters: ["Other App.x"] }), /not <app>\.<filter>/);
   assert.equal(route({ filters: ["kernel.beef", "page", "chain.check"] }), "", "the kernel's, the app's own, another app's");
   assert.match(route({ filters: "kernel.beef" }), /filters is a list/);
+  // #149: kernel.pay, after kernel.brc104 on an http route; `price` in sats.
+  const http = (r: Record<string, unknown>) => route({ transport: "http", address: "/x", ...r });
+  assert.equal(http({ filters: ["kernel.brc104", "kernel.pay"], price: 1000 }), "");
+  assert.match(http({ filters: ["kernel.pay"], price: 1000 }), /kernel\.pay needs kernel\.brc104 before it/);
+  assert.match(http({ filters: ["kernel.pay", "kernel.brc104"], price: 1000 }), /kernel\.pay needs kernel\.brc104 before it/);
+  assert.match(route({ filters: ["kernel.brc104", "kernel.pay"] }), /kernel\.pay prices an http route/);
+  assert.match(http({ filters: ["kernel.brc104", "kernel.pay"], price: -1 }), /price: want sats/);
+  assert.match(http({ filters: ["kernel.brc104", "kernel.pay"], price: 1.5 }), /price: want sats/);
   assert.match(problems({ ...base(), routes: [{ address: "demo", handler: "demo.m" }, { address: "", handler: "demo.n" }] }).join("\n"), /mailbox demo twice/, "\"\" and the app's name are one box");
   assert.match(problems({ ...base(), routes: [{ transport: "libp2p", address: "tm_x", handler: "demo" }] }).join("\n"), /an libp2p route names a function/);
   assert.match(problems({ ...base(), routes: [{ transport: "http", address: "/x", handler: "demo" }] }).join("\n"), /an http route names a function/);

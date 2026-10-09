@@ -28,7 +28,7 @@
 //               "/<name>/"; a ".." or "." segment, an encoded dot or slash (%2e, %2f), a backslash, a
 //               NUL or a URL is refused), `prefix: true` for a prefix; a libp2p route's a topic or
 //               "/<protocol>" (global, not namespaced; exact). `filters`, in order: "kernel.brc104",
-//               "kernel.beef", one of this app's own (a name its `filters` declares) or another
+//               "kernel.beef", "kernel.pay" (#149: http, after kernel.brc104; `price` in sats), one of this app's own (a name its `filters` declares) or another
 //               app's ("<app>.<filter>"); none on an event route. `handler`: "<role>.<fn>" — a
 //               function of one of `programs` — or, for an app with one program, "<fn>"; a mailbox
 //               or event route may name only "<role>" (the program stepped, no function named). An
@@ -122,7 +122,7 @@ const FILTER = /^[A-Za-z0-9_-]+$/;
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const INTERFACE = /^[a-z0-9][a-z0-9._-]*\/\d+$/;
 const TYPES = ["string", "int", "ms", "bytes", "cid", "bool", "map", "any"];
-const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef"];
+const KERNEL_FILTERS = ["kernel.brc104", "kernel.beef", "kernel.pay"];
 
 const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 
@@ -227,6 +227,10 @@ function routeProblem(app: string, r: unknown, roles: string[], declared: (f: st
   const filters = r.filters ?? [];
   if (!Array.isArray(filters) || filters.some((f) => typeof f !== "string")) return "filters is a list of filter names";
   if (filters.length && t === "event") return "an event route has no filters (an event is the host's wiring)";
+  const pay = (filters as string[]).indexOf("kernel.pay");
+  if (pay >= 0 && t !== "http") return "filter kernel.pay prices an http route";
+  if (pay >= 0 && !(filters as string[]).slice(0, pay).includes("kernel.brc104")) return "filter kernel.pay needs kernel.brc104 before it (#149: the sender must be authenticated)";
+  if (r.price !== undefined && !(Number.isSafeInteger(r.price) && (r.price as number) >= 0)) return "price: want sats (an integer, 0 or more)";
   for (const f of filters as string[]) {
     if (f.startsWith("kernel.")) { if (!KERNEL_FILTERS.includes(f)) return `filter ${f}: the kernel's are ${KERNEL_FILTERS.join(", ")}`; continue; }
     const dot = f.lastIndexOf(".");
